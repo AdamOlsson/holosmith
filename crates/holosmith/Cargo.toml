@@ -10,6 +10,8 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rusqlite.workspace = true
+toml_edit.workspace = true
+shlex.workspace = true
 
 [lints]
 workspace = true

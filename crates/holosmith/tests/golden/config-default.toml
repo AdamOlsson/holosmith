@@ -1,0 +1,31 @@
+role = "both"
+control_listen = "127.0.0.1:8080"
+preview_listen = "127.0.0.1:8081"
+control_origin = "http://localhost:8080"
+preview_origin = "http://localhost:8081"
+allowed_hosts = []
+# owner unset
+data_root = "/var/lib/holosmith"
+projects_root = "/srv/holosmith/projects"
+# docker_host unset
+# hosts_seed unset
+allowed_hubs = []
+network_default = false
+max_live_sessions = 3
+project_backup = false
+turn_timeout_min = 45
+idle_stop_min = 30
+# max_session_tokens unset
+abort_grace = "10s"
+min_free_gb = 20
+session_disk_soft_gb = 10
+stopped_ttl_days = 7
+
+[merge]
+targets = ["main", "master"]
+
+[publish]
+remotes = []
+
+[egress]
+allow = []
