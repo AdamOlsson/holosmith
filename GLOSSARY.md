@@ -15,7 +15,7 @@ Which parts of the system a machine runs: `hub`, `server`, or `both`.
 _Avoid_: Mode, type
 
 **Server**:
-A machine that runs sessions. Has Docker, git and a project root.
+A machine that runs sessions. Has Docker, git and a projects root.
 _Avoid_: Worker, agent host, runner
 
 **Hub**:
@@ -33,6 +33,28 @@ _Avoid_: Config sync, inventory
 **Local**:
 The host name a server uses for its own sessions.
 _Avoid_: Self, here
+
+### Configuration
+
+**Config**:
+The single TOML file of machine settings that the binary reads at startup: role, addresses, roots, limits and allow-lists. It never holds a credential.
+_Avoid_: Settings, preferences, env
+
+**Config source**:
+Where the running config came from: the config file, or the built-in defaults when no file exists at the path that was tried. `config show` prints it on its second line.
+_Avoid_: Config origin, mode, fallback
+
+**Data root**:
+The directory holding everything the binary writes: the database, session directories, backups and the secrets file. Its machine name is `data_root`.
+_Avoid_: Data dir, state dir, home
+
+**Projects root**:
+The directory holding the git repositories that sessions are created against, deliberately outside the data root — the two compared lexically, with `.` and `..` folded — so that no path this file can spell puts a repository inside the data. A symlink that points back into the data root is the operator's responsibility. Its machine name is `projects_root`.
+_Avoid_: Project root, workspace, repos dir
+
+**Secrets file**:
+The file at `<data>/secrets/keys.toml`, mode 0600, holding the provider API keys that the key proxy uses. The config loader never reads it.
+_Avoid_: Keys config, credentials file
 
 ### Sessions and turns
 
