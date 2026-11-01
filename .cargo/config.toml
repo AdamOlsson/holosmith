@@ -1,0 +1,11 @@
+# Builds need the cross toolchains on PATH:  . ~/.pi/toolchains/env.sh  (docs/build.md).
+#
+# Never export RUSTFLAGS anywhere in this repo: it silently disables the
+# per-target rustflags below and ships static-PIE without an error (ADR-0005).
+[target.x86_64-unknown-linux-musl]
+linker = "x86_64-linux-musl-gcc"
+rustflags = ["-C", "relocation-model=static"]
+
+[target.aarch64-unknown-linux-musl]
+linker = "aarch64-linux-musl-gcc"
+rustflags = ["-C", "relocation-model=static"]

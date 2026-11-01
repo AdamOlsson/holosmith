@@ -1,0 +1,15 @@
+[package]
+name = "holosmith"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The single static binary that is the Holosmith hub, server, proxies and CLI"
+
+[dependencies]
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+
+[lints]
+workspace = true
