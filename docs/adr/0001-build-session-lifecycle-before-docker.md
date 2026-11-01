@@ -1,0 +1,7 @@
+# Build the session lifecycle before Docker
+
+The spec describes the session lifecycle, event stream and UI against real containers, and mentions a `--backend stub` only as an aside for the dev instance. We are promoting that stub to the primary vehicle for the whole first phase: session creation, the state machine, turns, abort, stop/resume, delete, caps and timeouts all ship and are demoed with no Docker, no git and no agent process, before any container code exists.
+
+Reasons: the expensive, failure-prone part of this system is Docker/git/network plumbing, while the part that most needs iteration is the API, the event contract and the UI. Building the plumbing first means every UI change waits on a container start, and every event-shape change waits on a real agent turn. Building the stub first means the contract is settled and tested in milliseconds, and the Docker work then has a fixed target to satisfy. It also means a laptop with no Docker can develop the app.
+
+Consequence we accept: there are two fakes. The **stub backend** is in-process and produces sessions without Docker (this ADR); the **fake pi** is a process inside a real container that replays a recorded session (spec §10, used by the promotion smoke test). They are not the same thing and must not be merged: the stub proves the API and UI, the fake pi proves the container and proxy wiring. A reader will wonder why both exist — this is why.
