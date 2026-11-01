@@ -114,11 +114,13 @@ Every section of `HolosmithSpec.md` maps to at least one story. If a spec item g
 
 ## Decisions taken while slicing
 
-Three decisions were made that the spec does not make. Each has an ADR because each is hard to reverse, surprising to a later reader, and the result of a real trade-off.
+Five decisions were made that the spec does not make. Each has an ADR because each is hard to reverse, surprising to a later reader, and the result of a real trade-off.
 
 - [ADR-0001](../adr/0001-build-session-lifecycle-before-docker.md) — the session lifecycle is built against the stub backend before Docker exists. Consequence: there are two fakes, the in-process stub backend and the in-container fake pi, and they are not the same thing.
 - [ADR-0002](../adr/0002-security-guards-before-endpoints.md) — the browser guards and network isolation land before the features they protect.
 - [ADR-0003](../adr/0003-verification-checks-as-story-gates.md) — V1–V11 are acceptance gates on stories, plus one closing verification run.
+- [ADR-0004](../adr/0004-cargo-workspace-with-one-binary-crate.md) — a Cargo workspace with one binary crate. Consequence: `cargo run` from the root needs `-p holosmith`, and `web/` is not a workspace member.
+- [ADR-0005](../adr/0005-static-musl-artifacts-proven-without-docker.md) — non-PIE static musl artifacts, proven with `bwrap` and qemu instead of Docker. Consequence: nothing may export `RUSTFLAGS`, and the empty-container run stays open until HS-046.
 
 Gaps in the spec that had to be filled to write these stories, all reversible and all flagged in the story that fills them:
 

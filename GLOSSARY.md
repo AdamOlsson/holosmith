@@ -212,6 +212,22 @@ _Avoid_: Preview URL
 
 ### Operations
 
+**Version**:
+The semantic version of the `holosmith` binary itself, such as `0.1.0`. It is not a Release and never a synonym for one.
+_Avoid_: Release, build, build number
+
+**Git tag**:
+The tag the binary was built from, or the short commit sha when no tag exists.
+_Avoid_: Commit, release version, build id
+
+**Pinned pi version**:
+The one pi version that the build, `doctor` and the agent image all read, kept in `pins/pi.txt` and nowhere else. Its machine name is `pi_version`, in the binary's output and in any later config key.
+_Avoid_: Pi version, agent version, latest pi
+
+**Schema version**:
+The number of the newest database migration the binary embeds, which `version` reports and the database records.
+_Avoid_: DB version, migration count, schema revision
+
 **Release**:
 One built version of the binary, in its own directory, with the `current` symlink pointing at the live one.
 _Avoid_: Version, build, deploy
