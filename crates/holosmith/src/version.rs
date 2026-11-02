@@ -1,6 +1,6 @@
-//! What the binary reports about itself. Later stories reuse these names: `/api/health`
-//! takes `version` and `target`, `doctor` compares `pi_version`, `deploy --ssh` refuses
-//! on a `target` mismatch.
+//! What the binary reports about itself. Later stories reuse these names: `/api/health` takes
+//! `version`, `serve` logs `version` and `target` on its startup line, `doctor` compares
+//! `pi_version`, and `deploy --ssh` refuses on a `target` mismatch.
 
 use serde::Serialize;
 

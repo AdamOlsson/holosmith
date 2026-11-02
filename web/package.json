@@ -1,0 +1,14 @@
+{
+  "name": "holosmith-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The Holosmith app shell, built into web/dist and embedded in the binary",
+  "scripts": {
+    "build": "tsc --noEmit && vite build"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.3",
+    "vite": "^7.3.7"
+  }
+}

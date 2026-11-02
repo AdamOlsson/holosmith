@@ -1,7 +1,7 @@
 //! The config file: one typed value, loaded once, validated strictly (ADR-0006).
 //!
-//! Defaults < file < CLI overrides. This story adds no overrides; HS-003 applies its
-//! `--port`/`--data-dir`/`--backend` to the value [`Config::load`] returns.
+//! Defaults < file < CLI overrides. `serve` applies its `--port` and `--data-dir` to the value
+//! [`Config::load`] returns ([`Config::apply_overrides`]) and re-checks what they can break.
 
 mod duration;
 mod editor;
@@ -38,14 +38,35 @@ pub enum Role {
 }
 
 impl Role {
+    /// Every role and its spec word, in one table: the word that parses and the word that
+    /// prints cannot drift, and a fourth role is one line here.
+    const WORDS: [(Self, &'static str); 3] = [
+        (Self::Hub, "hub"),
+        (Self::Server, "server"),
+        (Self::Both, "both"),
+    ];
+
     /// The role a config file names, if it names one.
     pub fn parse(text: &str) -> Option<Self> {
-        match text {
-            "hub" => Some(Self::Hub),
-            "server" => Some(Self::Server),
-            "both" => Some(Self::Both),
-            _ => None,
-        }
+        Self::WORDS
+            .iter()
+            .find(|(_, word)| *word == text)
+            .map(|(role, _)| *role)
+    }
+
+    /// The word `serve` logs and the health endpoint reports.
+    pub fn as_str(self) -> &'static str {
+        Self::WORDS
+            .iter()
+            .find(|(role, _)| *role == self)
+            .map(|(_, word)| *word)
+            .expect("every role has a word in WORDS")
+    }
+}
+
+impl std::fmt::Display for Role {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -74,6 +95,49 @@ impl Origin {
             return Err(format!("must not contain whitespace, not {text:?}"));
         }
         Ok(Self(text.to_string()))
+    }
+
+    /// The origin as the config file spells it: scheme, host and port.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The same scheme and host on another port. `--port` moves the control listener and the
+    /// control origin together, so the browser's `Origin` header keeps matching the address
+    /// the operator was told to open. A port that is the scheme's default is left out, because
+    /// a browser never sends `:80` or `:443` in `Origin` and HS-005 compares the two as text.
+    /// An origin with no scheme, which [`Self::parse`] refuses, is returned unchanged rather
+    /// than guessed at.
+    pub fn with_port(&self, port: u16) -> Self {
+        let (scheme, authority) = match self.0.split_once("://") {
+            Some(parts) => parts,
+            None => return self.clone(),
+        };
+        // A bracketed IPv6 literal may itself contain colons, so only the brackets delimit it.
+        let host = match authority.strip_prefix('[') {
+            Some(rest) => match rest.split_once(']') {
+                Some((literal, _)) => format!("[{literal}]"),
+                None => format!("[{rest}"),
+            },
+            None => match authority.rsplit_once(':') {
+                Some((host, _)) => host.to_string(),
+                None => authority.to_string(),
+            },
+        };
+        if default_port(scheme) == Some(port) {
+            Self(format!("{scheme}://{host}"))
+        } else {
+            Self(format!("{scheme}://{host}:{port}"))
+        }
+    }
+}
+
+/// The port a browser leaves out of `Origin` for this scheme, if it is one of the two we serve.
+fn default_port(scheme: &str) -> Option<u16> {
+    match scheme {
+        "http" => Some(80),
+        "https" => Some(443),
+        _ => None,
     }
 }
 
@@ -199,6 +263,54 @@ impl Config {
     pub fn secrets_path(&self) -> PathBuf {
         self.data_root.join("secrets").join("keys.toml")
     }
+
+    /// Apply the CLI overrides to the loaded value (ADR-0006: defaults < file < CLI).
+    ///
+    /// `--port` moves the control listener and the control origin's port, keeping its scheme
+    /// and host; the preview listener and origin are not touched. `--data-dir` replaces the
+    /// data root. Neither creates a directory: HS-004 owns the data root.
+    ///
+    /// `--port 0` is the one case where the origin cannot be written here: the port is the
+    /// kernel's to pick, so `serve` re-derives the origin from the bound port after `bind`.
+    pub fn apply_overrides(&mut self, overrides: &Overrides) {
+        if let Some(port) = overrides.port {
+            self.control_listen.set_port(port);
+            self.control_origin = self.control_origin.with_port(port);
+        }
+        if let Some(data_root) = &overrides.data_root {
+            self.data_root = data_root.clone();
+        }
+    }
+
+    /// What an override broke, in the config pass's own words: `key: message`, one line each.
+    ///
+    /// Every rule is re-checked with the function the semantic pass calls, so a `--port` that
+    /// lands on the preview port, or a `--data-dir` the file itself must not name, is reported
+    /// exactly as the file would be. The CLI is held to the file's standard (ADR-0006).
+    pub fn override_problems(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        if let Some(message) = preview_listen_problem(self, "") {
+            problems.push(format!("preview_listen: {message}"));
+        }
+        if let Some(message) = preview_origin_problem(self, "") {
+            problems.push(format!("preview_origin: {message}"));
+        }
+        problems.extend(
+            root_problems(self, "")
+                .into_iter()
+                .map(|(key, message)| format!("{key}: {message}")),
+        );
+        problems
+    }
+}
+
+/// The CLI values applied to the loaded config, after the file and before anything runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Overrides {
+    /// `--port`: the control listener's port, and the control origin's.
+    pub port: Option<u16>,
+    /// `--data-dir`: the data root for this run, replacing the file's.
+    pub data_root: Option<PathBuf>,
 }
 
 /// Where the path to read came from, which decides whether a missing file is an error.
@@ -364,90 +476,22 @@ fn semantic_problems(
 ) -> Vec<Problem> {
     let mut problems = Vec::new();
 
-    if config.control_listen == config.preview_listen {
-        report(
-            &mut problems,
-            document,
-            text,
-            "preview_listen",
-            format!(
-                "must differ from control_listen{}, both are {}",
-                default_note(applied, ["control_listen", "preview_listen"]),
-                config.control_listen
-            ),
-        );
+    if let Some(message) = preview_listen_problem(
+        config,
+        &default_note(applied, ["control_listen", "preview_listen"]),
+    ) {
+        report(&mut problems, document, text, "preview_listen", message);
     }
-    if config.control_origin == config.preview_origin {
-        report(
-            &mut problems,
-            document,
-            text,
-            "preview_origin",
-            format!(
-                "must differ from control_origin{}: a preview must not share the control \
-                 origin (item 3)",
-                default_note(applied, ["control_origin", "preview_origin"])
-            ),
-        );
+    if let Some(message) = preview_origin_problem(
+        config,
+        &default_note(applied, ["control_origin", "preview_origin"]),
+    ) {
+        report(&mut problems, document, text, "preview_origin", message);
     }
 
-    if !config.data_root.is_absolute() {
-        report(
-            &mut problems,
-            document,
-            text,
-            "data_root",
-            "must be an absolute path",
-        );
-    }
-    if !config.projects_root.is_absolute() {
-        report(
-            &mut problems,
-            document,
-            text,
-            "projects_root",
-            "must be an absolute path",
-        );
-    }
-    // Compare the folded spelling of both roots: `Path::starts_with` is component-wise, so
-    // without folding a `..` either hides a nested root or invents a nested one.
-    let data_root = normalized(&config.data_root);
-    let projects_root = normalized(&config.projects_root);
-    let roots_note = || default_note(applied, ["data_root", "projects_root"]);
-    if data_root == projects_root {
-        report(
-            &mut problems,
-            document,
-            text,
-            "projects_root",
-            format!(
-                "must differ from data_root{}: deleting data must never touch a repository",
-                roots_note()
-            ),
-        );
-    } else if projects_root.starts_with(&data_root) {
-        report(
-            &mut problems,
-            document,
-            text,
-            "projects_root",
-            format!(
-                "must not be inside data_root{}: deleting data must never touch a repository",
-                roots_note()
-            ),
-        );
-    } else if data_root.starts_with(&projects_root) {
-        report(
-            &mut problems,
-            document,
-            text,
-            "data_root",
-            format!(
-                "must not be inside projects_root{}: deleting data must never touch a \
-                 repository",
-                roots_note()
-            ),
-        );
+    let roots_note = default_note(applied, ["data_root", "projects_root"]);
+    for (key, message) in root_problems(config, &roots_note) {
+        report(&mut problems, document, text, key, message);
     }
 
     if let Some(docker_host) = &config.docker_host
@@ -627,6 +671,74 @@ fn semantic_problems(
     problems
 }
 
+/// `preview_listen` must differ from `control_listen`, or a preview is served on the control
+/// port. One implementation, called by the config pass and by the `--port` override, so the
+/// two cannot word the same collision differently. `note` says when one of the values being
+/// compared is a built-in default.
+fn preview_listen_problem(config: &Config, note: &str) -> Option<String> {
+    (config.control_listen == config.preview_listen).then(|| {
+        format!(
+            "must differ from control_listen{note}, both are {}",
+            config.control_listen
+        )
+    })
+}
+
+/// `preview_origin` must differ from `control_origin` (item 3). One implementation, for the
+/// same reason as [`preview_listen_problem`].
+fn preview_origin_problem(config: &Config, note: &str) -> Option<String> {
+    (config.control_origin == config.preview_origin).then(|| {
+        format!(
+            "must differ from control_origin{note}: a preview must not share the control \
+             origin (item 3)"
+        )
+    })
+}
+
+/// What the two roots broke: both must be absolute, and neither may contain the other, because
+/// deleting data must never touch a repository.
+///
+/// One implementation, called by the config pass and by the `--data-dir` override, so a data
+/// root the file must not name is not accepted from the command line either. `note` says when
+/// one of the compared values is a built-in default.
+fn root_problems(config: &Config, note: &str) -> Vec<(&'static str, String)> {
+    let mut problems = Vec::new();
+    if !config.data_root.is_absolute() {
+        problems.push(("data_root", "must be an absolute path".to_string()));
+    }
+    if !config.projects_root.is_absolute() {
+        problems.push(("projects_root", "must be an absolute path".to_string()));
+    }
+    // Compare the folded spelling of both roots: `Path::starts_with` is component-wise, so
+    // without folding a `..` either hides a nested root or invents a nested one.
+    let data_root = normalized(&config.data_root);
+    let projects_root = normalized(&config.projects_root);
+    if data_root == projects_root {
+        problems.push((
+            "projects_root",
+            format!(
+                "must differ from data_root{note}: deleting data must never touch a repository"
+            ),
+        ));
+    } else if projects_root.starts_with(&data_root) {
+        problems.push((
+            "projects_root",
+            format!(
+                "must not be inside data_root{note}: deleting data must never touch a repository"
+            ),
+        ));
+    } else if data_root.starts_with(&projects_root) {
+        problems.push((
+            "data_root",
+            format!(
+                "must not be inside projects_root{note}: deleting data must never touch a \
+                 repository"
+            ),
+        ));
+    }
+    problems
+}
+
 fn report(
     problems: &mut Vec<Problem>,
     document: &Document<&str>,
@@ -761,6 +873,7 @@ fn domain_problem(name: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::ffi::OsStringExt;
 
     /// The path every problem line is prefixed with in these tests.
     fn test_path() -> &'static Path {
@@ -1385,6 +1498,177 @@ allow = ["crates.io"]
                 refused.is_err(),
                 "the belt accepted {text:?}, so deny_unknown_fields is not doing its job"
             );
+        }
+    }
+
+    fn overridden(port: Option<u16>, data_root: Option<&str>) -> Config {
+        let mut config = settings();
+        config.apply_overrides(&Overrides {
+            port,
+            data_root: data_root.map(PathBuf::from),
+        });
+        config
+    }
+
+    #[test]
+    fn the_port_override_moves_the_listener_and_the_origin_but_not_the_preview() {
+        let config = overridden(Some(9123), None);
+        assert_eq!(config.control_listen, socket("127.0.0.1:9123"));
+        assert_eq!(
+            config.control_origin.as_str(),
+            "https://control.example:9123",
+            "a browser sends the origin it read; the scheme and host stay"
+        );
+        assert_eq!(config.preview_listen, socket("127.0.0.1:9001"));
+        assert_eq!(
+            config.preview_origin.as_str(),
+            "https://preview.example:8444"
+        );
+    }
+
+    #[test]
+    fn an_origin_moves_to_another_port_and_keeps_scheme_and_host() {
+        let cases = [
+            // A browser never sends a default port, so the rewrite does not write one either.
+            ("http://localhost:8080", 80, "http://localhost"),
+            ("https://hub.example", 443, "https://hub.example"),
+            ("https://hub.example", 8443, "https://hub.example:8443"),
+            ("http://[::1]:8080", 9999, "http://[::1]:9999"),
+            ("https://[2001:db8::1]", 443, "https://[2001:db8::1]"),
+        ];
+        for (text, port, expected) in cases {
+            let origin = Origin::parse(text).expect("a valid origin");
+            assert_eq!(origin.with_port(port).as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn the_data_dir_override_replaces_the_data_root() {
+        let config = overridden(None, Some("/tmp/holosmith-data"));
+        assert_eq!(config.data_root, Path::new("/tmp/holosmith-data"));
+        assert_eq!(config.projects_root, Path::new("/srv/holosmith/projects"));
+    }
+
+    #[test]
+    fn a_data_dir_that_is_not_utf8_is_still_a_path() {
+        let mut config = Config::default();
+        let odd = PathBuf::from(std::ffi::OsString::from_vec(vec![b'/', 0xff, b'x']));
+        config.apply_overrides(&Overrides {
+            port: None,
+            data_root: Some(odd.clone()),
+        });
+        assert_eq!(config.data_root, odd);
+    }
+
+    #[test]
+    fn an_override_that_collides_is_reported_in_the_config_passes_words() {
+        // The file names `control_listen` but not `preview_listen`, so the file alone is
+        // valid; `--port` walks the control listener onto the preview one.
+        let mut config = settings();
+        config.apply_overrides(&Overrides {
+            port: Some(9001),
+            data_root: None,
+        });
+        assert_eq!(
+            config.override_problems(),
+            vec!["preview_listen: must differ from control_listen, both are 127.0.0.1:9001"]
+        );
+    }
+
+    #[test]
+    fn a_valid_override_reports_nothing() {
+        assert!(
+            overridden(Some(9123), Some("/tmp/holosmith-data"))
+                .override_problems()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_override_collision_message_is_the_ones_one_implementation_produces() {
+        // Both keys written by the file: the semantic pass reports the collision with the same
+        // sentence the override path uses, because both call one function.
+        let file = "control_listen = \"127.0.0.1:8081\"\npreview_listen = \"127.0.0.1:8081\"\n";
+        let reported = problems_of(file);
+        assert_eq!(
+            reported,
+            "config.toml:2:1: preview_listen: must differ from control_listen, both are \
+             127.0.0.1:8081\n1 problem in config.toml\n"
+        );
+        let mut config = Config::default();
+        config.apply_overrides(&Overrides {
+            port: Some(8081),
+            data_root: None,
+        });
+        let from_override = config.override_problems();
+        // `--port 8081` also walks the control origin onto the built-in preview origin, so
+        // both collision rules fire; the listener sentence is the one compared here.
+        let listener = from_override
+            .iter()
+            .find(|problem| problem.starts_with("preview_listen: "))
+            .expect("the listener collision is reported");
+        assert!(
+            reported.contains(listener.as_str()),
+            "{reported:?} does not contain {listener:?}"
+        );
+        assert_eq!(
+            from_override
+                .iter()
+                .filter(|problem| problem.starts_with("preview_origin: "))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_relative_data_dir_is_refused_in_the_config_passes_words() {
+        // The config pass refuses a relative `data_root` in the file, and `--data-dir` answers
+        // to the same rule: that `serve` creates no directory does not make the root valid
+        // (ADR-0006 — one typed value, validated once, whichever layer set it).
+        assert_eq!(
+            overridden(None, Some("relative/data")).override_problems(),
+            vec!["data_root: must be an absolute path"]
+        );
+    }
+
+    #[test]
+    fn a_data_dir_that_overlaps_projects_root_is_refused() {
+        // `/srv/holosmith/projects` is the built-in projects_root: the same path the file may
+        // not name, refused from the CLI, which makes the repro for this story's second P1.
+        assert_eq!(
+            overridden(None, Some("/srv/holosmith/projects")).override_problems(),
+            vec![
+                "projects_root: must differ from data_root: deleting data must never touch a \
+                 repository"
+            ]
+        );
+        assert_eq!(
+            overridden(None, Some("/srv/holosmith/projects/data")).override_problems(),
+            vec![
+                "data_root: must not be inside projects_root: deleting data must never touch a \
+                 repository"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_role_word_is_the_specs_word() {
+        assert_eq!(Role::Hub.as_str(), "hub");
+        assert_eq!(Role::Server.as_str(), "server");
+        assert_eq!(Role::Both.as_str(), "both");
+        for word in ["hub", "server", "both"] {
+            assert_eq!(Role::parse(word).map(Role::as_str), Some(word));
+        }
+    }
+
+    #[test]
+    fn the_role_word_is_spelled_the_same_by_serde_display_and_parse() {
+        // Serde's `rename_all` is the one spelling the table in `Role` cannot supply, so this
+        // test holds it to the same word the banner prints and the file parses.
+        for role in [Role::Hub, Role::Server, Role::Both] {
+            let json = serde_json::to_string(&role).expect("a role serialises");
+            assert_eq!(json, format!("\"{}\"", role.as_str()));
+            assert_eq!(role.to_string(), role.as_str());
         }
     }
 
