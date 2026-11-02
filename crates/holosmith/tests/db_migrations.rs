@@ -100,27 +100,23 @@ fn an_embed_that_disagrees_with_the_constant_refuses_before_the_file_exists() {
     // refusal fires; deleting the `check_embed` call would leave every other test green.
     let dir = TempDir::new("stale-embed");
     let path = dir.database();
-    let migrations = [
-        Migration {
-            number: 1,
-            name: "initial",
+    // One migration past the constant, so this keeps working when the schema grows. Every
+    // literal migration creates the registry, so a set that ever ran would also fail loudly —
+    // but the assertion below is that `open` refused before the file was even created.
+    let migrations: Vec<Migration> = (1..=SCHEMA_VERSION + 1)
+        .map(|number| Migration {
+            number,
+            name: "literal",
             sql: "CREATE TABLE schema_version (version INTEGER PRIMARY KEY);",
-        },
-        Migration {
-            number: 2,
-            name: "one_too_many",
-            sql: "CREATE TABLE events (id INTEGER);",
-        },
-    ];
+        })
+        .collect();
     let error = Database::open_with(&path, OpenOptions::default(), NOW, &migrations)
         .expect_err("a migration past the constant cannot be opened");
     assert!(
         matches!(
             error,
-            DbError::Embed(EmbedError::Disagrees {
-                embedded: 2,
-                constant: SCHEMA_VERSION
-            })
+            DbError::Embed(EmbedError::Disagrees { embedded, constant })
+                if embedded == SCHEMA_VERSION + 1 && constant == SCHEMA_VERSION
         ),
         "expected a disagreement, got {error}"
     );
@@ -170,8 +166,11 @@ fn the_first_start_creates_wal_and_records_the_migration() {
     assert_eq!(pragma_string(&path, "journal_mode"), "wal");
     assert_eq!(
         recorded(&path),
-        vec![(SCHEMA_VERSION, "0001_initial.sql".to_string(), NOW)],
-        "the first start did not record exactly one migration"
+        vec![
+            (1, "0001_initial.sql".to_string(), NOW),
+            (2, "0002_sessions.sql".to_string(), NOW),
+        ],
+        "the first start did not record both migrations"
     );
 }
 
@@ -185,7 +184,10 @@ fn a_second_start_applies_nothing_and_records_nothing() {
     assert_eq!(second.schema_version(), SCHEMA_VERSION);
     assert_eq!(
         recorded(&path),
-        vec![(SCHEMA_VERSION, "0001_initial.sql".to_string(), NOW)],
+        vec![
+            (1, "0001_initial.sql".to_string(), NOW),
+            (2, "0002_sessions.sql".to_string(), NOW),
+        ],
         "the second start rewrote the applied set"
     );
 }
@@ -358,11 +360,14 @@ fn two_processes_starting_at_once_end_at_one_schema() {
         );
     }
     let rows = recorded(&data_root.join(db::DATABASE_FILE));
-    assert_eq!(rows.len(), 1, "the migration was applied twice: {rows:?}");
+    let applied: Vec<(u32, &str)> = rows
+        .iter()
+        .map(|(version, name, _)| (*version, name.as_str()))
+        .collect();
     assert_eq!(
-        (rows[0].0, rows[0].1.as_str()),
-        (SCHEMA_VERSION, "0001_initial.sql"),
-        "the recorded row is not the one migration"
+        applied,
+        [(1, "0001_initial.sql"), (2, "0002_sessions.sql")],
+        "the migrations were not applied exactly once: {rows:?}"
     );
 }
 

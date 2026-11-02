@@ -1,0 +1,519 @@
+//! Every statement that reads or writes the `sessions` table (HS-007).
+//!
+//! The repository borrows the open `Database`'s connection rather than owning one, so ADR-0009's
+//! "the connection is not in `AppState`" stays true and the single-writer decision stays with
+//! HS-009. A test below walks `src/**` and fails if a sessions statement appears in any other
+//! file, which is what makes "no SQL outside the repository" checkable rather than a review note.
+
+use std::str::FromStr;
+
+use rusqlite::types::ToSql;
+use rusqlite::{Connection, OptionalExtension, Row, params};
+
+use super::{NewSession, RepoError, Session, Status};
+
+/// Every column, in the order `row_to_session` reads them.
+const COLUMNS: &str = "id, project, model, thinking, worktree, base_commit, status, status_reason, \
+     client_key, network, created_at, last_active_at, stopped_at, usage_in, usage_out";
+
+/// The id: 16 lowercase hex characters from the database that stores them, so no crate is added
+/// for a uuid and no PRNG is hand-rolled (ADR-0011).
+const NEW_ID: &str = "SELECT lower(hex(randomblob(8)))";
+
+/// A new row: `worktree` is `''` until the provisioner runs, and `?9` is both `created_at` and
+/// `last_active_at`.
+const INSERT: &str = "INSERT INTO sessions \
+     (id, project, model, thinking, worktree, base_commit, status, status_reason, client_key, \
+      network, created_at, last_active_at, stopped_at, usage_in, usage_out) \
+     VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, NULL, ?7, ?8, ?9, ?9, NULL, 0, 0)";
+
+/// A status change: `stopped_at` moves with the status, `last_active_at` does not (it is
+/// activity, and HS-020/HS-021 own when it moves).
+const UPDATE_STATUS: &str =
+    "UPDATE sessions SET status = ?2, status_reason = ?3, stopped_at = ?4 WHERE id = ?1";
+
+/// The order `list` answers in: newest activity first, for the Sessions screen (HS-013), and the
+/// id after it so the order is total. The same `sessions_last_active` index also serves
+/// eviction's ascending read of the least recently active session (HS-020).
+const ORDER: &str = "ORDER BY last_active_at DESC, id ASC";
+
+/// The only way to read or write a `sessions` row. Obtained from `Database::sessions`.
+pub struct SessionRepository<'a> {
+    connection: &'a Connection,
+}
+
+impl<'a> SessionRepository<'a> {
+    /// Borrow `connection`. `pub(crate)` rather than `pub`, so `Database::sessions` is the only
+    /// way a caller gets one and the connection itself never leaves the database.
+    pub(crate) fn new(connection: &'a Connection) -> Self {
+        Self { connection }
+    }
+
+    /// Insert a session in `starting` and return the row as stored.
+    ///
+    /// The id is generated before the insert, not by a column default, so the caller can log it
+    /// and a test can assert its shape.
+    pub fn create(&self, new: &NewSession, now: i64) -> Result<Session, RepoError> {
+        let sqlite = |error| RepoError::sqlite("create", error);
+        let id: String = self
+            .connection
+            .query_row(NEW_ID, [], |row| row.get(0))
+            .map_err(sqlite)?;
+        self.connection
+            .execute(
+                INSERT,
+                params![
+                    &id,
+                    new.project,
+                    new.model,
+                    new.thinking,
+                    new.base_commit,
+                    Status::Starting.as_str(),
+                    new.client_key,
+                    new.network,
+                    now,
+                ],
+            )
+            .map_err(sqlite)?;
+        // Read the row back rather than assembling what was written: the returned session is the
+        // one a later `get` sees. `query_row` makes "the row vanished" an error, not an `Option`
+        // this call would have to unwrap.
+        self.connection
+            .query_row(&select("WHERE id = ?1"), [&id], row_to_session)
+            .map_err(sqlite)?
+    }
+
+    /// One session by its id.
+    pub fn get(&self, id: &str) -> Result<Option<Session>, RepoError> {
+        self.one("get", "WHERE id = ?1", &[&id])
+    }
+
+    /// One session by the idempotency key its create carried (HS-008).
+    pub fn by_client_key(&self, client_key: &str) -> Result<Option<Session>, RepoError> {
+        self.one("by_client_key", "WHERE client_key = ?1", &[&client_key])
+    }
+
+    /// Every session, or every session in one status, in `ORDER`.
+    pub fn list(&self, status: Option<Status>) -> Result<Vec<Session>, RepoError> {
+        let sqlite = |error| RepoError::sqlite("list", error);
+        let sql = match status {
+            Some(_) => select(&format!("WHERE status = ?1 {ORDER}")),
+            None => select(ORDER),
+        };
+        let mut statement = self.connection.prepare(&sql).map_err(sqlite)?;
+        let rows = match status {
+            Some(status) => statement.query_map([status.as_str()], row_to_session),
+            None => statement.query_map([], row_to_session),
+        }
+        .map_err(sqlite)?;
+        let rows = rows.collect::<rusqlite::Result<Vec<_>>>().map_err(sqlite)?;
+        rows.into_iter().collect()
+    }
+
+    /// Set the status and its reason, and move `stopped_at` with it: `now` when the new status is
+    /// `stopped`, `NULL` otherwise, which is item 15's "cleared on resume".
+    ///
+    /// `None` when there is no such id, so a caller can answer 404 without a second read.
+    pub fn set_status(
+        &self,
+        id: &str,
+        status: Status,
+        status_reason: Option<&str>,
+        now: i64,
+    ) -> Result<Option<Session>, RepoError> {
+        let stopped_at = (status == Status::Stopped).then_some(now);
+        let updated = self
+            .connection
+            .execute(
+                UPDATE_STATUS,
+                params![id, status.as_str(), status_reason, stopped_at],
+            )
+            .map_err(|error| RepoError::sqlite("set_status", error))?;
+        if updated == 0 {
+            return Ok(None);
+        }
+        self.one("set_status", "WHERE id = ?1", &[&id])
+    }
+
+    /// The row a filter matches, or `None`: the reads that must not fail on "no such row".
+    /// `operation` is the public method the statement belongs to, so the error names it.
+    fn one(
+        &self,
+        operation: &'static str,
+        filter: &str,
+        parameters: &[&dyn ToSql],
+    ) -> Result<Option<Session>, RepoError> {
+        self.connection
+            .query_row(&select(filter), parameters, row_to_session)
+            .optional()
+            .map_err(|error| RepoError::sqlite(operation, error))?
+            .transpose()
+    }
+}
+
+/// `SELECT <every column> FROM sessions <filter>`, so the readers cannot drift from `COLUMNS`.
+fn select(filter: &str) -> String {
+    format!("SELECT {COLUMNS} FROM sessions {filter}")
+}
+
+/// One row, with `status` parsed.
+///
+/// The parse is fallible and `Row` is not, so the mapper answers `Result<Session, RepoError>`
+/// inside the `rusqlite` result and each caller transposes it — which is what keeps a corrupt
+/// row's offending text inside `RepoError::Status` instead of being flattened into a SQLite error.
+fn row_to_session(row: &Row<'_>) -> rusqlite::Result<Result<Session, RepoError>> {
+    let status = match Status::from_str(&row.get::<_, String>("status")?) {
+        Ok(status) => status,
+        Err(error) => return Ok(Err(error)),
+    };
+    Ok(Ok(Session {
+        id: row.get("id")?,
+        project: row.get("project")?,
+        model: row.get("model")?,
+        thinking: row.get("thinking")?,
+        worktree: row.get("worktree")?,
+        base_commit: row.get("base_commit")?,
+        status,
+        status_reason: row.get("status_reason")?,
+        client_key: row.get("client_key")?,
+        network: row.get("network")?,
+        created_at: row.get("created_at")?,
+        last_active_at: row.get("last_active_at")?,
+        stopped_at: row.get("stopped_at")?,
+        usage_in: row.get("usage_in")?,
+        usage_out: row.get("usage_out")?,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+
+    /// The one file allowed to name the table in a statement.
+    const REPOSITORY: &str = "sessions/repository.rs";
+
+    /// The spellings a sessions statement can take, longest first so `DELETE FROM sessions` is
+    /// reported as itself rather than as `FROM sessions`.
+    const STATEMENTS: [&str; 4] = [
+        "delete from sessions",
+        "from sessions",
+        "into sessions",
+        "update sessions",
+    ];
+
+    #[test]
+    fn every_status_round_trips_through_its_text() {
+        for status in Status::ALL {
+            let parsed: Status = status
+                .as_str()
+                .parse()
+                .expect("a status's own text parses back");
+            assert_eq!(parsed, status);
+            assert_eq!(status.to_string(), status.as_str());
+        }
+        let texts: Vec<&str> = Status::ALL.iter().map(|status| status.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "starting", "idle", "running", "stopped", "error", "deleting"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_status_that_is_not_one_of_the_six_is_refused_with_its_text() {
+        // `ended` was removed from the spec's set, so it is exactly the kind of value an old row
+        // could still hold.
+        let error = "ended"
+            .parse::<Status>()
+            .expect_err("ended is not a status");
+        assert!(matches!(error, RepoError::Status(ref text) if text == "ended"));
+        assert!(
+            error.to_string().contains("holds the status \"ended\""),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn no_sessions_sql_outside_the_repository() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        assert!(
+            sources_under(&root)
+                .iter()
+                .any(|(file, _)| file == REPOSITORY),
+            "the walk did not find {root:?}/{REPOSITORY}"
+        );
+        let offenders = offenders_under(&root);
+        assert!(
+            offenders.is_empty(),
+            "a sessions statement lives outside src/{REPOSITORY}, which owns every read and \
+             write of the table: {offenders:?}"
+        );
+    }
+
+    #[test]
+    fn the_guard_fires_on_a_planted_statement() {
+        // The guard above passes over today's tree, so this one plants a tree where it must
+        // fire: empty the walk's collection and this fails instead of the rule quietly
+        // stopping. The other files are the shapes the matcher has to leave alone.
+        let planted = TempDir::new("planted");
+        planted.plant("planted.rs", "let sql = \"SELECT id FROM sessions\";\n");
+        planted.plant("harmless.rs", "let sessions = 1;\n");
+        planted.plant("suffix.rs", "let sql = \"SELECT * FROM sessions_notes\";\n");
+        // A `\`-continuation after no space is not a break in Rust either: the two lines are the
+        // one token `FROMsessions` at runtime, which is not a statement.
+        planted.plant(
+            "glued.rs",
+            "let sql = \"SELECT id FROM\\\n     sessions\";\n",
+        );
+        planted.plant(
+            "rename.rs",
+            "let sql = \"ALTER TABLE old_sessions RENAME TO sessions\";\n",
+        );
+        planted.plant(
+            "index.rs",
+            "let sql = \"CREATE INDEX sessions_status ON sessions (status)\";\n",
+        );
+        assert_eq!(
+            offenders_under(planted.path()),
+            ["planted.rs:1: from sessions"]
+        );
+    }
+
+    #[test]
+    fn the_guard_sees_through_the_spellings_that_hide_a_statement() {
+        // Each spelling is one statement at runtime while the literal phrase in `STATEMENTS`
+        // never appears on its line: a schema prefix, identifier quoting, a conflict clause and
+        // a Rust `\`-continuation. One planted file each, so the reported line is the one the
+        // statement was written on.
+        for (file, text, reported) in [
+            (
+                "prefix.rs",
+                "let sql = \"SELECT id FROM main.sessions\";\n",
+                "prefix.rs:1: from sessions",
+            ),
+            (
+                "quoted.rs",
+                "let sql = \"SELECT id FROM \\\"sessions\\\"\";\n",
+                "quoted.rs:1: from sessions",
+            ),
+            (
+                "bracketed.rs",
+                "let sql = \"DELETE FROM [sessions]\";\n",
+                "bracketed.rs:1: delete from sessions",
+            ),
+            (
+                "conflict.rs",
+                "let sql = \"UPDATE OR REPLACE sessions SET status = 'idle'\";\n",
+                "conflict.rs:1: update sessions",
+            ),
+            (
+                "continued.rs",
+                "let sql = \"SELECT id FROM \\\n     sessions\";\n",
+                "continued.rs:1: from sessions",
+            ),
+        ] {
+            let planted = TempDir::new("spelling");
+            planted.plant(file, text);
+            assert_eq!(offenders_under(planted.path()), [reported], "{file}");
+        }
+    }
+
+    /// Every sessions statement in a file under `root` that is not the repository's, as
+    /// `<file>:<line>: <phrase>`.
+    fn offenders_under(root: &Path) -> Vec<String> {
+        let mut offenders = Vec::new();
+        for (file, text) in sources_under(root) {
+            if file == REPOSITORY {
+                continue;
+            }
+            let (normalised, lines) = normalise(&text);
+            if let Some((at, statement)) = sessions_statement(&normalised) {
+                let line = lines[normalised[..at].chars().count()];
+                offenders.push(format!("{file}:{line}: {statement}"));
+            }
+        }
+        offenders
+    }
+
+    /// The first statement normalised `text` holds, as its offset and the phrase that matched.
+    /// The phrases are tried in order, so `DELETE FROM sessions` is reported as itself rather
+    /// than as `FROM sessions`.
+    fn sessions_statement(normalised: &str) -> Option<(usize, &'static str)> {
+        STATEMENTS
+            .into_iter()
+            .find_map(|statement| names_word(normalised, statement).map(|at| (at, statement)))
+    }
+
+    /// Where `needle` appears in normalised `haystack` with neither end inside a longer word:
+    /// `sessions` is the table, and `sessions_notes` is not.
+    fn names_word(haystack: &str, needle: &str) -> Option<usize> {
+        let mut from = 0;
+        while let Some(index) = haystack[from..].find(needle) {
+            let start = from + index;
+            let end = start + needle.len();
+            let before = haystack[..start].chars().next_back();
+            let after = haystack[end..].chars().next();
+            if !before.is_some_and(is_word) && !after.is_some_and(is_word) {
+                return Some(start);
+            }
+            from = start + 1;
+        }
+        None
+    }
+
+    /// A file's text as the guard matches it, and the line of the original each character came
+    /// from, so a statement split across lines is still reported where it was written.
+    ///
+    /// The per-file normalisation is what makes a spelling like `FROM main.sessions` or a
+    /// statement broken by a Rust `\`-continuation visible: the patterns are literal, so the
+    /// text is rewritten into the one spelling `STATEMENTS` holds before they are applied.
+    fn normalise(text: &str) -> (String, Vec<usize>) {
+        let (mut normalised, mut lines) = squashed(&text.to_ascii_lowercase());
+        // `FROM main.sessions` is `FROM sessions`: `main` is the schema SQLite attaches by
+        // default, and it is not part of the statement the guard names.
+        rewrite(&mut normalised, &mut lines, "main.sessions", "sessions");
+        // `INSERT OR REPLACE`/`UPDATE OR IGNORE`: the conflict clause sits between the keyword
+        // and the table, and `STATEMENTS` does not name it.
+        for clause in ["or replace ", "or ignore "] {
+            for keyword in ["insert ", "update "] {
+                rewrite(
+                    &mut normalised,
+                    &mut lines,
+                    &format!("{keyword}{clause}"),
+                    keyword,
+                );
+            }
+        }
+        (normalised, lines)
+    }
+
+    /// `text` with `\`-continuations joined, every run of whitespace collapsed to one space, and
+    /// the quoting a word can wear (`"sessions"`, `` `sessions` ``, `[sessions]`, and the
+    /// backslash Rust needs to escape a quote inside one) removed.
+    ///
+    /// `lines[i]` is the line of `text` that character `i` came from, so a statement found in the
+    /// squashed text is still reported on the line its first keyword is written on.
+    fn squashed(text: &str) -> (String, Vec<usize>) {
+        let mut squashed = String::with_capacity(text.len());
+        let mut lines = Vec::with_capacity(text.len());
+        let mut line = 1;
+        let mut characters = text.chars().peekable();
+        while let Some(character) = characters.next() {
+            // A `\`-continuation is not a break at all: Rust drops the backslash, the newline and
+            // the next line's indentation, so the statement's two source lines are one statement
+            // here too, and `"FROM\` + newline + `sessions"` stays the one token it is at
+            // runtime.
+            if character == '\\' && characters.peek() == Some(&'\n') {
+                characters.next();
+                line += 1;
+                while characters
+                    .peek()
+                    .is_some_and(|next| next.is_whitespace() && *next != '\n')
+                {
+                    characters.next();
+                }
+                continue;
+            }
+            if character == '\n' {
+                line += 1;
+            }
+            if character.is_whitespace() {
+                if !squashed.is_empty() && !squashed.ends_with(' ') {
+                    squashed.push(' ');
+                    lines.push(line);
+                }
+                continue;
+            }
+            if matches!(character, '"' | '`' | '[' | ']' | '\\') {
+                continue;
+            }
+            squashed.push(character);
+            lines.push(line);
+        }
+        (squashed, lines)
+    }
+
+    /// Replace every `needle` in `normalised` with `replacement`, keeping `lines` — one entry
+    /// per character of `normalised` — aligned: a rewritten character keeps the line of the
+    /// spelling it replaced.
+    fn rewrite(normalised: &mut String, lines: &mut Vec<usize>, needle: &str, replacement: &str) {
+        let mut from = 0;
+        while let Some(index) = normalised[from..].find(needle) {
+            let start = from + index;
+            let start_at = normalised[..start].chars().count();
+            let line = lines[start_at];
+            let needle_chars = needle.chars().count();
+            normalised.replace_range(start..start + needle.len(), replacement);
+            lines.splice(
+                start_at..start_at + needle_chars,
+                std::iter::repeat_n(line, replacement.chars().count()),
+            );
+            from = start + replacement.len();
+        }
+    }
+
+    fn is_word(character: char) -> bool {
+        character.is_ascii_alphanumeric() || character == '_'
+    }
+
+    /// Every file under `root`, relative to it with `/` separators, and its text.
+    fn sources_under(root: &Path) -> Vec<(String, String)> {
+        let mut sources = Vec::new();
+        let mut pending: Vec<PathBuf> = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                let path = entry.path();
+                if file_type.is_dir() {
+                    pending.push(path);
+                } else if file_type.is_file() {
+                    let Ok(text) = std::fs::read_to_string(&path) else {
+                        continue;
+                    };
+                    let Ok(relative) = path.strip_prefix(root) else {
+                        continue;
+                    };
+                    sources.push((relative.to_string_lossy().replace('\\', "/"), text));
+                }
+            }
+        }
+        sources
+    }
+
+    /// A directory of planted files that removes itself, so the tests leave nothing in `/tmp`.
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("holosmith-guard-{label}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("the planted directory is creatable");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+
+        fn plant(&self, file: &str, text: &str) {
+            std::fs::write(self.path.join(file), text).expect("the planted file is writable");
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}

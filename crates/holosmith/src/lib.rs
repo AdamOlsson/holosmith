@@ -10,6 +10,7 @@ pub mod pins;
 pub mod runtime;
 pub mod schema;
 pub mod serve;
+pub mod sessions;
 mod sql;
 pub mod version;
 pub mod web;

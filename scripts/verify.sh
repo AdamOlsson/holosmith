@@ -167,6 +167,7 @@ answer() {
 serve_cases=(
   case_health
   case_schema_version
+  case_sessions_table
   case_app_shell
   case_api_not_found
   case_guard_bad_host
@@ -211,6 +212,26 @@ case_schema_version() {
   [ -f "$database" ] ||
     fail "$name/app_db" "serve did not write $database: $(ls -A "$WORK/data" 2>/dev/null)"
   assertions=$((assertions + 1))
+}
+
+# HS-007's acceptance is "migration adds `sessions`", and nothing else proves the booted
+# artifact created it: `case_schema_version` derives the number the artifact reports, which a
+# migration bump alone would satisfy. The table's SQL lives in SQLite's `sqlite_master`, so the
+# database's own bytes carry it and no `sqlite3` binary is needed — the same byte grep
+# scripts/check-static.sh makes for `CREATE TABLE schema_version`. The glob covers the WAL
+# sidecars, because while serve is running the schema may still be in `app.db-wal`.
+case_sessions_table() {
+  local name=case_sessions_table file
+  for file in "$WORK"/data/app.db*; do
+    [ -f "$file" ] || continue
+    if grep -aq 'CREATE TABLE sessions' "$file" &&
+      grep -aq 'sessions_status' "$file"; then
+      assertions=$((assertions + 1))
+      return 0
+    fi
+  done
+  fail "$name/table" \
+    "no app.db file carries CREATE TABLE sessions and the sessions_status index: $(ls -A "$WORK/data" 2>/dev/null)"
 }
 
 case_app_shell() {

@@ -13,6 +13,7 @@ use std::time::Duration;
 use rusqlite::{Connection, TransactionBehavior, params};
 
 use crate::schema::{self, EmbedError, Migration};
+use crate::sessions::repository::SessionRepository;
 use crate::sql::split_statements;
 
 /// The file under `data_root` that holds the schema (item 5).
@@ -44,8 +45,9 @@ impl Default for OpenOptions {
 /// An open, migrated database. Held for the process lifetime; sharing the connection between
 /// handlers is the single-writer decision HS-009 owns, not this story's (ADR-0009).
 pub struct Database {
-    /// Held, not read: keeping it open is the point, and HS-009 is its first reader.
-    _connection: Connection,
+    /// The one connection this process has. `sessions` lends it to the repository; sharing it
+    /// between tasks is the single-writer decision HS-009 owns.
+    connection: Connection,
     path: PathBuf,
     schema_version: u32,
 }
@@ -80,7 +82,7 @@ impl Database {
         configured(&connection, path, options)?;
         let schema_version = apply_pending(&mut connection, path, migrations, options, now)?;
         Ok(Self {
-            _connection: connection,
+            connection,
             path: path.to_path_buf(),
             schema_version,
         })
@@ -94,6 +96,14 @@ impl Database {
     /// What `schema_version` records after the start: the reported schema.
     pub fn schema_version(&self) -> u32 {
         self.schema_version
+    }
+
+    /// Every read and write of a `sessions` row (HS-007).
+    ///
+    /// The repository borrows this database's connection, so the connection itself stays private
+    /// and ADR-0009's "not in `AppState`" holds (ADR-0011).
+    pub fn sessions(&self) -> SessionRepository<'_> {
+        SessionRepository::new(&self.connection)
     }
 }
 
