@@ -10,6 +10,8 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=build_support/web_embed.rs");
     println!("cargo:rerun-if-changed=../../pins/pi.txt");
+    // Without this line a new migration file is silently left out of the binary (ADR-0009).
+    println!("cargo:rerun-if-changed=migrations");
     println!("cargo:rerun-if-env-changed=HOLOSMITH_GIT_TAG");
     println!("cargo:rerun-if-env-changed=HOLOSMITH_WEB_DIST");
     println!("cargo:rerun-if-env-changed=HOLOSMITH_REQUIRE_WEB");

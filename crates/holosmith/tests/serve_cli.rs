@@ -43,10 +43,18 @@ impl TempDir {
     }
 
     /// The config every serving test reads, unless it needs another one.
+    ///
+    /// It names a data root inside this directory: without one, `serve` would create and
+    /// migrate the default `/var/lib/holosmith`, so the tests would write machine state and
+    /// fail wherever that path is not writable (ADR-0009).
     fn config(&self) -> PathBuf {
         self.write(
             "config.toml",
-            "control_listen = \"127.0.0.1:0\"\npreview_listen = \"127.0.0.1:8081\"\n",
+            &format!(
+                "control_listen = \"127.0.0.1:0\"\npreview_listen = \"127.0.0.1:8081\"\n\
+                 data_root = \"{}\"\n",
+                self.file("data").display()
+            ),
         )
     }
 }
@@ -198,7 +206,7 @@ fn the_startup_lines_are_exact_and_name_the_bound_port() {
     .wait_until_listening();
     let said = server.said();
     let lines: Vec<&str> = said.lines().collect();
-    assert_eq!(lines.len(), 7, "{said}");
+    assert_eq!(lines.len(), 8, "{said}");
     assert_eq!(lines[0], "log info");
     let version = holosmith::version::VersionInfo::current();
     assert_eq!(
@@ -223,6 +231,21 @@ fn the_startup_lines_are_exact_and_name_the_bound_port() {
         lines[6],
         "preview_listen 127.0.0.1:8081 (configured, not bound until HS-041)"
     );
+    // The eighth line, appended after `preview_listen` (ADR-0009): the file the process
+    // opened and the schema it recorded.
+    assert_eq!(
+        lines[7],
+        format!(
+            "database {} schema {}",
+            data.join("app.db").display(),
+            holosmith::schema::SCHEMA_VERSION
+        )
+    );
+    assert!(
+        data.join("app.db").is_file(),
+        "serve created no database under {}",
+        data.display()
+    );
     assert_ne!(server.port, 0, "a bound port is a real port");
     assert_eq!(server.signal("TERM"), 0);
 }
@@ -232,7 +255,10 @@ fn the_role_in_the_config_file_reaches_the_health_payload() {
     let dir = TempDir::new("role");
     let config = dir.write(
         "config.toml",
-        "role = \"hub\"\ncontrol_listen = \"127.0.0.1:0\"\n",
+        &format!(
+            "role = \"hub\"\ncontrol_listen = \"127.0.0.1:0\"\ndata_root = \"{}\"\n",
+            dir.file("data").display()
+        ),
     );
     let mut server = Server::start(
         dir,
@@ -388,6 +414,36 @@ fn a_data_dir_that_is_not_utf8_can_be_served() {
     .wait_until_listening();
     assert_eq!(server.get("/api/health").0, 200);
     assert_eq!(server.signal("TERM"), 0);
+}
+
+#[test]
+fn a_data_dir_that_cannot_be_created_is_reported_before_anything_binds() {
+    // A regular file where the data root belongs: `mkdir -p` fails, so the start names the
+    // path and exits 1 with no listener (ADR-0009).
+    let dir = TempDir::new("data-dir-unwritable");
+    let config = dir.config();
+    let blocker = dir.write("blocker", "not a directory\n");
+    let data = blocker.join("data");
+    let output = holosmith(&[
+        "serve",
+        "--config",
+        config.to_str().expect("UTF-8"),
+        "--data-dir",
+        data.to_str().expect("UTF-8"),
+        "--port",
+        "0",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.lines().next().unwrap_or_default(),
+        format!(
+            "holosmith: serve: cannot create the data root {}: Not a directory (os error 20)",
+            data.display()
+        ),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("control_listen "), "{stderr}");
 }
 
 #[test]

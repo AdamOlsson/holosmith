@@ -8,10 +8,12 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::net::TcpListener;
 
 use crate::config::{Config, LoadError, LoadedConfig, Overrides};
+use crate::db::{self, Database, OpenOptions};
 use crate::http::{self, App, AppState};
 use crate::logging;
 use crate::runtime::{Backend, Runtime};
@@ -47,11 +49,33 @@ pub fn run(args: ServeArgs) -> ExitCode {
         }
         return ExitCode::FAILURE;
     }
+    // `serve` owns the data root: ADR-0006's handoff said `serve` creates no directories, so
+    // this story creates it (ADR-0009), and a database that cannot be opened or migrated is a
+    // startup failure before any port exists.
+    if let Err(error) = std::fs::create_dir_all(&loaded.config.data_root) {
+        eprintln!(
+            "holosmith: serve: cannot create the data root {}: {error}",
+            loaded.config.data_root.display()
+        );
+        return ExitCode::FAILURE;
+    }
+    // Held for the process lifetime. The connection is deliberately **not** in `AppState`:
+    // sharing it between handlers is the single-writer decision HS-009 owns.
+    let database = match Database::open(
+        &loaded.config.data_root.join(db::DATABASE_FILE),
+        OpenOptions::default(),
+        unix_now(),
+    ) {
+        Ok(database) => database,
+        Err(error) => {
+            eprintln!("holosmith: serve: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     // `--port 0` asks the kernel for a port, so the origin a browser will send is not knowable
     // until after `bind`; the flag decides, because a port written in the file may deliberately
     // name a proxied address rather than the local one.
     let ephemeral_origin = args.overrides.port == Some(0);
-
     let runtime = Runtime::started(args.backend);
     let version = VersionInfo::current();
     let listen = loaded.config.control_listen;
@@ -83,7 +107,7 @@ pub fn run(args: ServeArgs) -> ExitCode {
         if ephemeral_origin {
             loaded.config.control_origin = loaded.config.control_origin.with_port(bound.port());
         }
-        banner(&filter, &loaded, &runtime, &version, bound);
+        banner(&filter, &loaded, &runtime, &version, bound, &database);
         let app = App::new(http::router(AppState {
             config: loaded.config.clone(),
             runtime,
@@ -109,18 +133,19 @@ pub fn run(args: ServeArgs) -> ExitCode {
     }
 }
 
-/// The seven startup lines, in this order, on stderr.
+/// The eight startup lines, in this order, on stderr.
 ///
 /// They are written directly rather than logged as events so they survive any
 /// `HOLOSMITH_LOG` filter: an operator reading `journalctl` sees the addresses the process
-/// bound, the origin HS-005 will compare a browser's `Origin` against, and the config it read
-/// even when diagnostics are off.
+/// bound, the origin HS-005 will compare a browser's `Origin` against, the config it read, and
+/// the database it opened and migrated, even when diagnostics are off.
 fn banner(
     filter: &str,
     loaded: &LoadedConfig,
     runtime: &Runtime,
     version: &VersionInfo,
     bound: SocketAddr,
+    database: &Database,
 ) {
     eprintln!("log {filter}");
     eprintln!(
@@ -135,4 +160,18 @@ fn banner(
         "preview_listen {} (configured, not bound until HS-041)",
         loaded.config.preview_listen
     );
+    eprintln!(
+        "database {} schema {}",
+        database.path().display(),
+        database.schema_version()
+    );
+}
+
+/// Unix seconds recorded as `schema_version.applied_at`. A clock set before 1970 reads as 0:
+/// a wrong timestamp is not worth failing a start over.
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_secs() as i64)
+        .unwrap_or_default()
 }

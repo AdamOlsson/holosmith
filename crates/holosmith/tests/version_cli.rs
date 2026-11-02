@@ -93,6 +93,43 @@ fn json_prints_one_line_with_the_contract_keys() {
 }
 
 #[test]
+fn json_schema_version_is_the_highest_embedded_migration() {
+    // Guard 2 of ADR-0009, from the outside: the constant the binary reports without opening a
+    // database is the highest migration it embeds, and it writes nothing on the way.
+    let dir = std::env::temp_dir().join(format!("holosmith-version-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("the temp directory is creatable");
+    let output = Command::new(env!("CARGO_BIN_EXE_holosmith"))
+        .args(["version", "--json"])
+        .current_dir(&dir)
+        .output()
+        .expect("the binary runs");
+    let stdout = stdout_of(&output);
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is valid JSON");
+    let highest = holosmith::schema::embedded()
+        .expect("the embedded migrations are well formed")
+        .last()
+        .map(|migration| migration.number)
+        .unwrap_or_default();
+    assert_eq!(value["schema_version"], serde_json::json!(highest));
+    let left: Vec<String> = fs::read_dir(&dir)
+        .expect("the directory is readable")
+        .map(|entry| {
+            entry
+                .expect("a readable entry")
+                .file_name()
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect();
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        left.is_empty(),
+        "version opened or created something: {left:?}"
+    );
+}
+
+#[test]
 fn unknown_subcommand_fails() {
     let output = holosmith(&["nonsense"]);
     assert!(
