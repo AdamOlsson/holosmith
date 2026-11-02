@@ -225,12 +225,20 @@ A second HTTP listener that serves only session previews, on its own origin.
 _Avoid_: Preview port, proxy port
 
 **Control origin**:
-The origin of the control listener.
+The origin of the control listener, spelled the way a browser spells it: scheme and host, plus a port only when it is not the scheme's default (`Origin::with_port`).
 _Avoid_: App URL
 
 **Preview origin**:
 The origin of the preview listener. Never the same as the control origin.
 _Avoid_: Preview URL
+
+**App shell**:
+The page the control listener serves at `/`: the app's name, version, role and uptime, read from the health endpoint. It holds no sessions yet.
+_Avoid_: Home page, landing page, index, SPA
+
+**Health endpoint**:
+`GET /api/health` on the control listener: name, version, role and uptime of the running binary, and the one endpoint no role check applies to. Never the same thing as `holosmith status`, which also asks other machines.
+_Avoid_: Status, ping, heartbeat, healthcheck
 
 ### Operations
 
