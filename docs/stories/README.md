@@ -114,7 +114,7 @@ Every section of `HolosmithSpec.md` maps to at least one story. If a spec item g
 
 ## Decisions taken while slicing
 
-Nine decisions were made that the spec does not make. Each has an ADR because each is hard to reverse, surprising to a later reader, and the result of a real trade-off.
+Ten decisions were made that the spec does not make. Each has an ADR because each is hard to reverse, surprising to a later reader, and the result of a real trade-off.
 
 - [ADR-0001](../adr/0001-build-session-lifecycle-before-docker.md) — the session lifecycle is built against the stub backend before Docker exists. Consequence: there are two fakes, the in-process stub backend and the in-container fake pi, and they are not the same thing.
 - [ADR-0002](../adr/0002-security-guards-before-endpoints.md) — the browser guards and network isolation land before the features they protect.
@@ -125,6 +125,7 @@ Nine decisions were made that the spec does not make. Each has an ADR because ea
 - [ADR-0007](../adr/0007-serve-from-one-assembled-service.md) — serve one assembled axum service from tokio, with the web app embedded and a deadline on shutdown. Consequence: routes are added to a `Routes` and are servable only as an `App`, so a later route cannot skip the middleware HS-005 attaches.
 - [ADR-0008](../adr/0008-one-json-error-envelope.md) — every error with a body is `{"code","message"}` and the code is the spec's own name. Consequence: `code` values are effectively an API, and a new code arrives with the story that returns it.
 - [ADR-0009](../adr/0009-embedded-forward-only-migrations.md) — the binary opens, asserts and migrates its own database, with numbered SQL embedded at compile time and one transaction per start guarded by SQLite's own write lock. Consequence: the startup banner has eight lines, `serve` owns the data root, and the connection stays out of `AppState` until HS-009 decides how handlers share it.
+- [ADR-0010](../adr/0010-browser-facing-guards-are-one-layer.md) — the browser-facing guards are one middleware layer inside `App::new`, so a route added later cannot skip them, and every refusal is the ADR-0008 envelope. Consequence: `GET /api/health` is exempt from all four checks, and no response ever carries a CORS header.
 
 Gaps in the spec that had to be filled to write these stories, all reversible and all flagged in the story that fills them:
 

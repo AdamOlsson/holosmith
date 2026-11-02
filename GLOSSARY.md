@@ -240,6 +240,10 @@ _Avoid_: Home page, landing page, index, SPA
 `GET /api/health` on the control listener: name, version, role and uptime of the running binary, and the one endpoint no role check applies to. Never the same thing as `holosmith status`, which also asks other machines.
 _Avoid_: Status, ping, heartbeat, healthcheck
 
+**Guard**:
+One of the four checks the control listener makes on a request that is not a health probe: the Host allow-list, the control origin, the JSON client header, and the owner. A route cannot skip them.
+_Avoid_: Filter, middleware, auth
+
 ### Operations
 
 **Version**:
