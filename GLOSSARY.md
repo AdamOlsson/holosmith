@@ -254,6 +254,14 @@ _Avoid_: Commit, release version, build id
 The one pi version that the build, `doctor` and the agent image all read, kept in `pins/pi.txt` and nowhere else. Its machine name is `pi_version`, in the binary's output and in any later config key.
 _Avoid_: Pi version, agent version, latest pi
 
+**Migration**:
+One numbered SQL file that changes the database schema, embedded in the binary and applied in order at startup. Forward-only: an applied migration is never edited and never runs twice.
+_Avoid_: Patch, upgrade script, version script
+
+**Contract migration**:
+A migration that drops or renames something an earlier release still uses. It ships one release after the migration that replaced it, and only in a file marked as a contract migration, so a release that only expands can never contain one by accident.
+_Avoid_: Cleanup script, destructive migration, breaking migration
+
 **Schema version**:
 The number of the newest database migration the binary embeds, which `version` reports and the database records.
 _Avoid_: DB version, migration count, schema revision
