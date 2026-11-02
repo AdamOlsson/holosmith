@@ -42,11 +42,13 @@ impl Default for OpenOptions {
     }
 }
 
-/// An open, migrated database. Held for the process lifetime; sharing the connection between
-/// handlers is the single-writer decision HS-009 owns, not this story's (ADR-0009).
+/// An open, migrated database. Held for the process lifetime; the connection stays private, and a
+/// handler reaches it only through ADR-0012's `Arc<Mutex<Database>>` stopgap until HS-009's single
+/// writer owns the write path (ADR-0009, ADR-0012).
 pub struct Database {
-    /// The one connection this process has. `sessions` lends it to the repository; sharing it
-    /// between tasks is the single-writer decision HS-009 owns.
+    /// The one connection this process has. `sessions` lends it to the repository and nothing else
+    /// reaches it; a handler gets to it only through ADR-0012's `Arc<Mutex<Database>>` stopgap
+    /// until HS-009's single writer owns the write path.
     connection: Connection,
     path: PathBuf,
     schema_version: u32,
@@ -100,8 +102,9 @@ impl Database {
 
     /// Every read and write of a `sessions` row (HS-007).
     ///
-    /// The repository borrows this database's connection, so the connection itself stays private
-    /// and ADR-0009's "not in `AppState`" holds (ADR-0011).
+    /// The repository borrows this database's connection, so the connection itself stays private.
+    /// A handler reaches it only through ADR-0012's `Arc<Mutex<Database>>` stopgap until HS-009's
+    /// single writer owns the write path (ADR-0011, ADR-0012).
     pub fn sessions(&self) -> SessionRepository<'_> {
         SessionRepository::new(&self.connection)
     }

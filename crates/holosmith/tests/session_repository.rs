@@ -5,47 +5,17 @@
 //! read the table's own schema, and write a status the `Status` enum refuses. That is why the
 //! "no SQL outside the repository" guard walks `src/**` and not `tests/**`.
 
-use std::env;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use rusqlite::Connection;
 
-use holosmith::db::{self, Database, OpenOptions};
 use holosmith::sessions::{NewSession, RepoError, Status};
+
+mod support;
+use support::{TempDir, open};
 
 /// The timestamps these tests write, so the value can be asserted rather than raced.
 const NOW: i64 = 1_760_000_000;
-
-/// A directory that removes itself, so the tests leave nothing in `/tmp`.
-struct TempDir {
-    path: PathBuf,
-}
-
-impl TempDir {
-    fn new(label: &str) -> Self {
-        let path =
-            env::temp_dir().join(format!("holosmith-sessions-{label}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).expect("the temp directory is creatable");
-        Self { path }
-    }
-
-    fn database(&self) -> PathBuf {
-        self.path.join(db::DATABASE_FILE)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
-/// Open (and migrate) the temporary database, taking the same `now` every test asserts on.
-fn open(dir: &TempDir) -> Database {
-    Database::open(&dir.database(), OpenOptions::default(), NOW).expect("a fresh database opens")
-}
 
 /// The create body these tests share: the four fields HS-008 will validate, plus the key.
 fn new_session(client_key: Option<&str>) -> NewSession {
@@ -391,22 +361,12 @@ fn the_same_client_key_twice_is_refused() {
     let error = repository
         .create(&new_session(Some("taken")), NOW)
         .expect_err("a duplicate client key is refused");
-    // The error names the operation, so an operator sees which call failed, not a bare SQLite
-    // string (the convention `DbError::Sqlite` follows by naming its file).
-    assert!(
-        matches!(
-            error,
-            RepoError::Sqlite {
-                operation: "create",
-                ..
-            }
-        ),
-        "{error}"
-    );
-    assert!(error.to_string().starts_with("create: "), "{error}");
-    assert!(
-        error.to_string().contains("UNIQUE constraint failed"),
-        "{error}"
+    // The repository maps SQLite's `UNIQUE` violation to this variant by extended code, which is
+    // what lets the handler answer the winning row instead of a 500 (HS-008, ADR-0012).
+    assert!(matches!(error, RepoError::DuplicateClientKey), "{error}");
+    assert_eq!(
+        error.to_string(),
+        "create: a session already holds this client key"
     );
     assert_eq!(
         repository
@@ -448,6 +408,35 @@ fn a_corrupt_status_is_reported_with_the_text_it_holds() {
         repository.list(None),
         Err(RepoError::Status(ref text)) if text == "ended"
     ));
+}
+
+// ---- the live count ------------------------------------------------------------------
+
+#[test]
+fn live_count_counts_only_the_three_live_statuses() {
+    let dir = TempDir::new("live-count");
+    let database = open(&dir);
+    let repository = database.sessions();
+    assert_eq!(
+        repository.live_count().expect("the count reads"),
+        0,
+        "an empty table has no live session"
+    );
+    for status in Status::ALL {
+        let created = repository
+            .create(&new_session(Some(status.as_str())), NOW)
+            .expect("a session is creatable");
+        repository
+            .set_status(&created.id, status, None, NOW)
+            .expect("the update succeeds")
+            .expect("the session exists");
+    }
+    assert_eq!(repository.list(None).expect("the list reads").len(), 6);
+    assert_eq!(
+        repository.live_count().expect("the count reads"),
+        3,
+        "starting, idle and running are the live set (spec item 8)"
+    );
 }
 
 // ---- list ----------------------------------------------------------------------------

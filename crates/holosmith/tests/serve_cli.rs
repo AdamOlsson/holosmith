@@ -4,65 +4,33 @@
 //! and the files left behind are the real ones. `kill` is a process, not a syscall, so the
 //! test needs no `unsafe`.
 
-use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::unix::ffi::OsStringExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-/// A directory that removes itself, so the tests leave nothing in `/tmp`.
-struct TempDir {
-    path: PathBuf,
-}
+mod support;
+use support::TempDir;
 
-impl TempDir {
-    fn new(label: &str) -> Self {
-        let path = env::temp_dir().join(format!("holosmith-serve-{label}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).expect("the temp directory is creatable");
-        Self { path }
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-
-    fn file(&self, name: &str) -> PathBuf {
-        self.path.join(name)
-    }
-
-    fn write(&self, name: &str, contents: &str) -> PathBuf {
-        let path = self.file(name);
-        fs::write(&path, contents).expect("the temp file is writable");
-        path
-    }
-
-    /// The config every serving test reads, unless it needs another one.
-    ///
-    /// It names a data root inside this directory: without one, `serve` would create and
-    /// migrate the default `/var/lib/holosmith`, so the tests would write machine state and
-    /// fail wherever that path is not writable (ADR-0009).
-    fn config(&self) -> PathBuf {
-        self.write(
-            "config.toml",
-            &format!(
-                "control_listen = \"127.0.0.1:0\"\npreview_listen = \"127.0.0.1:8081\"\n\
-                 data_root = \"{}\"\n",
-                self.file("data").display()
-            ),
-        )
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
+/// The config every serving test reads, unless it needs another one.
+///
+/// It names a data root inside the directory: without one, `serve` would create and migrate the
+/// default `/var/lib/holosmith`, so the tests would write machine state and fail wherever that
+/// path is not writable (ADR-0009). `serve`-specific, so it stays here rather than in `support`.
+fn config(dir: &TempDir) -> PathBuf {
+    dir.write(
+        "config.toml",
+        &format!(
+            "control_listen = \"127.0.0.1:0\"\npreview_listen = \"127.0.0.1:8081\"\n\
+             data_root = \"{}\"\n",
+            dir.file("data").display()
+        ),
+    )
 }
 
 /// A `serve` process, started and waited for until it says where it listens.
@@ -187,7 +155,7 @@ fn build(args: &[&str]) -> Vec<OsString> {
 #[test]
 fn the_startup_lines_are_exact_and_name_the_bound_port() {
     let dir = TempDir::new("startup");
-    let config = dir.config();
+    let config = config(&dir);
     let data = dir.file("data");
     let mut server = Server::start(
         dir,
@@ -275,7 +243,7 @@ fn the_role_in_the_config_file_reaches_the_health_payload() {
 #[test]
 fn sigterm_stops_the_process_with_exit_zero() {
     let dir = TempDir::new("sigterm");
-    let config = dir.config();
+    let config = config(&dir);
     let mut server = Server::start(
         dir,
         &build(&["serve", "--config", config.to_str().expect("UTF-8")]),
@@ -287,7 +255,7 @@ fn sigterm_stops_the_process_with_exit_zero() {
 #[test]
 fn sigint_stops_the_process_with_exit_zero() {
     let dir = TempDir::new("sigint");
-    let config = dir.config();
+    let config = config(&dir);
     let mut server = Server::start(
         dir,
         &build(&["serve", "--config", config.to_str().expect("UTF-8")]),
@@ -353,7 +321,7 @@ fn a_data_dir_the_file_must_not_name_is_refused_from_the_cli_too() {
     // The repro this story's first P1 names: `config validate` refuses this data_root, so
     // `serve --data-dir` must refuse it in the same words and never bind.
     let dir = TempDir::new("data-dir-overlap");
-    let config = dir.config();
+    let config = config(&dir);
     let output = holosmith(&[
         "serve",
         "--config",
@@ -379,7 +347,7 @@ fn a_data_dir_the_file_must_not_name_is_refused_from_the_cli_too() {
 #[test]
 fn a_relative_data_dir_is_refused_from_the_cli_too() {
     let dir = TempDir::new("data-dir-relative");
-    let config = dir.config();
+    let config = config(&dir);
     let output = holosmith(&[
         "serve",
         "--config",
@@ -398,7 +366,7 @@ fn a_relative_data_dir_is_refused_from_the_cli_too() {
 #[test]
 fn a_data_dir_that_is_not_utf8_can_be_served() {
     let dir = TempDir::new("osstring");
-    let config = dir.config();
+    let config = config(&dir);
     let mut data = dir.file("data").into_os_string().into_vec();
     data.push(0xff);
     let mut server = Server::start(
@@ -421,7 +389,7 @@ fn a_data_dir_that_cannot_be_created_is_reported_before_anything_binds() {
     // A regular file where the data root belongs: `mkdir -p` fails, so the start names the
     // path and exits 1 with no listener (ADR-0009).
     let dir = TempDir::new("data-dir-unwritable");
-    let config = dir.config();
+    let config = config(&dir);
     let blocker = dir.write("blocker", "not a directory\n");
     let data = blocker.join("data");
     let output = holosmith(&[

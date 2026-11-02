@@ -8,10 +8,11 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
 
 use tokio::net::TcpListener;
 
+use crate::clock;
 use crate::config::{Config, LoadError, LoadedConfig, Overrides};
 use crate::db::{self, Database, OpenOptions};
 use crate::http::{self, App, AppState, Guards};
@@ -59,12 +60,13 @@ pub fn run(args: ServeArgs) -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
-    // Held for the process lifetime. The connection is deliberately **not** in `AppState`:
-    // sharing it between handlers is the single-writer decision HS-009 owns.
+    // Held for the process lifetime. ADR-0012's stopgap shares it with handlers behind an
+    // `Arc<Mutex<Database>>` until HS-009's single writer owns the write path; the guard is
+    // taken for one synchronous block and never held across an `.await`.
     let database = match Database::open(
         &loaded.config.data_root.join(db::DATABASE_FILE),
         OpenOptions::default(),
-        unix_now(),
+        clock::unix_now(),
     ) {
         Ok(database) => database,
         Err(error) => {
@@ -109,10 +111,12 @@ pub fn run(args: ServeArgs) -> ExitCode {
         }
         banner(&filter, &loaded, &runtime, &version, bound, &database);
         let guards = Guards::from_config(&loaded.config);
+        let database = Arc::new(Mutex::new(database));
         let app = App::new(
             http::router(AppState {
                 config: loaded.config.clone(),
                 runtime,
+                database,
             }),
             guards,
         );
@@ -169,13 +173,4 @@ fn banner(
         database.path().display(),
         database.schema_version()
     );
-}
-
-/// Unix seconds recorded as `schema_version.applied_at`. A clock set before 1970 reads as 0:
-/// a wrong timestamp is not worth failing a start over.
-fn unix_now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|since| since.as_secs() as i64)
-        .unwrap_or_default()
 }

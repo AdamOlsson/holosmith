@@ -1,9 +1,10 @@
 //! Every statement that reads or writes the `sessions` table (HS-007).
 //!
-//! The repository borrows the open `Database`'s connection rather than owning one, so ADR-0009's
-//! "the connection is not in `AppState`" stays true and the single-writer decision stays with
-//! HS-009. A test below walks `src/**` and fails if a sessions statement appears in any other
-//! file, which is what makes "no SQL outside the repository" checkable rather than a review note.
+//! The repository borrows the open `Database`'s connection rather than owning one. The connection
+//! reaches a handler behind ADR-0012's `Arc<Mutex<Database>>` stopgap until HS-009's single writer
+//! owns the write path; either way this file is the only one with a sessions statement. A test
+//! below walks `src/**` and fails if a sessions statement appears anywhere else, which is what
+//! makes "no SQL outside the repository" checkable rather than a review note.
 
 use std::str::FromStr;
 
@@ -36,6 +37,10 @@ const UPDATE_STATUS: &str =
 /// id after it so the order is total. The same `sessions_last_active` index also serves
 /// eviction's ascending read of the least recently active session (HS-020).
 const ORDER: &str = "ORDER BY last_active_at DESC, id ASC";
+
+/// The cap's count: the three live statuses, supplied from `Status::as_str` so the words stay in
+/// the enum, over the `sessions_status` index (ADR-0012).
+const LIVE_COUNT: &str = "SELECT count(*) FROM sessions WHERE status IN (?1, ?2, ?3)";
 
 /// The only way to read or write a `sessions` row. Obtained from `Database::sessions`.
 pub struct SessionRepository<'a> {
@@ -74,7 +79,13 @@ impl<'a> SessionRepository<'a> {
                     now,
                 ],
             )
-            .map_err(sqlite)?;
+            .map_err(|error| {
+                if is_duplicate_key(&error) {
+                    RepoError::DuplicateClientKey
+                } else {
+                    sqlite(error)
+                }
+            })?;
         // Read the row back rather than assembling what was written: the returned session is the
         // one a later `get` sees. `query_row` makes "the row vanished" an error, not an `Option`
         // this call would have to unwrap.
@@ -108,6 +119,23 @@ impl<'a> SessionRepository<'a> {
         .map_err(sqlite)?;
         let rows = rows.collect::<rusqlite::Result<Vec<_>>>().map_err(sqlite)?;
         rows.into_iter().collect()
+    }
+
+    /// How many sessions are live — `starting`, `idle` or `running` — the set item 8's cap
+    /// counts (ADR-0012). One statement over the `sessions_status` index, not `list` with three
+    /// filters: a count is one row of one column, and the three-status set is HS-020's to change.
+    pub fn live_count(&self) -> Result<u64, RepoError> {
+        self.connection
+            .query_row(
+                LIVE_COUNT,
+                params![
+                    Status::Starting.as_str(),
+                    Status::Idle.as_str(),
+                    Status::Running.as_str(),
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|error| RepoError::sqlite("live_count", error))
     }
 
     /// Set the status and its reason, and move `stopped_at` with it: `now` when the new status is
@@ -154,6 +182,15 @@ impl<'a> SessionRepository<'a> {
 /// `SELECT <every column> FROM sessions <filter>`, so the readers cannot drift from `COLUMNS`.
 fn select(filter: &str) -> String {
     format!("SELECT {COLUMNS} FROM sessions {filter}")
+}
+
+/// Whether `error` is SQLite's `UNIQUE` constraint violation, which on this table can only be
+/// `client_key` (ADR-0011). The extended code is what separates it from every other constraint:
+/// `ErrorCode` answers only `ConstraintViolation`, which a `NOT NULL` failure produces too. A
+/// message match would pass a naive test and break on a SQLite upgrade.
+fn is_duplicate_key(error: &rusqlite::Error) -> bool {
+    error.sqlite_error().map(|error| error.extended_code)
+        == Some(rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE)
 }
 
 /// One row, with `status` parsed.
@@ -220,6 +257,31 @@ mod tests {
                 "starting", "idle", "running", "stopped", "error", "deleting"
             ]
         );
+    }
+
+    #[test]
+    fn the_duplicate_key_mapping_only_fires_on_a_unique_violation() {
+        // `ffi::Error` is constructible, so the mapping is proved against the codes rather than
+        // against a SQLite version's message text.
+        let unique = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ffi::ErrorCode::ConstraintViolation,
+                extended_code: rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE,
+            },
+            Some("UNIQUE constraint failed: sessions.client_key".to_string()),
+        );
+        assert!(is_duplicate_key(&unique), "{unique}");
+
+        // 1299 is `SQLITE_CONSTRAINT_NOTNULL`: the same primary code, a different failure.
+        let not_null = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ffi::ErrorCode::ConstraintViolation,
+                extended_code: 1299,
+            },
+            Some("NOT NULL constraint failed: sessions.project".to_string()),
+        );
+        assert!(!is_duplicate_key(&not_null), "{not_null}");
+        assert!(!is_duplicate_key(&rusqlite::Error::ExecuteReturnedResults));
     }
 
     #[test]

@@ -1,0 +1,531 @@
+//! `POST /api/sessions`: validate the body, write one `starting` row, answer 202 (HS-008,
+//! ADR-0012).
+//!
+//! The body is parsed by hand rather than through `axum::Json<T>`: that extractor rejects a bad
+//! body with its own `text/plain` answer, which would break ADR-0008's envelope on exactly the
+//! 422 path this endpoint exists to get right. The handler also never holds the database's
+//! `MutexGuard` across an `.await`; the lock scope is one synchronous block, and the compiler
+//! enforces it because a guard is not `Send`.
+
+use std::sync::PoisonError;
+
+use axum::Json;
+use axum::body::Bytes;
+use axum::extract::rejection::BytesRejection;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::clock;
+use crate::http::app::AppState;
+use crate::http::error::ApiError;
+use crate::sessions::{NewSession, RepoError, Session};
+
+/// The header a create's idempotency key travels in.
+const KEY_HEADER: &str = "idempotency-key";
+
+/// How many characters a key may hold. Generous for a UUID, small enough that the unique column
+/// cannot become a payload.
+const MAX_KEY_CHARS: usize = 200;
+
+/// The body's fields, exactly: any other key is `unknown_field`.
+const FIELDS: [&str; 4] = ["project", "model", "thinking", "network"];
+
+/// `NAME_MAX`'s 255: HS-025 builds `<projects_root>/<project>` from this value.
+const MAX_PROJECT_CHARS: usize = 255;
+
+const MAX_MODEL_CHARS: usize = 128;
+
+const MAX_THINKING_CHARS: usize = 32;
+
+/// The body of a create. `network` defaults to `false` when absent, unconditionally: the
+/// config's `network_default` is the UI checkbox's default, not an API body's.
+#[derive(Debug, Deserialize)]
+struct CreateBody {
+    project: String,
+    model: String,
+    thinking: String,
+    #[serde(default)]
+    network: bool,
+}
+
+/// Read the body as JSON, refuse an unknown field, then deserialise.
+///
+/// No `deny_unknown_fields`: the key-set check is here so `unknown_field` is a decision and not
+/// a string match on serde's error text.
+fn parse_body(bytes: &[u8]) -> Result<CreateBody, ApiError> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|_| ApiError::bad_body())?;
+    let object = value.as_object().ok_or_else(ApiError::bad_body)?;
+    if object.keys().any(|field| !FIELDS.contains(&field.as_str())) {
+        return Err(ApiError::unknown_field());
+    }
+    serde_json::from_value(value).map_err(|_| ApiError::bad_body())
+}
+
+/// The create's key: exactly one header value, non-empty, at most 200 characters, stored
+/// verbatim (the header's bytes as HTTP parsed them, with no folding or normalisation).
+fn idempotency_key(headers: &HeaderMap) -> Result<&str, ApiError> {
+    let mut values = headers.get_all(KEY_HEADER).iter();
+    let value = values
+        .next()
+        .ok_or_else(ApiError::missing_idempotency_key)?;
+    if values.next().is_some() {
+        return Err(ApiError::bad_idempotency_key());
+    }
+    let key = value
+        .to_str()
+        .map_err(|_| ApiError::bad_idempotency_key())?;
+    if key.is_empty() {
+        return Err(ApiError::missing_idempotency_key());
+    }
+    if key.chars().count() > MAX_KEY_CHARS {
+        return Err(ApiError::bad_idempotency_key());
+    }
+    Ok(key)
+}
+
+/// `project` is one path segment: non-empty, at most 255 characters, letters, digits, `.`, `_`
+/// and `-`, and not `.` or `..`. Whether a repository exists there is HS-025's check.
+fn validate_project(project: &str) -> Result<(), ApiError> {
+    if project.is_empty()
+        || project.chars().count() > MAX_PROJECT_CHARS
+        || project == "."
+        || project == ".."
+        || !project.bytes().all(is_project_byte)
+    {
+        return Err(ApiError::bad_project());
+    }
+    Ok(())
+}
+
+fn is_project_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+}
+
+/// `model` is 1–128 characters of letters, digits, `.`, `:`, `/` and `-`. No list of models is
+/// invented here: pi's real values are HS-031's.
+fn validate_model(model: &str) -> Result<(), ApiError> {
+    if model.is_empty()
+        || model.chars().count() > MAX_MODEL_CHARS
+        || !model.bytes().all(is_model_byte)
+    {
+        return Err(ApiError::bad_model());
+    }
+    Ok(())
+}
+
+fn is_model_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b':' | b'/' | b'-')
+}
+
+/// `thinking` is 1–32 lowercase letters, digits, `_` and `-`, starting with a letter. No list of
+/// levels is invented here either (HS-031).
+fn validate_thinking(thinking: &str) -> Result<(), ApiError> {
+    let starts_with_letter = thinking
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_lowercase());
+    if !starts_with_letter
+        || thinking.chars().count() > MAX_THINKING_CHARS
+        || !thinking.bytes().all(is_thinking_byte)
+    {
+        return Err(ApiError::bad_thinking());
+    }
+    Ok(())
+}
+
+fn is_thinking_byte(byte: u8) -> bool {
+    byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+}
+
+/// A create's decisions in their fixed order: body shape and unknown field (`parse_body`), the
+/// key, then project, model, thinking (ADR-0012). Pinned by `the_precedence_is_...` below,
+/// because an order that is not written down is an order that changes when the code moves.
+fn request_parts<'a>(
+    headers: &'a HeaderMap,
+    body: &[u8],
+) -> Result<(CreateBody, &'a str), ApiError> {
+    let parsed = parse_body(body)?;
+    let key = idempotency_key(headers)?;
+    validate_project(&parsed.project)?;
+    validate_model(&parsed.model)?;
+    validate_thinking(&parsed.thinking)?;
+    Ok((parsed, key))
+}
+
+/// The row on the wire plus the one key the table does not have: where its event stream will be
+/// served (HS-010). Flattening `Session` is what keeps the body the row rather than a hand-built
+/// copy of it.
+#[derive(Debug, Serialize)]
+pub struct CreatedSession {
+    #[serde(flatten)]
+    session: Session,
+    events: String,
+}
+
+impl CreatedSession {
+    fn of(session: Session) -> Self {
+        Self {
+            events: format!("/api/sessions/{}/events", session.id),
+            session,
+        }
+    }
+}
+
+/// Answer a create: 202, `Location`, and the row plus `events`.
+///
+/// The body arrives as a `Result` because the `Bytes` extractor's rejection is otherwise axum's
+/// `text/plain` answer, outside ADR-0008's envelope.
+pub async fn create(
+    state: &AppState,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let body = match body {
+        Ok(body) => body,
+        // Every rejection — a body hyper could not buffer, or one over axum's 2 MiB default — is
+        // `bad_body`. There is no 413 code and no configured limit, and a refusal that carries a
+        // code is more use to a client than a bodiless plain-text 413 (ADR-0008, ADR-0012).
+        Err(_) => return ApiError::bad_body().into_response(),
+    };
+    let (parsed, key) = match request_parts(&headers, &body) {
+        Ok(parts) => parts,
+        Err(error) => return error.into_response(),
+    };
+    match create_locked(state, &parsed, key) {
+        Ok(session) => created(session),
+        Err(error) => error.into_response(),
+    }
+}
+
+/// The one lock scope: lookup, cap count and insert, with no `.await` inside so the guard cannot
+/// outlive a synchronous statement. `live_count` and `create` share it, so two creates cannot
+/// both see a free slot (ADR-0012).
+fn create_locked(state: &AppState, body: &CreateBody, key: &str) -> Result<Session, ApiError> {
+    let database = state
+        .database
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = database.sessions();
+    // The lookup runs before the cap: a retry whose first attempt filled the last slot must get
+    // its own session, not 409.
+    if let Some(existing) = repository
+        .by_client_key(key)
+        .map_err(|error| internal("by_client_key", error))?
+    {
+        return Ok(existing);
+    }
+    let live = repository
+        .live_count()
+        .map_err(|error| internal("live_count", error))?;
+    if live >= u64::from(state.config.max_live_sessions) {
+        return Err(ApiError::cap_reached());
+    }
+    let new = NewSession {
+        project: body.project.clone(),
+        model: body.model.clone(),
+        thinking: body.thinking.clone(),
+        network: body.network,
+        client_key: Some(key.to_string()),
+        base_commit: None,
+    };
+    match repository.create(&new, clock::unix_now()) {
+        Ok(session) => Ok(session),
+        Err(RepoError::DuplicateClientKey) => match repository.by_client_key(key) {
+            Ok(Some(winner)) => Ok(winner),
+            Ok(None) => {
+                // The insert said the key exists and the re-read says it does not; a retry must
+                // never see an error for a race it cannot fix, so this is not a client error.
+                tracing::error!(
+                    target: "holosmith::http",
+                    operation = "create",
+                    "a duplicate client key answered no session"
+                );
+                Err(ApiError::internal())
+            }
+            Err(error) => Err(internal("by_client_key", error)),
+        },
+        Err(error) => Err(internal("create", error)),
+    }
+}
+
+/// The 500's log line and body: the operation and the error go to the log, because a rusqlite
+/// message can carry the database path; the client gets one fixed sentence.
+fn internal(operation: &'static str, error: RepoError) -> ApiError {
+    tracing::error!(
+        target: "holosmith::http",
+        operation,
+        %error,
+        "a create could not be completed"
+    );
+    ApiError::internal()
+}
+
+fn created(session: Session) -> Response {
+    let location = format!("/api/sessions/{}", session.id);
+    let mut response = (StatusCode::ACCEPTED, Json(CreatedSession::of(session))).into_response();
+    response.headers_mut().insert(
+        header::LOCATION,
+        HeaderValue::from_str(&location).expect("a session id is a valid header value"),
+    );
+    response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::http::error::{
+        BAD_BODY, BAD_IDEMPOTENCY_KEY, BAD_MODEL, BAD_PROJECT, BAD_THINKING,
+        MISSING_IDEMPOTENCY_KEY, UNKNOWN_FIELD,
+    };
+
+    fn body(project: &str, model: &str, thinking: &str) -> Vec<u8> {
+        format!(r#"{{"project":"{project}","model":"{model}","thinking":"{thinking}"}}"#)
+            .into_bytes()
+    }
+
+    fn key_headers(key: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            KEY_HEADER,
+            HeaderValue::from_str(key).expect("a test key is a header value"),
+        );
+        headers
+    }
+
+    fn refusal<T>(result: Result<T, ApiError>) -> ApiError {
+        match result {
+            Ok(_) => panic!("the request was accepted"),
+            Err(error) => error,
+        }
+    }
+
+    fn assert_code<T>(result: Result<T, ApiError>, code: &'static str) {
+        let error = refusal(result);
+        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY, "{code}");
+        assert_eq!(error.body.code, code);
+    }
+
+    #[test]
+    fn a_project_is_one_path_segment() {
+        let longest = "a".repeat(MAX_PROJECT_CHARS);
+        for project in ["my.repo_2-x", "a", longest.as_str()] {
+            assert!(validate_project(project).is_ok(), "{project:?}");
+        }
+        let too_long = "a".repeat(MAX_PROJECT_CHARS + 1);
+        for project in [
+            "",
+            ".",
+            "..",
+            "a/b",
+            "a b",
+            "proj.ect/..",
+            too_long.as_str(),
+        ] {
+            let error = refusal(validate_project(project));
+            assert_eq!(error.body.code, BAD_PROJECT, "{project:?}");
+        }
+    }
+
+    #[test]
+    fn a_model_is_one_model_name() {
+        let longest = "a".repeat(MAX_MODEL_CHARS);
+        for model in [
+            "claude-sonnet-4.5",
+            "openrouter/anthropic:beta",
+            longest.as_str(),
+        ] {
+            assert!(validate_model(model).is_ok(), "{model:?}");
+        }
+        let too_long = "a".repeat(MAX_MODEL_CHARS + 1);
+        for model in ["", "claude!", "a b", too_long.as_str()] {
+            let error = refusal(validate_model(model));
+            assert_eq!(error.body.code, BAD_MODEL, "{model:?}");
+        }
+    }
+
+    #[test]
+    fn a_thinking_level_is_a_lowercase_word_starting_with_a_letter() {
+        let longest = "a".repeat(MAX_THINKING_CHARS);
+        for thinking in ["high", "x", "x-high_2", longest.as_str()] {
+            assert!(validate_thinking(thinking).is_ok(), "{thinking:?}");
+        }
+        let too_long = "a".repeat(MAX_THINKING_CHARS + 1);
+        for thinking in ["", "1high", "High", "high!", too_long.as_str()] {
+            let error = refusal(validate_thinking(thinking));
+            assert_eq!(error.body.code, BAD_THINKING, "{thinking:?}");
+        }
+    }
+
+    #[test]
+    fn a_well_shaped_body_parses_and_an_absent_network_is_off() {
+        let parsed = parse_body(&body("my.repo_2-x", "claude-sonnet-4.5", "high"))
+            .expect("the four-field body parses");
+        assert_eq!(parsed.project, "my.repo_2-x");
+        assert_eq!(parsed.model, "claude-sonnet-4.5");
+        assert_eq!(parsed.thinking, "high");
+        assert!(!parsed.network, "an absent network is off");
+        let online = parse_body(br#"{"project":"p","model":"m","thinking":"high","network":true}"#)
+            .expect("the network field parses");
+        assert!(online.network);
+    }
+
+    #[test]
+    fn a_body_that_is_not_a_json_object_is_bad_body() {
+        for text in [
+            "not json",
+            "",
+            "[]",
+            "null",
+            "42",
+            r#""project""#,
+            r#"{"project":"p","model":"m","thinking":"high""#,
+        ] {
+            let error = refusal(parse_body(text.as_bytes()));
+            assert_eq!(error.body.code, BAD_BODY, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_body_of_the_wrong_shape_is_bad_body() {
+        for text in [
+            "{}",
+            r#"{"project":5,"model":"m","thinking":"high"}"#,
+            r#"{"project":"p","thinking":"high"}"#,
+            r#"{"project":"p","model":"m","thinking":null}"#,
+            r#"{"project":"p","model":"m","thinking":"high","network":"yes"}"#,
+        ] {
+            let error = refusal(parse_body(text.as_bytes()));
+            assert_eq!(error.body.code, BAD_BODY, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_body_with_a_field_the_endpoint_does_not_accept_is_unknown_field() {
+        for text in [
+            r#"{"project":"p","model":"m","thinking":"high","extra":1}"#,
+            r#"{"project":"p","model":"m","thinking":"high","id":"x"}"#,
+        ] {
+            let error = refusal(parse_body(text.as_bytes()));
+            assert_eq!(error.body.code, UNKNOWN_FIELD, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_key_is_one_bounded_non_empty_value() {
+        assert_eq!(idempotency_key(&key_headers("k")).expect("one value"), "k");
+        let without_key = HeaderMap::new();
+        assert_code(
+            request_parts(&without_key, &body("p", "m", "high")),
+            MISSING_IDEMPOTENCY_KEY,
+        );
+        let mut empty = HeaderMap::new();
+        empty.insert(KEY_HEADER, HeaderValue::from_static(""));
+        assert_code(
+            request_parts(&empty, &body("p", "m", "high")),
+            MISSING_IDEMPOTENCY_KEY,
+        );
+        let too_long = "k".repeat(MAX_KEY_CHARS + 1);
+        assert_code(
+            request_parts(&key_headers(&too_long), &body("p", "m", "high")),
+            BAD_IDEMPOTENCY_KEY,
+        );
+        let mut repeated = key_headers("one");
+        repeated.append(KEY_HEADER, HeaderValue::from_static("two"));
+        assert_code(
+            request_parts(&repeated, &body("p", "m", "high")),
+            BAD_IDEMPOTENCY_KEY,
+        );
+        let longest = "k".repeat(MAX_KEY_CHARS);
+        assert!(idempotency_key(&key_headers(&longest)).is_ok());
+    }
+
+    #[test]
+    fn the_precedence_is_body_then_unknown_then_key_then_fields() {
+        // Body first: `{}` is missing fields, so it is `bad_body` even with no key at all.
+        assert_code(request_parts(&HeaderMap::new(), b"{}"), BAD_BODY);
+        // An unknown field is decided before the missing key.
+        assert_code(
+            request_parts(
+                &HeaderMap::new(),
+                br#"{"project":"p","model":"m","thinking":"high","extra":1}"#,
+            ),
+            UNKNOWN_FIELD,
+        );
+        // The key is decided before the fields: this body's project is bad and it has no key.
+        assert_code(
+            request_parts(&HeaderMap::new(), &body("..", "m", "high")),
+            MISSING_IDEMPOTENCY_KEY,
+        );
+        // The fields last.
+        assert_code(
+            request_parts(&key_headers("k"), &body("..", "m", "high")),
+            BAD_PROJECT,
+        );
+    }
+
+    #[test]
+    fn the_response_is_the_fifteen_column_names_plus_events() {
+        let session = Session {
+            id: "0123456789abcdef".to_string(),
+            project: "holosmith".to_string(),
+            model: "claude-sonnet-4.5".to_string(),
+            thinking: "high".to_string(),
+            worktree: String::new(),
+            base_commit: None,
+            status: crate::sessions::Status::Starting,
+            status_reason: None,
+            client_key: Some("the-key".to_string()),
+            network: false,
+            created_at: 1_760_000_000,
+            last_active_at: 1_760_000_000,
+            stopped_at: None,
+            usage_in: 0,
+            usage_out: 0,
+        };
+        let created = CreatedSession::of(session.clone());
+        let json = serde_json::to_string(&created).expect("the response serialises");
+        let value: Value = serde_json::from_str(&json).expect("the response is JSON");
+        let object = value.as_object().expect("the response is an object");
+        assert_eq!(
+            object.len(),
+            16,
+            "the response is the row plus one key: {json}"
+        );
+        assert_eq!(object["id"].as_str(), Some(session.id.as_str()));
+        assert_eq!(object["status"].as_str(), Some("starting"));
+        assert_eq!(object["network"].as_bool(), Some(false));
+        assert_eq!(object["base_commit"].as_str(), None);
+        assert_eq!(
+            object["events"].as_str(),
+            Some(format!("/api/sessions/{}/events", session.id).as_str())
+        );
+        // The row's keys keep column order, and `events` is last.
+        let mut at = 0;
+        for name in [
+            "id",
+            "project",
+            "model",
+            "thinking",
+            "worktree",
+            "base_commit",
+            "status",
+            "status_reason",
+            "client_key",
+            "network",
+            "created_at",
+            "last_active_at",
+            "stopped_at",
+            "usage_in",
+            "usage_out",
+            "events",
+        ] {
+            let needle = format!("\"{name}\":");
+            let found = json[at..]
+                .find(&needle)
+                .unwrap_or_else(|| panic!("{name} is missing or out of order in {json}"));
+            at += found + needle.len();
+        }
+    }
+}

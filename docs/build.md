@@ -92,16 +92,19 @@ asks the kernel for the port and is also what makes `serve` re-derive `control_o
 the bound address (ADR-0007), so the case for a request that passes the guards sends exactly
 the origin the guard compares; `control_listen` and `control_origin` are both read from the
 startup banner, never assumed. The data root is inside the work dir, so a run never touches
-`/var/lib/holosmith` (ADR-0009), and the config file carries `owner` and nothing else that
-matters: the `bad_owner` case is the only reason that file exists. Every request is a
-`/dev/tcp` fetch, so the harness needs neither `curl` nor `jq`.
+`/var/lib/holosmith` (ADR-0009), and the config file carries `owner` and
+`max_live_sessions = 1`: the `bad_owner` case and the create cases are the only reasons that
+file exists. Every request is a `/dev/tcp` fetch (`fetch` for a body-less request,
+`fetch_body` when a body is needed), so the harness needs neither `curl` nor `jq`.
 
 A `serve_cases` array names the `case_*` functions, one per answer a browser gets: the health
 payload, the schema version the banner reports against `version --json`, the app shell
 byte-for-byte against `web/dist/index.html`, the `404` envelope of ADR-0008, one case per
 guard refusal (`bad_host`, `bad_origin`, `bad_client`, `bad_owner`), the request that passes
-all four, and the exempt health probe. A case that must assert one code keeps every higher
-guard check correct, or it asserts another guard's code under its own name.
+all four, the exempt health probe, and the create endpoint (`case_create_session`,
+`case_create_is_idempotent`, `case_create_bad_project`, `case_create_cap_reached`). A case
+that must assert one code keeps every higher guard check correct, or it asserts another
+guard's code under its own name.
 
 The CORS sweep is deliberately **not** in that array: it runs once after every case and checks
 that no answer the run saved carries an `access-control-*` header or `vary: origin`. Being

@@ -6,9 +6,13 @@
 //! use are dead there; the `allow` above is what keeps `clippy -D warnings` a gate.
 
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use holosmith::clock;
 use holosmith::config::Config;
+use holosmith::db::{self, Database, OpenOptions};
 use holosmith::http::{App, AppState, Guards, RequestCounter, Routes};
 use holosmith::runtime::{Backend, Runtime};
 use holosmith::serve::{self, ServeOptions};
@@ -17,11 +21,86 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 
-/// A state for the control listener's own route table.
+/// A directory that removes itself, so the tests leave nothing in `/tmp`.
+///
+/// The one copy every socket-level and database test shares (PER-39's third copy). The label
+/// names the test and the process id is what makes two concurrent runs safe: without it, two
+/// `cargo test` invocations — or two binaries that use the same label — would `remove_dir_all`
+/// each other's live directories and open database. Nothing asserts the prefix, and `new` clears
+/// a directory before using it, so a name it reuses is never stale.
+pub struct TempDir {
+    path: PathBuf,
+}
+
+impl TempDir {
+    pub fn new(label: &str) -> Self {
+        let path =
+            std::env::temp_dir().join(format!("holosmith-test-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("the temp directory is creatable");
+        Self { path }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn file(&self, name: &str) -> PathBuf {
+        self.path.join(name)
+    }
+
+    pub fn write(&self, name: &str, contents: &str) -> PathBuf {
+        let path = self.file(name);
+        std::fs::write(&path, contents).expect("the temp file is writable");
+        path
+    }
+
+    pub fn database(&self) -> PathBuf {
+        self.file(db::DATABASE_FILE)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Open (and migrate) `dir`'s database, the one opener the tests share.
+pub fn open(dir: &TempDir) -> Database {
+    Database::open(&dir.database(), OpenOptions::default(), clock::unix_now())
+        .expect("a fresh database opens")
+}
+
+/// A state for the control listener's own route table: the default config, the stub backend and
+/// one process-wide database.
+///
+/// The database is opened exactly once because two `Database::open` calls on one path in one
+/// process is ADR-0009's measured "database is locked" trap. Its directory is held for the
+/// process lifetime, because a live connection must not have its file unlinked, and its name
+/// carries the process id, so two concurrent runs never share it. Tests that use this state
+/// never write.
 pub fn state() -> AppState {
+    static SHARED: OnceLock<(TempDir, Arc<Mutex<Database>>)> = OnceLock::new();
+    let (_, database) = SHARED.get_or_init(|| {
+        let dir = TempDir::new("shared");
+        let database = Arc::new(Mutex::new(open(&dir)));
+        (dir, database)
+    });
     AppState {
         config: Config::default(),
         runtime: Runtime::started(Backend::Stub),
+        database: Arc::clone(database),
+    }
+}
+
+/// A state for a test that writes: its own database in its own directory, so no two tests (and
+/// no two `Database::open` calls in one process) share a file.
+pub fn state_in(dir: &TempDir, config: Config) -> AppState {
+    AppState {
+        config,
+        runtime: Runtime::started(Backend::Stub),
+        database: Arc::new(Mutex::new(open(dir))),
     }
 }
 

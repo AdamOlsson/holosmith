@@ -1,6 +1,7 @@
 //! The Holosmith binary: hub, server, proxies, container helpers and deploy tool.
 
 pub mod cli;
+pub mod clock;
 pub mod commands;
 pub mod config;
 pub mod db;

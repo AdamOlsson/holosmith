@@ -5,6 +5,7 @@ pub mod app;
 pub mod error;
 pub mod guard;
 pub mod health;
+mod sessions;
 
 pub use app::{
     App, AppState, ManifestEntry, RequestCounter, RouteKind, Routes, is_guard_exempt, router,

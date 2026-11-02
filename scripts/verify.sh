@@ -7,8 +7,8 @@
 # cargo test, scripts/build.sh (which runs scripts/build-web.sh and scripts/check-static.sh),
 # scripts/check-embed.sh, then serve: dist/<host-triple>/holosmith on a random port with a temp
 # config and a temp data dir, answering /api/health, the schema version, the app shell, the 404
-# envelope and every browser-facing guard refusal (ADR-0010), with no CORS header on any answer,
-# and stopping on SIGTERM with exit 0.
+# envelope, every browser-facing guard refusal (ADR-0010) and the create endpoint's 202/422/409
+# answers, with no CORS header on any answer, and stopping on SIGTERM with exit 0.
 # --no-build skips the two artifact phases; --keep keeps the work dir of a successful run. On
 # failure this prints FAIL <assertion> and keeps the work dir (config, banner, every answer).
 # Downloads nothing and needs neither curl nor jq: every request is a /dev/tcp fetch. Put the
@@ -54,6 +54,7 @@ owner="verify@example"
 WORK="$(mktemp -d)"
 mkdir -p "$WORK/responses"
 serve_pid=""
+created_id=""
 assertions=0
 
 # The only cleanup path: the work dir is removed on success, kept on failure (and with --keep),
@@ -151,9 +152,42 @@ fetch() {
   sed '1,/^\r$/d' "$WORK/responses/$label.http" >"$WORK/responses/$label.body"
 }
 
+# fetch_body <label> <method> <path> <body> [Header: value]...: the same fetch with a request
+# body. `Content-Length` is written explicitly and the body follows the header block: a bare
+# `Content-Length` would leave the server waiting for bytes until the read deadline. The length is
+# the body's bytes, not its characters, because `${#body}` counts characters and its result is
+# locale-dependent: a non-ASCII body would send a short length and hang the reader.
+fetch_body() {
+  local label="$1" method="$2" path="$3" body="$4"
+  shift 4
+  local -a sent=("$@")
+  local request="$method $path HTTP/1.1"$'\r\n' fd header
+  for header in "${sent[@]}"; do
+    request+="$header"$'\r\n'
+  done
+  request+="Content-Length: $(printf '%s' "$body" | wc -c)"$'\r\n'$'Connection: close\r\n\r\n'
+  request+="$body"
+  exec {fd}<>"/dev/tcp/127.0.0.1/$port" || return 1
+  printf '%s' "$request" >&"$fd"
+  if ! timeout 10 cat <&"$fd" >"$WORK/responses/$label.http"; then
+    exec {fd}<&-
+    return 1
+  fi
+  exec {fd}<&-
+  sed '1,/^\r$/d' "$WORK/responses/$label.http" >"$WORK/responses/$label.body"
+}
+
 # The answer fetch saved for <label>: status line, headers and body.
 answer() {
   cat "$WORK/responses/$1.http"
+}
+
+# expect_header <name> <response> <header> <expected>: one header's value, compared exactly.
+expect_header() {
+  local name="$1" response="$2" header="$3" expected="$4" value
+  value="$(printf '%s\n' "$response" | sed '/^\r$/q' | tr -d '\r' |
+    { grep -i "^${header}:" || true; } | sed -n '1s/^[^:]*: *//p')"
+  check "$name/$header" "$expected" "$value"
 }
 
 # Every answer a browser gets from the booted artifact: one function per case, run in this
@@ -176,6 +210,10 @@ serve_cases=(
   case_guard_bad_owner
   case_guard_passes
   case_health_is_exempt
+  case_create_session
+  case_create_is_idempotent
+  case_create_bad_project
+  case_create_cap_reached
 )
 
 # The health payload: exactly four keys, and the uptime is not predictable, so the assertion is
@@ -321,6 +359,84 @@ case_health_is_exempt() {
   expect_status "$name" "$response" 200
 }
 
+# HS-008: a create answers 202 with the row, a `Location` and the event stream's URL. The id is
+# parsed out of the body for the cases below; the body is the row, so it carries the status and
+# the key's row too.
+case_create_session() {
+  local name=case_create_session response body
+  fetch_body "$name" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-create-1" ||
+    fail "$name/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 202
+  body="$(cat "$WORK/responses/$name.body")"
+  created_id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$created_id" ] ||
+    fail "$name/id" "the response names no 16-character id: $body"
+  assertions=$((assertions + 1))
+  expect_header "$name" "$response" Location "/api/sessions/$created_id"
+  case "$body" in
+    *'"status":"starting"'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "$name/status" "the response is not a starting session: $body"
+      ;;
+  esac
+  case "$body" in
+    *"\"events\":\"/api/sessions/$created_id/events\""*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "$name/events" "the response names no event stream: $body"
+      ;;
+  esac
+}
+
+# HS-008: the same key answers the same session with a second 202, not a second row.
+case_create_is_idempotent() {
+  local name=case_create_is_idempotent response body id
+  fetch_body "$name" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-create-1" ||
+    fail "$name/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 202
+  body="$(cat "$WORK/responses/$name.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  check "$name/id" "$created_id" "$id"
+}
+
+# HS-008: a project that is not one path segment is refused, and the code says so.
+case_create_bad_project() {
+  local name=case_create_bad_project response
+  fetch_body "$name" POST /api/sessions \
+    '{"project":"..","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-create-2" ||
+    fail "$name/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 422
+  expect_code "$name" "$response" bad_project
+}
+
+# HS-008: one live session against the boot config's cap of one, so a fresh create is refused
+# with 409 `cap_reached` (nothing is evictable until HS-020).
+case_create_cap_reached() {
+  local name=case_create_cap_reached response
+  fetch_body "$name" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-create-3" ||
+    fail "$name/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 409
+  expect_code "$name" "$response" cap_reached
+}
+
 # Box 4, over every answer the cases above saved: none of them carries a CORS header, and none
 # carries a `Vary` that would imply one. Runs after the case loop rather than as a member of it,
 # so nothing answered above is missed and a case appended later is covered automatically.
@@ -393,8 +509,8 @@ phase_serve() {
     fail "serve/version" "cannot read version and schema_version from: $json"
   fi
 
-  # The owner the bad_owner case needs, and the only reason a config file exists at all.
-  printf 'owner = "%s"\n' "$owner" >"$WORK/config.toml"
+  # The owner the bad_owner case needs, and the cap the create cases need.
+  printf 'owner = "%s"\nmax_live_sessions = 1\n' "$owner" >"$WORK/config.toml"
 
   start_serve
   local case_fn

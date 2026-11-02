@@ -7,28 +7,39 @@
 //! route registered by any later story passes through them without knowing they exist.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Router;
+use axum::body::Bytes;
 use axum::extract::Request;
+use axum::extract::rejection::BytesRejection;
 use axum::handler::Handler;
-use axum::http::{Method, Uri, header};
+use axum::http::{HeaderMap, Method, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{MethodRouter, get};
 
 use crate::config::Config;
+use crate::db::Database;
 use crate::http::error::ApiError;
 use crate::http::guard::{self, Guards};
 use crate::http::health::{self, Health};
+use crate::http::sessions;
 use crate::runtime::Runtime;
 use crate::web;
 
-/// What a handler may read: the config in force and this run's backend and start time.
+/// What a handler may read: the config in force, this run's backend and start time, and the one
+/// open database.
+///
+/// The database is reached through ADR-0012's `Arc<Mutex<Database>>` stopgap for HS-009: the
+/// guard is held only across synchronous repository calls and never across an `.await`, and
+/// HS-009's single writer replaces it.
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub config: Config,
     pub runtime: Runtime,
+    pub database: Arc<Mutex<Database>>,
 }
 
 /// Whether a route may change state. Recorded at registration, because item 4's "`GET`
@@ -258,15 +269,27 @@ impl RequestCounter {
     }
 }
 
-/// The control listener's route table: the health endpoint, the embedded app, and the two
-/// answers to an unknown path (ADR-0007).
+/// The control listener's route table: the health endpoint, the create endpoint, the embedded
+/// app, and the two answers to an unknown path (ADR-0007).
 pub fn router(state: AppState) -> Routes {
     let state = Arc::new(state);
+    let health_state = Arc::clone(&state);
+    let create_state = Arc::clone(&state);
     Routes::new()
         .get("/api/health", move || {
-            let state = Arc::clone(&state);
+            let state = Arc::clone(&health_state);
             async move { health::respond(&Health::of(&state.config, &state.runtime)) }
         })
+        // The body is taken as a `Result`, not as `Bytes`: a rejection left to axum answers a
+        // `text/plain` 400/413 outside ADR-0008's envelope, so the handler maps it to `bad_body`
+        // itself (ADR-0012).
+        .post(
+            "/api/sessions",
+            move |headers: HeaderMap, body: Result<Bytes, BytesRejection>| {
+                let state = Arc::clone(&create_state);
+                async move { sessions::create(&state, headers, body).await }
+            },
+        )
         .fallback(fallback)
 }
 

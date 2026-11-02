@@ -3,9 +3,8 @@
 //! Every test here drives the public path — `Database::open`, `apply_pending` and the real
 //! binary — against a temporary file, because WAL cannot be proved on `:memory:`.
 
-use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
@@ -15,40 +14,11 @@ use rusqlite::Connection;
 use holosmith::db::{self, Database, DbError, OpenOptions};
 use holosmith::schema::{self, EmbedError, Migration, SCHEMA_VERSION};
 
+mod support;
+use support::TempDir;
+
 /// The `applied_at` these tests write, so the value can be asserted rather than raced.
 const NOW: i64 = 1_760_000_000;
-
-/// A directory that removes itself, so the tests leave nothing in `/tmp`.
-struct TempDir {
-    path: PathBuf,
-}
-
-impl TempDir {
-    fn new(label: &str) -> Self {
-        let path = env::temp_dir().join(format!("holosmith-db-{label}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).expect("the temp directory is creatable");
-        Self { path }
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-
-    fn file(&self, name: &str) -> PathBuf {
-        self.path.join(name)
-    }
-
-    fn database(&self) -> PathBuf {
-        self.file(db::DATABASE_FILE)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
 
 /// Write a database by hand: the migrations record, with `version` already in it.
 ///
