@@ -46,12 +46,34 @@ The empty-root run proves there is no dynamic loader and no userspace dependency
 not a container run: HS-001's "both run in an empty container" clause stays open until
 HS-046's verification run on real Docker hosts (ADR-0005).
 
-`scripts/check-static.sh` carries three assertions HS-003 added, all of them about the
-embedded app rather than the ELF: the artifact does not contain the placeholder marker
-`build.rs` writes when `web/dist` is missing (so a build without the app cannot ship), the
-app it serves from the empty root is byte-for-byte this tree's `web/dist/index.html`, and
-nothing appears under the `--data-dir` it was given. The marker is read out of
+`scripts/check-static.sh` carries the assertions HS-003 and HS-004 added, about what the
+artifact ships rather than about the ELF: the artifact does not contain the placeholder
+marker `build.rs` writes when `web/dist` is missing (so a build without the app cannot
+ship), the app it serves from the empty root is byte-for-byte this tree's
+`web/dist/index.html`, the migration SQL is compiled in (a byte grep of the artifact for
+`CREATE TABLE schema_version`, which survives `strip` and LTO), and under the `--data-dir`
+it was given it writes `app.db` and its WAL sidecars — and nothing else, before or after the
+stop. The marker is read out of
 `crates/holosmith/build_support/web_embed.rs` rather than restated here or in the script.
+
+## The database and its migrations
+
+`serve` creates the data root and opens `<data_root>/app.db` before the listener binds, so a
+data root that cannot be written is a startup failure and not a half-served process
+(ADR-0009). The schema is built from numbered SQL files in `crates/holosmith/migrations`,
+embedded at compile time with `include_dir!` and applied in one transaction at startup; a
+new migration needs no build-script edit beyond the `cargo:rerun-if-changed=migrations` line
+`build.rs` already carries, which is what makes a new file reappear in the next build. The
+artifact is the authority: `holosmith version` reports `schema_version`, the startup banner
+prints `database <path> schema <n>`, and `scripts/check-static.sh` proves both the SQL and
+`app.db` are in the shipped binary.
+
+A fresh build of this crate is a fresh test of the embed: `cargo test` runs
+`tests/db_migrations.rs` against temporary files, because WAL cannot be observed on an
+in-memory database. `cargo test` also needs no writable `/var/lib/holosmith`: every `serve`
+test names a data root inside its own temporary directory, because `serve` now creates and
+migrates whatever root the config resolves to, and an omitted key resolves to the built-in
+default.
 
 ## Prerequisites
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Assert the dist/ artifacts are the plain static binaries this tree built (ADR-0005),
-# carry the real app rather than its placeholder, and serve it from an empty root (ADR-0007).
+# carry the real app rather than its placeholder, serve it from an empty root (ADR-0007), and
+# write its own schema there (ADR-0009).
 #
 # Usage: scripts/check-static.sh [--target <triple>]...
 # Reads the artifact's `version` and `serve` output, so run scripts/build.sh first. Downloads
@@ -114,7 +115,7 @@ check_serve_in_empty_root() {
   done
   shift
   local -a inner=("$@")
-  local dir addr port
+  local dir addr port schema_version
   dir="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '$dir'" RETURN
@@ -141,6 +142,26 @@ check_serve_in_empty_root() {
     fail "$label in an empty root: serve printed no control_listen line: $(cat "$dir/serve.err")"
   fi
   port="${addr##*:}"
+
+  # The database is the eighth startup line (ADR-0009): the artifact opens and migrates its own
+  # schema, at the path item 5 names. The number comes from the `version` output this script
+  # already parsed, so a new migration cannot fail here with a message naming the wrong cause.
+  schema_version="$(sed -n 's/^schema_version //p' <<<"$plain")"
+  grep -qx "database /data/app.db schema $schema_version" "$dir/serve.err" ||
+    fail "$label in an empty root: serve did not report the database it opened: $(cat "$dir/serve.err")"
+
+  # While the process runs the database is in WAL, and nothing else is written under the data
+  # root. The -wal is the proof the schema was written through the WAL, not around it.
+  local running wanted
+  running="$(find "$dir/data" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
+  for wanted in app.db app.db-wal; do
+    printf '%s\n' "$running" | grep -qx "$wanted" ||
+      fail "$label in an empty root: '$wanted' is missing while serving: $running"
+  done
+  local unexpected
+  unexpected="$(printf '%s\n' "$running" | grep -vx -e app.db -e app.db-wal -e app.db-shm || true)"
+  [ -z "$unexpected" ] ||
+    fail "$label in an empty root: serve wrote $unexpected under the data dir"
 
   if ! fetch "$port" / >"$dir/response"; then
     kill -TERM "$pid" 2>/dev/null || true
@@ -170,9 +191,16 @@ check_serve_in_empty_root() {
   cmp -s "$dir/served.html" web/dist/index.html ||
     fail "$label in an empty root: / is not web/dist/index.html"
 
-  local stray
-  stray="$(find "$dir/data" -mindepth 1 -type f)"
-  [ -z "$stray" ] || fail "$label in an empty root: serve wrote files under the data dir: $stray"
+  # After the stop the data root holds the database and, because the sandbox reports the
+  # signal's own status instead of a clean exit, at most its two WAL sidecars — never anything
+  # else, and app.db is still the schema.
+  local left
+  left="$(printf '%s\n' "$(find "$dir/data" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)")"
+  printf '%s\n' "$left" | grep -qx app.db ||
+    fail "$label in an empty root: app.db is gone after the stop: $left"
+  unexpected="$(printf '%s\n' "$left" | grep -vx -e app.db -e app.db-wal -e app.db-shm || true)"
+  [ -z "$unexpected" ] ||
+    fail "$label in an empty root: after the stop the data dir holds $unexpected"
   printf 'ok %s: serves the app from an empty root\n' "$label"
 }
 
@@ -214,6 +242,13 @@ for target in "${targets[@]}"; do
   if grep -q "$placeholder_marker" "$bin_abs"; then
     fail "$bin carries the placeholder page: it was built without web/dist (run scripts/build.sh)"
   fi
+
+  # The migrations are compiled in (ADR-0009): a string literal survives strip and LTO, so its
+  # absence means the artifact would start with no schema at all. Greped straight out of the
+  # file rather than through `strings | grep -q`, which `pipefail` turns into a failure: grep
+  # stops reading at the match and `strings` dies of SIGPIPE.
+  grep -q 'CREATE TABLE schema_version' "$bin_abs" ||
+    fail "$bin does not carry the initial migration: the migrations were not embedded"
 
   arch="${target%%-*}"
   runner=()
