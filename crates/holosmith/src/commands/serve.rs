@@ -14,7 +14,7 @@ use tokio::net::TcpListener;
 
 use crate::config::{Config, LoadError, LoadedConfig, Overrides};
 use crate::db::{self, Database, OpenOptions};
-use crate::http::{self, App, AppState};
+use crate::http::{self, App, AppState, Guards};
 use crate::logging;
 use crate::runtime::{Backend, Runtime};
 use crate::serve::{self, ServeOptions};
@@ -108,10 +108,14 @@ pub fn run(args: ServeArgs) -> ExitCode {
             loaded.config.control_origin = loaded.config.control_origin.with_port(bound.port());
         }
         banner(&filter, &loaded, &runtime, &version, bound, &database);
-        let app = App::new(http::router(AppState {
-            config: loaded.config.clone(),
-            runtime,
-        }));
+        let guards = Guards::from_config(&loaded.config);
+        let app = App::new(
+            http::router(AppState {
+                config: loaded.config.clone(),
+                runtime,
+            }),
+            guards,
+        );
         match serve::run(listener, app, ServeOptions::default(), stop.recv()).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {

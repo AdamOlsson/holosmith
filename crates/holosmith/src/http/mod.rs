@@ -3,6 +3,10 @@
 
 pub mod app;
 pub mod error;
+pub mod guard;
 pub mod health;
 
-pub use app::{App, AppState, RequestCounter, Routes, is_guard_exempt, router};
+pub use app::{
+    App, AppState, ManifestEntry, RequestCounter, RouteKind, Routes, is_guard_exempt, router,
+};
+pub use guard::Guards;

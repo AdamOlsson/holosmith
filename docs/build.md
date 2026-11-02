@@ -56,6 +56,26 @@ it was given it writes `app.db` and its WAL sidecars — and nothing else, befor
 stop. The marker is read out of
 `crates/holosmith/build_support/web_embed.rs` rather than restated here or in the script.
 
+## Browser-facing guards
+
+The control listener refuses a request that is not your browser before any route sees it
+(ADR-0010). On every request that is not a health probe the `Host` header must be in
+`allowed_hosts`; every non-`GET` request must additionally carry the control origin as its
+`Origin`, `Content-Type: application/json`, and `X-Holosmith-Client: 1`; and when `owner` is
+set, a request carrying `Tailscale-User-Login` must carry yours. Only `localhost` and
+`127.0.0.1` are implicit. A machine reached by its Tailnet name must therefore list that name
+in `allowed_hosts`, and a browser that reaches the control listener over IPv6 loopback must
+list `[::1]`; both are refused as `bad_host` otherwise. A refusal is the JSON envelope of
+ADR-0008 with the code `bad_host`, `bad_origin`, `bad_client` or `bad_owner`, and no response
+ever carries a CORS header.
+
+`GET /api/health` is exempt from all four checks — `is_guard_exempt` is the one list — so the
+probe works from `systemd`, from `curl` and from the hub's host registration.
+
+The guard assertions are `crates/holosmith/tests/guards.rs` and are deliberately **not** in
+`scripts/check-static.sh`: HS-006's `scripts/verify.sh` is where they are lifted into the
+one-command check, on the same list as `check-embed.sh`.
+
 ## The database and its migrations
 
 `serve` creates the data root and opens `<data_root>/app.db` before the listener binds, so a

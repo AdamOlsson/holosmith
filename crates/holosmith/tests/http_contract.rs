@@ -4,151 +4,13 @@
 //! the status, the headers and the bytes are the ones a browser gets. No client crate: the
 //! requests are tiny and one of them has to be slow or hanging.
 
-use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use axum::routing::get;
-use holosmith::config::Config;
-use holosmith::http::{self, App, AppState, RequestCounter, Routes};
-use holosmith::runtime::{Backend, Runtime};
-use holosmith::serve::{self, ServeOptions};
+use holosmith::http::{self, Routes};
 use holosmith::web;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::oneshot;
 
-fn state() -> AppState {
-    AppState {
-        config: Config::default(),
-        runtime: Runtime::started(Backend::Stub),
-    }
-}
-
-fn version() -> String {
-    holosmith::version::VersionInfo::current().version
-}
-
-/// A running app, the handle that stops it, and where it listens.
-struct Served {
-    addr: SocketAddr,
-    counter: RequestCounter,
-    stop: Option<oneshot::Sender<()>>,
-    handle: tokio::task::JoinHandle<Result<(), String>>,
-}
-
-impl Served {
-    async fn start(routes: Routes, grace: Duration) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("an ephemeral port is bindable");
-        let addr = listener.local_addr().expect("a bound address");
-        let (stop, stopped) = oneshot::channel();
-        let app = App::new(routes);
-        let counter = app.counter();
-        let handle = tokio::spawn(async move {
-            serve::run(
-                listener,
-                app,
-                ServeOptions {
-                    shutdown_grace: grace,
-                },
-                async move {
-                    let _ = stopped.await;
-                },
-            )
-            .await
-            .map_err(|error| error.to_string())
-        });
-        Self {
-            addr,
-            counter,
-            stop: Some(stop),
-            handle,
-        }
-    }
-
-    fn stop(&mut self) {
-        if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
-        }
-    }
-
-    async fn finish(mut self) -> Result<(), String> {
-        self.stop();
-        self.handle.await.expect("the serving task does not panic")
-    }
-}
-
-struct Response {
-    status: u16,
-    headers: Vec<(String, String)>,
-    body: String,
-}
-
-impl Response {
-    fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
-    }
-}
-
-/// One request/response over a fresh connection, `Connection: close` so the read ends.
-async fn request(addr: SocketAddr, request: &str) -> Response {
-    let mut stream = TcpStream::connect(addr).await.expect("the server accepts");
-    stream
-        .write_all(request.as_bytes())
-        .await
-        .expect("the request is written");
-    let mut raw = Vec::new();
-    stream
-        .read_to_end(&mut raw)
-        .await
-        .expect("the response is read");
-    parse(&raw)
-}
-
-/// `get`/`head` for a path, with the host header a browser would send.
-async fn fetch(addr: SocketAddr, path: &str) -> Response {
-    request(
-        addr,
-        &format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"),
-    )
-    .await
-}
-
-async fn fetch_head(addr: SocketAddr, path: &str) -> Response {
-    request(
-        addr,
-        &format!("HEAD {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"),
-    )
-    .await
-}
-
-fn parse(raw: &[u8]) -> Response {
-    let split = raw
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .expect("a response has a header block");
-    let head = String::from_utf8_lossy(&raw[..split]).to_string();
-    let body = String::from_utf8_lossy(&raw[split + 4..]).to_string();
-    let mut lines = head.split("\r\n");
-    let status = lines
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse().ok())
-        .expect("a status line starts with the code");
-    let headers = lines
-        .filter_map(|line| line.split_once(':'))
-        .map(|(name, value)| (name.trim().to_string(), value.trim().to_string()))
-        .collect();
-    Response {
-        status,
-        headers,
-        body,
-    }
-}
+mod support;
+use support::{Served, fetch, fetch_head, state, version};
 
 #[tokio::test]
 async fn the_health_endpoint_answers_the_four_keys() {
@@ -275,13 +137,10 @@ async fn an_idle_server_stops_at_once() {
 
 #[tokio::test]
 async fn an_in_flight_request_finishes_before_the_process_stops() {
-    let routes = Routes::new().route(
-        "/slow",
-        get(|| async {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            "finished"
-        }),
-    );
+    let routes = Routes::new().get("/slow", || async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        "finished"
+    });
     let mut served = Served::start(routes, Duration::from_secs(10)).await;
     let addr = served.addr;
     let in_flight = tokio::spawn(async move { fetch(addr, "/slow").await });
@@ -296,23 +155,19 @@ async fn an_in_flight_request_finishes_before_the_process_stops() {
 
 #[tokio::test]
 async fn a_hanging_request_is_cut_at_the_deadline() {
-    let routes = Routes::new().route(
-        "/hang",
-        get(|| async {
-            std::future::pending::<()>().await;
-            "never"
-        }),
-    );
+    let routes = Routes::new().get("/hang", || async {
+        std::future::pending::<()>().await;
+        "never"
+    });
     let mut served = Served::start(routes, Duration::from_millis(200)).await;
     let addr = served.addr;
     let hung = tokio::spawn(async move { fetch(addr, "/hang").await });
     tokio::time::sleep(Duration::from_millis(100)).await;
     let started = Instant::now();
     served.stop();
-    let stopped = tokio::time::timeout(Duration::from_secs(5), served.handle)
+    let stopped = tokio::time::timeout(Duration::from_secs(5), served.join())
         .await
-        .expect("the drain deadline ends the wait")
-        .expect("the serving task does not panic");
+        .expect("the drain deadline ends the wait");
     stopped.expect("a drain deadline is still a clean stop");
     assert!(
         started.elapsed() < Duration::from_secs(5),

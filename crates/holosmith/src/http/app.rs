@@ -3,13 +3,15 @@
 //! Feature code adds routes to [`Routes`]. The only value that can be served is [`App`], and
 //! `Router::layer` runs in exactly one place — [`App::new`] — because a layer applied at the
 //! call site would wrap only the routes that existed when it ran, and a route added later
-//! would silently skip it.
+//! would silently skip it. That single layer is also what makes the guards unavoidable: a
+//! route registered by any later story passes through them without knowing they exist.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Router;
 use axum::extract::Request;
+use axum::handler::Handler;
 use axum::http::{Method, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -17,6 +19,7 @@ use axum::routing::{MethodRouter, get};
 
 use crate::config::Config;
 use crate::http::error::ApiError;
+use crate::http::guard::{self, Guards};
 use crate::http::health::{self, Health};
 use crate::runtime::Runtime;
 use crate::web;
@@ -28,28 +31,158 @@ pub struct AppState {
     pub runtime: Runtime,
 }
 
+/// Whether a route may change state. Recorded at registration, because item 4's "`GET`
+/// endpoints are read-only" is not something a test can observe from outside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteKind {
+    ReadOnly,
+    Mutating,
+}
+
+/// A registered route, as the app holds it for inspection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestEntry {
+    pub path: String,
+    pub method: Method,
+    pub kind: RouteKind,
+}
+
 /// A route table. There is no constructor from a bare `Router` and no accessor that returns
 /// one, so a route can only exist inside the app that carries the layer.
-pub struct Routes(Router<()>);
+pub struct Routes {
+    router: Router<()>,
+    manifest: Vec<ManifestEntry>,
+}
 
 impl Routes {
     /// An empty table. Feature code builds one and hands it to [`App::new`].
     pub fn new() -> Self {
-        Self(Router::new())
+        Self {
+            router: Router::new(),
+            manifest: Vec::new(),
+        }
     }
 
-    /// Add a route. The handler takes no arguments beyond what axum extracts.
-    pub fn route(self, path: &str, methods: MethodRouter<()>) -> Self {
-        Self(self.0.route(path, methods))
+    /// A read-only route answered by `GET`.
+    pub fn get<H, T>(self, path: &str, handler: H) -> Self
+    where
+        H: Handler<T, ()>,
+        T: 'static,
+    {
+        self.register(path, Method::GET, RouteKind::ReadOnly, get(handler))
+    }
+
+    /// A read-only route answered by `HEAD`.
+    pub fn head<H, T>(self, path: &str, handler: H) -> Self
+    where
+        H: Handler<T, ()>,
+        T: 'static,
+    {
+        self.register(
+            path,
+            Method::HEAD,
+            RouteKind::ReadOnly,
+            axum::routing::head(handler),
+        )
+    }
+
+    /// A mutating route answered by `POST`.
+    pub fn post<H, T>(self, path: &str, handler: H) -> Self
+    where
+        H: Handler<T, ()>,
+        T: 'static,
+    {
+        self.register(
+            path,
+            Method::POST,
+            RouteKind::Mutating,
+            axum::routing::post(handler),
+        )
+    }
+
+    /// A mutating route answered by `PUT`.
+    pub fn put<H, T>(self, path: &str, handler: H) -> Self
+    where
+        H: Handler<T, ()>,
+        T: 'static,
+    {
+        self.register(
+            path,
+            Method::PUT,
+            RouteKind::Mutating,
+            axum::routing::put(handler),
+        )
+    }
+
+    /// A mutating route answered by `PATCH`.
+    pub fn patch<H, T>(self, path: &str, handler: H) -> Self
+    where
+        H: Handler<T, ()>,
+        T: 'static,
+    {
+        self.register(
+            path,
+            Method::PATCH,
+            RouteKind::Mutating,
+            axum::routing::patch(handler),
+        )
+    }
+
+    /// A mutating route answered by `DELETE`.
+    pub fn delete<H, T>(self, path: &str, handler: H) -> Self
+    where
+        H: Handler<T, ()>,
+        T: 'static,
+    {
+        self.register(
+            path,
+            Method::DELETE,
+            RouteKind::Mutating,
+            axum::routing::delete(handler),
+        )
     }
 
     /// Set the handler for every request no route matches.
+    ///
+    /// The manifest records nothing for it: it answers every method, and its body only reads
+    /// (an asset, the app shell, the not-found envelope), so a mutating fallback is not
+    /// expressible through this API.
     pub fn fallback<H, T>(self, handler: H) -> Self
     where
-        H: axum::handler::Handler<T, ()>,
+        H: Handler<T, ()>,
         T: 'static,
     {
-        Self(self.0.fallback(handler))
+        Self {
+            router: self.router.fallback(handler),
+            manifest: self.manifest,
+        }
+    }
+
+    /// Add one method to one path and record what it is. Each helper above takes a handler
+    /// rather than a `MethodRouter`, which is what makes a `Mutating` kind on a `GET`
+    /// unexpressible; axum merges the method routers of a path, so later methods merge too.
+    /// The kind is what each helper declares, never what the method implies: deriving it would
+    /// make the manifest test a tautology (ADR-0010).
+    fn register(
+        self,
+        path: &str,
+        method: Method,
+        kind: RouteKind,
+        methods: MethodRouter<()>,
+    ) -> Self {
+        let Self {
+            router,
+            mut manifest,
+        } = self;
+        manifest.push(ManifestEntry {
+            path: path.to_string(),
+            method,
+            kind,
+        });
+        Self {
+            router: router.route(path, methods),
+            manifest,
+        }
     }
 }
 
@@ -63,19 +196,29 @@ impl Default for Routes {
 pub struct App {
     router: Router<()>,
     requests: RequestCounter,
+    manifest: Vec<ManifestEntry>,
 }
 
 impl App {
     /// Wrap the route table in the layer every request passes through, fallback included.
-    pub fn new(routes: Routes) -> Self {
+    ///
+    /// The layer is the one `Router::layer` call in the crate (ADR-0007), so the guards and the
+    /// counter cannot be assembled in a different order anywhere else.
+    pub fn new(routes: Routes, guards: Guards) -> Self {
+        let Routes { router, manifest } = routes;
         let requests = RequestCounter::new();
         let counter = Arc::clone(&requests.0);
+        // Cloned per request, so the guards are shared rather than rebuilt: the allow-list is
+        // resolved once, at startup.
+        let guards = Arc::new(guards);
         Self {
-            router: routes.0.layer(middleware::from_fn(move |request, next| {
+            router: router.layer(middleware::from_fn(move |request, next| {
                 let counter = Arc::clone(&counter);
-                async move { edge(counter, request, next).await }
+                let guards = Arc::clone(&guards);
+                async move { edge(counter, guards, request, next).await }
             })),
             requests,
+            manifest,
         }
     }
 
@@ -84,6 +227,13 @@ impl App {
     #[doc(hidden)]
     pub fn counter(&self) -> RequestCounter {
         self.requests.clone()
+    }
+
+    /// The routes this app carries and whether each may change state. Hidden from the docs for
+    /// the same reason as [`Self::counter`]: evidence for a test, not part of the seam.
+    #[doc(hidden)]
+    pub fn manifest(&self) -> &[ManifestEntry] {
+        &self.manifest
     }
 
     /// The router `axum::serve` takes. Crate-private on purpose: [`crate::serve::run`] is the
@@ -113,23 +263,36 @@ impl RequestCounter {
 pub fn router(state: AppState) -> Routes {
     let state = Arc::new(state);
     Routes::new()
-        .route(
-            "/api/health",
-            get(move || {
-                let state = Arc::clone(&state);
-                async move { health::respond(&Health::of(&state.config, &state.runtime)) }
-            }),
-        )
+        .get("/api/health", move || {
+            let state = Arc::clone(&state);
+            async move { health::respond(&Health::of(&state.config, &state.runtime)) }
+        })
         .fallback(fallback)
 }
 
-/// The `edge` layer: request accounting and one `debug` line. It is the extension point, not
-/// a guard — HS-005 adds the checks here, and [`is_guard_exempt`] is the list it reads.
-async fn edge(counter: Arc<AtomicU64>, request: Request, next: Next) -> Response {
+/// The `edge` layer: request accounting, the guards, and one `debug` line, in that order.
+///
+/// A rejected request is counted like any other, which is why the counter runs first. The CORS
+/// strip runs on both answers — a refusal and a route's response — because "no CORS header,
+/// ever" is unconditional (ADR-0010).
+async fn edge(
+    counter: Arc<AtomicU64>,
+    guards: Arc<Guards>,
+    request: Request,
+    next: Next,
+) -> Response {
     let served = counter.fetch_add(1, Ordering::Relaxed) + 1;
     let method = request.method().clone();
     let path = request.uri().path().to_string();
-    let response = next.run(request).await;
+    let mut response = if is_guard_exempt(&method, &path) {
+        next.run(request).await
+    } else {
+        match guards.check(&request) {
+            Some(error) => error.into_response(),
+            None => next.run(request).await,
+        }
+    };
+    guard::strip_cors(&mut response);
     tracing::debug!(
         target: "holosmith::http",
         served,
@@ -213,9 +376,9 @@ mod tests {
         // no accessor returning one, which is the rule the type exists for. The behaviour of
         // the table and of the layer is `tests/http_contract.rs`.
         let routes = Routes::new()
-            .route("/api/health", get(|| async { "ok" }))
+            .get("/api/health", || async { "ok" })
             .fallback(|| async { "fallback" });
-        let app = App::new(routes);
+        let app = App::new(routes, Guards::from_config(&Config::default()));
         assert_eq!(app.counter().served(), 0);
     }
 }
