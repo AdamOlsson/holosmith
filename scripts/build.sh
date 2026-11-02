@@ -53,6 +53,12 @@ HOLOSMITH_GIT_TAG="$(git describe --tags --always --dirty 2>/dev/null || echo un
 export HOLOSMITH_GIT_TAG
 
 printf 'git tag: %s\n' "$HOLOSMITH_GIT_TAG"
+
+# The app is built first and embedded in the binary ("Build and release"). From here on a
+# missing web/dist is a build failure, never a silently shipped placeholder (ADR-0007).
+"$repo_root/scripts/build-web.sh"
+export HOLOSMITH_REQUIRE_WEB=1
+
 for target in "${targets[@]}"; do
   echo "building $target"
   cargo build --release --locked --target "$target"

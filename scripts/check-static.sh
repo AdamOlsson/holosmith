@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Assert the dist/ artifacts are the plain static binaries this tree built (ADR-0005).
+# Assert the dist/ artifacts are the plain static binaries this tree built (ADR-0005),
+# carry the real app rather than its placeholder, and serve it from an empty root (ADR-0007).
 #
 # Usage: scripts/check-static.sh [--target <triple>]...
-# Reads the artifact's `version` output, so run scripts/build.sh first. Downloads
+# Reads the artifact's `version` and `serve` output, so run scripts/build.sh first. Downloads
 # nothing: qemu-aarch64-static is a machine-local tool (docs/build.md) and its absence
 # prints one SKIP line instead of failing.
 
@@ -47,6 +48,15 @@ fail() {
   exit 1
 }
 
+# The marker build.rs writes into a placeholder page. Read from the source of truth
+# (crates/holosmith/build_support/web_embed.rs) rather than restated, so rewording the constant
+# cannot leave this grep silently looking for a string that no longer exists. A shipped
+# artifact that contains it was built without web/dist.
+placeholder_marker="$(sed -n 's/.*PLACEHOLDER_MARKER: &str = "\(.*\)";/\1/p' \
+  crates/holosmith/build_support/web_embed.rs)"
+[ -n "$placeholder_marker" ] ||
+  fail "cannot read PLACEHOLDER_MARKER from crates/holosmith/build_support/web_embed.rs"
+
 pin="$(tr -d '[:space:]' < pins/pi.txt)"
 [ -n "$pin" ] || fail "pins/pi.txt is empty"
 
@@ -77,6 +87,93 @@ check_version_output() {
   reported="$(printf '%s\n' "$output" | sed -n 's/^pi_version //p')"
   [ "$reported" = "$pin" ] ||
     fail "$label: pi_version $reported does not match pins/pi.txt ($pin)"
+}
+
+# fetch <port> <path>: one HTTP/1.1 GET over /dev/tcp, so the check needs no curl. The read has
+# a deadline: a connection the server never closes would otherwise hang the whole check.
+fetch() {
+  local port="$1" path="$2" fd
+  exec {fd}<>"/dev/tcp/127.0.0.1/$port" || return 1
+  printf 'GET %s HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' "$path" >&"$fd"
+  timeout 10 cat <&"$fd"
+  exec {fd}<&-
+}
+
+# check_serve_in_empty_root <label> <bwrap args...> -- <inner command...>
+#
+# Serves the app from the same empty root, fetches `/` and `/api/health` over loopback, and
+# requires the served page to be byte-for-byte this tree's web/dist/index.html: the artifact
+# ships the app, and the app is this tree's.
+check_serve_in_empty_root() {
+  local label="$1"
+  shift
+  local -a prefix=()
+  while [ "$1" != "--" ]; do
+    prefix+=("$1")
+    shift
+  done
+  shift
+  local -a inner=("$@")
+  local dir addr port
+  dir="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$dir'" RETURN
+  # The data dir is bound into the sandbox, so anything `serve` wrote there lands where this
+  # script can see it: the sandbox root is a writable tmpfs, so a check that looked at the host
+  # copy without the bind could never fail.
+  mkdir -p "$dir/data"
+
+  # --share-net puts the sandbox beside the host's loopback, which is the only way to fetch
+  # the port it bound; the filesystem is still empty.
+  bwrap "${prefix[@]}" --bind "$dir/data" /data --share-net "${inner[@]}" \
+    serve --port 0 --data-dir /data >"$dir/serve.log" 2>"$dir/serve.err" &
+  local pid=$!
+  local i
+  for i in $(seq 1 200); do
+    grep -q '^control_listen ' "$dir/serve.err" 2>/dev/null && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  addr="$(sed -n 's/^control_listen //p' "$dir/serve.err" | head -1)"
+  if [ -z "$addr" ]; then
+    kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "$label in an empty root: serve printed no control_listen line: $(cat "$dir/serve.err")"
+  fi
+  port="${addr##*:}"
+
+  if ! fetch "$port" / >"$dir/response"; then
+    kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "$label in an empty root: GET / did not answer"
+  fi
+  if ! fetch "$port" /api/health >"$dir/health.response"; then
+    kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "$label in an empty root: GET /api/health did not answer"
+  fi
+  sed '1,/^\r$/d' "$dir/response" >"$dir/served.html"
+  local health
+  health="$(sed '1,/^\r$/d' "$dir/health.response")"
+  kill -TERM "$pid" 2>/dev/null || true
+  # bwrap exits with the signal's own status (143) instead of forwarding the child's, so that
+  # this proves the process stopped; the exit code 0 itself is proved by tests/serve_cli.rs.
+  wait "$pid" 2>/dev/null || true
+
+  local reported_version
+  reported_version="$(sed -n 's/^version //p' <<<"$plain")"
+  case "$health" in
+    "{\"name\":\"holosmith\",\"version\":\"$reported_version\",\"role\":\"both\",\"uptime_s\":"*"}") ;;
+    *) fail "$label in an empty root: /api/health answered $health" ;;
+  esac
+
+  cmp -s "$dir/served.html" web/dist/index.html ||
+    fail "$label in an empty root: / is not web/dist/index.html"
+
+  local stray
+  stray="$(find "$dir/data" -mindepth 1 -type f)"
+  [ -z "$stray" ] || fail "$label in an empty root: serve wrote files under the data dir: $stray"
+  printf 'ok %s: serves the app from an empty root\n' "$label"
 }
 
 # check_git_tag <label> <output of `version`>
@@ -113,6 +210,10 @@ for target in "${targets[@]}"; do
     *"There is no dynamic section in this file"*) ;;
     *) fail "$bin has a dynamic section: $dynamic" ;;
   esac
+
+  if grep -q "$placeholder_marker" "$bin_abs"; then
+    fail "$bin carries the placeholder page: it was built without web/dist (run scripts/build.sh)"
+  fi
 
   arch="${target%%-*}"
   runner=()
@@ -154,6 +255,7 @@ for target in "${targets[@]}"; do
     check_git_tag "$label in an empty root" "$sandboxed"
     [ "$sandboxed" = "$plain" ] ||
       fail "$label: empty-root output differs from the plain run: $sandboxed"
+    check_serve_in_empty_root "$label" "${bwrap_args[@]}" -- "${inner[@]}"
     printf 'ok %s: runs with no loader and no userspace dependencies\n' "$target"
   else
     printf 'SKIP %s empty-root run: bwrap not found (see docs/build.md)\n' "$target"

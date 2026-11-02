@@ -5,15 +5,16 @@ The only artifacts are static musl binaries for `x86_64-unknown-linux-musl` and
 
 ```bash
 . ~/.pi/toolchains/env.sh     # rustc + both musl cross toolchains + qemu on PATH
-scripts/build.sh              # both targets, then scripts/check-static.sh
+scripts/build.sh              # web app, both targets, then scripts/check-static.sh
 ```
 
-`scripts/build.sh` copies each artifact to `dist/<target-triple>/holosmith` (by rename,
-so an interrupted build never leaves a truncated file there), prints its SHA-256 and
-size, and finishes by asserting that both are plain static binaries that run with no
-loader and no userspace dependencies. `--target <triple>` builds one, `--no-check` skips
-the assertions. `scripts/check-static.sh` can be re-run on its own; it also refuses an
-artifact whose `git_tag` is not the tag of this tree, so a stale `dist/` cannot pass.
+`scripts/build.sh` builds the web app first (`scripts/build-web.sh`, ADR-0007) and then
+each target, copies each artifact to `dist/<target-triple>/holosmith` (by rename, so an
+interrupted build never leaves a truncated file there), prints its SHA-256 and size, and
+finishes by asserting that both are plain static binaries that run with no loader and no
+userspace dependencies. `--target <triple>` builds one, `--no-check` skips the assertions.
+`scripts/check-static.sh` can be re-run on its own; it also refuses an artifact whose
+`git_tag` is not the tag of this tree, so a stale `dist/` cannot pass.
 
 ## Gates
 
@@ -29,11 +30,28 @@ cargo test
 `-D warnings` is what turns it into a gate. `scripts/build.sh` and
 `scripts/check-static.sh` are the artifact gate, and `scripts/check-static.sh` is the
 assertion `scripts/verify.sh` calls in HS-006 rather than a second way to check the same
-thing; until that script exists this is the documented one-command check.
+thing; until that script exists this is the documented one-command check. HS-006's
+`scripts/verify.sh` is also where `scripts/build-web.sh` (before `build.sh`) and
+`scripts/check-embed.sh` belong: `check-embed.sh` is the HS-003 proof of the three embed
+cases (app present, absent, required), it runs a nested `cargo build` and so cannot be a
+`cargo test`, and it is cheap enough to call from the gate.
+
+`cargo test` needs no node and no `web/dist`: without them `build.rs` embeds a placeholder
+page that says the web app was not built, and the asset test in
+`crates/holosmith/tests/http_contract.rs` prints a `SKIP` line instead of asserting the
+built app's files. A green `cargo test` therefore proves the code, never that the app was
+built — `scripts/check-embed.sh` and `scripts/build.sh` are what prove that.
 
 The empty-root run proves there is no dynamic loader and no userspace dependency. It is
 not a container run: HS-001's "both run in an empty container" clause stays open until
 HS-046's verification run on real Docker hosts (ADR-0005).
+
+`scripts/check-static.sh` carries three assertions HS-003 added, all of them about the
+embedded app rather than the ELF: the artifact does not contain the placeholder marker
+`build.rs` writes when `web/dist` is missing (so a build without the app cannot ship), the
+app it serves from the empty root is byte-for-byte this tree's `web/dist/index.html`, and
+nothing appears under the `--data-dir` it was given. The marker is read out of
+`crates/holosmith/build_support/web_embed.rs` rather than restated here or in the script.
 
 ## Prerequisites
 
@@ -41,6 +59,10 @@ HS-046's verification run on real Docker hosts (ADR-0005).
   the build fetches nothing beyond its declared dependencies (HS-001).
 - **`x86_64-linux-musl-gcc` and `aarch64-linux-musl-gcc`** on `PATH`. SQLite is compiled
   from source (`rusqlite` with the `bundled` feature), so the C toolchain crosses too.
+- **node and npm** for the app shell: `scripts/build.sh` runs `scripts/build-web.sh`
+  first, which runs `npm ci` from `web/package-lock.json` and then Vite 7's build. Vite 7
+  needs node 20.19 or later. Without them `scripts/build.sh` stops before cargo with a
+  message naming this file. A bare `cargo build` never runs npm.
 - **git** for `scripts/build.sh`. Not required by `cargo build` itself.
 - Optional: **`qemu-aarch64-static`** (or point `HOLOSMITH_QEMU_AARCH64` at one) to run
   the aarch64 artifact on an x86_64 machine. It is a machine-local dev tool installed
@@ -100,3 +122,11 @@ bwrap --dev-bind / / --unshare-net --die-with-parent \
 
 `scripts/check-static.sh` rejects a `source = "git+…"` entry in `Cargo.lock` for the same
 reason, so the dependency set cannot start needing the network without a gate failing.
+
+That proof covers cargo only, and it is not enough on its own since HS-003: the binary
+embeds the web app, so a cargo-only build of a clone without `web/dist` still succeeds and
+serves a placeholder page. Run `scripts/build-web.sh` first (that is what `npm ci` reads
+`web/package-lock.json` for, the same category as `cargo fetch --locked`), and build the
+artifact with `HOLOSMITH_REQUIRE_WEB=1` set — which `scripts/build.sh` always does, and
+which turns a missing app into a build failure instead of a warning. `scripts/build.sh` is
+the documented release path for exactly that reason.
