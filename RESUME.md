@@ -176,8 +176,10 @@ cargo test
 scripts/build.sh            # includes scripts/check-static.sh
 ```
 
-Then run the story's own demo yourself. `scripts/verify.sh` does not exist yet — HS-006 creates it, and
-every story so far has recorded its slice in `check-static.sh` or in tests instead.
+Then run the story's own demo yourself. `scripts/verify.sh` is the one-command gate: `fmt`,
+`clippy`, `test`, `build` (which includes `scripts/check-static.sh`), `embed`, then the shipped
+artifact booted with its cases. It exists since HS-006; every later story adds at least one
+`case_*` to it (docs/build.md).
 
 ---
 
