@@ -90,7 +90,8 @@ steer HS-017's** — so pressing one names the story that will wire it rather th
 that would 404. **Superseded by ADR-0019:** the prompt is wired; abort and steer still name their
 story. **Superseded by ADR-0020:** abort is wired too; only steer still names its story.
 **Superseded by ADR-0021:** steer is wired too, so no composer action names a later story; a steer's
-block is the one block a frame creates without a message id. The form also swallows its own submit: with no `action` a native submit is a GET of
+block is the one block a frame creates without a message id. **Superseded by ADR-0022:** a fourth
+action, Resume, exists in `stopped` and `error`, so "nothing" is true only of `starting` and `deleting`. The form also swallows its own submit: with no `action` a native submit is a GET of
 the current path, which would reload the screen and discard the transcript the operator is reading. That is the same choice
 HS-013 made for the retention placeholder: a control that cannot work yet says which story makes it
 work.

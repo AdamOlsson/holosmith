@@ -83,7 +83,7 @@ The page for one session, at the path `/sessions/<id>`: its state badge and reas
 _Avoid_: Detail page, viewer, session viewer
 
 **Composer**:
-The session screen's box of guidance and the three actions it offers: prompt, steer and abort. Which of the three exist is the state's (`affordances`): prompt on `idle`, steer and abort on `running`, none on the four other states.
+The session screen's box of guidance and the four actions it offers: prompt, steer, abort and resume. Which of the four exist is the state's (`affordances`): prompt on `idle`, steer and abort on `running`, resume on `stopped` and `error`, and none on `starting` or `deleting`.
 _Avoid_: Input bar, message box, chat box, prompt bar
 
 **Turn**:
@@ -146,12 +146,8 @@ A session whose container is gone but whose history, worktree and events are kep
 _Avoid_: Ended, closed, paused, evicted
 
 **Resume**:
-Bringing a stopped (or failed) session back to `idle` under the same id: the transition table's `resume` row takes it to `starting`, and the provisioner walks it the rest of the way. It is the operator's action on a `stopped` or `error` session, and the page performs it under a request that was refused with `session_stopped` or `session_error`.
-_Avoid_: Restart, reopen, revive, unpause
-
-**Resume**:
-Bringing a stopped session back with the same id: the `stopped` + `resume` row of the transition table takes it to `starting`, and provisioning then takes it to `idle`.
-_Avoid_: Restart, reopen, wake
+Bringing a stopped (or failed) session back under the same id: the transition table's `resume` row takes it to `starting`, and provisioning walks it to `idle`. It is the operator's action on a `stopped` or `error` session, and the page performs it under a request that was refused with `session_stopped` or `session_error`.
+_Avoid_: Restart, reopen, revive, unpause, wake
 
 **Live session**:
 A session in `starting`, `idle` or `running` — the only states the cap counts. `stopped`, `error` and `deleting` are not live, so a machine may hold any number of them.

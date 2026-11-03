@@ -84,7 +84,8 @@ silently changed the request the operator made would be worse than one that says
 - `scripts/verify.sh` grows two cases: `case_steer` (the 202, the frame on the stream, then the row
   polled until it says `idle` — 30 cases) and `case_steer_on_an_idle_session` (the `409`).
 - `SessionBackend::steer` has its first production caller. `resume` is now the only trait method
-  without one, which is HS-018's.
+  without one. **Superseded by ADR-0022:** HS-018 deliberately leaves `resume` uncalled — a session
+  comes back through the provisioner, and whether a resume re-runs every step is HS-024's question.
 - The steer handler holds no lock across an `.await`: one synchronous read for the row, the backend
   call, then one touch and one append. The touch and the append are logged rather than fatal, for the
   reason the ladder's are.

@@ -52,9 +52,13 @@ the two states the table's `resume` rows accept, `stopped` and `error`, and nowh
 `affordances`, and it is tested as a matrix because it is the one place a UI can quietly offer a request
 the API will refuse.
 
-The retry rule is one helper: every composer action is a POST through the same function, and a refusal
-with `session_stopped` or `session_error` — the two codes a resume can fix — resumes, waits for the row
-to say `idle`, and sends the same request **once** more. Three details are deliberate:
+The retry rule is one helper: the prompt and the steer are POSTs through the same function, and a
+refusal with `session_stopped` or `session_error` — the two codes a resume can fix — resumes, waits for
+the row to say `idle`, and sends the same request **once** more. **Abort is the exception and passes
+`mayResume: false`**: a resume ends with the row `idle`, and abort needs it `running`, so a retried
+abort could only ever answer `session_idle` — after paying for a provisioning run the operator did not
+ask for. The spec's "the UI resumes and retries" is written for the requests a resume can make legal,
+and an abort is not one of them. Four details are deliberate:
 
 - **Once.** A resume that is refused again, or a second refusal, is reported to the operator with its
   code. A page that retried until it worked would turn a broken machine into a spinner.
@@ -63,6 +67,21 @@ to say `idle`, and sends the same request **once** more. Three details are delib
   come back, rather than sending a request into a state that will refuse it.
 - **The badge follows the row, not the retry.** The 202s carry the row, so `showState` is called with
   what the server actually said, and the stream continues to be the authority afterwards.
+
+## Two deferrals this story cannot close, recorded so they are not rediscovered
+
+**Spec item 8's `error` row is conditional** — `| error | resume (clone present) | starting |` — and the
+condition is not implemented here: the table's row is unconditional and the handler checks only the
+status. Whether a session that died before its worktree was cloned can be resumed at all is a question
+about what a stopped session still owns, which is HS-024's (the first story with a real container and a
+real worktree). This story accepts an `error` resume and lets the provisioner say what is missing.
+
+**A resumed session re-runs all four provisioning steps, including `worktree`, and the provisioner's
+failure path undoes what completed.** For a session whose worktree the stop deliberately preserved
+("history, worktree, events and images are kept", spec item 9), a later step failing could therefore
+remove the very thing the stop kept. Unreachable today — the Docker backend refuses every step, so the
+undo is a no-op recording — but it is a real risk the moment HS-024 fills the trait in, and it belongs
+in HS-024's brief rather than in this story's code.
 
 ## Consequences
 
@@ -75,9 +94,11 @@ to say `idle`, and sends the same request **once** more. Three details are delib
 - `web/test/transcript.test.ts` grows the affordance matrix: `resume` on `stopped` and `error` only.
 - `scripts/verify.sh` grows two cases — the two refusals — for 32 cases, and says in its own comment why
   the happy path is not among them.
-- The **`stopped` producer remains open** and is now the most visible gap in the phase: until HS-020 or
-  HS-021 lands, `stopped` can only be reached through the state function. Both stories are blocked by
-  HS-018, so the gap closes with the next one.
+- The **`stopped` producer remains open** and is the most visible gap in the phase: until HS-020 or
+  HS-021 lands, `stopped` can be reached only through the state function. The next story, HS-019
+  (delete), produces none either; **HS-020's eviction is the first producer**, HS-021's idle stop the
+  second, and the demo's "stopped *with a reason*" half is theirs (this story's tests supply the reason
+  themselves, and the resume clears it, which is what they assert).
 - Retention (`stopped_ttl_days`, HS-064) and the UI's "days remaining" line have the column they need:
   `stopped_at` moves with the state and is cleared by the resume, which was ADR-0016's choice and is
   proved here.

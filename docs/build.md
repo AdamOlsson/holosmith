@@ -140,9 +140,8 @@ and then polls the row until it says `idle`, which is what proves the turn conti
 `case_steer_on_an_idle_session`, which asserts the `409 session_idle` envelope), and the resume's two
 refusals (`case_resume_on_an_idle_session` and `case_resume_unknown_session`; the round trip itself
 cannot be driven here because nothing in the API produces `stopped` yet — `tests/resume.rs` proves it
-against a row the transition table stopped). A case that must
-assert one code
-keeps every higher guard check correct, or it asserts another guard's code under its own name.
+against a row the transition table stopped). A case that must assert one code keeps every higher guard
+check correct, or it asserts another guard's code under its own name.
 
 The CORS sweep is deliberately **not** in that array: it runs once after every case and checks
 that no answer the run saved carries an `access-control-*` header or `vary: origin`. Being

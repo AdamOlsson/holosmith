@@ -626,7 +626,10 @@ function composerSection(id: string, showState: (state: SessionState, reason: st
       return { envelope: (await resumed.json()) as ErrorEnvelope, row: null };
     }
     if (!(await waitIdle())) {
-      return { envelope: { code: "unreachable", message: "this session did not come back" }, row: null };
+      // Not an envelope: no API answer carries a code for "the client gave up waiting", and inventing
+      // one would put a word in the operator's error matching that no server can ever send. The
+      // callers' `catch` already reports this as `unreachable`.
+      throw new Error("this session did not come back");
     }
     return post(path, body, mayResume, true);
   };
@@ -638,7 +641,8 @@ function composerSection(id: string, showState: (state: SessionState, reason: st
   const steerTurn = async (): Promise<void> => {
     steer.disabled = true;
     try {
-      const { envelope, row } = await post("/steer", JSON.stringify({ guidance: guidance.value }));
+      const sent = guidance.value;
+      const { envelope, row } = await post("/steer", JSON.stringify({ guidance: sent }));
       if (envelope !== null) {
         say(
           envelope.code === "session_idle"
@@ -650,7 +654,9 @@ function composerSection(id: string, showState: (state: SessionState, reason: st
       if (row !== null) {
         showState(row.status, row.status_reason);
       }
-      guidance.value = "";
+      if (guidance.value === sent) {
+        guidance.value = "";
+      }
       notice.hidden = true;
     } catch (failure) {
       say(`unreachable: ${String(failure)}`);
@@ -668,7 +674,9 @@ function composerSection(id: string, showState: (state: SessionState, reason: st
   const abortTurn = async (): Promise<void> => {
     abort.disabled = true;
     try {
-      const { envelope, row } = await post("/abort");
+      // `mayResume: false`: a resume ends with the row `idle` and abort needs it `running`, so a
+      // retried abort could only answer `session_idle` — after a provisioning run nobody asked for.
+      const { envelope, row } = await post("/abort", undefined, false);
       if (envelope !== null) {
         say(`${envelope.code}: ${envelope.message}`);
         return;
@@ -703,7 +711,9 @@ function composerSection(id: string, showState: (state: SessionState, reason: st
         update(row.status);
       }
       notice.hidden = true;
-      await waitIdle();
+      if (!(await waitIdle())) {
+        say("The resume was accepted, but this session has not come back yet.");
+      }
     } catch (failure) {
       say(`unreachable: ${String(failure)}`);
     } finally {
@@ -724,7 +734,8 @@ function composerSection(id: string, showState: (state: SessionState, reason: st
       // The prompt, through the shared POST: a `session_stopped` refusal resumes and retries it once
       // (HS-018). The 202 carries the row, now `running`, so the badge and the buttons follow it and
       // the box is emptied, so the next prompt starts from nothing.
-      const { envelope, row } = await post("/prompt", JSON.stringify({ prompt: guidance.value }));
+      const sent = guidance.value;
+      const { envelope, row } = await post("/prompt", JSON.stringify({ prompt: sent }));
       if (envelope !== null) {
         // The ADR-0008 envelope: the code is what the operator acts on, and the message says why.
         say(`${envelope.code}: ${envelope.message}`);
@@ -734,7 +745,11 @@ function composerSection(id: string, showState: (state: SessionState, reason: st
         showState(row.status, row.status_reason);
         update(row.status);
       }
-      guidance.value = "";
+      // Only what was sent is cleared: a resume-and-retry can take ten seconds, and anything typed in
+      // the meantime is the operator's next prompt, not something to throw away.
+      if (guidance.value === sent) {
+        guidance.value = "";
+      }
       notice.hidden = true;
     } catch (failure) {
       say(`unreachable: ${String(failure)}`);

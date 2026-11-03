@@ -593,6 +593,10 @@ pub async fn resume(state: &AppState, id: &str) -> Response {
     if let Err(error) = apply_resume(state, id).await {
         return error.into_response();
     }
+    // A resume is the operator acting on the session, so the row's activity moves with it: without
+    // this, a session stopped a week ago and just resumed would sort as HS-020's least recently active
+    // idle row and be evicted first. The touch is the same one a prompt and a steer make.
+    activity::touch(&state.database, id);
     // The row is `starting` now, and the provisioner is spawned before the answer is built, so no
     // response waits for a step. The refetch only improves the 202's body.
     let mut starting = current;

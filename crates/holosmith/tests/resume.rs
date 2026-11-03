@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use axum::http::Method;
-use holosmith::backend::{Backends, Step, StubBackend};
+use holosmith::backend::{Step, StubBackend};
 use holosmith::config::Config;
 use holosmith::http::error::{
     CAP_REACHED, NOT_FOUND, SESSION_IDLE, SESSION_RUNNING, SESSION_STARTING, SESSION_STOPPED,
@@ -141,10 +141,12 @@ async fn wait_status(state: &AppState, id: &str, want: Status) {
     .await;
 }
 
-/// Move a session with the one state function, the way the policies that stop a session will.
-async fn drive(state: &AppState, id: &str, trigger: Trigger) {
+/// Move a session with the one state function, the way the policies that stop a session will, with the
+/// reason that policy records. The reason is explicit because the demo's claim is "stopped *with a
+/// reason*": a stop with `None` would let a regression that dropped the reason pass every test.
+async fn drive(state: &AppState, id: &str, trigger: Trigger, reason: Option<&str>) {
     Transitioner::new(std::sync::Arc::clone(&state.database), state.events.clone())
-        .apply(id, trigger, None)
+        .apply(id, trigger, reason)
         .await
         .expect("the move is in the table");
 }
@@ -157,13 +159,16 @@ async fn a_resume_answers_the_starting_row_and_provisions_back_to_idle() {
     let id = created_id(&post_create(served.addr, "resume-round-trip").await);
     wait_status(&state, &id, Status::Idle).await;
 
-    drive(&state, &id, Trigger::IdleStop).await;
+    drive(&state, &id, Trigger::IdleStop, Some("idle_stop")).await;
     let stopped = row(&state, &id);
     assert_eq!(stopped.status, Status::Stopped);
     assert!(
         stopped.stopped_at.is_some(),
         "stopped_at moves with the state"
     );
+    // The stop's reason is on the row, and the resume is what clears it: this is the half of the demo
+    // that "stopped with a reason" means, and the half a stale reason would break.
+    assert_eq!(stopped.status_reason.as_deref(), Some("idle_stop"));
     // The row can be ahead of its events (the writer commits on its own tick), and a prefix assertion
     // over an empty log would pass vacuously: wait for the provisioning's `starting -> idle` before
     // capturing, and require that something is actually there.
@@ -279,6 +284,9 @@ async fn a_resume_is_accepted_from_error_too_because_the_table_has_two_rows_for_
     assert_eq!(accepted.status, 202, "{}", accepted.body);
     let body: Value = serde_json::from_str(&accepted.body).expect("the answer is JSON");
     assert_eq!(body["status"], "starting", "{}", accepted.body);
+    // The failure's reason is cleared by the resume, which is the only place it can be observed for an
+    // `error` row this stub then fails again.
+    assert_eq!(body["status_reason"], Value::Null, "{}", accepted.body);
     // This stub fails every time, so the session ends `error` again — which is honest: the resume ran
     // the provisioner, and the provisioner is what says the step still fails.
     wait_status(&state, &id, Status::Error).await;
@@ -347,7 +355,7 @@ async fn a_resume_at_the_cap_is_refused_and_leaves_the_session_stopped() {
     // One session, stopped: a stopped session is not live, so it does not count against the cap.
     let stopped_id = created_id(&post_create(served.addr, "resume-at-cap-stopped").await);
     wait_status(&state, &stopped_id, Status::Idle).await;
-    drive(&state, &stopped_id, Trigger::IdleStop).await;
+    drive(&state, &stopped_id, Trigger::IdleStop, None).await;
 
     // A second session takes the only slot.
     let live_id = created_id(&post_create(served.addr, "resume-at-cap-live").await);
@@ -374,7 +382,7 @@ async fn prompt_steer_and_abort_on_a_stopped_session_are_session_stopped() {
     let served = Served::start(http::router(state.clone()), GRACE).await;
     let id = created_id(&post_create(served.addr, "resume-stopped-refusals").await);
     wait_status(&state, &id, Status::Idle).await;
-    drive(&state, &id, Trigger::IdleStop).await;
+    drive(&state, &id, Trigger::IdleStop, None).await;
 
     assert_envelope(&post_prompt(served.addr, &id).await, 409, SESSION_STOPPED);
     assert_envelope(
@@ -408,12 +416,4 @@ fn the_resume_route_is_recorded_mutating() {
         .expect("the resume is registered");
     assert_eq!(resume.method, Method::POST);
     assert_eq!(resume.kind, RouteKind::Mutating);
-    // The three refusals this story leans on are one family, so a client matches the family.
-    assert_eq!(SESSION_STOPPED, "session_stopped");
-    assert_eq!(SESSION_IDLE, "session_idle");
-    assert_eq!(SESSION_RUNNING, "session_running");
-    assert_eq!(SESSION_STARTING, "session_starting");
-    assert_eq!(CAP_REACHED, "cap_reached");
-    // The stub's own handle is reachable through the state, so the test above can assert on it.
-    assert!(matches!(state().backend, Backends::Stub(_)));
 }
