@@ -1,7 +1,9 @@
 //! The sessions collection: `POST /api/sessions` validates the body, writes one `starting` row and
 //! answers 202 (HS-008, ADR-0012); `GET /api/sessions` answers every row in the repository's own
 //! order together with the machine's network default (HS-013, ADR-0017); `GET /api/sessions/{id}`
-//! answers one row, which is what the session screen opens with (HS-014).
+//! answers one row, which is what the session screen opens with (HS-014); and
+//! `POST /api/sessions/{id}/prompt` starts a turn and answers 202 with the now-`running` row
+//! (HS-015).
 //!
 //! The body is parsed by hand rather than through `axum::Json<T>`: that extractor rejects a bad
 //! body with its own `text/plain` answer, which would break ADR-0008's envelope on exactly the
@@ -22,7 +24,8 @@ use serde_json::Value;
 use crate::clock;
 use crate::http::app::AppState;
 use crate::http::error::{ApiError, internal};
-use crate::sessions::{NewSession, RepoError, Session};
+use crate::sessions::state::{StateError, Trigger};
+use crate::sessions::{NewSession, RepoError, Session, Status};
 
 /// The header a create's idempotency key travels in.
 const KEY_HEADER: &str = "idempotency-key";
@@ -33,6 +36,14 @@ const MAX_KEY_CHARS: usize = 200;
 
 /// The body's fields, exactly: any other key is `unknown_field`.
 const FIELDS: [&str; 4] = ["project", "model", "thinking", "network"];
+
+/// A prompt's body: one field, exactly, and a body that is anything else is `bad_body` (D1). No
+/// length cap beyond axum's own 2 MiB: the spec sets none, and a cap would be an invented number.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PromptBody {
+    prompt: String,
+}
 
 /// `NAME_MAX`'s 255: HS-025 builds `<projects_root>/<project>` from this value.
 const MAX_PROJECT_CHARS: usize = 255;
@@ -350,6 +361,96 @@ fn one_locked(state: &AppState, id: &str) -> Result<Option<Session>, ApiError> {
         .map_err(|error| internal("get", error))
 }
 
+/// A prompt's body: the one field, non-empty. Anything else — a non-object, a missing or empty
+/// `prompt`, a second field — is `bad_body` (D1).
+fn parse_prompt(bytes: &[u8]) -> Result<String, ApiError> {
+    let body: PromptBody = serde_json::from_slice(bytes).map_err(|_| ApiError::bad_prompt())?;
+    if body.prompt.trim().is_empty() {
+        return Err(ApiError::bad_prompt());
+    }
+    Ok(body.prompt)
+}
+
+/// Answer `POST /api/sessions/{id}/prompt`: 202 and the row, now `running`, or ADR-0008's envelope.
+///
+/// The decisions are in this order, and each one can only be reached by passing the ones above it:
+/// the body (`bad_body`), the row (`not_found`), the state (`not_idle` — one code per state, D2), and
+/// the transition itself. The transition is the [table's](crate::sessions::state), applied by the one
+/// function that applies it; a lost race — the row moved between the read and the apply — is refused
+/// with the code of the state it moved to, so a client never gets a 202 for a session that is not
+/// running (D3).
+///
+/// The row moves **before** the answer and before any event (D4): the body is refetched after the
+/// transition, so a client that acts on the 202 finds `running`, and the turn runner is spawned only
+/// once the answer is built, so no response waits for a turn.
+pub async fn prompt(state: &AppState, id: &str, body: Result<Bytes, BytesRejection>) -> Response {
+    let body = match body {
+        Ok(body) => body,
+        // Every rejection — a body hyper could not buffer, or one over axum's 2 MiB default — is
+        // `bad_body`, the same rule the create follows.
+        Err(_) => return ApiError::bad_prompt().into_response(),
+    };
+    let prompt = match parse_prompt(&body) {
+        Ok(prompt) => prompt,
+        Err(error) => return error.into_response(),
+    };
+    let current = match one_locked(state, id) {
+        Ok(Some(session)) => session,
+        Ok(None) => return ApiError::not_found().into_response(),
+        Err(error) => return error.into_response(),
+    };
+    // Refused before the transition is asked for, so the code names the state the client can see
+    // rather than the state the table happened to find.
+    if current.status != Status::Idle {
+        return ApiError::not_idle(current.status).into_response();
+    }
+    if let Err(error) = apply_prompt(state, id).await {
+        return error.into_response();
+    }
+    // The row is `running` now, so the turn is started **before** anything else can fail: a session
+    // left in `running` with no runner has no way out until HS-016 adds abort, and a refetch that
+    // failed would otherwise strand exactly that. The row the runner is handed is the one read
+    // above with the status the table has just written; the refetch only improves the 202's body.
+    let mut running = current;
+    running.status = Status::Running;
+    running.status_reason = None;
+    if let Ok(Some(row)) = one_locked(state, id) {
+        running = row;
+    }
+    state.turner().spawn(running.clone(), prompt);
+    (StatusCode::ACCEPTED, Json(running)).into_response()
+}
+
+/// Move the row to `running`, or the refusal to answer.
+///
+/// The table is the authority (ADR-0016); the read above only chose the fast refusal. A lost race is
+/// retried **once**: if the row is `idle` again, the turn that won has already settled and the
+/// prompt is legal now, so a client is not refused for a session that is idle the instant it asks.
+/// A row that is gone is `not_found`, and any other state is refused with its own code.
+async fn apply_prompt(state: &AppState, id: &str) -> Result<(), ApiError> {
+    for _ in 0..2 {
+        match state.transitioner().apply(id, Trigger::Prompt, None).await {
+            Ok(_) => return Ok(()),
+            // The row moved but its event did not reach the writer — a process on its way down.
+            // The row is what a client acts on, so this is the prompt succeeding, not failing.
+            Err(StateError::Unreported(_)) => return Ok(()),
+            Err(StateError::Illegal { .. }) => {}
+            Err(StateError::UnknownSession(_)) => return Err(ApiError::not_found()),
+            Err(error) => return Err(internal("prompt", error)),
+        }
+        match one_locked(state, id) {
+            Ok(Some(session)) if session.status == Status::Idle => continue,
+            Ok(Some(session)) => return Err(ApiError::not_idle(session.status)),
+            Ok(None) => return Err(ApiError::not_found()),
+            Err(error) => return Err(error),
+        }
+    }
+    // Two races in a row, the last of which left the row `idle`: a third attempt would be a loop
+    // around a state that keeps moving, and no state code would be true. The fixed sentence is the
+    // honest answer (ADR-0008).
+    Err(ApiError::internal())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,6 +642,31 @@ mod tests {
             request_parts(&key_headers("k"), &body("..", "m", "high")),
             BAD_PROJECT,
         );
+    }
+
+    #[test]
+    fn a_prompt_body_is_one_non_empty_prompt_and_nothing_else() {
+        assert_eq!(
+            parse_prompt(br#"{"prompt":"fix the parser"}"#).expect("the body parses"),
+            "fix the parser"
+        );
+        for text in [
+            "",
+            "not json",
+            "[]",
+            "null",
+            "42",
+            "{}",
+            r#"{"prompt":""}"#,
+            r#"{"prompt":42}"#,
+            r#"{"prompt":null}"#,
+            r#"{"prompt":"p","extra":1}"#,
+            r#"{"prompt":"p","model":"m"}"#,
+        ] {
+            let error = refusal(parse_prompt(text.as_bytes()));
+            assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY, "{text:?}");
+            assert_eq!(error.body.code, BAD_BODY, "{text:?}");
+        }
     }
 
     #[test]

@@ -45,7 +45,9 @@ Three rules follow, and they are what HS-015's producer must satisfy:
 - **A boundary carries no payload this screen reads.** `turn.end` will want a stop reason; that is
   HS-015's decision, and reading no payload here means the decision costs this story nothing. A
   frame whose kind this screen does not know — `tool.start`, `usage`, later kinds — is dropped, so
-  HS-032 through HS-034 add kinds without a page release.
+  HS-032 through HS-034 add kinds without a page release. **Superseded in part by ADR-0019:** HS-015
+  emits `message.end`, `tool.start` and `tool.end`, and the page renders them; the drop rule now
+  covers the kinds no story has named yet.
 
 ## One block per message id, and a delta is an append
 
@@ -85,7 +87,8 @@ The composer exists in every state and its three actions come from `affordances(
 `idle` (the `prompt` trigger's row), steer and abort on `running`, nothing on `starting`, `stopped`,
 `error` or `deleting`. The endpoints are later stories' — **prompt is HS-015's, abort HS-016's,
 steer HS-017's** — so pressing one names the story that will wire it rather than sending a request
-that would 404. The form also swallows its own submit: with no `action` a native submit is a GET of
+that would 404. **Superseded by ADR-0019:** the prompt is wired; abort and steer still name their
+story. The form also swallows its own submit: with no `action` a native submit is a GET of
 the current path, which would reload the screen and discard the transcript the operator is reading. That is the same choice
 HS-013 made for the retention placeholder: a control that cannot work yet says which story makes it
 work.

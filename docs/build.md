@@ -125,10 +125,13 @@ asserts the four step words arrived in order), and the state machine's payload
 (`case_state_transition_payload`, which asserts the four step reports claim no state change and
 the fifth is exactly `{"from":"starting","to":"idle","step":null,"reason":null}`), one
 session by id (`case_session_detail`, which asserts the row the create made, that it carries no
-`events` key, and that an unknown id is the `not_found` envelope), and the session screen's path
-(`case_session_screen`, which asserts `/sessions/<id>` answers the shell byte-for-byte). A case
-that must assert one code keeps every higher guard check correct, or it asserts another guard's
-code under its own name.
+`events` key, and that an unknown id is the `not_found` envelope), the session screen's path
+(`case_session_screen`, which asserts `/sessions/<id>` answers the shell byte-for-byte), and the
+prompt (`case_prompt_turn`, which asserts the 202 answers the row `running` and then reads that
+session's stream until the turn settles, asserting the turn's six kinds in order and the
+`idle → running → idle` transitions; `case_prompt_bad_body` and `case_prompt_unknown_session`,
+which assert the `422 bad_body` and `404 not_found` envelopes). A case that must assert one code
+keeps every higher guard check correct, or it asserts another guard's code under its own name.
 
 The CORS sweep is deliberately **not** in that array: it runs once after every case and checks
 that no answer the run saved carries an `access-control-*` header or `vary: origin`. Being

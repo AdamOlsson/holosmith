@@ -609,6 +609,46 @@ fn set_status_on_an_unknown_id_returns_none() {
     );
 }
 
+#[test]
+fn touch_moves_last_active_at_and_nothing_else() {
+    // HS-015: the turn runner touches at the prompt and again at the settle, and neither is a
+    // state change, so the status write deliberately leaves the column alone and this is the only
+    // statement that moves it.
+    let dir = TempDir::new("touch");
+    let database = open(&dir);
+    let repository = database.sessions();
+    let created = repository
+        .create(&new_session(Some("touch")), NOW)
+        .expect("a session is creatable");
+    repository
+        .set_status(&created.id, Status::Running, None, NOW + 10)
+        .expect("the update succeeds")
+        .expect("the session exists");
+    repository
+        .touch(&created.id, NOW + 20)
+        .expect("the touch succeeds");
+    let touched = repository
+        .get(&created.id)
+        .expect("the read succeeds")
+        .expect("the session exists");
+    assert_eq!(touched.last_active_at, NOW + 20);
+    assert_eq!(touched.created_at, NOW, "a touch is not a create");
+    assert_eq!(touched.status, Status::Running, "a touch is not a state");
+    assert_eq!(touched.status_reason, None);
+}
+
+#[test]
+fn touch_succeeds_for_an_unknown_id() {
+    // A turn's task can lose its session to a delete or a recovery, and there is nothing to record
+    // then: an error would turn an ordinary race into a logged failure.
+    let dir = TempDir::new("touch-unknown");
+    let database = open(&dir);
+    database
+        .sessions()
+        .touch("no-such-id", NOW)
+        .expect("touching a row that is gone is not a failure");
+}
+
 // ---- the demo ------------------------------------------------------------------------
 
 #[test]

@@ -373,7 +373,10 @@ impl Transitioner {
                 .map_err(StateError::Repository)?
                 .ok_or_else(|| StateError::UnknownSession(session_id.to_string()))?;
             let Some(transition) = lookup(current.status, trigger) else {
-                tracing::error!(
+                // `debug`, not `error`: since HS-015 a refused transition is the *expected* outcome
+                // of a legal request (a prompt that lost a race to another prompt), and the callers
+                // that treat it as impossible log it themselves.
+                tracing::debug!(
                     target: "holosmith::sessions::state",
                     session = session_id,
                     from = current.status.as_str(),
@@ -418,6 +421,30 @@ impl Transitioner {
             "state changed"
         );
         Ok(to)
+    }
+
+    /// Apply one transition from a background runner: every failure is logged, never returned.
+    ///
+    /// A runner's state change reports work that already happened, so a refused transition (a bug)
+    /// or a stopped writer must not make the task lie about the outcome. The provisioner and the
+    /// turn runner differ only in what they do *around* this call, so the reporting lives here
+    /// rather than once in each.
+    pub async fn apply_logged(&self, session_id: &str, trigger: Trigger, reason: Option<&str>) {
+        match self.apply(session_id, trigger, reason).await {
+            Ok(_) => {}
+            Err(error @ StateError::Illegal { .. }) => tracing::error!(
+                target: "holosmith::sessions::state",
+                session = session_id,
+                %error,
+                "a runner asked for a transition the table does not have"
+            ),
+            Err(error) => tracing::warn!(
+                target: "holosmith::sessions::state",
+                session = session_id,
+                %error,
+                "a runner's state change did not complete"
+            ),
+        }
     }
 }
 

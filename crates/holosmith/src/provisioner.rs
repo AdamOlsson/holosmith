@@ -29,7 +29,7 @@ use crate::backend::{Backends, SessionBackend, Step};
 use crate::clock;
 use crate::db::Database;
 use crate::events::{EventWriter, NewEvent};
-use crate::sessions::state::{SESSION_STATUS, SessionStatus, StateError, Transitioner, Trigger};
+use crate::sessions::state::{SESSION_STATUS, SessionStatus, Transitioner, Trigger};
 use crate::sessions::{Session, Status};
 
 /// The provisioner's handles: where to run steps, where the row is, and where events go.
@@ -124,25 +124,11 @@ impl Provisioner {
     /// outcome and the event is a report of it, so a refused transition (a bug) or a stopped
     /// writer must not make the task lie about what happened.
     async fn transition(&self, session: &Session, trigger: Trigger, reason: Option<&str>) {
-        match self
-            .transitioner()
-            .apply(&session.id, trigger, reason)
-            .await
-        {
-            Ok(_) => {}
-            Err(error @ StateError::Illegal { .. }) => tracing::error!(
-                target: "holosmith::provisioner",
-                session = %session.id,
-                %error,
-                "the provisioner asked for a transition the table does not have"
-            ),
-            Err(error) => tracing::warn!(
-                target: "holosmith::provisioner",
-                session = %session.id,
-                %error,
-                "a provisioning state change did not complete"
-            ),
-        }
+        // The reporting is the state module's, so this runner and the turn cannot drift apart in
+        // how they log a refusal.
+        self.transitioner()
+            .apply_logged(&session.id, trigger, reason)
+            .await;
     }
 
     /// The one state function, wired to this provisioner's two handles.

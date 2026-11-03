@@ -22,6 +22,7 @@ use serde::Serialize;
 pub use docker::DockerBackend;
 pub use stub::{Call, Recorded, StubBackend};
 
+use crate::events::EventWriter;
 use crate::runtime::Backend;
 use crate::sessions::Session;
 
@@ -151,8 +152,18 @@ pub trait SessionBackend {
     /// Called in the reverse of the order the steps ran, and only for the steps that completed.
     async fn undo(&self, session: &Session, step: Step) -> Result<(), BackendError>;
 
-    /// Start a turn: send `prompt` to the agent.
-    async fn start_turn(&self, session: &Session, prompt: &str) -> Result<(), BackendError>;
+    /// Start a turn: send `prompt` to the agent, and report what the turn produces as events.
+    ///
+    /// The backend **emits** a turn's frames and never decides a state (D6): it is handed the
+    /// writer, because the frames are the backend's own output, and it has no `Transitioner`, so a
+    /// state change stays the server's. The stub scripts a turn and HS-032 pumps pi's RPC into the
+    /// same writer.
+    async fn start_turn(
+        &self,
+        session: &Session,
+        prompt: &str,
+        events: &EventWriter,
+    ) -> Result<(), BackendError>;
 
     /// Add guidance to the turn that is running.
     async fn steer(&self, session: &Session, text: &str) -> Result<(), BackendError>;
@@ -224,10 +235,15 @@ impl SessionBackend for Backends {
         }
     }
 
-    async fn start_turn(&self, session: &Session, prompt: &str) -> Result<(), BackendError> {
+    async fn start_turn(
+        &self,
+        session: &Session,
+        prompt: &str,
+        events: &EventWriter,
+    ) -> Result<(), BackendError> {
         match self {
-            Self::Stub(backend) => backend.start_turn(session, prompt).await,
-            Self::Docker(backend) => backend.start_turn(session, prompt).await,
+            Self::Stub(backend) => backend.start_turn(session, prompt, events).await,
+            Self::Docker(backend) => backend.start_turn(session, prompt, events).await,
         }
     }
 

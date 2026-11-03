@@ -1,7 +1,7 @@
-// The transcript's rules, folded over synthetic frames. There is no message producer until HS-015
-// and no browser on the machine these gates run on, so these are the tests the session screen gets:
-// the wire format HS-015 must emit, the append-or-replace rule per message id, the turn boundary,
-// the composer's affordance matrix and the 10k-delta budget (ADR-0018).
+// The transcript's rules, folded over synthetic frames. There is no browser on the machine these
+// gates run on, so these are the tests the session screen gets: the wire format HS-015's producer
+// emits, the append-or-replace rule per message id, a tool call's own block and order, a message's
+// usage, the turn boundary, the composer's affordance matrix and the 10k-delta budget (ADR-0018).
 //
 // Run with `npm test` in `web/`: node 24's own test runner, which strips the types. No dependency and
 // no lock-file change (ADR-0017). This file sits outside `src`, so `tsc --noEmit` does not typecheck
@@ -95,13 +95,96 @@ test("a frame this screen cannot render is dropped, not rendered blank", () => {
     ["message.delta", '{"message_id":"m1","kind":"text"}'],
     // A snapshot without an id names no block, which is the one field it cannot omit.
     ["message.snapshot", '{"text":"done"}'],
-    // A later story's kinds: the page ignores them without a release, which is the point.
-    ["tool.start", '{"message_id":"m1"}'],
+    // A tool call needs its own id, a `message.end` needs its usage, and a kind the page does not
+    // render — a later story's — is ignored without a release, which is the point.
+    ["tool.start", '{"message_id":"m1","name":"read_file"}'],
+    ["tool.end", '{"tool_id":"","output":"x"}'],
+    ["message.end", '{"message_id":"m1"}'],
+    ["message.end", '{"message_id":"m1","usage":{"in":1}}'],
+    ["message.end", '{"message_id":"m1","usage":[1,2]}'],
     ["usage", '{"in":1,"out":2}'],
     ["", ""],
   ] as const) {
     assert.equal(parseFrame(frame[0], frame[1]), null, `${frame[0]} ${frame[1]}`);
   }
+});
+
+test("a message's end carries its usage, keyed to the message it ends", () => {
+  assert.deepEqual(
+    parseFrame("message.end", '{"message_id":"m1","usage":{"in":1200,"out":340}}'),
+    { type: "usage", messageId: "m1", input: 1200, output: 340 },
+  );
+  const transcript = new Transcript();
+  transcript.apply(delta("m1", "text", "answered"));
+  assert.deepEqual(
+    transcript.apply({
+      type: "usage",
+      messageId: "m1",
+      input: 1200,
+      output: 340,
+    }),
+    [{ op: "usage", messageId: "m1", input: 1200, output: 340 }],
+    "the usage names the message it belongs to and creates no block of its own",
+  );
+  assert.deepEqual(transcript.order(), ["m1"]);
+  // A usage for a message never seen creates its block first, like a snapshot.
+  const unseen = transcript.apply({ type: "usage", messageId: "m2", input: 1, output: 2 });
+  assert.deepEqual(
+    unseen.map((change) => change.op),
+    ["message", "usage"],
+  );
+  assert.deepEqual(transcript.order(), ["m1", "m2"]);
+});
+
+test("a tool call is its own block, in its own order, never a message", () => {
+  assert.deepEqual(
+    parseFrame(
+      "tool.start",
+      '{"tool_id":"tool-1","name":"read_file","arguments":"src/main.ts"}',
+    ),
+    { type: "tool-start", toolId: "tool-1", name: "read_file", arguments: "src/main.ts" },
+  );
+  assert.deepEqual(
+    parseFrame("tool.end", '{"tool_id":"tool-1","name":"read_file","output":"1  // The app"}'),
+    { type: "tool-end", toolId: "tool-1", output: "1  // The app" },
+  );
+
+  const transcript = new Transcript();
+  const start = transcript.apply({
+    type: "tool-start",
+    toolId: "tool-1",
+    name: "read_file",
+    arguments: "src/main.ts",
+  });
+  assert.deepEqual(start, [
+    { op: "tool", toolId: "tool-1" },
+    { op: "tool-start", toolId: "tool-1", name: "read_file", arguments: "src/main.ts" },
+  ]);
+  // The second call interleaves with a message: two tool blocks keep their own order, and neither
+  // is a message block.
+  const second = transcript.apply({
+    type: "tool-start",
+    toolId: "tool-2",
+    name: "grep",
+    arguments: "turn",
+  });
+  assert.deepEqual(second.map((change) => change.op), ["tool", "tool-start"]);
+  transcript.apply(delta("m1", "text", "read both"));
+  const end = transcript.apply({ type: "tool-end", toolId: "tool-1", output: "done" });
+  assert.deepEqual(end, [{ op: "tool-end", toolId: "tool-1", output: "done" }]);
+  assert.deepEqual(transcript.toolOrder(), ["tool-1", "tool-2"]);
+  assert.deepEqual(transcript.order(), ["m1"], "a tool call is never a message block");
+});
+
+test("a tool.end without its tool.start creates the block first", () => {
+  const transcript = new Transcript();
+  const changes = transcript.apply({ type: "tool-end", toolId: "tool-9", output: "the output" });
+  assert.deepEqual(changes, [
+    { op: "tool", toolId: "tool-9" },
+    { op: "tool-end", toolId: "tool-9", output: "the output" },
+  ]);
+  assert.deepEqual(transcript.toolOrder(), ["tool-9"]);
+  assert.deepEqual(transcript.order(), []);
 });
 
 test("two messages interleaved keep one block each, thinking apart from text", () => {

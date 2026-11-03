@@ -32,6 +32,7 @@ use crate::http::streams;
 use crate::provisioner::Provisioner;
 use crate::runtime::Runtime;
 use crate::sessions::state::Transitioner;
+use crate::turn::Turn;
 use crate::web;
 
 /// What a handler may read: the config in force, this run's backend and start time, the one open
@@ -63,6 +64,18 @@ impl AppState {
     /// one place: a second wiring would be a second thing to keep right.
     pub fn provisioner(&self) -> Provisioner {
         Provisioner::new(
+            self.backend.clone(),
+            Arc::clone(&self.database),
+            self.events.clone(),
+        )
+    }
+
+    /// A turn runner wired to this state's backend, database and event writer (HS-015).
+    ///
+    /// Here for the same reason as [`Self::provisioner`]: the prompt handler clones the three
+    /// handles a background turn needs in one place.
+    pub fn turner(&self) -> Turn {
+        Turn::new(
             self.backend.clone(),
             Arc::clone(&self.database),
             self.events.clone(),
@@ -307,8 +320,8 @@ impl RequestCounter {
 }
 
 /// The control listener's route table: the health endpoint, the sessions collection (its list, its
-/// create and one row), the session's event stream, the embedded app, and the two answers to an
-/// unknown path (ADR-0007).
+/// create and one row), the session's event stream, a session's prompt, the embedded app, and the two
+/// answers to an unknown path (ADR-0007).
 pub fn router(state: AppState) -> Routes {
     let state = Arc::new(state);
     let health_state = Arc::clone(&state);
@@ -316,6 +329,7 @@ pub fn router(state: AppState) -> Routes {
     let one_state = Arc::clone(&state);
     let create_state = Arc::clone(&state);
     let stream_state = Arc::clone(&state);
+    let prompt_state = Arc::clone(&state);
     Routes::new()
         .get("/api/health", move || {
             let state = Arc::clone(&health_state);
@@ -364,6 +378,18 @@ pub fn router(state: AppState) -> Routes {
                 let state = Arc::clone(&stream_state);
                 let id = id.map(|Path(id)| id).unwrap_or_default();
                 async move { streams::respond(&state, &id, &headers).await }
+            },
+        )
+        // The prompt: a mutating route, so every guard applies and the manifest records it (HS-015).
+        // The path is a `Result` for the same reason as the routes above — a `%FF` segment is a
+        // session the table does not hold — and the body is one, so a rejection axum would answer
+        // `text/plain` becomes ADR-0008's `bad_body`.
+        .post(
+            "/api/sessions/{id}/prompt",
+            move |id: Result<Path<String>, PathRejection>, body: Result<Bytes, BytesRejection>| {
+                let state = Arc::clone(&prompt_state);
+                let id = id.map(|Path(id)| id).unwrap_or_default();
+                async move { sessions::prompt(&state, &id, body).await }
             },
         )
         .fallback(fallback)

@@ -279,6 +279,9 @@ serve_cases=(
   case_sessions_list
   case_session_detail
   case_session_screen
+  case_prompt_turn
+  case_prompt_bad_body
+  case_prompt_unknown_session
 )
 
 # The health payload: exactly four keys, and the uptime is not predictable, so the assertion is
@@ -696,6 +699,91 @@ case_session_screen() {
   cmp -s "$WORK/responses/$name.body" web/dist/index.html ||
     fail "$name/index_html" "the screen path is not this tree's web/dist/index.html"
   assertions=$((assertions + 1))
+}
+
+# HS-015: one prompt, one turn. The 202 is the row, now `running`, and the stream read until the
+# event that says `idle` is the whole script: a turn boundary, a message's deltas, a tool call and
+# its output, the message's end and the closing boundary, then the settle that ends the turn.
+case_prompt_turn() {
+  local name=case_prompt_turn response body kinds
+  fetch_body "$name" POST "/api/sessions/$created_id/prompt" '{"prompt":"read the app shell"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "$name/no_answer" "POST /api/sessions/$created_id/prompt did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 202
+  body="$(cat "$WORK/responses/$name.body")"
+  case "$body" in
+    *'"status":"running"'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "$name/status" "the answer is not a running session: $body"
+      ;;
+  esac
+
+  # The stub paces its turn, so the settle arrives after the 202: read the same session's stream
+  # until the event that reports it, and the turn's frames are in the replay before it.
+  name=case_prompt_stream
+  fetch_sse_until "$name" "/api/sessions/$created_id/events" '"from":"running","to":"idle"' \
+    "Host: 127.0.0.1" ||
+    fail "$name/no_answer" "GET /api/sessions/$created_id/events did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 200
+  body="$(cat "$WORK/responses/$name.body")"
+  # One pass over the body, one event name per line, so the order is the stream's own: every frame
+  # of the turn, in the order the script emitted them.
+  kinds="$(printf '%s\n' "$body" | tr -d '\r' | sed -n 's/^event: *//p' |
+    grep -E '^(turn\.start|message\.delta|tool\.start|tool\.end|message\.end|turn\.end)$' |
+    tr '\n' ' ' | sed 's/ $//')"
+  # Seven deltas: three thinking, then two text, then two more after the tool call.
+  check "$name/kinds" \
+    "turn.start message.delta message.delta message.delta message.delta message.delta tool.start tool.end message.delta message.delta message.end turn.end" \
+    "$kinds"
+  case "$body" in
+    *'"from":"idle","to":"running"'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "$name/running" "no event reports the prompt's transition: $body"
+      ;;
+  esac
+  case "$body" in
+    *'"from":"running","to":"idle","step":null'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "$name/idle" "no event reports the turn settled: $body"
+      ;;
+  esac
+}
+
+# HS-015: a prompt's body is one non-empty `prompt`, and a body that is not is 422 `bad_body` — the
+# same envelope the create's validation answers with.
+case_prompt_bad_body() {
+  local name=case_prompt_bad_body response
+  fetch_body "$name" POST "/api/sessions/$created_id/prompt" '{"prompt":""}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "$name/no_answer" "POST /api/sessions/$created_id/prompt did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 422
+  expect_header "$name" "$response" content-type "application/json"
+  expect_code "$name" "$response" bad_body
+}
+
+# HS-015: a prompt for a session the table does not hold is ADR-0008's 404 `not_found`, decided
+# after the body and before any state is read.
+case_prompt_unknown_session() {
+  local name=case_prompt_unknown_session response
+  fetch_body "$name" POST "/api/sessions/0000000000000000/prompt" '{"prompt":"hello"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "$name/no_answer" "POST an unknown session's prompt did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 404
+  expect_header "$name" "$response" content-type "application/json"
+  expect_code "$name" "$response" not_found
 }
 
 # Box 4, over every answer the cases above saved: none of them carries a CORS header, and none

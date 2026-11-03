@@ -207,6 +207,35 @@ button:disabled {
   white-space: pre-wrap;
 }
 
+/* A tool call (HS-015): the call's name, then its output, in its own block so it is never mistaken
+   for something the agent said. */
+.tool {
+  border-left: 2px solid color-mix(in srgb, currentColor 20%, transparent);
+  padding-left: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.tool-name {
+  font-size: 0.875rem;
+  font-family: ui-monospace, monospace;
+  opacity: 0.8;
+}
+
+.tool-output {
+  font-family: ui-monospace, monospace;
+  font-size: 0.8125rem;
+  white-space: pre-wrap;
+  margin-top: 0.25rem;
+  opacity: 0.8;
+}
+
+/* A message's usage (HS-015): a quiet line inside the block it belongs to. */
+.usage {
+  font-size: 0.75rem;
+  opacity: 0.6;
+  margin-top: 0.25rem;
+}
+
 .turn-boundary {
   font-size: 0.75rem;
   letter-spacing: 0.04em;

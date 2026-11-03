@@ -56,6 +56,13 @@ type SessionDetail = Session & {
 // The one node per kind that a delta appends to and a snapshot replaces.
 type BlockNodes = Record<DeltaKind, HTMLElement>;
 
+// One message's block on screen and the nodes inside it. The element is kept as well as the nodes
+// because the usage line is appended to the block itself.
+type MessageBlock = { element: HTMLElement; nodes: BlockNodes };
+
+// One tool call's block: its name and, once it ends, its output.
+type ToolBlock = { element: HTMLElement; name: HTMLElement; output: HTMLElement };
+
 // The key the create carries. `crypto.randomUUID` is the platform's own UUID, but it exists only in
 // a secure context, and the control listener is plain HTTP unless it sits behind `tailscale serve`.
 // The fallback is the same CSPRNG (`getRandomValues` works everywhere), formatted as a v4 UUID by
@@ -411,13 +418,24 @@ function kindNode(className: string): HTMLElement {
   return element;
 }
 
-function messageBlock(id: string): { element: HTMLElement; nodes: BlockNodes } {
+function messageBlock(id: string): MessageBlock {
   const element = make("article", "message");
   element.dataset.message = id;
   const thinking = kindNode("thinking");
   const text = kindNode("text");
   element.append(thinking, text);
   return { element, nodes: { thinking, text } };
+}
+
+// One tool call's block: the tool's name, then its output. Both are `textContent` — the payload
+// carries agent-controlled text and none of it is parsed as markup.
+function toolBlock(id: string): ToolBlock {
+  const element = make("article", "tool");
+  element.dataset.tool = id;
+  const name = make("div", "tool-name");
+  const output = kindNode("tool-output");
+  element.append(name, output);
+  return { element, name, output };
 }
 
 // Append one piece of output to a kind's node. This is the whole of the 10k-event rule: a text node
@@ -444,7 +462,8 @@ function replaceKind(node: HTMLElement, value: string): void {
 function applyChange(
   change: Change,
   container: HTMLElement,
-  blocks: Map<string, BlockNodes>,
+  blocks: Map<string, MessageBlock>,
+  tools: Map<string, ToolBlock>,
 ): void {
   if (change.op === "boundary") {
     // A turn's number comes from the `turn.start` events seen so far. A `turn.end` with no start
@@ -461,31 +480,60 @@ function applyChange(
   }
   if (change.op === "message") {
     const block = messageBlock(change.messageId);
-    blocks.set(change.messageId, block.nodes);
+    blocks.set(change.messageId, block);
     container.append(block.element);
     return;
   }
-  const nodes = blocks.get(change.messageId);
-  if (nodes === undefined) {
+  if (change.op === "tool") {
+    const block = toolBlock(change.toolId);
+    tools.set(change.toolId, block);
+    container.append(block.element);
+    return;
+  }
+  if (change.op === "tool-start" || change.op === "tool-end") {
+    const block = tools.get(change.toolId);
+    if (block === undefined) {
+      // The model creates a tool block before it changes one, so this cannot happen on a stream it
+      // folded itself.
+      return;
+    }
+    if (change.op === "tool-start") {
+      block.name.textContent = change.name;
+      return;
+    }
+    // Appended when it arrives and never re-rendered: output can be large, and one assignment is
+    // the whole of the cost.
+    block.output.textContent = change.output;
+    block.output.hidden = change.output === "";
+    return;
+  }
+  const block = blocks.get(change.messageId);
+  if (block === undefined) {
     // The model creates a block before it changes one, so this cannot happen on a stream it folded
     // itself; a frame from somewhere else renders nothing rather than a heading with no message.
     return;
   }
   if (change.op === "delta") {
-    appendPiece(nodes[change.delta], change.text);
+    appendPiece(block.nodes[change.delta], change.text);
     return;
   }
-  replaceKind(nodes.text, change.text);
-  replaceKind(nodes.thinking, change.thinking);
+  if (change.op === "usage") {
+    block.element.append(make("div", "usage", `in ${change.input} · out ${change.output}`));
+    return;
+  }
+  replaceKind(block.nodes.text, change.text);
+  replaceKind(block.nodes.thinking, change.thinking);
 }
 
 // The composer: one box of guidance and the three things that can be done with it. Prompting is the
 // `idle` row's trigger and steering is a running turn's, so the buttons exist in one state each
-// (`affordances`), and the box says which story wires the request there is no endpoint for yet:
-// HS-015 prompts, HS-017 steers, HS-016 aborts.
+// (`affordances`). Prompting posts for real (HS-015); steering and aborting keep the notice naming
+// the story that wires them, because a request that would 404 is worse than a note.
 type Composer = { element: HTMLElement; update: (state: SessionState) => void };
 
-function composerSection(): Composer {
+// `showState` patches the screen's badge from a row the prompt's answer carried, so a 202 says
+// `running` before the stream has said anything.
+function composerSection(id: string, showState: (state: SessionState, reason: string | null) => void): Composer {
   const section = make("section", "composer");
   const form = document.createElement("form");
   const guidance = document.createElement("textarea");
@@ -511,17 +559,51 @@ function composerSection(): Composer {
     notice.hidden = false;
   };
 
-  // No request is invented: the endpoint a button would call is a later story's, and a button that
-  // silently did nothing would be indistinguishable from a broken one.
-  prompt.addEventListener("click", () => say("Prompting arrives with HS-015; nothing was sent."));
+  // The two endpoints that are not this story's are named rather than called: a button that silently
+  // did nothing would be indistinguishable from a broken one.
   steer.addEventListener("click", () => say("Steering arrives with HS-017; nothing was sent."));
   abort.addEventListener("click", () => say("Aborting arrives with HS-016; nothing was sent."));
 
+  // True while the badge on screen offers a prompt, so a submit that arrives while the session is
+  // running (a second tap before the frame lands) sends nothing.
+  let canPrompt = false;
+
+  const send = async (): Promise<void> => {
+    prompt.disabled = true;
+    try {
+      const response = await fetch(`${sessionPath(id)}/prompt`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-holosmith-client": "1" },
+        body: JSON.stringify({ prompt: guidance.value }),
+      });
+      if (!response.ok) {
+        // The ADR-0008 envelope: the code is what the operator acts on, and the message says why.
+        const envelope = (await response.json()) as ErrorEnvelope;
+        say(`${envelope.code}: ${envelope.message}`);
+        return;
+      }
+      // The 202's row is the session, now `running`: the badge and the buttons follow it and the box
+      // is emptied, so the next prompt starts from nothing.
+      const row = (await response.json()) as Session;
+      showState(row.status, row.status_reason);
+      update(row.status);
+      guidance.value = "";
+      notice.hidden = true;
+    } catch (failure) {
+      say(`unreachable: ${String(failure)}`);
+    } finally {
+      prompt.disabled = false;
+    }
+  };
+
   // The form has no action, so its default submit is a GET of the current path with the guidance in
-  // the query string: a full reload that discards the transcript and the notice. HS-015 inherits a
-  // form that submits nowhere rather than a page that forgets what it was showing.
+  // the query string: a full reload that discards the transcript and the notice. The form swallows
+  // its own submit whether or not there is a prompt to send.
   form.addEventListener("submit", (event) => {
     event.preventDefault();
+    if (canPrompt && !prompt.disabled) {
+      void send();
+    }
   });
 
   form.append(label, actions);
@@ -532,6 +614,7 @@ function composerSection(): Composer {
   let stateNotice = false;
   const update = (state: SessionState): void => {
     const shown = affordances(state);
+    canPrompt = shown.prompt;
     prompt.hidden = !shown.prompt;
     steer.hidden = !shown.steer;
     abort.hidden = !shown.abort;
@@ -559,7 +642,8 @@ function openSessionStream(
   updateComposer: (state: SessionState) => void,
 ): void {
   const model = new Transcript();
-  const blocks = new Map<string, BlockNodes>();
+  const blocks = new Map<string, MessageBlock>();
+  const tools = new Map<string, ToolBlock>();
   const source = new EventSource(streamPath(id));
   openSources.add(source);
   for (const eventType of TRANSCRIPT_EVENTS) {
@@ -572,7 +656,7 @@ function openSessionStream(
         placeholder.remove();
       }
       for (const change of model.apply(frame)) {
-        applyChange(change, transcript, blocks);
+        applyChange(change, transcript, blocks, tools);
       }
     });
   }
@@ -619,11 +703,13 @@ function sessionScreen(health: Health, session: SessionDetail): void {
   const placeholder = make(
     "p",
     "empty",
-    "Nothing yet: the agent's text, its thinking and the turn boundaries appear here.",
+    "Nothing yet: the agent's text, its thinking, its tool calls and the turn boundaries appear here.",
   );
   transcript.append(placeholder);
 
-  const composer = composerSection();
+  const composer = composerSection(session.id, (state, reason) => {
+    badge.textContent = stateText(state, reason);
+  });
   composer.update(session.status);
 
   const section = make("section", "session-screen");

@@ -54,6 +54,21 @@ pub const CAP_REACHED: &str = "cap_reached";
 /// A create could not be completed for a reason no client can fix (HS-008).
 pub const INTERNAL: &str = "internal";
 
+/// A prompt was refused because the session is still provisioning (HS-015).
+pub const SESSION_STARTING: &str = "session_starting";
+
+/// A prompt was refused because a turn is already running (HS-015; spec item 12).
+pub const SESSION_RUNNING: &str = "session_running";
+
+/// A prompt was refused because the session is stopped (HS-015; spec item 8).
+pub const SESSION_STOPPED: &str = "session_stopped";
+
+/// A prompt was refused because the session is in `error` (HS-015).
+pub const SESSION_ERROR: &str = "session_error";
+
+/// A prompt was refused because the session is being deleted (HS-015).
+pub const SESSION_DELETING: &str = "session_deleting";
+
 /// The body of every error response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ErrorBody {
@@ -124,6 +139,19 @@ impl ApiError {
             BAD_BODY,
             "the body must be a JSON object with `project`, `model`, `thinking` and optionally \
              `network`",
+        )
+    }
+
+    /// The same code as [`Self::bad_body`], with the sentence a prompt's body deserves.
+    ///
+    /// The code is the API and the sentence is prose (ADR-0008), so a second answer to "this body
+    /// is not a prompt" is a message, not a code: a client that told the operator the create's
+    /// fields would be describing the wrong request.
+    pub fn bad_prompt() -> Self {
+        Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            BAD_BODY,
+            "the body must be a JSON object with a non-empty `prompt` string",
         )
     }
 
@@ -201,6 +229,36 @@ impl ApiError {
             StatusCode::INTERNAL_SERVER_ERROR,
             INTERNAL,
             "the server could not complete the request",
+        )
+    }
+
+    /// What a prompt is refused with when the session is not `idle` (HS-015, D2).
+    ///
+    /// One code per state, the state's own machine word: the spec names `session_stopped` (item 8)
+    /// and `session_running` (item 12), and the other three follow that rule rather than inventing
+    /// an umbrella code that lists the states accepting a prompt.
+    ///
+    /// The five codes are the five states a prompt is refused in. `Idle` is the state a prompt is
+    /// *accepted* in, so it is never a refusal: the handler answers 202 before it asks for one, and
+    /// that arm is unreachable rather than a sixth code.
+    pub fn not_idle(status: crate::sessions::Status) -> Self {
+        use crate::sessions::Status;
+        let code = match status {
+            Status::Starting => SESSION_STARTING,
+            Status::Running => SESSION_RUNNING,
+            Status::Stopped => SESSION_STOPPED,
+            Status::Error => SESSION_ERROR,
+            Status::Deleting => SESSION_DELETING,
+            // Total rather than a panic: a handler that panics drops the connection with no
+            // envelope at all, and "idle" is not a state a prompt is refused for. The one caller
+            // that could see it (a turn settling between the read and the refusal) answers the
+            // fixed 500 sentence itself instead of landing here.
+            Status::Idle => return Self::internal(),
+        };
+        Self::new(
+            StatusCode::CONFLICT,
+            code,
+            "the session is not idle, so it cannot be prompted",
         )
     }
 }
@@ -377,5 +435,38 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR,
             INTERNAL,
         );
+    }
+
+    #[test]
+    fn a_prompt_on_a_session_that_is_not_idle_is_a_409_naming_its_state() {
+        // One code per state, and the code is the state's own machine word: `Status::as_str` is
+        // where the word lives, so the constants are proved against it rather than restated.
+        use crate::sessions::Status;
+        for status in Status::ALL {
+            if status == Status::Idle {
+                continue;
+            }
+            let error = ApiError::not_idle(status);
+            assert_eq!(error.status, StatusCode::CONFLICT, "{status}");
+            assert_eq!(
+                error.body.code,
+                format!("session_{}", status.as_str()),
+                "{status}"
+            );
+            assert_eq!(
+                error
+                    .into_response()
+                    .headers()
+                    .get(axum::http::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok()),
+                Some("application/json"),
+                "{status}"
+            );
+        }
+        assert_eq!(SESSION_STARTING, "session_starting");
+        assert_eq!(SESSION_RUNNING, "session_running");
+        assert_eq!(SESSION_STOPPED, "session_stopped");
+        assert_eq!(SESSION_ERROR, "session_error");
+        assert_eq!(SESSION_DELETING, "session_deleting");
     }
 }

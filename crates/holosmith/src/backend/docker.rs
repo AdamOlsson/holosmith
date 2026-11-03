@@ -13,6 +13,7 @@
 //! that those stories own.
 
 use super::{BackendError, SessionBackend, Step};
+use crate::events::EventWriter;
 use crate::sessions::Session;
 
 /// The Docker backend. No state yet: `docker_host`, the CLI path and the image tags arrive with
@@ -42,7 +43,12 @@ impl SessionBackend for DockerBackend {
         Ok(())
     }
 
-    async fn start_turn(&self, _session: &Session, _prompt: &str) -> Result<(), BackendError> {
+    async fn start_turn(
+        &self,
+        _session: &Session,
+        _prompt: &str,
+        _events: &EventWriter,
+    ) -> Result<(), BackendError> {
         Err(Self::refuse("start_turn"))
     }
 
@@ -100,6 +106,8 @@ mod tests {
     async fn every_operation_refuses_and_says_which_one_it_was() {
         let backend = DockerBackend;
         let session = session();
+        // `start_turn` takes a writer and refuses before it would append anything to it.
+        let (_scratch, events) = crate::events::scratch_writer();
         let error = backend
             .provision(&session, Step::Network)
             .await
@@ -109,7 +117,10 @@ mod tests {
             "the network step: the docker backend does not provision yet (HS-024)"
         );
         for (operation, error) in [
-            ("start_turn", backend.start_turn(&session, "a prompt").await),
+            (
+                "start_turn",
+                backend.start_turn(&session, "a prompt", &events).await,
+            ),
             ("steer", backend.steer(&session, "more").await),
             ("abort", backend.abort(&session).await),
             ("stop", backend.stop(&session).await),

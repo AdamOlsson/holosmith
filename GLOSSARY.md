@@ -90,6 +90,13 @@ _Avoid_: Input bar, message box, chat box, prompt bar
 One prompt-to-settled cycle inside a session.
 _Avoid_: Request, message, exchange
 
+**Turn runner**:
+The background work one prompt becomes: it touches the session's last activity, asks the backend to run
+the turn, and then takes the session out of `running` — `agent_settled` on a normal finish,
+`unexpected_exit` on a failed one. Its machine name is the `Turn` type in `crates/holosmith/src/turn.rs`.
+The backend emits the turn's events; only the runner and the state function move the session's state.
+_Avoid_: Turn loop, task, executor, agent loop
+
 **Turn boundary**:
 The pair of events that brackets a turn in a transcript: `turn.start` when it begins and `turn.end` when it ends. The event kinds are their machine names, and a turn's number on screen is counted from the `turn.start` events a client has seen.
 _Avoid_: Turn marker, divider, separator
@@ -209,6 +216,18 @@ _Avoid_: Heartbeat, ping, keepalive event
 **Delta**:
 An incremental piece of model output that is appended to a message.
 _Avoid_: Chunk, token, fragment
+
+**Tool call**:
+One call the agent makes to a tool inside a turn, reported as two events: `tool.start`, which carries the
+tool's name and its arguments, and `tool.end`, which carries its output. A call is keyed by its
+`tool_id` and is its own block in the transcript, never a message block.
+_Avoid_: Tool use, function call, invocation, action
+
+**Usage**:
+The token counts a message ends with: `in`, the tokens the message consumed, and `out`, the tokens it
+produced. They arrive on `message.end` as `{"usage": {"in": …, "out": …}}`, and the screen shows them as
+one `in N · out N` line inside the message's block. Persisting them on the session is HS-034's.
+_Avoid_: Cost, tokens, billing, price
 
 **Delta kind**:
 Which of a message's two kinds of output a delta belongs to: `text`, the answer, or `thinking`, the agent's reasoning, which the screen renders apart from it. Its machine name is `kind` in a `message.delta` payload; it is not an event kind, because one message holds both kinds. On screen, each kind has its own node inside the message's block, and that node is never called anything else.

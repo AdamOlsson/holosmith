@@ -190,3 +190,33 @@ impl std::error::Error for RepoError {
         }
     }
 }
+
+/// A writer over a scratch database that lives as long as the returned directory, for a unit test
+/// that has to hand a backend an `EventWriter` and does not need to read what it appended — the
+/// stream those events reach is read off the wire instead (`tests/turns.rs`).
+///
+/// The directory is returned rather than dropped with the function, because a live connection must
+/// not have its file unlinked underneath it (the rule `tests/support` documents for its own).
+#[cfg(test)]
+pub(crate) fn scratch_writer() -> (crate::sql::guard::TempDir, EventWriter) {
+    // One directory per call: two tests of one binary run at the same time, and a shared scratch
+    // directory would have one of them open a file the other is deleting.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let label = format!(
+        "scratch-writer-{}",
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let dir = crate::sql::guard::TempDir::new(&label);
+    let database = crate::db::Database::open(
+        &dir.path().join(crate::db::DATABASE_FILE),
+        crate::db::OpenOptions::default(),
+        crate::clock::unix_now(),
+    )
+    .expect("a fresh database opens");
+    let handle = spawn(
+        std::sync::Arc::new(std::sync::Mutex::new(database)),
+        WriterOptions::default(),
+    )
+    .0;
+    (dir, handle)
+}

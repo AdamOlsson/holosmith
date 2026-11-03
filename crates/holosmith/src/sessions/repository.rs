@@ -33,6 +33,10 @@ const INSERT: &str = "INSERT INTO sessions \
 const UPDATE_STATUS: &str =
     "UPDATE sessions SET status = ?2, status_reason = ?3, stopped_at = ?4 WHERE id = ?1";
 
+/// One bit of activity: `last_active_at` moves and nothing else (HS-015's prompt and settle, and
+/// HS-017's steer).
+const TOUCH: &str = "UPDATE sessions SET last_active_at = ?2 WHERE id = ?1";
+
 /// The event counter's bump: one per event, inside the event insert's transaction, returning the
 /// value it assigned (HS-009). A column, not `MAX(seq)`, because compaction deletes rows and a
 /// derived counter would rewind and reuse a seq (ADR-0013).
@@ -175,6 +179,23 @@ impl<'a> SessionRepository<'a> {
             return Ok(None);
         }
         self.one("set_status", "WHERE id = ?1", &[&id])
+    }
+
+    /// Record that this session was active at `now` (HS-015, HS-020/HS-021's LRU order).
+    ///
+    /// Activity is not a state change, so this is the repository's and not the transitioner's: the
+    /// status write deliberately leaves `last_active_at` alone, and the callers that mean "something
+    /// happened" (`prompt`, `agent_settled`, `steer`) say so here.
+    ///
+    /// **A missing row is not an error.** The caller is a background task that is touching a session
+    /// it just moved, and a session it can no longer touch (one deleted or recovered underneath it)
+    /// has nothing to record — an `Err` would turn that ordinary race into a logged failure. Nothing
+    /// reads the row back, so there is no `Option<Session>` to answer: `Ok` means the statement ran.
+    pub fn touch(&self, id: &str, now: i64) -> Result<(), RepoError> {
+        self.connection
+            .execute(TOUCH, params![id, now])
+            .map_err(|error| RepoError::sqlite("touch", error))?;
+        Ok(())
     }
 
     /// Bump and return this session's event counter (HS-009).
