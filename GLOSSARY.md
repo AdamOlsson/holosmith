@@ -95,15 +95,23 @@ The moment the agent has finished everything for the current turn and is waiting
 _Avoid_: Idle, done, finished
 
 **State**:
-One of `starting`, `idle`, `running`, `stopped`, `error`, `deleting`. Its machine names are the `sessions.status` column and the `Status` type.
+One of `starting`, `idle`, `running`, `stopped`, `error`, `deleting`. Its machine names are the `sessions.status` column and the `Status` type. The legal moves between states are the transition table, and no production code changes a state outside the one function that applies a row of it — a create's first state is the table's own `none` row, read rather than spelled again.
 _Avoid_: Status code, phase
+
+**Trigger**:
+The cause of one state change, one per row of the transition table: `create_accepted`, `pi_ready`, `provisioning_failed`, `prompt`, `agent_settled`, `abort_completed`, `abort_ladder`, `evict`, `idle_stop`, `drain`, `resume`, `unexpected_exit`, `delete`, `crash_recovery`. Its machine name is the `Trigger` type.
+_Avoid_: Event, action, cause, command
+
+**Transition**:
+One legal state change: a from, a trigger and a to, held as data in the transition table. Its machine name is `Transition`, and the one function that applies one is `Transitioner::apply`, which persists it and then emits its `session.status` event.
+_Avoid_: Move, step, change, migration
 
 **Stopped**:
 A session whose container is gone but whose history, worktree and events are kept, and which can be resumed.
 _Avoid_: Ended, closed, paused, evicted
 
 **Resume**:
-Bringing a stopped session back to `idle` with the same id.
+Bringing a stopped session back with the same id: the `stopped` + `resume` row of the transition table takes it to `starting`, and provisioning then takes it to `idle`.
 _Avoid_: Restart, reopen, wake
 
 **Live session**:

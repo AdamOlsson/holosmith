@@ -114,7 +114,7 @@ Every section of `HolosmithSpec.md` maps to at least one story. If a spec item g
 
 ## Decisions taken while slicing
 
-Fifteen decisions were made that the spec does not make. Each has an ADR because each is hard to reverse, surprising to a later reader, and the result of a real trade-off.
+Sixteen decisions were made that the spec does not make. Each has an ADR because each is hard to reverse, surprising to a later reader, and the result of a real trade-off.
 
 - [ADR-0001](../adr/0001-build-session-lifecycle-before-docker.md) — the session lifecycle is built against the stub backend before Docker exists. Consequence: there are two fakes, the in-process stub backend and the in-container fake pi, and they are not the same thing.
 - [ADR-0002](../adr/0002-security-guards-before-endpoints.md) — the browser guards and network isolation land before the features they protect.
@@ -131,6 +131,7 @@ Fifteen decisions were made that the spec does not make. Each has an ADR because
 - [ADR-0013](../adr/0013-event-log-single-writer-and-seq-counter.md) — one writer thread assigns every seq from `sessions.last_seq`, commits a batch every 25 ms and broadcasts only what survived. Consequence: the mutex stays and the database actor is deferred; an event a client sees is an event a crash cannot undo.
 - [ADR-0014](../adr/0014-event-stream-replay-lag-and-open-stream-registry.md) — a stream subscribes before it replays, drops a lagging subscriber with a `stream_lagged` event, and keeps a per-session count of open streams. Consequence: `futures-core` becomes a direct dependency, and the heartbeat is axum's `KeepAlive` rather than a second writer on the connection.
 - [ADR-0015](../adr/0015-one-backend-trait-per-step-and-a-background-provisioner.md) — the backend trait is one method per provisioning step, the provisioner is one spawned task per accepted session, and progress is five `session.status` events. Consequence: `AppState` carries the backend, `backend` becomes a config key with `--backend` overriding it, and the Docker backend refuses every operation until HS-024.
+- [ADR-0016](../adr/0016-one-transition-table-and-one-function-that-applies-it.md) — the session states and their triggers are one data table, applied by one function that persists the change and then emits `session.status` with `from`/`to`. Consequence: no production code writes a state anywhere else, a source-level guard proves it, and a step beginning is a payload with `from == to` rather than a table row.
 
 Gaps in the spec that had to be filled to write these stories, all reversible and all flagged in the story that fills them:
 

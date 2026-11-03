@@ -31,6 +31,7 @@ use crate::http::sessions;
 use crate::http::streams;
 use crate::provisioner::Provisioner;
 use crate::runtime::Runtime;
+use crate::sessions::state::Transitioner;
 use crate::web;
 
 /// What a handler may read: the config in force, this run's backend and start time, the one open
@@ -66,6 +67,15 @@ impl AppState {
             Arc::clone(&self.database),
             self.events.clone(),
         )
+    }
+
+    /// The one state function (HS-012), wired to this state's database and event writer.
+    ///
+    /// Here for the same reason as [`Self::provisioner`]: a story that changes a session's state
+    /// reaches it through the state it already has, so the two handles cannot be wired wrong or
+    /// half-wired.
+    pub fn transitioner(&self) -> Transitioner {
+        Transitioner::new(Arc::clone(&self.database), self.events.clone())
     }
 }
 

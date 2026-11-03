@@ -79,7 +79,10 @@ impl<'a> SessionRepository<'a> {
                     new.model,
                     new.thinking,
                     new.base_commit,
-                    Status::Starting.as_str(),
+                    // The table's `none` row, not a second spelling of "a create starts in
+                    // starting" (HS-012). `initial_status` panics only if the table loses its
+                    // create row, which its own test refuses.
+                    super::state::initial_status().as_str(),
                     new.client_key,
                     new.network,
                     now,
@@ -146,6 +149,11 @@ impl<'a> SessionRepository<'a> {
 
     /// Set the status and its reason, and move `stopped_at` with it: `now` when the new status is
     /// `stopped`, `NULL` otherwise, which is item 15's "cleared on resume".
+    ///
+    /// **Not the way to change a state.** Since HS-012 the one production caller is
+    /// [`super::state::Transitioner::apply`], which decides whether the move is in the table and
+    /// emits the `session.status` event; this method only writes. A source-level guard in
+    /// `sessions/state.rs` fails the build's tests if any other file under `src/` names it.
     ///
     /// `None` when there is no such id, so a caller can answer 404 without a second read.
     pub fn set_status(
@@ -333,8 +341,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let guard = guard();
         assert!(
-            guard
-                .sources_under(&root)
+            crate::sql::guard::sources_under(&root)
                 .iter()
                 .any(|(file, _)| file == REPOSITORY),
             "the walk did not find {root:?}/{REPOSITORY}"

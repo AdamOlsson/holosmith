@@ -199,8 +199,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let guard = guard();
         assert!(
-            guard
-                .sources_under(&root)
+            crate::sql::guard::sources_under(&root)
                 .iter()
                 .any(|(file, _)| file == REPOSITORY),
             "the walk did not find {root:?}/{REPOSITORY}"

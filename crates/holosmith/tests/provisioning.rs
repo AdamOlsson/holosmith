@@ -14,7 +14,7 @@ use std::time::Duration;
 use holosmith::backend::{Backends, Call, Step, StubBackend};
 use holosmith::config::Config;
 use holosmith::http::{self, AppState};
-use holosmith::provisioner::SESSION_STATUS;
+use holosmith::sessions::state::SESSION_STATUS;
 use holosmith::sessions::{Session, Status};
 use serde_json::Value;
 
@@ -144,10 +144,10 @@ async fn a_create_provisions_the_four_steps_in_order_and_ends_idle() {
         ["worktree", "network", "container", "pi", "-"],
         "the steps did not arrive in the spec's order: {events:?}"
     );
-    // The four step events report that the session is starting; the last reports where it ended.
+    // The four step events report no state change; the last reports the transition.
     let reported: Vec<Option<&str>> = events
         .iter()
-        .map(|(_, payload)| payload["status"].as_str())
+        .map(|(_, payload)| payload["to"].as_str())
         .collect();
     assert_eq!(
         reported,
@@ -204,11 +204,11 @@ async fn the_steps_reach_a_browser_over_the_event_stream() {
         [Some(SESSION_STATUS); 5]
     );
     assert_eq!(
-        frames[0].data, r#"{"step":"worktree","status":"starting","reason":null}"#,
+        frames[0].data, r#"{"from":"starting","to":"starting","step":"worktree","reason":null}"#,
         "the first frame is not the worktree step"
     );
     assert_eq!(
-        frames[4].data, r#"{"step":null,"status":"idle","reason":null}"#,
+        frames[4].data, r#"{"from":"starting","to":"idle","step":null,"reason":null}"#,
         "the last frame does not end the session idle"
     );
     assert_eq!(row(&state, &id).status, Status::Idle);
@@ -299,15 +299,23 @@ async fn a_failure_at_a_named_step_undoes_what_completed_and_ends_error() {
     settled(&state, &id).await;
     let reason = "the stub backend was told to fail at the container step";
     let events = committed_status_events(&state, &id, 4).await;
+    // Three steps were announced, then the transition; the failing step is the one the last
+    // announcement named, because a step is announced before it runs (HS-011) and a transition
+    // carries no step of its own.
     assert_eq!(
         steps(&events),
-        ["worktree", "network", "container", "container"],
+        ["worktree", "network", "container", "-"],
         "the failing step's event is missing or out of order: {events:?}"
     );
     let (_, last) = events.last().expect("the failure event exists");
-    assert_eq!(last["status"].as_str(), Some("error"));
+    assert_eq!(last["from"].as_str(), Some("starting"));
+    assert_eq!(last["to"].as_str(), Some("error"));
     assert_eq!(last["reason"].as_str(), Some(reason));
-    assert_eq!(last["step"].as_str(), Some("container"));
+    assert!(
+        last["step"].is_null(),
+        "a transition carried a step: {last}"
+    );
+    assert_eq!(steps(&events)[2], "container", "the last step announced");
 
     // The row agrees with the event, and the reason is the same sentence a client was told.
     let failed = row(&state, &id);
@@ -354,7 +362,7 @@ async fn the_docker_backend_fails_honestly_and_leaves_the_session_resumable() {
         "the reason does not name the step and the backend: {reason}"
     );
     let events = committed_status_events(&state, &id, 2).await;
-    assert_eq!(steps(&events), ["worktree", "worktree"], "{events:?}");
+    assert_eq!(steps(&events), ["worktree", "-"], "{events:?}");
     let live = {
         let database = state.database.lock().expect("the lock is not poisoned");
         database.sessions().live_count().expect("the count reads")

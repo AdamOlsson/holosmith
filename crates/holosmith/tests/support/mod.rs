@@ -96,7 +96,7 @@ pub fn state() -> AppState {
         database: Arc::clone(database),
         events: events.clone(),
         streams: StreamRegistry::default(),
-        backend: slow_stub(),
+        backend: Backends::Stub(slow_stub()),
     }
 }
 
@@ -108,9 +108,15 @@ pub fn state() -> AppState {
 /// that minute — the provisioner is a spawned task and the test's runtime drops it at the end.
 pub const SLOW_STUB_STEP: Duration = Duration::from_secs(60);
 
-/// The harness's default backend: a stub that does not finish while a test is looking.
-pub fn slow_stub() -> Backends {
-    Backends::Stub(StubBackend::new(SLOW_STUB_STEP))
+/// The harness's default stub: one that does not finish while a test is looking.
+pub fn slow_stub() -> StubBackend {
+    StubBackend::new(SLOW_STUB_STEP)
+}
+
+/// A stub that finishes a step in a millisecond, for a test that wants provisioning to *complete*
+/// while it waits: the four steps are then four separate commits and the session reaches `idle`.
+pub fn fast_stub() -> StubBackend {
+    StubBackend::new(Duration::from_millis(1))
 }
 
 /// The same state with the stub backend `stub` replaces, so a test can pace or fail provisioning
@@ -136,7 +142,7 @@ pub fn state_with_writer(dir: &TempDir, config: Config, options: WriterOptions) 
         events: writer_handle_with(Arc::clone(&database), options),
         database,
         streams: StreamRegistry::default(),
-        backend: slow_stub(),
+        backend: Backends::Stub(slow_stub()),
     }
 }
 

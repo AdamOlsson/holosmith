@@ -116,9 +116,11 @@ all four, the exempt health probe, the create endpoint (`case_create_session`,
 `case_create_is_idempotent`, `case_create_bad_project`, `case_create_cap_reached`), the
 session's event stream (`case_events_stream`, which reads the stream's header block with
 `fetch_stream` and asserts `200`, `text/event-stream` and `no-cache` on the session
-`case_create_session` made), the backend the boot chose (`case_backend_from_config`), and the
-provisioning that create starts (`case_provisioning_steps`, which reads that session's stream
-until the event says `idle` and asserts the four step words arrived in order). A case
+`case_create_session` made), the backend the boot chose (`case_backend_from_config`), the
+provisioning that create starts (`case_provisioning_steps`, which reads that session's stream until
+the event says `idle` and asserts the four step words arrived in order), and the state machine's
+payload (`case_state_transition_payload`, which asserts the four step reports claim no state change
+and the fifth is exactly `{"from":"starting","to":"idle","step":null,"reason":null}`). A case
 that must assert one code keeps every higher guard check correct, or it asserts another
 guard's code under its own name.
 

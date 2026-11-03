@@ -6,6 +6,7 @@
 //! a migration that has to rewrite a constraint (ADR-0011).
 
 pub mod repository;
+pub mod state;
 
 use std::fmt;
 use std::str::FromStr;

@@ -275,6 +275,7 @@ serve_cases=(
   case_events_stream
   case_backend_from_config
   case_provisioning_steps
+  case_state_transition_payload
 )
 
 # The health payload: exactly four keys, and the uptime is not predictable, so the assertion is
@@ -546,7 +547,7 @@ case_backend_from_config() {
 # sees and that the last thing it is told is the state the story requires.
 case_provisioning_steps() {
   local name=case_provisioning_steps response body steps
-  fetch_sse_until "$name" "/api/sessions/$created_id/events" '"status":"idle"' "Host: 127.0.0.1" ||
+  fetch_sse_until "$name" "/api/sessions/$created_id/events" '"to":"idle"' "Host: 127.0.0.1" ||
     fail "$name/no_answer" "GET /api/sessions/$created_id/events did not answer"
   response="$(answer "$name")"
   expect_status "$name" "$response" 200
@@ -557,11 +558,34 @@ case_provisioning_steps() {
     sed 's/.*:"//; s/"$//' | tr '\n' ' ' | sed 's/ $//')"
   check "$name/steps" "worktree network container pi" "$steps"
   case "$body" in
-    *'"step":null,"status":"idle"'*)
+    *'"to":"idle","step":null'*)
       assertions=$((assertions + 1))
       ;;
     *)
       fail "$name/idle" "no event reports the session idle: $body"
+      ;;
+  esac
+}
+
+# HS-012: the state machine's `session.status` payload. The four step reports claim no state
+# change (`from` and `to` are both `starting`), and the fifth reports the transition the table
+# allows and the story requires: `starting` to `idle`, with no step and no reason.
+case_state_transition_payload() {
+  local name=case_state_transition_payload response body last
+  fetch_sse_until "$name" "/api/sessions/$created_id/events" '"to":"idle"' "Host: 127.0.0.1" ||
+    fail "$name/no_answer" "GET /api/sessions/$created_id/events did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 200
+  body="$(cat "$WORK/responses/$name.body")"
+  last="$(printf '%s\n' "$body" | grep -o '{"from":[a-z"{}:, -]*}' |
+    sed -n '$p')"
+  check "$name/last_payload" '{"from":"starting","to":"idle","step":null,"reason":null}' "$last"
+  case "$body" in
+    *'"from":"starting","to":"starting","step":"worktree"'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "$name/step_payload" "a step report does not claim the unchanged state: $body"
       ;;
   esac
 }

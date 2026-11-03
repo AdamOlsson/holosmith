@@ -15,10 +15,11 @@ use holosmith::http::error::{
     MISSING_IDEMPOTENCY_KEY, UNKNOWN_FIELD,
 };
 use holosmith::http::{self, AppState};
+use holosmith::sessions::state::Trigger;
 use holosmith::sessions::{Session, Status};
 
 mod support;
-use support::{Response, Served, TempDir, request, state_in};
+use support::{Response, Served, TempDir, fast_stub, request, state_in, with_stub};
 
 const GRACE: Duration = Duration::from_secs(10);
 
@@ -139,16 +140,24 @@ fn live_count(state: &AppState) -> u64 {
         .expect("the live count reads")
 }
 
-fn set_status(state: &AppState, id: &str, status: Status) {
-    let database = state
-        .database
-        .lock()
-        .expect("the test's database is not poisoned");
-    database
-        .sessions()
-        .set_status(id, status, Some("the test's reason"), clock::unix_now())
-        .expect("the update succeeds")
-        .expect("the session exists");
+/// Stop an idle session the way the product does — spec item 8's `idle` + `evict` row, through
+/// the one state function (HS-012). A create provisions in the background since HS-011, so the
+/// test waits for `idle` rather than writing a state the table does not allow.
+async fn stop_idle_session(state: &AppState, id: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while locked_row(state, id).status != Status::Idle {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the session never left starting"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    state
+        .transitioner()
+        .apply(id, Trigger::Evict, Some("the test's reason"))
+        .await
+        .expect("idle -> stopped is in the table");
+    assert_eq!(locked_row(state, id).status, Status::Stopped);
 }
 
 // ---- the body -----------------------------------------------------------------------
@@ -453,10 +462,10 @@ async fn a_retry_of_the_session_that_filled_the_cap_still_answers_202() {
 #[tokio::test]
 async fn stopped_sessions_do_not_count_towards_the_cap() {
     let dir = TempDir::new("api-stopped");
-    let state = state_in(&dir, one_live_session());
+    let state = with_stub(state_in(&dir, one_live_session()), fast_stub());
     let served = Served::start(http::router(state.clone()), GRACE).await;
     let (id, _) = assert_created(&post_create(served.addr, Some("stopped"), BODY).await);
-    set_status(&state, &id, Status::Stopped);
+    stop_idle_session(&state, &id).await;
     let (fresh_id, _) = assert_created(&post_create(served.addr, Some("fresh"), BODY).await);
     assert_ne!(fresh_id, id);
     assert_eq!(live_count(&state), 1);

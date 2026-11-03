@@ -161,6 +161,39 @@ fn skip_block(bytes: &[u8], start: usize) -> usize {
 pub(crate) mod guard {
     use std::path::{Path, PathBuf};
 
+    /// Every file under `root`, relative to it with `/` separators, and its text.
+    ///
+    /// The walk several source-level rules share: a table's SQL location, and HS-012's rule that
+    /// only one function writes a session's state. One copy, because the second caller would
+    /// otherwise reimplement the recursion and quietly disagree about, say, `.rs` suffixes.
+    pub(crate) fn sources_under(root: &Path) -> Vec<(String, String)> {
+        let mut sources = Vec::new();
+        let mut pending: Vec<PathBuf> = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                let path = entry.path();
+                if file_type.is_dir() {
+                    pending.push(path);
+                } else if file_type.is_file() {
+                    let Ok(text) = std::fs::read_to_string(&path) else {
+                        continue;
+                    };
+                    let Ok(relative) = path.strip_prefix(root) else {
+                        continue;
+                    };
+                    sources.push((relative.to_string_lossy().replace('\\', "/"), text));
+                }
+            }
+        }
+        sources
+    }
+
     /// One table's guard: its word, the spellings that name it, and the file allowed to hold
     /// them.
     pub(crate) struct Guard {
@@ -191,7 +224,7 @@ pub(crate) mod guard {
         /// as `<file>:<line>: <phrase>`.
         pub(crate) fn offenders_under(&self, root: &Path) -> Vec<String> {
             let mut offenders = Vec::new();
-            for (file, text) in self.sources_under(root) {
+            for (file, text) in sources_under(root) {
                 if file == self.repository {
                     continue;
                 }
@@ -204,46 +237,12 @@ pub(crate) mod guard {
             offenders
         }
 
-        /// Every file under `root`, relative to it with `/` separators, and its text.
-        pub(crate) fn sources_under(&self, root: &Path) -> Vec<(String, String)> {
-            let mut sources = Vec::new();
-            let mut pending: Vec<PathBuf> = vec![root.to_path_buf()];
-            while let Some(directory) = pending.pop() {
-                let Ok(entries) = std::fs::read_dir(&directory) else {
-                    continue;
-                };
-                for entry in entries.flatten() {
-                    let Ok(file_type) = entry.file_type() else {
-                        continue;
-                    };
-                    let path = entry.path();
-                    if file_type.is_dir() {
-                        pending.push(path);
-                    } else if file_type.is_file() {
-                        let Ok(text) = std::fs::read_to_string(&path) else {
-                            continue;
-                        };
-                        let Ok(relative) = path.strip_prefix(root) else {
-                            continue;
-                        };
-                        sources.push((relative.to_string_lossy().replace('\\', "/"), text));
-                    }
-                }
-            }
-            sources
-        }
-
         /// A directory of planted files that removes itself, so a test leaves nothing in `/tmp`.
         ///
         /// `purpose` names the test within the table (`planted`, `spelling`); the table word
         /// separates the guards sharing this binary.
         pub(crate) fn temp_dir(&self, purpose: &str) -> TempDir {
-            let label = format!("{}-{purpose}", self.table);
-            let path = std::env::temp_dir()
-                .join(format!("holosmith-guard-{label}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&path);
-            std::fs::create_dir_all(&path).expect("the planted directory is creatable");
-            TempDir { path }
+            TempDir::new(&format!("{}-{purpose}", self.table))
         }
 
         /// The first statement normalised `text` holds, as its offset and the phrase that
@@ -378,12 +377,30 @@ pub(crate) mod guard {
     }
 
     impl TempDir {
+        /// A directory the label names, removing anything a previous run left there.
+        ///
+        /// The label is the whole name: `Guard::temp_dir` prefixes its table word, so two guards
+        /// sharing this test binary cannot collide, and a rule that has no table names its own.
+        pub(crate) fn new(label: &str) -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("holosmith-guard-{label}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("the planted directory is creatable");
+            Self { path }
+        }
+
         pub(crate) fn path(&self) -> &Path {
             &self.path
         }
 
+        /// Write `text` to `file`, creating the directories a nested path names — a rule about a
+        /// file like `sessions/state.rs` needs its fixture at that path, not at its basename.
         pub(crate) fn plant(&self, file: &str, text: &str) {
-            std::fs::write(self.path.join(file), text).expect("the planted file is writable");
+            let path = self.path.join(file);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("the planted directories are creatable");
+            }
+            std::fs::write(path, text).expect("the planted file is writable");
         }
     }
 
