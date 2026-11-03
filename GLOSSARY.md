@@ -141,12 +141,16 @@ _Avoid_: Mock pi, test agent
 ### Events and history
 
 **Event**:
-One durable record in a session's stream, identified by a strictly increasing seq.
+One durable record in a session's stream, identified by a strictly increasing seq. Stored in the `events` table and written only by the event writer.
 _Avoid_: Log line, message, item
 
 **Seq**:
-The per-session sequence number of an event. Gaps are legal only where compaction removed rows.
+The per-session sequence number of an event, assigned by the event writer from the session's `last_seq` counter and never reused. Gaps are legal only where compaction removed rows.
 _Avoid_: Offset, id, index
+
+**Event writer**:
+The one thread that assigns each event's seq, commits a batch of events in one transaction, and only then broadcasts it. Its two handles are `EventWriter` (a producer appends) and `EventStream` (a subscriber reads committed events).
+_Avoid_: Logger, event loop, queue
 
 **Delta**:
 An incremental piece of model output that is appended to a message.

@@ -24,6 +24,8 @@ A poisoned lock is recovered (`PoisonError::into_inner`) rather than answered: t
 
 **This is a stopgap and is recorded as one.** ADR-0009 deferred the sharing decision to HS-009, whose single writer task with group commit owns the write path; HS-009 replaces this `Mutex` rather than living beside it. Nothing in this story should be read as the final design: it is the smallest thing that lets item 7's synchronous validation and insert exist without deciding item 5's writer.
 
+**Superseded by ADR-0013:** HS-009 keeps this `Mutex` and adds the event writer on top of it, because a lock that serialises writes and a task that owns the event pipeline are two decisions and item 5 needs only the second. The paragraph above is kept as the record of what was decided here, not as the shipped design.
+
 ## Validation is shape, not vocabulary
 
 The body is `{project, model, thinking, network}` and validation is four shape rules:
@@ -69,7 +71,7 @@ The body is built by a `#[derive(Serialize)]` wrapper that flattens `Session` an
 
 - A repository failure during a create answers 500 `internal` with a fixed sentence, and the operation and the error go to the log at `error` level. A rusqlite message can contain the database path, so no SQLite text and no path ever reaches a client.
 - `RepoError` gains `DuplicateClientKey`; `create` stays the only writer. `tests/session_repository.rs`'s duplicate-key test changes from asserting the SQLite message to asserting the variant, which is what makes the mapping a proof rather than a claim.
-- The `Mutex` is this story's, and HS-009 removes it. Until then, a handler that holds the guard across an `.await` does not compile, so the stopgap cannot decay silently.
+- The `Mutex` is this story's, and HS-009 removes it. Until then, a handler that holds the guard across an `.await` does not compile, so the stopgap cannot decay silently. **Superseded by ADR-0013:** HS-009 keeps the `Mutex` and adds the event writer on top of it, so the stopgap is the shipped design and the same compile-time rule still holds.
 - Validation lives in `src/http/sessions.rs` with the handler, and `src/sessions/` learns no HTTP status code. No SQL leaves `sessions/repository.rs`; the new `live_count` is a repository method for that reason.
 - No provisioning happens here (HS-011), no eviction (HS-020), no event stream (HS-010), no list endpoint (HS-013), and no new guard: this route is a non-`GET`, so ADR-0010's three headers already apply to it and the layer already covers it.
 - The cap's answer is temporary by design. HS-020 owns the sentence that replaces it, and this ADR is the record that the 409 was a split, not a shortcut.
