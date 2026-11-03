@@ -15,24 +15,23 @@ canonically, record the decision in the Linear issue and the commit message, and
 Branch `master` (this repo has **no `main`**; do not rename it). Latest commits:
 
 | Commit | What |
-|---|---|
+| --- | --- |
 | `d302635` | HS-001 — workspace layout, static-artifact ADRs (ADR-0004, 0005) |
 | `bbb1f0f`, `a45edac` | HS-002 — one typed config, ADR-0006 |
 | `50c20ee`, `e71da58`, `cc9aadb` | HS-003 — `serve`, embedded web app, ADR-0007, 0008 |
 | `a4774b9`, `bd3b73e`, `ae92a7d` | HS-004 — SQLite, embedded forward-only migrations, ADR-0009 |
+| `6c4f02c`, `6994c0f` | HS-005 — browser-facing guards, ADR-0010 |
+| `2af15d4`, `108a6ee` | HS-006 — `scripts/verify.sh`, the one-command gate |
+| `ad3ffc0`, `fad974d` | HS-007 — session row + repository, ADR-0011, schema 2 |
+| `c5891e4`, `858d295` | HS-008 — `POST /api/sessions`, ADR-0012 |
+| `5cae107`, `dae1fd9` | HS-009 — event log + single writer, ADR-0013, schema 3 |
+| `3b03c5c`, `07f318d` | HS-010 — SSE stream, `Last-Event-ID`, ADR-0014 |
 
-**Linear state: 4 Done, 76 Backlog, all in project `Holosmith`** (`P-PER-2`, team `Personal`/`PER`).
+**Linear state: 10 Done, 70 Backlog, all in project `Holosmith`** (`P-PER-2`, team
+`Personal`/`PER`). Done: HS-001…HS-010 (`PER-33`…`PER-42`).
 
-| Story | Linear | State |
-|---|---|---|
-| HS-001 static binary | PER-33 | Done |
-| HS-002 config | PER-34 | Done |
-| HS-003 serve + embedded app | PER-35 | Done |
-| HS-004 SQLite migrations | PER-36 | Done |
-
-**Next issue: PER-37 (HS-005 — browser-facing request guards).** It is unblocked: HS-003 and HS-004
-both landed. Then PER-38 (HS-006 verification harness), PER-39 (HS-007 session row), and so on in
-`HS-###` order.
+**Next issue: PER-43 (HS-011 — stub backend and provisioner steps).** Unblocked: HS-009 and HS-010
+both landed. Then PER-44 (HS-012 state machine), PER-45 (HS-013 UI), and so on in `HS-###` order.
 
 Ranking, per `PROMPT.md`: Linear priority (all are `No priority`) → `HS-###` order in
 `docs/stories/` → anything already `In Progress` first → skip an issue whose `Blocked by` stories are
@@ -261,6 +260,30 @@ Commit messages are prose about *why*, not a restatement of the diff. Look at th
 - **Reviews are saved verbatim** and a `## Resolution` section is appended afterwards. Do not edit the review
   body; do not delete a dismissal.
 
+- **Every fallible axum extractor answers `text/plain`, not the envelope.** `axum::Json<T>`'s
+  rejection and the `Bytes` extractor's rejection (`UnknownBodyError` 400, `LengthLimitError` 413) all
+  bypass ADR-0008. Take the raw body and parse it yourself, and take extractors as
+  `Result<T, Rejection>` and map them through `ApiError`. Both traps were found the hard way (HS-008).
+- **`scripts/build.sh` builds with `cargo build --release --locked`.** Adding a dependency without
+  regenerating `Cargo.lock` fails the whole gate. Regenerate the lock, check its diff shows only the
+  edge you meant, then run the gate (HS-010).
+- **The two SQL-location guards share one helper in `src/sql.rs`** and name their scratch directory
+  from their own table word. They once shared a label, and the sessions guard failed intermittently
+  because the events guard `remove_dir_all`'d its directory — a real flake, not a theory (HS-009).
+- **A seq counter must never be derived from `MAX(seq)`.** Compaction deletes event rows, so the
+  counter is the durable `sessions.last_seq`, bumped inside the same transaction as the insert.
+- **The writer has one broadcast channel for all sessions**, so an SSE forward loop must filter by
+  `session_id` before comparing seqs — otherwise one session's frames reach another's response and a
+  foreign seq corrupts the resume point (HS-010's blocker).
+- **`scripts/verify.sh`'s `fetch` waits for EOF**, which an SSE stream never sends; use `fetch_stream`
+  with its own bound. And **every story adds at least one `case_*`** — the reviewer enforces the rule
+  written in `docs/build.md`, and HS-007 was caught breaking it one story after it was written.
+- **Adding an ADR means updating `docs/stories/README.md`**: the "Decisions taken while slicing" count
+  and the bullet list. Earlier stories did this; a reviewer will notice if you do not.
+- **`scripts/check-static.sh`'s banner wait is a fixed 200 × 50 ms (10 s)** and has flaked once under
+  load average ≈4 on the aarch64 qemu path. Pre-existing; widen the bound if it recurs (the loop exits
+  as soon as the banner appears, so a larger bound costs nothing).
+
 ---
 
 ## 6. Decisions taken on the operator's behalf (do not silently undo)
@@ -286,13 +309,11 @@ cd /home/adamolsson/projects/holosmith
 git status --short                 # must be clean
 . ~/.pi/toolchains/env.sh
 python3 /tmp/lin.py issues | grep -v Done | head    # next unfininished issues  (recreate /tmp/lin.py if missing)
-python3 /tmp/lin.py issue PER-37                    # sanity-check Linear is reachable and scoped
+python3 /tmp/lin.py issue PER-43                    # sanity-check Linear is reachable and scoped
 cargo test                                          # baseline green
 ```
 
-Then start the cycle at **PER-37 (HS-005)**. Its brief must carry the handoffs already recorded in
-`ADR-0007`/`ADR-0008` and in PER-35's closing comment: the guard layer goes inside `App::new` via
-`is_guard_exempt` (true for `GET`/`HEAD /api/health` only), the 403 bodies use the `{"code","message"}`
-envelope with codes `bad_host`, `bad_origin`, `bad_client`, `bad_owner`, no CORS headers ever, GET must not
-mutate state, and the config keys `allowed_hosts` / `control_origin` / `owner` already exist — HS-005 must
-not add a config key of its own.
+Then start the cycle at **PER-43 (HS-011)**. The guard layer HS-005 built is in place, `POST
+/api/sessions` (HS-008), the event writer (HS-009) and the SSE stream (HS-010) are live, so HS-011
+adds the first real event producers and the stub provisioner. Check `docs/adr/0013` and `0014` for
+the writer and stream contracts before briefing it.
