@@ -202,6 +202,7 @@ serve_cases=(
   case_health
   case_schema_version
   case_sessions_table
+  case_events_table
   case_app_shell
   case_api_not_found
   case_guard_bad_host
@@ -270,6 +271,27 @@ case_sessions_table() {
   done
   fail "$name/table" \
     "no app.db file carries CREATE TABLE sessions and the sessions_status index: $(ls -A "$WORK/data" 2>/dev/null)"
+}
+
+# HS-009's acceptance is the `events` table and the `last_seq` counter it bumps. Same byte grep as
+# `case_sessions_table`, and the same glob over `app.db*`: while serve is running the schema may
+# still be in `app.db-wal`, and `ALTER TABLE ... ADD COLUMN` rewrites the `sessions` entry in
+# `sqlite_master` to carry `last_seq`. The index grep is `sqlite_autoindex_events` rather than a
+# named index of our own: SQLite derives that name from the table name and builds it for the
+# composite primary key, so it is both stable and the index the range reads actually use (S4).
+case_events_table() {
+  local name=case_events_table file
+  for file in "$WORK"/data/app.db*; do
+    [ -f "$file" ] || continue
+    if grep -aq 'CREATE TABLE events' "$file" &&
+      grep -aq 'sqlite_autoindex_events' "$file" &&
+      grep -aq 'last_seq' "$file"; then
+      assertions=$((assertions + 1))
+      return 0
+    fi
+  done
+  fail "$name/table" \
+    "no app.db file carries CREATE TABLE events, the primary key's sqlite_autoindex_events index and sessions.last_seq: $(ls -A "$WORK/data" 2>/dev/null)"
 }
 
 case_app_shell() {

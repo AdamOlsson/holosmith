@@ -13,6 +13,7 @@ use std::time::Duration;
 use holosmith::clock;
 use holosmith::config::Config;
 use holosmith::db::{self, Database, OpenOptions};
+use holosmith::events::{self, EventWriter, WriterOptions};
 use holosmith::http::{App, AppState, Guards, RequestCounter, Routes};
 use holosmith::runtime::{Backend, Runtime};
 use holosmith::serve::{self, ServeOptions};
@@ -81,27 +82,37 @@ pub fn open(dir: &TempDir) -> Database {
 /// carries the process id, so two concurrent runs never share it. Tests that use this state
 /// never write.
 pub fn state() -> AppState {
-    static SHARED: OnceLock<(TempDir, Arc<Mutex<Database>>)> = OnceLock::new();
-    let (_, database) = SHARED.get_or_init(|| {
+    static SHARED: OnceLock<(TempDir, Arc<Mutex<Database>>, EventWriter)> = OnceLock::new();
+    let (_, database, events) = SHARED.get_or_init(|| {
         let dir = TempDir::new("shared");
         let database = Arc::new(Mutex::new(open(&dir)));
-        (dir, database)
+        let events = writer_handle(Arc::clone(&database));
+        (dir, database, events)
     });
     AppState {
         config: Config::default(),
         runtime: Runtime::started(Backend::Stub),
         database: Arc::clone(database),
+        events: events.clone(),
     }
 }
 
 /// A state for a test that writes: its own database in its own directory, so no two tests (and
 /// no two `Database::open` calls in one process) share a file.
 pub fn state_in(dir: &TempDir, config: Config) -> AppState {
+    let database = Arc::new(Mutex::new(open(dir)));
     AppState {
         config,
         runtime: Runtime::started(Backend::Stub),
-        database: Arc::new(Mutex::new(open(dir))),
+        events: writer_handle(Arc::clone(&database)),
+        database,
     }
+}
+
+/// The writer handle for a state's database. The tests that use it emit no events, so the
+/// default interval never runs; the thread exits when the state's last handle drops.
+fn writer_handle(database: Arc<Mutex<Database>>) -> EventWriter {
+    events::spawn(database, WriterOptions::default()).0
 }
 
 /// The version this build reports, for a payload that names it.

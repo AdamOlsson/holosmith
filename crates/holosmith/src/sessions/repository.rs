@@ -33,6 +33,12 @@ const INSERT: &str = "INSERT INTO sessions \
 const UPDATE_STATUS: &str =
     "UPDATE sessions SET status = ?2, status_reason = ?3, stopped_at = ?4 WHERE id = ?1";
 
+/// The event counter's bump: one per event, inside the event insert's transaction, returning the
+/// value it assigned (HS-009). A column, not `MAX(seq)`, because compaction deletes rows and a
+/// derived counter would rewind and reuse a seq (ADR-0013).
+const BUMP_LAST_SEQ: &str =
+    "UPDATE sessions SET last_seq = last_seq + 1 WHERE id = ?1 RETURNING last_seq";
+
 /// The order `list` answers in: newest activity first, for the Sessions screen (HS-013), and the
 /// id after it so the order is total. The same `sessions_last_active` index also serves
 /// eviction's ascending read of the least recently active session (HS-020).
@@ -163,6 +169,23 @@ impl<'a> SessionRepository<'a> {
         self.one("set_status", "WHERE id = ?1", &[&id])
     }
 
+    /// Bump and return this session's event counter (HS-009).
+    ///
+    /// The caller runs it inside the event insert's transaction, so the seq a row carries and the
+    /// counter that assigned it commit together; `None` means there is no such session. It lives
+    /// here because every `sessions` statement does, and the events repository calls it through
+    /// the transaction rather than writing the table itself (ADR-0013).
+    ///
+    /// `pub(crate)` because there is exactly one caller and one writer: "exactly one thread
+    /// assigns seq" would be convention if anything holding the database's lock could bump the
+    /// counter on its own and leave a permanent gap in a session's stream (PER-41 S3).
+    pub(crate) fn bump_last_seq(&self, id: &str) -> Result<Option<i64>, RepoError> {
+        self.connection
+            .query_row(BUMP_LAST_SEQ, [id], |row| row.get(0))
+            .optional()
+            .map_err(|error| RepoError::sqlite("bump_last_seq", error))
+    }
+
     /// The row a filter matches, or `None`: the reads that must not fail on "no such row".
     /// `operation` is the public method the statement belongs to, so the error names it.
     fn one(
@@ -224,9 +247,10 @@ fn row_to_session(row: &Row<'_>) -> rusqlite::Result<Result<Session, RepoError>>
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     use super::*;
+    use crate::sql::guard::Guard;
 
     /// The one file allowed to name the table in a statement.
     const REPOSITORY: &str = "sessions/repository.rs";
@@ -239,6 +263,12 @@ mod tests {
         "into sessions",
         "update sessions",
     ];
+
+    /// This table's SQL-location guard: the walk and the matcher are shared with every other
+    /// repository that has one (`crate::sql::guard`), so the two cannot drift or collide.
+    fn guard() -> Guard {
+        Guard::new("sessions", REPOSITORY, &STATEMENTS)
+    }
 
     #[test]
     fn every_status_round_trips_through_its_text() {
@@ -301,13 +331,15 @@ mod tests {
     #[test]
     fn no_sessions_sql_outside_the_repository() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let guard = guard();
         assert!(
-            sources_under(&root)
+            guard
+                .sources_under(&root)
                 .iter()
                 .any(|(file, _)| file == REPOSITORY),
             "the walk did not find {root:?}/{REPOSITORY}"
         );
-        let offenders = offenders_under(&root);
+        let offenders = guard.offenders_under(&root);
         assert!(
             offenders.is_empty(),
             "a sessions statement lives outside src/{REPOSITORY}, which owns every read and \
@@ -320,7 +352,7 @@ mod tests {
         // The guard above passes over today's tree, so this one plants a tree where it must
         // fire: empty the walk's collection and this fails instead of the rule quietly
         // stopping. The other files are the shapes the matcher has to leave alone.
-        let planted = TempDir::new("planted");
+        let planted = guard().temp_dir("planted");
         planted.plant("planted.rs", "let sql = \"SELECT id FROM sessions\";\n");
         planted.plant("harmless.rs", "let sessions = 1;\n");
         planted.plant("suffix.rs", "let sql = \"SELECT * FROM sessions_notes\";\n");
@@ -339,7 +371,7 @@ mod tests {
             "let sql = \"CREATE INDEX sessions_status ON sessions (status)\";\n",
         );
         assert_eq!(
-            offenders_under(planted.path()),
+            guard().offenders_under(planted.path()),
             ["planted.rs:1: from sessions"]
         );
     }
@@ -350,6 +382,7 @@ mod tests {
         // never appears on its line: a schema prefix, identifier quoting, a conflict clause and
         // a Rust `\`-continuation. One planted file each, so the reported line is the one the
         // statement was written on.
+        let guard = guard();
         for (file, text, reported) in [
             (
                 "prefix.rs",
@@ -377,205 +410,9 @@ mod tests {
                 "continued.rs:1: from sessions",
             ),
         ] {
-            let planted = TempDir::new("spelling");
+            let planted = guard.temp_dir("spelling");
             planted.plant(file, text);
-            assert_eq!(offenders_under(planted.path()), [reported], "{file}");
-        }
-    }
-
-    /// Every sessions statement in a file under `root` that is not the repository's, as
-    /// `<file>:<line>: <phrase>`.
-    fn offenders_under(root: &Path) -> Vec<String> {
-        let mut offenders = Vec::new();
-        for (file, text) in sources_under(root) {
-            if file == REPOSITORY {
-                continue;
-            }
-            let (normalised, lines) = normalise(&text);
-            if let Some((at, statement)) = sessions_statement(&normalised) {
-                let line = lines[normalised[..at].chars().count()];
-                offenders.push(format!("{file}:{line}: {statement}"));
-            }
-        }
-        offenders
-    }
-
-    /// The first statement normalised `text` holds, as its offset and the phrase that matched.
-    /// The phrases are tried in order, so `DELETE FROM sessions` is reported as itself rather
-    /// than as `FROM sessions`.
-    fn sessions_statement(normalised: &str) -> Option<(usize, &'static str)> {
-        STATEMENTS
-            .into_iter()
-            .find_map(|statement| names_word(normalised, statement).map(|at| (at, statement)))
-    }
-
-    /// Where `needle` appears in normalised `haystack` with neither end inside a longer word:
-    /// `sessions` is the table, and `sessions_notes` is not.
-    fn names_word(haystack: &str, needle: &str) -> Option<usize> {
-        let mut from = 0;
-        while let Some(index) = haystack[from..].find(needle) {
-            let start = from + index;
-            let end = start + needle.len();
-            let before = haystack[..start].chars().next_back();
-            let after = haystack[end..].chars().next();
-            if !before.is_some_and(is_word) && !after.is_some_and(is_word) {
-                return Some(start);
-            }
-            from = start + 1;
-        }
-        None
-    }
-
-    /// A file's text as the guard matches it, and the line of the original each character came
-    /// from, so a statement split across lines is still reported where it was written.
-    ///
-    /// The per-file normalisation is what makes a spelling like `FROM main.sessions` or a
-    /// statement broken by a Rust `\`-continuation visible: the patterns are literal, so the
-    /// text is rewritten into the one spelling `STATEMENTS` holds before they are applied.
-    fn normalise(text: &str) -> (String, Vec<usize>) {
-        let (mut normalised, mut lines) = squashed(&text.to_ascii_lowercase());
-        // `FROM main.sessions` is `FROM sessions`: `main` is the schema SQLite attaches by
-        // default, and it is not part of the statement the guard names.
-        rewrite(&mut normalised, &mut lines, "main.sessions", "sessions");
-        // `INSERT OR REPLACE`/`UPDATE OR IGNORE`: the conflict clause sits between the keyword
-        // and the table, and `STATEMENTS` does not name it.
-        for clause in ["or replace ", "or ignore "] {
-            for keyword in ["insert ", "update "] {
-                rewrite(
-                    &mut normalised,
-                    &mut lines,
-                    &format!("{keyword}{clause}"),
-                    keyword,
-                );
-            }
-        }
-        (normalised, lines)
-    }
-
-    /// `text` with `\`-continuations joined, every run of whitespace collapsed to one space, and
-    /// the quoting a word can wear (`"sessions"`, `` `sessions` ``, `[sessions]`, and the
-    /// backslash Rust needs to escape a quote inside one) removed.
-    ///
-    /// `lines[i]` is the line of `text` that character `i` came from, so a statement found in the
-    /// squashed text is still reported on the line its first keyword is written on.
-    fn squashed(text: &str) -> (String, Vec<usize>) {
-        let mut squashed = String::with_capacity(text.len());
-        let mut lines = Vec::with_capacity(text.len());
-        let mut line = 1;
-        let mut characters = text.chars().peekable();
-        while let Some(character) = characters.next() {
-            // A `\`-continuation is not a break at all: Rust drops the backslash, the newline and
-            // the next line's indentation, so the statement's two source lines are one statement
-            // here too, and `"FROM\` + newline + `sessions"` stays the one token it is at
-            // runtime.
-            if character == '\\' && characters.peek() == Some(&'\n') {
-                characters.next();
-                line += 1;
-                while characters
-                    .peek()
-                    .is_some_and(|next| next.is_whitespace() && *next != '\n')
-                {
-                    characters.next();
-                }
-                continue;
-            }
-            if character == '\n' {
-                line += 1;
-            }
-            if character.is_whitespace() {
-                if !squashed.is_empty() && !squashed.ends_with(' ') {
-                    squashed.push(' ');
-                    lines.push(line);
-                }
-                continue;
-            }
-            if matches!(character, '"' | '`' | '[' | ']' | '\\') {
-                continue;
-            }
-            squashed.push(character);
-            lines.push(line);
-        }
-        (squashed, lines)
-    }
-
-    /// Replace every `needle` in `normalised` with `replacement`, keeping `lines` — one entry
-    /// per character of `normalised` — aligned: a rewritten character keeps the line of the
-    /// spelling it replaced.
-    fn rewrite(normalised: &mut String, lines: &mut Vec<usize>, needle: &str, replacement: &str) {
-        let mut from = 0;
-        while let Some(index) = normalised[from..].find(needle) {
-            let start = from + index;
-            let start_at = normalised[..start].chars().count();
-            let line = lines[start_at];
-            let needle_chars = needle.chars().count();
-            normalised.replace_range(start..start + needle.len(), replacement);
-            lines.splice(
-                start_at..start_at + needle_chars,
-                std::iter::repeat_n(line, replacement.chars().count()),
-            );
-            from = start + replacement.len();
-        }
-    }
-
-    fn is_word(character: char) -> bool {
-        character.is_ascii_alphanumeric() || character == '_'
-    }
-
-    /// Every file under `root`, relative to it with `/` separators, and its text.
-    fn sources_under(root: &Path) -> Vec<(String, String)> {
-        let mut sources = Vec::new();
-        let mut pending: Vec<PathBuf> = vec![root.to_path_buf()];
-        while let Some(directory) = pending.pop() {
-            let Ok(entries) = std::fs::read_dir(&directory) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let Ok(file_type) = entry.file_type() else {
-                    continue;
-                };
-                let path = entry.path();
-                if file_type.is_dir() {
-                    pending.push(path);
-                } else if file_type.is_file() {
-                    let Ok(text) = std::fs::read_to_string(&path) else {
-                        continue;
-                    };
-                    let Ok(relative) = path.strip_prefix(root) else {
-                        continue;
-                    };
-                    sources.push((relative.to_string_lossy().replace('\\', "/"), text));
-                }
-            }
-        }
-        sources
-    }
-
-    /// A directory of planted files that removes itself, so the tests leave nothing in `/tmp`.
-    struct TempDir {
-        path: PathBuf,
-    }
-
-    impl TempDir {
-        fn new(label: &str) -> Self {
-            let path = std::env::temp_dir()
-                .join(format!("holosmith-guard-{label}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&path);
-            std::fs::create_dir_all(&path).expect("the planted directory is creatable");
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-
-        fn plant(&self, file: &str, text: &str) {
-            std::fs::write(self.path.join(file), text).expect("the planted file is writable");
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.path);
+            assert_eq!(guard.offenders_under(planted.path()), [reported], "{file}");
         }
     }
 }

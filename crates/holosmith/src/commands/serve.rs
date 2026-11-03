@@ -15,6 +15,7 @@ use tokio::net::TcpListener;
 use crate::clock;
 use crate::config::{Config, LoadError, LoadedConfig, Overrides};
 use crate::db::{self, Database, OpenOptions};
+use crate::events::{self, WriterOptions};
 use crate::http::{self, App, AppState, Guards};
 use crate::logging;
 use crate::runtime::{Backend, Runtime};
@@ -60,9 +61,9 @@ pub fn run(args: ServeArgs) -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
-    // Held for the process lifetime. ADR-0012's stopgap shares it with handlers behind an
-    // `Arc<Mutex<Database>>` until HS-009's single writer owns the write path; the guard is
-    // taken for one synchronous block and never held across an `.await`.
+    // Held for the process lifetime. ADR-0012's lock is kept (ADR-0013): the event writer is the
+    // single writer for events and takes the lock only for its own transaction, so a handler's
+    // guard is still taken for one synchronous block and never held across an `.await`.
     let database = match Database::open(
         &loaded.config.data_root.join(db::DATABASE_FILE),
         OpenOptions::default(),
@@ -112,11 +113,17 @@ pub fn run(args: ServeArgs) -> ExitCode {
         banner(&filter, &loaded, &runtime, &version, bound, &database);
         let guards = Guards::from_config(&loaded.config);
         let database = Arc::new(Mutex::new(database));
+        // The writer thread outlives this scope, so its handle is what the app carries. No
+        // subscriber exists yet (HS-010), so the stream `spawn` also hands back is dropped and
+        // the writer's sends answer "no receivers", which is not an error (ADR-0013); HS-010
+        // subscribes from the handle with `EventWriter::subscribe`.
+        let (events, _stream) = events::spawn(Arc::clone(&database), WriterOptions::default());
         let app = App::new(
             http::router(AppState {
                 config: loaded.config.clone(),
                 runtime,
                 database,
+                events,
             }),
             guards,
         );

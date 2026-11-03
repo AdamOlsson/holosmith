@@ -81,6 +81,7 @@ fn the_table_has_every_column_the_spec_names() {
             "stopped_at",
             "usage_in",
             "usage_out",
+            "last_seq",
         ],
         "the sessions table is not the one the spec names: {columns:?}"
     );
@@ -109,6 +110,7 @@ fn the_table_has_every_column_the_spec_names() {
         "last_active_at",
         "usage_in",
         "usage_out",
+        "last_seq",
     ] {
         assert_eq!(text(name), "INTEGER", "{name} is not INTEGER");
     }
@@ -127,6 +129,7 @@ fn the_table_has_every_column_the_spec_names() {
         "last_active_at",
         "usage_in",
         "usage_out",
+        "last_seq",
     ] {
         assert!(column(name).2, "{name} must be NOT NULL");
     }
@@ -135,8 +138,9 @@ fn the_table_has_every_column_the_spec_names() {
     for name in ["base_commit", "status_reason", "client_key", "stopped_at"] {
         assert!(!column(name).2, "{name} must be nullable");
     }
-    // The spec's three `DEFAULT 0` columns, `network` being the one the acceptance names.
-    for name in ["network", "usage_in", "usage_out"] {
+    // The spec's three `DEFAULT 0` columns, `network` being the one the acceptance names, plus
+    // HS-009's `last_seq`, which makes every pre-HS-009 row correct without a backfill.
+    for name in ["network", "usage_in", "usage_out", "last_seq"] {
         assert_eq!(
             column(name).3.as_deref(),
             Some("0"),

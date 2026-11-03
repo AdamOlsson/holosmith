@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, TransactionBehavior, params};
 
+use crate::events::repository::EventRepository;
 use crate::schema::{self, EmbedError, Migration};
 use crate::sessions::repository::SessionRepository;
 use crate::sql::split_statements;
@@ -43,12 +44,13 @@ impl Default for OpenOptions {
 }
 
 /// An open, migrated database. Held for the process lifetime; the connection stays private, and a
-/// handler reaches it only through ADR-0012's `Arc<Mutex<Database>>` stopgap until HS-009's single
-/// writer owns the write path (ADR-0009, ADR-0012).
+/// handler reaches it only through the `Arc<Mutex<Database>>` ADR-0012 introduced and ADR-0013
+/// keeps. HS-009 adds the single writer for events on top of that lock; a database actor that
+/// funnels every read and write through one task is not part of it.
 pub struct Database {
-    /// The one connection this process has. `sessions` lends it to the repository and nothing else
-    /// reaches it; a handler gets to it only through ADR-0012's `Arc<Mutex<Database>>` stopgap
-    /// until HS-009's single writer owns the write path.
+    /// The one connection this process has. `sessions` and `events` lend it to their repositories
+    /// and nothing else reaches it; a handler gets to it only through the `Arc<Mutex<Database>>`
+    /// that ADR-0012 introduced and ADR-0013 keeps.
     connection: Connection,
     path: PathBuf,
     schema_version: u32,
@@ -103,10 +105,19 @@ impl Database {
     /// Every read and write of a `sessions` row (HS-007).
     ///
     /// The repository borrows this database's connection, so the connection itself stays private.
-    /// A handler reaches it only through ADR-0012's `Arc<Mutex<Database>>` stopgap until HS-009's
-    /// single writer owns the write path (ADR-0011, ADR-0012).
+    /// A handler reaches it only through the `Arc<Mutex<Database>>` that ADR-0012 introduced and
+    /// ADR-0013 keeps.
     pub fn sessions(&self) -> SessionRepository<'_> {
         SessionRepository::new(&self.connection)
+    }
+
+    /// Every read and write of an `events` row (HS-009).
+    ///
+    /// Like [`Self::sessions`], the repository borrows this database's connection rather than
+    /// owning one. The writer thread is the only caller in production: it takes the lock, runs
+    /// one `insert_batch`, and releases it before broadcasting (ADR-0013).
+    pub fn events(&self) -> EventRepository<'_> {
+        EventRepository::new(&self.connection)
     }
 }
 
@@ -218,6 +229,13 @@ fn busy_or(path: &Path, timeout: Duration, error: rusqlite::Error) -> DbError {
 /// before every `BEGIN` because SQLite refuses WAL from inside a transaction without an error.
 /// The read-backs are the only way to know the spec's durability settings are actually in
 /// force: a filesystem that cannot do WAL answers `"delete"` the same way.
+///
+/// What each read-back proves is not the same, and the difference is worth stating: `journal_mode`
+/// is a property of the file, so `"wal"` is proof the database is in WAL. `synchronous` is
+/// per-connection and SQLite's default is already `FULL(2)`, so reading `2` proves the statement
+/// ran without an error and the value is now what we asked for — not that SQLite would otherwise
+/// have answered anything different. `the_four_pragmas_read_back_on_a_real_file` sets it to `OFF`
+/// first for exactly that reason, so its assertion reflects the statement rather than a default.
 fn configured(conn: &Connection, path: &Path, options: OpenOptions) -> Result<(), DbError> {
     let failed = |error| busy_or(path, options.busy_timeout, error);
     conn.busy_timeout(options.busy_timeout).map_err(failed)?;
@@ -229,6 +247,10 @@ fn configured(conn: &Connection, path: &Path, options: OpenOptions) -> Result<()
         .map_err(sqlite_error_about(path))?;
     conn.pragma_update(None, "foreign_keys", "ON")
         .map_err(sqlite_error_about(path))?;
+    // Read back · but read this one for what it is: `synchronous` is per-connection and SQLite's
+    // default is already FULL(2), so a `2` here proves the statement ran without an error and
+    // the value is now what was asked for. Only `journal_mode` above is proof of a property of
+    // the file; the test that makes *this* assertion falsifiable sets OFF first (see above).
     let synchronous: i64 = conn
         .pragma_query_value(None, "synchronous", |row| row.get(0))
         .map_err(sqlite_error_about(path))?;
@@ -376,6 +398,15 @@ mod tests {
         // needs a temporary file.
         let file = TempPath::new("pragmas");
         let conn = Connection::open(file.path()).expect("a temporary database opens");
+        // `synchronous` needs a value to move *from* before a read-back of 2 is a proof: it is
+        // per-connection and SQLite's default is already FULL(2), so `configured` doing nothing
+        // would still leave 2 here. OFF first makes the assertion below falsifiable.
+        conn.pragma_update(None, "synchronous", "OFF")
+            .expect("synchronous is settable");
+        let off: i64 = conn
+            .pragma_query_value(None, "synchronous", |row| row.get(0))
+            .expect("synchronous answers");
+        assert_eq!(off, 0, "the scratch connection did not take OFF");
         configured(
             &conn,
             file.path(),
@@ -391,7 +422,11 @@ mod tests {
         let synchronous: i64 = conn
             .pragma_query_value(None, "synchronous", |row| row.get(0))
             .expect("synchronous answers");
-        assert_eq!(synchronous, 2);
+        assert_eq!(
+            synchronous, 2,
+            "the read-back answered {synchronous} after it answered 0: the configured \
+             synchronous did not take"
+        );
         let foreign_keys: i64 = conn
             .pragma_query_value(None, "foreign_keys", |row| row.get(0))
             .expect("foreign_keys answers");

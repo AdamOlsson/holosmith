@@ -5,6 +5,7 @@ pub mod clock;
 pub mod commands;
 pub mod config;
 pub mod db;
+pub mod events;
 pub mod http;
 pub mod logging;
 pub mod pins;
