@@ -158,7 +158,7 @@ impl ApiError {
         )
     }
 
-    /// The same code again, with the sentence a steer's body deserves (HS-017).
+    /// The same code as [`Self::bad_body`], with the sentence a steer's body deserves (HS-017).
     ///
     /// A steer carries one `guidance` string and nothing else, so telling the operator about a
     /// prompt's or a create's fields would describe the wrong request (ADR-0008).
@@ -252,7 +252,7 @@ impl ApiError {
     ///
     /// One code per state, the state's own machine word: the spec names `session_stopped` (item 8)
     /// and `session_running` (item 12), HS-016 adds `session_idle` (an abort with no turn to abort)
-    /// and HS-017 will name it too. The family is the rule rather than a list of the codes the spec
+    /// and HS-017 names it too (a steer with no turn). The family is the rule rather than a list of the codes the spec
     /// happens to spell, so `idle` is a member like the rest and there is no umbrella code.
     ///
     /// The **message** is the caller's, because it has to describe its own request: an abort's

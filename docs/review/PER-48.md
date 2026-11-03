@@ -57,8 +57,8 @@ Sources read: `AGENTS.md`, `PROMPT.md` (rules 2/73), `HolosmithSpec.md` §16 + t
 **Tests a supervisor must run (this role has no shell).** `. ~/.pi/toolchains/env.sh && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test && cd ../web && npm test`, then `scripts/verify.sh` (expect 28 cases). Nothing below is confirmed by a run; every claim above is read from source.
 ## Resolution
 
-Every finding was triaged. "Fixed" means the code or doc changed in `8ba1ba2`'s parent commit (the
-fix commit for this story); "dismissed" carries the citation that makes it not a defect.
+Every finding was triaged. "Fixed" means the code or doc changed in the story's fix commit (`3d2ecba`);
+"dismissed" carries the citation that makes it not a defect.
 
 | # | Axis | Finding | Verdict |
 | --- | --- | --- | --- |

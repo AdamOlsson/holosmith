@@ -492,7 +492,7 @@ function applyChange(
   }
   // A steer is one block drawn from one frame: no id, nothing a later frame updates, and its text is
   // set once rather than appended to (ADR-0021). The composer's guidance appears where it landed in
-  // the turn, which is what "the transcript shows what was injected and when" means.
+  // the turn, which is what "the transcript shows what was delivered and when" means.
   if (change.op === "steer") {
     const block = make("article", "steer");
     block.append(make("div", "steer-label", "You"), make("div", "steer-text", change.text));
@@ -536,9 +536,8 @@ function applyChange(
 
 // The composer: one box of guidance and the three things that can be done with it. Prompting is the
 // `idle` row's trigger and steering and aborting are a running turn's, so the buttons exist in one
-// state each (`affordances`). Prompting posts for real (HS-015) and aborting does too (HS-016);
-// steering keeps the notice naming the story that wires it, because a request that would 404 is
-// worse than a note.
+// state each (`affordances`). All three post for real: the prompt (HS-015), the abort (HS-016) and the
+// steer (HS-017), which is the one whose frame the page also draws into the transcript.
 type Composer = { element: HTMLElement; update: (state: SessionState) => void };
 
 // `showState` patches the screen's badge from a row the prompt's answer carried, so a 202 says

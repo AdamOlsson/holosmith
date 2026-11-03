@@ -5,6 +5,7 @@
 //! an error at read time naming the text that was found, and the transition rules arrive without
 //! a migration that has to rewrite a constraint (ADR-0011).
 
+pub(crate) mod activity;
 pub mod repository;
 pub mod state;
 

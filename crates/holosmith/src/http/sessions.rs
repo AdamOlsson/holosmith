@@ -29,6 +29,7 @@ use crate::events::NewEvent;
 use crate::http::app::AppState;
 use crate::http::error::{ApiError, internal};
 use crate::ladder;
+use crate::sessions::activity;
 use crate::sessions::state::{StateError, Trigger};
 use crate::sessions::{NewSession, RepoError, Session, Status};
 
@@ -522,40 +523,16 @@ pub async fn steer(state: &AppState, id: &str, body: Result<Bytes, BytesRejectio
     if let Err(error) = state.backend.steer(&current, &guidance).await {
         // The turn may have ended between the read and the call, which is an ordinary race; a
         // backend that does not implement steering is a deployment mistake. Neither is something the
-        // client can act on differently, so both are the fixed 500 with the error in the log.
-        tracing::warn!(
-            target: "holosmith::http::sessions",
-            session = %current.id,
-            %error,
-            "a steer was not delivered"
-        );
+        // client can act on differently, so both are the fixed 500 — and `internal` is what logs the
+        // error, once.
         return internal("steer", error).into_response();
     }
-    touch(state, &current.id);
+    activity::touch(&state.database, &current.id);
     record_steer(state, &current.id, &guidance).await;
     (StatusCode::ACCEPTED, Json(current)).into_response()
 }
 
-/// Move `last_active_at`, which a steer does as much as a prompt or a settle does.
-///
-/// A failed touch is logged and never fails the request: the row's activity is what HS-020's eviction
-/// order reads, not the steer's outcome, and the guidance has already reached the agent.
-fn touch(state: &AppState, id: &str) {
-    let database = state
-        .database
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    if let Err(error) = database.sessions().touch(id, clock::unix_now()) {
-        tracing::warn!(
-            target: "holosmith::http::sessions",
-            session = id,
-            %error,
-            "last_active_at did not move for a steer"
-        );
-    }
-}
-
-/// Append the `turn.steer` frame, so the transcript can show what was injected and when.
+/// Append the `turn.steer` frame, so the transcript can show what was delivered and when.
 ///
 /// A failed append means the writer has stopped, which in a served process means the process is
 /// going down; the loss is logged and the request still answers 202, because the guidance reached the
@@ -801,6 +778,38 @@ mod tests {
             request_parts(&key_headers("k"), &body("..", "m", "high")),
             BAD_PROJECT,
         );
+    }
+
+    /// HS-017: a steer's body is one non-empty `guidance`, and the sentence it is refused with is
+    /// its own — the code is shared with a prompt's `bad_body`, which is the point of ADR-0008.
+    #[test]
+    fn a_steer_body_is_one_non_empty_guidance_and_nothing_else() {
+        assert_eq!(
+            parse_steer(br#"{"guidance":"and the lexer too"}"#).expect("the body parses"),
+            "and the lexer too"
+        );
+        for text in [
+            "",
+            "not json",
+            "[]",
+            "null",
+            "42",
+            "{}",
+            r#"{"guidance":""}"#,
+            r#"{"guidance":"   "}"#,
+            r#"{"guidance":42}"#,
+            r#"{"guidance":null}"#,
+            r#"{"guidance":"g","extra":1}"#,
+            r#"{"text":"a steer"}"#,
+        ] {
+            let error = refusal(parse_steer(text.as_bytes()));
+            assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY, "{text:?}");
+            assert_eq!(error.body.code, BAD_BODY, "{text:?}");
+            assert!(
+                error.body.message.contains("guidance"),
+                "the sentence must name the steer's own field: {text:?}"
+            );
+        }
     }
 
     #[test]

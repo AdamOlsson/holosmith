@@ -236,6 +236,26 @@ button:disabled {
   margin-top: 0.25rem;
 }
 
+/* The operator's guidance, drawn where it landed in the turn (HS-017): its own block, marked so it is
+   never mistaken for something the agent said, and its text keeps the line breaks the composer's
+   textarea produced — the same rule `.text` follows. */
+.steer {
+  border-left: 2px solid color-mix(in srgb, currentColor 20%, transparent);
+  padding-left: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.steer-label {
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.6;
+}
+
+.steer-text {
+  white-space: pre-wrap;
+}
+
 .turn-boundary {
   font-size: 0.75rem;
   letter-spacing: 0.04em;

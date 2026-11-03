@@ -127,5 +127,6 @@ and a 202 that does nothing is indistinguishable from a ladder that failed.
   a constructor argument only a test can set.
 - `web/src/main.ts` aborts for real now: a POST with no body and the two guard headers, a notice on
   success and the envelope's code on failure. The badge follows the stream, not the answer.
-- `SessionBackend` is now ten methods. `steer` and `resume` still have no caller; HS-017 and HS-018
-  are one story away each, which is why they were added with the trait rather than with their callers.
+- `SessionBackend` is now ten methods. `steer` and `resume` had no caller when this was written; HS-017
+  gave `steer` one (**see ADR-0021**) and HS-018 owns `resume`, which is why the methods were added with
+  the trait rather than with their callers.

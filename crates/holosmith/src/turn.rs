@@ -22,15 +22,15 @@
 //! Abort and steer are HS-016's and HS-017's: the script is cut short by the backend's own
 //! `abort`/`stop`, and the ladder that asks for it is [`crate::ladder`].
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use tokio::task::JoinHandle;
 
 use crate::backend::{Backends, SessionBackend, TurnEnd};
-use crate::clock;
 use crate::db::Database;
 use crate::events::EventWriter;
 use crate::sessions::Session;
+use crate::sessions::activity;
 use crate::sessions::state::{StateError, Transitioner, Trigger};
 
 /// The reason a turn that ended because of an abort records on `running -> idle`.
@@ -136,18 +136,11 @@ impl Turn {
     /// Record that the session was active: `last_active_at` moves at the prompt and at the settle,
     /// which is what HS-020's LRU order and HS-021's idle stop read.
     ///
-    /// A failed touch is logged and does not end the turn: the row's activity is a hint for
-    /// eviction, and losing it is not a reason to strand a session in `running`.
+    /// The rule that a failed touch is logged rather than fatal lives in
+    /// [`crate::sessions::activity`], because the steer handler moves the same column for the same
+    /// reason.
     fn touch(&self, session_id: &str) {
-        let database = self.database.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Err(error) = database.sessions().touch(session_id, clock::unix_now()) {
-            tracing::warn!(
-                target: "holosmith::turn",
-                session = session_id,
-                %error,
-                "last_active_at did not move"
-            );
-        }
+        activity::touch(&self.database, session_id);
     }
 
     /// One state change, with a failure logged rather than fatal: the row is the turn's outcome and

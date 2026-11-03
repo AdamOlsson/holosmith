@@ -111,21 +111,8 @@ export function parseFrame(eventType: string, data: string): Frame | null {
   if (eventType === TURN_START || eventType === TURN_END) {
     return { type: "boundary", boundary: eventType === TURN_START ? "start" : "end" };
   }
-  if (eventType === TURN_STEER) {
-    // No id to check: the block is drawn from this one frame, so a payload with no text simply has
-    // nothing to draw and is dropped like any other malformed frame.
-    try {
-      const steer: unknown = JSON.parse(data);
-      if (typeof steer !== "object" || steer === null || Array.isArray(steer)) {
-        return null;
-      }
-      const guidance = text((steer as Record<string, unknown>)["text"]);
-      return guidance === null ? null : { type: "steer", text: guidance };
-    } catch {
-      return null;
-    }
-  }
   if (
+    eventType !== TURN_STEER &&
     eventType !== DELTA &&
     eventType !== SNAPSHOT &&
     eventType !== MESSAGE_END &&
@@ -144,6 +131,12 @@ export function parseFrame(eventType: string, data: string): Frame | null {
     return null;
   }
   const fields = payload as Record<string, unknown>;
+  if (eventType === TURN_STEER) {
+    // No id to read: the block is drawn from this one frame, so a payload with no text has nothing
+    // to draw and is dropped like any other malformed frame.
+    const guidance = text(fields["text"]);
+    return guidance === null ? null : { type: "steer", text: guidance };
+  }
   if (eventType === TOOL_START || eventType === TOOL_END) {
     const tool = toolId(fields);
     if (tool === null) {

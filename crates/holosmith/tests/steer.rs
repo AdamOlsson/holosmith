@@ -169,7 +169,20 @@ async fn a_steer_answers_the_running_row_and_records_what_was_delivered() {
         "the prompt is accepted"
     );
     wait_running(&state, &id).await;
-    let before = row(&state, &id).last_active_at;
+    // HS-015's acceptance: `last_active_at` moves on prompt, settle **and steer**. The clock is whole
+    // seconds, so "it moved" a second later would be satisfied by the settle alone — the row is pushed
+    // into the past first, and only the steer's own touch can bring it back. The read below is
+    // immediate, not a `wait_until`: the handler touches before it answers, and the turn it is running
+    // takes twelve frames, so nothing else can have moved the column yet.
+    let past = holosmith::clock::unix_now() - 60;
+    {
+        let database = state.database.lock().expect("the lock is not poisoned");
+        database
+            .sessions()
+            .touch(&id, past)
+            .expect("the row is there");
+    }
+    assert_eq!(row(&state, &id).last_active_at, past);
 
     let steered = post_steer(served.addr, &id, &format!(r#"{{"guidance":"{GUIDANCE}"}}"#)).await;
     assert_eq!(steered.status, 202, "{}", steered.body);
@@ -205,11 +218,10 @@ async fn a_steer_answers_the_running_row_and_records_what_was_delivered() {
             .any(|(kind, payload)| kind == TURN_STEER && payload["text"] == GUIDANCE)
     })
     .await;
-    // HS-015's acceptance: `last_active_at` moves on prompt, settle and steer.
-    wait_until("last_active_at moved", || {
-        row(&state, &id).last_active_at > before
-    })
-    .await;
+    assert!(
+        row(&state, &id).last_active_at > past,
+        "the steer did not move last_active_at: it is still {past}"
+    );
 
     // The turn continues: the guide did not end it, and nothing else moved the session.
     wait_idle(&state, &id).await;
@@ -237,6 +249,14 @@ async fn a_steer_is_refused_with_the_states_own_code() {
     );
 
     // `stopped`: the spec's own example (item 8: prompt, steer and abort on a stopped session).
+    // Both refusals happened before the agent was asked: a handler that steered first would keep this
+    // test green, so the stub's own record is the assertion.
+    assert!(
+        steers(&idle_state).is_empty(),
+        "a refused steer reached the agent: {:?}",
+        steers(&idle_state)
+    );
+
     drive(&idle_state, &idle_id, Trigger::IdleStop).await;
     assert_eq!(row(&idle_state, &idle_id).status, Status::Stopped);
     assert_envelope(
@@ -292,6 +312,14 @@ async fn a_steer_body_of_the_wrong_shape_is_bad_body_before_anything_else() {
         let refused = post_steer(served.addr, &id, body).await;
         assert_envelope(&refused, 422, BAD_BODY);
     }
+    // Body before row: an id the table does not hold still answers `bad_body` when the body is wrong,
+    // because a client that sent the wrong field should not be told its session is missing.
+    assert_envelope(
+        &post_steer(served.addr, "0123456789abcdef", r#"{"guidance":""}"#).await,
+        422,
+        BAD_BODY,
+    );
+
     // No refusal reached the agent: a body that was refused steered nothing.
     assert!(
         steers(&state).is_empty(),

@@ -858,7 +858,7 @@ case_abort_on_an_idle_session() {
 }
 
 # HS-017: a steer hands guidance to the running turn, answers 202 with the row, and is recorded as a
-# `turn.steer` frame — which is how the transcript shows what was injected and when. The abort left the
+# `turn.steer` frame — which is how the transcript shows what was delivered and when. The abort left the
 # session idle, so this case starts its own turn.
 case_steer() {
   local name=case_steer response body
@@ -931,7 +931,7 @@ wait_for_idle() {
   local label="$1" body
   for _ in $(seq 1 100); do
     fetch "$label" GET "/api/sessions/$created_id" "Host: 127.0.0.1" ||
-      return 1
+      fail "$label/no_answer" "GET /api/sessions/$created_id did not answer"
     body="$(cat "$WORK/responses/$label.body")"
     case "$body" in
       *'"status":"idle"'*)

@@ -24,9 +24,12 @@ ADR-0018's "a message id keys a transcript block":
   `Last-Event-ID`, and a client without one rebuilds the whole page anyway.
 
 The alternative — mint a `steer-<instant>-<n>` id — buys nothing today and invents a third id
-namespace (after the session's hex id and the stub's message ids), so it is not done. If a later story
-gives a steer a continuable shape (a tool call answering it, say), it can add an id then, because a
-frame that names no id is not a block a client has ever keyed by.
+namespace (after the session's hex id and the stub's message ids), so it is not done. What it would cost
+to add later is worth naming: the log is durable, so a `turn.steer` that grew an id would leave two
+shapes of one kind in the same table, and every reader would branch on which it got. That price is paid
+by the story that adds the id, not by this one, and the choice there is either a kind of its own
+(`turn.steer.end`, say) or keying an unkeyed block by the frame's `seq` — which already travels as the
+SSE `id` (ADR-0014) and would generalize ADR-0018's rule rather than except it.
 
 ## The agent is asked first; the record follows what was delivered
 
@@ -78,10 +81,10 @@ silently changed the request the operator made would be worse than one that says
 - `web/test/transcript.test.ts` grows two tests: a `turn.steer` frame parses to one steer change, three
   steers are three blocks (no folding, no message id), a steer is not in `order()`, and a frame with no
   string `text` is dropped rather than drawn empty.
-- `scripts/verify.sh` grows two cases: `case_steer` (the 202, the frame on the stream, and the settle
-  that follows it — 30 cases) and `case_steer_on_an_idle_session` (the `409`).
+- `scripts/verify.sh` grows two cases: `case_steer` (the 202, the frame on the stream, then the row
+  polled until it says `idle` — 30 cases) and `case_steer_on_an_idle_session` (the `409`).
 - `SessionBackend::steer` has its first production caller. `resume` is now the only trait method
   without one, which is HS-018's.
-- The `register_steer` path holds no lock across an `.await`: one synchronous read for the row, the
-  backend call, then one touch and one append. The touch and the append are logged rather than fatal,
-  for the reason the ladder's are.
+- The steer handler holds no lock across an `.await`: one synchronous read for the row, the backend
+  call, then one touch and one append. The touch and the append are logged rather than fatal, for the
+  reason the ladder's are.
