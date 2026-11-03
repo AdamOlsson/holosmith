@@ -152,6 +152,22 @@ _Avoid_: Offset, id, index
 The one thread that assigns each event's seq, commits a batch of events in one transaction, and only then broadcasts it. Its two handles are `EventWriter` (a producer appends) and `EventStream` (a subscriber reads committed events).
 _Avoid_: Logger, event loop, queue
 
+**Stream**:
+The HTTP response at `GET /api/sessions/:id/events`: one session's committed events as server-sent events, replayed from the client's last-seen seq and then delivered live. Its SSE `id` field is the seq. Not the `EventStream` handle, which is the in-process subscriber the event writer broadcasts to.
+_Avoid_: Event stream, connection, feed, socket
+
+**Last-Event-ID**:
+The request header a reconnecting client sends: the last SSE `id` it received, which is a seq. The replay starts at that seq plus one; absent or unusable, it starts at the beginning.
+_Avoid_: Cursor, offset, resume token, since
+
+**Stream registry**:
+The per-session record of open streams that `AppState` carries: how many are open (HS-066 reads it) and one close signal each (HS-019 ends them by deleting a session).
+_Avoid_: Subscriber list, presence, connection pool
+
+**Keep-alive comment**:
+The `:` line axum's keep-alive writes on a stream that has been silent for 15 s, so an intermediary cannot idle-close it. Its machine name is `KEEP_ALIVE_INTERVAL`, re-exported from `http`; nothing writes it by hand.
+_Avoid_: Heartbeat, ping, keepalive event
+
 **Delta**:
 An incremental piece of model output that is appended to a message.
 _Avoid_: Chunk, token, fragment
