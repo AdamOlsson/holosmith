@@ -306,17 +306,25 @@ impl RequestCounter {
     }
 }
 
-/// The control listener's route table: the health endpoint, the create endpoint, the session's
-/// event stream, the embedded app, and the two answers to an unknown path (ADR-0007).
+/// The control listener's route table: the health endpoint, the sessions collection (its list and
+/// its create), the session's event stream, the embedded app, and the two answers to an unknown path
+/// (ADR-0007).
 pub fn router(state: AppState) -> Routes {
     let state = Arc::new(state);
     let health_state = Arc::clone(&state);
+    let list_state = Arc::clone(&state);
     let create_state = Arc::clone(&state);
     let stream_state = Arc::clone(&state);
     Routes::new()
         .get("/api/health", move || {
             let state = Arc::clone(&health_state);
             async move { health::respond(&Health::of(&state.config, &state.runtime)) }
+        })
+        // Read-only, so the guards apply as they do to every other `GET`, the manifest records
+        // `ReadOnly`, and nothing new is needed for HS-013's list (ADR-0017).
+        .get("/api/sessions", move || {
+            let state = Arc::clone(&list_state);
+            async move { sessions::list(&state).await }
         })
         // The body is taken as a `Result`, not as `Bytes`: a rejection left to axum answers a
         // `text/plain` 400/413 outside ADR-0008's envelope, so the handler maps it to `bad_body`

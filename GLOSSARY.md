@@ -74,6 +74,10 @@ _Avoid_: Start, launch, new session, create session
 The `Idempotency-Key` header a create carries, stored verbatim in the unique column `client_key`: two creates with one key are one session, and the repeat is answered with the same one.
 _Avoid_: Client key, request id, dedupe token, idempotency token
 
+**Sessions screen**:
+The page the operator works from: the machine's health, the sessions it holds with each one's state and last activity, and the form that creates a session. Its list is `GET /api/sessions` and its states arrive as `session.status` frames, so the page holds no state of its own.
+_Avoid_: Dashboard, home page, console, session list page
+
 **Turn**:
 One prompt-to-settled cycle inside a session.
 _Avoid_: Request, message, exchange

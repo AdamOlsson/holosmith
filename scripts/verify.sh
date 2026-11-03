@@ -8,8 +8,8 @@
 # scripts/check-embed.sh, then serve: dist/<host-triple>/holosmith on a random port with a temp
 # config and a temp data dir, answering /api/health, the schema version, the app shell, the 404
 # envelope, every browser-facing guard refusal (ADR-0010), the create endpoint's 202/422/409
-# answers and the session's event stream, with no CORS header on any answer, and stopping on
-# SIGTERM with exit 0.
+# answers, the sessions list and the session's event stream, with no CORS header on any answer,
+# and stopping on SIGTERM with exit 0.
 # --no-build skips the two artifact phases; --keep keeps the work dir of a successful run. On
 # failure this prints FAIL <assertion> and keeps the work dir (config, banner, every answer).
 # Downloads nothing and needs neither curl nor jq: every request is a /dev/tcp fetch. Put the
@@ -276,6 +276,7 @@ serve_cases=(
   case_backend_from_config
   case_provisioning_steps
   case_state_transition_payload
+  case_sessions_list
 )
 
 # The health payload: exactly four keys, and the uptime is not predictable, so the assertion is
@@ -588,6 +589,47 @@ case_state_transition_payload() {
       fail "$name/step_payload" "a step report does not claim the unchanged state: $body"
       ;;
   esac
+}
+
+# HS-013: the sessions list. A `GET`, so only the host check applies, and the body carries the
+# session `case_create_session` made plus the machine's network default, which is the create form's
+# checkbox initial state. Read last, because it needs `$created_id`.
+case_sessions_list() {
+  local name=case_sessions_list response body
+  fetch "$name" GET /api/sessions "Host: 127.0.0.1" ||
+    fail "$name/no_answer" "GET /api/sessions did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 200
+  expect_header "$name" "$response" content-type "application/json"
+  body="$(cat "$WORK/responses/$name.body")"
+  case "$body" in
+    *'"sessions":[{'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "$name/sessions" "the body carries no sessions array with a row: $body"
+      ;;
+  esac
+  case "$body" in
+    *"$created_id"*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "$name/session" "the body does not carry $created_id: $body"
+      ;;
+  esac
+  # The boot config does not set `network_default`, so the machine's default is off and the value is
+  # pinned: a renamed or inverted field would otherwise still "appear".
+  case "$body" in
+    *'"network_default":false'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "$name/network_default" "the body does not carry network_default:false: $body"
+      ;;
+  esac
+  # The row's *state* is deliberately not pinned: the provisioner HS-011 starts runs while these
+  # cases run, so `starting` or `idle` are both correct by the time this answer is read.
 }
 
 # Box 4, over every answer the cases above saved: none of them carries a CORS header, and none

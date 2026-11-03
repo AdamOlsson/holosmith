@@ -1,5 +1,6 @@
-//! `POST /api/sessions`: validate the body, write one `starting` row, answer 202 (HS-008,
-//! ADR-0012).
+//! The sessions collection: `POST /api/sessions` validates the body, writes one `starting` row and
+//! answers 202 (HS-008, ADR-0012); `GET /api/sessions` answers every row in the repository's own
+//! order together with the machine's network default (HS-013, ADR-0017).
 //!
 //! The body is parsed by hand rather than through `axum::Json<T>`: that extractor rejects a bad
 //! body with its own `text/plain` answer, which would break ADR-0008's envelope on exactly the
@@ -277,6 +278,48 @@ fn created(session: Session) -> Response {
         HeaderValue::from_str(&location).expect("a session id is a valid header value"),
     );
     response
+}
+
+/// The list's body: every row in the repository's own order, plus the machine setting the
+/// new-session form's Internet-access checkbox defaults from.
+///
+/// `network_default` rides here rather than on `/api/health` because that payload is pinned at four
+/// keys (ADR-0009) and because the screen needs both answers to draw itself: one round trip, no new
+/// endpoint (ADR-0017). The elements are the `Session` row itself, so the list cannot drift from the
+/// create's answer.
+#[derive(Debug, Serialize)]
+pub struct SessionList {
+    sessions: Vec<Session>,
+    network_default: bool,
+}
+
+/// Answer `GET /api/sessions`: 200 and the collection, or the ADR-0008 envelope.
+///
+/// A read-only route, so the guards apply with nothing added here (ADR-0010).
+pub async fn list(state: &AppState) -> Response {
+    match list_locked(state) {
+        Ok(list) => Json(list).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+/// The one lock scope the list has: no `.await` inside it, so the guard cannot outlive a statement.
+///
+/// No filter and no paging: the repository's state filter has no caller yet and HS-061 owns paging,
+/// so the answer is the order `list(None)` already returns (`last_active_at DESC, id ASC`).
+fn list_locked(state: &AppState) -> Result<SessionList, ApiError> {
+    let database = state
+        .database
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let sessions = database
+        .sessions()
+        .list(None)
+        .map_err(|error| internal("list", error))?;
+    Ok(SessionList {
+        sessions,
+        network_default: state.config.network_default,
+    })
 }
 
 #[cfg(test)]

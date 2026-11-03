@@ -109,20 +109,23 @@ lines until one contains a needle — an event stream never ends, so "read until
 settles the question" is the only bounded way to watch a producer.
 
 A `serve_cases` array names the `case_*` functions, one per answer a browser gets: the health
-payload, the schema version the banner reports against `version --json`, the app shell
-byte-for-byte against `web/dist/index.html`, the `404` envelope of ADR-0008, one case per
-guard refusal (`bad_host`, `bad_origin`, `bad_client`, `bad_owner`), the request that passes
-all four, the exempt health probe, the create endpoint (`case_create_session`,
-`case_create_is_idempotent`, `case_create_bad_project`, `case_create_cap_reached`), the
-session's event stream (`case_events_stream`, which reads the stream's header block with
-`fetch_stream` and asserts `200`, `text/event-stream` and `no-cache` on the session
-`case_create_session` made), the backend the boot chose (`case_backend_from_config`), the
-provisioning that create starts (`case_provisioning_steps`, which reads that session's stream until
-the event says `idle` and asserts the four step words arrived in order), and the state machine's
-payload (`case_state_transition_payload`, which asserts the four step reports claim no state change
-and the fifth is exactly `{"from":"starting","to":"idle","step":null,"reason":null}`). A case
-that must assert one code keeps every higher guard check correct, or it asserts another
-guard's code under its own name.
+payload, the schema version the banner reports against `version --json`, the app shell, the page
+that holds the session list and the new-session form, byte-for-byte against
+`web/dist/index.html`, the `404` envelope of ADR-0008, one case per guard refusal (`bad_host`,
+`bad_origin`, `bad_client`, `bad_owner`), the request that passes all four, the exempt health
+probe, the create endpoint (`case_create_session`, `case_create_is_idempotent`,
+`case_create_bad_project`, `case_create_cap_reached`), the sessions list (`case_sessions_list`,
+which asserts `200`, `application/json`, the session `case_create_session` made and a
+`network_default` field the create form's checkbox starts from), the session's event stream
+(`case_events_stream`, which reads the stream's header block with `fetch_stream` and asserts
+`200`, `text/event-stream` and `no-cache` on the session `case_create_session` made), the backend
+the boot chose (`case_backend_from_config`), the provisioning that create starts
+(`case_provisioning_steps`, which reads that session's stream until the event says `idle` and
+asserts the four step words arrived in order), and the state machine's payload
+(`case_state_transition_payload`, which asserts the four step reports claim no state change and
+the fifth is exactly `{"from":"starting","to":"idle","step":null,"reason":null}`). A case
+that must assert one code keeps every higher guard check correct, or it asserts another guard's
+code under its own name.
 
 The CORS sweep is deliberately **not** in that array: it runs once after every case and checks
 that no answer the run saved carries an `access-control-*` header or `vary: origin`. Being
