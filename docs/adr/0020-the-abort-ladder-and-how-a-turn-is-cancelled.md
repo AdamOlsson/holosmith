@@ -49,13 +49,22 @@ HS-023's budget climb the same two rungs and record their own word — `turn_tim
 `budget_exceeded` — where the abort records `forced_abort`. A constant inside the routine would have
 made the two later stories a copy of it.
 
+**The parameter is rung 2's reason only.** Rung 1's ending is the turn runner's and is always
+`abort_completed`, because the runner is not told why its turn is being stopped — the backend answers
+`Aborted` and nothing more. That is enough for this story (an abort is what rung 1 is for) and it is
+*not* enough for HS-022 and HS-023, whose acceptance is that the caller's own word reaches the row's
+`status_reason`. Those two stories must plumb it: the smallest shape is a reason on the turn itself
+(`Turn` holding the `&'static str` its abort ending records), set by whoever climbs the ladder. Naming
+that here is deliberate — a later story that finds the row saying `abort_completed` after a timeout has
+this paragraph to blame, not a mystery.
+
 The rungs, in the spec's order and with the reasoning that fixes each one:
 
 | Step | What it does | Why in this order |
 | --- | --- | --- |
 | 1a | `clear_queue` | The queue is what would run *next*; dropping it first means the abort cannot be followed by the work it was meant to cancel |
 | 1b | `abort` | The agent's own stop, which is the cheap path |
-| 1c | wait up to `abort_grace`, reading the row | The row is the question, not a flag in the ladder: the runner writes `running → idle` when the agent stops, so "the row is no longer `running`" *is* "rung 1 worked" |
+| 1c | wait until `abort_grace` has passed, reading the row | The row is the question, not a flag in the ladder: the runner writes `running → idle` when the agent stops, so "the row is no longer `running`" *is* "rung 1 worked" |
 | 2a | apply `abort_ladder` → `stopped` with the reason | The row first, because the other order leaves a row that says `idle` over a dead container — the one lie a client cannot detect |
 | 2b | `stop` the backend | Kills the hung agent, which is what finally makes the turn answer `Aborted` |
 | 2c | apply `resume` → `starting`, then the provisioner | "Then immediate resume" (item 16 §2); the four steps are the provisioner's, and that is the path HS-018's endpoint reuses |
@@ -111,8 +120,8 @@ and a 202 that does nothing is indistinguishable from a ladder that failed.
   `idle` with the same id and the four provisioning steps; the ladder's reason is the caller's
   (`turn_timeout`); `409 session_starting`, `409 session_idle` twice over, and `404 not_found`; and
   the route is recorded `Mutating`. Every refusal is asserted on status, `code` and `content-type`.
-- `src/backend/stub.rs` grows three tests' worth of behaviour: an abort cuts the script short, an
-  ignored abort does not, and a stop cuts it either way and leaves no flag behind.
+- `src/backend/stub.rs` grows one test in three phases: an abort cuts the script short, an ignored
+  abort does not, and a stop cuts it either way and leaves no stop request behind.
 - `scripts/verify.sh` grows two cases (`case_abort`, `case_abort_on_an_idle_session`) — 28 cases —
   and the shipped artifact is where rung 1's `abort_completed` is proved, because rung 2's trigger is
   a constructor argument only a test can set.

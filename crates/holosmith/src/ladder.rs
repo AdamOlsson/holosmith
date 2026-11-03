@@ -6,10 +6,14 @@
 //!
 //! 1. [`SessionBackend::clear_queue`], then [`SessionBackend::abort`]: the agent is asked to stop,
 //!    which is the cheap path and works whenever the agent is still listening.
-//! 2. If the row is still `running` after `abort_grace`, the container is killed: the row becomes
-//!    `stopped` with the ladder's reason (`forced_abort` here), the backend is stopped, and the
-//!    session is resumed at once, because a killed container is not a session the operator asked
+//! 2. If the row is still `running` when `abort_grace` is spent, the container is killed: the row
+//!    becomes `stopped` with the ladder's reason (`forced_abort` here), the backend is stopped, and
+//!    the session is resumed at once, because a killed container is not a session the operator asked
 //!    to keep stopped.
+//!
+//! **The grace covers rung 1 as well as the wait.** It runs from the abort, not from whenever the two
+//! calls answer: an RPC that never returns is exactly the hang this routine exists for, so each call
+//! is bounded by what is left of the grace rather than awaited forever.
 //!
 //! Four rules it keeps:
 //!
@@ -32,13 +36,14 @@
 //! call [`SessionBackend::resume`]: whether a resumed session runs every provisioning step or only
 //! the container's is HS-018's and HS-024's question, and answering it here would be a guess.
 
+use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-use crate::backend::{Backends, SessionBackend};
+use crate::backend::{BackendError, Backends, SessionBackend};
 use crate::db::Database;
 use crate::events::EventWriter;
 use crate::provisioner::Provisioner;
@@ -57,8 +62,22 @@ pub const FORCED_ABORT: &str = "forced_abort";
 /// reported yet.
 const POLL: Duration = Duration::from_millis(25);
 
-/// The ladder's handles: where to stop the agent, where the row is, where events go, and how long
-/// rung 1 gets before rung 2 fires.
+/// One backend call, awaited no later than `deadline`.
+///
+/// A failure and a spent grace answer the same way — a reason a log line can print — because the
+/// ladder treats both as "rung 1 did not work": the difference between an RPC that refused and one
+/// that never answered is the agent's, and both are the hung agent rung 2 exists for.
+async fn bounded(
+    deadline: Instant,
+    call: impl Future<Output = Result<(), BackendError>>,
+) -> Result<(), String> {
+    match tokio::time::timeout_at(deadline, call).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err("did not answer before abort_grace".to_string()),
+    }
+}
+
 ///
 /// `Clone` for the same reason [`Provisioner`] and [`crate::turn::Turn`] are: the abort handler
 /// builds one per accepted request and hands it to a task.
@@ -97,8 +116,11 @@ impl Ladder {
     /// Public so a test can await it instead of racing a spawned task; `spawn` is what production
     /// calls.
     pub async fn climb(&self, session: &Session, reason: &'static str) {
-        self.rung_one(session).await;
-        if self.the_turn_ended(session).await {
+        // The clock starts at the abort, not after rung 1: spec item 16 measures the grace from the
+        // abort, and a wedged `clear_queue` must not be able to postpone rung 2 forever.
+        let deadline = Instant::now() + self.grace;
+        self.rung_one(session, deadline).await;
+        if self.the_turn_ended(session, deadline).await {
             return;
         }
         self.rung_two(session, reason).await;
@@ -108,9 +130,10 @@ impl Ladder {
     ///
     /// Both failures are logged and neither ends the ladder: rung 2 exists precisely because the
     /// agent may not answer. A backend that cannot do either is a backend whose turn cannot stop,
-    /// which is what the grace period and the forced rung are for.
-    async fn rung_one(&self, session: &Session) {
-        if let Err(error) = self.backend.clear_queue(session).await {
+    /// which is what the grace period and the forced rung are for. Each call is bounded by what is
+    /// left of the grace, so an RPC that never returns is a spent grace rather than a hung ladder.
+    async fn rung_one(&self, session: &Session, deadline: Instant) {
+        if let Err(error) = bounded(deadline, self.backend.clear_queue(session)).await {
             tracing::warn!(
                 target: "holosmith::ladder",
                 session = %session.id,
@@ -118,7 +141,7 @@ impl Ladder {
                 "the agent's queue was not cleared"
             );
         }
-        if let Err(error) = self.backend.abort(session).await {
+        if let Err(error) = bounded(deadline, self.backend.abort(session)).await {
             tracing::warn!(
                 target: "holosmith::ladder",
                 session = %session.id,
@@ -128,13 +151,12 @@ impl Ladder {
         }
     }
 
-    /// Wait up to `abort_grace` for the turn to end, and say whether it did.
+    /// Wait until `deadline` for the turn to end, and say whether it did.
     ///
     /// The row is the question, not a flag: the turn runner writes `running -> idle` when the agent
     /// stops, so "the row is no longer `running`" is exactly "rung 1 worked". A row that is gone is
     /// also an ending — there is nothing left to force.
-    async fn the_turn_ended(&self, session: &Session) -> bool {
-        let deadline = Instant::now() + self.grace;
+    async fn the_turn_ended(&self, session: &Session, deadline: Instant) -> bool {
         loop {
             match self.status(&session.id) {
                 Ok(None) => return true,
@@ -168,6 +190,9 @@ impl Ladder {
             .await
         {
             Ok(_) => {}
+            // The state changed and only the report of it was lost, which means the process is on
+            // its way down. The row is already `stopped`, so the container must still be killed.
+            Err(StateError::Unreported(_)) => {}
             Err(StateError::Illegal { .. } | StateError::UnknownSession(_)) => {
                 tracing::debug!(
                     target: "holosmith::ladder",
@@ -213,6 +238,8 @@ impl Ladder {
             .await
         {
             Ok(_) => {}
+            // As above: the row is `starting` already, so it still needs a provisioner.
+            Err(StateError::Unreported(_)) => {}
             Err(error) => {
                 tracing::error!(
                     target: "holosmith::ladder",

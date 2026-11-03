@@ -418,10 +418,11 @@ pub async fn prompt(state: &AppState, id: &str, body: Result<Bytes, BytesRejecti
     if let Err(error) = apply_prompt(state, id).await {
         return error.into_response();
     }
-    // The row is `running` now, so the turn is started **before** anything else can fail: a session
-    // left in `running` with no runner has no way out until HS-016 adds abort, and a refetch that
-    // failed would otherwise strand exactly that. The row the runner is handed is the one read
-    // above with the status the table has just written; the refetch only improves the 202's body.
+    // The row is `running` now, so the turn is started **before** anything else can fail: a refetch
+    // that failed would otherwise leave a `running` row whose turn never began. The abort ladder
+    // (HS-016) can end such a row, which is why this order is defensible rather than merely fast.
+    // The row the runner is handed is the one read above with the status the table has just written;
+    // the refetch only improves the 202's body.
     let mut running = current;
     running.status = Status::Running;
     running.status_reason = None;

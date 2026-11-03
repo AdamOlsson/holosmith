@@ -298,14 +298,13 @@ async fn the_ladder_forces_the_stop_when_the_agent_ignores_the_abort() {
             payload["from"], payload["to"], payload["step"], payload["reason"]
         );
     }
+    // The resume's transition carries no reason: the forced stop's reason is the record of *why*
+    // the session went `stopped`, and clearing it is what makes the resumed row `idle`/`null`.
     assert!(
-        carries(&log, "stopped", "starting", "resume")
-            || log.iter().any(|payload| {
-                payload["from"] == "stopped"
-                    && payload["to"] == "starting"
-                    && payload["reason"].is_null()
-            }),
-        "the forced stop did not resume: {log:?}"
+        log.iter().any(|payload| payload["from"] == "stopped"
+            && payload["to"] == "starting"
+            && payload["reason"].is_null()),
+        "the forced stop did not resume with no reason: {log:?}"
     );
     assert!(
         log.iter().any(|payload| payload["to"] == "idle"),

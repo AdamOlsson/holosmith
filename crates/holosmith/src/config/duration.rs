@@ -23,8 +23,9 @@ impl Duration {
         Self { millis }
     }
 
-    /// The value as whole milliseconds, for the code that waits on it.
-    pub fn millis(self) -> u64 {
+    /// The value as whole milliseconds. Private: the only caller is the `From` impl below, which
+    /// is what a caller that waits actually uses.
+    fn millis(self) -> u64 {
         self.millis
     }
 }

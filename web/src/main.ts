@@ -566,7 +566,7 @@ function composerSection(id: string, showState: (state: SessionState, reason: st
   // off-request, so the badge and the buttons follow the stream rather than this answer. No body is
   // sent — there is nothing to say — but the content type goes with it, because the guards read it
   // on every request that changes something (ADR-0010).
-  const stop = async (): Promise<void> => {
+  const abortTurn = async (): Promise<void> => {
     abort.disabled = true;
     try {
       const response = await fetch(`${sessionPath(id)}/abort`, {
@@ -586,7 +586,7 @@ function composerSection(id: string, showState: (state: SessionState, reason: st
     }
   };
   abort.addEventListener("click", () => {
-    void stop();
+    void abortTurn();
   });
 
   // True while the badge on screen offers a prompt, so a submit that arrives while the session is

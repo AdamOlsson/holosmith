@@ -88,7 +88,7 @@ The composer exists in every state and its three actions come from `affordances(
 `error` or `deleting`. The endpoints are later stories' — **prompt is HS-015's, abort HS-016's,
 steer HS-017's** — so pressing one names the story that will wire it rather than sending a request
 that would 404. **Superseded by ADR-0019:** the prompt is wired; abort and steer still name their
-story. The form also swallows its own submit: with no `action` a native submit is a GET of
+story. **Superseded by ADR-0020:** abort is wired too; only steer still names its story. The form also swallows its own submit: with no `action` a native submit is a GET of
 the current path, which would reload the screen and discard the transcript the operator is reading. That is the same choice
 HS-013 made for the retention placeholder: a control that cannot work yet says which story makes it
 work.

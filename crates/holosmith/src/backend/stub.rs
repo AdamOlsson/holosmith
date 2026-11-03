@@ -161,20 +161,27 @@ impl StubBackend {
         self
     }
 
-    /// Whether a running turn has been asked to stop but has not noticed yet.
-    fn stopping(&self, session_id: &str, stop: bool) -> bool {
-        let mut stopping = self
-            .state
+    /// Ask this session's running turn to stop: rung 1's `abort`, or rung 2's `stop`.
+    fn request_stop(&self, session_id: &str) {
+        self.state
             .stopping
             .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if stop {
-            stopping.insert(session_id.to_string());
-            return true;
-        }
-        // `remove`, not `contains`: observing the flag is what consumes it, so a turn that ends
-        // here cannot make the next turn of the same session abort before it starts.
-        stopping.remove(session_id)
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(session_id.to_string());
+    }
+
+    /// Take the stop request, if there is one.
+    ///
+    /// `remove`, not `contains`: observing the request is what consumes it, so a request a turn
+    /// acted on cannot make the next turn of the same session abort before it starts. A request that
+    /// arrives before its turn's loop begins is cleared there for the same reason — see
+    /// [`SessionBackend::start_turn`](super::SessionBackend::start_turn).
+    fn take_stop_request(&self, session_id: &str) -> bool {
+        self.state
+            .stopping
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(session_id)
     }
 
     /// The stub's pace: the delay before each provisioning step and before each frame of a turn.
@@ -307,14 +314,18 @@ impl SessionBackend for StubBackend {
         // provisioning step.
         let outcome = self.note(Call::StartTurn, session, prompt);
         outcome?;
-        // A turn starts unstopped: whatever a previous turn left here belongs to that turn.
-        self.stopping(&session.id, false);
+        // A turn starts unstopped: a request this session left here belongs to a turn that is over.
+        // The cost is that a stop arriving between the prompt's 202 and this line is dropped, which
+        // the ladder turns into a forced stop after the grace — slower than a clean abort, but never
+        // wrong. Keeping it instead would abort the *next* turn of the session instantly, which is
+        // wrong and instant.
+        self.take_stop_request(&session.id);
         for (kind, payload) in Self::script(NEXT_TURN.fetch_add(1, Ordering::Relaxed)) {
             tokio::time::sleep(self.state.step_delay).await;
             // The one place a turn can be cut short: between frames, because a frame already
             // emitted is a frame the screen has, and a real agent's abort lands between messages
             // for the same reason.
-            if self.stopping(&session.id, false) {
+            if self.take_stop_request(&session.id) {
                 return Ok(TurnEnd::Aborted);
             }
             let event = NewEvent {
@@ -351,7 +362,7 @@ impl SessionBackend for StubBackend {
         self.note(Call::Abort, session, "")?;
         // The hung agent: told to abort, and the turn keeps going anyway.
         if !self.state.ignores_abort {
-            self.stopping(&session.id, true);
+            self.request_stop(&session.id);
         }
         Ok(())
     }
@@ -359,7 +370,7 @@ impl SessionBackend for StubBackend {
     async fn stop(&self, session: &Session) -> Result<(), BackendError> {
         self.note(Call::Stop, session, "")?;
         // A forced stop kills the runtime, so the turn stops whether or not it honours an abort.
-        self.stopping(&session.id, true);
+        self.request_stop(&session.id);
         Ok(())
     }
 
@@ -557,7 +568,7 @@ mod tests {
             super::TurnEnd::Aborted
         );
         assert!(
-            !stub.stopping(&session.id, false),
+            !stub.take_stop_request(&session.id),
             "the turn consumed the stop flag"
         );
     }
