@@ -34,10 +34,10 @@ read, create, comment on, or close anything there.
 ## 1. Where the work stands
 
 Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is clean. `HEAD` is
-**`82c8c35`** (HS-014); the commit after it is this handoff refresh.
+**`d4077df`** (HS-015). The commit after it is this handoff refresh.
 
-**Linear: 14 Done, 66 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-014`
-(`PER-33` … `PER-46`).
+**Linear: 15 Done, 65 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-015`
+(`PER-33` … `PER-47`).
 
 | Story | Linear | Commits | ADR |
 | --- | --- | --- | --- |
@@ -55,43 +55,41 @@ Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is
 | HS-012 one enforced state machine | PER-44 | `9424677` | 0016 |
 | HS-013 sessions list + new-session form | PER-45 | `47471c4` | 0017 |
 | HS-014 session screen, live transcript | PER-46 | `82c8c35` | 0018 |
+| HS-015 prompt and the turn lifecycle | PER-47 | `d4077df` | 0019 |
 
-**Next issue: `PER-47` (HS-015 — prompt and the turn lifecycle).** Then `PER-48` (HS-016 — abort),
-`PER-49` (HS-017 — steer), `PER-50` (HS-018 — stopped/resume), and onward in `HS-###` order.
+**Next issue: `PER-48` (HS-016 — abort with the full ladder).** Then `PER-49` (HS-017 — steer),
+`PER-50` (HS-018 — stopped/resume), and onward in `HS-###` order.
 
 Ranking, per `PROMPT.md`: Linear priority (all are `No priority`) → `HS-###` order in `docs/stories/`
 → anything already `In Progress` first → skip an issue whose `Blocked by` stories are not `Done`.
 
-### What HS-014 settled, and two facts about HS-015 that a cold start must know
+### What HS-014 and HS-015 settled, and what HS-016 inherits
 
-HS-014 shipped the session screen at `/sessions/<id>` (read from `location.pathname`), grew
-`GET /api/sessions/{id}` (the bare row, `not_found` for anything else), and **pinned the transcript's
-event contract in ADR-0018**, because its producer does not exist yet:
+HS-014 shipped the session screen at `/sessions/<id>` and `GET /api/sessions/{id}`, and pinned the
+transcript's event contract in ADR-0018. HS-015 made a turn real:
 
-| Kind | Payload |
-| --- | --- |
-| `message.delta` | `{"message_id", "kind": "text"\|"thinking", "text"}` |
-| `message.snapshot` | `{"message_id", "text", "thinking"}` — both kinds default to `""` |
-| `turn.start` / `turn.end` | `{}` — no payload is read |
+| Kind | Payload | Emitted by |
+| --- | --- | --- |
+| `message.delta` | `{"message_id", "kind": "text"\|"thinking", "text"}` | the backend |
+| `message.snapshot` | `{"message_id", "text", "thinking"}` | nothing yet (HS-060) |
+| `message.end` | `{"message_id", "usage": {"in", "out"}}` | the backend |
+| `tool.start` / `tool.end` | `{"tool_id", "name", "arguments"}` / `{"tool_id", "name", "output"}` | the backend |
+| `turn.start` / `turn.end` | `{}` | the backend |
+| `session.status` | `{"from", "to", "step", "reason"}` (ADR-0016) | the transitioner only |
 
-A message id is the block key; a delta is one appended text node; a snapshot replaces both kind
-nodes; a snapshot is the last frame for its id; an unknown kind is dropped, not refused. The rules
-live in `web/src/transcript.ts` and are tested by `web/test/transcript.test.ts` with node's own
-runner (`npm test`, wired into `scripts/build-web.sh`, so it runs inside the gate).
+The split is the thing to keep: **the backend emits a turn's frames; the server owns every state
+change.** `SessionBackend::start_turn` takes `&EventWriter` for exactly that reason, and a backend has
+no `Transitioner`. The prompt's `idle → running` is the *handler's* (so the 202 can promise `running`);
+the way out (`agent_settled`, or `unexpected_exit`) is `turn.rs`'s. Refusals are one family:
+`409 session_<state>` — `session_starting`, `session_running`, `session_stopped`, `session_error`,
+`session_deleting` — built by `ApiError::not_idle`.
 
-1. **The stub still emits no message.** HS-015 owns the scripted turn, so HS-014's own demo line
-   ("prompt a session, watch text and thinking arrive") has **never run**, and the DOM half of the
-   screen is unverified from source — this machine has no browser. HS-015 is the first story whose
-   demo can look at it, so start its demo with the session screen open.
-2. **The composer is wired to nothing, on purpose.** Prompt, steer and abort exist per
-   `affordances(state)` — prompt on `idle`, steer and abort on `running` — and pressing one names the
-   story that will wire it (prompt HS-015, abort HS-016, steer HS-017). The form swallows its own
-   submit; HS-015 replaces that handler with the real request.
-
-**Pushing is impossible.** `origin` is `git@github.com:AdamOlsson/holosmith.git` and it answers
-`Permission denied (publickey)` — re-tested after HS-013, so this is a live fact, not a stale note.
-There is no ssh key and no `gh`. Every story so far is local commits on `master` plus a closing
-comment that says so, and every Linear note repeats it. Do not fake a push; report the blocker.
+1. **A running turn has no way to stop it.** `SessionBackend::abort` is a recording, the runner holds
+   no cancellation token, and there is no timeout — HS-016 is exactly this gap, and it is the most
+   dangerous one in the system (a runaway turn costs money).
+2. **The screen's DOM half is still unverified.** There is no browser on this machine; the transcript
+   *rules* are covered by 15 node tests, but nothing has ever rendered this page. Say so rather than
+   claiming a visual check.
 
 ---
 
@@ -202,15 +200,15 @@ If that fails, **stop and report** — that is a `PROMPT.md` stop condition.
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                     # 395 tests: 204 lib + 191 across 16 integration binaries
-cd web && npm test             # 12 transcript tests (node's runner; also run by build-web.sh)
+cargo test                     # 409 tests: 207 lib + 202 across 16 integration binaries
+cd web && npm test             # 15 transcript tests (node's runner; also run by build-web.sh)
 scripts/verify.sh              # THE one-command gate since HS-006
 ```
 
 `scripts/verify.sh` runs six phases, cheapest first: `fmt`, `clippy`, `test`, `build`
 (`scripts/build.sh`, which itself runs `build-web.sh` — `npm test` then Vite — and `check-static.sh`
 last), `embed` (`scripts/check-embed.sh`), then `serve` — the **shipped musl artifact** booted on
-`--port 0` with a temp data dir, running **23 cases plus a CORS sweep (82 assertions)**, then torn
+`--port 0` with a temp data dir, running **26 cases plus a CORS sweep (98 assertions)**, then torn
 down with `SIGTERM` and an asserted exit 0. It takes ~3 min (both musl targets). `--no-build` skips `build` and `embed`;
 `--keep` keeps the work dir.
 
@@ -241,7 +239,10 @@ crates/holosmith/
   src/commands/             version.rs, config.rs, serve.rs
   src/config/               mod.rs (typed Config, KeySpec walk), schema.rs (26 keys), problem.rs,
                             render.rs, duration.rs, editor.rs
-  src/backend/              mod.rs (Step, SessionBackend, Backends, BackendError), stub.rs, docker.rs
+  src/backend/              mod.rs (Step, SessionBackend, Backends, BackendError), stub.rs (the
+                            scripted turn), docker.rs
+  src/turn.rs               the turn runner: touch → the backend's turn → agent_settled + touch,
+                            or unexpected_exit with the reason
   src/provisioner.rs        the four-step background task and its five session.status events
   src/runtime.rs            runtime::Backend {Stub,Docker} — which backend this run uses
   src/http/                 mod.rs, app.rs (Routes/App seam, AppState + provisioner()/transitioner(),
@@ -261,7 +262,7 @@ crates/holosmith/
   tests/                    version_cli, config_cli, http_contract, serve_cli, db_migrations,
                             pin_single_source, guards, session_repository, sessions_api, events,
                             streams, provisioning, state_machine, session_list, session_screen,
-                            support/mod.rs (shared harness)
+                            turns, support/mod.rs (shared harness)
 web/                        Vite 7 + TypeScript, two screens (`/` and `/sessions/<id>`);
                             package-lock COMMITTED; the one screen module is web/src/main.ts and
                             the renderer's rules are web/src/transcript.ts
@@ -273,7 +274,7 @@ scripts/check-static.sh     file/readelf, empty-root serve + cmp against web/dis
                             gate, app.db assertions, byte grep for the schema SQL, Cargo.lock guard
 scripts/check-embed.sh      the three embed cases (present / absent warns / required fails)
 scripts/verify.sh           the one-command gate (see §3)
-docs/adr/0001…0018          read the recent ones before planning anything
+docs/adr/0001…0019          read the recent ones before planning anything
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
 docs/review/PER-33…PER-45   each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
@@ -287,8 +288,9 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   `GET /api/sessions/{id}/events`), SQLite with three migrations, the guards, the event writer, the SSE
   stream, the stub backend and its four-step provisioner, the enforced state machine, the Sessions
   screen with its create form, and the session screen at `/sessions/<id>` with a live transcript.
-- **Not built yet:** any turn or message producer (HS-015+), prompt/steer/abort/resume/delete
-  endpoints, the preview listener (HS-041), Docker (HS-024+), merge, publish, push, the hub, releases.
+- **Not built yet:** abort/steer/resume/delete endpoints (HS-016 … HS-018), the abort ladder and the
+  turn timeout (HS-016/HS-022), tool-output files and `output_ref` (HS-033), usage totals (HS-034), the
+  preview listener (HS-041), Docker (HS-024+), merge, publish, push, the hub, releases.
 - **`runtime::Backend`** has `Stub` and `Docker`; `serve --backend` and the config key `backend` select
   it. `backend::SessionBackend` is what a backend must do. `DockerBackend` **refuses every operation**
   until HS-024, and the default backend is `docker` (ADR-0001: the stub is opt-in), so a default build
@@ -496,10 +498,11 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 - **Every story adds at least one `case_*` to `scripts/verify.sh`.** The rule is in bold in
   `docs/build.md`, and the reviewer enforces it. The current gate is 23 cases / 82 assertions.
 - **Adding an ADR means updating `docs/stories/README.md`**: the "Decisions taken while slicing" count
-  (now eighteen) and the bullet list. A reviewer will check the links resolve — three did not, once.
+  (now nineteen) and the bullet list. A reviewer will check the links resolve — three did not, once.
 - **`GLOSSARY.md` is the vocabulary authority.** Check it before inventing a term. Recent entries to
   respect: **Step**, **Backend**, **Trigger**, **Transition**, **Sessions screen**, **Session screen**,
-  **Composer**, **Transcript**, **Delta kind**, **Message id**, **Turn boundary**. `Status` in code is
+  **Composer**, **Transcript**, **Delta kind**, **Message id**, **Turn boundary**, **Turn runner**,
+  **Tool call**, **Usage**. `Status` in code is
   **State** in the glossary, and a delta's node is a "kind's node", never a "channel"; a second
   spelling is forbidden, including inside an entry's own prose.
 
@@ -566,15 +569,41 @@ cd /home/adamolsson/projects/holosmith
 git status --short                          # must be clean
 . ~/.pi/toolchains/env.sh
 python3 /tmp/lin.py issues | grep -v ' Done ' | head   # next unfinished issues (recreate /tmp/lin.py if missing)
-python3 /tmp/lin.py issue PER-47            # sanity-check Linear is reachable and scoped
-scripts/verify.sh                           # baseline green (~3 min, 23 cases, 82 assertions)
+python3 /tmp/lin.py issue PER-48            # sanity-check Linear is reachable and scoped
+scripts/verify.sh                           # baseline green (~3 min, 26 cases, 98 assertions)
 ```
 
-Then start the cycle at **`PER-47` (HS-015 — prompt and the turn lifecycle)**. Read §1's two facts
-about it first: nothing emits a message yet, and the session screen it renders into has never been
-looked at in a browser.
+Then start the cycle at **`PER-48` (HS-016 — abort with the full ladder)**. Read §1's two facts about
+it first: a running turn currently has no way to stop, and nothing on this machine has ever rendered
+the page.
 
-### What HS-015 is about, so the first brief is fast
+### What HS-016 is about, so the first brief is fast
+
+Acceptance, verbatim from `docs/stories/phase-1-session-lifecycle-stub.md:165`:
+
+- `POST /api/sessions/:id/abort` returns 202 immediately; progress arrives as events.
+- Rung 1: `clear_queue` then `abort` over the backend RPC.
+- Rung 2: if not idle after `abort_grace` (10 s), force-stop → `stopped` with reason `forced_abort`,
+  then immediate resume → `idle`.
+- Abort completing normally moves `running → idle`.
+- The ladder is a shared routine with a parameterised reason, because HS-022 and HS-023 reuse it.
+- A test drives the stub to ignore rung 1 and asserts rung 2 fires and the session ends `idle`.
+
+What is already in place: the table's `running + abort_completed → idle`, `running + abort_ladder →
+stopped` and `stopped + resume → starting`; `SessionBackend::abort`, `stop` and `resume` (recordings in
+the stub, `unsupported` in Docker); two runners to copy (`provisioner.rs`, `turn.rs`); the
+`409 session_<state>` family; and the `session.status` payload. What is missing is the cancellation: the
+turn runner must be interruptible, and the stub must be able to *ignore* rung 1 so rung 2 can fire.
+
+Things to decide canonically when planning it, and record: how a turn is cancelled (a shared token the
+script checks, or the backend owning it), where `abort_grace` comes from (a config key — ADR-0006's
+table is machine settings, and 10 s is the spec's default — which means the golden config file and
+`KNOWN_KEYS.len()` move with it), how the stub is told to ignore rung 1 (a constructor argument, as
+ADR-0015 did for step pacing, not a config key), whether the forced rung resumes inline or through the
+provisioner, and which code an abort on an idle or stopped session answers (the family says
+`409 session_<state>`).
+
+### What HS-015 was about, for reference
 
 Acceptance, verbatim from `docs/stories/phase-1-session-lifecycle-stub.md:155`:
 
