@@ -2,8 +2,8 @@
 
 You are the **orchestrator for implementing Holosmith**. Read `PROMPT.md` first: it is the standing
 operating procedure and it still governs. This file is the delta — the state of the world, the
-environment repairs already made, the decisions taken on the operator's behalf, and the landmines that
-cost real time. Read it all before touching anything.
+environment repairs already made, the decisions taken on the operator's behalf, and the landmines
+that cost real time. Read it all before touching anything.
 
 The run is **fully automatic**. The operator is not present. Never ask them a question; decide
 canonically, record the decision in the Linear issue and the commit message, and continue.
@@ -33,9 +33,8 @@ read, create, comment on, or close anything there.
 
 ## 1. Where the work stands
 
-Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is clean. The last
-story commit was **`bf0f460`** (a docs commit bringing the previous handoff up to date); any commit
-after it is this file's own bookkeeping.
+Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is clean. `HEAD` is
+**`786132c`** (a docs commit bringing this handoff up to date); any commit after it is bookkeeping.
 
 **Linear: 13 Done, 67 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-013`
 (`PER-33` … `PER-45`).
@@ -52,24 +51,31 @@ after it is this file's own bookkeeping.
 | HS-008 `POST /api/sessions` | PER-40 | `c5891e4`, `858d295` | 0012 |
 | HS-009 event log + single writer, schema 3 | PER-41 | `5cae107`, `dae1fd9` | 0013 |
 | HS-010 SSE stream, `Last-Event-ID` | PER-42 | `3b03c5c`, `07f318d` | 0014 |
-| HS-011 stub backend + provisioner | PER-43 | `9071390`, `b5022fc` | 0015 |
-| HS-012 one state machine | PER-44 | `9424677` | 0016 |
-| HS-013 sessions list + create form | PER-45 | `47471c4` | 0017 |
+| HS-011 stub backend + provisioner steps | PER-43 | `9071390`, `b5022fc` | 0015 |
+| HS-012 one enforced state machine | PER-44 | `9424677` | 0016 |
+| HS-013 sessions list + new-session form | PER-45 | `47471c4` | 0017 |
 
-**Next issue: `PER-46` (HS-014 — UI: session screen with a live transcript).** Unblocked: HS-013
-landed. Note what HS-014 needs that no story has built yet: there is **no `GET /api/sessions/:id`**,
-and **no message producer** — HS-015 owns the stub's scripted turn, so HS-014 can render deltas,
-snapshots, turn boundaries and the state badge only against events it cannot yet receive, and its
-"prompt a session" demo cannot run until HS-015 wires the composer. Then `PER-47` (HS-015 — prompt
-and the turn lifecycle), `PER-48` (HS-016 — abort), and onward in `HS-###` order.
+**Next issue: `PER-46` (HS-014 — UI: session screen with a live transcript).** Then `PER-47`
+(HS-015 — prompt and the turn lifecycle), `PER-48` (HS-016 — abort), `PER-49` (HS-017 — steer),
+`PER-50` (HS-018 — stopped/resume), and onward in `HS-###` order.
 
 Ranking, per `PROMPT.md`: Linear priority (all are `No priority`) → `HS-###` order in `docs/stories/`
 → anything already `In Progress` first → skip an issue whose `Blocked by` stories are not `Done`.
 
+### Two facts about HS-014 that a cold start must know
+
+1. **There is no `GET /api/sessions/:id`.** The session screen needs one session by id, so HS-014
+   grows that endpoint (it is nobody else's story; add it there rather than borrowing HS-061's paging).
+2. **There is no message producer.** HS-014 renders deltas, snapshots, turn boundaries and the state
+   badge from events that nothing emits yet — HS-015 owns the stub's scripted turn. So HS-014's demo
+   line ("prompt a session, watch text and thinking arrive") **cannot run** as written: build the
+   renderer against synthetic events in tests, wire the composer as a stub, and say so in the Linear
+   note. Its acceptance bullets are all renderer-side, which is what makes the story doable first.
+
 **Pushing is impossible.** `origin` is `git@github.com:AdamOlsson/holosmith.git` and it answers
-`Permission denied (publickey)` (re-tested after HS-013): there is no ssh key and no `gh`. Every story
-so far is local commits on `master` and a closing comment that says so. Do not fake a push; report the
-blocker.
+`Permission denied (publickey)` — re-tested after HS-013, so this is a live fact, not a stale note.
+There is no ssh key and no `gh`. Every story so far is local commits on `master` plus a closing
+comment that says so, and every Linear note repeats it. Do not fake a push; report the blocker.
 
 ---
 
@@ -95,26 +101,27 @@ It sets `RUSTUP_HOME`, `CARGO_HOME` and `PATH` to:
 Why outside the repo: `/` is a 3.4 GB tmpfs and `~/.pi` is the only large writable ext4 mount.
 
 **Available:** node 24.22.2 / npm 11.19.1 with the npm registry reachable; `curl`; `python3`; `sed`,
-`grep`, `tr`, `cut`, `cmp`, `find`, `timeout`.
-**Not available, and not to be invented:** no Docker daemon, no `sudo`, no `apt`, no `gh`, no ssh key or
-token. **No `awk`** and **no `shellcheck`** on this machine — do not write a script or a gate that needs
+`grep`, `tr`, `cut`, `cmp`, `find`, `timeout`, `git`.
+**Not available, and not to be invented:** no Docker daemon, no `sudo`, no `apt`, no `gh`, no ssh key
+or token, no **browser** (so nothing renders `web/` — say "unverified" rather than guessing).
+**No `awk`** and **no `shellcheck`** on this machine — do not write a script or a gate that needs
 either.
 
 ### Linear access
 
-`list_issues` / `save_issue` / `save_comment` / `get_issue` are reachable through the same HTTP MCP
-endpoint `scripts/import-linear.py` uses. There are no Linear tools in the tool list, so drive it from a
+There are no Linear tools in the tool list. `list_issues` / `save_issue` / `save_comment` / `get_issue`
+are reachable through the same HTTP MCP endpoint `scripts/import-linear.py` uses, so drive it from a
 wrapper. Recreate `/tmp/lin.py` if it is gone:
 
 ```python
 #!/usr/bin/env python3
 # Thin CLI over the Linear MCP server, reusing scripts/import-linear.py plumbing.
 #   python3 /tmp/lin.py issues            # id, title, status
-#   python3 /tmp/lin.py issue PER-43      # full issue JSON
-#   python3 /tmp/lin.py comment PER-43 FILE
-#   python3 /tmp/lin.py state PER-43 "In Progress"
+#   python3 /tmp/lin.py issue PER-46      # full issue JSON
+#   python3 /tmp/lin.py comment PER-46 FILE
+#   python3 /tmp/lin.py state PER-46 "In Progress"
 #   python3 /tmp/lin.py states            # the team's states
-#   python3 /tmp/lin.py call get_issue '{"id":"PER-43"}'
+#   python3 /tmp/lin.py call get_issue '{"id":"PER-46"}'
 import importlib.util, json, sys
 REPO = '/home/adamolsson/projects/holosmith'
 spec = importlib.util.spec_from_file_location('imp', REPO + '/scripts/import-linear.py')
@@ -138,7 +145,8 @@ elif a[0] == 'call':
 ```
 
 Always run it with `PYTHONDONTWRITEBYTECODE=1` and `rm -rf scripts/__pycache__` afterwards, or you will
-leave an untracked `scripts/__pycache__/` behind.
+leave an untracked `scripts/__pycache__/` behind. `list_issues` on this project returns **80 issues**
+(not 250); `grep -v ' Done '` is the quickest way to the unfinished ones.
 
 **Two API traps, both hit already:**
 
@@ -178,19 +186,23 @@ If that fails, **stop and report** — that is a `PROMPT.md` stop condition.
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test
-scripts/verify.sh          # THE one-command gate since HS-006
+cargo test                     # 389 tests: 204 lib + 15 integration binaries
+scripts/verify.sh              # THE one-command gate since HS-006
 ```
 
 `scripts/verify.sh` runs six phases, cheapest first: `fmt`, `clippy`, `test`, `build`
 (`scripts/build.sh`, which itself runs `build-web.sh` first and `check-static.sh` last), `embed`
 (`scripts/check-embed.sh`), then `serve` — the **shipped musl artifact** booted on `--port 0` with a
-temp data dir, running **17 cases plus a CORS sweep (51 assertions)**, then torn down with `SIGTERM` and
-an asserted exit 0. It takes ~70 s and it is the gate that matters. `--no-build` skips `build` and
-`embed`; `--keep` keeps the work dir.
+temp data dir, running **21 cases plus a CORS sweep (66 assertions)**, then torn down with `SIGTERM`
+and an asserted exit 0. It takes ~3 min (both musl targets). `--no-build` skips `build` and `embed`;
+`--keep` keeps the work dir.
 
 A story is not done until all four are green on a clean tree, and then you run the story's own demo
 yourself and paste its output.
+
+**Run one build at a time.** A `scripts/build.sh` or `scripts/verify.sh` in the same tree while another
+one runs can make `check-static.sh`'s banner wait flake under load (it happened once during HS-013: the
+gate reported `FAIL build/failed` while the same command passed a minute later, alone). Serialise them.
 
 ---
 
@@ -208,30 +220,31 @@ crates/holosmith/
   migrations/0002_sessions.sql  sessions + two indexes (schema 2)
   migrations/0003_events.sql    events + sessions.last_seq (schema 3)
   src/main.rs               dispatcher only
-  src/cli.rs                clap: version, config {validate,show,edit}, serve [--backend]
+  src/cli.rs                clap: version, config {validate,show,edit}, serve [--port|--data-dir|--backend]
   src/commands/             version.rs, config.rs, serve.rs
-  src/config/               mod.rs (typed Config, KeySpec table + walk), schema.rs, problem.rs,
+  src/config/               mod.rs (typed Config, KeySpec walk), schema.rs (26 keys), problem.rs,
                             render.rs, duration.rs, editor.rs
-  src/http/                 mod.rs, app.rs (Routes/App seam, AppState, edge layer, is_guard_exempt),
-                            error.rs (the one envelope + every code), health.rs, guard.rs (the four
-                            checks), sessions.rs (POST /api/sessions), streams.rs (the SSE handler)
-  src/sessions/             mod.rs (Status, Session, NewSession, RepoError),
-                            repository.rs (every `sessions` statement + its SQL-location guard)
   src/backend/              mod.rs (Step, SessionBackend, Backends, BackendError), stub.rs, docker.rs
-  src/provisioner.rs        the four-step background task and its five `session.status` events
-  src/sessions/state.rs     the transition table, `SessionStatus`, `Transitioner::apply`, the guard
-  src/events/               mod.rs (Event, NewEvent, EventWriter, EventStream, WriterOptions),
-                            writer.rs (the writer thread, group commit, broadcast),
-                            repository.rs (every `events` statement + its guard),
-                            stream.rs (replay→live, lag handling), registry.rs (open-stream counts)
+  src/provisioner.rs        the four-step background task and its five session.status events
+  src/runtime.rs            runtime::Backend {Stub,Docker} — which backend this run uses
+  src/http/                 mod.rs, app.rs (Routes/App seam, AppState + provisioner()/transitioner(),
+                            edge layer, is_guard_exempt), error.rs (the one envelope + every code),
+                            health.rs, guard.rs (the four checks), sessions.rs (POST+GET
+                            /api/sessions), streams.rs (the SSE handler)
+  src/sessions/             mod.rs (Status, Session, NewSession, RepoError), repository.rs (every
+                            `sessions` statement + its SQL-location guard), state.rs (the transition
+                            table, SessionStatus, Transitioner::apply, the set_status guard)
+  src/events/               mod.rs (Event, NewEvent, EventWriter, EventStream), writer.rs, repository.rs,
+                            stream.rs (replay→live, lag), registry.rs (open-stream counts)
   src/db.rs                 pragmas + read-back, apply_pending, Database::sessions()/events()
-  src/sql.rs                the one SQL statement scanner, and the shared test-only guard helper
+  src/sql.rs                the one SQL statement scanner + the shared source walk (cfg(test) guard)
   src/schema.rs             SCHEMA_VERSION (= 3), include_dir! embed, check_embed, contract_violations
-  src/{serve,web,runtime,logging,clock,version,pins}.rs
+  src/{serve,web,logging,clock,version,pins}.rs
   tests/                    version_cli, config_cli, http_contract, serve_cli, db_migrations,
                             pin_single_source, guards, session_repository, sessions_api, events,
-                            streams, support/mod.rs (shared harness)
-web/                        Vite 7 + TypeScript single page; package-lock COMMITTED; dist/ ignored
+                            streams, provisioning, state_machine, session_list,
+                            support/mod.rs (shared harness)
+web/                        Vite 7 + TypeScript single page (431 lines of TS); package-lock COMMITTED
 scripts/build-web.sh        npm ci + npm run build, asserts web/dist/index.html
 scripts/build.sh            web first, HOLOSMITH_REQUIRE_WEB=1, both musl targets → dist/<triple>/,
                             atomic copy, then check-static.sh. Uses `cargo build --locked`.
@@ -241,7 +254,7 @@ scripts/check-embed.sh      the three embed cases (present / absent warns / requ
 scripts/verify.sh           the one-command gate (see §3)
 docs/adr/0001…0017          read the recent ones before planning anything
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-42   each a verbatim review + a `## Resolution` table
+docs/review/PER-33…PER-45   each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -249,56 +262,72 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
 ### What exists and what does not
 
 - **Working:** `version` (text + `--json`), `config {validate,show,edit}`, `serve` (control listener,
-  embedded app, `/api/health`, `POST /api/sessions`, `GET /api/sessions`, `GET /api/sessions/:id/events`),
-  SQLite with three migrations, the guards, the event writer, the SSE stream, the stub backend and its
-  provisioner, the state machine, and the Sessions screen with its create form.
-- **Not built yet:** `GET /api/sessions/:id`, the session screen (HS-014), any turn (HS-015+), delete,
-  resume/prompt/steer/abort endpoints, the preview listener (HS-041), Docker (HS-024+), merge, publish,
+  embedded app, `/api/health`, `POST /api/sessions`, `GET /api/sessions`,
+  `GET /api/sessions/:id/events`), SQLite with three migrations, the guards, the event writer, the SSE
+  stream, the stub backend and its four-step provisioner, the enforced state machine, and the Sessions
+  screen with its create form.
+- **Not built yet:** `GET /api/sessions/:id`, the session screen (HS-014), any turn (HS-015+), prompt/
+  steer/abort/resume/delete endpoints, the preview listener (HS-041), Docker (HS-024+), merge, publish,
   push, the hub, releases.
-- **`runtime::Backend`** has `Stub` and `Docker`, `serve --backend` and the config's `backend` select
-  it, and `backend::SessionBackend` is what a backend must do. `DockerBackend` refuses every
-  operation until HS-024, so a default build provisions to `error` with a reason rather than hanging
-  in `starting`.
+- **`runtime::Backend`** has `Stub` and `Docker`; `serve --backend` and the config key `backend` select
+  it. `backend::SessionBackend` is what a backend must do. `DockerBackend` **refuses every operation**
+  until HS-024, and the default backend is `docker` (ADR-0001: the stub is opt-in), so a default build
+  provisions a session to `error` with a reason ("the worktree step: the docker backend does not
+  provision yet (HS-024)") rather than hanging in `starting`. `scripts/verify.sh` boots with
+  `backend = "stub"` in its config file.
 - **`AppState`** is `{ config, runtime, database: Arc<std::sync::Mutex<Database>>, events: EventWriter,
-  streams: StreamRegistry }`. The mutex is an explicit stopgap (ADR-0012/0013) — see §6.
+  streams: StreamRegistry, backend: Backends }`, with two wiring helpers — `provisioner()` and
+  `transitioner()`. The mutex is an explicit stopgap (ADR-0012/0013) — see §6.
+- **`sessions::state::Transitioner::apply`** is the only way a session's state changes. It writes the
+  row (with `stopped_at`) and then emits `session.status` with `{from, to, step, reason}`. A
+  provisioning step report is `from == to` with `step` set, and is *not* a table row.
+- **`web/src/main.ts`** is the Sessions screen: the health header, one row per session patched live by
+  one `EventSource` per visible live session, and the create form with an idempotency key. No
+  framework, no router, no state library, no new dependency.
 
 ---
 
-## 5. The per-issue cycle (what actually worked, ten times)
+## 5. The per-issue cycle (what actually worked, thirteen times)
 
 Everything is **sequential: one writer at a time**, never two children editing files.
 
 1. **Pick** the issue (ranking above) and read its Linear body plus the matching `docs/stories/` slice.
    Note the HEAD SHA — that is the review's fixed point.
-2. **Plan.** For **M/L** stories, use a fresh `delegate` child briefed to run the grilling protocol
+2. **Plan.** For **L** stories, use a fresh `delegate` child briefed to run the grilling protocol
    (`~/.agents/skills/grilling/SKILL.md` + `domain-modeling`), which puts **one** round of frontier
    questions to *you* via `contact_supervisor`; answer with
-   `subagent_supervisor({action:"reply", replyTo, message})`. For **S** stories, write the plan
-   yourself — it is faster and the analysis is usually already done. In either case: state the
-   environment facts, name the files to read, list the decisions already settled so they are not
-   re-litigated, and **pre-answer the obvious round-2 questions** — that is what kept these stories to
-   one round. The planner may write only `GLOSSARY.md` and a new `docs/adr/*.md`.
+   `subagent({action:"reply", ...})`/`subagent_supervisor({action:"reply", replyTo, message})`. For
+   **S/M** stories, write the plan yourself — it is faster and the analysis is usually already done. In
+   either case: state the environment facts, name the files to read, list the decisions already settled
+   so they are not re-litigated, and **pre-answer the obvious round-2 questions** — that is what kept
+   these stories to one round. The planner may write only `GLOSSARY.md` and a new `docs/adr/*.md`.
 3. **Record in Linear before any code exists**: `save_comment` with the plan shape, a
    decisions→precedent table, acceptance restated as testable checks, non-goals, docs touched, the
-   demo, and handoffs; then set the issue `In Progress`. Keep it self-contained but not enormous —
+   demo, and follow-ups; then set the issue `In Progress`. Keep it self-contained but not enormous —
    later readers are the operator and the next orchestrator.
-4. **Implement** with a fresh `worker` child pointed at the saved plan artifact. Tell it: do not
-   re-litigate, do not commit/push/Linear, do not touch off-limits files, **run the full gate set and
-   the demo**, and — critically — **budget discipline**: keep the tree compiling, and if it runs long,
-   stop green and report which steps remain. A timed-out child that leaves a broken tree costs more
-   than a partial one.
-5. **Verify yourself.** Never trust the child's pasted output: run the gates and the demo. This has
-   caught real problems every single time.
+4. **Implement.** Two patterns, both proven:
+   - **S/M with the analysis already in hand** (HS-011, HS-012): implement in-session. You hold the
+     plan; a child would only re-read the same files.
+   - **M/L with a lot of new surface** (HS-013's screen and form): hand a fresh `worker` child a
+     *written* brief — the plan plus the "how", the ground rules (no commit, no Linear, no new
+     dependency, `env.sh` first), the exact gate commands, and "budget discipline: keep the tree
+     compiling; if you run long, stop green and report which steps remain". Launch it async; native
+     completion wakes you. It worked first time.
+5. **Verify yourself.** Never trust a child's pasted output: run the gates and the demo. This has
+   caught real problems every single time (and once caught a *flake*: two builds at once).
 6. **Review** with a fresh `reviewer` child running `~/.agents/skills/code-review/SKILL.md`, read-only,
    against `<fixed-point>...HEAD` plus untracked files, with the spec axis sourced from the Linear body
-   + story slice + spec items. Write the diff to a file first (`git diff <fp>` plus every untracked
-   file behind a `# NEW FILE:` banner) because this role has **no shell** — it reasons from source, so
-   its claims must be checked and it says so itself.
-7. **Fix** with a fresh `worker` child given the saved review. It triages every finding as fixed or
-   dismissed-with-citation, proves each new guard fires (by mutating the code and watching the test go
-   red), and re-runs the gates. Then **you** append a `## Resolution` table to the review file
-   (finding → fixed/dismissed → how/why) and commit it with the fixes.
-8. **Ship**: focused conventional commits naming the issue, the last one ending `Closes <IDENT>`.
+   + story slice + spec items. Write the diff to a file first (`git diff <fp>`; if you `git add -A`
+   first, new files appear as `new file mode` entries and `git ls-files --others` is empty — either is
+   fine, but check the artifact contains them). **The reviewer child has no write tool in this
+   environment**: it returns the review as its answer, so *you* must save it verbatim to
+   `/tmp/holosmith/reviews/PER-<n>-review-verbatim.md` and then `docs/review/PER-<n>.md`.
+7. **Fix** in the same session (or with a fresh `worker`), triaging every finding as fixed or
+   dismissed-with-citation. Where a guard was added or changed, prove it fires by planting an offender
+   and watching the test go red. Re-run the gates. Then append a `## Resolution` table to the review
+   file (finding → fixed/dismissed → how/why) and commit it with the fixes.
+8. **Ship**: focused conventional commits naming the issue, the last one ending `Closes <IDENT>`
+   (or, as this run did, a commit body that names it — Linear is closed by the `Done` state).
    Rebuild after committing — `git describe` changes and `check-static.sh` fails on a stale `dist/`.
    Then `save_comment` with what shipped, the gates, verbatim demo output, acceptance item by item, and
    follow-ups; set the issue `Done`; re-read it to confirm.
@@ -311,10 +340,10 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 /tmp/holosmith/plans/PER-<n>.md           the plan
 /tmp/holosmith/plans/PER-<n>-linear.md    the Linear comment body
 /tmp/holosmith/plans/PER-<n>-impl-brief.md
+/tmp/holosmith/plans/PER-<n>-ship.md      the closing Linear comment body
 /tmp/holosmith/reviews/PER-<n>-diff.txt   the diff artifact for the reviewer
 /tmp/holosmith/reviews/PER-<n>-review-brief.md
 /tmp/holosmith/reviews/PER-<n>-review-verbatim.md
-/tmp/holosmith/reviews/PER-<n>-fix-brief.md
 ```
 
 ---
@@ -323,9 +352,6 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 
 ### Build and toolchain
 
-- **`scripts/verify.sh` is at 21 cases / 66 assertions** and takes ~3 min including both musl
-  builds. A concurrent `scripts/build.sh` in the same tree can make `check-static.sh`'s banner wait
-  flake — run one at a time.
 - **The pinned pi version lives in exactly one tracked file, `pins/pi.txt`.** `tests/pin_single_source.rs`
   fails if the literal appears in a second tracked file — including `docs/review/*.md`. A commit message
   is fine; a doc file is not. Every saved review and Resolution table deliberately never spells it out.
@@ -339,7 +365,11 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   first or your demo shows the placeholder.
 - **`git describe` and `dist/`.** After a commit, `dist/` is stale and `check-static.sh` fails by design.
   Rebuild after committing, before the demo you paste into Linear.
-- **No `awk`, no `shellcheck`.** Scripts must use `sed`/`grep`/`tr`/`cut`/`cmp`/`find`/`timeout`.
+- **No `awk`, no `shellcheck`, no browser.** Scripts must use `sed`/`grep`/`tr`/`cut`/`cmp`/`find`/
+  `timeout`; UI claims you cannot render are "unverified from source", not "done".
+- **One build at a time.** Two `scripts/build.sh`/`verify.sh` runs in one tree can flake the banner wait
+  in `check-static.sh` (fixed 200 × 50 ms). If the gate says `FAIL build/failed`, re-run it alone before
+  believing it.
 
 ### Tests
 
@@ -348,40 +378,47 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   starts `serve` must give it a temp `data_root` inside its own temp dir.
 - **Two `Database::open`s on one path in one process is ADR-0009's measured "database is locked" trap.**
   A shared test harness must open exactly one (`OnceLock`), and a per-test harness must always take its
-  own `TempDir`. `tests/support/mod.rs` carries the pid in the directory name so concurrent runs do not
-  collide.
+  own `TempDir`. `tests/support/mod.rs` carries the pid in the directory name.
 - **Same-process SQLite contention bypasses the busy handler.** A two-thread concurrency test is flaky
   by construction; test the lock with a second *process*.
 - **A guard test that shares a scratch directory with another guard flakes.** The two SQL-location guards
-  share one helper in `src/sql.rs` and name their directory from their own table word. A shared label
-  once made the sessions guard fail because the events guard `remove_dir_all`'d its directory.
+  and HS-012's `set_status` guard share `sql::guard`; a directory name comes from its own table word (or
+  its own label), and `TempDir::new`/`Guard::temp_dir` clear only their own path.
+- **A rule that walks `src/**` must prove it found something.** HS-012's `set_status` guard asserts the
+  walk saw both allowed files *before* asserting no offenders — otherwise a broken walk passes green.
+  Share one matcher between the rule and its planted-offender test, or weakening the rule passes both.
 - **A test that asserts only a status is how a wrong code ships.** HS-005's review found a test that had
   been silently asserting `bad_client` while labelled `bad_origin`. Assert status **and** `code` **and**
   `content-type`, and prove a new guard fires by removing the behaviour and watching the test go red.
+- **The harness's stub is deliberately slow** (`SLOW_STUB_STEP` = 60 s per step) so no test that is not
+  about provisioning loses the race against HS-011's background task. Tests that need provisioning to
+  finish use `support::with_stub(state, support::fast_stub())` (1 ms). Waiting for a row to reach `idle`
+  is `wait_until(...)`, never a `sleep`.
+- **A row can be ahead of its event.** The provisioner/state function writes first and the writer
+  commits every 25 ms, so "the row says `idle`" does not mean the event is committed. Tests that read
+  the log wait for a count (`committed_status_events`), and tests reading the stream take N frames.
 
 ### HTTP and the envelope
 
 - **Every fallible axum extractor answers `text/plain`, not the envelope.** `axum::Json<T>`'s rejection
   and the `Bytes` extractor's (`UnknownBodyError` 400, `LengthLimitError` 413) all bypass ADR-0008. Take
-  the raw body and parse it yourself, and take extractors as `Result<T, Rejection>` and map them through
-  `ApiError`.
+  the raw body and parse it yourself, and take extractors as `Result<T, Rejection>`.
 - **The `Routes`/`App` seam is load-bearing**: `Routes` has no constructor from a bare `Router` and no
   accessor yielding one, `axum::serve` appears once, and `Router::layer` runs in exactly one place —
-  `App::new`. Do not add a second assembly point; `tests/guards.rs` pins the one `.layer(`.
+  `App::new`. `tests/guards.rs` pins the one `.layer(` and the manifest's read-only/mutating kinds.
 - **A `GET` route cannot be mutating.** `Routes::route` was deleted; `get`/`head` record `ReadOnly` and
   `post`/`put`/`patch`/`delete` record `Mutating`. Use the helpers.
 - **Errors are one envelope**, `{"code","message"}` (ADR-0008); codes are constants in `http/error.rs`.
-  No test pins a message sentence. A 500's message must be a **fixed sentence** — a rusqlite message can
-  carry the database path.
-- **`is_guard_exempt` is the only exemption list** (true only for `GET`/`HEAD /api/health`). Never add a
-  second one.
+  No test pins a message sentence. A 500's message must be a **fixed sentence**.
+- **`is_guard_exempt` is the only exemption list** (true only for `GET`/`HEAD /api/health`).
 - **Banner line order is pinned by tests** (`log`, version line, `config`, `data_root`,
-  `control_listen`, `control_origin`, `preview_listen`, `database … schema n`). Change the banner and
-  the test together, and say so in the ADR.
-- **`--port 0` re-derives `control_origin` from the bound port** after `bind`; a browser's `Origin` is
-  compared as text, so this is what makes the guard work in tests and demos.
+  `control_listen`, `control_origin`, `preview_listen`, `database … schema n`).
+- **`--port 0` re-derives `control_origin` from the bound port** after `bind`; the guard compares the
+  browser's `Origin` as text, which is what makes it work in tests and demos.
+- **A `{id}` capture is axum 0.8's syntax**; the spec writes `:id`. `/api/sessions` (the collection) and
+  `/api/sessions/{id}/events` are both registered; the former is `ReadOnly`.
 
-### Data
+### Data and state
 
 - **A seq counter must never be derived from `MAX(seq)`.** Compaction (HS-060) deletes event rows, so the
   counter is the durable `sessions.last_seq`, bumped inside the same transaction as the insert.
@@ -393,38 +430,70 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 - **`id TEXT PRIMARY KEY` is nullable in SQLite** (measured on the bundled 3.50.2). The invariant is the
   repository's, not the schema's.
 - **`SCHEMA_VERSION` is a literal** and `check_embed` fails the build if it disagrees with the embedded
-  files. Bump it in the same commit as the migration. `ALTER TABLE … ADD COLUMN` goes **last** in its
-  migration.
+  files. Bump it in the same commit as the migration. `ALTER TABLE … ADD COLUMN` goes **last**.
 - **The repository owns every statement against its table**, enforced by a test that walks `src/**`.
+- **No state changes outside `sessions::state::Transitioner::apply`.** `set_status` may be *named* only
+  in `sessions/repository.rs` and `sessions/state.rs`; a walk over `src/**` enforces it. Integration
+  tests outside the crate may still call the raw write (they are testing the repository) — that is the
+  crate boundary, not an exemption. `stopped_at` moves inside the same `UPDATE`.
+- **The `session.status` payload is `{from, to, step, reason}`**, four keys, explicit `null`s. A step
+  report is `from == to` with `step` set and writes nothing; a transition carries `step: null`. A
+  refusal (`StateError::Illegal`) writes nothing and logs from + trigger (a refused request has no
+  `to` — the table decides it).
+- **The create's initial state is the table's `none` row** (`state::initial_status()`), not a second
+  spelling of `starting`.
+
+### Web
+
+- **`web/src/main.ts` holds no state beyond the DOM**, one `EventSource` per visible live session,
+  closed on `stopped`/`error`/`deleting` and `beforeunload`. Frames are applied in arrival order; the
+  stream replays from the beginning, so the last frame wins and the page needs no seq.
+- **Never `innerHTML` with server data.** Agent text is untrusted; every node is `createElement` +
+  `textContent`.
+- **`crypto.randomUUID` needs a secure context** and the control listener is plain HTTP unless it sits
+  behind `tailscale serve`; the page falls back to one `getRandomValues` v4 (same CSPRNG) and shows the
+  reason in the form's error line if neither exists.
+- **A page cannot set `Last-Event-ID`.** `EventSource` resends the last SSE `id` it saw; the browser owns
+  that, not the page.
+- **`case_app_shell` compares `GET /` byte-for-byte with `web/dist/index.html`**, so a stale `dist/` or a
+  changed `index.html` fails the gate. `npm run build` is `tsc --noEmit && vite build`.
+- **No new npm dependency.** `EventSource`, `crypto`, `fetch` are the platform; `package-lock.json` is
+  committed.
 
 ### Config and docs
 
 - **Config output** uses `# <key> unset` rather than omitting an unset optional, and `config show`
-  output must re-validate clean. `config edit` never removes a directory, never reverts the operator's
-  save.
+  output must re-validate clean. `tests/golden/config-default.toml` pins the exact output, so **a new
+  config key means updating the golden file and `KNOWN_KEYS.len()`** (currently 26).
 - **`docs/build.md` is a story deliverable, not orchestrator-only.** If a story changes prerequisites or
-  gates, the doc is in scope. One story shipped a stale build doc because the brief said off-limits.
-- **Every story adds at least one `case_*` to `scripts/verify.sh`.** The rule is written in bold in
-  `docs/build.md`, and the reviewer enforces it — HS-007 broke it one story after it was written.
+  gates, the doc is in scope, and its prose must be reflowed (~100 columns), not just appended to.
+- **Every story adds at least one `case_*` to `scripts/verify.sh`.** The rule is in bold in
+  `docs/build.md`, and the reviewer enforces it. The current gate is 21 cases / 66 assertions.
 - **Adding an ADR means updating `docs/stories/README.md`**: the "Decisions taken while slicing" count
-  and the bullet list. Earlier stories did this; a reviewer will notice if you do not.
-- **`GLOSSARY.md` is the vocabulary authority.** Check it before inventing a term — HS-007's plan said to
-  add `Session`/`Status` when both already existed under other names. `Status` in code is **State** in
-  the glossary; a separate entry would be a second spelling, which the glossary forbids.
+  (now seventeen) and the bullet list. A reviewer will check the links resolve — three did not, once.
+- **`GLOSSARY.md` is the vocabulary authority.** Check it before inventing a term. Recent entries to
+  respect: **Step**, **Backend**, **Trigger**, **Transition**, **Sessions screen**. `Status` in code is
+  **State** in the glossary; a second spelling is forbidden, including inside an entry's own prose.
+
+### Reviews
+
 - **Reviews are saved verbatim** and a `## Resolution` section is appended afterwards. Do not edit the
   review body; do not delete a dismissal.
-- **`scripts/check-static.sh`'s banner wait is a fixed 200 × 50 ms (10 s)** and has flaked once under
-  load average ≈4 on the aarch64 qemu path. Pre-existing; widen the bound if it recurs (the loop exits
-  as soon as the banner appears, so a larger bound costs nothing).
+- **The reviewer has no shell.** Its claims must be checked; it says so itself. Expect it to be right
+  about structure and to need you to run the gates.
+- It reliably finds one real should-fix per story — dead doc links, an inaccurate glossary rule, a
+  guard that is not proved non-vacuous, an uncaught `crypto.randomUUID`. Take them seriously.
 
 ### Demos
 
 - **Demo commands must be bounded.** Background a server with every fd redirected and `timeout`, and
-  kill it by its unique temp data dir. A backgrounded server keeps the tool call's stdout open and hangs
-  the child; `pgrep -f 'holosmith serve'` matches unrelated processes (and has matched leftovers from
-  previous sessions — kill those by pid, they are stale demo servers).
+  kill it by its own pid (write `$!` to a file). A backgrounded server keeps the tool call's stdout open
+  and hangs the child. `pgrep -f 'holosmith serve'` matches unrelated processes.
 - **`scripts/verify.sh`'s `fetch` waits for EOF**, which an SSE stream never sends. Use `fetch_stream`
-  with its own bound.
+  (header block) or `fetch_sse_until` (body lines until a needle, bounded).
+- **A create's state is not stable in a demo**: the provisioner runs 200 ms/step under
+  `--backend stub`, so a `GET /api/sessions` a second later shows `idle`, not `starting`. Assert what
+  the answer *is*, not what it was.
 
 ---
 
@@ -433,7 +502,7 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 | Decision | Why | Where recorded |
 | --- | --- | --- |
 | Default branch stays `master` | the repo's own default; renaming would be an invented change | commit history, every run note |
-| Ship locally, never fake a push | no credentials exist; reporting the blocker is the honest path | every issue's run note |
+| Ship locally, never fake a push | no credentials exist (`Permission denied (publickey)`, re-tested); reporting the blocker is the honest path | every issue's run note |
 | Rust + root Cargo workspace, one binary crate | stories assume Rust; ADR-0004 | ADR-0004 |
 | Static non-PIE musl on both arches, proven with bwrap + qemu, container runs deferred to HS-046 | no Docker daemon; ADR-0003 says a check belongs to the story where changing the design is still cheap | ADR-0005 |
 | Config: one typed value, `KeySpec` single table, three-pass validation, `# <key> unset` | "reports every problem at once" is impossible with a single `toml` parse | ADR-0006 |
@@ -445,13 +514,18 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 | `status` has no `CHECK`; the six values are a Rust enum | a corrupt row should be a read-time error, and HS-012 adds transitions without rewriting a constraint SQLite cannot drop | ADR-0011 |
 | `Arc<std::sync::Mutex<Database>>` in `AppState` as an explicit stopgap | `rusqlite::Connection` is `Send` but not `Sync`; ADR-0009 deferred the sharing decision | ADR-0012 |
 | Validation is **shape, not vocabulary** (no model/thinking list) | the spec enumerates neither; inventing a list is a third vocabulary, and HS-031 confirms pi's real values | ADR-0012 |
-| The cap refuses with 409 rather than evicting | nothing is evictable until HS-019 can stop and HS-020 can evict; HS-020 refines the branch | ADR-0012 |
-| The mutex stays and the writer task is added on top | ADR-0012's "HS-009 replaces it" conflated a lock with a task; a database actor is deferred and not needed | ADR-0013 |
+| The cap refuses with 409 rather than evicting | nothing is evictable until HS-019 can stop and HS-020 can evict | ADR-0012, HS-020 refines |
+| The mutex stays and the writer task is added on top | ADR-0012's "HS-009 replaces it" conflated a lock with a task | ADR-0013 |
 | The SSE heartbeat is axum's `KeepAlive`; `futures-core` is a direct dependency | writing our own comment line would double the heartbeat; the `Stream` trait must be nameable and the crate adds no package | ADR-0014 |
-| Every state change goes through `sessions::state::Transitioner::apply`; `set_status` may be named only in `sessions/repository.rs` and `sessions/state.rs`, enforced by a source walk | one table, one function: a story cannot invent an illegal state, and a change is reported because the function emits the event | ADR-0016 |
-| The `session.status` payload is `{from, to, step, reason}`; a provisioning step report is `from == to` with `step` set and is not a table row | one payload shape for the UI, and a step beginning is not a state change | ADR-0016 |
-| `GET /api/sessions` answers `{"sessions":[…],"network_default":…}`; the screen opens one `EventSource` per visible live session and holds no state beyond the DOM | one round trip for the form's default, and no cache to reconcile after a reconnect | ADR-0017 |
+| One backend trait with **one method per provisioning step** plus `undo`; an enum `Backends`, not `dyn` | the story's progress reporting *is* step granularity; `async fn` traits are not object-safe and both impls are in-crate | ADR-0015 |
+| The stub's per-step delay is a constructor argument (200 ms under `serve`), not a config key | a stub's pacing is not a machine setting; ADR-0006's table is settings | ADR-0015 |
+| `backend` **is** a config key (default `docker`), with `--backend` overriding it and the override written back into the loaded config | the story names both, and ADR-0006 says an override is applied to the loaded value | ADR-0015 |
+| The transition table is data keyed by `(from, trigger)`; a caller never names a target; one function applies it | a story cannot invent an illegal state, and the write and its event cannot diverge | ADR-0016 |
+| "Impossible outside it" is a source walk over `src/**`, not a `pub(crate)` write | the repository's own tests live outside the crate and are HS-007's coverage of the write | ADR-0016 |
+| The recovery row admits the three **live** states, not `any` | the spec's cell is "server crash", not a state; `stopped` would clear `stopped_at` and restart retention | ADR-0016 |
+| `GET /api/sessions` answers `{"sessions":[…],"network_default":…}`; one `EventSource` per visible live session; the page holds only the DOM | one round trip for the form's default; the cap bounds open streams; nothing to reconcile after a reconnect | ADR-0017 |
 | Story docs in `docs/stories/` are not edited — they are the source the Linear issues were imported from | editing them drifts from Linear; the ADR carries the contract instead | PER-34 plan comment |
+| This run implements **S/M stories in-session** and delegates **M/L with new surface** to a worker child | the orchestrator already holds the plan for small ones; a fresh context is better for a large UI | §5, and every Linear note since HS-011 |
 
 ---
 
@@ -462,38 +536,37 @@ cd /home/adamolsson/projects/holosmith
 git status --short                          # must be clean
 . ~/.pi/toolchains/env.sh
 python3 /tmp/lin.py issues | grep -v ' Done ' | head   # next unfinished issues (recreate /tmp/lin.py if missing)
-python3 /tmp/lin.py issue PER-43            # sanity-check Linear is reachable and scoped
-scripts/verify.sh                           # baseline green (~70 s, 17 cases, 51 assertions)
+python3 /tmp/lin.py issue PER-46            # sanity-check Linear is reachable and scoped
+scripts/verify.sh                           # baseline green (~3 min, 21 cases, 66 assertions)
 ```
 
-Then start the cycle at **`PER-46` (HS-014 — UI: session screen with a live transcript)**.
+Then start the cycle at **`PER-46` (HS-014 — UI: session screen with a live transcript)**. Read §1's
+two facts about it first: it must grow `GET /api/sessions/:id`, and its demo cannot run until HS-015
+produces messages.
 
-### What HS-011 is about, so the first brief is fast
+### What HS-014 is about, so the first brief is fast
 
-Acceptance, verbatim from `docs/stories/phase-1-session-lifecycle-stub.md:82`:
+Acceptance, verbatim from `docs/stories/phase-1-session-lifecycle-stub.md:141`:
 
-- A backend trait covers: provision, start turn, steer, abort, stop, resume, delete, snapshot. Stub
-  implements it with configurable per-step delays.
-- `backend = "stub"` is selectable by config and by `--backend`; stub needs no Docker, git or agent
-  binary.
-- The provisioner runs in the background and emits `session.status` with `step` set to `worktree`,
-  `network`, `container`, `pi`.
-- On failure it undoes completed steps and sets `error` with a reason; partial resources are not left
-  behind.
-- Success ends in `idle`, not `starting`.
-- The stub can be told to fail at a named step, and a test does exactly that.
+- Session screen subscribes to the stream and appends deltas per message id; thinking is visually
+  distinct from text.
+- Reconnect uses `Last-Event-ID`; a `message.snapshot` replaces by message id rather than appending
+  (safe even mid-delta).
+- State badge, reason, and a per-turn boundary are visible.
+- A composer exists (wired in HS-015) with Steer and Abort affordances shown only when `running`.
+- Rendering stays responsive at 10k events: no full re-render per delta.
 
-What is already in place for it: `runtime::Backend { Stub, Docker }` and `serve --backend`;
-`EventWriter::append` (bounded queue, so a producer waits rather than the writer); `SessionRepository`
-(`create`, `get`, `by_client_key`, `list`, `set_status`, `live_count`); `Status` with all six values;
-`AppState.events`. The writer's commit-before-broadcast contract is ADR-0013; the stream's replay
-contract is ADR-0014. **Read both before briefing.**
+What is already in place: `GET /api/sessions` (add `GET /api/sessions/:id` beside it, `Routes::get`),
+the SSE stream with `Last-Event-ID` (ADR-0014), the payload from ADR-0016, and a `web/src/main.ts` that
+already opens one `EventSource` per live row and holds only the DOM — the transcript is the same
+pattern with a bounded append. Two ways to open a session screen without a router: the fallback already
+serves the shell for any non-`/api/` path, so `/sessions/<id>` can be read from `location.pathname`.
 
-Things to decide canonically when planning it, and record: where the provisioner task lives and how it
-is spawned (it must not hold the `Mutex` across an `await`); how a failure undoes a step when the stub
-creates nothing (it must still *emit* the undo, or HS-024's Docker backend has no shape to fill); the
-`session.status` payload shape (`{step, status}` today in the demo — pin it); and that HS-012 owns the
-transition rules, so HS-011 must not invent a second state machine.
+Things to decide canonically when planning it, and record: how a delta is keyed (message id from the
+payload — pin the shape now, because HS-015's stub script must produce it), how the 10k-event rule is
+met (append to a per-message node; never re-render the list), what a "turn boundary" event looks like
+(HS-015 owns emitting it — pin the name now or render nothing and say so), and that `message.snapshot`
+must be applied by id even when its deltas are already on screen.
 
 ---
 
@@ -501,4 +574,6 @@ transition rules, so HS-011 must not invent a second state machine.
 
 Keep a running ledger in the conversation (issue → plan → implement → review → fix → ship, with SHAs) so
 a restart can see what was done from Linear, `docs/review/` and `git log`. The Linear issue is the
-durable record; the review file is the durable review; the commit history is the durable change.
+durable record; the review file is the durable review; the commit history is the durable change. If you
+stop before the backlog is empty, say so explicitly, say which issue is next, and leave the tree clean
+and the gates green — a half-finished story is worse than an honest stop.
