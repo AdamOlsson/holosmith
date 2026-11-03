@@ -15,7 +15,7 @@ use tokio::net::TcpListener;
 use crate::clock;
 use crate::config::{Config, LoadError, LoadedConfig, Overrides};
 use crate::db::{self, Database, OpenOptions};
-use crate::events::{self, WriterOptions};
+use crate::events::{self, StreamRegistry, WriterOptions};
 use crate::http::{self, App, AppState, Guards};
 use crate::logging;
 use crate::runtime::{Backend, Runtime};
@@ -113,10 +113,10 @@ pub fn run(args: ServeArgs) -> ExitCode {
         banner(&filter, &loaded, &runtime, &version, bound, &database);
         let guards = Guards::from_config(&loaded.config);
         let database = Arc::new(Mutex::new(database));
-        // The writer thread outlives this scope, so its handle is what the app carries. No
-        // subscriber exists yet (HS-010), so the stream `spawn` also hands back is dropped and
-        // the writer's sends answer "no receivers", which is not an error (ADR-0013); HS-010
-        // subscribes from the handle with `EventWriter::subscribe`.
+        // The writer thread outlives this scope, so its handle is what the app carries. The
+        // stream `spawn` also hands back is dropped: every subscriber is made from the handle
+        // with `EventWriter::subscribe`, because a stream cannot be cloned into an `AppState`
+        // and each one starts at the point of the broadcast (ADR-0013, ADR-0014).
         let (events, _stream) = events::spawn(Arc::clone(&database), WriterOptions::default());
         let app = App::new(
             http::router(AppState {
@@ -124,6 +124,7 @@ pub fn run(args: ServeArgs) -> ExitCode {
                 runtime,
                 database,
                 events,
+                streams: StreamRegistry::new(),
             }),
             guards,
         );

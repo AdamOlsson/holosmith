@@ -12,8 +12,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::Request;
 use axum::extract::rejection::BytesRejection;
+use axum::extract::{Path, Request};
 use axum::handler::Handler;
 use axum::http::{HeaderMap, Method, Uri, header};
 use axum::middleware::{self, Next};
@@ -22,27 +22,31 @@ use axum::routing::{MethodRouter, get};
 
 use crate::config::Config;
 use crate::db::Database;
-use crate::events::EventWriter;
+use crate::events::{EventWriter, StreamRegistry};
 use crate::http::error::ApiError;
 use crate::http::guard::{self, Guards};
 use crate::http::health::{self, Health};
 use crate::http::sessions;
+use crate::http::streams;
 use crate::runtime::Runtime;
 use crate::web;
 
 /// What a handler may read: the config in force, this run's backend and start time, the one open
-/// database, and the event writer's handle.
+/// database, the event writer's handle, and the sessions with a stream open.
 ///
 /// The database is reached through the `Arc<Mutex<Database>>` ADR-0012 introduced; ADR-0013 keeps
 /// it and adds the writer thread on top: the guard is held only across synchronous repository
 /// calls and never across an `.await`, and the writer takes it for its own transaction only. The
-/// writer handle is a sender, so cloning the state clones a queue, not the writer.
+/// writer handle is a sender, so cloning the state clones a queue, not the writer. The stream
+/// registry is one `Arc`, cloned with the state per request (ADR-0014).
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub config: Config,
     pub runtime: Runtime,
     pub database: Arc<Mutex<Database>>,
     pub events: EventWriter,
+    /// Which sessions have an SSE stream open: HS-019 closes them, HS-066 reads the count.
+    pub streams: StreamRegistry,
 }
 
 /// Whether a route may change state. Recorded at registration, because item 4's "`GET`
@@ -272,12 +276,13 @@ impl RequestCounter {
     }
 }
 
-/// The control listener's route table: the health endpoint, the create endpoint, the embedded
-/// app, and the two answers to an unknown path (ADR-0007).
+/// The control listener's route table: the health endpoint, the create endpoint, the session's
+/// event stream, the embedded app, and the two answers to an unknown path (ADR-0007).
 pub fn router(state: AppState) -> Routes {
     let state = Arc::new(state);
     let health_state = Arc::clone(&state);
     let create_state = Arc::clone(&state);
+    let stream_state = Arc::clone(&state);
     Routes::new()
         .get("/api/health", move || {
             let state = Arc::clone(&health_state);
@@ -291,6 +296,15 @@ pub fn router(state: AppState) -> Routes {
             move |headers: HeaderMap, body: Result<Bytes, BytesRejection>| {
                 let state = Arc::clone(&create_state);
                 async move { sessions::create(&state, headers, body).await }
+            },
+        )
+        // Read-only, so the guards apply as they do to every other `GET` and the manifest says
+        // which kind it is (D7). `{id}` is axum 0.8's capture syntax; the spec writes `:id`.
+        .get(
+            "/api/sessions/{id}/events",
+            move |Path(id): Path<String>, headers: HeaderMap| {
+                let state = Arc::clone(&stream_state);
+                async move { streams::respond(&state, &id, &headers).await }
             },
         )
         .fallback(fallback)

@@ -7,8 +7,9 @@
 # cargo test, scripts/build.sh (which runs scripts/build-web.sh and scripts/check-static.sh),
 # scripts/check-embed.sh, then serve: dist/<host-triple>/holosmith on a random port with a temp
 # config and a temp data dir, answering /api/health, the schema version, the app shell, the 404
-# envelope, every browser-facing guard refusal (ADR-0010) and the create endpoint's 202/422/409
-# answers, with no CORS header on any answer, and stopping on SIGTERM with exit 0.
+# envelope, every browser-facing guard refusal (ADR-0010), the create endpoint's 202/422/409
+# answers and the session's event stream, with no CORS header on any answer, and stopping on
+# SIGTERM with exit 0.
 # --no-build skips the two artifact phases; --keep keeps the work dir of a successful run. On
 # failure this prints FAIL <assertion> and keeps the work dir (config, banner, every answer).
 # Downloads nothing and needs neither curl nor jq: every request is a /dev/tcp fetch. Put the
@@ -182,6 +183,33 @@ answer() {
   cat "$WORK/responses/$1.http"
 }
 
+# fetch_stream <label> <path> [Header: value]...: a GET whose answer never ends, so it cannot use
+# `fetch`: an event stream sends its header block at once and then nothing until the first event,
+# and `fetch` would sit in `timeout 10 cat` until the deadline and then report a failure. This
+# reads the header block line by line with bash's own `read -t 3` and stops at the blank line, so
+# the read ends when the headers do and nothing is thrown away: an early close, a 404 or a
+# plain-text refusal is still saved and asserted like any other answer.
+fetch_stream() {
+  local label="$1" path="$2"
+  shift 2
+  local -a sent=("$@")
+  local request="GET $path HTTP/1.1"$'\r\n' fd header line
+  for header in "${sent[@]}"; do
+    request+="$header"$'\r\n'
+  done
+  request+=$'Connection: close\r\n\r\n'
+  exec {fd}<>"/dev/tcp/127.0.0.1/$port" || return 1
+  printf '%s' "$request" >&"$fd"
+  : >"$WORK/responses/$label.http"
+  while IFS= read -r -t 3 line <&"$fd"; do
+    printf '%s\n' "$line" >>"$WORK/responses/$label.http"
+    # The empty line ends the header block; the body is deliberately not read.
+    [ "$line" != $'\r' ] || break
+  done
+  exec {fd}<&-
+  sed '1,/^\r$/d' "$WORK/responses/$label.http" >"$WORK/responses/$label.body"
+}
+
 # expect_header <name> <response> <header> <expected>: one header's value, compared exactly.
 expect_header() {
   local name="$1" response="$2" header="$3" expected="$4" value
@@ -215,6 +243,7 @@ serve_cases=(
   case_create_is_idempotent
   case_create_bad_project
   case_create_cap_reached
+  case_events_stream
 )
 
 # The health payload: exactly four keys, and the uptime is not predictable, so the assertion is
@@ -457,6 +486,19 @@ case_create_cap_reached() {
   response="$(answer "$name")"
   expect_status "$name" "$response" 409
   expect_code "$name" "$response" cap_reached
+}
+
+# HS-010: the `events` URL a create answers with is a server-sent event stream. No producer exists
+# yet, so the case proves the route and its content type rather than an event; the stream never
+# sends EOF, which is why this uses `fetch_stream` and not `fetch`.
+case_events_stream() {
+  local name=case_events_stream response
+  fetch_stream "$name" "/api/sessions/$created_id/events" "Host: 127.0.0.1" ||
+    fail "$name/no_answer" "GET /api/sessions/$created_id/events did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 200
+  expect_header "$name" "$response" content-type "text/event-stream"
+  expect_header "$name" "$response" cache-control "no-cache"
 }
 
 # Box 4, over every answer the cases above saved: none of them carries a CORS header, and none

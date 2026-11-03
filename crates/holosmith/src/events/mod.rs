@@ -6,7 +6,9 @@
 //! a subscriber reads committed events only; and the writer assigns the seq, using the session's
 //! `last_seq` counter, so a client never sees a seq a crash could undo.
 
+pub mod registry;
 pub mod repository;
+pub(crate) mod stream;
 mod writer;
 
 use std::fmt;
@@ -15,6 +17,7 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 
+pub use registry::{StreamGuard, StreamRegistry};
 pub use repository::EventRepository;
 pub use writer::spawn;
 

@@ -13,7 +13,7 @@ use std::time::Duration;
 use holosmith::clock;
 use holosmith::config::Config;
 use holosmith::db::{self, Database, OpenOptions};
-use holosmith::events::{self, EventWriter, WriterOptions};
+use holosmith::events::{self, EventWriter, StreamRegistry, WriterOptions};
 use holosmith::http::{App, AppState, Guards, RequestCounter, Routes};
 use holosmith::runtime::{Backend, Runtime};
 use holosmith::serve::{self, ServeOptions};
@@ -94,25 +94,37 @@ pub fn state() -> AppState {
         runtime: Runtime::started(Backend::Stub),
         database: Arc::clone(database),
         events: events.clone(),
+        streams: StreamRegistry::default(),
     }
 }
 
 /// A state for a test that writes: its own database in its own directory, so no two tests (and
 /// no two `Database::open` calls in one process) share a file.
 pub fn state_in(dir: &TempDir, config: Config) -> AppState {
+    state_with_writer(dir, config, WriterOptions::default())
+}
+
+/// A state whose writer commits on `options.commit_interval`, so a test can hold an event
+/// uncommitted and choose which half of a stream's replay window it lands in.
+pub fn state_with_writer(dir: &TempDir, config: Config, options: WriterOptions) -> AppState {
     let database = Arc::new(Mutex::new(open(dir)));
     AppState {
         config,
         runtime: Runtime::started(Backend::Stub),
-        events: writer_handle(Arc::clone(&database)),
+        events: writer_handle_with(Arc::clone(&database), options),
         database,
+        streams: StreamRegistry::default(),
     }
 }
 
 /// The writer handle for a state's database. The tests that use it emit no events, so the
 /// default interval never runs; the thread exits when the state's last handle drops.
 fn writer_handle(database: Arc<Mutex<Database>>) -> EventWriter {
-    events::spawn(database, WriterOptions::default()).0
+    writer_handle_with(database, WriterOptions::default())
+}
+
+fn writer_handle_with(database: Arc<Mutex<Database>>, options: WriterOptions) -> EventWriter {
+    events::spawn(database, options).0
 }
 
 /// The version this build reports, for a payload that names it.

@@ -15,6 +15,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 toml_edit = { version = "0.25", default-features = false, features = ["parse", "serde"] }
 shlex = "2"
 axum = "0.8"
+futures-core = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "time", "macros", "sync", "io-util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }

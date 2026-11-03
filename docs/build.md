@@ -95,14 +95,23 @@ startup banner, never assumed. The data root is inside the work dir, so a run ne
 `/var/lib/holosmith` (ADR-0009), and the config file carries `owner` and
 `max_live_sessions = 1`: the `bad_owner` case and the create cases are the only reasons that
 file exists. Every request is a `/dev/tcp` fetch (`fetch` for a body-less request,
-`fetch_body` when a body is needed), so the harness needs neither `curl` nor `jq`.
+`fetch_body` when a body is needed, `fetch_stream` for a response that never ends), so the
+harness needs neither `curl` nor `jq`. `fetch_stream` exists because `fetch` reads until EOF:
+an event stream sends its header block at once and then nothing until the first event, so
+`fetch` would sit in its ten-second deadline and report a working stream as a broken one.
+`fetch_stream` reads the header block line by line under bash's own three-second timeout and
+stops at the blank line, so an early close, a `404` or a `text/plain` refusal is still saved
+and asserted like any other answer.
 
 A `serve_cases` array names the `case_*` functions, one per answer a browser gets: the health
 payload, the schema version the banner reports against `version --json`, the app shell
 byte-for-byte against `web/dist/index.html`, the `404` envelope of ADR-0008, one case per
 guard refusal (`bad_host`, `bad_origin`, `bad_client`, `bad_owner`), the request that passes
-all four, the exempt health probe, and the create endpoint (`case_create_session`,
-`case_create_is_idempotent`, `case_create_bad_project`, `case_create_cap_reached`). A case
+all four, the exempt health probe, the create endpoint (`case_create_session`,
+`case_create_is_idempotent`, `case_create_bad_project`, `case_create_cap_reached`), and the
+session's event stream (`case_events_stream`, which reads the stream's header block with
+`fetch_stream` and asserts `200`, `text/event-stream` and `no-cache` on the session
+`case_create_session` made). A case
 that must assert one code keeps every higher guard check correct, or it asserts another
 guard's code under its own name.
 

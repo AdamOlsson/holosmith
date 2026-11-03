@@ -302,6 +302,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
+ "futures-core",
  "include_dir",
  "rusqlite",
  "serde",

@@ -4,6 +4,8 @@
 //! snake_case name from the spec, never the transport status; the message may be rewritten
 //! without breaking a client.
 
+use std::fmt::Display;
+
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -207,6 +209,19 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.status, Json(self.body)).into_response()
     }
+}
+
+/// The 500 every handler answers for a failure no client can fix: the operation and the error go
+/// to the log, because a rusqlite message can carry the database path, and the client gets the one
+/// fixed sentence.
+pub fn internal(operation: &'static str, error: impl Display) -> ApiError {
+    tracing::error!(
+        target: "holosmith::http",
+        operation,
+        %error,
+        "a request could not be completed"
+    );
+    ApiError::internal()
 }
 
 #[cfg(test)]

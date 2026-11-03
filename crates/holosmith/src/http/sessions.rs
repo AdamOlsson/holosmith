@@ -19,7 +19,7 @@ use serde_json::Value;
 
 use crate::clock;
 use crate::http::app::AppState;
-use crate::http::error::ApiError;
+use crate::http::error::{ApiError, internal};
 use crate::sessions::{NewSession, RepoError, Session};
 
 /// The header a create's idempotency key travels in.
@@ -248,18 +248,6 @@ fn create_locked(state: &AppState, body: &CreateBody, key: &str) -> Result<Sessi
         },
         Err(error) => Err(internal("create", error)),
     }
-}
-
-/// The 500's log line and body: the operation and the error go to the log, because a rusqlite
-/// message can carry the database path; the client gets one fixed sentence.
-fn internal(operation: &'static str, error: RepoError) -> ApiError {
-    tracing::error!(
-        target: "holosmith::http",
-        operation,
-        %error,
-        "a create could not be completed"
-    );
-    ApiError::internal()
 }
 
 fn created(session: Session) -> Response {
