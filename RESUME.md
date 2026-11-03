@@ -37,8 +37,8 @@ Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is
 story commit was **`bf0f460`** (a docs commit bringing the previous handoff up to date); any commit
 after it is this file's own bookkeeping.
 
-**Linear: 10 Done, 70 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-010`
-(`PER-33` … `PER-42`).
+**Linear: 13 Done, 67 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-013`
+(`PER-33` … `PER-45`).
 
 | Story | Linear | Commits | ADR |
 | --- | --- | --- | --- |
@@ -52,16 +52,24 @@ after it is this file's own bookkeeping.
 | HS-008 `POST /api/sessions` | PER-40 | `c5891e4`, `858d295` | 0012 |
 | HS-009 event log + single writer, schema 3 | PER-41 | `5cae107`, `dae1fd9` | 0013 |
 | HS-010 SSE stream, `Last-Event-ID` | PER-42 | `3b03c5c`, `07f318d` | 0014 |
+| HS-011 stub backend + provisioner | PER-43 | `9071390`, `b5022fc` | 0015 |
+| HS-012 one state machine | PER-44 | `9424677` | 0016 |
+| HS-013 sessions list + create form | PER-45 | `47471c4` | 0017 |
 
-**Next issue: `PER-43` (HS-011 — stub backend and provisioner steps).** Unblocked: HS-008 and HS-010
-both landed. Then `PER-44` (HS-012 — one enforced state machine), `PER-45` (HS-013 — UI sessions list),
-and onward in `HS-###` order.
+**Next issue: `PER-46` (HS-014 — UI: session screen with a live transcript).** Unblocked: HS-013
+landed. Note what HS-014 needs that no story has built yet: there is **no `GET /api/sessions/:id`**,
+and **no message producer** — HS-015 owns the stub's scripted turn, so HS-014 can render deltas,
+snapshots, turn boundaries and the state badge only against events it cannot yet receive, and its
+"prompt a session" demo cannot run until HS-015 wires the composer. Then `PER-47` (HS-015 — prompt
+and the turn lifecycle), `PER-48` (HS-016 — abort), and onward in `HS-###` order.
 
 Ranking, per `PROMPT.md`: Linear priority (all are `No priority`) → `HS-###` order in `docs/stories/`
 → anything already `In Progress` first → skip an issue whose `Blocked by` stories are not `Done`.
 
-**Pushing is impossible.** There is no remote credential, ssh key, or `gh`. Every story so far is local
-commits on `master` and a closing comment that says so. Do not fake a push; report the blocker.
+**Pushing is impossible.** `origin` is `git@github.com:AdamOlsson/holosmith.git` and it answers
+`Permission denied (publickey)` (re-tested after HS-013): there is no ssh key and no `gh`. Every story
+so far is local commits on `master` and a closing comment that says so. Do not fake a push; report the
+blocker.
 
 ---
 
@@ -209,6 +217,9 @@ crates/holosmith/
                             checks), sessions.rs (POST /api/sessions), streams.rs (the SSE handler)
   src/sessions/             mod.rs (Status, Session, NewSession, RepoError),
                             repository.rs (every `sessions` statement + its SQL-location guard)
+  src/backend/              mod.rs (Step, SessionBackend, Backends, BackendError), stub.rs, docker.rs
+  src/provisioner.rs        the four-step background task and its five `session.status` events
+  src/sessions/state.rs     the transition table, `SessionStatus`, `Transitioner::apply`, the guard
   src/events/               mod.rs (Event, NewEvent, EventWriter, EventStream, WriterOptions),
                             writer.rs (the writer thread, group commit, broadcast),
                             repository.rs (every `events` statement + its guard),
@@ -228,7 +239,7 @@ scripts/check-static.sh     file/readelf, empty-root serve + cmp against web/dis
                             gate, app.db assertions, byte grep for the schema SQL, Cargo.lock guard
 scripts/check-embed.sh      the three embed cases (present / absent warns / required fails)
 scripts/verify.sh           the one-command gate (see §3)
-docs/adr/0001…0014          read the recent ones before planning anything
+docs/adr/0001…0017          read the recent ones before planning anything
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
 docs/review/PER-33…PER-42   each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
@@ -238,13 +249,16 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
 ### What exists and what does not
 
 - **Working:** `version` (text + `--json`), `config {validate,show,edit}`, `serve` (control listener,
-  embedded app, `/api/health`, `POST /api/sessions`, `GET /api/sessions/:id/events`), SQLite with three
-  migrations, the guards, the event writer, the SSE stream.
-- **Not built yet:** any provisioner or real session work (HS-011), the state machine (HS-012), the UI
-  beyond a shell (HS-013+), the preview listener (HS-041), Docker (HS-024+), a `GET /api/sessions`
-  list, `GET /api/sessions/:id`, delete, merge, publish, push, the hub, releases.
-- **`runtime::Backend`** already has `Stub` and `Docker`, and `serve --backend` already selects it. HS-011
-  is where the stub acquires a real trait and a provisioner.
+  embedded app, `/api/health`, `POST /api/sessions`, `GET /api/sessions`, `GET /api/sessions/:id/events`),
+  SQLite with three migrations, the guards, the event writer, the SSE stream, the stub backend and its
+  provisioner, the state machine, and the Sessions screen with its create form.
+- **Not built yet:** `GET /api/sessions/:id`, the session screen (HS-014), any turn (HS-015+), delete,
+  resume/prompt/steer/abort endpoints, the preview listener (HS-041), Docker (HS-024+), merge, publish,
+  push, the hub, releases.
+- **`runtime::Backend`** has `Stub` and `Docker`, `serve --backend` and the config's `backend` select
+  it, and `backend::SessionBackend` is what a backend must do. `DockerBackend` refuses every
+  operation until HS-024, so a default build provisions to `error` with a reason rather than hanging
+  in `starting`.
 - **`AppState`** is `{ config, runtime, database: Arc<std::sync::Mutex<Database>>, events: EventWriter,
   streams: StreamRegistry }`. The mutex is an explicit stopgap (ADR-0012/0013) — see §6.
 
@@ -309,6 +323,9 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 
 ### Build and toolchain
 
+- **`scripts/verify.sh` is at 21 cases / 66 assertions** and takes ~3 min including both musl
+  builds. A concurrent `scripts/build.sh` in the same tree can make `check-static.sh`'s banner wait
+  flake — run one at a time.
 - **The pinned pi version lives in exactly one tracked file, `pins/pi.txt`.** `tests/pin_single_source.rs`
   fails if the literal appears in a second tracked file — including `docs/review/*.md`. A commit message
   is fine; a doc file is not. Every saved review and Resolution table deliberately never spells it out.
@@ -431,6 +448,9 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 | The cap refuses with 409 rather than evicting | nothing is evictable until HS-019 can stop and HS-020 can evict; HS-020 refines the branch | ADR-0012 |
 | The mutex stays and the writer task is added on top | ADR-0012's "HS-009 replaces it" conflated a lock with a task; a database actor is deferred and not needed | ADR-0013 |
 | The SSE heartbeat is axum's `KeepAlive`; `futures-core` is a direct dependency | writing our own comment line would double the heartbeat; the `Stream` trait must be nameable and the crate adds no package | ADR-0014 |
+| Every state change goes through `sessions::state::Transitioner::apply`; `set_status` may be named only in `sessions/repository.rs` and `sessions/state.rs`, enforced by a source walk | one table, one function: a story cannot invent an illegal state, and a change is reported because the function emits the event | ADR-0016 |
+| The `session.status` payload is `{from, to, step, reason}`; a provisioning step report is `from == to` with `step` set and is not a table row | one payload shape for the UI, and a step beginning is not a state change | ADR-0016 |
+| `GET /api/sessions` answers `{"sessions":[…],"network_default":…}`; the screen opens one `EventSource` per visible live session and holds no state beyond the DOM | one round trip for the form's default, and no cache to reconcile after a reconnect | ADR-0017 |
 | Story docs in `docs/stories/` are not edited — they are the source the Linear issues were imported from | editing them drifts from Linear; the ADR carries the contract instead | PER-34 plan comment |
 
 ---
@@ -446,7 +466,7 @@ python3 /tmp/lin.py issue PER-43            # sanity-check Linear is reachable a
 scripts/verify.sh                           # baseline green (~70 s, 17 cases, 51 assertions)
 ```
 
-Then start the cycle at **`PER-43` (HS-011 — stub backend and provisioner steps)**.
+Then start the cycle at **`PER-46` (HS-014 — UI: session screen with a live transcript)**.
 
 ### What HS-011 is about, so the first brief is fast
 
