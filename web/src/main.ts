@@ -526,9 +526,10 @@ function applyChange(
 }
 
 // The composer: one box of guidance and the three things that can be done with it. Prompting is the
-// `idle` row's trigger and steering is a running turn's, so the buttons exist in one state each
-// (`affordances`). Prompting posts for real (HS-015); steering and aborting keep the notice naming
-// the story that wires them, because a request that would 404 is worse than a note.
+// `idle` row's trigger and steering and aborting are a running turn's, so the buttons exist in one
+// state each (`affordances`). Prompting posts for real (HS-015) and aborting does too (HS-016);
+// steering keeps the notice naming the story that wires it, because a request that would 404 is
+// worse than a note.
 type Composer = { element: HTMLElement; update: (state: SessionState) => void };
 
 // `showState` patches the screen's badge from a row the prompt's answer carried, so a 202 says
@@ -559,10 +560,34 @@ function composerSection(id: string, showState: (state: SessionState, reason: st
     notice.hidden = false;
   };
 
-  // The two endpoints that are not this story's are named rather than called: a button that silently
-  // did nothing would be indistinguishable from a broken one.
+  // Steering is not this story's, so it says so rather than calling an endpoint that does not exist.
   steer.addEventListener("click", () => say("Steering arrives with HS-017; nothing was sent."));
-  abort.addEventListener("click", () => say("Aborting arrives with HS-016; nothing was sent."));
+  // Aborting is a real request (HS-016): the 202 says the ladder accepted it and the turn ends
+  // off-request, so the badge and the buttons follow the stream rather than this answer. No body is
+  // sent — there is nothing to say — but the content type goes with it, because the guards read it
+  // on every request that changes something (ADR-0010).
+  const stop = async (): Promise<void> => {
+    abort.disabled = true;
+    try {
+      const response = await fetch(`${sessionPath(id)}/abort`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-holosmith-client": "1" },
+      });
+      if (!response.ok) {
+        const envelope = (await response.json()) as ErrorEnvelope;
+        say(`${envelope.code}: ${envelope.message}`);
+        return;
+      }
+      say("Abort accepted: the turn is stopping.");
+    } catch (failure) {
+      say(`unreachable: ${String(failure)}`);
+    } finally {
+      abort.disabled = false;
+    }
+  };
+  abort.addEventListener("click", () => {
+    void stop();
+  });
 
   // True while the badge on screen offers a prompt, so a submit that arrives while the session is
   // running (a second tap before the frame lands) sends nothing.

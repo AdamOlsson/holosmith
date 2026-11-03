@@ -137,6 +137,22 @@ impl fmt::Display for BackendError {
 
 impl std::error::Error for BackendError {}
 
+/// How a turn ended, as the backend saw it (HS-016).
+///
+/// The backend reports what happened to the turn it was asked to run; the runner still chooses the
+/// table row (ADR-0019: the backend emits, the server decides). Two answers are enough for both
+/// rows `running` has: [`Self::Settled`] is the agent finishing on its own, [`Self::Aborted`] is a
+/// turn that stopped because [`SessionBackend::abort`] or [`SessionBackend::stop`] cut it short — a
+/// forced stop lands on the same table row as an abort, because the caller ascends the ladder and
+/// the row is already `stopped` by then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnEnd {
+    /// The agent finished everything for this turn.
+    Settled,
+    /// Something stopped the turn before the agent finished.
+    Aborted,
+}
+
 /// The eight operations the story names, plus the per-step undo a failed provisioning needs.
 ///
 /// `async fn` in a trait, which is not object-safe: the crate never holds a `dyn SessionBackend`
@@ -158,17 +174,34 @@ pub trait SessionBackend {
     /// writer, because the frames are the backend's own output, and it has no `Transitioner`, so a
     /// state change stays the server's. The stub scripts a turn and HS-032 pumps pi's RPC into the
     /// same writer.
+    ///
+    /// The answer says **how** the turn ended (HS-016), which is the one thing the server cannot
+    /// observe: `Settled` is the agent finishing, `Aborted` is an [`Self::abort`] or [`Self::stop`]
+    /// cutting the turn short. It is not a state decision — the runner maps it onto the table
+    /// (`agent_settled` or `abort_completed`) — but without it the two rows would be
+    /// indistinguishable from the outside.
     async fn start_turn(
         &self,
         session: &Session,
         prompt: &str,
         events: &EventWriter,
-    ) -> Result<(), BackendError>;
+    ) -> Result<TurnEnd, BackendError>;
 
     /// Add guidance to the turn that is running.
     async fn steer(&self, session: &Session, text: &str) -> Result<(), BackendError>;
 
+    /// Drop the prompts the agent has queued but not started.
+    ///
+    /// The abort ladder's first step, and its own operation rather than part of [`Self::abort`],
+    /// because the spec names two RPC calls in order (item 16 §1) and an agent whose queue survives
+    /// an abort starts the next prompt the operator no longer wants.
+    async fn clear_queue(&self, session: &Session) -> Result<(), BackendError>;
+
     /// End the running turn early.
+    ///
+    /// Returns once the agent has been told, not once the turn has stopped: the turn's own
+    /// `start_turn` answers [`TurnEnd::Aborted`] when the agent gets there, and the ladder is what
+    /// waits for it (HS-016, ADR-0020).
     async fn abort(&self, session: &Session) -> Result<(), BackendError>;
 
     /// Stop the container, keeping the worktree, the history and the events.
@@ -240,7 +273,7 @@ impl SessionBackend for Backends {
         session: &Session,
         prompt: &str,
         events: &EventWriter,
-    ) -> Result<(), BackendError> {
+    ) -> Result<TurnEnd, BackendError> {
         match self {
             Self::Stub(backend) => backend.start_turn(session, prompt, events).await,
             Self::Docker(backend) => backend.start_turn(session, prompt, events).await,
@@ -251,6 +284,13 @@ impl SessionBackend for Backends {
         match self {
             Self::Stub(backend) => backend.steer(session, text).await,
             Self::Docker(backend) => backend.steer(session, text).await,
+        }
+    }
+
+    async fn clear_queue(&self, session: &Session) -> Result<(), BackendError> {
+        match self {
+            Self::Stub(backend) => backend.clear_queue(session).await,
+            Self::Docker(backend) => backend.clear_queue(session).await,
         }
     }
 

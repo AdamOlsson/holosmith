@@ -8,6 +8,7 @@ pub mod config;
 pub mod db;
 pub mod events;
 pub mod http;
+pub mod ladder;
 pub mod logging;
 pub mod pins;
 pub mod provisioner;

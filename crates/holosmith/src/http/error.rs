@@ -60,14 +60,17 @@ pub const SESSION_STARTING: &str = "session_starting";
 /// A prompt was refused because a turn is already running (HS-015; spec item 12).
 pub const SESSION_RUNNING: &str = "session_running";
 
-/// A prompt was refused because the session is stopped (HS-015; spec item 8).
+/// A request was refused because the session is stopped (HS-015; spec item 8).
 pub const SESSION_STOPPED: &str = "session_stopped";
 
-/// A prompt was refused because the session is in `error` (HS-015).
+/// A request was refused because the session is in `error` (HS-015).
 pub const SESSION_ERROR: &str = "session_error";
 
-/// A prompt was refused because the session is being deleted (HS-015).
+/// A request was refused because the session is being deleted (HS-015).
 pub const SESSION_DELETING: &str = "session_deleting";
+
+/// An abort was refused because there is no turn to abort (HS-016; HS-017 names it).
+pub const SESSION_IDLE: &str = "session_idle";
 
 /// The body of every error response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -232,34 +235,29 @@ impl ApiError {
         )
     }
 
-    /// What a prompt is refused with when the session is not `idle` (HS-015, D2).
+    /// What a request is refused with when the session's state does not accept it (HS-015, D2;
+    /// HS-016).
     ///
     /// One code per state, the state's own machine word: the spec names `session_stopped` (item 8)
-    /// and `session_running` (item 12), and the other three follow that rule rather than inventing
-    /// an umbrella code that lists the states accepting a prompt.
+    /// and `session_running` (item 12), HS-016 adds `session_idle` (an abort with no turn to abort)
+    /// and HS-017 will name it too. The family is the rule rather than a list of the codes the spec
+    /// happens to spell, so `idle` is a member like the rest and there is no umbrella code.
     ///
-    /// The five codes are the five states a prompt is refused in. `Idle` is the state a prompt is
-    /// *accepted* in, so it is never a refusal: the handler answers 202 before it asks for one, and
-    /// that arm is unreachable rather than a sixth code.
-    pub fn not_idle(status: crate::sessions::Status) -> Self {
+    /// The **message** is the caller's, because it has to describe its own request: an abort's
+    /// refusal must not read like a prompt's (HS-015's demo caught the prompt reusing the create's
+    /// sentence). Every caller passes a fixed sentence, which is why the envelope can keep its
+    /// borrowed `&'static str`.
+    pub fn not_in_state(status: crate::sessions::Status, message: &'static str) -> Self {
         use crate::sessions::Status;
         let code = match status {
             Status::Starting => SESSION_STARTING,
+            Status::Idle => SESSION_IDLE,
             Status::Running => SESSION_RUNNING,
             Status::Stopped => SESSION_STOPPED,
             Status::Error => SESSION_ERROR,
             Status::Deleting => SESSION_DELETING,
-            // Total rather than a panic: a handler that panics drops the connection with no
-            // envelope at all, and "idle" is not a state a prompt is refused for. The one caller
-            // that could see it (a turn settling between the read and the refusal) answers the
-            // fixed 500 sentence itself instead of landing here.
-            Status::Idle => return Self::internal(),
         };
-        Self::new(
-            StatusCode::CONFLICT,
-            code,
-            "the session is not idle, so it cannot be prompted",
-        )
+        Self::new(StatusCode::CONFLICT, code, message)
     }
 }
 
@@ -438,21 +436,19 @@ mod tests {
     }
 
     #[test]
-    fn a_prompt_on_a_session_that_is_not_idle_is_a_409_naming_its_state() {
+    fn a_request_a_state_refuses_is_a_409_naming_that_state() {
         // One code per state, and the code is the state's own machine word: `Status::as_str` is
         // where the word lives, so the constants are proved against it rather than restated.
         use crate::sessions::Status;
         for status in Status::ALL {
-            if status == Status::Idle {
-                continue;
-            }
-            let error = ApiError::not_idle(status);
+            let error = ApiError::not_in_state(status, "the session is not running");
             assert_eq!(error.status, StatusCode::CONFLICT, "{status}");
             assert_eq!(
                 error.body.code,
                 format!("session_{}", status.as_str()),
                 "{status}"
             );
+            assert_eq!(error.body.message, "the session is not running", "{status}");
             assert_eq!(
                 error
                     .into_response()
@@ -464,6 +460,7 @@ mod tests {
             );
         }
         assert_eq!(SESSION_STARTING, "session_starting");
+        assert_eq!(SESSION_IDLE, "session_idle");
         assert_eq!(SESSION_RUNNING, "session_running");
         assert_eq!(SESSION_STOPPED, "session_stopped");
         assert_eq!(SESSION_ERROR, "session_error");

@@ -130,7 +130,11 @@ session by id (`case_session_detail`, which asserts the row the create made, tha
 prompt (`case_prompt_turn`, which asserts the 202 answers the row `running` and then reads that
 session's stream until the turn settles, asserting the turn's six kinds in order and the
 `idle → running → idle` transitions; `case_prompt_bad_body` and `case_prompt_unknown_session`,
-which assert the `422 bad_body` and `404 not_found` envelopes). A case that must assert one code
+which assert the `422 bad_body` and `404 not_found` envelopes), and the abort
+(`case_abort`, which prompts, aborts, and reads that session's stream until the event carries the
+abort's own reason, asserting the 202 answered the row still `running` and that the turn ended
+`running → idle` with reason `abort_completed`; `case_abort_on_an_idle_session`, which asserts the
+`409 session_idle` envelope). A case that must assert one code
 keeps every higher guard check correct, or it asserts another guard's code under its own name.
 
 The CORS sweep is deliberately **not** in that array: it runs once after every case and checks

@@ -19,19 +19,26 @@
 //! - **This is not a state machine.** HS-012 owns the table and the one function that writes a
 //!   state; the runner asks it for `agent_settled` or `unexpected_exit` and writes nothing itself.
 //!
-//! Abort and steer are HS-016's and HS-017's: the script is unconditional today, and a stop signal a
-//! backend could raise arrives with the story that needs it.
+//! Abort and steer are HS-016's and HS-017's: the script is cut short by the backend's own
+//! `abort`/`stop`, and the ladder that asks for it is [`crate::ladder`].
 
 use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::task::JoinHandle;
 
-use crate::backend::{Backends, SessionBackend};
+use crate::backend::{Backends, SessionBackend, TurnEnd};
 use crate::clock;
 use crate::db::Database;
 use crate::events::EventWriter;
 use crate::sessions::Session;
-use crate::sessions::state::{Transitioner, Trigger};
+use crate::sessions::state::{StateError, Transitioner, Trigger};
+
+/// The reason a turn that ended because of an abort records on `running -> idle`.
+///
+/// The event's payload has no trigger field (ADR-0016), so the reason is the only place a client
+/// can read *how* a turn ended: `abort_completed` here, [`crate::ladder::FORCED_ABORT`] when the
+/// ladder had to kill the container. Spelling the trigger's own word keeps one vocabulary.
+pub const ABORT_COMPLETED: &str = "abort_completed";
 
 /// The turn runner's handles: where a turn runs, where the row is, and where its frames go.
 ///
@@ -73,8 +80,12 @@ impl Turn {
             .start_turn(&session, &prompt, &self.events)
             .await
         {
-            Ok(()) => {
+            Ok(TurnEnd::Settled) => {
                 self.transition(&session, Trigger::AgentSettled, None).await;
+                self.touch(&session.id);
+            }
+            Ok(TurnEnd::Aborted) => {
+                self.abort_ended(&session).await;
                 self.touch(&session.id);
             }
             Err(error) => {
@@ -90,6 +101,35 @@ impl Turn {
                 self.transition(&session, Trigger::UnexpectedExit, Some(&reason))
                     .await;
             }
+        }
+    }
+
+    /// The abort ending: `running -> idle` on `abort_completed`, unless the ladder got there first.
+    ///
+    /// Two tasks can end one turn (HS-016, ADR-0020): the ladder's second rung exists exactly for a
+    /// turn that did not stop, so it applies `running -> stopped` and then stops the backend, which
+    /// is what finally makes this turn answer [`TurnEnd::Aborted`]. The row is therefore often no
+    /// longer `running` by the time this runs, and the table refusing the row is the ordinary
+    /// outcome of the two owners rather than a bug — so it is a `debug` line here, and only here.
+    async fn abort_ended(&self, session: &Session) {
+        match self
+            .transitioner()
+            .apply(&session.id, Trigger::AbortCompleted, Some(ABORT_COMPLETED))
+            .await
+        {
+            Ok(_) => {}
+            Err(error @ StateError::Illegal { .. }) => tracing::debug!(
+                target: "holosmith::turn",
+                session = %session.id,
+                %error,
+                "the abort ladder ended this turn instead"
+            ),
+            Err(error) => tracing::warn!(
+                target: "holosmith::turn",
+                session = %session.id,
+                %error,
+                "a turn's abort ending did not complete"
+            ),
         }
     }
 

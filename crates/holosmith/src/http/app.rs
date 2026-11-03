@@ -29,6 +29,7 @@ use crate::http::guard::{self, Guards};
 use crate::http::health::{self, Health};
 use crate::http::sessions;
 use crate::http::streams;
+use crate::ladder::Ladder;
 use crate::provisioner::Provisioner;
 use crate::runtime::Runtime;
 use crate::sessions::state::Transitioner;
@@ -89,6 +90,21 @@ impl AppState {
     /// half-wired.
     pub fn transitioner(&self) -> Transitioner {
         Transitioner::new(Arc::clone(&self.database), self.events.clone())
+    }
+
+    /// An abort ladder wired to this state's backend, database, event writer and `abort_grace`
+    /// (HS-016).
+    ///
+    /// Here for the same reason as [`Self::turner`]: the abort handler clones the handles a
+    /// background ladder needs in one place, and the grace period is the config's rather than a
+    /// second number a caller could choose.
+    pub fn ladder(&self) -> Ladder {
+        Ladder::new(
+            self.backend.clone(),
+            Arc::clone(&self.database),
+            self.events.clone(),
+            self.config.abort_grace.into(),
+        )
     }
 }
 
@@ -320,8 +336,8 @@ impl RequestCounter {
 }
 
 /// The control listener's route table: the health endpoint, the sessions collection (its list, its
-/// create and one row), the session's event stream, a session's prompt, the embedded app, and the two
-/// answers to an unknown path (ADR-0007).
+/// create and one row), the session's event stream, a session's prompt and abort, the embedded app,
+/// and the two answers to an unknown path (ADR-0007).
 pub fn router(state: AppState) -> Routes {
     let state = Arc::new(state);
     let health_state = Arc::clone(&state);
@@ -330,6 +346,7 @@ pub fn router(state: AppState) -> Routes {
     let create_state = Arc::clone(&state);
     let stream_state = Arc::clone(&state);
     let prompt_state = Arc::clone(&state);
+    let abort_state = Arc::clone(&state);
     Routes::new()
         .get("/api/health", move || {
             let state = Arc::clone(&health_state);
@@ -390,6 +407,16 @@ pub fn router(state: AppState) -> Routes {
                 let state = Arc::clone(&prompt_state);
                 let id = id.map(|Path(id)| id).unwrap_or_default();
                 async move { sessions::prompt(&state, &id, body).await }
+            },
+        )
+        // The abort: a mutating route on the same terms as the prompt (HS-016). No body extractor:
+        // there is nothing to parse, so there is no rejection to map.
+        .post(
+            "/api/sessions/{id}/abort",
+            move |id: Result<Path<String>, PathRejection>| {
+                let state = Arc::clone(&abort_state);
+                let id = id.map(|Path(id)| id).unwrap_or_default();
+                async move { sessions::abort(&state, &id).await }
             },
         )
         .fallback(fallback)

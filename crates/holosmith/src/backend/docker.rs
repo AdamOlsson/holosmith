@@ -12,7 +12,7 @@
 //! Writing them now would mean guessing at `docker_host`, the projects root and the image tags
 //! that those stories own.
 
-use super::{BackendError, SessionBackend, Step};
+use super::{BackendError, SessionBackend, Step, TurnEnd};
 use crate::events::EventWriter;
 use crate::sessions::Session;
 
@@ -48,12 +48,16 @@ impl SessionBackend for DockerBackend {
         _session: &Session,
         _prompt: &str,
         _events: &EventWriter,
-    ) -> Result<(), BackendError> {
+    ) -> Result<TurnEnd, BackendError> {
         Err(Self::refuse("start_turn"))
     }
 
     async fn steer(&self, _session: &Session, _text: &str) -> Result<(), BackendError> {
         Err(Self::refuse("steer"))
+    }
+
+    async fn clear_queue(&self, _session: &Session) -> Result<(), BackendError> {
+        Err(Self::refuse("clear_queue"))
     }
 
     async fn abort(&self, _session: &Session) -> Result<(), BackendError> {
@@ -106,7 +110,8 @@ mod tests {
     async fn every_operation_refuses_and_says_which_one_it_was() {
         let backend = DockerBackend;
         let session = session();
-        // `start_turn` takes a writer and refuses before it would append anything to it.
+        // `start_turn` answers how the turn ended; it refuses before it would append anything, so
+        // the outcome is discarded and only the refusal is asserted.
         let (_scratch, events) = crate::events::scratch_writer();
         let error = backend
             .provision(&session, Step::Network)
@@ -116,12 +121,14 @@ mod tests {
             error.to_string(),
             "the network step: the docker backend does not provision yet (HS-024)"
         );
+        let start_turn = backend
+            .start_turn(&session, "a prompt", &events)
+            .await
+            .map(|_| ());
         for (operation, error) in [
-            (
-                "start_turn",
-                backend.start_turn(&session, "a prompt", &events).await,
-            ),
+            ("start_turn", start_turn),
             ("steer", backend.steer(&session, "more").await),
+            ("clear_queue", backend.clear_queue(&session).await),
             ("abort", backend.abort(&session).await),
             ("stop", backend.stop(&session).await),
             ("resume", backend.resume(&session).await),

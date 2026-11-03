@@ -110,8 +110,20 @@ Adding guidance to a turn that is already running.
 _Avoid_: Interrupt, inject, redirect
 
 **Abort**:
-Ending a turn early, on request or by timeout.
+Ending a turn early, on request or by timeout. The work is the abort ladder's.
 _Avoid_: Cancel, kill, stop
+
+**Abort ladder**:
+The two-rung routine that ends a turn which will not end itself: rung 1 clears the agent's queue and then asks it to abort; rung 2 is reached when the row is still `running` after the grace, and kills the container, records the reason, and resumes the session at once. Its machine name is the `Ladder` type, and the reason rung 2 records is the caller's — `forced_abort` for an abort, and the turn timeout's and the token budget's own words.
+_Avoid_: Kill path, escape hatch, force stop, cancel chain
+
+**Rung**:
+One numbered step of the abort ladder, as spec item 16 numbers them.
+_Avoid_: Stage, level, attempt
+
+**Grace**:
+The span rung 1 gets before rung 2 fires: the config key `abort_grace`, ten seconds unless the file says otherwise. It is the ladder's only number, and `0s` is refused because a ladder with no grace is rung 2 with extra steps.
+_Avoid_: Timeout, patience, deadline
 
 **Agent settled**:
 The moment the agent has finished everything for the current turn and is waiting for input.

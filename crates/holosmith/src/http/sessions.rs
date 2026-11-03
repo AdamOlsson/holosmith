@@ -3,7 +3,8 @@
 //! order together with the machine's network default (HS-013, ADR-0017); `GET /api/sessions/{id}`
 //! answers one row, which is what the session screen opens with (HS-014); and
 //! `POST /api/sessions/{id}/prompt` starts a turn and answers 202 with the now-`running` row
-//! (HS-015).
+//! (HS-015); `POST /api/sessions/{id}/abort` accepts an abort and answers 202 with the row while the
+//! ladder ends the turn off-request (HS-016).
 //!
 //! The body is parsed by hand rather than through `axum::Json<T>`: that extractor rejects a bad
 //! body with its own `text/plain` answer, which would break ADR-0008's envelope on exactly the
@@ -24,11 +25,21 @@ use serde_json::Value;
 use crate::clock;
 use crate::http::app::AppState;
 use crate::http::error::{ApiError, internal};
+use crate::ladder;
 use crate::sessions::state::{StateError, Trigger};
 use crate::sessions::{NewSession, RepoError, Session, Status};
 
 /// The header a create's idempotency key travels in.
 const KEY_HEADER: &str = "idempotency-key";
+
+/// What a prompt is refused with: the sentence names the request, because an envelope that reads
+/// like another endpoint's is how a client builder picks the wrong branch.
+const NOT_IDLE_PROMPT: &str = "the session is not idle, so it cannot be prompted";
+
+/// What an abort is refused with. `abort` is the one request that needs a *running* turn, so a
+/// session in any other state is refused rather than answered with a 202 that does nothing
+/// (spec item 16: abort stops a turn, and there is no turn otherwise).
+const NOT_RUNNING_ABORT: &str = "the session is not running, so it has no turn to abort";
 
 /// How many characters a key may hold. Generous for a UUID, small enough that the unique column
 /// cannot become a payload.
@@ -374,7 +385,7 @@ fn parse_prompt(bytes: &[u8]) -> Result<String, ApiError> {
 /// Answer `POST /api/sessions/{id}/prompt`: 202 and the row, now `running`, or ADR-0008's envelope.
 ///
 /// The decisions are in this order, and each one can only be reached by passing the ones above it:
-/// the body (`bad_body`), the row (`not_found`), the state (`not_idle` — one code per state, D2), and
+/// the body (`bad_body`), the row (`not_found`), the state (`not_in_state` — one code per state, D2), and
 /// the transition itself. The transition is the [table's](crate::sessions::state), applied by the one
 /// function that applies it; a lost race — the row moved between the read and the apply — is refused
 /// with the code of the state it moved to, so a client never gets a 202 for a session that is not
@@ -402,7 +413,7 @@ pub async fn prompt(state: &AppState, id: &str, body: Result<Bytes, BytesRejecti
     // Refused before the transition is asked for, so the code names the state the client can see
     // rather than the state the table happened to find.
     if current.status != Status::Idle {
-        return ApiError::not_idle(current.status).into_response();
+        return ApiError::not_in_state(current.status, NOT_IDLE_PROMPT).into_response();
     }
     if let Err(error) = apply_prompt(state, id).await {
         return error.into_response();
@@ -419,6 +430,32 @@ pub async fn prompt(state: &AppState, id: &str, body: Result<Bytes, BytesRejecti
     }
     state.turner().spawn(running.clone(), prompt);
     (StatusCode::ACCEPTED, Json(running)).into_response()
+}
+
+/// Answer `POST /api/sessions/{id}/abort`: 202 and the row as it stands, or ADR-0008's envelope.
+///
+/// Two decisions, in this order: the row (`not_found`), then the state — only a `running` session
+/// has a turn to abort, and every other state is `409 session_<state>`, `idle` included (HS-016,
+/// ADR-0020). Nothing is parsed: the request has no body, and a client that sends one is ignored
+/// rather than refused, because no field of it could change what an abort does.
+///
+/// The ladder runs **off** the request's task, so the 202 means "accepted": progress arrives as
+/// `session.status` events (spec item 16), and the body is the row as it stands — `running` — not a
+/// promise about the state it will hold. A second abort racing the first is refused by the state
+/// check, or climbs a ladder whose rungs are both already spent.
+pub async fn abort(state: &AppState, id: &str) -> Response {
+    let current = match one_locked(state, id) {
+        Ok(Some(session)) => session,
+        Ok(None) => return ApiError::not_found().into_response(),
+        Err(error) => return error.into_response(),
+    };
+    if current.status != Status::Running {
+        return ApiError::not_in_state(current.status, NOT_RUNNING_ABORT).into_response();
+    }
+    // Spawned after the decision and before the answer is built, so no response ever waits for a
+    // grace period — and so a ladder that fired instantly still answers the row it was given.
+    state.ladder().spawn(current.clone(), ladder::FORCED_ABORT);
+    (StatusCode::ACCEPTED, Json(current)).into_response()
 }
 
 /// Move the row to `running`, or the refusal to answer.
@@ -440,7 +477,9 @@ async fn apply_prompt(state: &AppState, id: &str) -> Result<(), ApiError> {
         }
         match one_locked(state, id) {
             Ok(Some(session)) if session.status == Status::Idle => continue,
-            Ok(Some(session)) => return Err(ApiError::not_idle(session.status)),
+            Ok(Some(session)) => {
+                return Err(ApiError::not_in_state(session.status, NOT_IDLE_PROMPT));
+            }
             Ok(None) => return Err(ApiError::not_found()),
             Err(error) => return Err(error),
         }

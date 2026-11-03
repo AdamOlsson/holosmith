@@ -18,13 +18,14 @@
 //! stream and every rendering path of the session screen are exercisable with no agent process. The
 //! words live in [`StubBackend::script`] and nowhere else.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 
-use super::{BackendError, SessionBackend, Step};
+use super::{BackendError, SessionBackend, Step, TurnEnd};
 use crate::clock;
 use crate::events::{EventWriter, NewEvent};
 use crate::sessions::Session;
@@ -76,6 +77,7 @@ pub enum Call {
     Undo(Step),
     StartTurn,
     Steer,
+    ClearQueue,
     Abort,
     Stop,
     Resume,
@@ -105,6 +107,11 @@ pub struct StubBackend {
 struct StubState {
     step_delay: Duration,
     fail_at: Option<Step>,
+    /// Sessions whose running turn has been asked to stop, by `abort` or by `stop`. The turn loop
+    /// reads and clears the entry between frames, so the flag lives at most as long as one turn.
+    stopping: Mutex<HashSet<String>>,
+    /// Whether an `abort` is ignored, which is how a test produces a rung-2 ladder (HS-016).
+    ignores_abort: bool,
     recorded: Mutex<Vec<Recorded>>,
 }
 
@@ -121,6 +128,8 @@ impl StubBackend {
             state: Arc::new(StubState {
                 step_delay,
                 fail_at: None,
+                stopping: Mutex::new(HashSet::new()),
+                ignores_abort: false,
                 recorded: Mutex::new(Vec::new()),
             }),
         }
@@ -137,6 +146,35 @@ impl StubBackend {
             .expect("a stub that has not been cloned yet is mutable")
             .fail_at = Some(step);
         self
+    }
+
+    /// The same stub, told to ignore `abort` — the hung agent HS-016's rung 2 exists for.
+    ///
+    /// `clear_queue` and `abort` are still recorded and still answer `Ok`; the running turn simply
+    /// does not stop, so the ladder's grace expires and the forced rung fires. Like
+    /// [`Self::failing_at`] this is a constructor argument and not a config key: nothing an operator
+    /// runs should be able to make abort lie, and the ladder's second rung is proved by a test.
+    pub fn ignoring_abort(mut self) -> Self {
+        Arc::get_mut(&mut self.state)
+            .expect("a stub that has not been cloned yet is mutable")
+            .ignores_abort = true;
+        self
+    }
+
+    /// Whether a running turn has been asked to stop but has not noticed yet.
+    fn stopping(&self, session_id: &str, stop: bool) -> bool {
+        let mut stopping = self
+            .state
+            .stopping
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if stop {
+            stopping.insert(session_id.to_string());
+            return true;
+        }
+        // `remove`, not `contains`: observing the flag is what consumes it, so a turn that ends
+        // here cannot make the next turn of the same session abort before it starts.
+        stopping.remove(session_id)
     }
 
     /// The stub's pace: the delay before each provisioning step and before each frame of a turn.
@@ -264,13 +302,21 @@ impl SessionBackend for StubBackend {
         session: &Session,
         prompt: &str,
         events: &EventWriter,
-    ) -> Result<(), BackendError> {
+    ) -> Result<TurnEnd, BackendError> {
         // Recorded before the first frame, so a test can observe the call in flight as it can a
         // provisioning step.
         let outcome = self.note(Call::StartTurn, session, prompt);
         outcome?;
+        // A turn starts unstopped: whatever a previous turn left here belongs to that turn.
+        self.stopping(&session.id, false);
         for (kind, payload) in Self::script(NEXT_TURN.fetch_add(1, Ordering::Relaxed)) {
             tokio::time::sleep(self.state.step_delay).await;
+            // The one place a turn can be cut short: between frames, because a frame already
+            // emitted is a frame the screen has, and a real agent's abort lands between messages
+            // for the same reason.
+            if self.stopping(&session.id, false) {
+                return Ok(TurnEnd::Aborted);
+            }
             let event = NewEvent {
                 session_id: session.id.clone(),
                 kind: kind.to_string(),
@@ -290,19 +336,31 @@ impl SessionBackend for StubBackend {
                 );
             }
         }
-        Ok(())
+        Ok(TurnEnd::Settled)
     }
 
     async fn steer(&self, session: &Session, text: &str) -> Result<(), BackendError> {
         self.note(Call::Steer, session, text)
     }
 
+    async fn clear_queue(&self, session: &Session) -> Result<(), BackendError> {
+        self.note(Call::ClearQueue, session, "")
+    }
+
     async fn abort(&self, session: &Session) -> Result<(), BackendError> {
-        self.note(Call::Abort, session, "")
+        self.note(Call::Abort, session, "")?;
+        // The hung agent: told to abort, and the turn keeps going anyway.
+        if !self.state.ignores_abort {
+            self.stopping(&session.id, true);
+        }
+        Ok(())
     }
 
     async fn stop(&self, session: &Session) -> Result<(), BackendError> {
-        self.note(Call::Stop, session, "")
+        self.note(Call::Stop, session, "")?;
+        // A forced stop kills the runtime, so the turn stops whether or not it honours an abort.
+        self.stopping(&session.id, true);
+        Ok(())
     }
 
     async fn resume(&self, session: &Session) -> Result<(), BackendError> {
@@ -407,6 +465,7 @@ mod tests {
             .await
             .expect("a prompt passes");
         stub.steer(&session, "and the lexer").await.expect("steer");
+        stub.clear_queue(&session).await.expect("clear_queue");
         stub.abort(&session).await.expect("abort");
         stub.stop(&session).await.expect("stop");
         stub.resume(&session).await.expect("resume");
@@ -432,12 +491,74 @@ mod tests {
                 Call::Undo(Step::Pi),
                 Call::StartTurn,
                 Call::Steer,
+                Call::ClearQueue,
                 Call::Abort,
                 Call::Stop,
                 Call::Resume,
                 Call::Delete,
                 Call::Snapshot,
             ]
+        );
+    }
+
+    /// Run one turn in the background and answer its handle, so a test can interrupt it.
+    fn running_turn(
+        stub: StubBackend,
+        session: &Session,
+        events: &EventWriter,
+    ) -> tokio::task::JoinHandle<Result<super::TurnEnd, BackendError>> {
+        let stub = stub.clone();
+        let session = session.clone();
+        let events = events.clone();
+        tokio::spawn(async move { stub.start_turn(&session, "a prompt", &events).await })
+    }
+
+    #[tokio::test]
+    async fn an_abort_cuts_the_turn_short_but_a_stop_cuts_it_even_when_the_abort_is_ignored() {
+        let session = session();
+        let (_scratch, events) = crate::events::scratch_writer();
+
+        // An abort the agent honours: the turn answers `Aborted` instead of running its script out.
+        let stub = StubBackend::new(Duration::from_millis(20));
+        let turn = running_turn(stub.clone(), &session, &events);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        stub.abort(&session).await.expect("abort");
+        assert_eq!(
+            turn.await
+                .expect("the turn task finished")
+                .expect("no failure"),
+            super::TurnEnd::Aborted
+        );
+
+        // The hung agent: the abort is recorded and answered, and the turn runs to the end anyway,
+        // which is the state HS-016's second rung exists for.
+        let stub = StubBackend::new(Duration::from_millis(1)).ignoring_abort();
+        let turn = running_turn(stub.clone(), &session, &events);
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        stub.abort(&session).await.expect("abort");
+        assert_eq!(
+            turn.await
+                .expect("the turn task finished")
+                .expect("no failure"),
+            super::TurnEnd::Settled,
+            "an ignored abort must not stop the script"
+        );
+
+        // A stop kills the runtime, so even the hung agent's turn ends — and its flag does not
+        // survive into the next turn of the same session.
+        let stub = StubBackend::new(Duration::from_millis(20)).ignoring_abort();
+        let turn = running_turn(stub.clone(), &session, &events);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        stub.stop(&session).await.expect("stop");
+        assert_eq!(
+            turn.await
+                .expect("the turn task finished")
+                .expect("no failure"),
+            super::TurnEnd::Aborted
+        );
+        assert!(
+            !stub.stopping(&session.id, false),
+            "the turn consumed the stop flag"
         );
     }
 

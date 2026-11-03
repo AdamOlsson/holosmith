@@ -53,7 +53,8 @@ number for "how fast this fake moves", not a second knob — and its message and
 from one process-wide counter (`msg-<n>`, `tool-<n>`): ADR-0018 asks only that a message id be
 unique within a session, and one counter in one process gives that with no state per session. The
 script is unconditional today; a backend-raised stop signal arrives with HS-016, which is the story
-that needs one.
+that needs one. **Superseded by ADR-0020:** HS-016 types the turn's end (`TurnEnd`), adds
+`clear_queue`, and lets `abort` and `stop` cut the script short.
 
 Three payloads are pinned here, because HS-033 and HS-034 will own their full treatment:
 
@@ -89,6 +90,8 @@ create's rule, ADR-0012).
 
 `idle` is the one state a prompt is accepted in, so `ApiError::not_idle` has five codes and no
 sixth: a call with `Idle` is a bug in its caller rather than a state a client can reach.
+**Superseded by ADR-0020:** the constructor is `not_in_state`, total over the six states with
+`session_idle` included, because HS-016 and HS-017 refuse a request *for* `idle`.
 
 ## Consequences
 

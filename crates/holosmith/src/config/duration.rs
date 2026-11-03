@@ -22,6 +22,19 @@ impl Duration {
     pub fn from_millis(millis: u64) -> Self {
         Self { millis }
     }
+
+    /// The value as whole milliseconds, for the code that waits on it.
+    pub fn millis(self) -> u64 {
+        self.millis
+    }
+}
+
+/// The runtime's own span, so a caller that waits (`abort_grace`'s ladder) does not have to know
+/// the config's representation.
+impl From<Duration> for std::time::Duration {
+    fn from(config: Duration) -> Self {
+        Self::from_millis(config.millis())
+    }
 }
 
 impl FromStr for Duration {

@@ -8,8 +8,9 @@
 # scripts/check-embed.sh, then serve: dist/<host-triple>/holosmith on a random port with a temp
 # config and a temp data dir, answering /api/health, the schema version, the app shell, the 404
 # envelope, every browser-facing guard refusal (ADR-0010), the create endpoint's 202/422/409
-# answers, the sessions list, one session by id, the session screen's path, and the session's
-# event stream, with no CORS header on any answer, and stopping on SIGTERM with exit 0.
+# answers, the sessions list, one session by id, the session screen's path, the session's event
+# stream, a prompt's turn, and an abort down to `abort_completed`, with no CORS header on any
+# answer, and stopping on SIGTERM with exit 0.
 # --no-build skips the two artifact phases; --keep keeps the work dir of a successful run. On
 # failure this prints FAIL <assertion> and keeps the work dir (config, banner, every answer).
 # Downloads nothing and needs neither curl nor jq: every request is a /dev/tcp fetch. Put the
@@ -282,6 +283,8 @@ serve_cases=(
   case_prompt_turn
   case_prompt_bad_body
   case_prompt_unknown_session
+  case_abort
+  case_abort_on_an_idle_session
 )
 
 # The health payload: exactly four keys, and the uptime is not predictable, so the assertion is
@@ -784,6 +787,72 @@ case_prompt_unknown_session() {
   expect_status "$name" "$response" 404
   expect_header "$name" "$response" content-type "application/json"
   expect_code "$name" "$response" not_found
+}
+
+# HS-016: abort answers 202 with the running row, the ladder ends the turn off-request, and the
+# reason on the transition says which rung fired. The stub honours an abort, so this is rung 1 —
+# rung 2 is a constructor argument only a test can set, and `tests/abort.rs` drives it.
+case_abort() {
+  local name=case_abort response body
+  # A turn to abort: the prompt's own turn has settled by the time the previous case returns.
+  fetch_body "case_abort_prompt" POST "/api/sessions/$created_id/prompt" \
+    '{"prompt":"read the app shell"}' "Host: 127.0.0.1" "Origin: $control_origin" \
+    "Content-Type: application/json" "X-Holosmith-Client: 1" \
+    "Tailscale-User-Login: $owner" ||
+    fail "case_abort_prompt/no_answer" "POST /api/sessions/$created_id/prompt did not answer"
+  response="$(answer case_abort_prompt)"
+  expect_status case_abort_prompt "$response" 202
+
+  # No body at all, which is what the endpoint takes; the content type is still sent because the
+  # guards read it on every request that changes something (ADR-0010).
+  fetch "$name" POST "/api/sessions/$created_id/abort" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "$name/no_answer" "POST /api/sessions/$created_id/abort did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 202
+  expect_header "$name" "$response" content-type "application/json"
+  body="$(cat "$WORK/responses/$name.body")"
+  case "$body" in
+    *'"status":"running"'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "$name/status" "the answer is not the running row a 202 promises: $body"
+      ;;
+  esac
+
+  # The ladder's progress is events, so the proof is the stream: the turn ends `running -> idle`
+  # with the abort's own reason, which is how a client reads which rung fired.
+  name=case_abort_stream
+  fetch_sse_until "$name" "/api/sessions/$created_id/events" '"reason":"abort_completed"' \
+    "Host: 127.0.0.1" ||
+    fail "$name/no_answer" "GET /api/sessions/$created_id/events did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 200
+  body="$(cat "$WORK/responses/$name.body")"
+  case "$body" in
+    *'"from":"running","to":"idle","step":null,"reason":"abort_completed"'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "$name/transition" "the abort's transition is not in the stream: $body"
+      ;;
+  esac
+}
+
+# HS-016: an abort with no turn to abort is `409 session_idle` — the code the family gained for it —
+# because aborting an idle session is not a request that silently does nothing.
+case_abort_on_an_idle_session() {
+  local name=case_abort_on_an_idle_session response
+  fetch "$name" POST "/api/sessions/$created_id/abort" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "$name/no_answer" "POST an idle session's abort did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 409
+  expect_header "$name" "$response" content-type "application/json"
+  expect_code "$name" "$response" session_idle
 }
 
 # Box 4, over every answer the cases above saved: none of them carries a CORS header, and none
