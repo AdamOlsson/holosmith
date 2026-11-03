@@ -1,4 +1,4 @@
-# RESUME — orchestrator handoff (cold start, after fifteen stories)
+# RESUME — orchestrator handoff (cold start, after eighteen stories)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating
 procedure and still governs; this file is the state of the world — what exists, what the environment
@@ -36,11 +36,12 @@ created, prompted, aborted, steered, stopped and resumed, and it is driven from 
 
 ## 1. Where the work stands
 
-Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is clean. `HEAD` is
-**`e17920c`** (a handoff-refresh docs commit); any commit after it is bookkeeping.
+Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is clean, and every
+commit is **pushed** (see the note on pushing below). `HEAD` is `ff9d907`; any commit after it is
+bookkeeping.
 
-**Linear: 15 Done, 65 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-015`
-(`PER-33` … `PER-47`).
+**Linear: 18 Done, 62 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-018`
+(`PER-33` … `PER-50`).
 
 | Story | Linear | Commits | ADR |
 | --- | --- | --- | --- |
@@ -59,21 +60,33 @@ Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is
 | HS-013 sessions list + new-session form | PER-45 | `47471c4` | 0017 |
 | HS-014 session screen, live transcript | PER-46 | `82c8c35` | 0018 |
 | HS-015 prompt and the turn lifecycle | PER-47 | `d4077df` | 0019 |
+| HS-016 abort with the full ladder | PER-48 | `d034237`, `3d2ecba` | 0020 |
+| HS-017 steer a running turn | PER-49 | `0099ca3`, `8ff1d77` | 0021 |
+| HS-018 stopped state and resume | PER-50 | `dce53c4`, `ff9d907` | 0022 |
 
-**Next issue: `PER-48` (HS-016 — abort with the full ladder).** Then `PER-49` (HS-017 — steer),
-`PER-50` (HS-018 — stopped/resume), and onward in `HS-###` order.
+**Next issue: `PER-51` (HS-019 — delete flow).** Then `PER-52` (HS-020 — cap and eviction), `PER-53`
+(HS-021 — idle stop), `PER-54` (HS-022 — turn timeout), and onward in `HS-###` order.
 
 Ranking, per `PROMPT.md`: Linear priority (all are `No priority`) → `HS-###` order in `docs/stories/` →
 anything already `In Progress` first → skip an issue whose `Blocked by` stories are not `Done`.
 
 ### Two facts a cold start must know
 
-1. **A running turn has nothing that can stop it.** `SessionBackend::abort`/`stop`/`resume` are
-   recordings in the stub and `unsupported` in Docker; `turn.rs` holds no cancellation token; there is
-   no timeout. HS-016 is exactly that gap and it is the most expensive one to leave open.
-2. **Nothing has ever rendered the web page.** There is no browser here. The transcript's *rules* are
-   covered by node tests; the DOM half is **unverified from source** — say so, never claim a visual
-   check.
+1. **A running turn can now be stopped, in two rungs.** `src/ladder.rs` is the shared routine:
+   `clear_queue` then `abort`, wait up to `abort_grace` (the grace *bounds rung 1 too*), then
+   `running → stopped` with the caller's reason, `stop`, and a resume through the provisioner. A turn's
+   end is typed (`TurnEnd::{Settled, Aborted}`) so the runner picks `agent_settled` or
+   `abort_completed`; a forced stop has **two owners** and the table decides, which is why exactly one
+   `StateError::Illegal` in `turn.rs` is a `debug` line. What is still open: **the turn timeout and the
+   token budget** (HS-022/HS-023) and **HS-022/HS-023 must plumb their own reason into rung 1's ending**
+   — the ladder's parameter is rung 2's reason only (ADR-0020 says so).
+2. **The web page has now been rendered.** Playwright's Chromium is inside the sandbox (see §2), and
+   HS-016 … HS-018 each drove the shipped artifact in it: the sessions list, the create form, the
+   session screen, the composer's four actions, the transcript's blocks and boundaries, and the abort /
+   steer / resume round trips. That is still **not** a substitute for a gate — nothing in `scripts/` may
+   require a browser — but "unverified from source" is no longer the honest answer for a screen that has
+   been looked at. What has *not* been looked at: the hub (HS-057+), the changes sheet, and anything
+   phase 2 adds.
 
 Two things HS-014 and HS-015 settled that later stories inherit:
 
@@ -86,22 +99,27 @@ Two things HS-014 and HS-015 settled that later stories inherit:
   | `message.end` | `{"message_id", "usage": {"in", "out"}}` |
   | `tool.start` / `tool.end` | `{"tool_id", "name", "arguments"}` / `{"tool_id", "name", "output"}` |
   | `turn.start` / `turn.end` | `{}` |
+  | `turn.steer` | `{"text"}` — **no message id**: one frame, one block, nothing continues it (ADR-0021) |
   | `session.status` | `{"from", "to", "step", "reason"}` (ADR-0016, the transitioner only) |
 
   A message id keys a transcript block; a delta is one appended text node; a snapshot is the only
-  replacing operation and is the last frame for its id; an unknown kind is dropped, not refused.
+  replacing operation and is the last frame for its id; an unknown kind is dropped, not refused. The
+  steer frame is the one deliberate exception: its block is created per frame.
 
 - **The backend emits a turn's frames; the server owns every state change.** `start_turn` takes
   `&EventWriter` for that reason, and no backend can reach a `Transitioner`. The prompt's
   `idle → running` is the *handler's* (so the 202 can promise `running`); the way out (`agent_settled`,
-  or `unexpected_exit` with the reason) is `turn.rs`'s. Refusals are one family: `409 session_<state>`
-  — `session_starting`, `session_running`, `session_stopped`, `session_error`, `session_deleting` —
-  built by `ApiError::not_idle`.
+  or `unexpected_exit`) is `turn.rs`'s, and an abort's is `turn.rs`'s or the ladder's. Refusals are one
+  family: `409 session_<state>` for **all six** states — `session_starting`, `session_idle`,
+  `session_running`, `session_stopped`, `session_error`, `session_deleting` — built by
+  `ApiError::not_in_state(status, sentence)`, where the **sentence is the caller's** so an abort's
+  refusal does not read like a prompt's.
 
-**Pushing is impossible.** `origin` is `git@github.com:AdamOlsson/holosmith.git` and it answers
-`Permission denied (publickey)` — re-tested at `e17920c`, so this is a live fact, not a stale note.
-There is no ssh key and no `gh`. Every story so far is local commits on `master` plus a closing comment
-that says so. Do not fake a push; report the blocker.
+**Pushing works, through the sandbox's ssh-agent.** `origin` is
+`git@github.com:AdamOlsson/holosmith.git`; `bwrap.sh` binds the host's `SSH_AUTH_SOCK` at
+`/run/ssh-agent.sock` (the private key never enters the sandbox), so `git push origin master` signs on
+the host. Confirmed: `700b157` … `ff9d907` are all on `origin/master`. Push after every story, and if a
+push fails, report it — do not fake one.
 
 ---
 
@@ -127,8 +145,13 @@ It sets `RUSTUP_HOME`, `CARGO_HOME` and `PATH` to:
 Why outside the repo: `/` is a 3.4 GB tmpfs and `~/.pi` is the only large writable ext4 mount.
 
 **Available:** node 24.22.2 / npm 11.19.1 with the npm registry reachable (node 24 strips TypeScript
-types natively, which is what `npm test` relies on); `curl`; `python3`; `sed`, `grep`, `tr`, `cut`,
-`cmp`, `find`, `timeout`, `git`.
+types natively, which is what `npm test` relies on); `curl`; `python3` (with stdlib `sqlite3` and
+`http.client`); `sed`, `grep`, `tr`, `cut`, `cmp`, `find`, `timeout`, `git`; **Playwright's Chromium**
+(`~/.cache/ms-playwright`, bound read-only by `bwrap.sh`) and the `playwright` npm package at
+`~/.cache/hs-browser/pw/node_modules`. Two quirks, both hit: ESM **ignores `NODE_PATH`**, so a script
+imports the package by its own path — `…/playwright/index.mjs` (the `.js` entry is CJS and its default
+export does not have `chromium` at the top level); and Chromium must be launched with
+`--no-sandbox`, because its own namespace sandbox cannot nest inside ours.
 **Not available, and not to be invented:** no Docker daemon, no `sudo`, no `apt`, no `gh`, no ssh key
 or token, no **browser** (so nothing renders `web/` — say "unverified" rather than guessing).
 **No `awk`** and **no `shellcheck`** on this machine — do not write a script or a gate that needs
@@ -213,15 +236,15 @@ If that fails, **stop and report** — that is a `PROMPT.md` stop condition.
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                     # 409 tests: 207 lib + 202 across 16 integration binaries
-cd web && npm test             # 15 transcript tests (node's own runner)
+cargo test                     # 209 lib + 228 across 21 integration binaries
+cd web && npm test             # 18 transcript tests (node's own runner)
 scripts/verify.sh              # THE one-command gate since HS-006
 ```
 
 `scripts/verify.sh` runs six phases, cheapest first: `fmt`, `clippy`, `test`, `build`
 (`scripts/build.sh`, which itself runs `build-web.sh` — `npm test` then Vite — and `check-static.sh`
 last), `embed` (`scripts/check-embed.sh`), then `serve` — the **shipped musl artifact** booted on
-`--port 0` with a temp data dir, running **26 cases plus a CORS sweep (98 assertions)**, then torn down
+`--port 0` with a temp data dir, running **32 cases plus a CORS sweep (134 assertions)**, then torn down
 with `SIGTERM` and an asserted exit 0. It takes ~3 min (both musl targets). `--no-build` skips `build`
 and `embed`; `--keep` keeps the work dir.
 
@@ -260,17 +283,23 @@ crates/holosmith/
                             scripted turn), docker.rs (refuses everything until HS-024)
   src/provisioner.rs        the four-step background task and its five session.status events
   src/turn.rs               the turn runner: touch → the backend's turn → agent_settled + touch,
-                            or unexpected_exit with the reason
+                            abort_completed (or a `debug` line if the ladder got there first), or
+                            unexpected_exit with the reason. `TurnEnd` is the backend's answer
+  src/ladder.rs             the abort ladder (HS-016): clear_queue → abort → wait out abort_grace →
+                            `running → stopped` with the caller's reason → stop → resume through the
+                            provisioner. `FORCED_ABORT`; `climb(session, reason)` is the shared
+                            routine HS-022/HS-023 will call
   src/runtime.rs            runtime::Backend {Stub,Docker} — which backend this run uses
   src/http/                 mod.rs, app.rs (Routes/App seam, AppState + provisioner()/turner()/
-                            transitioner(), edge layer, is_guard_exempt), error.rs (the one envelope,
-                            every code, ApiError::not_idle), health.rs, guard.rs (the four checks),
-                            sessions.rs (POST+GET /api/sessions, GET /api/sessions/{id},
-                            POST /api/sessions/{id}/prompt), streams.rs (the SSE handler)
+                            transitioner()/ladder(), edge layer, is_guard_exempt), error.rs (the one
+                            envelope, every code, ApiError::not_in_state / bad_prompt / bad_steer),
+                            health.rs, guard.rs (the four checks), sessions.rs (POST+GET
+                            /api/sessions, GET /api/sessions/{id}, POST …/prompt, …/abort, …/steer,
+                            …/resume, TURN_STEER), streams.rs (the SSE handler)
   src/sessions/             mod.rs (Status, Session, NewSession, RepoError), repository.rs (every
                             `sessions` statement + its SQL-location guard; includes touch), state.rs
                             (the transition table, Transitioner::apply / apply_logged, the set_status
-                            guard)
+                            guard), activity.rs (the one `touch`: lock, warn, carry on)
   src/events/               mod.rs (Event, NewEvent, EventWriter, EventStream), writer.rs, repository.rs,
                             stream.rs (replay→live, lag), registry.rs (open-stream counts)
   src/db.rs                 pragmas + read-back, apply_pending, Database::sessions()/events()
@@ -280,11 +309,11 @@ crates/holosmith/
   tests/                    version_cli, config_cli, http_contract, serve_cli, db_migrations,
                             pin_single_source, guards, session_repository, sessions_api, events,
                             streams, provisioning, state_machine, session_list, session_screen,
-                            turns, support/mod.rs (the shared harness)
+                            turns, abort, steer, resume, support/mod.rs (the shared harness)
 web/                        Vite 7 + TypeScript, two screens (`/` and `/sessions/<id>`);
                             package-lock COMMITTED; main.ts is the DOM, transcript.ts the renderer's
                             rules (frame parsing, block model, affordances)
-web/test/transcript.test.ts 15 tests over synthetic frames, node's own runner (`npm test`)
+web/test/transcript.test.ts 18 tests over synthetic frames, node's own runner (`npm test`)
 scripts/build-web.sh        npm ci + npm test + npm run build, asserts web/dist/index.html
 scripts/build.sh            web first, HOLOSMITH_REQUIRE_WEB=1, both musl targets → dist/<triple>/,
                             atomic copy, then check-static.sh. Uses `cargo build --locked`.
@@ -293,9 +322,9 @@ scripts/check-static.sh     file/readelf, empty-root serve + cmp against web/dis
 scripts/check-embed.sh      the three embed cases (present / absent warns / required fails)
 scripts/verify.sh           the one-command gate (see §3)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0019          read the recent ones before planning anything
+docs/adr/0001…0022          read the recent ones before planning anything
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-47   each a verbatim review + a `## Resolution` table
+docs/review/PER-33…PER-50   each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -304,25 +333,31 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
 
 - **Working:** `version` (text + `--json`), `config {validate,show,edit}`, `serve` (control listener,
   embedded app, `/api/health`, `POST`/`GET /api/sessions`, `GET /api/sessions/{id}`,
-  `POST /api/sessions/{id}/prompt`, `GET /api/sessions/{id}/events`), SQLite with three migrations, the
-  guards, the event writer, the SSE stream, the stub backend and its four-step provisioner, the enforced
-  state machine, the Sessions screen with its create form, the session screen at `/sessions/<id>` with a
-  live transcript, and a prompt that runs a scripted turn to `idle`.
-- **Not built yet:** abort/steer/resume/delete endpoints (HS-016 … HS-018), the abort ladder and the
-  turn timeout (HS-016/HS-022), tool-output files and `output_ref` (HS-033), usage totals (HS-034), the
-  preview listener (HS-041), Docker (HS-024+), merge, publish, push, the hub, releases.
+  `POST /api/sessions/{id}/{prompt,abort,steer,resume}`, `GET /api/sessions/{id}/events`), SQLite with
+  three migrations, the guards, the event writer, the SSE stream, the stub backend and its four-step
+  provisioner, the enforced state machine, the abort ladder, the Sessions screen with its create form,
+  the session screen at `/sessions/<id>` with a live transcript and a four-action composer.
+- **Not built yet:** **delete** (HS-019), the **cap's eviction** and the **`stopped` producer**
+  (HS-020 evict, HS-021 idle stop, HS-044 drain — nothing in the API can stop a session yet, so
+  `stopped` is reachable only through the state function), the turn timeout (HS-022), the token budget
+  (HS-023), tool-output files and `output_ref` (HS-033), usage totals (HS-034), the preview listener
+  (HS-041), Docker (HS-024+), merge, publish, the hub, releases.
 - **`runtime::Backend`** has `Stub` and `Docker`; `serve --backend` and the config key `backend` select
   it. `DockerBackend` **refuses every operation** until HS-024, and the default backend is `docker`
   (ADR-0001: the stub is opt-in), so a default build provisions a session to `error` with a reason
   rather than hanging in `starting`. `scripts/verify.sh` boots with `backend = "stub"` in its config.
 - **`AppState`** is `{ config, runtime, database: Arc<std::sync::Mutex<Database>>, events: EventWriter,
-  streams: StreamRegistry, backend: Backends }`, with three wiring helpers — `provisioner()`,
-  `turner()`, `transitioner()`. The mutex is an explicit stopgap (ADR-0012/0013) — see §6.
+  streams: StreamRegistry, backend: Backends }`, with four wiring helpers — `provisioner()`, `turner()`,
+  `transitioner()`, `ladder()`. The mutex is an explicit stopgap (ADR-0012/0013) — see §6.
 - **`sessions::state::Transitioner::apply`** is the only way a session's state changes; `apply_logged`
   is the runners' wrapper (log, never return). A provisioning step report is `from == to` with `step`
   set and is *not* a table row.
-- **`config`** already has `abort_grace` (default `10s`), `idle_stop_min`, `stopped_ttl_days`,
-  `min_free_gb` and the rest — check `config show` before adding a key. HS-016 **uses** `abort_grace`.
+- **`config`** already has `abort_grace` (default `10s`, **used** by the ladder), `idle_stop_min`,
+  `stopped_ttl_days`, `min_free_gb`, `turn_timeout_min`, `max_session_tokens` and the rest — check
+  `config show` before adding a key. HS-019's delete flow has **no** config key of its own.
+- **`POST /resume`** takes the transition, then spawns the provisioner, and **touches `last_active_at`**
+  (a resumed session must not be HS-020's first eviction candidate). The cap is checked **before** the
+  transition (ADR-0022). `SessionBackend::resume` is still uncalled.
 
 ---
 
@@ -425,7 +460,15 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   is `wait_until(...)`, never a `sleep`.
 - **A row can be ahead of its event.** The runner writes first and the writer commits every 25 ms, so
   "the row says `idle`" does not mean the event is committed. Tests read the log by event count, and the
-  stream tests take N frames.
+  stream tests take N frames. HS-018 hit the sharper form: a `prefix` assertion over a log captured from
+  a row that had just changed was **vacuously true over zero events** — wait for the event you mean, then
+  assert the log is not empty.
+- **`last_active_at` is whole seconds, so "it moved" is usually the next touch, not yours.** HS-017's
+  review proved this by mutation: a steer's `touch` could be deleted and the test stayed green, because
+  the turn settled a second later. Push the column into the past first
+  (`sessions().touch(id, now - 60)`), then act, then read **immediately** — a `wait_until` reintroduces
+  the race. HS-018 changed its stop helper to take a `reason` for the same class of reason: a `None`
+  reason made "the resume clears the reason" untestable.
 - **A prompt turns a race into an expected outcome.** Two prompts can both see `idle`; the loser gets
   `StateError::Illegal` and `apply_prompt` retries once when the row is idle again. Do not "fix" that by
   holding the lock across the read and the apply.
@@ -443,6 +486,13 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   No test pins a message sentence — but a message must describe *its own* request (HS-015's prompt
   reused the create's sentence until a demo showed it).
 - **`is_guard_exempt` is the only exemption list** (true only for `GET`/`HEAD /api/health`).
+- **A mutating request needs `Content-Type: application/json` even with no body.** The `bad_client`
+  guard reads the content type as well as `X-Holosmith-Client`, so `POST /abort` and `POST /resume` must
+  send it — a client (or a test) that omits it gets `403 bad_client` and thinks its endpoint is missing.
+- **In `scripts/verify.sh`, a stream needle can be answered by the *replay of an earlier turn*.** Every
+  turn's settle payload is identical, so "wait for `running → idle`" returns the previous turn's frame.
+  Use a needle unique to the action (`"reason":"abort_completed"`, the steer's text) or poll the row
+  (`wait_for_idle`), which is what the steer case does.
 - **Banner line order is pinned by tests** (`log`, version line, `config`, `data_root`, `control_listen`,
   `control_origin`, `preview_listen`, `database … schema n`).
 - **`--port 0` re-derives `control_origin`** from the bound port after `bind`; the guard compares the
@@ -486,6 +536,13 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   and a full reload, which discards the transcript (HS-014's review caught exactly that).
 - **The session screen keeps its stream open in every state**, unlike a list row (ADR-0017 closes a dead
   row's source). Both are deliberate; ADR-0018 says why.
+- **`turn.steer` is the one frame with no message id** (ADR-0021): its block is created per frame, and
+  `order()`/`toolOrder()` do not see it. Do not "fix" that by minting an id without reading ADR-0021's
+  price — the log is durable, so two shapes of one kind would live in it forever.
+- **The composer is four actions in three states**: prompt on `idle`, steer+abort on `running`, resume on
+  `stopped`/`error`, nothing on `starting`/`deleting`. Its POST helper resumes **once** and retries
+  **once**, and `abort` passes `mayResume: false` — a resume ends `idle` and abort needs `running`, so a
+  retried abort can only fail (HS-018's review found that).
 - **The stub's ids carry the process instant** (`msg-<nanos>-<n>`), because a restart that started over
   at `msg-1` would fold a new turn into a previous turn's block against a durable log.
 - **`crypto.randomUUID` needs a secure context**; the create form falls back to one `getRandomValues` v4
@@ -570,6 +627,10 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 | `message.end`, `tool.start`, `tool.end` payloads are pinned now; `output_ref` and usage persistence wait | HS-033/HS-034 own their full treatment, and the screen renders them minimally meanwhile | ADR-0019 |
 | Story docs in `docs/stories/` are not edited — they are the source the Linear issues were imported from | editing them drifts from Linear; the ADR carries the contract instead | PER-34 plan comment |
 | S/M stories are implemented in-session; M/L with new surface goes to a worker child with a written brief | the orchestrator already holds the plan for small ones; a fresh context is better for a large slice | §5, and every Linear note since HS-011 |
+| A turn's end is typed (`TurnEnd`), and cancellation is the backend's — no server token, no `select!` | the agent process is what must stop, and a token would let the server believe it had stopped a turn still running | ADR-0020 |
+| Abort climbs two rungs, the row moves before the container is killed, and the ladder's reason is a parameter | the other order leaves a row saying `idle` over a dead container; HS-022/HS-023 pass their own word | ADR-0020 |
+| A steer is `turn.steer` with `{"text"}` and **no** message id; the agent is asked before the record is written | a steer is one frame that nothing continues, so an id would have no second use; the record must claim only what was delivered | ADR-0021 |
+| No stop endpoint; resume is the only way back, the cap is checked before its transition, and `SessionBackend::resume` stays uncalled | the spec has no stop endpoint, and the policies that stop a session are HS-020/021/044 | ADR-0022 |
 
 ---
 
@@ -581,42 +642,41 @@ git status --short                          # must be clean
 . ~/.pi/toolchains/env.sh
 python3 /tmp/lin.py issues | grep -v ' Done ' | head   # next unfinished (recreate /tmp/lin.py, §2)
 python3 /tmp/lin.py issue PER-48            # sanity-check Linear is reachable and scoped
-scripts/verify.sh                           # baseline green (~3 min, 26 cases, 98 assertions)
+scripts/verify.sh                           # baseline green (~4 min, 32 cases, 134 assertions)
 ```
 
-Then start the cycle at **`PER-48` (HS-016 — abort with the full ladder)**. Read §1's two facts first: a
-running turn currently cannot be stopped, and nothing has ever rendered the page.
+Then start the cycle at **`PER-51` (HS-019 — delete flow)**. Read §1's two facts first: abort works in
+two rungs but the *timeout* and the *budget* do not exist, and the page has now been rendered (so a DOM
+claim needs a Chromium run, not a shrug).
 
-### What HS-016 is about, so the first brief is fast
+### What HS-019 is about, so the first brief is fast
 
-Acceptance, verbatim from `docs/stories/phase-1-session-lifecycle-stub.md:165`:
+Acceptance, verbatim from `docs/stories/phase-1-session-lifecycle-stub.md:212`:
 
-- `POST /api/sessions/:id/abort` returns 202 immediately; progress arrives as events.
-- Rung 1: `clear_queue` then `abort` over the backend RPC.
-- Rung 2: if not idle after `abort_grace` (10 s), force-stop → `stopped` with reason `forced_abort`,
-  then immediate resume → `idle`.
-- Abort completing normally moves `running → idle`.
-- The ladder is a shared routine with a parameterised reason, because HS-022 and HS-023 reuse it.
-- A test drives the stub to ignore rung 1 and asserts rung 2 fires and the session ends `idle`.
+- `DELETE /api/sessions/:id` returns 202, sets `deleting`, then removes the row; the stream closes.
+- Abort first if running; snapshot before removal; remove session directory and network.
+- A failed snapshot returns 409 `unsaved_work` unless `?force=true`.
+- Delete is idempotent: a second call returns 202/404 deterministically, never a partial state.
+- Deleting a session revokes its dummy key (wired in HS-039) — the hook exists here.
 
-**Already in place:** the table's `running + abort_completed → idle`, `running + abort_ladder →
-stopped` and `stopped + resume → starting`; `SessionBackend::abort`/`stop`/`resume` (recordings in the
-stub, `unsupported` in Docker); two runners to copy (`provisioner.rs`, `turn.rs`); the `409
-session_<state>` family; the `session.status` payload; and **`abort_grace` is already a config key**
-(default `10s`) — use it, do not add one.
+**Already in place:** the table's `any + delete → deleting` row; `SessionBackend::{abort, snapshot,
+delete}` (`delete`/`snapshot` are recordings in the stub and `unsupported` in Docker); the
+`StreamRegistry` with its open-stream count (HS-010), which is what closes a deleting session's stream;
+`Activity`-style wiring helpers; the `409 session_<state>` family; the abort ladder to stop a running
+turn first; ADR-0011's id and ADR-0013's event writer.
 
-**What is missing:** the cancellation. The turn runner holds no token, and the stub cannot be told to
-ignore rung 1, so the ladder has nothing to climb.
+**What is missing:** the endpoint, the `deleting` state's *removal* (the table stops at `deleting`: no
+row deletion and no event), the snapshot-before-removal ordering and its `unsaved_work` refusal, the
+idempotency rule for a second delete, the directory teardown (the stub owns no directory — the
+`worktree` field is a string until HS-025), and the stream close.
 
-**Decide canonically and record:** how a turn is cancelled (a shared token the stub's script checks
-between frames, versus the backend owning it — the token keeps "the backend emits, the server decides"
-intact because the runner still applies the transitions); how the stub is told to ignore rung 1 (a
-constructor argument like HS-011's step delay, **not** a config key); whether the forced rung resumes
-inline or through a runner; whether an abort on `idle`/`stopped` answers `409 session_<state>` or 202
-with no work (the family says the former); and `clear_queue` — the trait has no such method, so say
-whether it is a new backend method or folded into `abort`.
-
----
+**Decide canonically and record:** what happens to the events (cascade delete vs. keep — the stream
+closes either way, and HS-060's compaction assumes the log exists); where the "revoke the dummy key"
+hook lives when there is no key yet (a named no-op with a story number, not silence); whether a second
+`DELETE` on a deleted row is `404` or `202` (the bullet allows either, "deterministically", so pick one
+and prove it); what `deleting` looks like if the row removal fails (the row must not be left lying
+`deleting` forever — but nothing retries it either); and whether `snapshot` is called on a `stopped`
+session at all.
 
 ## 9. Reporting
 
@@ -630,5 +690,6 @@ Last session's ledger, for the shape of it:
 
 | Issue | Story | Commits | Outcome |
 | --- | --- | --- | --- |
-| PER-46 | HS-014 session screen | `82c8c35`, `527931a` | Done — 2 P1 findings from the review, both fixed |
-| PER-47 | HS-015 prompt/turn | `d4077df`, `e17920c` | Done — 1 P1 (ids reset per process) fixed, one dismissal cited |
+| PER-48 | HS-016 abort ladder | `d034237`, `3d2ecba` | Done — 2 P2s fixed (the grace did not bound rung 1; `Unreported` read as failure), 6 nits |
+| PER-49 | HS-017 steer | `0099ca3`, `8ff1d77` | Done — 1 P1 fixed (a `last_active_at` assertion the *settle* satisfied, proved by mutation), 11 notes |
+| PER-50 | HS-018 stopped/resume | `dce53c4`, `ff9d907` | Done — 1 P2 fixed (abort retried a dead path, provisioning a session nobody asked for), 16 findings |
