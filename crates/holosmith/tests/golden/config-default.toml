@@ -1,4 +1,5 @@
 role = "both"
+backend = "docker"
 control_listen = "127.0.0.1:8080"
 preview_listen = "127.0.0.1:8081"
 control_origin = "http://localhost:8080"

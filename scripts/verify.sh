@@ -210,6 +210,35 @@ fetch_stream() {
   sed '1,/^\r$/d' "$WORK/responses/$label.http" >"$WORK/responses/$label.body"
 }
 
+# fetch_sse_until <label> <path> <needle> [Header: value]...: the header block like
+# `fetch_stream`, then body lines until one contains <needle>. An event stream never ends, so
+# "read until the event that settles the question" is the only bounded way to watch a producer:
+# every line has its own three-second timeout and the loop stops after 200 of them, so a stream
+# that never sends the needle fails the case instead of hanging the run.
+fetch_sse_until() {
+  local label="$1" path="$2" needle="$3"
+  shift 3
+  local -a sent=("$@")
+  local request="GET $path HTTP/1.1"$'\r\n' fd header line count=0
+  for header in "${sent[@]}"; do
+    request+="$header"$'\r\n'
+  done
+  request+=$'Connection: close\r\n\r\n'
+  exec {fd}<>"/dev/tcp/127.0.0.1/$port" || return 1
+  printf '%s' "$request" >&"$fd"
+  : >"$WORK/responses/$label.http"
+  while IFS= read -r -t 3 line <&"$fd"; do
+    printf '%s\n' "$line" >>"$WORK/responses/$label.http"
+    case "$line" in
+      *"$needle"*) break ;;
+    esac
+    count=$((count + 1))
+    [ "$count" -lt 200 ] || break
+  done
+  exec {fd}<&-
+  sed '1,/^\r$/d' "$WORK/responses/$label.http" >"$WORK/responses/$label.body"
+}
+
 # expect_header <name> <response> <header> <expected>: one header's value, compared exactly.
 expect_header() {
   local name="$1" response="$2" header="$3" expected="$4" value
@@ -244,6 +273,8 @@ serve_cases=(
   case_create_bad_project
   case_create_cap_reached
   case_events_stream
+  case_backend_from_config
+  case_provisioning_steps
 )
 
 # The health payload: exactly four keys, and the uptime is not predictable, so the assertion is
@@ -501,6 +532,40 @@ case_events_stream() {
   expect_header "$name" "$response" cache-control "no-cache"
 }
 
+# HS-011: the backend is a machine setting, so a config file saying `backend = "stub"` is what
+# this boot runs on, with no flag. The banner is what proves it took effect; the provisioning case
+# below is what proves the stub is the backend that actually provisioned the session.
+case_backend_from_config() {
+  local name=case_backend_from_config banner
+  banner="$(sed -n 's/^holosmith .* backend \([a-z]*\)$/\1/p' "$WORK/serve.err" | sed -n '1p')"
+  check "$name/banner" "stub" "$banner"
+}
+
+# HS-011: a create hands off to the provisioner, which reports the four steps and ends the session
+# idle. The stream is read until the event that says `idle`, so the case proves the order a browser
+# sees and that the last thing it is told is the state the story requires.
+case_provisioning_steps() {
+  local name=case_provisioning_steps response body steps
+  fetch_sse_until "$name" "/api/sessions/$created_id/events" '"status":"idle"' "Host: 127.0.0.1" ||
+    fail "$name/no_answer" "GET /api/sessions/$created_id/events did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 200
+  body="$(cat "$WORK/responses/$name.body")"
+  # `grep -o` rather than a sed range: the four step events carry a step and the fifth carries
+  # `null`, so the words alone are the sequence the story asks for.
+  steps="$(printf '%s\n' "$body" | grep -o '"step":"[a-z]*"' |
+    sed 's/.*:"//; s/"$//' | tr '\n' ' ' | sed 's/ $//')"
+  check "$name/steps" "worktree network container pi" "$steps"
+  case "$body" in
+    *'"step":null,"status":"idle"'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "$name/idle" "no event reports the session idle: $body"
+      ;;
+  esac
+}
+
 # Box 4, over every answer the cases above saved: none of them carries a CORS header, and none
 # carries a `Vary` that would imply one. Runs after the case loop rather than as a member of it,
 # so nothing answered above is missed and a case appended later is covered automatically.
@@ -573,8 +638,10 @@ phase_serve() {
     fail "serve/version" "cannot read version and schema_version from: $json"
   fi
 
-  # The owner the bad_owner case needs, and the cap the create cases need.
-  printf 'owner = "%s"\nmax_live_sessions = 1\n' "$owner" >"$WORK/config.toml"
+  # The owner the bad_owner case needs, the cap the create cases need, and the backend: `stub`
+  # from the *file*, so `--backend` is not what makes this boot work (HS-011's acceptance is both
+  # spellings; `tests/serve_cli.rs` covers the flag).
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "stub"\n' "$owner" >"$WORK/config.toml"
 
   start_serve
   local case_fn

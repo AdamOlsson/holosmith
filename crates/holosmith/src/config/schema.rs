@@ -13,6 +13,7 @@ use toml_edit::{Document, Item, Key, Value};
 
 use super::problem::{Position, Problem};
 use super::{Config, Duration, Origin, Role};
+use crate::runtime::Backend;
 
 /// How a key's value is written in TOML.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +69,12 @@ pub const KNOWN_KEYS: &[KeySpec] = &[
         section: None,
         kind: Kind::String,
         set: set_role,
+    },
+    KeySpec {
+        path: "backend",
+        section: None,
+        kind: Kind::String,
+        set: set_backend,
     },
     KeySpec {
         path: "control_listen",
@@ -445,6 +452,15 @@ fn set_role(config: &mut Config, value: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn set_backend(config: &mut Config, value: &Value) -> Result<(), String> {
+    let text = string(value)?;
+    config.backend = Backend::ALL
+        .into_iter()
+        .find(|backend| backend.as_str() == text)
+        .ok_or_else(|| format!("must be stub or docker, not {text:?}"))?;
+    Ok(())
+}
+
 fn set_control_listen(config: &mut Config, value: &Value) -> Result<(), String> {
     config.control_listen = socket_addr(value)?;
     Ok(())
@@ -683,7 +699,7 @@ mod tests {
 
     #[test]
     fn the_table_holds_the_documented_keys() {
-        assert_eq!(KNOWN_KEYS.len(), 25);
+        assert_eq!(KNOWN_KEYS.len(), 26);
     }
 
     #[test]

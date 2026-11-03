@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::net::TcpListener;
 
+use crate::backend::Backends;
 use crate::clock;
 use crate::config::{Config, LoadError, LoadedConfig, Overrides};
 use crate::db::{self, Database, OpenOptions};
@@ -27,7 +28,8 @@ use crate::version::VersionInfo;
 pub struct ServeArgs {
     pub config: Option<PathBuf>,
     pub overrides: Overrides,
-    pub backend: Backend,
+    /// The backend for this run; `None` means the config file's `backend` decides.
+    pub backend: Option<Backend>,
 }
 
 pub fn run(args: ServeArgs) -> ExitCode {
@@ -75,11 +77,20 @@ pub fn run(args: ServeArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // The CLI wins over the file, the same rule `--port` and `--data-dir` follow: the file is the
+    // machine's setting and the flag is this run's (ADR-0006, ADR-0015). It is written back into
+    // the loaded value as well as used here, because an override ADR-0006 applies is applied to
+    // the value every later reader sees — otherwise `config.backend` and `runtime.backend` would
+    // disagree for exactly one run.
+    if let Some(backend) = args.backend {
+        loaded.config.backend = backend;
+    }
+    let backend = loaded.config.backend;
     // `--port 0` asks the kernel for a port, so the origin a browser will send is not knowable
     // until after `bind`; the flag decides, because a port written in the file may deliberately
     // name a proxied address rather than the local one.
     let ephemeral_origin = args.overrides.port == Some(0);
-    let runtime = Runtime::started(args.backend);
+    let runtime = Runtime::started(backend);
     let version = VersionInfo::current();
     let listen = loaded.config.control_listen;
 
@@ -125,6 +136,7 @@ pub fn run(args: ServeArgs) -> ExitCode {
                 database,
                 events,
                 streams: StreamRegistry::new(),
+                backend: Backends::for_run(backend),
             }),
             guards,
         );

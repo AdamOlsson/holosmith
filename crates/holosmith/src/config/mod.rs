@@ -25,6 +25,8 @@ pub use render::{RenderError, render, render_show};
 
 use problem::{Position, Problem};
 
+use crate::runtime::Backend;
+
 /// The one path the spec names for the machine's config file.
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/holosmith/config.toml";
 
@@ -175,6 +177,10 @@ pub struct Egress {
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
     pub role: Role,
+    /// The backend `serve` runs unless `--backend` names another one for this run (HS-011).
+    /// A machine setting rather than a flag because a dev instance should not have to remember
+    /// one on every start, and `docker` because the stub is opt-in (ADR-0001).
+    pub backend: Backend,
     pub control_listen: SocketAddr,
     pub preview_listen: SocketAddr,
     pub control_origin: Origin,
@@ -205,6 +211,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             role: Role::Both,
+            backend: Backend::default(),
             control_listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 8080)),
             preview_listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 8081)),
             control_origin: Origin("http://localhost:8080".to_string()),
@@ -883,6 +890,7 @@ mod tests {
     /// One file that sets every documented key to a value that is not the default.
     const EVERY_KEY: &str = r#"
 role = "hub"
+backend = "stub"
 control_listen = "127.0.0.1:9000"
 preview_listen = "127.0.0.1:9001"
 control_origin = "https://control.example:8443"
@@ -953,6 +961,7 @@ allow = ["crates.io"]
     fn every_documented_key_is_read_into_its_field() {
         let config = settings();
         assert_eq!(config.role, Role::Hub);
+        assert_eq!(config.backend, Backend::Stub);
         assert_eq!(config.control_listen, socket("127.0.0.1:9000"));
         assert_eq!(config.preview_listen, socket("127.0.0.1:9001"));
         assert_eq!(
@@ -1081,6 +1090,17 @@ allow = ["crates.io"]
         assert_eq!(
             problems_of("role = \"hub\"\nrole = \"server\"\n"),
             "config.toml:2:1: duplicate key\n1 problem in config.toml\n"
+        );
+    }
+
+    #[test]
+    fn backend_must_be_stub_or_docker() {
+        // HS-011's config key: the two words are the ones `--backend` accepts, so a third spelling
+        // is a problem here rather than a backend nobody can select.
+        assert_eq!(
+            problems_of("backend = \"Podman\"\n"),
+            "config.toml:1:1: backend: must be stub or docker, not \"Podman\"\n\
+             1 problem in config.toml\n"
         );
     }
 

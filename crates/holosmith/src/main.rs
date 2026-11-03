@@ -19,7 +19,7 @@ fn main() -> ExitCode {
                 port,
                 data_root: data_dir,
             },
-            backend: backend.unwrap_or_default(),
+            backend,
         }),
         Cmd::Version { json } => commands::version::run(json),
         Cmd::Config { action } => commands::config::run(action, cli.config),

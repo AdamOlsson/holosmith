@@ -503,7 +503,12 @@ async fn a_create_answers_202_with_the_row_and_one_extra_key() {
 }
 
 #[tokio::test]
-async fn a_create_starts_no_provisioning() {
+async fn a_create_answers_a_starting_row_without_waiting_for_provisioning() {
+    // **Amended by HS-011**, which made the create hand the new row to a background provisioner:
+    // the handler still does no provisioning itself and still answers before any step (spec item
+    // 7), and the row it answers with is `starting` with no worktree. The harness's stub takes a
+    // minute per step, so a row still `starting` after the answer is the handler not having
+    // waited for one; `tests/provisioning.rs` owns the other half — that the steps then happen.
     let dir = TempDir::new("api-no-provisioning");
     let state = state_in(&dir, Config::default());
     let served = Served::start(http::router(state.clone()), GRACE).await;

@@ -8,8 +8,9 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use holosmith::backend::{Backends, StubBackend};
 use holosmith::clock;
 use holosmith::config::Config;
 use holosmith::db::{self, Database, OpenOptions};
@@ -95,7 +96,28 @@ pub fn state() -> AppState {
         database: Arc::clone(database),
         events: events.clone(),
         streams: StreamRegistry::default(),
+        backend: slow_stub(),
     }
+}
+
+/// How long the harness's stub backend takes per provisioning step.
+///
+/// Long enough that a test which creates a session and immediately reads its row cannot lose the
+/// race against the provisioner that HS-011 now starts in the background: a session stays
+/// `starting` for a minute unless a test asks for a faster stub with [`with_stub`]. Nothing waits
+/// that minute — the provisioner is a spawned task and the test's runtime drops it at the end.
+pub const SLOW_STUB_STEP: Duration = Duration::from_secs(60);
+
+/// The harness's default backend: a stub that does not finish while a test is looking.
+pub fn slow_stub() -> Backends {
+    Backends::Stub(StubBackend::new(SLOW_STUB_STEP))
+}
+
+/// The same state with the stub backend `stub` replaces, so a test can pace or fail provisioning
+/// without the backend being decided by a config file inside the handler.
+pub fn with_stub(mut state: AppState, stub: StubBackend) -> AppState {
+    state.backend = Backends::Stub(stub);
+    state
 }
 
 /// A state for a test that writes: its own database in its own directory, so no two tests (and
@@ -114,6 +136,7 @@ pub fn state_with_writer(dir: &TempDir, config: Config, options: WriterOptions) 
         events: writer_handle_with(Arc::clone(&database), options),
         database,
         streams: StreamRegistry::default(),
+        backend: slow_stub(),
     }
 }
 
@@ -267,3 +290,178 @@ pub fn parse(raw: &[u8]) -> Response {
         body,
     }
 }
+
+/// One SSE block: the three fields the client uses.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Frame {
+    /// The SSE `id`, which is the seq.
+    pub id: Option<String>,
+    /// The SSE `event`, which is the stored kind.
+    pub kind: Option<String>,
+    pub data: String,
+}
+
+impl Frame {
+    pub fn parse(block: &str) -> Self {
+        let mut frame = Self::default();
+        for line in block.lines() {
+            // A comment line — axum's keep-alive — has no field name, so it parses to nothing.
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            let value = value.strip_prefix(' ').unwrap_or(value);
+            match name {
+                "id" => frame.id = Some(value.to_string()),
+                "event" => frame.kind = Some(value.to_string()),
+                "data" => {
+                    if !frame.data.is_empty() {
+                        frame.data.push('\n');
+                    }
+                    frame.data.push_str(value);
+                }
+                _ => {}
+            }
+        }
+        frame
+    }
+
+    pub fn seq(&self) -> i64 {
+        self.id
+            .as_deref()
+            .expect("the frame carries an id")
+            .parse()
+            .expect("the id is the seq")
+    }
+}
+
+/// An open stream: the answer's head, then one block at a time.
+pub struct Sse {
+    socket: TcpStream,
+    pending: Vec<u8>,
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+}
+
+impl Sse {
+    /// Open a stream for `session`, resuming after `last_event_id` when one is given.
+    pub async fn connect(addr: SocketAddr, session: &str, last_event_id: Option<i64>) -> Self {
+        let mut socket = TcpStream::connect(addr).await.expect("the server accepts");
+        let mut request = format!(
+            "GET /api/sessions/{session}/events HTTP/1.0\r\nHost: 127.0.0.1\r\n\
+             Connection: close\r\n"
+        );
+        if let Some(seq) = last_event_id {
+            request.push_str(&format!("Last-Event-ID: {seq}\r\n"));
+        }
+        request.push_str("\r\n");
+        socket
+            .write_all(request.as_bytes())
+            .await
+            .expect("the request is written");
+
+        let mut head = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            if let Some(end) = head.windows(4).position(|window| window == b"\r\n\r\n") {
+                let body = head.split_off(end + 4);
+                let answer = parse(&head);
+                return Self {
+                    socket,
+                    pending: body,
+                    status: answer.status,
+                    headers: answer.headers,
+                };
+            }
+            let read = tokio::time::timeout(PATIENCE, socket.read(&mut chunk))
+                .await
+                .expect("the answer starts within the deadline")
+                .expect("the answer is readable");
+            assert!(read > 0, "the server closed before answering");
+            head.extend_from_slice(&chunk[..read]);
+        }
+    }
+
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// The next block, or `None` once the server ends the stream.
+    pub async fn next_block(&mut self, bound: Duration) -> Option<Frame> {
+        let deadline = Instant::now() + bound;
+        loop {
+            if let Some(end) = self.pending.windows(2).position(|window| window == b"\n\n") {
+                let block: Vec<u8> = self.pending.drain(..end + 2).collect();
+                let text = String::from_utf8(block[..block.len() - 2].to_vec())
+                    .expect("an SSE block is UTF-8");
+                return Some(Frame::parse(&text));
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "no SSE block arrived within {bound:?}; pending: {:?}",
+                String::from_utf8_lossy(&self.pending)
+            );
+            let mut chunk = [0u8; 4096];
+            match tokio::time::timeout(remaining, self.socket.read(&mut chunk)).await {
+                Err(_) => panic!("no SSE block arrived within {bound:?}"),
+                Ok(Ok(0)) => {
+                    assert!(
+                        self.pending.is_empty(),
+                        "the stream ended mid-block: {:?}",
+                        String::from_utf8_lossy(&self.pending)
+                    );
+                    return None;
+                }
+                Ok(Ok(read)) => self.pending.extend_from_slice(&chunk[..read]),
+                Ok(Err(error)) => panic!("the stream could not be read: {error}"),
+            }
+        }
+    }
+
+    /// The next `count` blocks, failing if the stream ends first.
+    pub async fn take(&mut self, count: usize, bound: Duration) -> Vec<Frame> {
+        let mut frames = Vec::with_capacity(count);
+        for _ in 0..count {
+            frames.push(
+                self.next_block(bound)
+                    .await
+                    .expect("the stream ended before the events ran out"),
+            );
+        }
+        frames
+    }
+
+    /// Every remaining block, which means reading until the stream ends.
+    pub async fn drain(&mut self, bound: Duration) -> Vec<Frame> {
+        let mut frames = Vec::new();
+        while let Some(frame) = self.next_block(bound).await {
+            frames.push(frame);
+        }
+        frames
+    }
+
+    /// Whether the server wrote nothing at all within `bound`.
+    pub async fn quiet_for(&mut self, bound: Duration) -> bool {
+        assert!(
+            self.pending.is_empty(),
+            "a block was already waiting: {:?}",
+            String::from_utf8_lossy(&self.pending)
+        );
+        let mut chunk = [0u8; 64];
+        match tokio::time::timeout(bound, self.socket.read(&mut chunk)).await {
+            Err(_) => true,
+            Ok(Ok(read)) => {
+                self.pending.extend_from_slice(&chunk[..read]);
+                false
+            }
+            Ok(Err(_)) => false,
+        }
+    }
+}
+
+/// How long a test waits for something the server does before calling it stuck. One value for
+/// every socket-level test, so no two of them disagree about what "slow" means.
+pub const PATIENCE: Duration = Duration::from_secs(10);

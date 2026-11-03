@@ -13,11 +13,7 @@
 //! parse, and the format a browser sees — `text/event-stream`, `id`/`event`/`data` blocks — is
 //! unchanged by the version.
 
-use std::net::SocketAddr;
 use std::time::{Duration, Instant};
-
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 
 use holosmith::clock;
 use holosmith::config::Config;
@@ -26,10 +22,7 @@ use holosmith::http::{self, AppState};
 use holosmith::sessions::{NewSession, Session};
 
 mod support;
-use support::{Served, TempDir};
-
-/// How long a test waits for something the server does before calling it stuck.
-const PATIENCE: Duration = Duration::from_secs(10);
+use support::{Frame, PATIENCE, Served, Sse, TempDir};
 
 /// The drain deadline each test gives `serve`, so a socket a test forgot to drop cannot hold the
 /// server open for the production ten seconds.
@@ -91,177 +84,6 @@ async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
             "{what} did not happen within {PATIENCE:?}"
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-}
-
-/// One SSE block: the three fields this story's client uses.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct Frame {
-    /// The SSE `id`, which is the seq (D1).
-    id: Option<String>,
-    /// The SSE `event`, which is the stored kind.
-    kind: Option<String>,
-    data: String,
-}
-
-impl Frame {
-    fn parse(block: &str) -> Self {
-        let mut frame = Self::default();
-        for line in block.lines() {
-            // A comment line — axum's keep-alive — has no field name, so it parses to nothing.
-            let Some((name, value)) = line.split_once(':') else {
-                continue;
-            };
-            let value = value.strip_prefix(' ').unwrap_or(value);
-            match name {
-                "id" => frame.id = Some(value.to_string()),
-                "event" => frame.kind = Some(value.to_string()),
-                "data" => {
-                    if !frame.data.is_empty() {
-                        frame.data.push('\n');
-                    }
-                    frame.data.push_str(value);
-                }
-                _ => {}
-            }
-        }
-        frame
-    }
-
-    fn seq(&self) -> i64 {
-        self.id
-            .as_deref()
-            .expect("the frame carries an id")
-            .parse()
-            .expect("the id is the seq")
-    }
-}
-
-/// An open stream: the answer's head, then one block at a time.
-struct Sse {
-    socket: TcpStream,
-    pending: Vec<u8>,
-    status: u16,
-    headers: Vec<(String, String)>,
-}
-
-impl Sse {
-    /// Open a stream for `session`, resuming after `last_event_id` when one is given.
-    async fn connect(addr: SocketAddr, session: &str, last_event_id: Option<i64>) -> Self {
-        let mut socket = TcpStream::connect(addr).await.expect("the server accepts");
-        let mut request = format!(
-            "GET /api/sessions/{session}/events HTTP/1.0\r\nHost: 127.0.0.1\r\n\
-             Connection: close\r\n"
-        );
-        if let Some(seq) = last_event_id {
-            request.push_str(&format!("Last-Event-ID: {seq}\r\n"));
-        }
-        request.push_str("\r\n");
-        socket
-            .write_all(request.as_bytes())
-            .await
-            .expect("the request is written");
-
-        let mut head = Vec::new();
-        let mut chunk = [0u8; 1024];
-        loop {
-            if let Some(end) = head.windows(4).position(|window| window == b"\r\n\r\n") {
-                let body = head.split_off(end + 4);
-                let answer = support::parse(&head);
-                return Self {
-                    socket,
-                    pending: body,
-                    status: answer.status,
-                    headers: answer.headers,
-                };
-            }
-            let read = tokio::time::timeout(PATIENCE, socket.read(&mut chunk))
-                .await
-                .expect("the answer starts within the deadline")
-                .expect("the answer is readable");
-            assert!(read > 0, "the server closed before answering");
-            head.extend_from_slice(&chunk[..read]);
-        }
-    }
-
-    fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
-    }
-
-    /// The next block, or `None` once the server ends the stream.
-    async fn next_block(&mut self, bound: Duration) -> Option<Frame> {
-        let deadline = Instant::now() + bound;
-        loop {
-            if let Some(end) = self.pending.windows(2).position(|window| window == b"\n\n") {
-                let block: Vec<u8> = self.pending.drain(..end + 2).collect();
-                let text = String::from_utf8(block[..block.len() - 2].to_vec())
-                    .expect("an SSE block is UTF-8");
-                return Some(Frame::parse(&text));
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            assert!(
-                !remaining.is_zero(),
-                "no SSE block arrived within {bound:?}; pending: {:?}",
-                String::from_utf8_lossy(&self.pending)
-            );
-            let mut chunk = [0u8; 4096];
-            match tokio::time::timeout(remaining, self.socket.read(&mut chunk)).await {
-                Err(_) => panic!("no SSE block arrived within {bound:?}"),
-                Ok(Ok(0)) => {
-                    assert!(
-                        self.pending.is_empty(),
-                        "the stream ended mid-block: {:?}",
-                        String::from_utf8_lossy(&self.pending)
-                    );
-                    return None;
-                }
-                Ok(Ok(read)) => self.pending.extend_from_slice(&chunk[..read]),
-                Ok(Err(error)) => panic!("the stream could not be read: {error}"),
-            }
-        }
-    }
-
-    /// The next `count` blocks, failing if the stream ends first.
-    async fn take(&mut self, count: usize, bound: Duration) -> Vec<Frame> {
-        let mut frames = Vec::with_capacity(count);
-        for _ in 0..count {
-            frames.push(
-                self.next_block(bound)
-                    .await
-                    .expect("the stream ended before the events ran out"),
-            );
-        }
-        frames
-    }
-
-    /// Every remaining block, which means reading until the stream ends.
-    async fn drain(&mut self, bound: Duration) -> Vec<Frame> {
-        let mut frames = Vec::new();
-        while let Some(frame) = self.next_block(bound).await {
-            frames.push(frame);
-        }
-        frames
-    }
-
-    /// Whether the server wrote nothing at all within `bound`.
-    async fn quiet_for(&mut self, bound: Duration) -> bool {
-        assert!(
-            self.pending.is_empty(),
-            "a block was already waiting: {:?}",
-            String::from_utf8_lossy(&self.pending)
-        );
-        let mut chunk = [0u8; 64];
-        match tokio::time::timeout(bound, self.socket.read(&mut chunk)).await {
-            Err(_) => true,
-            Ok(Ok(read)) => {
-                self.pending.extend_from_slice(&chunk[..read]);
-                false
-            }
-            Ok(Err(_)) => false,
-        }
     }
 }
 

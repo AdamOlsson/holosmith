@@ -241,6 +241,79 @@ fn the_role_in_the_config_file_reaches_the_health_payload() {
 }
 
 #[test]
+fn the_backend_comes_from_the_config_file() {
+    // HS-011: `backend = "stub"` is selectable from the file *and* by `--backend`, and the flag
+    // wins — the same precedence `--port` and `--data-dir` already follow (ADR-0006).
+    let dir = TempDir::new("backend");
+    let config = dir.write(
+        "config.toml",
+        &format!(
+            "backend = \"stub\"\ncontrol_listen = \"127.0.0.1:0\"\ndata_root = \"{}\"\n",
+            dir.file("data").display()
+        ),
+    );
+    let mut server = Server::start(
+        dir,
+        &build(&["serve", "--config", config.to_str().expect("UTF-8")]),
+    )
+    .wait_until_listening();
+    let said = server.said();
+    assert!(
+        said.contains(" role both backend stub\n"),
+        "the file's backend did not reach the startup line: {said}"
+    );
+    assert_eq!(server.signal("TERM"), 0);
+}
+
+#[test]
+fn a_flag_backend_wins_over_the_config_file() {
+    let dir = TempDir::new("backend-flag");
+    let config = dir.write(
+        "config.toml",
+        &format!(
+            "backend = \"stub\"\ncontrol_listen = \"127.0.0.1:0\"\ndata_root = \"{}\"\n",
+            dir.file("data").display()
+        ),
+    );
+    let mut server = Server::start(
+        dir,
+        &build(&[
+            "serve",
+            "--config",
+            config.to_str().expect("UTF-8"),
+            "--backend",
+            "docker",
+        ]),
+    )
+    .wait_until_listening();
+    let said = server.said();
+    assert!(
+        said.contains(" role both backend docker\n"),
+        "--backend did not override the file: {said}"
+    );
+    assert_eq!(server.signal("TERM"), 0);
+}
+
+#[test]
+fn the_default_backend_is_docker_and_the_log_line_says_so() {
+    // ADR-0001: the stub is opt-in, so a machine that says nothing about the backend runs the
+    // Docker one.
+    let dir = TempDir::new("backend-default");
+    let config = config(&dir);
+    let mut server = Server::start(
+        dir,
+        &build(&["serve", "--config", config.to_str().expect("UTF-8")]),
+    )
+    .wait_until_listening();
+    let said = server.said();
+    assert!(
+        said.contains(" role both backend docker\n"),
+        "the default backend is not docker: {said}"
+    );
+    assert_eq!(server.signal("TERM"), 0);
+}
+
+#[test]
 fn sigterm_stops_the_process_with_exit_zero() {
     let dir = TempDir::new("sigterm");
     let config = config(&dir);

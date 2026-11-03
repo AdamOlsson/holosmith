@@ -194,7 +194,19 @@ pub async fn create(
         Err(error) => return error.into_response(),
     };
     match create_locked(state, &parsed, key) {
-        Ok(session) => created(session),
+        Ok((session, inserted)) => {
+            // The handoff, and the only place this story spawns anything. The answer is built
+            // first, from the `starting` row this call just wrote, and only then does the
+            // provisioner get the session on another task — so the 202 can never wait for a step,
+            // and the body can never show a state a step has already moved past. A retry of the
+            // same key inserts nothing and is answered from the row it already has, so one
+            // session is provisioned once.
+            let response = created(session.clone());
+            if inserted {
+                state.provisioner().spawn(session);
+            }
+            response
+        }
         Err(error) => error.into_response(),
     }
 }
@@ -202,7 +214,14 @@ pub async fn create(
 /// The one lock scope: lookup, cap count and insert, with no `.await` inside so the guard cannot
 /// outlive a synchronous statement. `live_count` and `create` share it, so two creates cannot
 /// both see a free slot (ADR-0012).
-fn create_locked(state: &AppState, body: &CreateBody, key: &str) -> Result<Session, ApiError> {
+///
+/// `true` as the second element means this call inserted the row, so it is the caller's to
+/// provision; `false` means the idempotency key already named a session.
+fn create_locked(
+    state: &AppState,
+    body: &CreateBody,
+    key: &str,
+) -> Result<(Session, bool), ApiError> {
     let database = state
         .database
         .lock()
@@ -214,7 +233,7 @@ fn create_locked(state: &AppState, body: &CreateBody, key: &str) -> Result<Sessi
         .by_client_key(key)
         .map_err(|error| internal("by_client_key", error))?
     {
-        return Ok(existing);
+        return Ok((existing, false));
     }
     let live = repository
         .live_count()
@@ -231,9 +250,9 @@ fn create_locked(state: &AppState, body: &CreateBody, key: &str) -> Result<Sessi
         base_commit: None,
     };
     match repository.create(&new, clock::unix_now()) {
-        Ok(session) => Ok(session),
+        Ok(session) => Ok((session, true)),
         Err(RepoError::DuplicateClientKey) => match repository.by_client_key(key) {
-            Ok(Some(winner)) => Ok(winner),
+            Ok(Some(winner)) => Ok((winner, false)),
             Ok(None) => {
                 // The insert said the key exists and the re-read says it does not; a retry must
                 // never see an error for a race it cannot fix, so this is not a client error.
