@@ -92,26 +92,33 @@ asks the kernel for the port and is also what makes `serve` re-derive `control_o
 the bound address (ADR-0007), so the case for a request that passes the guards sends exactly
 the origin the guard compares; `control_listen` and `control_origin` are both read from the
 startup banner, never assumed. The data root is inside the work dir, so a run never touches
-`/var/lib/holosmith` (ADR-0009), and the config file carries `owner` and
-`max_live_sessions = 1`: the `bad_owner` case and the create cases are the only reasons that
-file exists. Every request is a `/dev/tcp` fetch (`fetch` for a body-less request,
+`/var/lib/holosmith` (ADR-0009), and the config file carries `owner`, `max_live_sessions = 1`
+and `backend = "stub"`: the `bad_owner` case, the create cases and provisioning are the only
+reasons that file exists. The backend comes from the *file* rather than from a `--backend` flag
+on purpose — that is half of HS-011's "selectable by config and by `--backend`", and
+`case_backend_from_config` is what proves it; `tests/serve_cli.rs` covers the flag, the override
+and the default. Every request is a `/dev/tcp` fetch (`fetch` for a body-less request,
 `fetch_body` when a body is needed, `fetch_stream` for a response that never ends), so the
 harness needs neither `curl` nor `jq`. `fetch_stream` exists because `fetch` reads until EOF:
 an event stream sends its header block at once and then nothing until the first event, so
 `fetch` would sit in its ten-second deadline and report a working stream as a broken one.
 `fetch_stream` reads the header block line by line under bash's own three-second timeout and
 stops at the blank line, so an early close, a `404` or a `text/plain` refusal is still saved
-and asserted like any other answer.
+and asserted like any other answer. `fetch_sse_until` goes one step further and keeps reading body
+lines until one contains a needle — an event stream never ends, so "read until the event that
+settles the question" is the only bounded way to watch a producer.
 
 A `serve_cases` array names the `case_*` functions, one per answer a browser gets: the health
 payload, the schema version the banner reports against `version --json`, the app shell
 byte-for-byte against `web/dist/index.html`, the `404` envelope of ADR-0008, one case per
 guard refusal (`bad_host`, `bad_origin`, `bad_client`, `bad_owner`), the request that passes
 all four, the exempt health probe, the create endpoint (`case_create_session`,
-`case_create_is_idempotent`, `case_create_bad_project`, `case_create_cap_reached`), and the
+`case_create_is_idempotent`, `case_create_bad_project`, `case_create_cap_reached`), the
 session's event stream (`case_events_stream`, which reads the stream's header block with
 `fetch_stream` and asserts `200`, `text/event-stream` and `no-cache` on the session
-`case_create_session` made). A case
+`case_create_session` made), the backend the boot chose (`case_backend_from_config`), and the
+provisioning that create starts (`case_provisioning_steps`, which reads that session's stream
+until the event says `idle` and asserts the four step words arrived in order). A case
 that must assert one code keeps every higher guard check correct, or it asserts another
 guard's code under its own name.
 

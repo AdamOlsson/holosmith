@@ -130,6 +130,20 @@ _Avoid_: Shutdown, quiesce
 The background work that turns an accepted session into a running one, reporting progress by step.
 _Avoid_: Launcher, bootstrapper
 
+**Step**:
+One of the four parts of provisioning, in order: `worktree`, `network`, `container`, `pi`. Its
+machine name is the `Step` type, and its word is what a `session.status` event carries in `step`. A
+step event reports that the step is now running. The event that ends a *successful* provisioning
+carries `null`, because no step is running then; the event that ends a failed one names the step
+that failed.
+_Avoid_: Phase, stage, task, milestone
+
+**Backend**:
+What performs provisioning and the session lifecycle: the stub backend, or the Docker backend. Its
+machine name is the `SessionBackend` trait; `runtime::Backend` is only which backend this run chose
+and is not a backend itself.
+_Avoid_: Provider, driver, engine, runtime
+
 **Stub backend**:
 A session backend that produces sessions, turns and events without Docker, git or a real agent.
 _Avoid_: Mock, test mode, dry run
