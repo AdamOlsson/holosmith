@@ -1,6 +1,7 @@
 //! The sessions collection: `POST /api/sessions` validates the body, writes one `starting` row and
 //! answers 202 (HS-008, ADR-0012); `GET /api/sessions` answers every row in the repository's own
-//! order together with the machine's network default (HS-013, ADR-0017).
+//! order together with the machine's network default (HS-013, ADR-0017); `GET /api/sessions/{id}`
+//! answers one row, which is what the session screen opens with (HS-014).
 //!
 //! The body is parsed by hand rather than through `axum::Json<T>`: that extractor rejects a bad
 //! body with its own `text/plain` answer, which would break ADR-0008's envelope on exactly the
@@ -320,6 +321,33 @@ fn list_locked(state: &AppState) -> Result<SessionList, ApiError> {
         sessions,
         network_default: state.config.network_default,
     })
+}
+
+/// Answer `GET /api/sessions/{id}`: 200 and that row, or ADR-0008's envelope.
+///
+/// The session screen opens with this and nothing else: the list's elements are the row, so the one
+/// row is the same body, and the stream the screen then opens is a path the page spells itself
+/// (ADR-0018). An unknown id is `not_found`, which is also what the stream answers for one.
+///
+/// A read-only route, so the guards apply with nothing added here (ADR-0010).
+pub async fn one(state: &AppState, id: &str) -> Response {
+    match one_locked(state, id) {
+        Ok(Some(session)) => Json(session).into_response(),
+        Ok(None) => ApiError::not_found().into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+/// The one lock scope this answer has, for the same reason the list has one: no `.await` inside it.
+fn one_locked(state: &AppState, id: &str) -> Result<Option<Session>, ApiError> {
+    let database = state
+        .database
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    database
+        .sessions()
+        .get(id)
+        .map_err(|error| internal("get", error))
 }
 
 #[cfg(test)]

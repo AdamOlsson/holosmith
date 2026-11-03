@@ -1,7 +1,24 @@
-// The app shell: the machine's health, the session list and the new-session form. Every value it
-// shows came from a response or from a `session.status` frame, so a reconnect has nothing to
-// reconcile and there is no cache to invalidate (ADR-0017). The one value it keeps that is not on
-// screen is the pending Idempotency-Key a retry has to repeat.
+// The app shell: two screens that share one header and one stream. `/` is the machine's health, the
+// session list and the new-session form; `/sessions/<id>` is one session with its live transcript
+// (HS-014). Every value either screen shows came from a response or from a stream frame, so a
+// reconnect has nothing to reconcile and there is no cache to invalidate (ADR-0017). The one value
+// the list keeps that is not on screen is the pending Idempotency-Key a retry has to repeat.
+//
+// The transcript's rules — what a frame means, one block per message id, append-or-replace — live in
+// `transcript.ts` and are tested without a DOM (ADR-0018). This file only turns those changes into
+// nodes, which is why every delta is one appended text node and nothing is ever re-rendered.
+
+import {
+  TRANSCRIPT_EVENTS,
+  Transcript,
+  affordances,
+  parseFrame,
+  sessionIdFromPath,
+  streamPath,
+  type Change,
+  type DeltaKind,
+  type SessionState,
+} from "./transcript";
 
 type Health = {
   name: string;
@@ -15,9 +32,6 @@ type ErrorEnvelope = {
   message: string;
 };
 
-// The six states, spelled as the API spells them (spec item 8).
-type SessionState = "starting" | "idle" | "running" | "stopped" | "error" | "deleting";
-
 // The four provisioning steps, in order (ADR-0015).
 type Step = "worktree" | "network" | "container" | "pi";
 
@@ -30,6 +44,17 @@ type Session = {
   status_reason: string | null;
   last_active_at: number;
 };
+
+// One session's row as the session screen reads it: the same fifteen columns, of which the list only
+// draws six. `thinking` and `network` are what the create was accepted with, so the screen can say
+// how the agent is configured without a second endpoint.
+type SessionDetail = Session & {
+  thinking: string;
+  network: boolean;
+};
+
+// The one node per kind that a delta appends to and a snapshot replaces.
+type BlockNodes = Record<DeltaKind, HTMLElement>;
 
 // The key the create carries. `crypto.randomUUID` is the platform's own UUID, but it exists only in
 // a secure context, and the control listener is plain HTTP unless it sits behind `tailscale serve`.
@@ -59,6 +84,9 @@ type StatusFrame = {
   step: Step | null;
   reason: string | null;
 };
+
+// The six states are `SessionState` in `transcript.ts`: one spelling, shared by the list, the screen
+// and the stream.
 
 // A response or the ADR-0008 envelope that refused it, so one path renders either.
 type Answer<T> =
@@ -138,7 +166,9 @@ function sessionRow(session: Session): HTMLLIElement {
   const row = make("li", "session");
   row.dataset.session = session.id;
 
-  const head = make("div", "session-head");
+  const head = document.createElement("a");
+  head.className = "session-head session-link";
+  head.href = `/sessions/${session.id}`;
   head.append(
     make("span", "project", session.project),
     make("span", "state", stateText(session.status, session.status_reason)),
@@ -190,11 +220,11 @@ function openSource(row: HTMLLIElement): void {
   }
   // The create's answer carries `events` and a list element does not; both spell this path, so one
   // rule opens a stream for a row however it arrived.
-  const source = new EventSource(`/api/sessions/${id}/events`);
+  const source = new EventSource(streamPath(id));
   rowSources.set(row, source);
   openSources.add(source);
   source.addEventListener("session.status", (event) => {
-    const frame = parseFrame((event as MessageEvent<string>).data);
+    const frame = parseStatusFrame((event as MessageEvent<string>).data);
     if (frame === null) {
       return;
     }
@@ -203,7 +233,7 @@ function openSource(row: HTMLLIElement): void {
   });
 }
 
-function parseFrame(data: string): StatusFrame | null {
+function parseStatusFrame(data: string): StatusFrame | null {
   try {
     return JSON.parse(data) as StatusFrame;
   } catch {
@@ -369,6 +399,245 @@ function header(health: Health): HTMLElement {
   return element;
 }
 
+// ---- the session screen (HS-014) ----------------------------------------------------------
+
+// One kind's node inside one message: a delta appends a text node to it, a snapshot replaces its
+// children. `BlockNodes` holds the pair, keyed by `DeltaKind`; `article[data-message]` is the block
+// they both live in.
+function kindNode(className: string): HTMLElement {
+  const element = make("div", className);
+  // An empty kind's node is not shown at all, so a text-only message has no blank "thinking" band.
+  element.hidden = true;
+  return element;
+}
+
+function messageBlock(id: string): { element: HTMLElement; nodes: BlockNodes } {
+  const element = make("article", "message");
+  element.dataset.message = id;
+  const thinking = kindNode("thinking");
+  const text = kindNode("text");
+  element.append(thinking, text);
+  return { element, nodes: { thinking, text } };
+}
+
+// Append one piece of output to a kind's node. This is the whole of the 10k-event rule: a text node
+// is added and nothing already on screen is read back, so the cost of a delta does not grow with the
+// length of the message it lands in (ADR-0018).
+function appendPiece(node: HTMLElement, piece: string): void {
+  if (piece === "") {
+    return;
+  }
+  node.appendChild(document.createTextNode(piece));
+  node.hidden = false;
+}
+
+// Replace a kind's whole content, which is what a snapshot means: an absent kind empties the node
+// on screen rather than leaving a stale half of it there — and an emptied one is hidden again.
+function replaceKind(node: HTMLElement, value: string): void {
+  node.replaceChildren();
+  node.hidden = value === "";
+  appendPiece(node, value);
+}
+
+// One change from the transcript model, applied to the DOM. Blocks are found in the map the stream
+// fills, never by querying the document, so no frame costs a walk over the transcript.
+function applyChange(
+  change: Change,
+  container: HTMLElement,
+  blocks: Map<string, BlockNodes>,
+): void {
+  if (change.op === "boundary") {
+    // A turn's number comes from the `turn.start` events seen so far. A `turn.end` with no start
+    // before it — reachable once HS-061 truncates a replay to recent messages — says "a turn settled"
+    // rather than "turn 0 settled".
+    let label = `turn ${change.turn} settled`;
+    if (change.boundary === "start") {
+      label = `turn ${change.turn}`;
+    } else if (change.turn === 0) {
+      label = "a turn settled";
+    }
+    container.append(make("div", "turn-boundary", label));
+    return;
+  }
+  if (change.op === "message") {
+    const block = messageBlock(change.messageId);
+    blocks.set(change.messageId, block.nodes);
+    container.append(block.element);
+    return;
+  }
+  const nodes = blocks.get(change.messageId);
+  if (nodes === undefined) {
+    // The model creates a block before it changes one, so this cannot happen on a stream it folded
+    // itself; a frame from somewhere else renders nothing rather than a heading with no message.
+    return;
+  }
+  if (change.op === "delta") {
+    appendPiece(nodes[change.delta], change.text);
+    return;
+  }
+  replaceKind(nodes.text, change.text);
+  replaceKind(nodes.thinking, change.thinking);
+}
+
+// The composer: one box of guidance and the three things that can be done with it. Prompting is the
+// `idle` row's trigger and steering is a running turn's, so the buttons exist in one state each
+// (`affordances`), and the box says which story wires the request there is no endpoint for yet:
+// HS-015 prompts, HS-017 steers, HS-016 aborts.
+type Composer = { element: HTMLElement; update: (state: SessionState) => void };
+
+function composerSection(): Composer {
+  const section = make("section", "composer");
+  const form = document.createElement("form");
+  const guidance = document.createElement("textarea");
+  guidance.name = "guidance";
+  guidance.rows = 3;
+  guidance.placeholder = "Tell the agent what to do…";
+  const label = make("label", "field");
+  label.append(make("span", "field-name", "Guidance"), guidance);
+
+  const prompt = make("button", "", "Prompt");
+  prompt.type = "submit";
+  const steer = make("button", "secondary", "Steer");
+  steer.type = "button";
+  const abort = make("button", "danger", "Abort");
+  abort.type = "button";
+  const actions = make("div", "actions");
+  actions.append(prompt, steer, abort);
+
+  const notice = make("p", "notice");
+  notice.hidden = true;
+  const say = (message: string): void => {
+    notice.textContent = message;
+    notice.hidden = false;
+  };
+
+  // No request is invented: the endpoint a button would call is a later story's, and a button that
+  // silently did nothing would be indistinguishable from a broken one.
+  prompt.addEventListener("click", () => say("Prompting arrives with HS-015; nothing was sent."));
+  steer.addEventListener("click", () => say("Steering arrives with HS-017; nothing was sent."));
+  abort.addEventListener("click", () => say("Aborting arrives with HS-016; nothing was sent."));
+
+  // The form has no action, so its default submit is a GET of the current path with the guidance in
+  // the query string: a full reload that discards the transcript and the notice. HS-015 inherits a
+  // form that submits nowhere rather than a page that forgets what it was showing.
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+  });
+
+  form.append(label, actions);
+  section.append(form, notice);
+
+  // True while the line on screen is the state's own ("nothing can be sent"), so a real notice is
+  // not cleared by an update that has an action to offer.
+  let stateNotice = false;
+  const update = (state: SessionState): void => {
+    const shown = affordances(state);
+    prompt.hidden = !shown.prompt;
+    steer.hidden = !shown.steer;
+    abort.hidden = !shown.abort;
+    // A state that offers no action says so once, instead of showing an empty button row.
+    if (!shown.prompt && !shown.steer && !shown.abort) {
+      notice.textContent = `This session is ${state}; its next action arrives with a later story.`;
+      notice.hidden = false;
+      stateNotice = true;
+    } else if (stateNotice) {
+      notice.hidden = true;
+      stateNotice = false;
+    }
+  };
+  return { element: section, update };
+}
+
+// The session's stream, folded into the transcript. The browser owns `Last-Event-ID` and resends the
+// last seq it saw (ADR-0014), so a reconnect resumes after what is already on screen and the page
+// needs no cursor of its own.
+function openSessionStream(
+  id: string,
+  transcript: HTMLElement,
+  placeholder: HTMLElement,
+  badge: HTMLElement,
+  updateComposer: (state: SessionState) => void,
+): void {
+  const model = new Transcript();
+  const blocks = new Map<string, BlockNodes>();
+  const source = new EventSource(streamPath(id));
+  openSources.add(source);
+  for (const eventType of TRANSCRIPT_EVENTS) {
+    source.addEventListener(eventType, (event) => {
+      const frame = parseFrame(eventType, (event as MessageEvent<string>).data);
+      if (frame === null) {
+        return;
+      }
+      if (placeholder.isConnected) {
+        placeholder.remove();
+      }
+      for (const change of model.apply(frame)) {
+        applyChange(change, transcript, blocks);
+      }
+    });
+  }
+  source.addEventListener("session.status", (event) => {
+    const frame = parseStatusFrame((event as MessageEvent<string>).data);
+    if (frame === null) {
+      return;
+    }
+    if (frame.from !== frame.to) {
+      badge.textContent = stateText(frame.to, frame.reason);
+      updateComposer(frame.to);
+    }
+  });
+}
+
+// The session screen: one row's worth of the list, the transcript, and the composer. The state badge
+// is drawn from the answer and then patched by `session.status`, so a reconnect has nothing to
+// reconcile; the row that is not live still opens a stream, because this is the screen the operator
+// asked for by name.
+function sessionScreen(health: Health, session: SessionDetail): void {
+  if (app === null) {
+    return;
+  }
+  const back = document.createElement("a");
+  back.className = "back";
+  back.href = "/";
+  back.textContent = "← All sessions";
+
+  const head = make("div", "session-head");
+  const badge = make("span", "state", stateText(session.status, session.status_reason));
+  head.append(make("span", "project", session.project), badge);
+
+  const meta = make("div", "session-meta");
+  meta.append(
+    make("span", "id", session.id),
+    make("span", "model", session.model),
+    make("span", "level", `thinking ${session.thinking}`),
+    make("span", "network", session.network ? "internet on" : "internet off"),
+    make("span", "activity", `active ${relativeTime(session.last_active_at, secondsNow())}`),
+  );
+
+  const transcript = make("div", "transcript");
+  transcript.id = "transcript";
+  const placeholder = make(
+    "p",
+    "empty",
+    "Nothing yet: the agent's text, its thinking and the turn boundaries appear here.",
+  );
+  transcript.append(placeholder);
+
+  const composer = composerSection();
+  composer.update(session.status);
+
+  const section = make("section", "session-screen");
+  section.id = "session";
+  section.dataset.session = session.id;
+  section.append(back, head, meta, transcript, composer.element);
+  app.replaceChildren(header(health), section);
+  openSessionStream(session.id, transcript, placeholder, badge, composer.update);
+}
+
+function sessionPath(id: string): string {
+  return `/api/sessions/${encodeURIComponent(id)}`;
+}
+
 function render(health: Health, list: SessionList): void {
   if (app === null) {
     return;
@@ -405,6 +674,19 @@ async function show(): Promise<void> {
   const health = await getJson<Health>("/api/health");
   if (!health.ok) {
     renderFailure(health.code, health.message);
+    return;
+  }
+  // The path decides the screen. `/sessions/<id>` is read from the address rather than from a
+  // router: the server already answers the app shell for every non-`/api/` path (ADR-0007), so a
+  // reload of one session's screen lands here with nothing installed (ADR-0017).
+  const id = sessionIdFromPath(location.pathname);
+  if (id !== null) {
+    const session = await getJson<SessionDetail>(sessionPath(id));
+    if (!session.ok) {
+      renderFailure(session.code, session.message);
+      return;
+    }
+    sessionScreen(health.value, session.value);
     return;
   }
   // The list after the health: a machine whose database is not open answers 500 here, and that

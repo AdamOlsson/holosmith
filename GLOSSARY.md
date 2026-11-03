@@ -78,9 +78,21 @@ _Avoid_: Client key, request id, dedupe token, idempotency token
 The page the operator works from: the machine's health, the sessions it holds with each one's state and last activity, and the form that creates a session. Its list is `GET /api/sessions` and its states arrive as `session.status` frames, so the page holds no state of its own.
 _Avoid_: Dashboard, home page, console, session list page
 
+**Session screen**:
+The page for one session, at the path `/sessions/<id>`: its state badge and reason, its transcript, and the composer. Its first answer is `GET /api/sessions/:id` and everything after that arrives on the session's stream; the path is read from the address, not from a router.
+_Avoid_: Detail page, viewer, session viewer
+
+**Composer**:
+The session screen's box of guidance and the three actions it offers: prompt, steer and abort. Which of the three exist is the state's (`affordances`): prompt on `idle`, steer and abort on `running`, none on the four other states.
+_Avoid_: Input bar, message box, chat box, prompt bar
+
 **Turn**:
 One prompt-to-settled cycle inside a session.
 _Avoid_: Request, message, exchange
+
+**Turn boundary**:
+The pair of events that brackets a turn in a transcript: `turn.start` when it begins and `turn.end` when it ends. The event kinds are their machine names, and a turn's number on screen is counted from the `turn.start` events a client has seen.
+_Avoid_: Turn marker, divider, separator
 
 **Prompt**:
 Starting a turn.
@@ -198,6 +210,14 @@ _Avoid_: Heartbeat, ping, keepalive event
 An incremental piece of model output that is appended to a message.
 _Avoid_: Chunk, token, fragment
 
+**Delta kind**:
+Which of a message's two kinds of output a delta belongs to: `text`, the answer, or `thinking`, the agent's reasoning, which the screen renders apart from it. Its machine name is `kind` in a `message.delta` payload; it is not an event kind, because one message holds both kinds. On screen, each kind has its own node inside the message's block, and that node is never called anything else.
+_Avoid_: Channel, stream, type, part
+
+**Message id**:
+The identifier a delta and a snapshot name, and the key a transcript holds one block under. Minted by the producer, unique within a session; its machine name is `message_id` in the payload.
+_Avoid_: Message key, uuid, index
+
 **Message snapshot**:
 A single event that replaces the deltas of an old message with its full text.
 _Avoid_: Compaction record, rollup
@@ -205,6 +225,10 @@ _Avoid_: Compaction record, rollup
 **Message**:
 A completed unit of conversation output (text plus thinking) that deltas accumulate into.
 _Avoid_: Bubble, response
+
+**Transcript**:
+The session screen's ordered output: one block per message id, with a marker per turn boundary. Its machine name is the `Transcript` model in `web/src/transcript.ts`, which folds stream frames into the changes the page applies and is tested without a DOM.
+_Avoid_: Log view, output, console, chat
 
 **History**:
 The events of a session that a client can read back, in pages.

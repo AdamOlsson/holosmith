@@ -123,7 +123,10 @@ the boot chose (`case_backend_from_config`), the provisioning that create starts
 (`case_provisioning_steps`, which reads that session's stream until the event says `idle` and
 asserts the four step words arrived in order), and the state machine's payload
 (`case_state_transition_payload`, which asserts the four step reports claim no state change and
-the fifth is exactly `{"from":"starting","to":"idle","step":null,"reason":null}`). A case
+the fifth is exactly `{"from":"starting","to":"idle","step":null,"reason":null}`), one
+session by id (`case_session_detail`, which asserts the row the create made, that it carries no
+`events` key, and that an unknown id is the `not_found` envelope), and the session screen's path
+(`case_session_screen`, which asserts `/sessions/<id>` answers the shell byte-for-byte). A case
 that must assert one code keeps every higher guard check correct, or it asserts another guard's
 code under its own name.
 
@@ -201,9 +204,12 @@ default.
 - **`x86_64-linux-musl-gcc` and `aarch64-linux-musl-gcc`** on `PATH`. SQLite is compiled
   from source (`rusqlite` with the `bundled` feature), so the C toolchain crosses too.
 - **node and npm** for the app shell: `scripts/build.sh` runs `scripts/build-web.sh`
-  first, which runs `npm ci` from `web/package-lock.json` and then Vite 7's build. Vite 7
-  needs node 20.19 or later. Without them `scripts/build.sh` stops before cargo with a
-  message naming this file. A bare `cargo build` never runs npm.
+  first, which runs `npm ci` from `web/package-lock.json`, then `npm test` and then Vite 7's
+  build. Vite 7 needs node 20.19 or later; `npm test` is node's own runner over the
+  transcript's rules in `web/test/` (ADR-0018), and it imports TypeScript directly, so it
+  needs native type stripping: **node 22.18 or later** (22.6 through 22.17 need
+  `--experimental-strip-types`, and 23.6+ is fine). Without node and npm `scripts/build.sh`
+  stops before cargo with a message naming this file. A bare `cargo build` never runs npm.
 - **git** for `scripts/build.sh`. Not required by `cargo build` itself.
 - Optional: **`qemu-aarch64-static`** (or point `HOLOSMITH_QEMU_AARCH64` at one) to run
   the aarch64 artifact on an x86_64 machine. It is a machine-local dev tool installed

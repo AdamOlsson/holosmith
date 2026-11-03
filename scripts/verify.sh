@@ -8,8 +8,8 @@
 # scripts/check-embed.sh, then serve: dist/<host-triple>/holosmith on a random port with a temp
 # config and a temp data dir, answering /api/health, the schema version, the app shell, the 404
 # envelope, every browser-facing guard refusal (ADR-0010), the create endpoint's 202/422/409
-# answers, the sessions list and the session's event stream, with no CORS header on any answer,
-# and stopping on SIGTERM with exit 0.
+# answers, the sessions list, one session by id, the session screen's path, and the session's
+# event stream, with no CORS header on any answer, and stopping on SIGTERM with exit 0.
 # --no-build skips the two artifact phases; --keep keeps the work dir of a successful run. On
 # failure this prints FAIL <assertion> and keeps the work dir (config, banner, every answer).
 # Downloads nothing and needs neither curl nor jq: every request is a /dev/tcp fetch. Put the
@@ -277,6 +277,8 @@ serve_cases=(
   case_provisioning_steps
   case_state_transition_payload
   case_sessions_list
+  case_session_detail
+  case_session_screen
 )
 
 # The health payload: exactly four keys, and the uptime is not predictable, so the assertion is
@@ -630,6 +632,70 @@ case_sessions_list() {
   esac
   # The row's *state* is deliberately not pinned: the provisioner HS-011 starts runs while these
   # cases run, so `starting` or `idle` are both correct by the time this answer is read.
+}
+
+# HS-014: one session by id, and the screen path that opens with it. The one row is the list's
+# element, so the answer is read against `$created_id` and the absent `events` key is asserted: the
+# page spells the stream path itself, and a second copy on the row would be a second contract.
+case_session_detail() {
+  local name=case_session_detail response body
+  fetch "$name" GET "/api/sessions/$created_id" "Host: 127.0.0.1" ||
+    fail "$name/no_answer" "GET /api/sessions/$created_id did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 200
+  expect_header "$name" "$response" content-type "application/json"
+  body="$(cat "$WORK/responses/$name.body")"
+  case "$body" in
+    *"\"id\":\"$created_id\""*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "$name/id" "the row is not $created_id: $body"
+      ;;
+  esac
+  case "$body" in
+    *'"events"'*)
+      fail "$name/events" "one row carries no events key: $body"
+      ;;
+    *)
+      assertions=$((assertions + 1))
+      ;;
+  esac
+
+  # An id the table does not hold is ADR-0008's 404 envelope, code and content type included.
+  name=case_session_detail_missing
+  fetch "$name" GET /api/sessions/0000000000000000 "Host: 127.0.0.1" ||
+    fail "$name/no_answer" "GET an unknown session did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 404
+  expect_header "$name" "$response" content-type "application/json"
+  expect_code "$name" "$response" not_found
+
+  # A percent-encoded segment that is not UTF-8 cannot name a row, and must not become axum's
+  # `text/plain` 400: it is the same envelope as any id the table does not hold (ADR-0008).
+  name=case_session_detail_malformed
+  fetch "$name" GET /api/sessions/%FF "Host: 127.0.0.1" ||
+    fail "$name/no_answer" "GET a non-UTF-8 session id did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 404
+  expect_header "$name" "$response" content-type "application/json"
+  expect_code "$name" "$response" not_found
+}
+
+# HS-014: the session screen is a path, not a route. `/sessions/<id>` is not a file the app ships,
+# so the fallback answers the app shell (ADR-0007) — byte-for-byte the page `case_app_shell` reads,
+# which is what makes a reload of one session's screen work with no router installed.
+case_session_screen() {
+  local name=case_session_screen response
+  fetch "$name" GET "/sessions/$created_id" "Host: 127.0.0.1" ||
+    fail "$name/no_answer" "GET /sessions/$created_id did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 200
+  [ -f web/dist/index.html ] ||
+    fail "$name/index_html" "web/dist/index.html is missing: run scripts/build.sh"
+  cmp -s "$WORK/responses/$name.body" web/dist/index.html ||
+    fail "$name/index_html" "the screen path is not this tree's web/dist/index.html"
+  assertions=$((assertions + 1))
 }
 
 # Box 4, over every answer the cases above saved: none of them carries a CORS header, and none

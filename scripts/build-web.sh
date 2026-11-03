@@ -45,6 +45,11 @@ if [ ! -d node_modules ] || [ package-lock.json -nt node_modules ]; then
   npm ci --no-audit --no-fund
 fi
 
+# `npm test` runs the transcript's rules before the build: they are folded from synthetic frames,
+# not from a browser (ADR-0018), and a failing rule should name the rule rather than surface as a
+# bundler error halfway through the app.
+npm test
+
 npm run build
 
 if [ ! -f dist/index.html ]; then

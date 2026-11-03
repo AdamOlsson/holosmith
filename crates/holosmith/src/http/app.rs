@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::rejection::BytesRejection;
+use axum::extract::rejection::{BytesRejection, PathRejection};
 use axum::extract::{Path, Request};
 use axum::handler::Handler;
 use axum::http::{HeaderMap, Method, Uri, header};
@@ -306,13 +306,14 @@ impl RequestCounter {
     }
 }
 
-/// The control listener's route table: the health endpoint, the sessions collection (its list and
-/// its create), the session's event stream, the embedded app, and the two answers to an unknown path
-/// (ADR-0007).
+/// The control listener's route table: the health endpoint, the sessions collection (its list, its
+/// create and one row), the session's event stream, the embedded app, and the two answers to an
+/// unknown path (ADR-0007).
 pub fn router(state: AppState) -> Routes {
     let state = Arc::new(state);
     let health_state = Arc::clone(&state);
     let list_state = Arc::clone(&state);
+    let one_state = Arc::clone(&state);
     let create_state = Arc::clone(&state);
     let stream_state = Arc::clone(&state);
     Routes::new()
@@ -326,6 +327,21 @@ pub fn router(state: AppState) -> Routes {
             let state = Arc::clone(&list_state);
             async move { sessions::list(&state).await }
         })
+        // One row, for the session screen's first answer (HS-014). Read-only like the list, and
+        // `not_found` for an id the table does not hold.
+        //
+        // The path is taken as a `Result`, for the same reason the create takes its body as one:
+        // a `%FF` segment is not valid UTF-8, and a rejection left to axum answers `text/plain`
+        // 400 outside ADR-0008's envelope. A segment that is not a name we could look up is a
+        // name the table does not hold, so the answer is the envelope's `not_found`.
+        .get(
+            "/api/sessions/{id}",
+            move |id: Result<Path<String>, PathRejection>| {
+                let state = Arc::clone(&one_state);
+                let id = id.map(|Path(id)| id).unwrap_or_default();
+                async move { sessions::one(&state, &id).await }
+            },
+        )
         // The body is taken as a `Result`, not as `Bytes`: a rejection left to axum answers a
         // `text/plain` 400/413 outside ADR-0008's envelope, so the handler maps it to `bad_body`
         // itself (ADR-0012).
@@ -338,10 +354,15 @@ pub fn router(state: AppState) -> Routes {
         )
         // Read-only, so the guards apply as they do to every other `GET` and the manifest says
         // which kind it is (D7). `{id}` is axum 0.8's capture syntax; the spec writes `:id`.
+        //
+        // The path is a `Result` here too: HS-014's route answers the envelope for a segment that
+        // is not UTF-8, and a second route on the same prefix that answered `text/plain` would be
+        // one rule with two spellings.
         .get(
             "/api/sessions/{id}/events",
-            move |Path(id): Path<String>, headers: HeaderMap| {
+            move |id: Result<Path<String>, PathRejection>, headers: HeaderMap| {
                 let state = Arc::clone(&stream_state);
+                let id = id.map(|Path(id)| id).unwrap_or_default();
                 async move { streams::respond(&state, &id, &headers).await }
             },
         )
