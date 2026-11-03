@@ -38,12 +38,47 @@ PI=(
     # --setenv      PATH                "$AGENT_HOME/.pi:$PATH"
 )
 
+# Playwright's Chromium, installed on the host by `npx playwright install chromium`.
+# Run it with --no-sandbox: Chromium's own namespace sandbox cannot nest in this one.
+BROWSER=(
+    --ro-bind     "$HOME/.cache/ms-playwright" "$AGENT_HOME/.cache/ms-playwright"
+    --bind        "$HOME/.cache/hs-browser"    "$AGENT_HOME/.cache/hs-browser"
+    --ro-bind-try /etc/fonts                   /etc/fonts
+    --setenv      PLAYWRIGHT_BROWSERS_PATH     "$AGENT_HOME/.cache/ms-playwright"
+    --setenv      NODE_PATH                    "$AGENT_HOME/.cache/hs-browser/pw/node_modules"
+    --setenv      XDG_CACHE_HOME               "$AGENT_HOME/.cache"
+)
+
+# `git push` over SSH: the config, the pinned host keys and the global identity come in
+# read-only; the key itself does not. The host's ssh-agent socket is bound instead, so
+# the sandbox can ask it to sign and never sees the private key.
+GIT=(
+    --ro-bind-try "$HOME/.ssh/config"      "$AGENT_HOME/.ssh/config"
+    --ro-bind-try "$HOME/.ssh/known_hosts" "$AGENT_HOME/.ssh/known_hosts"
+    --ro-bind-try "$HOME/.gitconfig"       "$AGENT_HOME/.gitconfig"
+    --ro-bind-try /etc/ssh/ssh_config      /etc/ssh/ssh_config
+    --ro-bind-try /etc/ssh/ssh_config.d    /etc/ssh/ssh_config.d
+)
+
+if [ -S "${SSH_AUTH_SOCK:-/nonexistent}" ]; then
+  GIT+=(
+    --bind   "$SSH_AUTH_SOCK" /run/ssh-agent.sock
+    --setenv SSH_AUTH_SOCK    /run/ssh-agent.sock
+  )
+fi
+
 MOAT=(
     --ro-bind   $HOME/.config/agent-moat/skills/code-review     $AGENT_HOME/.agents/skills/code-review
     --ro-bind   $HOME/.config/agent-moat/skills/grill-with-docs $AGENT_HOME/.agents/skills/grill-with-docs
     --ro-bind   $HOME/.config/agent-moat/skills/domain-modeling $AGENT_HOME/.agents/skills/domain-modeling
     --ro-bind   $HOME/.config/agent-moat/skills/grilling        $AGENT_HOME/.agents/skills/grilling
 )
+
+mkdir -p "$HOME/.cache/hs-browser"
+[ -d "$HOME/.cache/ms-playwright" ] || {
+  echo "bwrap.sh: no browser to bind - run \`npx playwright install chromium\` on the host" >&2
+  exit 1
+}
 
 ENVVARS=(
   --setenv HOME  "$AGENT_HOME"
@@ -54,6 +89,8 @@ ENVVARS=(
 exec bwrap \
   "${BASE[@]}" "${NETWORK[@]}" "${ENVVARS[@]}" \
   "${PI[@]}" \
+  "${BROWSER[@]}" \
+  "${GIT[@]}" \
   "${MOAT[@]}" \
   --bind "$PWD" "$PWD" \
   --chdir "$PWD" \
