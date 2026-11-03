@@ -267,12 +267,25 @@ test("a delta with no text changes nothing, but its block still exists", () => {
 });
 
 test("Steer and Abort exist only while a turn runs", () => {
-  assert.deepEqual(affordances("running"), { prompt: false, steer: true, abort: true });
-  assert.deepEqual(affordances("idle"), { prompt: true, steer: false, abort: false });
-  assert.deepEqual(affordances("starting"), { prompt: false, steer: false, abort: false });
-  const quiet: SessionState[] = ["stopped", "error", "deleting"];
-  for (const state of quiet) {
-    assert.deepEqual(affordances(state), { prompt: false, steer: false, abort: false }, state);
+  const none = { prompt: false, steer: false, abort: false, resume: false };
+  assert.deepEqual(affordances("running"), { ...none, steer: true, abort: true });
+  assert.deepEqual(affordances("idle"), { ...none, prompt: true });
+  assert.deepEqual(affordances("starting"), none);
+  assert.deepEqual(affordances("deleting"), none);
+});
+
+test("Resume exists in exactly the two states the transition table resumes from", () => {
+  // HS-018: the table has two `resume` rows — `stopped` and `error` — so those are the two states whose
+  // one action is Resume, and no other state offers it.
+  for (const state of ["stopped", "error"] as SessionState[]) {
+    assert.deepEqual(
+      affordances(state),
+      { prompt: false, steer: false, abort: false, resume: true },
+      state,
+    );
+  }
+  for (const state of ["starting", "idle", "running", "deleting"] as SessionState[]) {
+    assert.equal(affordances(state).resume, false, state);
   }
 });
 

@@ -278,14 +278,21 @@ export class Transcript {
 
 // Which of the composer's actions this state offers. Steer and Abort belong to a running turn
 // (spec item 8's `running` row): nowhere else has anything to steer or abort. Prompting is the
-// `idle` row's trigger, and `starting` is a provisioning step away from it.
-export type Affordances = { prompt: boolean; steer: boolean; abort: boolean };
+// `idle` row's trigger, and `starting` is a provisioning step away from it. Resuming is the
+// `stopped` and `error` rows' trigger — the transition table's only two `resume` rows (HS-018).
+export type Affordances = {
+  prompt: boolean;
+  steer: boolean;
+  abort: boolean;
+  resume: boolean;
+};
 
 export function affordances(state: SessionState): Affordances {
   return {
     prompt: state === "idle",
     steer: state === "running",
     abort: state === "running",
+    resume: state === "stopped" || state === "error",
   };
 }
 

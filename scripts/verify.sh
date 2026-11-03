@@ -9,8 +9,8 @@
 # config and a temp data dir, answering /api/health, the schema version, the app shell, the 404
 # envelope, every browser-facing guard refusal (ADR-0010), the create endpoint's 202/422/409
 # answers, the sessions list, one session by id, the session screen's path, the session's event
-# stream, a prompt's turn, an abort down to `abort_completed`, and a steer's own frame, with no CORS
-# header on any answer, and stopping on SIGTERM with exit 0.
+# stream, a prompt's turn, an abort down to `abort_completed`, a steer's own frame, and a resume's two
+# refusals, with no CORS header on any answer, and stopping on SIGTERM with exit 0.
 # --no-build skips the two artifact phases; --keep keeps the work dir of a successful run. On
 # failure this prints FAIL <assertion> and keeps the work dir (config, banner, every answer).
 # Downloads nothing and needs neither curl nor jq: every request is a /dev/tcp fetch. Put the
@@ -287,6 +287,8 @@ serve_cases=(
   case_abort_on_an_idle_session
   case_steer
   case_steer_on_an_idle_session
+  case_resume_on_an_idle_session
+  case_resume_unknown_session
 )
 
 # The health payload: exactly four keys, and the uptime is not predictable, so the assertion is
@@ -942,6 +944,34 @@ wait_for_idle() {
     sleep 0.1
   done
   fail "$label/status" "the session never reached idle: $body"
+}
+
+# HS-018: a resume with nothing to bring back is `409 session_idle`. The happy path cannot be driven
+# from this harness: nothing in the API produces `stopped` yet — the policies that do are HS-020's,
+# HS-021's and HS-044's — so `tests/resume.rs` proves the round trip against a row the table stopped.
+case_resume_on_an_idle_session() {
+  local name=case_resume_on_an_idle_session response
+  fetch "$name" POST "/api/sessions/$created_id/resume" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "$name/no_answer" "POST an idle session's resume did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 409
+  expect_header "$name" "$response" content-type "application/json"
+  expect_code "$name" "$response" session_idle
+}
+
+# HS-018: a resume for a session the table does not hold is ADR-0008's 404 `not_found`.
+case_resume_unknown_session() {
+  local name=case_resume_unknown_session response
+  fetch "$name" POST "/api/sessions/0000000000000000/resume" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "$name/no_answer" "POST an unknown session's resume did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 404
+  expect_header "$name" "$response" content-type "application/json"
+  expect_code "$name" "$response" not_found
 }
 
 # Box 4, over every answer the cases above saved: none of them carries a CORS header, and none

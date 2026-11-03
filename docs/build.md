@@ -137,7 +137,10 @@ abort's own reason, asserting the 202 answered the row still `running` and that 
 `409 session_idle` envelope), and the steer (`case_steer`, which prompts, steers, asserts the 202
 answered the row still `running`, reads the stream for the `turn.steer` frame carrying the guidance,
 and then polls the row until it says `idle`, which is what proves the turn continued;
-`case_steer_on_an_idle_session`, which asserts the `409 session_idle` envelope). A case that must
+`case_steer_on_an_idle_session`, which asserts the `409 session_idle` envelope), and the resume's two
+refusals (`case_resume_on_an_idle_session` and `case_resume_unknown_session`; the round trip itself
+cannot be driven here because nothing in the API produces `stopped` yet — `tests/resume.rs` proves it
+against a row the transition table stopped). A case that must
 assert one code
 keeps every higher guard check correct, or it asserts another guard's code under its own name.
 

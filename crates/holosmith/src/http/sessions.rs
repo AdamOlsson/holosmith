@@ -4,8 +4,10 @@
 //! answers one row, which is what the session screen opens with (HS-014); and
 //! `POST /api/sessions/{id}/prompt` starts a turn and answers 202 with the now-`running` row
 //! (HS-015); `POST /api/sessions/{id}/abort` accepts an abort and answers 202 with the row while the
-//! ladder ends the turn off-request (HS-016); and `POST /api/sessions/{id}/steer` hands guidance to the
-//! running turn and records it as the event the transcript reads (HS-017).
+//! ladder ends the turn off-request (HS-016); `POST /api/sessions/{id}/steer` hands guidance to the
+//! running turn and records it as the event the transcript reads (HS-017); and
+//! `POST /api/sessions/{id}/resume` brings a stopped (or failed) session back through the provisioner
+//! (HS-018).
 //!
 //! The body is parsed by hand rather than through `axum::Json<T>`: that extractor rejects a bad
 //! body with its own `text/plain` answer, which would break ADR-0008's envelope on exactly the
@@ -47,6 +49,11 @@ const NOT_RUNNING_ABORT: &str = "the session is not running, so it has no turn t
 
 /// What a steer is refused with, for the same reason: guidance belongs to a turn that is running.
 const NOT_RUNNING_STEER: &str = "the session is not running, so there is no turn to steer";
+
+/// What a resume is refused with. The transition table has exactly two `resume` rows — from `stopped`
+/// and from `error` — so those are the two states that accept one (HS-018).
+const NOT_RESUMABLE: &str =
+    "the session is neither stopped nor in error, so there is nothing to resume";
 
 /// The event a steer is recorded as (HS-017, ADR-0021).
 ///
@@ -553,6 +560,88 @@ async fn record_steer(state: &AppState, id: &str, guidance: &str) {
             "a steer's event was not queued"
         );
     }
+}
+
+/// Answer `POST /api/sessions/{id}/resume`: 202 and the row, now `starting`, or ADR-0008's envelope.
+///
+/// The decisions run in this order: the row (`not_found`), the state (the table's two `resume` rows are
+/// `stopped` and `error`; everything else is refused with its own code), the cap, then the transition.
+///
+/// **The cap is checked before the transition**, unlike the create's lookup: a resume takes a slot, and
+/// refusing after the row moved would leave a session `starting` with nothing provisioning it. The
+/// bullet allows either branch — evicting the least recently active idle session is HS-020's — so this
+/// answers `409 cap_reached` and touches nothing.
+///
+/// The provisioner does the work, as it does for a create: `stopped -> starting` is the table's, and
+/// the four steps are the way back (spec item 8's resume row, item 16's "the same session id reopens
+/// the pi session"). Nothing else about the session is touched — the events, the history and the
+/// worktree path are what a stop left alone (spec item 15).
+pub async fn resume(state: &AppState, id: &str) -> Response {
+    let current = match one_locked(state, id) {
+        Ok(Some(session)) => session,
+        Ok(None) => return ApiError::not_found().into_response(),
+        Err(error) => return error.into_response(),
+    };
+    if !matches!(current.status, Status::Stopped | Status::Error) {
+        return ApiError::not_in_state(current.status, NOT_RESUMABLE).into_response();
+    }
+    match live_at_cap(state) {
+        Ok(true) => return ApiError::cap_reached().into_response(),
+        Ok(false) => {}
+        Err(error) => return error.into_response(),
+    }
+    if let Err(error) = apply_resume(state, id).await {
+        return error.into_response();
+    }
+    // The row is `starting` now, and the provisioner is spawned before the answer is built, so no
+    // response waits for a step. The refetch only improves the 202's body.
+    let mut starting = current;
+    starting.status = Status::Starting;
+    starting.status_reason = None;
+    starting.stopped_at = None;
+    if let Ok(Some(row)) = one_locked(state, id) {
+        starting = row;
+    }
+    state.provisioner().spawn(starting.clone());
+    (StatusCode::ACCEPTED, Json(starting)).into_response()
+}
+
+/// Move the row to `starting`, or the refusal to answer.
+///
+/// The table is the authority (ADR-0016); the read above only chose the fast refusal. A lost race — the
+/// row moved between the read and the apply — is refused with the code of the state it moved to, so a
+/// client never gets a 202 for a session that is not starting.
+async fn apply_resume(state: &AppState, id: &str) -> Result<(), ApiError> {
+    match state.transitioner().apply(id, Trigger::Resume, None).await {
+        Ok(_) => Ok(()),
+        // The row moved and only the report of it was lost: the provisioner must still run.
+        Err(StateError::Unreported(_)) => Ok(()),
+        Err(StateError::Illegal { .. }) => match one_locked(state, id) {
+            Ok(Some(session)) => Err(ApiError::not_in_state(session.status, NOT_RESUMABLE)),
+            Ok(None) => Err(ApiError::not_found()),
+            Err(error) => Err(error),
+        },
+        Err(StateError::UnknownSession(_)) => Err(ApiError::not_found()),
+        Err(error) => Err(internal("resume", error)),
+    }
+}
+
+/// Whether the machine already runs the maximum number of live sessions.
+///
+/// Read under the same `Arc<Mutex<Database>>` the create counts under, but not in the create's one
+/// scope: a resume's count and transition are two statements, and the window between them is a window
+/// two resumes can share. That is a cap that can be overrun by one, which HS-020's eviction makes
+/// uninteresting; refusing before the transition is what keeps a row from being stranded in `starting`.
+fn live_at_cap(state: &AppState) -> Result<bool, ApiError> {
+    let database = state
+        .database
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let live = database
+        .sessions()
+        .live_count()
+        .map_err(|error| internal("live_count", error))?;
+    Ok(live >= u64::from(state.config.max_live_sessions))
 }
 
 /// Move the row to `running`, or the refusal to answer.

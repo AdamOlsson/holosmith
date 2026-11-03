@@ -142,8 +142,12 @@ One legal state change: a from, a trigger and a to, held as data in the transiti
 _Avoid_: Move, step, change, migration
 
 **Stopped**:
-A session whose container is gone but whose history, worktree and events are kept, and which can be resumed.
+A session whose container is gone but whose history, worktree and events are kept, and which can be resumed. Reached from `idle` by `evict`, `idle_stop` and `drain`, and from a killed `running` turn by the abort ladder; never a dead end.
 _Avoid_: Ended, closed, paused, evicted
+
+**Resume**:
+Bringing a stopped (or failed) session back to `idle` under the same id: the transition table's `resume` row takes it to `starting`, and the provisioner walks it the rest of the way. It is the operator's action on a `stopped` or `error` session, and the page performs it under a request that was refused with `session_stopped` or `session_error`.
+_Avoid_: Restart, reopen, revive, unpause
 
 **Resume**:
 Bringing a stopped session back with the same id: the `stopped` + `resume` row of the transition table takes it to `starting`, and provisioning then takes it to `idle`.

@@ -558,14 +558,77 @@ function composerSection(id: string, showState: (state: SessionState, reason: st
   steer.type = "button";
   const abort = make("button", "danger", "Abort");
   abort.type = "button";
+  const resume = make("button", "secondary", "Resume");
+  resume.type = "button";
   const actions = make("div", "actions");
-  actions.append(prompt, steer, abort);
+  actions.append(prompt, steer, abort, resume);
 
   const notice = make("p", "notice");
   notice.hidden = true;
   const say = (message: string): void => {
     notice.textContent = message;
     notice.hidden = false;
+  };
+
+  // The two states the transition table has a `resume` row for, so the two refusals a resume can fix
+  // (HS-018). Everything else is the operator's to act on.
+  const RESUMABLE = new Set(["session_stopped", "session_error"]);
+
+  // Wait until the row says `idle`, which is what a retried prompt or steer needs after a resume's
+  // 202 put the session in `starting`. The stream moves the badge; this poll only bounds the wait, so
+  // a session that never comes back leaves the retry unsent instead of looping.
+  const waitIdle = async (): Promise<boolean> => {
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const response = await fetch(sessionPath(id), { headers: { accept: "application/json" } });
+      if (response.ok) {
+        const row = (await response.json()) as Session;
+        showState(row.status, row.status_reason);
+        update(row.status);
+        if (row.status === "idle") {
+          return true;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    return false;
+  };
+
+  // One POST, with the story's resume-and-retry rule: a `session_stopped` or `session_error` refusal
+  // resumes the session once, waits for it to be idle, and sends the same request once more. Anything
+  // else — and a retry that is refused again — is answered to the caller.
+  type PostResult = { envelope: ErrorEnvelope | null; row: Session | null };
+
+  const post = async (
+    path: string,
+    body?: string,
+    mayResume = true,
+    retried = false,
+  ): Promise<PostResult> => {
+    const response = await fetch(`${sessionPath(id)}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-holosmith-client": "1" },
+      body,
+    });
+    if (response.ok) {
+      // Every one of these answers the row it acted on, so the badge can follow the 202 rather than
+      // waiting for the stream to catch up (HS-015's rule, kept for all four).
+      return { envelope: null, row: (await response.json()) as Session };
+    }
+    const envelope = (await response.json()) as ErrorEnvelope;
+    if (!mayResume || retried || !RESUMABLE.has(envelope.code)) {
+      return { envelope, row: null };
+    }
+    const resumed = await fetch(`${sessionPath(id)}/resume`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-holosmith-client": "1" },
+    });
+    if (!resumed.ok) {
+      return { envelope: (await resumed.json()) as ErrorEnvelope, row: null };
+    }
+    if (!(await waitIdle())) {
+      return { envelope: { code: "unreachable", message: "this session did not come back" }, row: null };
+    }
+    return post(path, body, mayResume, true);
   };
 
   // Steering is a real request (HS-017): the 202 means the running turn took the guidance, and the
@@ -575,19 +638,17 @@ function composerSection(id: string, showState: (state: SessionState, reason: st
   const steerTurn = async (): Promise<void> => {
     steer.disabled = true;
     try {
-      const response = await fetch(`${sessionPath(id)}/steer`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-holosmith-client": "1" },
-        body: JSON.stringify({ guidance: guidance.value }),
-      });
-      if (!response.ok) {
-        const envelope = (await response.json()) as ErrorEnvelope;
+      const { envelope, row } = await post("/steer", JSON.stringify({ guidance: guidance.value }));
+      if (envelope !== null) {
         say(
           envelope.code === "session_idle"
             ? "This turn has ended; send it as a prompt instead."
             : `${envelope.code}: ${envelope.message}`,
         );
         return;
+      }
+      if (row !== null) {
+        showState(row.status, row.status_reason);
       }
       guidance.value = "";
       notice.hidden = true;
@@ -607,14 +668,13 @@ function composerSection(id: string, showState: (state: SessionState, reason: st
   const abortTurn = async (): Promise<void> => {
     abort.disabled = true;
     try {
-      const response = await fetch(`${sessionPath(id)}/abort`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-holosmith-client": "1" },
-      });
-      if (!response.ok) {
-        const envelope = (await response.json()) as ErrorEnvelope;
+      const { envelope, row } = await post("/abort");
+      if (envelope !== null) {
         say(`${envelope.code}: ${envelope.message}`);
         return;
+      }
+      if (row !== null) {
+        showState(row.status, row.status_reason);
       }
       say("Abort accepted: the turn is stopping.");
     } catch (failure) {
@@ -627,6 +687,33 @@ function composerSection(id: string, showState: (state: SessionState, reason: st
     void abortTurn();
   });
 
+  // Resuming is the one action that brings a session back (HS-018): the 202 promises `starting`, the
+  // provisioner walks it back to `idle`, and the badge follows the stream. `mayResume` is false here
+  // because this *is* the resume — a refused one has nothing left to retry.
+  const resumeSession = async (): Promise<void> => {
+    resume.disabled = true;
+    try {
+      const { envelope, row } = await post("/resume", undefined, false);
+      if (envelope !== null) {
+        say(`${envelope.code}: ${envelope.message}`);
+        return;
+      }
+      if (row !== null) {
+        showState(row.status, row.status_reason);
+        update(row.status);
+      }
+      notice.hidden = true;
+      await waitIdle();
+    } catch (failure) {
+      say(`unreachable: ${String(failure)}`);
+    } finally {
+      resume.disabled = false;
+    }
+  };
+  resume.addEventListener("click", () => {
+    void resumeSession();
+  });
+
   // True while the badge on screen offers a prompt, so a submit that arrives while the session is
   // running (a second tap before the frame lands) sends nothing.
   let canPrompt = false;
@@ -634,22 +721,19 @@ function composerSection(id: string, showState: (state: SessionState, reason: st
   const send = async (): Promise<void> => {
     prompt.disabled = true;
     try {
-      const response = await fetch(`${sessionPath(id)}/prompt`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-holosmith-client": "1" },
-        body: JSON.stringify({ prompt: guidance.value }),
-      });
-      if (!response.ok) {
+      // The prompt, through the shared POST: a `session_stopped` refusal resumes and retries it once
+      // (HS-018). The 202 carries the row, now `running`, so the badge and the buttons follow it and
+      // the box is emptied, so the next prompt starts from nothing.
+      const { envelope, row } = await post("/prompt", JSON.stringify({ prompt: guidance.value }));
+      if (envelope !== null) {
         // The ADR-0008 envelope: the code is what the operator acts on, and the message says why.
-        const envelope = (await response.json()) as ErrorEnvelope;
         say(`${envelope.code}: ${envelope.message}`);
         return;
       }
-      // The 202's row is the session, now `running`: the badge and the buttons follow it and the box
-      // is emptied, so the next prompt starts from nothing.
-      const row = (await response.json()) as Session;
-      showState(row.status, row.status_reason);
-      update(row.status);
+      if (row !== null) {
+        showState(row.status, row.status_reason);
+        update(row.status);
+      }
       guidance.value = "";
       notice.hidden = true;
     } catch (failure) {
@@ -681,9 +765,12 @@ function composerSection(id: string, showState: (state: SessionState, reason: st
     prompt.hidden = !shown.prompt;
     steer.hidden = !shown.steer;
     abort.hidden = !shown.abort;
+    resume.hidden = !shown.resume;
     // A state that offers no action says so once, instead of showing an empty button row.
-    if (!shown.prompt && !shown.steer && !shown.abort) {
-      notice.textContent = `This session is ${state}; its next action arrives with a later story.`;
+    if (!shown.prompt && !shown.steer && !shown.abort && !shown.resume) {
+      // Only two states have no action now, and each has a real reason rather than a story number.
+      const wait = state === "starting" ? "it finishes provisioning" : "it is deleted";
+      notice.textContent = `This session is ${state}; nothing can be sent until ${wait}.`;
       notice.hidden = false;
       stateNotice = true;
     } else if (stateNotice) {

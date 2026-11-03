@@ -336,8 +336,8 @@ impl RequestCounter {
 }
 
 /// The control listener's route table: the health endpoint, the sessions collection (its list, its
-/// create and one row), the session's event stream, a session's prompt, abort and steer, the embedded
-/// app, and the two answers to an unknown path (ADR-0007).
+/// create and one row), the session's event stream, a session's prompt, abort, steer and resume, the
+/// embedded app, and the two answers to an unknown path (ADR-0007).
 pub fn router(state: AppState) -> Routes {
     let state = Arc::new(state);
     let health_state = Arc::clone(&state);
@@ -348,6 +348,7 @@ pub fn router(state: AppState) -> Routes {
     let prompt_state = Arc::clone(&state);
     let abort_state = Arc::clone(&state);
     let steer_state = Arc::clone(&state);
+    let resume_state = Arc::clone(&state);
     Routes::new()
         .get("/api/health", move || {
             let state = Arc::clone(&health_state);
@@ -428,6 +429,16 @@ pub fn router(state: AppState) -> Routes {
                 let state = Arc::clone(&steer_state);
                 let id = id.map(|Path(id)| id).unwrap_or_default();
                 async move { sessions::steer(&state, &id, body).await }
+            },
+        )
+        // The resume: a mutating route with no body (HS-018). The path is a `Result` for the same
+        // reason as its siblings — a `%FF` segment is a session the table does not hold.
+        .post(
+            "/api/sessions/{id}/resume",
+            move |id: Result<Path<String>, PathRejection>| {
+                let state = Arc::clone(&resume_state);
+                let id = id.map(|Path(id)| id).unwrap_or_default();
+                async move { sessions::resume(&state, &id).await }
             },
         )
         .fallback(fallback)
