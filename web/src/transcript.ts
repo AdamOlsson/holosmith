@@ -27,7 +27,8 @@ export type Frame =
   | { type: "usage"; messageId: string; input: number; output: number }
   | { type: "tool-start"; toolId: string; name: string; arguments: string }
   | { type: "tool-end"; toolId: string; output: string }
-  | { type: "boundary"; boundary: "start" | "end" };
+  | { type: "boundary"; boundary: "start" | "end" }
+  | { type: "steer"; text: string };
 
 // What the page must do for one frame, in this order. `message` and `tool` come first when the
 // block is not on screen yet, so a consumer can create the nodes the next change names.
@@ -39,7 +40,8 @@ export type Change =
   | { op: "tool"; toolId: string }
   | { op: "tool-start"; toolId: string; name: string; arguments: string }
   | { op: "tool-end"; toolId: string; output: string }
-  | { op: "boundary"; boundary: "start" | "end"; turn: number };
+  | { op: "boundary"; boundary: "start" | "end"; turn: number }
+  | { op: "steer"; text: string };
 
 // The SSE event names. Four are pinned by ADR-0018; `message.end`, `tool.start` and `tool.end` are
 // HS-015's, and the payloads are the plan's D8.
@@ -50,6 +52,10 @@ const TOOL_START = "tool.start";
 const TOOL_END = "tool.end";
 const TURN_START = "turn.start";
 const TURN_END = "turn.end";
+// The operator's guidance reaching a running turn (HS-017). One frame, one block, never continued:
+// a steer has no message id because it has nothing a second frame would update, and a reconnect
+// replays the log and rebuilds the page anyway (ADR-0021).
+const TURN_STEER = "turn.steer";
 
 // The event types `parseFrame` renders, so the page subscribes to exactly these and a new kind is
 // added in one place.
@@ -61,6 +67,7 @@ export const TRANSCRIPT_EVENTS: readonly string[] = [
   TOOL_END,
   TURN_START,
   TURN_END,
+  TURN_STEER,
 ];
 
 // The one id a block is keyed by. A frame that cannot name a message is not a frame: it is
@@ -103,6 +110,20 @@ function usage(payload: Record<string, unknown>): { input: number; output: numbe
 export function parseFrame(eventType: string, data: string): Frame | null {
   if (eventType === TURN_START || eventType === TURN_END) {
     return { type: "boundary", boundary: eventType === TURN_START ? "start" : "end" };
+  }
+  if (eventType === TURN_STEER) {
+    // No id to check: the block is drawn from this one frame, so a payload with no text simply has
+    // nothing to draw and is dropped like any other malformed frame.
+    try {
+      const steer: unknown = JSON.parse(data);
+      if (typeof steer !== "object" || steer === null || Array.isArray(steer)) {
+        return null;
+      }
+      const guidance = text((steer as Record<string, unknown>)["text"]);
+      return guidance === null ? null : { type: "steer", text: guidance };
+    } catch {
+      return null;
+    }
   }
   if (
     eventType !== DELTA &&
@@ -189,6 +210,11 @@ export class Transcript {
         this.turn += 1;
       }
       return [{ op: "boundary", boundary: frame.boundary, turn: this.turn }];
+    }
+    if (frame.type === "steer") {
+      // No bookkeeping: a steer block is its own frame's, so there is no id to remember and nothing
+      // a later frame could change about it (ADR-0021).
+      return [{ op: "steer", text: frame.text }];
     }
     if (frame.type === "tool-start" || frame.type === "tool-end") {
       const changes: Change[] = [];

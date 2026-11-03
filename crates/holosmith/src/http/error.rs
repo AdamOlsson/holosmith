@@ -158,6 +158,18 @@ impl ApiError {
         )
     }
 
+    /// The same code again, with the sentence a steer's body deserves (HS-017).
+    ///
+    /// A steer carries one `guidance` string and nothing else, so telling the operator about a
+    /// prompt's or a create's fields would describe the wrong request (ADR-0008).
+    pub fn bad_steer() -> Self {
+        Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            BAD_BODY,
+            "the body must be a JSON object with a non-empty `guidance` string",
+        )
+    }
+
     /// What a create naming a field the endpoint does not accept answers.
     pub fn unknown_field() -> Self {
         Self::new(

@@ -114,7 +114,7 @@ Every section of `HolosmithSpec.md` maps to at least one story. If a spec item g
 
 ## Decisions taken while slicing
 
-Twenty decisions were made that the spec does not make. Each has an ADR because each is hard to reverse, surprising to a later reader, and the result of a real trade-off.
+Twenty-one decisions were made that the spec does not make. Each has an ADR because each is hard to reverse, surprising to a later reader, and the result of a real trade-off.
 
 - [ADR-0001](../adr/0001-build-session-lifecycle-before-docker.md) — the session lifecycle is built against the stub backend before Docker exists. Consequence: there are two fakes, the in-process stub backend and the in-container fake pi, and they are not the same thing.
 - [ADR-0002](../adr/0002-security-guards-before-endpoints.md) — the browser guards and network isolation land before the features they protect.
@@ -136,6 +136,7 @@ Twenty decisions were made that the spec does not make. Each has an ADR because 
 - [ADR-0018](../adr/0018-the-transcript-contract-and-one-block-per-message.md) — four event kinds (`message.delta` with `message_id`/`kind`/`text`, `message.snapshot`, `turn.start`, `turn.end`) are pinned before their producer exists; a transcript block is keyed by message id and a delta is one appended text node, never a re-read; and the renderer's rules are tested with node's own runner over synthetic frames. Consequence: HS-015 emits these kinds and adds three of its own (ADR-0019), an unknown kind is dropped rather than refused, and the DOM half of the screen stays unverified from source until a browser or the producer exists.
 - [ADR-0019](../adr/0019-the-turn-runner-and-the-backends-events.md) — the prompt's transition is the handler's and the way out of `running` is the turn runner's, a backend emits its turn's events but can never move a state, and a prompt is refused with one `409 session_<state>` code per state rather than an umbrella code. Consequence: `SessionBackend::start_turn` takes the event writer, the stub scripts a turn with `msg-<n>`/`tool-<n>` ids, `message.end`, `tool.start` and `tool.end` are pinned before HS-033/HS-034 fill them in, and `last_active_at` moves through one new repository method (`touch`).
 - [ADR-0020](../adr/0020-the-abort-ladder-and-how-a-turn-is-cancelled.md) — abort climbs two rungs (clear the queue and ask the agent, then kill the container after `abort_grace`), the backend reports how its turn ended (`TurnEnd`) while the runner still chooses the table row, and the ladder is one routine whose reason is a parameter. Consequence: `running` has two owners on a forced stop and the table decides between them, the resume after rung 2 goes through the provisioner, and the refusal family gains `session_idle`.
+- [ADR-0021](../adr/0021-a-steers-frame-and-what-was-delivered.md) — a steer is recorded as a `turn.steer` frame with no message id, the agent is asked before the record is written so the log holds what was delivered, and a `409 session_idle` keeps the guidance in the box rather than resending it. Consequence: a steer block is created per frame (the one exception to ADR-0018's "a message id keys a block"), and the composer's third button is wired.
 
 Gaps in the spec that had to be filled to write these stories, all reversible and all flagged in the story that fills them:
 

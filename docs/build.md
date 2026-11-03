@@ -134,7 +134,11 @@ which assert the `422 bad_body` and `404 not_found` envelopes), and the abort
 (`case_abort`, which prompts, aborts, and reads that session's stream until the event carries the
 abort's own reason, asserting the 202 answered the row still `running` and that the turn ended
 `running → idle` with reason `abort_completed`; `case_abort_on_an_idle_session`, which asserts the
-`409 session_idle` envelope). A case that must assert one code
+`409 session_idle` envelope), and the steer (`case_steer`, which prompts, steers, asserts the 202
+answered the row still `running`, reads the stream for the `turn.steer` frame carrying the guidance,
+and then reads it again for the settle that proves the turn continued;
+`case_steer_on_an_idle_session`, which asserts the `409 session_idle` envelope). A case that must
+assert one code
 keeps every higher guard check correct, or it asserts another guard's code under its own name.
 
 The CORS sweep is deliberately **not** in that array: it runs once after every case and checks

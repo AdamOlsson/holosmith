@@ -106,7 +106,7 @@ Starting a turn.
 _Avoid_: Send, message, ask
 
 **Steer**:
-Adding guidance to a turn that is already running.
+Adding guidance to a turn that is already running. A steer changes no state: it is recorded as a `turn.steer` frame carrying the guidance, and the block a transcript draws for it is the frame's own — a steer has no message id, because no later frame continues it.
 _Avoid_: Interrupt, inject, redirect
 
 **Abort**:

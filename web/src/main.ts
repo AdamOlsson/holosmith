@@ -490,6 +490,15 @@ function applyChange(
     container.append(block.element);
     return;
   }
+  // A steer is one block drawn from one frame: no id, nothing a later frame updates, and its text is
+  // set once rather than appended to (ADR-0021). The composer's guidance appears where it landed in
+  // the turn, which is what "the transcript shows what was injected and when" means.
+  if (change.op === "steer") {
+    const block = make("article", "steer");
+    block.append(make("div", "steer-label", "You"), make("div", "steer-text", change.text));
+    container.append(block);
+    return;
+  }
   if (change.op === "tool-start" || change.op === "tool-end") {
     const block = tools.get(change.toolId);
     if (block === undefined) {
@@ -560,8 +569,38 @@ function composerSection(id: string, showState: (state: SessionState, reason: st
     notice.hidden = false;
   };
 
-  // Steering is not this story's, so it says so rather than calling an endpoint that does not exist.
-  steer.addEventListener("click", () => say("Steering arrives with HS-017; nothing was sent."));
+  // Steering is a real request (HS-017): the 202 means the running turn took the guidance, and the
+  // frame it answers with puts the steer's own block in the transcript. The one refusal worth a
+  // sentence is `session_idle`: a turn that ended while the operator was typing means the guidance is
+  // a prompt, and the Prompt button is already on screen for exactly that state.
+  const steerTurn = async (): Promise<void> => {
+    steer.disabled = true;
+    try {
+      const response = await fetch(`${sessionPath(id)}/steer`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-holosmith-client": "1" },
+        body: JSON.stringify({ guidance: guidance.value }),
+      });
+      if (!response.ok) {
+        const envelope = (await response.json()) as ErrorEnvelope;
+        say(
+          envelope.code === "session_idle"
+            ? "This turn has ended; send it as a prompt instead."
+            : `${envelope.code}: ${envelope.message}`,
+        );
+        return;
+      }
+      guidance.value = "";
+      notice.hidden = true;
+    } catch (failure) {
+      say(`unreachable: ${String(failure)}`);
+    } finally {
+      steer.disabled = false;
+    }
+  };
+  steer.addEventListener("click", () => {
+    void steerTurn();
+  });
   // Aborting is a real request (HS-016): the 202 says the ladder accepted it and the turn ends
   // off-request, so the badge and the buttons follow the stream rather than this answer. No body is
   // sent — there is nothing to say — but the content type goes with it, because the guards read it

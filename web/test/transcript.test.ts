@@ -288,6 +288,37 @@ test("the screen reads its id from /sessions/<id> and from nowhere else", () => 
   }
 });
 
+test("a steer is one block per frame, drawn once, and it is not a message", () => {
+  // HS-017's frame: `turn.steer` with the operator's guidance. It carries no message id because it
+  // has nothing a later frame would update, so the model does no bookkeeping for it at all.
+  const frame = parseFrame("turn.steer", JSON.stringify({ text: "and the lexer too" }));
+  assert.deepEqual(frame, { type: "steer", text: "and the lexer too" });
+
+  const transcript = new Transcript();
+  const first = transcript.apply(frame as Frame);
+  assert.deepEqual(first, [{ op: "steer", text: "and the lexer too" }]);
+  assert.deepEqual(transcript.apply(delta("m1", "text", "still working")), [
+    { op: "message", messageId: "m1" },
+    { op: "delta", messageId: "m1", delta: "text", text: "still working" },
+  ]);
+  // A second steer is a second block, and three steers are three: no id means no folding.
+  transcript.apply({ type: "steer", text: "and the tests" });
+  assert.deepEqual(transcript.apply({ type: "steer", text: "and the commit" }), [
+    { op: "steer", text: "and the commit" },
+  ]);
+  // Steers are not messages, so the message order is untouched by them.
+  assert.deepEqual(transcript.order(), ["m1"]);
+  assert.deepEqual(transcript.toolOrder(), []);
+});
+
+test("a steer with no text is dropped, and a non-string text with it", () => {
+  for (const payload of [JSON.stringify({}), JSON.stringify({ text: 7 }), JSON.stringify({ text: null })]) {
+    assert.equal(parseFrame("turn.steer", payload), null, payload);
+  }
+  assert.equal(parseFrame("turn.steer", "not json"), null);
+  assert.equal(parseFrame("turn.steer", "[]"), null);
+});
+
 test("10k deltas are 10k appends into one block, never a re-render", () => {
   const transcript = new Transcript();
   const piece = "0123456789";

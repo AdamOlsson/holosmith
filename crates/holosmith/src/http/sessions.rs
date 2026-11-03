@@ -4,7 +4,8 @@
 //! answers one row, which is what the session screen opens with (HS-014); and
 //! `POST /api/sessions/{id}/prompt` starts a turn and answers 202 with the now-`running` row
 //! (HS-015); `POST /api/sessions/{id}/abort` accepts an abort and answers 202 with the row while the
-//! ladder ends the turn off-request (HS-016).
+//! ladder ends the turn off-request (HS-016); and `POST /api/sessions/{id}/steer` hands guidance to the
+//! running turn and records it as the event the transcript reads (HS-017).
 //!
 //! The body is parsed by hand rather than through `axum::Json<T>`: that extractor rejects a bad
 //! body with its own `text/plain` answer, which would break ADR-0008's envelope on exactly the
@@ -22,7 +23,9 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::backend::SessionBackend;
 use crate::clock;
+use crate::events::NewEvent;
 use crate::http::app::AppState;
 use crate::http::error::{ApiError, internal};
 use crate::ladder;
@@ -41,6 +44,17 @@ const NOT_IDLE_PROMPT: &str = "the session is not idle, so it cannot be prompted
 /// (spec item 16: abort stops a turn, and there is no turn otherwise).
 const NOT_RUNNING_ABORT: &str = "the session is not running, so it has no turn to abort";
 
+/// What a steer is refused with, for the same reason: guidance belongs to a turn that is running.
+const NOT_RUNNING_STEER: &str = "the session is not running, so there is no turn to steer";
+
+/// The event a steer is recorded as (HS-017, ADR-0021).
+///
+/// `<subject>.<verb>`, like `turn.start`, and the subject is the turn: the operator's guidance is
+/// something that happened *to a turn*, not a message the agent produced. The payload is
+/// `{"text": "…"}` — no message id, because a steer is one frame that is never continued or
+/// replaced, so the block the renderer draws has nothing to be keyed by.
+pub const TURN_STEER: &str = "turn.steer";
+
 /// How many characters a key may hold. Generous for a UUID, small enough that the unique column
 /// cannot become a payload.
 const MAX_KEY_CHARS: usize = 200;
@@ -54,6 +68,14 @@ const FIELDS: [&str; 4] = ["project", "model", "thinking", "network"];
 #[serde(deny_unknown_fields)]
 struct PromptBody {
     prompt: String,
+}
+
+/// A steer's body: one `guidance` string and nothing else (HS-017). The word is the composer's own
+/// field name and the glossary's **Steer**, so the page and the API say the same thing.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SteerBody {
+    guidance: String,
 }
 
 /// `NAME_MAX`'s 255: HS-025 builds `<projects_root>/<project>` from this value.
@@ -457,6 +479,103 @@ pub async fn abort(state: &AppState, id: &str) -> Response {
     // grace period — and so a ladder that fired instantly still answers the row it was given.
     state.ladder().spawn(current.clone(), ladder::FORCED_ABORT);
     (StatusCode::ACCEPTED, Json(current)).into_response()
+}
+
+/// A steer's one field, non-empty after trimming. Anything else — a non-object, a missing or blank
+/// `guidance`, a second field — is `bad_body` with the steer's own sentence (ADR-0008).
+fn parse_steer(bytes: &[u8]) -> Result<String, ApiError> {
+    let body: SteerBody = serde_json::from_slice(bytes).map_err(|_| ApiError::bad_steer())?;
+    if body.guidance.trim().is_empty() {
+        return Err(ApiError::bad_steer());
+    }
+    Ok(body.guidance)
+}
+
+/// Answer `POST /api/sessions/{id}/steer`: 202 and the row, or ADR-0008's envelope.
+///
+/// The order is the decision (ADR-0021): the body (`bad_body`), the row (`not_found`), the state
+/// (`409 session_<state>` — only a running turn can take guidance), the agent, the record. The agent
+/// comes before the record because the transcript must show what was **delivered**, not what was
+/// attempted; a backend that cannot deliver the guidance answers `500 internal`, because the client
+/// can fix neither the backend nor a turn that stopped underneath it.
+///
+/// A steer changes no state: the transition table has no row for it, so this handler never asks for
+/// one. What it does do is move `last_active_at` — HS-015's acceptance names prompt, settle and steer
+/// — and append the `turn.steer` frame the transcript renders.
+pub async fn steer(state: &AppState, id: &str, body: Result<Bytes, BytesRejection>) -> Response {
+    let body = match body {
+        Ok(body) => body,
+        Err(_) => return ApiError::bad_steer().into_response(),
+    };
+    let guidance = match parse_steer(&body) {
+        Ok(guidance) => guidance,
+        Err(error) => return error.into_response(),
+    };
+    let current = match one_locked(state, id) {
+        Ok(Some(session)) => session,
+        Ok(None) => return ApiError::not_found().into_response(),
+        Err(error) => return error.into_response(),
+    };
+    if current.status != Status::Running {
+        return ApiError::not_in_state(current.status, NOT_RUNNING_STEER).into_response();
+    }
+    if let Err(error) = state.backend.steer(&current, &guidance).await {
+        // The turn may have ended between the read and the call, which is an ordinary race; a
+        // backend that does not implement steering is a deployment mistake. Neither is something the
+        // client can act on differently, so both are the fixed 500 with the error in the log.
+        tracing::warn!(
+            target: "holosmith::http::sessions",
+            session = %current.id,
+            %error,
+            "a steer was not delivered"
+        );
+        return internal("steer", error).into_response();
+    }
+    touch(state, &current.id);
+    record_steer(state, &current.id, &guidance).await;
+    (StatusCode::ACCEPTED, Json(current)).into_response()
+}
+
+/// Move `last_active_at`, which a steer does as much as a prompt or a settle does.
+///
+/// A failed touch is logged and never fails the request: the row's activity is what HS-020's eviction
+/// order reads, not the steer's outcome, and the guidance has already reached the agent.
+fn touch(state: &AppState, id: &str) {
+    let database = state
+        .database
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Err(error) = database.sessions().touch(id, clock::unix_now()) {
+        tracing::warn!(
+            target: "holosmith::http::sessions",
+            session = id,
+            %error,
+            "last_active_at did not move for a steer"
+        );
+    }
+}
+
+/// Append the `turn.steer` frame, so the transcript can show what was injected and when.
+///
+/// A failed append means the writer has stopped, which in a served process means the process is
+/// going down; the loss is logged and the request still answers 202, because the guidance reached the
+/// agent and the record of it is the report rather than the act.
+async fn record_steer(state: &AppState, id: &str, guidance: &str) {
+    let payload = serde_json::json!({ "text": guidance }).to_string();
+    let event = NewEvent {
+        session_id: id.to_string(),
+        kind: TURN_STEER.to_string(),
+        payload,
+        created_at: clock::unix_now(),
+    };
+    if let Err(error) = state.events.append(event).await {
+        tracing::warn!(
+            target: "holosmith::http::sessions",
+            session = id,
+            %error,
+            "a steer's event was not queued"
+        );
+    }
 }
 
 /// Move the row to `running`, or the refusal to answer.

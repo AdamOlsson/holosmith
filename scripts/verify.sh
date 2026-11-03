@@ -9,8 +9,8 @@
 # config and a temp data dir, answering /api/health, the schema version, the app shell, the 404
 # envelope, every browser-facing guard refusal (ADR-0010), the create endpoint's 202/422/409
 # answers, the sessions list, one session by id, the session screen's path, the session's event
-# stream, a prompt's turn, and an abort down to `abort_completed`, with no CORS header on any
-# answer, and stopping on SIGTERM with exit 0.
+# stream, a prompt's turn, an abort down to `abort_completed`, and a steer's own frame, with no CORS
+# header on any answer, and stopping on SIGTERM with exit 0.
 # --no-build skips the two artifact phases; --keep keeps the work dir of a successful run. On
 # failure this prints FAIL <assertion> and keeps the work dir (config, banner, every answer).
 # Downloads nothing and needs neither curl nor jq: every request is a /dev/tcp fetch. Put the
@@ -285,6 +285,8 @@ serve_cases=(
   case_prompt_unknown_session
   case_abort
   case_abort_on_an_idle_session
+  case_steer
+  case_steer_on_an_idle_session
 )
 
 # The health payload: exactly four keys, and the uptime is not predictable, so the assertion is
@@ -853,6 +855,93 @@ case_abort_on_an_idle_session() {
   expect_status "$name" "$response" 409
   expect_header "$name" "$response" content-type "application/json"
   expect_code "$name" "$response" session_idle
+}
+
+# HS-017: a steer hands guidance to the running turn, answers 202 with the row, and is recorded as a
+# `turn.steer` frame — which is how the transcript shows what was injected and when. The abort left the
+# session idle, so this case starts its own turn.
+case_steer() {
+  local name=case_steer response body
+  fetch_body "case_steer_prompt" POST "/api/sessions/$created_id/prompt" \
+    '{"prompt":"read the app shell"}' "Host: 127.0.0.1" "Origin: $control_origin" \
+    "Content-Type: application/json" "X-Holosmith-Client: 1" \
+    "Tailscale-User-Login: $owner" ||
+    fail "case_steer_prompt/no_answer" "POST /api/sessions/$created_id/prompt did not answer"
+  response="$(answer case_steer_prompt)"
+  expect_status case_steer_prompt "$response" 202
+
+  fetch_body "$name" POST "/api/sessions/$created_id/steer" '{"guidance":"and the lexer too"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "$name/no_answer" "POST /api/sessions/$created_id/steer did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 202
+  expect_header "$name" "$response" content-type "application/json"
+  body="$(cat "$WORK/responses/$name.body")"
+  case "$body" in
+    *'"status":"running"'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "$name/status" "the answer is not the running row: $body"
+      ;;
+  esac
+
+  # The frame the transcript reads, and then the proof that the turn continued: the same stream
+  # carries the settle the stub was going to produce anyway.
+  name=case_steer_stream
+  fetch_sse_until "$name" "/api/sessions/$created_id/events" '"text":"and the lexer too"' \
+    "Host: 127.0.0.1" ||
+    fail "$name/no_answer" "GET /api/sessions/$created_id/events did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 200
+  body="$(cat "$WORK/responses/$name.body")"
+  case "$body" in
+    *'event: turn.steer'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "$name/kind" "the steer's frame is not on the stream: $body"
+      ;;
+  esac
+
+  # The turn continued: the steer did not end it, and the row reaches idle on its own. The row is the
+  # question rather than a stream needle, because a settle's payload is the same shape for every turn
+  # and the replay would answer with the previous turn's.
+  wait_for_idle case_steer_settles
+}
+
+# HS-017: a steer with no running turn is `409 session_idle`, the code HS-016 added for it.
+case_steer_on_an_idle_session() {
+  local name=case_steer_on_an_idle_session response
+  fetch_body "$name" POST "/api/sessions/$created_id/steer" '{"guidance":"too late"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "$name/no_answer" "POST an idle session's steer did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 409
+  expect_header "$name" "$response" content-type "application/json"
+  expect_code "$name" "$response" session_idle
+}
+
+# wait_for_idle <label>: poll one session's row until it says idle, bounded and counted once. A case
+# that needs the session idle before it acts cannot use a stream needle: every turn's settle carries
+# the same payload, and the replay would answer with an earlier turn's.
+wait_for_idle() {
+  local label="$1" body
+  for _ in $(seq 1 100); do
+    fetch "$label" GET "/api/sessions/$created_id" "Host: 127.0.0.1" ||
+      return 1
+    body="$(cat "$WORK/responses/$label.body")"
+    case "$body" in
+      *'"status":"idle"'*)
+        assertions=$((assertions + 1))
+        return 0
+        ;;
+    esac
+    sleep 0.1
+  done
+  fail "$label/status" "the session never reached idle: $body"
 }
 
 # Box 4, over every answer the cases above saved: none of them carries a CORS header, and none
