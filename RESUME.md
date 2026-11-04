@@ -1,4 +1,4 @@
-# RESUME — orchestrator handoff (cold start, after eighteen stories)
+# RESUME — orchestrator handoff (cold start, after nineteen stories)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating
 procedure and still governs; this file is the state of the world — what exists, what the environment
@@ -37,10 +37,10 @@ created, prompted, aborted, steered, stopped and resumed, and it is driven from 
 ## 1. Where the work stands
 
 Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is clean, and every
-commit is **pushed** (see the note on pushing below). `HEAD` is `ff9d907`; any commit after it is
+commit is **pushed** (see the note on pushing below). `HEAD` is `db95a3f`; any commit after it is
 bookkeeping.
 
-**Linear: 18 Done, 62 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-018`
+**Linear: 19 Done, 61 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-019`
 (`PER-33` … `PER-50`).
 
 | Story | Linear | Commits | ADR |
@@ -63,23 +63,26 @@ bookkeeping.
 | HS-016 abort with the full ladder | PER-48 | `d034237`, `3d2ecba` | 0020 |
 | HS-017 steer a running turn | PER-49 | `0099ca3`, `8ff1d77` | 0021 |
 | HS-018 stopped state and resume | PER-50 | `dce53c4`, `ff9d907` | 0022 |
+| HS-019 delete flow | PER-51 | `3d5c415`, `7c4ea02`, `cd85572`, `db95a3f` | 0023 |
 
-**Next issue: `PER-51` (HS-019 — delete flow).** Then `PER-52` (HS-020 — cap and eviction), `PER-53`
-(HS-021 — idle stop), `PER-54` (HS-022 — turn timeout), and onward in `HS-###` order.
+**Next issue: `PER-52` (HS-020 — cap and eviction).** Then `PER-53` (HS-021 — idle stop), `PER-54`
+(HS-022 — turn timeout), and onward in `HS-###` order.
 
 Ranking, per `PROMPT.md`: Linear priority (all are `No priority`) → `HS-###` order in `docs/stories/` →
 anything already `In Progress` first → skip an issue whose `Blocked by` stories are not `Done`.
 
 ### Two facts a cold start must know
 
-1. **A running turn can now be stopped, in two rungs.** `src/ladder.rs` is the shared routine:
-   `clear_queue` then `abort`, wait up to `abort_grace` (the grace *bounds rung 1 too*), then
-   `running → stopped` with the caller's reason, `stop`, and a resume through the provisioner. A turn's
-   end is typed (`TurnEnd::{Settled, Aborted}`) so the runner picks `agent_settled` or
-   `abort_completed`; a forced stop has **two owners** and the table decides, which is why exactly one
-   `StateError::Illegal` in `turn.rs` is a `debug` line. What is still open: **the turn timeout and the
-   token budget** (HS-022/HS-023) and **HS-022/HS-023 must plumb their own reason into rung 1's ending**
-   — the ladder's parameter is rung 2's reason only (ADR-0020 says so).
+1. **A running turn can now be stopped, in two rungs, with or without the way back.** `src/ladder.rs`
+   is the shared routine: `clear_queue` then `abort`, wait up to `abort_grace` (the grace *bounds rung
+   1 too*), then `running → stopped` with the caller's reason and `stop`. `Ladder::climb` is that plus
+   a resume through the provisioner (the abort's path, unchanged); `Ladder::end_turn` is that alone and
+   returns `Ending::{Asked, Forced}` (HS-019's delete, which then removes the session instead of
+   resuming it). A turn's end is typed (`TurnEnd::{Settled, Aborted}`) so the runner picks
+   `agent_settled` or `abort_completed`; a forced stop has **two owners** and the table decides, which
+   is why exactly one `StateError::Illegal` in `turn.rs` is a `debug` line. What is still open: **the
+   turn timeout and the token budget** (HS-022/HS-023), which climb `end_turn` with their own reason
+   (`forced_abort`, `deleted` are the two words so far).
 2. **The web page has now been rendered.** Playwright's Chromium is inside the sandbox (see §2), and
    HS-016 … HS-018 each drove the shipped artifact in it: the sessions list, the create form, the
    session screen, the composer's four actions, the transcript's blocks and boundaries, and the abort /
@@ -236,7 +239,7 @@ If that fails, **stop and report** — that is a `PROMPT.md` stop condition.
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                     # 209 lib + 228 across 21 integration binaries
+cargo test                     # 212 lib + 24 integration binaries (14 in tests/delete.rs)
 cd web && npm test             # 18 transcript tests (node's own runner)
 scripts/verify.sh              # THE one-command gate since HS-006
 ```
@@ -244,7 +247,7 @@ scripts/verify.sh              # THE one-command gate since HS-006
 `scripts/verify.sh` runs six phases, cheapest first: `fmt`, `clippy`, `test`, `build`
 (`scripts/build.sh`, which itself runs `build-web.sh` — `npm test` then Vite — and `check-static.sh`
 last), `embed` (`scripts/check-embed.sh`), then `serve` — the **shipped musl artifact** booted on
-`--port 0` with a temp data dir, running **32 cases plus a CORS sweep (134 assertions)**, then torn down
+`--port 0` with a temp data dir, running **35 cases plus a CORS sweep (150 assertions)**, then torn down
 with `SIGTERM` and an asserted exit 0. It takes ~3 min (both musl targets). `--no-build` skips `build`
 and `embed`; `--keep` keeps the work dir.
 
@@ -286,13 +289,17 @@ crates/holosmith/
                             abort_completed (or a `debug` line if the ladder got there first), or
                             unexpected_exit with the reason. `TurnEnd` is the backend's answer
   src/ladder.rs             the abort ladder (HS-016): clear_queue → abort → wait out abort_grace →
-                            `running → stopped` with the caller's reason → stop → resume through the
-                            provisioner. `FORCED_ABORT`; `climb(session, reason)` is the shared
-                            routine HS-022/HS-023 will call
+                            `running → stopped` with the caller's reason → stop. `climb` adds the
+                            resume (the abort); `end_turn` returns `Ending::{Asked,Forced}` and does
+                            not (the delete, and HS-022/HS-023). `FORCED_ABORT`
+  src/deleter.rs            the delete flow's task (HS-019): revoke_key (a no-op until HS-039) →
+                            `backend.delete` → remove the row *and its event log* in one
+                            transaction → close the session's streams. `DELETED` is the rung-2 word
   src/runtime.rs            runtime::Backend {Stub,Docker} — which backend this run uses
   src/http/                 mod.rs, app.rs (Routes/App seam, AppState + provisioner()/turner()/
-                            transitioner()/ladder(), edge layer, is_guard_exempt), error.rs (the one
-                            envelope, every code, ApiError::not_in_state / bad_prompt / bad_steer),
+                            transitioner()/ladder()/deleter(), edge layer, is_guard_exempt), error.rs (the one
+                            envelope, every code, ApiError::not_in_state / bad_prompt / bad_steer /
+                            unsaved_work / unknown_session),
                             health.rs, guard.rs (the four checks), sessions.rs (POST+GET
                             /api/sessions, GET /api/sessions/{id}, POST …/prompt, …/abort, …/steer,
                             …/resume, TURN_STEER), streams.rs (the SSE handler)
@@ -333,15 +340,17 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
 
 - **Working:** `version` (text + `--json`), `config {validate,show,edit}`, `serve` (control listener,
   embedded app, `/api/health`, `POST`/`GET /api/sessions`, `GET /api/sessions/{id}`,
-  `POST /api/sessions/{id}/{prompt,abort,steer,resume}`, `GET /api/sessions/{id}/events`), SQLite with
+  `POST /api/sessions/{id}/{prompt,abort,steer,resume}`, `DELETE /api/sessions/{id}`,
+  `GET /api/sessions/{id}/events`), SQLite with
   three migrations, the guards, the event writer, the SSE stream, the stub backend and its four-step
-  provisioner, the enforced state machine, the abort ladder, the Sessions screen with its create form,
+  provisioner, the enforced state machine, the abort ladder, the delete flow, the Sessions screen with its create form,
   the session screen at `/sessions/<id>` with a live transcript and a four-action composer.
-- **Not built yet:** **delete** (HS-019), the **cap's eviction** and the **`stopped` producer**
-  (HS-020 evict, HS-021 idle stop, HS-044 drain — nothing in the API can stop a session yet, so
-  `stopped` is reachable only through the state function), the turn timeout (HS-022), the token budget
+- **Not built yet:** the **cap's eviction** and the **idle/drain stop** (HS-020 evict, HS-021 idle
+  stop, HS-044 drain — the delete can leave a session `stopped`, but nothing stops one on purpose
+  yet), the turn timeout (HS-022), the token budget
   (HS-023), tool-output files and `output_ref` (HS-033), usage totals (HS-034), the preview listener
-  (HS-041), Docker (HS-024+), merge, publish, the hub, releases.
+  (HS-041), Docker (HS-024+), merge, publish, the hub, releases, and any **delete affordance in
+  `web/`**.
 - **`runtime::Backend`** has `Stub` and `Docker`; `serve --backend` and the config key `backend` select
   it. `DockerBackend` **refuses every operation** until HS-024, and the default backend is `docker`
   (ADR-0001: the stub is opt-in), so a default build provisions a session to `error` with a reason
@@ -521,6 +530,12 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 - **A backend can emit an event but cannot write the row.** Its `EventWriter` takes free-form
   `kind`/`payload`, so a *forged* `session.status` frame is possible and is exactly the lie ADR-0016
   forbids. ADR-0019 records it as a known hole; closing it means typing the payload (no story yet).
+- **A delete takes its row's event log with it** (`sessions::repository::remove`, one transaction), and
+  the writer **drops** an event whose session has gone instead of refusing the batch (HS-019). Two
+  consequences a test must respect: a deleted session's events cannot be asserted *after* the removal
+  (assert the before-count while the row still exists, as `tests/delete.rs` does), and the `deleting`
+  event is usually dropped rather than delivered because the removal finishes inside the writer's 25 ms
+  tick — so never assert that a watcher saw it.
 
 ### Web
 
@@ -559,7 +574,7 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 - **`docs/build.md` is a story deliverable, not orchestrator-only.** If a story changes prerequisites or
   gates, the doc is in scope, and its prose must be reflowed (~100 columns), not just appended to.
 - **Every story adds at least one `case_*` to `scripts/verify.sh`.** The rule is in bold in
-  `docs/build.md`, and the reviewer enforces it. The current gate is 26 cases / 98 assertions.
+  `docs/build.md`, and the reviewer enforces it. The current gate is 35 cases / 150 assertions.
 - **Adding an ADR means updating `docs/stories/README.md`**: the "Decisions taken while slicing" count
   (now nineteen) and the bullet list. A reviewer will check the links resolve — three did not, once.
 - **An ADR that a later story changes gets a one-line "Superseded by ADR-00xx" note**, not a rewrite
@@ -631,6 +646,7 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 | Abort climbs two rungs, the row moves before the container is killed, and the ladder's reason is a parameter | the other order leaves a row saying `idle` over a dead container; HS-022/HS-023 pass their own word | ADR-0020 |
 | A steer is `turn.steer` with `{"text"}` and **no** message id; the agent is asked before the record is written | a steer is one frame that nothing continues, so an id would have no second use; the record must claim only what was delivered | ADR-0021 |
 | No stop endpoint; resume is the only way back, the cap is checked before its transition, and `SessionBackend::resume` stays uncalled | the spec has no stop endpoint, and the policies that stop a session are HS-020/021/044 | ADR-0022 |
+| The delete's snapshot is the request's and the removal a task's; the turn is ended by `end_turn` (no resume); the event log goes with the row, so the writer drops an event whose session has gone; idempotency is keyed to the row's state; `force` is the literal `force=true` | only a synchronous snapshot can answer 409 and leave the row intact, and a log nothing can read is dead weight | ADR-0023 |
 
 ---
 
@@ -641,42 +657,53 @@ cd /home/adamolsson/projects/holosmith
 git status --short                          # must be clean
 . ~/.pi/toolchains/env.sh
 python3 /tmp/lin.py issues | grep -v ' Done ' | head   # next unfinished (recreate /tmp/lin.py, §2)
-python3 /tmp/lin.py issue PER-48            # sanity-check Linear is reachable and scoped
-scripts/verify.sh                           # baseline green (~4 min, 32 cases, 134 assertions)
+python3 /tmp/lin.py issue PER-52            # sanity-check Linear is reachable and scoped
+scripts/verify.sh                           # baseline green (~4 min, 35 cases, 150 assertions)
 ```
 
-Then start the cycle at **`PER-51` (HS-019 — delete flow)**. Read §1's two facts first: abort works in
-two rungs but the *timeout* and the *budget* do not exist, and the page has now been rendered (so a DOM
-claim needs a Chromium run, not a shrug).
+Then start the cycle at **`PER-52` (HS-020 — cap and eviction)**. Read §1's two facts first: the
+ladder has `end_turn` and `climb`, and the page has been rendered (so a DOM claim needs a Chromium run).
 
-### What HS-019 is about, so the first brief is fast
+### What HS-020 is about, so the first brief is fast
 
-Acceptance, verbatim from `docs/stories/phase-1-session-lifecycle-stub.md:212`:
+Acceptance, verbatim from `docs/stories/phase-1-session-lifecycle-stub.md`:
 
-- `DELETE /api/sessions/:id` returns 202, sets `deleting`, then removes the row; the stream closes.
-- Abort first if running; snapshot before removal; remove session directory and network.
-- A failed snapshot returns 409 `unsaved_work` unless `?force=true`.
-- Delete is idempotent: a second call returns 202/404 deterministically, never a partial state.
-- Deleting a session revokes its dummy key (wired in HS-039) — the hook exists here.
+- The cap counts live sessions only: `starting`, `idle`, `running`. `stopped`, `error`, `deleting` do not count.
+- Create at cap evicts the least recently active `idle` session → `stopped` with reason `evicted`, then proceeds.
+- If nothing is evictable (all live sessions are `running` or `starting`) → 409 `cap_reached`.
+- Eviction deletes nothing: history, worktree, events and images survive, and the UI says so.
+- `max_live_sessions` is configurable and validated as ≥ 1.
 
-**Already in place:** the table's `any + delete → deleting` row; `SessionBackend::{abort, snapshot,
-delete}` (`delete`/`snapshot` are recordings in the stub and `unsupported` in Docker); the
-`StreamRegistry` with its open-stream count (HS-010), which is what closes a deleting session's stream;
-`Activity`-style wiring helpers; the `409 session_<state>` family; the abort ladder to stop a running
-turn first; ADR-0011's id and ADR-0013's event writer.
+**Already in place:** `live_count()` (the three live states, over `sessions_status`), `list()`'s
+`ORDER BY last_active_at DESC, id ASC` over the same index (`sessions_last_active` serves an ascending
+read too), the table's `idle + evict → stopped` row, `409 cap_reached`, `cap_reached()` in
+`http/error.rs`, the `create_locked` one-scope lookup/count/insert, `SessionBackend::stop`, and the
+ladder's `end_turn` shape (eviction does **not** climb the ladder at all — an idle session has no turn).
 
-**What is missing:** the endpoint, the `deleting` state's *removal* (the table stops at `deleting`: no
-row deletion and no event), the snapshot-before-removal ordering and its `unsaved_work` refusal, the
-idempotency rule for a second delete, the directory teardown (the stub owns no directory — the
-`worktree` field is a string until HS-025), and the stream close.
+**What is missing:** the eviction itself (nothing calls `Trigger::Evict`), a repository read for “the
+least recently active idle session” (``list(Some(Status::Idle))`` is descending; the eviction wants the
+*last* one or a new `oldest_idle()`), the create's new branch (at cap → evict → re-count → insert), and
+the UI's “stopped because the machine was full” message (the page renders `status_reason` already, so
+check `web/src/main.ts` before adding anything).
 
-**Decide canonically and record:** what happens to the events (cascade delete vs. keep — the stream
-closes either way, and HS-060's compaction assumes the log exists); where the "revoke the dummy key"
-hook lives when there is no key yet (a named no-op with a story number, not silence); whether a second
-`DELETE` on a deleted row is `404` or `202` (the bullet allows either, "deterministically", so pick one
-and prove it); what `deleting` looks like if the row removal fails (the row must not be left lying
-`deleting` forever — but nothing retries it either); and whether `snapshot` is called on a `stopped`
-session at all.
+**Decide canonically and record:** whether the create evicts one session or loops until it has a slot;
+whether the eviction's `stopped` write and the create's insert share the one lock scope (they must not
+strand a `starting` row — ADR-0022's lesson); what happens when the evicted session's `stop` call
+fails (the row is already `stopped`; the ladder's “best effort” precedent applies); whether a create
+that evicts and then fails still leaves the victim stopped (and what the answer says); and whether
+`?force`-style opt-out is needed (the story says no).
+
+### What HS-019 settled that HS-020 inherits
+
+- **A row can be removed under a background task**, and every runner must tolerate it: `touch` treats a
+  missing row as nothing to record, `insert_batch` drops an event whose session has gone, and the
+  provisioner stops when the row leaves `starting`. Eviction stops rather than removes, so these are
+  precedent rather than obstacles.
+- **`SessionBackend::stop` is the only container call an eviction needs**, and the row moves **before**
+  it (ADR-0020's order), with the reason `evicted` — the third of the reason words (`forced_abort`,
+  `deleted`, `evicted`).
+- **The cap's count is read under the create's one lock scope.** Evicting inside that scope is what a
+  later story must not turn into two scopes; ADR-0012 is where that is written down.
 
 ## 9. Reporting
 
@@ -693,3 +720,4 @@ Last session's ledger, for the shape of it:
 | PER-48 | HS-016 abort ladder | `d034237`, `3d2ecba` | Done — 2 P2s fixed (the grace did not bound rung 1; `Unreported` read as failure), 6 nits |
 | PER-49 | HS-017 steer | `0099ca3`, `8ff1d77` | Done — 1 P1 fixed (a `last_active_at` assertion the *settle* satisfied, proved by mutation), 11 notes |
 | PER-50 | HS-018 stopped/resume | `dce53c4`, `ff9d907` | Done — 1 P2 fixed (abort retried a dead path, provisioning a session nobody asked for), 16 findings |
+| PER-51 | HS-019 delete flow | `3d5c415`, `7c4ea02`, `cd85572`, `db95a3f` | Done — 1 spec P2 fixed (a refused delete of a running session has already ended the turn; now pinned by a test and by the glossary), 4 doc contradictions, 2 nits; also closed PER-41's recorded batch-collateral nit |
