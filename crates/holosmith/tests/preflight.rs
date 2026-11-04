@@ -23,6 +23,20 @@ use holosmith::preflight::{self, Check, Tools};
 mod support;
 use support::TempDir;
 
+/// Hold this for the whole body of a test here: one test at a time.
+///
+/// `exec` of a file that *any* process holds open for writing fails with `ETXTBSY` ("Text file busy"),
+/// and `std::process::Command`'s fork happens on another thread's behalf: the child inherits the write
+/// descriptor of a shim written a moment earlier and keeps it until its own `exec` finishes. Measured at
+/// roughly 3 runs in 40 before this lock (PER-56's note), which is what made the gate redden at random.
+/// Every test in this file writes shims and then runs them, and nothing else in this binary forks, so
+/// serialising each whole body is the whole fix.
+fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// An executable shim for `name` answering `body`, in `dir`'s own `bin`.
 fn shim(dir: &TempDir, name: &str, body: &str) -> std::path::PathBuf {
     let bin = dir.path().join("bin");
@@ -101,6 +115,7 @@ fn fake_daemon(path: &Path) -> Arc<AtomicBool> {
 
 #[test]
 fn a_machine_with_nothing_wrong_has_no_complaints() {
+    let _serial = one_at_a_time();
     // Every check passes: a daemon on a socket this test answers, git 2.43, and 480 GB free.
     let dir = TempDir::new("preflight-clean");
     let socket = dir.file("docker.sock");
@@ -121,6 +136,7 @@ fn a_machine_with_nothing_wrong_has_no_complaints() {
 
 #[test]
 fn a_daemon_that_is_not_there_is_one_sentence_naming_the_fix() {
+    let _serial = one_at_a_time();
     let dir = TempDir::new("preflight-no-daemon");
     let complaints = preflight::check_with(
         &config(
@@ -143,6 +159,7 @@ fn a_daemon_that_is_not_there_is_one_sentence_naming_the_fix() {
 
 #[test]
 fn an_old_git_and_a_full_disk_are_both_reported_at_once() {
+    let _serial = one_at_a_time();
     // The rule the config validator follows: every problem in one answer, because a machine missing two
     // things should take two edits and one restart.
     let dir = TempDir::new("preflight-two");
@@ -172,6 +189,7 @@ fn an_old_git_and_a_full_disk_are_both_reported_at_once() {
 
 #[test]
 fn a_git_that_cannot_be_run_is_a_complaint_and_not_a_pass() {
+    let _serial = one_at_a_time();
     // A `git` that is not there: `Command` fails with `NotFound`, which must be reported rather than
     // treated as "no opinion". A check that cannot run is never a pass.
     let dir = TempDir::new("preflight-no-git");
@@ -198,6 +216,7 @@ fn a_git_that_cannot_be_run_is_a_complaint_and_not_a_pass() {
 
 #[test]
 fn a_daemon_that_answers_something_else_is_a_complaint() {
+    let _serial = one_at_a_time();
     // A socket that accepts and answers `500` is not a daemon that can run sessions, and a check that
     // only proved "something is listening" would pass it.
     let dir = TempDir::new("preflight-bad-daemon");
@@ -225,6 +244,7 @@ fn a_daemon_that_answers_something_else_is_a_complaint() {
 
 #[test]
 fn the_check_word_leads_every_sentence() {
+    let _serial = one_at_a_time();
     // The report is one line per complaint, so the word before the colon is what an operator greps for.
     let dir = TempDir::new("preflight-words");
     let complaints = preflight::check_with(
