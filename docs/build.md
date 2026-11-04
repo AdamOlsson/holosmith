@@ -173,7 +173,11 @@ whole log 25 hours into the past with `python3`'s `sqlite3`, starts it again, an
 `message.snapshot` row and no `message.delta` row, and a replay that carries the snapshot holding the
 whole message, no delta frame, and the message's `end` frame still there — the window is the spec's fixed
 24 hours rather than a key, so aging a database the artifact wrote is the only way to show it; see
-ADR-0032), and the worktree (`case_worktree`, which boots its own
+ADR-0032), and history (`case_history`, which boots its own server with `history_window = 1`, drives
+two turns, and asserts the `history.truncated` frame's cursor and turn count, that the replay's first
+`id:` is that cursor, that the page below it carries the first turn with `has_more` false and
+`turns_before` 0, and that a `before=0` answers `422 bad_query` with the envelope's content type — the
+window is a key, so the shared boot must keep the default one; see ADR-0033), and the worktree (`case_worktree`, which boots its own
 server — `backend = "docker"`, a real repository under `projects_root`, and a socket that answers the
 preflight's `_ping` — creates a session, and asserts the row's `worktree` and `base_commit`, the network
 step's refusal, the worktree and branch gone afterwards, the registration back to one entry, and then a
@@ -194,7 +198,7 @@ remember to place the new case before it.
 is what makes this a growing gate rather than a snapshot: a story that adds a route or a
 behaviour has one obvious place to prove the shipped binary does it. A case that needs a setting the
 rest of the run must not carry gets a boot of its own (see `case_token_budget`, `case_compaction`,
-`case_worktree` and `case_worktree_refusal`), and
+`case_history`, `case_worktree` and `case_worktree_refusal`), and
 takes a place at the end of the array: nothing after it may assume the first boot's state, and a case
 that stops the server leaves the run with whatever boot it started.
 

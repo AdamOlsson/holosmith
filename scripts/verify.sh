@@ -318,6 +318,7 @@ serve_cases=(
   case_create_at_cap_refused
   case_token_budget
   case_compaction
+  case_history
   case_worktree
   case_docker_preflight
   case_worktree_refusal
@@ -1676,6 +1677,105 @@ case_compaction() {
     *message.end*) assertions=$((assertions + 1)) ;;
     *) fail "${name}_replay/end" "compaction took the message's end frame with it: $body" ;;
   esac
+}
+
+# HS-061's two halves from the artifact: a client that opens the stream with no `Last-Event-ID` gets the
+# newest `history_window` messages and a `history.truncated` frame naming where its replay starts, and
+# `GET .../events/history?before=` answers the page below that cursor.
+#
+# It boots its own server, like `case_compaction`: the window is a config key, and the shared boot must keep
+# the default window so that its replay reaches the beginning of its own log. `history_window = 1` makes the
+# smallest log that truncates — two turns — which is also the cheapest one to drive.
+case_history() {
+  local name=case_history response body id cut first
+  local create_body='{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}'
+
+  stop_serve
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "stub"\nhistory_window = 1\n' "$owner" \
+    >"$WORK/config-history.toml"
+  start_serve "$WORK/config-history.toml" "$WORK/data-history"
+
+  fetch_body "${name}_create" POST /api/sessions "$create_body" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-history-1" ||
+    fail "${name}_create/no_answer" "POST /api/sessions did not answer"
+  expect_status "${name}_create" "$(answer "${name}_create")" 202
+  body="$(cat "$WORK/responses/${name}_create.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id" ] || fail "${name}_create/id" "the response names no id: $body"
+  wait_for_idle_id "${name}_idle" "$id"
+
+  # Two turns, so the window of one has something to cut. Each prompt's 202 has already moved the row to
+  # `running`, so polling it is what waits for that turn rather than for an earlier one's settle frame.
+  local turn
+  for turn in 1 2; do
+    fetch_body "${name}_prompt_$turn" POST "/api/sessions/$id/prompt" '{"prompt":"read the app shell"}' \
+      "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+      "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+      fail "${name}_prompt_$turn/no_answer" "POST /api/sessions/$id/prompt did not answer"
+    expect_status "${name}_prompt_$turn" "$(answer "${name}_prompt_$turn")" 202
+    wait_for_idle_id "${name}_idle_$turn" "$id"
+  done
+
+  # No `Last-Event-ID`: the case the story is about. The needle is the frame's own payload, because the
+  # `event:` line alone would end the read before the cursor it names.
+  fetch_sse_until "${name}_stream" "/api/sessions/$id/events" '"before_seq"' "Host: 127.0.0.1" ||
+    fail "${name}_stream/no_answer" "GET /api/sessions/$id/events did not answer"
+  expect_status "${name}_stream" "$(answer "${name}_stream")" 200
+  body="$(cat "$WORK/responses/${name}_stream.body")"
+  case "$body" in
+    *history.truncated*) assertions=$((assertions + 1)) ;;
+    *) fail "${name}_stream/truncated" "a replay of two messages under a window of one sent no truncation frame: $body" ;;
+  esac
+  # One turn boundary sits below the cut, which is what keeps the replay's turn label true.
+  case "$body" in
+    *'"turns_before":1'*) assertions=$((assertions + 1)) ;;
+    *) fail "${name}_stream/turns_before" "the truncation frame did not count the turn it skipped: $body" ;;
+  esac
+  cut="$(printf '%s\n' "$body" | sed -n 's/.*"before_seq":\([0-9][0-9]*\).*/\1/p' | sed -n '1p')"
+  [ -n "$cut" ] || fail "${name}_stream/cursor" "the truncation frame named no cursor: $body"
+
+  # The replay begins exactly where the frame said: the first `id:` in the stream is the cut. Read to the
+  # second turn's settle, which is unique here because the first turn is below the cut.
+  fetch_sse_until "${name}_replay" "/api/sessions/$id/events" '"reason":"agent_settled"' "Host: 127.0.0.1" ||
+    fail "${name}_replay/no_answer" "GET /api/sessions/$id/events did not answer"
+  body="$(cat "$WORK/responses/${name}_replay.body")"
+  first="$(printf '%s\n' "$body" | sed -n 's/^id: *//p' | sed -n '1p')"
+  check "${name}_replay/first_seq" "$cut" "$first"
+
+  # The page below that cursor: the first turn, which the replay did not carry.
+  fetch "${name}_page" GET "/api/sessions/$id/events/history?before=$cut&limit=200" "Host: 127.0.0.1" ||
+    fail "${name}_page/no_answer" "GET /api/sessions/$id/events/history did not answer"
+  response="$(answer "${name}_page")"
+  expect_status "${name}_page" "$response" 200
+  expect_header "${name}_page" "$response" content-type application/json
+  body="$(cat "$WORK/responses/${name}_page.body")"
+  case "$body" in
+    *'"type":"message.delta"'*) assertions=$((assertions + 1)) ;;
+    *) fail "${name}_page/delta" "the page below the cursor carries no message: $body" ;;
+  esac
+  case "$body" in
+    *'"has_more":false'*) assertions=$((assertions + 1)) ;;
+    *) fail "${name}_page/has_more" "the whole of a one-turn page claimed there was more: $body" ;;
+  esac
+  # The page starts at the log's first row, so no turn boundary sits below it.
+  case "$body" in
+    *'"turns_before":0'*) assertions=$((assertions + 1)) ;;
+    *) fail "${name}_page/turns_before" "a page beginning at seq 1 counted a turn before it: $body" ;;
+  esac
+  case "$body" in
+    *'"before_seq":1'*) assertions=$((assertions + 1)) ;;
+    *) fail "${name}_page/before_seq" "the page did not name its own lowest seq as the next cursor: $body" ;;
+  esac
+
+  # A cursor that names no place in the log is refused with the envelope, not silently defaulted: "the
+  # newest page" is what the stream already gave the client.
+  fetch "${name}_bad_before" GET "/api/sessions/$id/events/history?before=0" "Host: 127.0.0.1" ||
+    fail "${name}_bad_before/no_answer" "GET /api/sessions/$id/events/history did not answer"
+  response="$(answer "${name}_bad_before")"
+  expect_status "${name}_bad_before" "$response" 422
+  expect_header "${name}_bad_before" "$response" content-type application/json
+  expect_code "${name}_bad_before" "$response" bad_query
 }
 
 # fake_docker_ping <socket>: a unix socket that answers the preflight's `GET /_ping` with `200 OK`, and then

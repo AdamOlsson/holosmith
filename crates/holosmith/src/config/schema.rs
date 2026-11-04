@@ -203,6 +203,12 @@ pub const KNOWN_KEYS: &[KeySpec] = &[
         set: set_stopped_ttl_days,
     },
     KeySpec {
+        path: "history_window",
+        section: None,
+        kind: Kind::Integer,
+        set: set_history_window,
+    },
+    KeySpec {
         path: "merge.targets",
         section: Some("merge"),
         kind: Kind::StringArray,
@@ -570,6 +576,11 @@ fn set_stopped_ttl_days(config: &mut Config, value: &Value) -> Result<(), String
     Ok(())
 }
 
+fn set_history_window(config: &mut Config, value: &Value) -> Result<(), String> {
+    config.history_window = u32_setting(value)?;
+    Ok(())
+}
+
 fn set_merge_targets(config: &mut Config, value: &Value) -> Result<(), String> {
     config.merge.targets = strings(value)?;
     Ok(())
@@ -699,7 +710,7 @@ mod tests {
 
     #[test]
     fn the_table_holds_the_documented_keys() {
-        assert_eq!(KNOWN_KEYS.len(), 26);
+        assert_eq!(KNOWN_KEYS.len(), 27);
     }
 
     #[test]

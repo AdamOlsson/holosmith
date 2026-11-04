@@ -12,13 +12,16 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  HISTORY_PAGE_LIMIT,
   NO_DETAIL,
   Transcript,
   affordances,
   budgetNotice,
   PROJECT_REFUSALS,
   createFailure,
+  historyPath,
   parseFrame,
+  parseTruncated,
   sessionIdFromPath,
   stoppedDetail,
   stoppedNotice,
@@ -536,4 +539,70 @@ test("the writer's merged payload is a frame the page parses", () => {
   const thinking = transcript.apply(delta("m1", "thinking", "hmm"));
   assert.equal(appended(thinking, "m1", "text"), "", "a thinking delta became text");
   assert.equal(appended(thinking, "m1", "thinking"), "hmm");
+});
+
+// A turn boundary's frame, which is what a turn number is derived from.
+function boundary(kind: "start" | "end"): Frame {
+  return { type: "boundary", boundary: kind };
+}
+
+// The turn number a boundary change names.
+function turnOf(changes: Change[]): number {
+  const change = changes[0];
+  assert.ok(change !== undefined && change.op === "boundary", "the change is not a boundary");
+  return change.turn;
+}
+
+test("a windowed transcript numbers its turns like a whole-log one", () => {
+  // HS-061: the page numbers a turn from the `turn.start` frames it has seen. A replay that starts at the
+  // 50th most recent message has seen none of the turns before it, so without the frame's `turns_before`
+  // the first turn on screen would be labelled "turn 1" while the log says turn 40.
+  const whole = new Transcript();
+  const wholeTurns = [1, 2, 3, 4].map(() => turnOf(whole.apply(boundary("start"))));
+
+  const windowed = new Transcript();
+  windowed.setTurnBase(3);
+  const windowedTurns = [1, 2].map(() => turnOf(windowed.apply(boundary("start"))));
+
+  assert.deepEqual(wholeTurns, [1, 2, 3, 4]);
+  assert.deepEqual(
+    windowedTurns,
+    [4, 5],
+    "a truncated replay renumbered its turns from one",
+  );
+});
+
+test("a truncation frame names a cursor and how many turns it skipped", () => {
+  assert.deepEqual(parseTruncated('{"before_seq":41,"turns_before":3}'), {
+    beforeSeq: 41,
+    turnsBefore: 3,
+  });
+  // A frame with no usable cursor has nothing to offer a page request, so it is dropped.
+  for (const data of ["", "{}", '{"before_seq":0}', '{"before_seq":"41"}', "not json", "[]"]) {
+    assert.equal(parseTruncated(data), null, `${data} was accepted as a cursor`);
+  }
+  // A missing turn count is 0, not a refusal: it is wrong about labels, not about content.
+  assert.deepEqual(parseTruncated('{"before_seq":7}'), { beforeSeq: 7, turnsBefore: 0 });
+});
+
+test("a history path carries the cursor and the page size", () => {
+  assert.equal(
+    historyPath("0123456789abcdef", 41),
+    `/api/sessions/0123456789abcdef/events/history?before=41&limit=${HISTORY_PAGE_LIMIT}`,
+  );
+  // The page size the button sends is the server's own default, so the two cannot drift.
+  assert.equal(HISTORY_PAGE_LIMIT, 200);
+});
+
+test("a page folded at its own turn base continues the live transcript's numbering", () => {
+  // The two halves of "load earlier" meeting: the live model has already numbered its turns from the
+  // truncation frame, and the page that is prepended to it must end where the live transcript begins.
+  const live = new Transcript();
+  live.setTurnBase(5);
+  assert.equal(turnOf(live.apply(boundary("start"))), 6);
+
+  const page = new Transcript();
+  page.setTurnBase(3);
+  const pageTurns = [1, 2].map(() => turnOf(page.apply(boundary("start"))));
+  assert.deepEqual(pageTurns, [4, 5], "the page did not end where the live transcript began");
 });

@@ -18,7 +18,7 @@ use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 
 pub use registry::{StreamGuard, StreamRegistry};
-pub use repository::{Compaction, EventRepository};
+pub use repository::{Compaction, EventRepository, Truncation};
 pub use writer::spawn;
 
 // The kinds whose payload ADR-0018 and ADR-0019 pin, and the only spelling of each.

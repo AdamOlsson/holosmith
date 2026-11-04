@@ -202,6 +202,12 @@ pub struct Config {
     pub min_free_gb: u64,
     pub session_disk_soft_gb: u64,
     pub stopped_ttl_days: u64,
+    /// How many messages a client that opens a stream with no `Last-Event-ID` is replayed (HS-061).
+    /// The newest `history_window` messages, plus a `history.truncated` frame naming where the
+    /// replay started; older history is paged with `GET /api/sessions/{id}/events/history`. A
+    /// machine setting rather than a constant because the story says it is configurable, and a
+    /// refusal of `0` because a client shown nothing cannot tell an empty session from a cut one.
+    pub history_window: u32,
     pub merge: Merge,
     pub publish: Publish,
     pub egress: Egress,
@@ -233,6 +239,7 @@ impl Default for Config {
             min_free_gb: 20,
             session_disk_soft_gb: 10,
             stopped_ttl_days: 7,
+            history_window: 50,
             merge: Merge::default(),
             publish: Publish::default(),
             egress: Egress::default(),
@@ -555,6 +562,16 @@ fn semantic_problems(
             text,
             "stopped_ttl_days",
             "must be at least 1",
+        );
+    }
+    if config.history_window < 1 {
+        report(
+            &mut problems,
+            document,
+            text,
+            "history_window",
+            "must be at least 1: a client replayed nothing cannot tell an empty session from a \
+             truncated one",
         );
     }
     if config.max_session_tokens == Some(0) {
@@ -912,6 +929,7 @@ abort_grace = "1500ms"
 min_free_gb = 5
 session_disk_soft_gb = 2
 stopped_ttl_days = 3
+history_window = 12
 
 [merge]
 targets = ["develop"]
@@ -995,6 +1013,7 @@ allow = ["crates.io"]
         assert_eq!(config.min_free_gb, 5);
         assert_eq!(config.session_disk_soft_gb, 2);
         assert_eq!(config.stopped_ttl_days, 3);
+        assert_eq!(config.history_window, 12);
         assert_eq!(config.merge.targets, ["develop"]);
         assert_eq!(config.publish.remotes, ["origin"]);
         assert_eq!(config.egress.allow, ["crates.io"]);
@@ -1117,6 +1136,15 @@ allow = ["crates.io"]
         assert_eq!(
             problems_of("stopped_ttl_days = 0\n"),
             "config.toml:1:1: stopped_ttl_days: must be at least 1\n1 problem in config.toml\n"
+        );
+    }
+
+    #[test]
+    fn history_window_must_be_at_least_one() {
+        assert_eq!(
+            problems_of("history_window = 0\n"),
+            "config.toml:1:1: history_window: must be at least 1: a client replayed nothing cannot \
+             tell an empty session from a truncated one\n1 problem in config.toml\n"
         );
     }
 

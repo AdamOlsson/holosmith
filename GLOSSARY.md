@@ -344,6 +344,10 @@ _Avoid_: Log view, output, console, chat
 The events of a session that a client can read back, in pages.
 _Avoid_: Log, archive, transcript
 
+**Truncated history**:
+A replay that does not reach the beginning of the log: the stream sends the newest `history_window` messages and announces where it started with a `history.truncated` frame carrying `before_seq` and `turns_before`. The frames below that cursor are what `GET /api/sessions/:id/events/history?before=` answers, one page per "Load earlier" click. It is a property of one replay, never of the log — the rows are all still there.
+_Avoid_: Partial log, clipped history, head cut
+
 ### Work and results
 
 **Worktree**:

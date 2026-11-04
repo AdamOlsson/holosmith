@@ -29,6 +29,7 @@ use crate::events::{EventWriter, StreamRegistry};
 use crate::http::error::ApiError;
 use crate::http::guard::{self, Guards};
 use crate::http::health::{self, Health};
+use crate::http::history;
 use crate::http::sessions;
 use crate::http::streams;
 use crate::ladder::Ladder;
@@ -403,6 +404,7 @@ pub fn router(state: AppState) -> Routes {
     let one_state = Arc::clone(&state);
     let create_state = Arc::clone(&state);
     let stream_state = Arc::clone(&state);
+    let history_state = Arc::clone(&state);
     let prompt_state = Arc::clone(&state);
     let abort_state = Arc::clone(&state);
     let steer_state = Arc::clone(&state);
@@ -456,6 +458,22 @@ pub fn router(state: AppState) -> Routes {
                 let state = Arc::clone(&stream_state);
                 let id = id.map(|Path(id)| id).unwrap_or_default();
                 async move { streams::respond(&state, &id, &headers).await }
+            },
+        )
+        // One older page of the same log (HS-061). Read-only like its neighbours, so the manifest records
+        // it `ReadOnly` and the guards apply with nothing new. The query is taken as `RawQuery`, whose
+        // rejection is `Infallible`: `before` is required and `limit` is clamped, and both are the
+        // handler's to read and to refuse with `bad_query`.
+        //
+        // The path is a `Result` for the same reason as its siblings — a `%FF` segment is a session the
+        // table does not hold — and a second route on the same prefix that answered `text/plain` would be
+        // one rule with two spellings.
+        .get(
+            "/api/sessions/{id}/events/history",
+            move |id: Result<Path<String>, PathRejection>, query: RawQuery| {
+                let state = Arc::clone(&history_state);
+                let id = id.map(|Path(id)| id).unwrap_or_default();
+                async move { history::respond(&state, &id, query).await }
             },
         )
         // The prompt: a mutating route, so every guard applies and the manifest records it (HS-015).

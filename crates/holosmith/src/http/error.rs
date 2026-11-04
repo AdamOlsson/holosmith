@@ -14,6 +14,13 @@ use serde::Serialize;
 /// An unknown path under `/api/`.
 pub const NOT_FOUND: &str = "not_found";
 
+/// A request's query names no place in the log it can answer from (HS-061).
+///
+/// The first query parameter this API refuses. A delete's `?force=true` is read leniently because its
+/// absence is legal and a typo fails safe; a history page's `before` has no safe default, because
+/// "the newest page" is what the stream already gave the client.
+pub const BAD_QUERY: &str = "bad_query";
+
 /// The `Host` header is not one this machine answers (ADR-0010).
 pub const BAD_HOST: &str = "bad_host";
 
@@ -124,6 +131,15 @@ impl ApiError {
             NOT_FOUND,
             "there is no session with that id",
         )
+    }
+
+    /// What a request whose query names no place in the log answers (HS-061).
+    ///
+    /// The sentence is the caller's, for [`Self::not_in_state`]'s reason: a bad `before` and a bad
+    /// `limit` are the same code and two different mistakes, and a caller reading one sentence about the
+    /// other has to guess which parameter it got wrong.
+    pub fn bad_query(message: &'static str) -> Self {
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, BAD_QUERY, message)
     }
 
     /// What a request whose `Host` is not in the allow-list answers.

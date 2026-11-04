@@ -9,18 +9,23 @@
 // nodes, which is why every delta is one appended text node and nothing is ever re-rendered.
 
 import {
+  HISTORY_PAGE_LIMIT,
+  HISTORY_TRUNCATED,
   NO_DETAIL,
   TRANSCRIPT_EVENTS,
   Transcript,
   affordances,
   budgetNotice,
   createFailure,
+  historyPath,
   parseFrame,
+  parseTruncated,
   sessionIdFromPath,
   stoppedDetail,
   streamPath,
   type Change,
   type DeltaKind,
+  type HistoryPage,
   type SessionState,
   type Spend,
 } from "./transcript";
@@ -478,10 +483,12 @@ function replaceKind(node: HTMLElement, value: string): void {
 }
 
 // One change from the transcript model, applied to the DOM. Blocks are found in the map the stream
-// fills, never by querying the document, so no frame costs a walk over the transcript.
+// fills, never by querying the document, so no frame costs a walk over the transcript. The container is
+// a `ParentNode` rather than an element because a page of older history is folded into a detached
+// fragment and inserted in one go (HS-061).
 function applyChange(
   change: Change,
-  container: HTMLElement,
+  container: ParentNode,
   blocks: Map<string, MessageBlock>,
   tools: Map<string, ToolBlock>,
 ): void {
@@ -819,19 +826,89 @@ function composerSection(id: string, showState: (state: SessionState, reason: st
 // The session's stream, folded into the transcript. The browser owns `Last-Event-ID` and resends the
 // last seq it saw (ADR-0014), so a reconnect resumes after what is already on screen and the page
 // needs no cursor of its own.
-function openSessionStream(
-  id: string,
-  transcript: HTMLElement,
-  placeholder: HTMLElement,
-  badge: HTMLElement,
-  updateComposer: (state: SessionState) => void,
-  showSpend: (spend: Spend) => void,
-): void {
+//
+// The one cursor it does keep is the truncation frame's (HS-061): a stream opened with no resume point
+// carries only the newest `history_window` messages, so the frame names where its replay started and
+// the "Load earlier" button walks down from there one page per click. Paging is a button and not
+// infinite scroll because the story says so, and because one click is one request.
+// The nodes the stream writes into, bundled so the stream's signature says what it needs rather than
+// counting it: the transcript's container and its placeholder, the row's state badge, the "Load earlier"
+// button, and the two pure rules the page applies after every frame.
+type StreamTarget = {
+  transcript: HTMLElement;
+  placeholder: HTMLElement;
+  badge: HTMLElement;
+  earlier: HTMLButtonElement;
+  updateComposer: (state: SessionState) => void;
+  showSpend: (spend: Spend) => void;
+};
+
+function openSessionStream(id: string, target: StreamTarget): void {
+  const { transcript, placeholder, badge, earlier, updateComposer, showSpend } = target;
   const model = new Transcript();
   const blocks = new Map<string, MessageBlock>();
   const tools = new Map<string, ToolBlock>();
   const source = new EventSource(streamPath(id));
   openSources.add(source);
+  // Where the next older page ends, or `null` while the replay reaches the beginning of the log.
+  let cursor: number | null = null;
+
+  source.addEventListener(HISTORY_TRUNCATED, (event) => {
+    const frame = parseTruncated((event as MessageEvent<string>).data);
+    if (frame === null) {
+      return;
+    }
+    // Before any transcript frame, which is the order the server sends them in: the replay's first turn
+    // is `turns_before` turns into the log, not turn 1.
+    model.setTurnBase(frame.turnsBefore);
+    cursor = frame.beforeSeq;
+    earlier.hidden = false;
+  });
+
+  // One page per click, folded through a model of its own and inserted in front of everything on
+  // screen. A page is strictly older than the cursor the stream was opened at, so its blocks are new
+  // ids and no live block is touched — and the fold happens in a detached fragment, so the document is
+  // written once.
+  earlier.addEventListener("click", () => {
+    if (cursor === null) {
+      return;
+    }
+    const before = cursor;
+    earlier.disabled = true;
+    void (async () => {
+      try {
+        const answer = await getJson<HistoryPage>(historyPath(id, before, HISTORY_PAGE_LIMIT));
+        if (!answer.ok) {
+          // The button stays, and stays enabled: a page that failed is worth another try, and the
+          // cursor has not moved.
+          return;
+        }
+        const older = new Transcript();
+        older.setTurnBase(answer.value.turns_before);
+        const fragment = document.createDocumentFragment();
+        const olderBlocks = new Map<string, MessageBlock>();
+        const olderTools = new Map<string, ToolBlock>();
+        for (const stored of answer.value.events) {
+          const frame = parseFrame(stored.type, stored.payload);
+          if (frame === null) {
+            continue;
+          }
+          for (const change of older.apply(frame)) {
+            applyChange(change, fragment, olderBlocks, olderTools);
+          }
+        }
+        transcript.prepend(fragment);
+        if (placeholder.isConnected) {
+          placeholder.remove();
+        }
+        cursor = answer.value.before_seq;
+        earlier.hidden = !answer.value.has_more;
+      } finally {
+        earlier.disabled = false;
+      }
+    })();
+  });
+
   for (const eventType of TRANSCRIPT_EVENTS) {
     source.addEventListener(eventType, (event) => {
       const frame = parseFrame(eventType, (event as MessageEvent<string>).data);
@@ -908,6 +985,12 @@ function sessionScreen(health: Health, session: SessionDetail): void {
   );
   transcript.append(placeholder);
 
+  // "Load earlier": hidden until the stream says its replay was truncated, so a short session never
+  // shows a button that would do nothing (HS-061).
+  const earlier = make("button", "secondary earlier", "Load earlier");
+  earlier.type = "button";
+  earlier.hidden = true;
+
   const composer = composerSection(session.id, (state, reason) => {
     badge.textContent = stateText(state, reason);
   });
@@ -916,9 +999,16 @@ function sessionScreen(health: Health, session: SessionDetail): void {
   const section = make("section", "session-screen");
   section.id = "session";
   section.dataset.session = session.id;
-  section.append(back, head, meta, transcript, composer.element);
+  section.append(back, head, meta, earlier, transcript, composer.element);
   app.replaceChildren(header(health), section);
-  openSessionStream(session.id, transcript, placeholder, badge, composer.update, showSpend);
+  openSessionStream(session.id, {
+    transcript,
+    placeholder,
+    badge,
+    earlier,
+    updateComposer: composer.update,
+    showSpend,
+  });
 }
 
 function sessionPath(id: string): string {

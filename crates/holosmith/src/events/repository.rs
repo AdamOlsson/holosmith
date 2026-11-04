@@ -9,7 +9,8 @@
 use rusqlite::{Connection, Row, params};
 
 use super::{
-    Event, MESSAGE_DELTA, MESSAGE_END, MESSAGE_SNAPSHOT, NewEvent, RepoError, parse_delta,
+    Event, MESSAGE_DELTA, MESSAGE_END, MESSAGE_SNAPSHOT, NewEvent, RepoError, TURN_START,
+    parse_delta,
 };
 use crate::sessions::repository::SessionRepository;
 
@@ -41,6 +42,30 @@ const SELECT_SINCE: &str = "SELECT session_id, seq, type, payload, created_at FR
 /// which compaction can move backwards. The counter that must never move backwards is
 /// `sessions.last_seq`, and seq assignment never reads this (ADR-0013).
 const LATEST: &str = "SELECT max(seq) FROM events WHERE session_id = ?1";
+
+/// The message-bearing rows of one session, **newest first**: what a truncated replay's cut is
+/// computed from (HS-061).
+///
+/// `message.delta` and `message.snapshot` are the two kinds that name a message and carry its text;
+/// a message has at least one of them, and compaction replaces a run of the first with the second.
+/// Descending order is what makes the scan a *window* rather than a pass: the caller stops as soon as
+/// it has seen one message more than the window, so a long session costs its newest messages' rows and
+/// not its whole log.
+const MESSAGES_BACKWARDS: &str = "SELECT seq, payload FROM events \
+     WHERE session_id = ?1 AND type IN (?2, ?3) ORDER BY seq DESC";
+
+/// How many turn boundaries sit below a seq (HS-061).
+///
+/// A truncated replay or a history page starts partway through the log, so the first `turn.start` it
+/// carries is not turn 1. The client numbers a turn from the frames it has seen, so the count of the
+/// boundaries it did *not* see is what keeps its labels true.
+const TURNS_BELOW: &str = "SELECT count(*) FROM events \
+     WHERE session_id = ?1 AND type = ?2 AND seq < ?3";
+
+/// One page of history: the events below `?2`, **newest first**, so a full page is the rows nearest the
+/// cursor rather than the oldest ones (HS-061). The caller reverses it: a page is delivered in order.
+const SELECT_BEFORE: &str = "SELECT session_id, seq, type, payload, created_at FROM events \
+     WHERE session_id = ?1 AND seq < ?2 ORDER BY seq DESC LIMIT ?3";
 
 /// Every event of one session: the delete flow's half of removing it (HS-019).
 const DELETE_LOG: &str = "DELETE FROM events WHERE session_id = ?1";
@@ -80,6 +105,18 @@ const DELTAS: &str = "SELECT seq, payload FROM events \
 /// Remove one row that a snapshot has replaced. One seq at a time, because the seqs are the fold's
 /// own and an `IN` list of them would be a second spelling of what the read already answered.
 const DELETE_ROW: &str = "DELETE FROM events WHERE session_id = ?1 AND seq = ?2";
+
+/// Where a truncated replay starts, and how many turns closed before it (HS-061).
+///
+/// `before_seq` is both the seq of the first event the replay carries and the value a client passes as
+/// `?before=` for the next older page, because the history endpoint's cursor is exclusive. One number
+/// for both is what lets the `history.truncated` frame and the page request agree without a second
+/// field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Truncation {
+    pub before_seq: i64,
+    pub turns_before: u32,
+}
 
 /// What one compaction pass did to one session (HS-060).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -229,6 +266,102 @@ impl<'a> EventRepository<'a> {
             .query_map(params![session_id, after, limit], row_to_event)
             .map_err(sqlite)?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(sqlite)
+    }
+
+    /// Where a replay that starts partway through the log begins, or `None` when the whole log fits in
+    /// `window` messages (HS-061, spec item 15).
+    ///
+    /// "The beginning of the 50th most recent message" is a **backwards** scan: the newest
+    /// message-bearing rows are read in descending seq, and the distinct `message_id`s they name are
+    /// collected until one more than `window` has been seen. The cut is then the **lowest** seq of the
+    /// window's oldest message, so a block is always whole — cutting at a message's last row would
+    /// render half of it. The scan stops the moment a row belongs to a message older than the window,
+    /// so its cost is the newest `window` messages' rows, not the session's log.
+    ///
+    /// A row whose payload names no message id belongs to no block, so it neither opens a message nor
+    /// ends the scan; compaction and the writer's coalescer read a payload the same forgiving way.
+    ///
+    /// `None` is "nothing was truncated", and it is decided by whether an older message was actually
+    /// found — not by whether the window is full, because a log of exactly `window` messages has a cut
+    /// at its own first row and its replay already starts at the beginning.
+    pub fn truncation_point(
+        &self,
+        session_id: &str,
+        window: u32,
+    ) -> Result<Option<Truncation>, RepoError> {
+        let sqlite = |error| RepoError::sqlite("truncation_point", error);
+        let window = usize::try_from(window).unwrap_or(usize::MAX);
+        let mut statement = self
+            .connection
+            .prepare(MESSAGES_BACKWARDS)
+            .map_err(sqlite)?;
+        let rows = statement
+            .query_map(
+                params![session_id, MESSAGE_DELTA, MESSAGE_SNAPSHOT],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(sqlite)?;
+        let mut seen: Vec<String> = Vec::new();
+        let mut cut: Option<i64> = None;
+        let mut older = false;
+        for row in rows {
+            let (seq, payload) = row.map_err(sqlite)?;
+            let Some(id) = message_id(&payload) else {
+                continue;
+            };
+            if !seen.contains(&id) {
+                if seen.len() == window {
+                    // The first row of a message older than the window: the window is closed.
+                    older = true;
+                    break;
+                }
+                seen.push(id);
+            }
+            cut = Some(seq);
+        }
+        let (Some(before_seq), true) = (cut, older) else {
+            return Ok(None);
+        };
+        Ok(Some(Truncation {
+            before_seq,
+            turns_before: self.turns_before(session_id, before_seq)?,
+        }))
+    }
+
+    /// How many `turn.start` rows sit below `seq` (HS-061).
+    pub fn turns_before(&self, session_id: &str, seq: i64) -> Result<u32, RepoError> {
+        let count: i64 = self
+            .connection
+            .query_row(TURNS_BELOW, params![session_id, TURN_START, seq], |row| {
+                row.get(0)
+            })
+            .map_err(|error| RepoError::sqlite("turns_before", error))?;
+        Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    }
+
+    /// One page of history: up to `limit` events of one session below `before`, **in seq order**
+    /// (HS-061).
+    ///
+    /// The cursor is exclusive and the page is read newest-first so a full page is the rows nearest the
+    /// cursor; the reversal is what makes the answer a page a client can prepend. Stability under
+    /// concurrent writes is free: seq is strictly increasing, so an event committed after this read has
+    /// a seq above every row the page could hold and cannot shift it. The one way a page's content moves
+    /// is compaction removing rows (ADR-0032), which is the log's documented gap rule and not a cursor
+    /// problem.
+    pub fn read_before(
+        &self,
+        session_id: &str,
+        before: i64,
+        limit: u32,
+    ) -> Result<Vec<Event>, RepoError> {
+        let sqlite = |error| RepoError::sqlite("read_before", error);
+        let mut statement = self.connection.prepare(SELECT_BEFORE).map_err(sqlite)?;
+        let rows = statement
+            .query_map(params![session_id, before, limit], row_to_event)
+            .map_err(sqlite)?;
+        let mut events = rows.collect::<rusqlite::Result<Vec<_>>>().map_err(sqlite)?;
+        events.reverse();
+        Ok(events)
     }
 
     /// The newest seq a reader can see, or `None` when the session has no events.
@@ -491,6 +624,28 @@ mod tests {
         }
     }
 
+    /// One `message.delta` of `message` (HS-061's tests read the message ids a log holds).
+    fn delta(session: &Session, message: &str, text: &str) -> NewEvent {
+        NewEvent {
+            session_id: session.id.clone(),
+            kind: MESSAGE_DELTA.to_string(),
+            payload: format!(
+                "{{\"message_id\":\"{message}\",\"kind\":\"text\",\"text\":\"{text}\"}}"
+            ),
+            created_at: NOW,
+        }
+    }
+
+    /// One turn's boundary, so `turns_before` has something to count.
+    fn turn_start(session: &Session) -> NewEvent {
+        NewEvent {
+            session_id: session.id.clone(),
+            kind: TURN_START.to_string(),
+            payload: "{}".to_string(),
+            created_at: NOW,
+        }
+    }
+
     #[test]
     fn no_events_sql_outside_the_repository() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -577,6 +732,114 @@ mod tests {
             planted.plant(file, text);
             assert_eq!(guard.offenders_under(planted.path()), [reported], "{file}");
         }
+    }
+
+    #[test]
+    fn a_windowed_log_is_cut_at_the_windows_oldest_message() {
+        // Three messages of two delta rows each, in one batch, with a turn boundary in front of each.
+        // The window of two keeps m2 and m3, so the cut is m2's **first** row and not its last: a block
+        // is whole, and a cut at the last row would render half a message.
+        let connection = database();
+        let session = create_session(&connection, "truncation");
+        let repository = EventRepository::new(&connection);
+        let batch: Vec<NewEvent> = ["m1", "m2", "m3"]
+            .into_iter()
+            .flat_map(|message| {
+                [
+                    turn_start(&session),
+                    delta(&session, message, "a"),
+                    delta(&session, message, "b"),
+                ]
+            })
+            .collect();
+        repository
+            .insert_batch(&batch)
+            .expect("the batch is inserted");
+
+        let cut = repository
+            .truncation_point(&session.id, 2)
+            .expect("the cut is computed")
+            .expect("three messages do not fit a window of two");
+        // m1 is rows 1-3, m2 is rows 4-6, m3 is rows 7-9; m2's first delta is seq 5.
+        assert_eq!(cut.before_seq, 5, "the cut was not m2's first row");
+        // Two turn boundaries sit below the cut, and that is the honest count: the cut is the message's
+        // own first row, so the boundary that introduced m2 (seq 4) is above it and is replayed. Only
+        // m1's (seq 1) and m2's are "before", which is what makes the client's first `turn.start`
+        // — m3's — turn 3 rather than turn 1.
+        assert_eq!(cut.turns_before, 2);
+
+        // The same log with a window of three has nothing to truncate: the cut would be its own first
+        // row, and the replay already starts there.
+        assert_eq!(
+            repository
+                .truncation_point(&session.id, 3)
+                .expect("the cut is computed"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_delta_that_names_no_message_neither_opens_a_message_nor_ends_the_scan() {
+        // A producer bug is not a message: a row with no `message_id` cannot be attributed to a block,
+        // so it must not consume a place in the window (which would cut too late) and must not stop the
+        // scan (which would cut too early).
+        let connection = database();
+        let session = create_session(&connection, "unattributable");
+        let repository = EventRepository::new(&connection);
+        let stray = NewEvent {
+            session_id: session.id.clone(),
+            kind: MESSAGE_DELTA.to_string(),
+            payload: "{\"text\":\"no id here\"}".to_string(),
+            created_at: NOW,
+        };
+        let batch = vec![
+            stray.clone(),
+            delta(&session, "m1", "one"),
+            stray,
+            delta(&session, "m2", "two"),
+            delta(&session, "m3", "three"),
+        ];
+        repository
+            .insert_batch(&batch)
+            .expect("the batch is inserted");
+
+        let cut = repository
+            .truncation_point(&session.id, 2)
+            .expect("the cut is computed")
+            .expect("m3 is older than the window's oldest message");
+        // Seqs: stray 1, m1 2, stray 3, m2 4, m3 5. The window of two is m2 and m3, so the cut is m2's
+        // row — a stray row above it changed nothing.
+        assert_eq!(cut.before_seq, 4);
+    }
+
+    #[test]
+    fn a_page_is_the_rows_below_the_cursor_in_order() {
+        let connection = database();
+        let session = create_session(&connection, "page");
+        let repository = EventRepository::new(&connection);
+        let batch: Vec<NewEvent> = ["a", "b", "c", "d"]
+            .into_iter()
+            .map(|kind| new_event(&session, kind))
+            .collect();
+        repository
+            .insert_batch(&batch)
+            .expect("the batch is inserted");
+
+        let page = repository
+            .read_before(&session.id, 4, 2)
+            .expect("the page answers");
+        // The two rows nearest the cursor, oldest first: a page a client can prepend.
+        assert_eq!(
+            page.iter().map(|event| event.seq).collect::<Vec<i64>>(),
+            [2, 3]
+        );
+        assert!(
+            repository
+                .read_before(&session.id, 1, 2)
+                .expect("the page answers")
+                .is_empty(),
+            "a cursor below every row answered a page"
+        );
     }
 
     #[test]

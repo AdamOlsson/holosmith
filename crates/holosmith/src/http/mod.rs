@@ -6,6 +6,7 @@ pub mod app;
 pub mod error;
 pub mod guard;
 pub mod health;
+mod history;
 mod sessions;
 mod streams;
 

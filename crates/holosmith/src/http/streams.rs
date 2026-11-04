@@ -43,6 +43,7 @@ pub(crate) async fn respond(state: &AppState, session_id: &str, headers: &Header
         &state.streams,
         session_id,
         after,
+        state.config.history_window,
     ) {
         Ok(body) => body,
         // Nothing has been sent yet, so this is still a plain HTTP answer.
@@ -63,11 +64,13 @@ fn known(state: &AppState, session_id: &str) -> Result<bool, crate::sessions::Re
     Ok(database.sessions().get(session_id)?.is_some())
 }
 
-/// Where the replay starts: the seq after the client's last-seen one, or the beginning.
+/// Where the replay starts: the seq after the client's last-seen one, or `0` — which
+/// [`stream::attach`] reads as "this client has nothing" and answers with a windowed replay plus a
+/// `history.truncated` frame (HS-061).
 ///
-/// Absent, empty, non-numeric and non-positive all mean "from the beginning", which is what this
-/// story promises a new client (D4). HS-061 replaces that with "the 50th most recent message"
-/// and its `history.truncated` event; no truncation rule is invented here.
+/// Absent, empty, non-numeric and non-positive all mean "no resume point". They are deliberately not
+/// distinguished: a browser that has seen no `id` sends no header at all, and a value it cannot use is
+/// the same case as one it did not send.
 fn resume_point(headers: &HeaderMap) -> i64 {
     headers
         .get(LAST_EVENT_ID)

@@ -36,11 +36,20 @@ use tokio::sync::mpsc;
 
 use super::Event as StoredEvent;
 use super::registry::{StreamGuard, StreamRegistry};
-use super::{EventStream, EventWriter, RepoError};
+use super::{EventStream, EventWriter, RepoError, Truncation};
 use crate::db::Database;
 
 /// The event kind a client listens for to learn it fell behind.
 pub(crate) const STREAM_LAGGED: &str = "stream_lagged";
+
+/// The event kind a client listens for to learn the replay it is receiving does not reach the
+/// beginning of the log (HS-061).
+///
+/// Not a stored kind: it is the stream's own answer about its own replay, so it carries no SSE `id`
+/// — a browser would otherwise resume past a seq that does not exist. The payload is
+/// `{"before_seq", "turns_before"}`; the second key is one more than the story names, and it is what
+/// keeps a windowed replay's turn labels true (see [`Truncation`]).
+pub(crate) const HISTORY_TRUNCATED: &str = "history.truncated";
 
 /// How many frames the body may hold before the task waits for the client to read them.
 ///
@@ -49,11 +58,12 @@ pub(crate) const STREAM_LAGGED: &str = "stream_lagged";
 /// The writer's own buffer (`SUBSCRIBER_BUFFER`) is what decides how much can be skipped.
 const BODY_QUEUE: usize = 64;
 
-/// How much history one replay reads: all of it.
+/// How much history one replay reads: everything from the cut the truncation rule picks.
 ///
-/// Deliberately not a window. HS-061 owns "the 50th most recent message" and the paged
-/// `GET /api/sessions/:id/events/history`; a truncation rule invented here would be that story's
-/// decision, taken in the wrong one.
+/// Deliberately not a second window. HS-061's "50th most recent message" decides where a replay
+/// *starts* (see [`crate::events::repository::EventRepository::truncation_point`]); once it has
+/// started, the whole tail is sent, because a client that is going to render the newest messages needs
+/// every frame between the cut and now. Paging the tail would be a second, invisible truncation.
 const REPLAY_LIMIT: u32 = u32::MAX;
 
 /// How often an idle stream checks whether its client is still there.
@@ -73,6 +83,8 @@ pub(crate) enum Item {
     Event(StoredEvent),
     /// This subscriber fell behind by `skipped` seqs, so the stream ends after this frame.
     Lagged { skipped: u64 },
+    /// The replay does not reach the beginning of the log, and this is where it does start.
+    Truncated(Truncation),
 }
 
 impl Item {
@@ -88,6 +100,15 @@ impl Item {
             Self::Lagged { skipped } => Event::default()
                 .event(STREAM_LAGGED)
                 .data(serde_json::json!({ "skipped": skipped }).to_string()),
+            // No `id`, for the lag report's reason: this frame is not a stored event, so a client that
+            // resumed after it would resume past a seq the log does not have.
+            Self::Truncated(truncation) => Event::default().event(HISTORY_TRUNCATED).data(
+                serde_json::json!({
+                    "before_seq": truncation.before_seq,
+                    "turns_before": truncation.turns_before,
+                })
+                .to_string(),
+            ),
         }
     }
 }
@@ -114,12 +135,18 @@ impl Stream for EventBody {
 /// The three steps are in the module comment and the order is the point: subscribe, read, then
 /// forward. `Err` is a history read that failed before anything was streamed, so the caller can
 /// still answer an envelope instead of a half-open connection.
+///
+/// `window` is the config's `history_window`: how many messages a replay that starts at the
+/// beginning is allowed to carry. It is read here, in the read step, and only when the client named
+/// no resume point — a reconnecting client already knows where it is, and truncating under it would
+/// throw away events it is entitled to (HS-061).
 pub(crate) fn attach(
     writer: &EventWriter,
     database: &Mutex<Database>,
     registry: &StreamRegistry,
     session_id: &str,
     after: i64,
+    window: u32,
 ) -> Result<EventBody, RepoError> {
     attach_with(
         writer,
@@ -131,28 +158,50 @@ pub(crate) fn attach(
             // One synchronous scope, released before the task starts: the lock is never held
             // across an await (ADR-0013).
             let database = database.lock().unwrap_or_else(PoisonError::into_inner);
-            database
-                .events()
-                .read_since(session_id, after, REPLAY_LIMIT)
+            let events = database.events();
+            // The cut is computed only for a client with no resume point, and it is the same read
+            // scope as the replay so the two cannot disagree about where the log starts.
+            let truncation = if after == 0 {
+                events.truncation_point(session_id, window)?
+            } else {
+                None
+            };
+            let from = truncation.map_or(after, |cut| cut.before_seq - 1);
+            Ok(Replay {
+                truncation,
+                events: events.read_since(session_id, from, REPLAY_LIMIT)?,
+            })
         },
     )
+}
+
+/// One replay: the frames it carries, and where it starts when it does not reach the beginning.
+///
+/// One value rather than a tuple or two parameters, because the two halves are a single answer from a
+/// single read: a cut that did not match the frames beside it would tell a client to page from a seq it
+/// already had.
+struct Replay {
+    truncation: Option<Truncation>,
+    events: Vec<StoredEvent>,
 }
 
 /// [`attach`] with the read step and the reclaim interval handed in.
 ///
 /// Both exist so a test can decide what the read sees and when an idle stream looks for its
 /// client: subscribe-before-read is only a rule if a test can tell the two orders apart, and a
-/// read that broadcasts before it returns loses its event under the wrong one.
+/// read that broadcasts before it returns loses its event under the wrong one. The window is not a
+/// parameter here: a test's read decides its own truncation, which is what lets one test state a
+/// windowed replay and another a whole one without a config.
 fn attach_with(
     writer: &EventWriter,
     registry: &StreamRegistry,
     session_id: &str,
     after: i64,
     reclaim: Duration,
-    read: impl FnOnce(&str, i64) -> Result<Vec<StoredEvent>, RepoError>,
+    read: impl FnOnce(&str, i64) -> Result<Replay, RepoError>,
 ) -> Result<EventBody, RepoError> {
     let subscription = writer.subscribe();
-    let history = read(session_id, after)?;
+    let replay = read(session_id, after)?;
     let session = session_id.to_string();
     let guard = registry.open(session_id);
     let (items, body) = mpsc::channel(BODY_QUEUE);
@@ -164,8 +213,8 @@ fn attach_with(
             subscription,
             &session,
             after,
+            &replay,
             reclaim,
-            &history,
             &items,
             &mut guard,
         )
@@ -185,15 +234,30 @@ async fn forward(
     mut subscription: EventStream,
     session_id: &str,
     after: i64,
+    replay: &Replay,
     reclaim: Duration,
-    history: &[StoredEvent],
     items: &mpsc::Sender<Item>,
     guard: &mut StreamGuard,
 ) {
     // The resume point, not zero: with `Last-Event-ID: n` and an empty replay the skip rule below
     // would be vacuous, and a live event with `seq <= n` would be forwarded as if it were new.
-    let mut last_sent = after;
-    for event in history {
+    //
+    // A truncated replay resumes from the cut's predecessor instead, and it announces the cut first
+    // so a client can offer to load what it was not sent. Announcing before sending is what makes
+    // the frame ordered with the frames it describes.
+    let mut last_sent = match replay.truncation {
+        Some(truncation) => {
+            if hand(items, guard, Item::Truncated(truncation))
+                .await
+                .is_none()
+            {
+                return;
+            }
+            truncation.before_seq - 1
+        }
+        None => after,
+    };
+    for event in &replay.events {
         if hand(items, guard, Item::Event(event.clone()))
             .await
             .is_none()
@@ -321,7 +385,8 @@ mod tests {
             .iter()
             .filter_map(|item| match item {
                 Item::Event(event) => Some(event.seq),
-                Item::Lagged { .. } => None,
+                // Neither is a stored event, so neither has a seq.
+                Item::Lagged { .. } | Item::Truncated(_) => None,
             })
             .collect()
     }
@@ -339,12 +404,16 @@ mod tests {
         let (items, mut body) = mpsc::channel(BODY_QUEUE);
 
         let forwarding = tokio::spawn(async move {
+            let replay = Replay {
+                truncation: None,
+                events: replay.to_vec(),
+            };
             forward(
                 subscription,
                 SESSION,
                 0,
-                NEVER_RECLAIM,
                 &replay,
+                NEVER_RECLAIM,
                 &items,
                 &mut guard,
             )
@@ -375,12 +444,16 @@ mod tests {
         let (items, mut body) = mpsc::channel(BODY_QUEUE);
 
         let forwarding = tokio::spawn(async move {
+            let replay = Replay {
+                truncation: None,
+                events: replay.to_vec(),
+            };
             forward(
                 subscription,
                 SESSION,
                 0,
-                NEVER_RECLAIM,
                 &replay,
+                NEVER_RECLAIM,
                 &items,
                 &mut guard,
             )
@@ -409,12 +482,16 @@ mod tests {
         let mut guard = StreamRegistry::new().open("0123456789abcdef");
         let (items, mut body) = mpsc::channel(BODY_QUEUE);
         let forwarding = tokio::spawn(async move {
+            let replay = Replay {
+                truncation: None,
+                events: Vec::new(),
+            };
             forward(
                 subscription,
                 SESSION,
                 0,
+                &replay,
                 NEVER_RECLAIM,
-                &[],
                 &items,
                 &mut guard,
             )
@@ -438,12 +515,16 @@ mod tests {
         let mut guard = registry.open("0123456789abcdef");
         let (items, mut body) = mpsc::channel(BODY_QUEUE);
         let forwarding = tokio::spawn(async move {
+            let replay = Replay {
+                truncation: None,
+                events: Vec::new(),
+            };
             forward(
                 subscription,
                 SESSION,
                 0,
+                &replay,
                 NEVER_RECLAIM,
-                &[],
                 &items,
                 &mut guard,
             )
@@ -473,12 +554,16 @@ mod tests {
         let mut guard = StreamRegistry::new().open(SESSION);
         let (items, mut body) = mpsc::channel(BODY_QUEUE);
         let forwarding = tokio::spawn(async move {
+            let replay = Replay {
+                truncation: None,
+                events: Vec::new(),
+            };
             forward(
                 subscription,
                 SESSION,
                 0,
+                &replay,
                 NEVER_RECLAIM,
-                &[],
                 &items,
                 &mut guard,
             )
@@ -506,12 +591,16 @@ mod tests {
         let mut guard = StreamRegistry::new().open(SESSION);
         let (items, mut body) = mpsc::channel(BODY_QUEUE);
         let forwarding = tokio::spawn(async move {
+            let replay = Replay {
+                truncation: None,
+                events: Vec::new(),
+            };
             forward(
                 subscription,
                 SESSION,
                 2,
+                &replay,
                 NEVER_RECLAIM,
-                &[],
                 &items,
                 &mut guard,
             )
@@ -545,7 +634,10 @@ mod tests {
             NEVER_RECLAIM,
             |_session_id, _after| {
                 live.send(event(2)).expect("the subscriber exists");
-                Ok(vec![event(1)])
+                Ok(Replay {
+                    truncation: None,
+                    events: vec![event(1)],
+                })
             },
         )
         .expect("the stream opens");
@@ -575,7 +667,12 @@ mod tests {
             SESSION,
             0,
             Duration::from_millis(10),
-            |_session_id, _after| Ok(Vec::new()),
+            |_session_id, _after| {
+                Ok(Replay {
+                    truncation: None,
+                    events: Vec::new(),
+                })
+            },
         )
         .expect("the stream opens");
         assert_eq!(registry.count(SESSION), 1, "the stream did not register");

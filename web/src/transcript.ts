@@ -57,6 +57,16 @@ const TURN_END = "turn.end";
 // replays the log and rebuilds the page anyway (ADR-0021).
 const TURN_STEER = "turn.steer";
 
+// The stream's own frame announcing that the replay it is about to send does not reach the beginning of
+// the log (HS-061). Not a transcript block: it is a cursor, and it is the only frame on this stream that
+// is about the stream rather than about the agent.
+export const HISTORY_TRUNCATED = "history.truncated";
+
+// How many events one "Load earlier" click asks for. The server's own default and its ceiling are its
+// business; this is the page size the button sends, and it is one spelling so the fetch and the test
+// cannot disagree.
+export const HISTORY_PAGE_LIMIT = 200;
+
 // The event types `parseFrame` renders, so the page subscribes to exactly these and a new kind is
 // added in one place.
 export const TRANSCRIPT_EVENTS: readonly string[] = [
@@ -208,6 +218,17 @@ export class Transcript {
   // declared what it spent. Both are facts about the log, so a replay re-establishes them.
   private settled = 0;
   private usage = false;
+
+  // How many turns closed before the first frame this transcript will see (HS-061).
+  //
+  // A turn is numbered from the `turn.start` frames a client has seen, which is true of a whole log and
+  // of a windowed one only if the window says how much it skipped. A replay that starts at the 50th most
+  // recent message would otherwise label its first turn "turn 1" while the operator's log says turn 40.
+  // The frame is sent before any transcript frame, and a page is folded through a fresh model, so this is
+  // always set before the first boundary arrives.
+  setTurnBase(turnsBefore: number): void {
+    this.turn = turnsBefore;
+  }
 
   // The changes `frame` implies, in the order the page must apply them.
   apply(frame: Frame): Change[] {
@@ -397,6 +418,63 @@ export function createFailure(code: string, message: string): string {
 // `Last-Event-ID` and the server replays after it (ADR-0014).
 export function streamPath(id: string): string {
   return `/api/sessions/${encodeURIComponent(id)}/events`;
+}
+
+// The `history.truncated` frame's payload: where the replay starts, and how many turns it skipped.
+//
+// Two keys, and the second is the one a client cannot compute: the frames that would have said how many
+// turns came before are exactly the ones it was not sent.
+export type Truncated = { beforeSeq: number; turnsBefore: number };
+
+function positive(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
+// One `history.truncated` frame, or `null` for a payload that names no cursor. A frame with no usable
+// `before_seq` has nothing to offer a page request, so it is dropped like any other malformed frame — and
+// a missing `turns_before` is 0 rather than a refusal, because a replay with no turn numbering is wrong
+// about labels and not about content.
+export function parseTruncated(data: string): Truncated | null {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    return null;
+  }
+  const fields = payload as Record<string, unknown>;
+  const beforeSeq = fields["before_seq"];
+  if (!positive(beforeSeq)) {
+    return null;
+  }
+  const turnsBefore = fields["turns_before"];
+  return {
+    beforeSeq,
+    turnsBefore: typeof turnsBefore === "number" && Number.isInteger(turnsBefore) && turnsBefore >= 0
+      ? turnsBefore
+      : 0,
+  };
+}
+
+// One page of older history, as `GET /api/sessions/:id/events/history` answers it (HS-061).
+//
+// `events` are stored rows, so each is a `type`/`payload` pair `parseFrame` already understands; the
+// three other fields are the cursor, whether another page exists, and how many turns closed before this
+// one — the same number the truncation frame carries, for the same reason.
+export type HistoryPage = {
+  events: { seq: number; type: string; payload: string; created_at: number }[];
+  before_seq: number;
+  has_more: boolean;
+  turns_before: number;
+};
+
+// Where one older page lives. `before` is exclusive and is the cursor the truncation frame or the previous
+// page named, so a client never computes a seq of its own.
+export function historyPath(id: string, before: number, limit: number = HISTORY_PAGE_LIMIT): string {
+  const query = `before=${before}&limit=${limit}`;
+  return `/api/sessions/${encodeURIComponent(id)}/events/history?${query}`;
 }
 
 // The session a path names, or `null` for every other path. `/sessions/<id>` and nothing deeper:

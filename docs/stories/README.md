@@ -114,7 +114,7 @@ Every section of `HolosmithSpec.md` maps to at least one story. If a spec item g
 
 ## Decisions taken while slicing
 
-Thirty-two decisions were made that the spec does not make. Each has an ADR because each is hard to reverse, surprising to a later reader, and the result of a real trade-off.
+Thirty-three decisions were made that the spec does not make. Each has an ADR because each is hard to reverse, surprising to a later reader, and the result of a real trade-off.
 
 - [ADR-0001](../adr/0001-build-session-lifecycle-before-docker.md) — the session lifecycle is built against the stub backend before Docker exists. Consequence: there are two fakes, the in-process stub backend and the in-container fake pi, and they are not the same thing.
 - [ADR-0002](../adr/0002-security-guards-before-endpoints.md) — the browser guards and network isolation land before the features they protect.
@@ -186,3 +186,4 @@ What was set up, and verified against the docs:
 To re-sync after editing the markdown, run `python3 scripts/import-linear.py` — it skips any HS-id already present, so it seeds and extends but never duplicates. `--dry-run` prints the payloads without writing. It reads its credentials from pi's MCP OAuth store and fails with a clear message if `linear` is not authenticated or the token has expired.
 
 Editing an existing story in Linear is not synced back to the markdown. The documents are the source of truth for the plan; treat Linear as the execution surface.
+- [ADR-0033](../adr/0033-history-truncation-and-pagination.md) — a stream opened with no `Last-Event-ID` is replayed from the **lowest seq of the `history_window`-th most recent message**, found by a backwards scan over the message-bearing kinds so a block is always whole; the cut is computed in the stream's read step and only for a client with no resume point, and it is announced by a `history.truncated` frame carrying `{before_seq, turns_before}` and **no** SSE `id` (it is not a stored event). Consequence: the window is a config key (`history_window`, default 50, `0` refused), a page is `seq < before ORDER BY seq DESC LIMIT n` and therefore stable under concurrent writes by construction, `before` is required with a new `422 bad_query`, and the page numbers a turn from `turns_before` rather than from the frames it was not sent — `case_history` and `tests/history.rs` are where the two halves meet.
