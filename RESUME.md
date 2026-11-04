@@ -1,4 +1,4 @@
-# RESUME — orchestrator handoff (cold start, after twenty-five stories)
+# RESUME — orchestrator handoff (cold start, after twenty-seven stories)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating
 procedure and still governs; this file is the state of the world — what exists, what the environment
@@ -37,11 +37,12 @@ created, prompted, aborted, steered, stopped, resumed and deleted, and it is dri
 ## 1. Where the work stands
 
 Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is clean, and every
-commit is **pushed** (see the note on pushing below). `HEAD` is `ce4dc82`; any commit after it is
+commit is **pushed** (see the note on pushing below). `HEAD` is `ef0784a`; any commit after it is
 bookkeeping — this file's own refresh.
 
-**Linear: 25 Done, 55 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-025`
-(`PER-33` … `PER-57`).
+**Linear: 27 Done, 53 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-026`
+(`PER-33` … `PER-58`) **plus `HS-059` (`PER-91`)** — the queue is not contiguous any more, because
+`HS-027` … `HS-058` are blocked on a Docker daemon this machine does not have (§8).
 
 | Story | Linear | Commits | ADR |
 | --- | --- | --- | --- |
@@ -70,14 +71,19 @@ bookkeeping — this file's own refresh.
 | HS-023 token budget | PER-55 | `2e902c2`, `fbc0659` | 0027 |
 | HS-024 Docker preflight | PER-56 | `f241ced`, `0b7d50e` | 0028 |
 | HS-025 worktree provisioning | PER-57 | `7e36bde`, `1fe7f6e`, `ce4dc82` | 0029 |
+| HS-026 worktree refusal rules | PER-58 | `18e4695`, `c233ab7` | 0030 |
+| HS-059 event coalescing | PER-91 | `06f506b`, `65f7107`, `5207a97` | 0031 |
 
-**Next issue: `PER-58` (HS-026 — worktree refusal rules).** Then onward in `HS-###` order. §8 carries
-what HS-026 is about and the facts it inherits.
+**Next issue: `PER-92` (HS-060 — message snapshots and compaction)**, now that HS-059 is Done. Then
+`HS-061` (`PER-93`), `HS-065` (`PER-97`), `HS-075` (`PER-107`) — the four stories whose blockers are all
+Done. **`HS-027` … `HS-058` are blocked** (no Docker daemon here; PER-59 carries the argument, and
+`PER-74`/`PER-79`/`PER-84`/`PER-94`/`PER-100` carry the pointer), so `HS-###` order now means: skip the
+blocked run, take the next unblocked story. §8 carries what HS-060 is about.
 
 Ranking, per `PROMPT.md`: Linear priority (all are `No priority`) → `HS-###` order in `docs/stories/` →
 anything already `In Progress` first → skip an issue whose `Blocked by` stories are not `Done`.
 
-### Eight facts a cold start must know
+### Ten facts a cold start must know
 
 1. **A running turn can now be stopped, in two rungs, with or without the way back.** `src/ladder.rs`
    is the shared routine: `clear_queue` then `abort`, wait up to `abort_grace` (the grace *bounds rung
@@ -145,7 +151,29 @@ anything already `In Progress` first → skip an issue whose `Blocked by` storie
    later step is handed is the **create's**, so `session.worktree` is still `''` even after the row has
    the path — HS-027's mounts must derive it (`DockerBackend::worktree`) rather than read it.
 
-8. **A Docker run does not start on a machine that cannot carry it.** `src/preflight.rs` checks the
+8. **A project the machine must not mount is refused by the create, with its own 422.**
+   `src/worktree.rs` holds `refuse(repository) -> Result<(), Refusal>` (and `Refusal`, `repository_of`,
+   `CONFIG_READ`): `.git` must be a directory, no `.gitmodules` and no `.git/modules`, and
+   `extensions.worktreeConfig` off (`git config --local --type=bool --get`). `Backends::refuse_project`
+   asks the question — the stub answers "no repository", because it mounts nothing — and the create runs
+   it on `spawn_blocking` **after** the idempotency lookup and **before** the cap, so a retry still
+   answers its row and a refused create never evicts. `resume` asks the same question (HS-026's review
+   found the hole). A repository git cannot read is `500 internal` with git's words only in the log, and
+   the page prints the refusal's **sentence alone** (`createFailure` in `web/src/transcript.ts`) for the
+   three codes. ADR-0030.
+
+9. **Deltas are merged inside one commit, and only inside one commit.** `events::coalesce` runs on the
+   writer's batch between `collect` and `commit`: consecutive `message.delta`s merge when the session,
+   the message id and the delta's own `text`/`thinking` all match, the merged row keeps the first
+   `created_at`, and the run's text is accumulated **outside** the rows and serialised once (a run of one
+   keeps its producer's bytes). "The pinned shape" is exact: three keys, no fourth — a payload that is
+   not it is passed through untouched and ends the run. **Coalescing is per batch, so two adjacent rows
+   of one message and kind are correct when they come from different commits**; a test that forbids them
+   at the production 25 ms window fails a correct implementation (that was HS-059's review P1 — the
+   live-path test now gives the writer a two-second interval so one commit is a fact). Measured: 5,000
+   deltas → 3 rows; the stub's seven scripted deltas → three. ADR-0031.
+
+10. **A Docker run does not start on a machine that cannot carry it.** `src/preflight.rs` checks the
    daemon's `_ping` over `docker_host`, git ≥ 2.38 and `df -Pk <data root>` against `min_free_gb`, and
    `serve --backend docker` refuses **before the database is opened** with one sentence per failure that
    names the fix (all failures at once). `role = "hub"` is exempt — a hub runs no sessions (item 10 §6) —
@@ -255,6 +283,11 @@ export does not have `chromium` at the top level); and Chromium must be launched
 navigate with `domcontentloaded` and wait for the rows.
 **Not available, and not to be invented:** no Docker daemon, no `sudo`, no `apt`, no `gh`, no ssh key
 or token. There is a **browser now** (see §1 fact 2), but no *gate* may need one.
+**The `docker` CLI (29.9.2) *is* installed but there is no daemon**: `/var/run/docker.sock` does not
+exist and `docker version` answers "failed to connect to the docker API". That is what blocks
+`HS-027` … `HS-058` (§8), and it is a hard block, not an inconvenience: mounts, capabilities and
+containers are the things those stories assert, and a socket that answers `_ping` proves a refusal or a
+host command, not a container. Do not implement them against a fake daemon and call the gate green.
 **No `awk`** and **no `shellcheck`** on this machine — do not write a script or a gate that needs
 either.
 
@@ -337,9 +370,9 @@ If that fails, **stop and report** — that is a `PROMPT.md` stop condition.
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                     # 223 lib + 30 test results (10 in tests/worktree.rs, 3 in
-                               # backend_contract.rs, 8 idle_stop.rs, 6 turn_timeout.rs, 14 delete.rs)
-cd web && npm test             # 22 transcript tests (node's own runner)
+cargo test                     # 228 lib + 32 integration binaries (22 in tests/worktree.rs, 13 in
+                               # tests/events.rs, 10 in tests/turns.rs, 14 delete.rs, 8 idle_stop.rs)
+cd web && npm test             # 30 transcript tests (node's own runner)
 cd web && npx tsc --noEmit     # not a gate phase, but a web edit that does not typecheck is a bug
 scripts/verify.sh              # THE one-command gate since HS-006
 ```
@@ -347,9 +380,9 @@ scripts/verify.sh              # THE one-command gate since HS-006
 `scripts/verify.sh` runs six phases, cheapest first: `fmt`, `clippy`, `test`, `build`
 (`scripts/build.sh`, which itself runs `build-web.sh` — `npm test` then Vite — and `check-static.sh`
 last), `embed` (`scripts/check-embed.sh`), then `serve` — the **shipped musl artifact** booted on
-`--port 0` with a temp data dir, running **41 cases plus a CORS sweep (237 assertions)**, then torn down
-with `SIGTERM` and an asserted exit 0. Three cases bring their own boot (`case_token_budget`,
-`case_worktree`, and `case_docker_preflight`, which needs no server at all). It takes ~3 min (both musl targets) plus `case_idle_stop`'s real
+`--port 0` with a temp data dir, running **43 cases plus a CORS sweep (268 assertions)**, then torn down
+with `SIGTERM` and an asserted exit 0. Four cases bring their own boot (`case_token_budget`,
+`case_worktree`, `case_worktree_refusal`, and `case_docker_preflight`, which needs no server at all). It takes ~3 min (both musl targets) plus `case_idle_stop`'s real
 minute. `--no-build` skips `build` and `embed`; `--keep` keeps the work dir.
 
 A story is not done until all four are green on a clean tree, and then you run the story's own demo
@@ -411,24 +444,31 @@ crates/holosmith/
   src/http/                 mod.rs, app.rs (Routes/App seam, AppState + provisioner()/turner()/
                             transitioner()/ladder()/deleter(), edge layer, is_guard_exempt), error.rs
                             (the one envelope, every code, ApiError::not_in_state / bad_prompt /
-                            bad_steer / unsaved_work / unknown_session / cap_without_idle),
+                            bad_steer / unsaved_work / unknown_session / cap_without_idle /
+                            git_not_directory / submodules_present / worktree_config_enabled),
                             health.rs, guard.rs (the four checks), sessions.rs (POST+GET
                             /api/sessions, GET /api/sessions/{id}, POST …/prompt, …/abort, …/steer,
                             …/resume, DELETE /api/sessions/{id}[?force=true], TURN_STEER, EVICTED,
-                            `Slot` + `slot_for` + `evict_one`, `apply_trigger`), streams.rs (the SSE
+                            `Slot` + `slot_for` + `evict_one`, `apply_trigger`, and the project's
+                            refusals: `refuse_project` + `refusal_error`), streams.rs (the SSE
                             handler)
   src/sessions/             mod.rs (Status, Session, NewSession, RepoError), repository.rs (every
                             `sessions` statement + its SQL-location guard; includes touch,
                             `oldest_idle`, and `remove` — the row and its log in one transaction),
                             state.rs (the transition table, Transitioner::apply / apply_logged, the
                             set_status guard), activity.rs (the one `touch`: lock, warn, carry on)
-  src/events/               mod.rs (Event, NewEvent, EventWriter, EventStream), writer.rs, repository.rs
-                            (`insert_batch` drops an event whose session has gone; `delete_session_log`),
-                            stream.rs (replay→live, lag), registry.rs (open-stream counts)
+  src/events/               mod.rs (Event, NewEvent, EventWriter, EventStream, and since HS-059
+                            `coalesce` + its private `parse_delta`/`Delta`), writer.rs (`collect` →
+                            `coalesce` → `commit`; the failure log names appended events *and* rows),
+                            repository.rs (`insert_batch` drops an event whose session has gone;
+                            `delete_session_log`), stream.rs (replay→live, lag), registry.rs
+                            (open-stream counts)
   src/worktree.rs           the session's worktree (HS-025, ADR-0029): `Worktree::of` (the naming rule),
                             `ensure` (create or adopt, answers `Ensured { base_commit, created }`), `ahead`
                             (`rev-list --count`), `remove` (registered? → remove → branch −D → prune), and
-                            `GitError`. Sync and std-only; the backend calls it on `spawn_blocking`
+                            `GitError`; and since HS-026 the refusal reads (ADR-0030): `refuse`,
+                            `Refusal`, `repository_of`, `CONFIG_READ` (`--local --type=bool`). Sync and
+                            std-only; the backend calls it on `spawn_blocking`
   src/preflight.rs          the three startup checks and their sentences (HS-024, ADR-0028):
                             `check`/`check_with` (the `Tools` seam is the test's shim for git/df),
                             `Complaint { check, sentence }`, `socket_sentence`
@@ -446,8 +486,8 @@ crates/holosmith/
 web/                        Vite 7 + TypeScript, two screens (`/` and `/sessions/<id>`); untouched by HS-025
                             package-lock COMMITTED; main.ts is the DOM, transcript.ts the renderer's
                             rules (frame parsing, block model, affordances, `stoppedNotice` /
-                            `stoppedDetail`)
-web/test/transcript.test.ts 21 tests over synthetic frames, node's own runner (`npm test`)
+                            `stoppedDetail`, `budgetNotice`, `createFailure`)
+web/test/transcript.test.ts 30 tests over synthetic frames, node's own runner (`npm test`)
 scripts/build-web.sh        npm ci + npm test + npm run build, asserts web/dist/index.html
 scripts/build.sh            web first, HOLOSMITH_REQUIRE_WEB=1, both musl targets → dist/<triple>/,
                             atomic copy, then check-static.sh. Uses `cargo build --locked`.
@@ -456,9 +496,9 @@ scripts/check-static.sh     file/readelf, empty-root serve + cmp against web/dis
 scripts/check-embed.sh      the three embed cases (present / absent warns / required fails)
 scripts/verify.sh           the one-command gate (see §3)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0029          read the recent ones before planning anything
+docs/adr/0001…0031          read the recent ones before planning anything
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-57   each a verbatim review + a `## Resolution` table
+docs/review/PER-33…PER-58, PER-91  each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -468,11 +508,12 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
 - **Working:** `version` (text + `--json`), `config {validate,show,edit}`, `serve` (control listener,
   embedded app, `/api/health`, `POST`/`GET /api/sessions`, `GET /api/sessions/{id}`,
   `POST /api/sessions/{id}/{prompt,abort,steer,resume}`, `DELETE /api/sessions/{id}[?force=true]`,
-  `GET /api/sessions/{id}/events`), SQLite with three migrations, the guards, the event writer, the SSE
-  stream, the stub backend and its four-step provisioner, the enforced state machine, the abort ladder,
-  the delete flow, the cap with eviction, the Sessions screen with its create form and the
-  "nothing was deleted" notice, the session screen at `/sessions/<id>` with a live transcript and a
-  four-action composer.
+  `GET /api/sessions/{id}/events`), SQLite with three migrations, the guards, the event writer (which
+  coalesces a commit's deltas), the SSE stream, the stub backend and its four-step provisioner, the
+  enforced state machine, the abort ladder, the delete flow, the cap with eviction, the create's and the
+  resume's three project refusals, the Sessions screen with its create form (which prints a project
+  refusal's sentence alone) and the "nothing was deleted" notice, the session screen at
+  `/sessions/<id>` with a live transcript and a four-action composer.
 - **Not built yet:** anything Docker beyond the preflight and the **worktree step** (HS-026 … HS-046 — the
   network, container and agent steps still refuse, each naming its story), the drain (HS-044), tool-output files and `output_ref` (HS-033), the **usage totals on the
   screen** (HS-034 — the columns are now real, the screen only says "no usage reported" when it must), the
@@ -487,8 +528,9 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   it. `DockerBackend::new(projects_root)` **provisions the worktree and refuses every other operation**
   (HS-026 … HS-031 fill them in), and the default backend is `docker`
   (ADR-0001: the stub is opt-in), so a default build provisions a session to `error` with a reason
-  rather than hanging in `starting`. That refusal is also the demo trick HS-019 used to provoke a real
-  failed snapshot from the shipped artifact. `scripts/verify.sh` boots with `backend = "stub"` in its
+  rather than hanging in `starting`. (Since HS-026 a create for a project that is not a plain checkout is
+  refused earlier, with a 422; the demo trick HS-019 used still works for a project that *is* one.) That
+  refusal is also how HS-019 provoked a real failed snapshot from the shipped artifact. `scripts/verify.sh` boots with `backend = "stub"` in its
   config, and so does `scripts/check-static.sh`'s empty-root run — a Docker run now refuses at startup on a
   machine that fails the preflight (HS-024), and that sandbox has no daemon, no `git` and no `df`.
 - **`AppState`** is `{ config, runtime, database: Arc<std::sync::Mutex<Database>>, events: EventWriter,
@@ -513,12 +555,14 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
 
 ---
 
-## 5. The per-issue cycle (what actually worked, twenty-four times)
+## 5. The per-issue cycle (what actually worked, twenty-seven times)
 
 Everything is **sequential: one writer at a time**, never two children editing files.
 
 1. **Pick** the issue (ranking in §1) and read its Linear body plus the matching `docs/stories/` slice.
-   Note the HEAD SHA — that is the review's fixed point.
+   Note the HEAD SHA — that is the review's fixed point. **Check the issue's title against the story you
+   mean**: HS-059 is `PER-91`, and this session's commits for it say `Closes PER-93` because the number
+   was assumed rather than read.
 2. **Plan.** For **L** stories, use a fresh `delegate` child briefed to run the grilling protocol
    (`~/.agents/skills/grilling/SKILL.md` + `domain-modeling`), which puts **one** round of frontier
    questions to *you* via `contact_supervisor`; answer with `subagent_supervisor({action:"reply", …})`.
@@ -776,9 +820,11 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 - **`docs/build.md` is a story deliverable, not orchestrator-only.** If a story changes prerequisites or
   gates, the doc is in scope, and its prose must be reflowed (~100 columns), not just appended to.
 - **Every story adds at least one `case_*` to `scripts/verify.sh`.** The rule is in bold in
-  `docs/build.md`, and the reviewer enforces it. The current gate is 36 cases / 169 assertions.
+  `docs/build.md`, and the reviewer enforces it. The current gate is 43 cases / 268 assertions, and a
+  case that makes its own session must run before the shared one exists or delete it at the end (the
+  gate's cap is one live session).
 - **Adding an ADR means updating `docs/stories/README.md`**: the "Decisions taken while slicing" count
-  (now **twenty-six**) and the bullet list. A reviewer will check the links resolve — three did not,
+  (now **thirty-one**) and the bullet list. A reviewer will check the links resolve — three did not,
   once.
 - **An ADR that a later story changes gets a one-line "Superseded by ADR-00xx" note**, not a rewrite
   (ADR-0012 and ADR-0013 do this; HS-015 added two to ADR-0018).
@@ -893,6 +939,43 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 
 ---
 
+### Landmines HS-026 and HS-059 added
+
+- **The gate's cap is one live session, so a case that creates one can evict the run's shared session.**
+  `case_event_coalescing` was first placed after `case_prompt_turn`; its create evicted `created_id`
+  (`max_live_sessions = 1` in `scripts/verify.sh`'s config) and `case_turn_timeout` then prompted a
+  stopped row: `FAIL case_turn_timeout_1/status — expected 202, got 409`. A case that makes its own
+  session either runs before the shared one exists or deletes its session as its last assertion.
+- **A refusal is read on the request's path, so it must not hold the database lock or block a worker.**
+  `refuse_project` is `spawn_blocking`, and the answer is raised *inside* the create's one lock scope
+  (as a value passed in) only on the path that would insert — after the idempotency lookup (a retry is
+  not a refusal) and before the cap (a refused create must not evict).
+- **`git config --get` without a scope reads system + global + local.** A global
+  `extensions.worktreeConfig` would have refused every project on the machine; `--local` is the fix and
+  the premise was measured (`GIT_CONFIG_GLOBAL` pointing at a temp file: `true` without `--local`, exit 1
+  with it). Any future repository read must ask which scope it means.
+- **`std::env::set_var` is `unsafe` in edition 2024 and this crate denies `unsafe`**, so a test cannot set
+  the process's git config. The `--local` spelling is pinned by a unit test over the `CONFIG_READ`
+  constant instead; do not "fix" that by mutating the environment.
+- **A repository git cannot read is `500 internal`, not a refusal**, and git's words stay in the log
+  (`internal(op, error)` is the repo's one log-and-answer pattern — do not hand-roll `warn!` + `internal()`).
+- **Coalescing is per batch, never per log.** Two adjacent rows of one message and kind are correct when
+  they came from different commits. HS-059's first live-path test forbade them and passed only because a
+  zero-paced stub fit one 25 ms window — the review called it BLOCK, and the fix was to give the test a
+  two-second window so one commit is a fact (do not "fix" it by deleting the assertions).
+- **The stub paces 200 ms per frame under `serve`, which is eight commit windows**, so the gate cannot
+  produce a burst and cannot show a merge. `case_event_coalescing` asserts the *contract* instead
+  (never more rows than frames, one message id, no lost text) and says so; a `case_*` that claimed to
+  prove the merge would be proving nothing. Two pre-existing assertions (seven deltas in `tests/turns.rs`
+  and in `case_prompt_turn`) depend on that pace and now say so.
+- **A merged payload is re-serialised, so its spelling becomes canonical.** Accumulate the run outside the
+  rows and serialise once; a run of one is never touched. Re-serialising per delta is the quadratic
+  re-read ADR-0018 rejects on the renderer side.
+- **The Linear issue number is not derivable from the story number.** HS-059 is `PER-91`, not `PER-93`
+  (that is HS-061); this session's two code commits say `Closes PER-93` and the correction is recorded in
+  `docs/review/PER-91.md`, its Linear comment and PER-93's own. Read the issue's title before writing
+  `Closes <IDENT>`.
+
 ## 7. Decisions taken on the operator's behalf (do not silently undo)
 
 | Decision | Why | Where recorded |
@@ -939,6 +1022,8 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 | The **Docker preflight is a startup refusal** with `Complaint` values reported all at once, `hub` and `stub` exempt, and no new dependency (`df`, `git --version`, a hand-written `_ping`) | the story says "fail at startup instead of mid-turn", item 10 §5 makes the same check `ExecStartPre`, and `unsafe` is denied so `statvfs` was not reachable | ADR-0028 |
 | The **worktree's five host commands live in one `src/worktree.rs` value**, the backend runs them on `spawn_blocking`, and the **provisioner** writes the two columns the step reports | item 1 names them as host commands that four later stories read, and ADR-0019 forbids a backend writing a row | ADR-0029 |
 | A worktree step that **adopted** a worktree is **not undone** when a later step fails; a delete still removes it | those commits are the agent's work, and deleting them to tidy up after a step that made nothing is data loss; a delete's session is going away and was snapshotted | ADR-0029 |
+| The **project's refusals are the create's and the resume's 422** (`git_not_directory`, `submodules_present`, `worktree_config_enabled`), read by `worktree::refuse` through `Backends::refuse_project` on `spawn_blocking`, raised after the key and before the cap, with the stub answering "no repository" | spec item 1 says "refused with 422 at session creation"; the provisioner has no request to answer; a retry must still answer its row and a refused create must not evict (ADR-0030) |
+| **Coalescing is the writer's**, a pure `coalesce(batch)` between `collect` and `commit`, merging only consecutive deltas of one session, message id and delta kind, serialising once per run | spec item 15 names the 25 ms commit; ADR-0013 makes the writer the one place a seq is assigned; a per-delta re-serialise is ADR-0018's quadratic mistake (ADR-0031) |
 | **`ahead` is a function, not a column and not an endpoint**, and the story's demo is recorded as half-showable | no column exists, HS-061 owns `GET /changes`, a per-row git call in the list endpoint is a second data path; the step after the worktree refuses, so a live worktree cannot be shown from the artifact | ADR-0029 |
 
 ---
@@ -950,72 +1035,71 @@ cd /home/adamolsson/projects/holosmith
 git status --short                          # must be clean
 . ~/.pi/toolchains/env.sh
 python3 /tmp/lin.py issues | grep -v ' Done ' | head   # next unfinished (recreate /tmp/lin.py, §2)
-python3 /tmp/lin.py issue PER-58            # sanity-check Linear is reachable and scoped
-scripts/verify.sh                           # baseline green (~6 min, 41 cases, 237 assertions)
+python3 /tmp/lin.py issue PER-92            # sanity-check Linear is reachable and scoped
+scripts/verify.sh                           # baseline green (~6 min, 43 cases, 268 assertions)
 ```
 
-Then start the cycle at **`PER-58` (HS-026 — worktree refusal rules)**. Read §1's facts first: the runner
-owns both turn policies, the spend is a column the writer adds to, the worktree step is real and idempotent,
-and the page has been rendered (so a DOM claim needs a Chromium run — and a `web/` edit needs a rebuild
-before that run).
+Then start the cycle at **`PER-92` (HS-060 — message snapshots and compaction)**. Read §1's ten facts
+first: the writer owns the batch (and coalescing), the runner owns both turn policies, the worktree step is
+real and idempotent, the create and the resume refuse a project the machine must not mount, and the page has
+been rendered (so a DOM claim needs a Chromium run — and a `web/` edit needs a rebuild before that run).
 
-### What HS-026 is about, so the first brief is fast
+**Do not try `HS-027` … `HS-058` first.** They are blocked on a Docker daemon this machine does not have;
+PER-59 records the argument, and the four stories whose blockers are all Done — `HS-060` (`PER-92`),
+`HS-061` (`PER-93`), `HS-065` (`PER-97`), `HS-075` (`PER-107`) — are the queue.
 
-Acceptance, verbatim from `docs/stories/phase-1b-docker-backend.md` (Size S, spec item 1):
+### What HS-060 is about, so the first brief is fast
 
-- [ ] 422 `git_not_directory` when the project's `.git` is not a directory.
-- [ ] 422 `submodules_present` when submodules exist (their hooks live under `.git/modules`).
-- [ ] 422 `worktree_config_enabled` when `extensions.worktreeConfig` is on.
-- [ ] Checks run before `git worktree add`, so a refused session leaves nothing behind.
-- [ ] The UI explains the refusal in one sentence rather than showing a code.
+Acceptance, verbatim from `docs/stories/phase-2-deployable-mvp.md` (Size M, spec item 15):
 
-**Already in place:** `DockerBackend::provision_worktree` is the one place a refusal can be raised before the
-first git command; `BackendError::failed(reason)` is how a sentence reaches the row and the transcript;
-`src/worktree.rs` holds `Worktree::of` (the repository path), so a `refusal()`-style check belongs beside it
-as `Worktree::refusal(&self) -> Result<(), Refusal>` or in the backend, decided by where the reading happens;
-`tests/worktree.rs` is where the cases go (a real repository in a `TempDir`); `ApiError`'s constructors are in
-`http/error.rs` and its codes are constants.
+- [ ] A compaction job replaces delta rows of messages completed more than 24 hours ago with one
+      `message.snapshot` event holding full text, thinking and message id.
+- [ ] The snapshot takes the highest seq of the removed rows, so seq stays strictly increasing with gaps
+      only where compaction removed rows.
+- [ ] Clients apply a snapshot by message id, replacing rather than appending, and it is safe to receive
+      after partial deltas.
+- [ ] Compaction is per session, batched, and never runs while a turn is running for that session.
+- [ ] A test replays a client through a compaction boundary and asserts an identical transcript.
+
+**Already in place:** `MESSAGE_SNAPSHOT` is pinned in `events/mod.rs` and the page already *replaces* on a
+snapshot (`message.snapshot` → `Change::Snapshot` → `replaceChildren`), so the renderer owes nothing;
+`session.status`-shaped tasks are the pattern for a job (`src/sweeper.rs` is the closest: a public `sweep`
+for tests, a `run` loop on a constant tick, `spawn`); the events repository owns every statement against
+`events` and already has `read_since`/`delete_session_log`; `sessions.last_seq` is the durable counter and
+must not move; the stub's turn is what writes delta rows to age.
 
 **What the story has to decide (none of it is settled — plan it before coding):**
 
-1. **422 is an HTTP answer, but the refusal is discovered inside the provisioner's background task**, where
-   there is no request to answer. Read the story's wording against the flow: `POST /api/sessions` answers 202
-   *before* provisioning. The honest options are (a) the refusal happens in the **create handler**, before the
-   202 (a `git` read per create — that is a synchronous check on the request's path and it is what "refused at
-   session creation" means), or (b) it stays in the step and reaches the operator through the row's reason
-   and a 409-shaped sentence instead of a 422. The spec (item 1) says "Refused with 422 at session creation",
-   so (a) is canonical — and the sentence must then not be a `BackendError` but the create's own `ApiError`.
-2. **Three new error codes** (`git_not_directory`, `submodules_present`, `worktree_config_enabled`) means
-   `http/error.rs` constants, the story's distinct-code acceptance, and a case each — plus the sentence rule
-   ("the UI explains the refusal in one sentence rather than showing a code"), which with today's page means a
-   sentence in the *create form's* error area (`web/src/main.ts` renders `bad_project` today — find it first).
-3. **How to detect each condition without a new dependency**: `.git` is a directory (`Path::is_dir`, but a
-   `.git` *file* means a worktree/submodule checkout); submodules (`git -C repo submodule status` is a read,
-   or `.gitmodules` existing — decide from what item 1 says the hole is); `extensions.worktreeConfig`
-   (`git -C repo config --get extensions.worktreeConfig` is a read that answers non-zero when unset).
-4. **Where the check runs so it costs nothing when it can be avoided**: a project that has been created from
-   before is checked again on every create unless it is cached, and a cache is a second source of truth for a
-   repository that can change under it. Simplest canonical answer: check on every create (one or two `git`
-   calls beside a `worktree add` that costs the same order), and say so.
-5. **Whether the stub is affected.** A stub create has no repository, so the check must be the Docker backend's
-   (or the handler's, gated on `runtime.backend`) — otherwise every stub test and the whole gate would need a
-   repository. Read §1 fact 7 and ADR-0015/0028 before choosing.
+1. **How "completed more than 24 hours ago" is read.** A `message.end` row's `created_at` is the only
+   durable instant; aging it in a test means writing `created_at` (tests may use the raw connection, as
+   `tests/idle_stop.rs` ages `last_active_at`). Decide whether the window is a config key or the spec's
+   fixed 24 hours (ADR-0006's list is exhaustive — inventing a key is a decision, not a detail).
+2. **Which rows are removed.** The deltas of that message (`message.delta` where the payload's `message_id`
+   matches) — the `message.end`, the tool frames and the turn boundaries stay. The snapshot carries the
+   concatenated `text` and `thinking`, so the read has to fold per delta kind the way the page does.
+3. **The insertion's seq.** Spec says "the highest seq of the removed rows"; that is a *reuse* of a number,
+   which is why the section says gaps are allowed where compaction removed rows. `last_seq` must not move
+   backwards, and a client whose `Last-Event-ID` is that number already has the deltas (ADR-0031's
+   neighbour, ADR-0013's counter rule).
+4. **Never while a turn runs.** Skip `running` (and `starting`/`deleting`) sessions; a session can start a
+   turn between the read and the write, so the skip has to be a predicate the write re-checks or a lock the
+   runner also takes — say which and why.
+5. **How the gate shows it.** The artifact has no aging API; `python3` (with `sqlite3`) is available, so a
+   `case_*` can stop the server, age rows in `$WORK/data/app.db`, restart it (a startup pass), and read the
+   stream for the snapshot. Decide whether compaction runs at startup, on a tick, or both — and keep the
+   gate's own `idle_stop_min = 1` in mind (§6: no case may leave a session idle for a minute).
 
-### What HS-025 and HS-024 settled that HS-026 inherits
+**What HS-059 settled that HS-060 inherits:**
 
-- **The worktree step is real and idempotent** (ADR-0029): create-or-adopt, the row's base wins over the
-  branch's head, and a step that only adopted is not undone when a later step fails
-  (`Provisioned::undoable`). A refusal must therefore run **before** `ensure`, so a refused create leaves
-  nothing behind — that is the story's fourth acceptance line.
-- **A backend cannot write the row** (ADR-0019); the provisioner writes what a step made. A refusal is not a
-  record, so it needs no `Provisioned` variant.
-- **The sentence is the deliverable**, not the code: `BackendError::failed` and `ApiError::not_in_state` both
-  exist because the operator reads one sentence, and no test pins prose — only that the code names its own
-  request.
-- **A new `case_*` per story**, and a case that needs a real repository puts one in a `TempDir` (as
-  `tests/worktree.rs` does) or boots its own server with `case_worktree`'s fake-`_ping` trick.
-- **One build at a time, commit then `verify.sh` then the demo** — and a `web/` edit needs the rebuild before
-  any browser check (§3).
+- **Coalescing is the writer's batch, and it is not compaction.** Two rows of one message and kind can sit
+  next to each other across commits; a compaction job that assumed one delta row per message would be wrong.
+- **The writer parses a delta's payload exactly** (`message_id`, `kind`, `text`, three keys, no fourth), and
+  a payload that is not that shape is left alone — a compaction job reading history must be as strict.
+- **The page already replaces on a snapshot** and is safe to receive one mid-stream; the "replay through a
+  compaction boundary" test belongs beside `tests/streams.rs`'s replay cases (`Sse::connect` with a
+  `Last-Event-ID`).
+- **A new `case_*` per story**, `docs/build.md`'s case paragraph, an ADR when a decision is hard to reverse,
+  and the gate's counts (43 cases / 268 assertions today).
 
 ## 9. Reporting
 
@@ -1025,7 +1109,17 @@ durable record; the review file is the durable review; the commit history is the
 stop before the backlog is empty, say so explicitly, say which issue is next, and leave the tree clean
 and the gates green — a half-finished story is worse than an honest stop.
 
-This session's ledger (the twenty-fifth story):
+This session's ledger (the twenty-seventh story — and the first where the queue's order had to be
+reinterpreted, because the Docker-backed run in front of it is blocked):
+
+| Issue | Story | Commits | Outcome |
+| --- | --- | --- | --- |
+| PER-58 | HS-026 worktree refusal rules | `18e4695`, `c233ab7` | Done — Standards **PASS with findings** (1 P2, 5 P3), Spec **PASS with findings** (1 P2, 3 P3). The spec P2 was real: **a resume bypassed the guard**, so a project that became unsafe could be re-mounted — `resume` now answers the same three codes. The standards P2 was the repo's one log-and-answer pattern (`internal(op, error)`) re-implemented by hand. Also fixed: `git config` needed **`--local`** (a global `extensions.worktreeConfig` would have refused every project on the machine — measured before the fix), an HTTP case for `Unreadable` → `500`, and the `.gitmodules` rule now argues itself in ADR-0030 (the declaration is checked out into `/work`, so `submodule update --init` writes hooks under the mounted `.git/modules`). New: `worktree::refuse`/`Refusal`, three codes + constructors, `Backends::refuse_project`, `createFailure` on the page, ADR-0030, 12 tests, `case_worktree_refusal`. Also **first: the story rewrote HS-025's behaviour** (a project the machine does not hold is now a 422, not an `error` row), recorded rather than papered over |
+| PER-91 | HS-059 event coalescing | `06f506b`, `65f7107`, `5207a97` | Done — Standards **BLOCK** (1 P1, 3 P2, 7 P3), Spec OK with notes. The P1 was real and is the lesson of the session: the live-path test asserted row adjacency **ADR-0031 itself declares false**, and passed only because a zero-paced stub fit one 25 ms window — fixed by giving the test a two-second commit window, not by deleting the assertion. P2s: `coalesce` re-serialised the whole run per delta (quadratic — ADR-0018's own argument), `pub` on an internal helper, and a shape check that would silently drop a fourth key. The **gate case also had to move**: at `max_live_sessions = 1` its create evicted the run's shared session and `case_turn_timeout` failed with `409` where it expected `202`. Measured: 5,000 deltas → 3 rows; the stub's seven → three. New: `events::coalesce`, ADR-0031, 3 `tests/events.rs` cases, a live-path case, 2 node tests, `case_event_coalescing`. **The issue number was wrong** — the commits say `Closes PER-93` (HS-061); `docs/review/PER-91.md` and both Linear issues carry the correction |
+| PER-59 | HS-027 hardened `.git` mounts and V1 | — | **Not done: blocked.** No Docker daemon here (`docker` CLI 29.9.2, no `/var/run/docker.sock`), and every acceptance line is a fact about a **container** (six mounts, `--cap-drop ALL`, `no-new-privileges`, the V1 gate). Not implemented against a fake daemon; PER-59 carries the argument and the exact question, and `HS-028 … HS-058` are blocked transitively (their roots — `PER-74`, `PER-79`, `PER-84`, `PER-94`, `PER-100` — carry a pointer) |
+| — | HS-061, HS-065, HS-075 | — | Not started. They are the rest of the unblocked queue: `PER-93`, `PER-97` and `PER-107`; everything else waits on `HS-027`'s chain |
+
+The session before it, for the shape of a ledger entry:
 
 | Issue | Story | Commits | Outcome |
 | --- | --- | --- | --- |
