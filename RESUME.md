@@ -154,8 +154,15 @@ that file is **not** in the sandbox, so a plain `git push` fails with
 time:
 
 ```bash
-git -c core.sshCommand='ssh -o IdentityAgent=/run/ssh-agent.sock' push origin master
+GIT_SSH_COMMAND='ssh -F /dev/null -o IdentityAgent=/run/ssh-agent.sock \
+  -o StrictHostKeyChecking=accept-new -o User=git' git push origin master
 ```
+
+`-F /dev/null` is the load-bearing part: it stops ssh reading the sandbox's `~/.ssh/config` at all, which
+is what names the missing key. (A plain `git push` worked once and then stopped; `-c
+core.sshCommand='ssh -o IdentityAgent=…'` was not enough either — the config still won.) `ssh -T
+git@github.com` with those options answering `Hi AdamOlsson!` is the way to check the agent before
+blaming the remote.
 
 Confirmed on `origin/master`: `b49f2cd` … `e767757`. Push after every story, and if a push fails, report
 it — do not fake one.
