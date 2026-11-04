@@ -649,6 +649,52 @@ fn touch_succeeds_for_an_unknown_id() {
         .expect("touching a row that is gone is not a failure");
 }
 
+#[test]
+fn set_worktree_records_the_path_and_the_base_and_nothing_else() {
+    // HS-025: the provisioner writes what the worktree step made. It is not a state change — the session
+    // stays `starting` while the next step runs — and it must not disturb the two timestamps, because
+    // `last_active_at` is activity's and the cap's eviction order reads it.
+    let dir = TempDir::new("set-worktree");
+    let database = open(&dir);
+    let repository = database.sessions();
+    let created = repository
+        .create(&new_session(Some("set-worktree")), NOW)
+        .expect("a session is creatable");
+    let base = "5f2c1d0e9b8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d";
+    repository
+        .touch(&created.id, NOW + 20)
+        .expect("the touch succeeds");
+    repository
+        .set_worktree(&created.id, "/srv/projects/.worktrees/an-id", base)
+        .expect("the record is writable");
+    let recorded = repository
+        .get(&created.id)
+        .expect("the read succeeds")
+        .expect("the session exists");
+    assert_eq!(recorded.worktree, "/srv/projects/.worktrees/an-id");
+    assert_eq!(recorded.base_commit.as_deref(), Some(base));
+    assert_eq!(recorded.status, Status::Starting, "a record is not a state");
+    assert_eq!(recorded.status_reason, None);
+    assert_eq!(
+        recorded.last_active_at,
+        NOW + 20,
+        "a record is not activity"
+    );
+    assert_eq!(recorded.created_at, NOW);
+}
+
+#[test]
+fn set_worktree_succeeds_for_an_unknown_id() {
+    // The worktree step's record is written by a background task, which can lose its session to a delete
+    // while git is running. The worktree went with the row, so there is nothing to record.
+    let dir = TempDir::new("set-worktree-unknown");
+    let database = open(&dir);
+    database
+        .sessions()
+        .set_worktree("no-such-id", "/srv/projects/.worktrees/an-id", "abc123")
+        .expect("recording a row that is gone is not a failure");
+}
+
 // ---- the demo ------------------------------------------------------------------------
 
 #[test]
