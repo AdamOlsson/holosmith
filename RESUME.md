@@ -1,4 +1,4 @@
-# RESUME — orchestrator handoff (cold start, after thirty-three stories, with a real Docker daemon)
+# RESUME — orchestrator handoff (cold start, after thirty-four stories, with a real Docker daemon)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating
 procedure and still governs; this file is the state of the world — what exists, what the environment
@@ -37,18 +37,20 @@ created, prompted, aborted, steered, stopped, resumed and deleted, and it is dri
 ## 1. Where the work stands
 
 Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is clean, and every
-commit is **pushed** (see the note on pushing below). `HEAD` is `0851325`; any commit after it is
-bookkeeping — this file's own refresh. Confirmed on `origin/master`: `0402d8f..0851325`.
+commit is **pushed** (see the note on pushing below). `HEAD` is `b3ce038`; any commit after it is
+bookkeeping — this file's own refresh. Confirmed on `origin/master`: `91b376a..b3ce038`.
 
-**Linear: 33 Done, 47 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-029`
-(`PER-33` … `PER-61`), `HS-059` (`PER-91`), `HS-060` (`PER-92`), `HS-061` (`PER-93`) and `HS-065`
+**Linear: 34 Done, 46 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-030`
+(`PER-33` … `PER-62`), `HS-059` (`PER-91`), `HS-060` (`PER-92`), `HS-061` (`PER-93`) and `HS-065`
 (`PER-97`).
 
 **The Docker block is gone.** A real daemon answers on this machine (§2), so `HS-027` … `HS-058` are
-unblocked and the queue is contiguous again from `HS-030` on. Three stories have now been built against a
-real `docker run` — the mounts and V1 (`HS-027`), the container with its limits (`HS-028`) and the start
-lock with `stop`/`resume` (`HS-029`) — and each is proven by a test that runs a container, not by a
-document.
+unblocked and the queue is contiguous again from `HS-031` on. Four stories have now been built against a
+real `docker run` — the mounts and V1 (`HS-027`), the container with its limits (`HS-028`), the start lock
+with `stop`/`resume` (`HS-029`) and the expected-stop flag with the exit classifier (`HS-030`) — and each is
+proven by a test that runs a container, not by a document. **`HS-031` is the story that makes the container
+an agent**: it replaces the detached `sleep infinity` with pi's stdio, and everything after it is RPC
+mapping.
 
 | Story | Linear | Commits | ADR |
 | --- | --- | --- | --- |
@@ -85,9 +87,14 @@ document.
 | HS-027 hardened `.git` mounts and V1 | PER-59 | `3025360`, `b009320` | 0035 |
 | HS-028 container run with limits | PER-60 | `5aae311`, `b009320` | 0036 |
 | HS-029 name conflicts, `stop`, `resume`, start lock | PER-61 | `e826539` | 0037 |
+| HS-030 exit classification | PER-62 | `9b79f75`, `a360fcd`, `b3ce038` | 0038 |
 
-**Next issue: `PER-62` (HS-030 — exit classification)**, then `HS-031` (real pi, `PER-63`) and so on in
-`HS-###` order. The whole Docker chain `HS-030` … `HS-058` is unblocked now. What is still behind something
+**Next issue: `PER-63` (HS-031 — real pi launch, ready handshake and project trust)** — size **L**, and
+the story that turns the container into an agent: attached stdio instead of the detached `sleep infinity`,
+pi in `--mode rpc`, a per-session agent directory, the version assertion, project trust (open question 9),
+and the launch line in `session.log`. §8 carries the facts it needs, including where pi's own RPC
+documentation is. Then `HS-032` … `HS-035` (the RPC mapping), and so on in `HS-###` order; the whole Docker
+chain `HS-031` … `HS-058` is unblocked. What is still behind something
 is phase 2 (`HS-047` … `HS-058` are `HS-046`'s, the phase-1 verification run, which is the story that gates
 the phase; `HS-066` … `HS-074` sit behind those and behind `HS-049`/`HS-050`), and `HS-075` (`PER-107`),
 which is independent of all of it and **still unstarted** — §8's own note carries its four decisions and
@@ -96,7 +103,7 @@ three landmines.
 Ranking, per `PROMPT.md`: Linear priority (all are `No priority`) → `HS-###` order in `docs/stories/` →
 anything already `In Progress` first → skip an issue whose `Blocked by` stories are not `Done`.
 
-### Sixteen facts a cold start must know
+### Seventeen facts a cold start must know
 
 1. **A running turn can now be stopped, in two rungs, with or without the way back.** `src/ladder.rs`
    is the shared routine: `clear_queue` then `abort`, wait up to `abort_grace` (the grace *bounds rung
@@ -108,7 +115,9 @@ anything already `In Progress` first → skip an issue whose `Blocked by` storie
    is why exactly one `StateError::Illegal` in `turn.rs` is a `debug` line. **Two policies now climb it**
    — HS-022's deadline and HS-023's ceiling — and both sit in the runner's own `select!`, each guarded on
    one `fired` so the first to fire owns the reason and no second climb is spawned. The six reason words
-   are `forced_abort`, `deleted`, `evicted`, `idle_stop`, `turn_timeout` and `budget_exceeded`.
+   for a climbed stop are `forced_abort`, `deleted`, `evicted`, `idle_stop`, `turn_timeout` and
+   `budget_exceeded`; a seventh, `pi_exit`, is not a climb at all but the *clean exit* HS-030 records on a
+   `stopped` row (fact 17).
 2. **A turn that will not end is ended for it, and the reason says which policy asked.** The deadline is
    the turn runner's own (`Turn::run`), not a sweeper's, because the row keeps no per-turn timestamp —
    `last_active_at` is activity, so a steer moves it. It races `start_turn` against a sleep and, when the
@@ -262,6 +271,27 @@ anything already `In Progress` first → skip an issue whose `Blocked by` storie
     (`container::IDLE_COMMAND`) until HS-031 attaches pi's stdio, and that placeholder is what lets
     `docker inspect` show the flags before there is an agent to run.
 
+17. **Whether a container stopped because we asked is now a row's bit, and it is decided by a pure
+    function.** `sessions.expected_stop INTEGER NOT NULL DEFAULT 0` (schema 4) records "the server asked
+    this one to stop"; `src/stop.rs`'s `Stopper` writes it and *then* calls the backend, and it is the only
+    path to a `docker stop` — the sweeper, the create's eviction and the ladder's forced rung all use it, so
+    there is one place the order can be wrong instead of three. It is **not** in the `Session` JSON (the
+    session object is the API's body, pinned to fifteen keys, and phase 1b may not change the API): the
+    repository's `set_expected_stop`/`take_expected_stop` read and write it, and the take is a
+    compare-and-swap because SQLite's `RETURNING` on an `UPDATE` answers the row *after* the write
+    (measured). `src/exit.rs` is the decision: `classify(expected, code, stderr)` with three answers —
+    expected → nothing (the row's caller already moved it), code 0 → `Trigger::PiExit`, the table's new row
+    to `stopped` with reason `pi_exit`, anything else → `Trigger::UnexpectedExit` to `error` with the last
+    five non-empty stderr lines as the reason — and `Exits::record` applies it and appends the stderr to
+    `<data>/sessions/<id>/session.log` (`session.log` is stderr plus HS-031's launch line; item 15's "stderr
+    only" keeps *tool* output out). **`Exits::record` has no production caller yet**: nothing observes an
+    exit until HS-031 attaches pi's stdio, and `--rm` leaves nothing to inspect. **HS-031 inherits one
+    ordering constraint from this**: a forced rung resumes *immediately*, so the resume's container step can
+    clear the flag before the stopped container's exit is recorded — HS-031 must record that exit before the
+    next container is provisioned, or key the flag to the container's incarnation (ADR-0038, cited from
+    `provisioner.rs`). The row's reason may now be **multi-line**; `transcript.ts`'s `stateText` renders its
+    last line, clipped (`REASON_MAX = 48`), and no badge shows the wall.
+
 Three things HS-014 and HS-015 settled that later stories inherit:
 
 - **The transcript's event contract** (ADR-0018 + ADR-0019), emitted by the backend:
@@ -381,6 +411,16 @@ story uses**: its pi version equals `pins/pi.txt` exactly (HS-031 will assert th
 node 24, default user `node` (uid **1000**, the host uid) — this is HS-031's agent image in all but name. Everything the Docker chain needs is here, including
 network access for `alpine:3` and friends.
 
+**pi's own RPC documentation is on this machine**, and HS-031 needs it before writing a line:
+`~/.pi/agent/install/releases/1.5.0/node_modules/@earendil-works/pi-coding-agent/docs/rpc.md` (how to start
+it, the JSONL framing rules — one complete JSON object per line, split on LF only, never a reader that also
+splits on U+2028), `rpc-commands.md` (the `prompt`/`steer`/`abort`/`get_state` commands and the `disposition`
+field), `json.md` (the event stream: `agent_end`, `agent_settled`, tool and message events),
+`rpc-extension-ui.md` (the UI requests HS-035 must auto-cancel) and `environment-variables.md`. The binary in
+the image is `/usr/local/bin/pi`, its version already equals `pins/pi.txt`, and `pi --mode rpc --no-session`
+is the launch HS-031 is aiming at. `pi --help` in the sandbox is the same version's, so an experiment is
+free; nothing in the repo may hard-code the path to those documents.
+
 **Not available, and not to be invented:** no `sudo`, no `apt`, no `gh`, no ssh key (the agent has one,
 §pushing), no Tailscale. There is a **browser** (§1 fact 3), but no *gate* may need one.
 **No `awk`** and **no `shellcheck`** on this machine — do not write a script or a gate that needs
@@ -465,11 +505,11 @@ If that fails, **stop and report** — that is a `PROMPT.md` stop condition.
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                     # 255 lib + 35 integration binaries, 600 tests in all (22 in
+cargo test                     # 263 lib + 36 integration binaries, 602 tests in all (22 in
                                # tests/worktree.rs, 16 tests/events.rs, 10 tests/turns.rs, 10
                                # tests/compaction.rs, 14 delete.rs, 8 idle_stop.rs, 9 backup.rs,
-                               # 7 history.rs)
-cd web && npm test             # 34 transcript tests (node's own runner)
+                               # 7 history.rs, 10 tests/exit.rs)
+cd web && npm test             # 36 transcript tests (node's own runner)
 cd web && npx tsc --noEmit     # not a gate phase, but a web edit that does not typecheck is a bug
 scripts/verify.sh              # THE one-command gate since HS-006
 ```
@@ -477,12 +517,13 @@ scripts/verify.sh              # THE one-command gate since HS-006
 `scripts/verify.sh` runs six phases, cheapest first: `fmt`, `clippy`, `test`, `build`
 (`scripts/build.sh`, which itself runs `build-web.sh` — `npm test` then Vite — and `check-static.sh`
 last), `embed` (`scripts/check-embed.sh`), then `serve` — the **shipped musl artifact** booted on
-`--port 0` with a temp data dir, running **49 cases plus a CORS sweep (367 assertions)**, then torn down
+`--port 0` with a temp data dir, running **50 cases plus a CORS sweep (390 assertions)**, then torn down
 with `SIGTERM` and an asserted exit 0. Eight cases bring their own boot (`case_token_budget`,
 `case_compaction`, `case_history`, `case_backup`, `case_worktree`, `case_worktree_refusal`,
 `case_docker_container`, `case_docker_resume`, plus `case_docker_preflight`, which needs no
-server at all, and `case_container_mounts`, which needs no server *and* no daemon — it skips, one printed
-line, when there is neither a daemon nor an image). It takes ~5 min (both musl targets, the Docker cases
+server at all, `case_container_mounts`, which needs no server *and* no daemon — it skips, one printed
+line, when there is neither a daemon nor an image — and `case_exit_classification`, which reads a row's
+`expected_stop` out of `app.db` with `python3` and skips when there is no `python3`). It takes ~5 min (both musl targets, the Docker cases
 and `case_idle_stop`'s real minute). `--no-build` skips `build` and `embed`; `--keep` keeps the work dir.
 
 A story is not done until all four are green on a clean tree, and then you run the story's own demo
@@ -516,6 +557,7 @@ crates/holosmith/
   migrations/0001_initial.sql   schema_version
   migrations/0002_sessions.sql  sessions + two indexes (schema 2)
   migrations/0003_events.sql    events + sessions.last_seq (schema 3)
+  migrations/0004_expected_stop.sql  sessions.expected_stop (schema 4, HS-030)
   src/main.rs               dispatcher only
   src/cli.rs                clap: version, config {validate,show,edit}, serve [--port|--data-dir|--backend]
   src/commands/             version.rs, config.rs, serve.rs
@@ -540,6 +582,16 @@ crates/holosmith/
                             not (the delete, the timeout and the budget). `FORCED_ABORT`
   src/sweeper.rs            the idle stop's task (HS-021): `Sweeper::sweep` (one pass, public for tests),
                             `run` (the tick loop), `spawn`; `IDLE_STOP`, `TICK` (5 s, a constant)
+  src/stop.rs               the one way a container is stopped (HS-030): `Stopper { backend, database }`,
+                            `stop` writes `sessions.expected_stop` and *then* calls the backend's `stop`.
+                            The sweeper, the create's eviction and the ladder's forced rung all use it, so
+                            spec item 6's "before every `docker stop -t 10`" has one home
+  src/exit.rs               exit classification (HS-030, ADR-0038): `Exit::{Expected,Clean,Failed}`, the
+                            pure `classify(expected_stop, code, stderr)`, `PI_EXIT`, `STDERR_LINES` (5),
+                            `HEADLINE`-free `session_dir`/`LOG_FILE`, and `Exits::record(session, code,
+                            stderr)` which takes the flag, applies `PiExit` or `UnexpectedExit`, and appends
+                            the stderr to `<data>/sessions/<id>/session.log`. **No production caller yet**:
+                            HS-031's attached stdio is the observer
   src/deleter.rs            the delete flow's task (HS-019): revoke_key (a no-op until HS-039) →
                             `backend.delete` → remove the row *and its event log* in one
                             transaction → close the session's streams. `DELETED` is the rung-2 word
@@ -601,9 +653,9 @@ crates/holosmith/
                             `Complaint { check, sentence }`, `socket_sentence`
   src/db.rs                 pragmas + read-back, apply_pending, Database::sessions()/events()
   src/sql.rs                the one SQL statement scanner + the shared source walk (cfg(test) guard)
-  src/schema.rs             SCHEMA_VERSION (= 3), include_dir! embed, check_embed, contract_violations
+  src/schema.rs             SCHEMA_VERSION (= 4), include_dir! embed, check_embed, contract_violations
   src/{serve,web,logging,clock,version,pins}.rs
-  tests/                    version_cli, config_cli, http_contract, serve_cli, db_migrations,
+  tests/                    version_cli, config_cli, http_contract, serve_cli, db_migrations, exit,
                             pin_single_source, guards, session_repository, sessions_api, events,
                             streams, provisioning, state_machine, session_list, session_screen,
                             turns, abort, steer, resume, delete, eviction, idle_stop, turn_timeout,
@@ -617,7 +669,8 @@ web/                        Vite 7 + TypeScript, two screens (`/` and `/sessions
                             package-lock COMMITTED; main.ts is the DOM, transcript.ts the renderer's
                             rules (frame parsing, block model, affordances, `stoppedNotice` /
                             `stoppedDetail`, `budgetNotice`, `createFailure`, `parseTruncated`,
-                            `setTurnBase`, `historyPath`)
+                            `setTurnBase`, `historyPath`, and since HS-030 `stateText`/`headline` — a
+                            multi-line reason renders as its last line, clipped at `REASON_MAX`)
 web/test/transcript.test.ts 34 tests over synthetic frames, node's own runner (`npm test`)
 scripts/build-web.sh        npm ci + npm test + npm run build, asserts web/dist/index.html
 scripts/build.sh            web first, HOLOSMITH_REQUIRE_WEB=1, both musl targets → dist/<triple>/,
@@ -627,9 +680,9 @@ scripts/check-static.sh     file/readelf, empty-root serve + cmp against web/dis
 scripts/check-embed.sh      the three embed cases (present / absent warns / required fails)
 scripts/verify.sh           the one-command gate (see §3)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0034          read the recent ones before planning anything
+docs/adr/0001…0038          read the recent ones before planning anything
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-58, PER-91, PER-92, PER-93, PER-97  each a verbatim review + a `## Resolution` table
+docs/review/PER-33…PER-60, PER-62, PER-91, PER-92, PER-93, PER-97  each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -647,8 +700,8 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   refusal's sentence alone) and the "nothing was deleted" notice, the session screen at
   `/sessions/<id>` with a live transcript and a four-action composer.
 - **Not built yet:** the **agent step** (HS-031 — the container runs `sleep infinity` until pi's stdio is
-  attached), pi's RPC mapping (HS-032/033/034/035), exit classification and the expected-stop flag (HS-030),
-  the `egress` network and its startup self-test (HS-036), the two proxies (HS-037/039), the preview
+  attached, and that is the story the whole Docker chain now waits behind), pi's RPC mapping
+  (HS-032/033/034/035), the `egress` network and its startup self-test (HS-036), the two proxies (HS-037/039), the preview
   listener (HS-041), the WIP snapshot (HS-042), the delete's keep-rules (HS-043), startup reconcile (HS-044),
   `doctor` (HS-045), the phase-1 verification run (HS-046), merge, publish, the hub, releases, the
   stopped-session expiry (HS-064), and any **delete affordance in `web/`** (the API has the endpoint; the
@@ -658,6 +711,11 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   answers the frames below that cursor. `events/stream.rs`'s `REPLAY_LIMIT` is still `u32::MAX` — it is
   "everything from the cut", and a second window there would be an invisible truncation. The project
   backup is a second *writer* of files under the data root (`<data>/backups/`), not of the database.
+- **A stop is now recorded as the server's own, and a clean exit has its own state row.** `Stopper` writes
+  `expected_stop` before the `docker stop`, and `Exits::record` turns an exit into `stopped` (expected),
+  `stopped · pi_exit` (code 0, no flag) or `error` + the last stderr lines. The half that is *not* wired is
+  the observation: nothing watches a container die until HS-031, and `Exits::record` therefore has no
+  production caller (ADR-0038 says so; do not "fix" that by adding a `docker events` watcher).
 - **Four policies can now stop something and they must not be confused:** the cap evicts (`evicted`,
   inside a create), the sweeper stops a quiet one (`idle_stop`, on its own tick), the turn timeout ends a
   *turn* (`turn_timeout`, from the runner) and the token budget ends a *turn* (`budget_exceeded`, also from
@@ -1248,6 +1306,35 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   recovery point is the one thing that must not lie. The same shape is worth copying wherever a file must
   never be half-present.
 
+### Landmines HS-030 added
+
+- **SQLite's `RETURNING` on an `UPDATE` answers the row *after* the write.** `UPDATE … SET expected_stop = 0
+  … RETURNING expected_stop` therefore reports `0` for a flag that was `1`, so "take the flag" cannot be
+  spelled that way; PostgreSQL's `OLD` has no SQLite spelling either. The take is a compare-and-swap
+  (`… WHERE id = ?1 AND expected_stop = 1`, and `execute`'s changed-row count is the answer). Measured after
+  a test failed with `Some(false)` for a value the same connection had just set.
+- **A test named for a function must call it.** HS-030's first draft had
+  `the_classifier_is_the_one_exit_record_uses` asserting three `classify` results and never touching
+  `record`; the review found it. The duplicate is the smell — the pure cells already live in the module's
+  unit tests.
+- **An assertion that cannot distinguish two arms is not an assertion.** `an_expected_exit_…` drove a row
+  that was already `stopped`, where *both* classifier answers are no-ops (the table has no
+  `unexpected_exit` row out of `stopped`) — so it passed with `classify` ignoring the flag entirely. The
+  discriminating case must start from a **live** row. Mutation-prove every claim about an arm.
+- **A spawned task's write is not there when the row is.** The eviction's stop — and so the flag write — runs
+  after the row moved, so `case_exit_classification` polls for the flag (50 × 100 ms) instead of reading it
+  once; the Rust test waits for `Call::Stop`. Same lesson as HS-020's backend call.
+- **`status_reason` is rendered in a badge five times over, so a new *shape* of reason is a rendering
+  change.** HS-030's failure reason is the last five stderr lines; `transcript.ts`'s `stateText` is now the
+  one place that decides how much of it shows (its last line, clipped). The plan said "no UI change" and was
+  wrong — a row's *text* is still a rule.
+- **A `Stopper` cannot prove its own ordering.** Write-then-call is two lines, and no test outside them can
+  see which came first (the swap mutation stays green). ADR-0038 says so rather than pretending; do not
+  "fix" it with a fake backend seam.
+- **`doc` edits must not be made with `git checkout` to undo a mutation.** HS-030's session reverted
+  `sessions/state.rs`'s uncommitted work that way (it was restored by hand). Copy the file aside
+  (`cp x /tmp/x.bak`) before a mutation, and never `git checkout` a file with uncommitted changes.
+
 ## 7. Decisions taken on the operator's behalf (do not silently undo)
 
 | Decision | Why | Where recorded |
@@ -1302,6 +1389,7 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 | **The hardened mounts are one value, kept at their host paths, and V1 passes as specified** (so the spec's narrower fallback is not applied), with `--user` deliberately not passed and the image as the key `agent_image` | the worktree's `.git` *file* holds an absolute `gitdir:`, so any other container path points git at nothing mounted; naming a uid would guess a mapping the deploy step owns, and a wrong guess is "permission denied" mid-turn | ADR-0035 |
 | **HS-028 fills the network step too**, `--internal` because that is the isolation, with the container **detached** on `sleep infinity` until HS-031 and three integer limit keys that refuse `0` | a container cannot join a network that does not exist, and spec item 6's run line names it; an attached process nobody reads is a container that fills its stdout pipe | ADR-0036 |
 | **A start is `rm -f` then `run`, serialised per session by a `tokio` mutex in the backend**; `stop` is `docker stop --time 10` and `resume` re-creates the network and container but no worktree | `--rm` removes an exited container a moment after `docker stop` answers (measured), a container the process lost track of must be replaceable, and interleaved starts fail with a name conflict one caller cannot explain; the worktree step's `ensure` is create-or-adopt | ADR-0037 |
+| **The expected-stop flag is a `sessions` column that no client is sent, written by one `Stopper` before every stop, and taken with a compare-and-swap**; a clean exit is its own table row (`pi_exit` → `stopped`), the failure arm keeps `unexpected_exit`, and the classifier is a pure function whose applier has **no production caller until HS-031** | `Session` is the API's body and phase 1b may not change the API, so the flag is a row fact like `last_seq`/`touch`; three copies of "write then stop" is two a test cannot see; SQLite's `RETURNING` answers the post-write row, so a read-then-clear would race; item 8 has no row for a clean exit and item 6 replaces its error cell for code 0; the container runs detached and `--rm` removes it, so nothing can observe an exit before HS-031's attached stdio | ADR-0038 |
 | **Compaction is a background pass inside the database mutex**, one transaction per session, bounded by `MESSAGES_PER_PASS` after the already-folded filter and by the newest candidate's `message.end` on the delta scan; the 24-hour window is the spec's constant and not a key; the snapshot takes the highest removed seq and `sessions.last_seq` never moves; nothing is broadcast | `Transitioner::apply` takes the same mutex, so the skip of a running turn needs no second lock; the spec names 24 hours and its config list is exhaustive; a client already connected has the deltas and a reconnecting one reads the snapshot from its replay | ADR-0032 |
 
 ---
@@ -1313,22 +1401,42 @@ cd /home/adamolsson/projects/holosmith
 git status --short                          # must be clean
 . ~/.pi/toolchains/env.sh
 python3 /tmp/lin.py issues | grep -v ' Done ' | head   # next unfinished (recreate /tmp/lin.py, §2)
-python3 /tmp/lin.py issue PER-62            # sanity-check Linear is reachable and scoped
+python3 /tmp/lin.py issue PER-63            # sanity-check Linear is reachable and scoped
 docker version                              # the daemon must answer, or every Docker story is a lie
-docker image inspect pi-agent:local         # the image the Docker stories run
-scripts/verify.sh                           # baseline green (~5-8 min, 49 cases, 367 assertions)
+docker image inspect pi-agent:local         # the image the Docker stories run; its pi == pins/pi.txt
+scripts/verify.sh                           # baseline green (~5-8 min, 50 cases, 390 assertions)
 ```
 
-Then start the cycle at **`PER-62` (HS-030 — exit classification)**, and after it the rest of the Docker
-chain in `HS-###` order: `HS-031` (real pi in the container), `HS-032`–`HS-035` (pi's RPC mapping),
+Then start the cycle at **`PER-63` (HS-031 — real pi launch, ready handshake, project trust)** — size **L**,
+so §5's rule applies: a fresh planning child briefed with the grilling protocol, one round of questions to
+you, answered before any code. What it needs that is not obvious:
+
+- **pi's RPC docs are on this machine** (§2 has the paths): `--mode rpc --no-session`, strict JSONL on stdio,
+  LF only as a record separator, and `agent_settled` as the "turn over" event. A "ready" signal must be a
+  real protocol fact (a `get_state` response or pi's own ready event), never a sleep — the acceptance says so.
+- **The container must stop being detached.** `container::SessionContainer::run_args` has `--detach` and
+  `container::IDLE_COMMAND` is `sleep infinity`; HS-031 replaces both with an attached `docker run -i … pi
+  --mode rpc` whose stdio the server holds. That is also what gives the process's **exit code and stderr**,
+  so HS-031 is the caller of `exit::Exits::record` and must record the exit **before** a resume provisions a
+  new container (the ordering constraint in §1 fact 17 — `provisioner.rs` and ADR-0038 both cite it).
+- **The session directory becomes real**: `<data>/sessions/<id>/pi-home` seeded from a template, which means
+  `ContainerSettings` (or the backend) finally needs the data root, and `container::Mounts` gains a mount the
+  spec does not list — decide and record whether pi-home is mounted or copied in.
+- **The version assertion** is `pi --version` equals `pins/pi.txt`, and `pins/pi.txt` is the only place that
+  literal may live (`tests/pin_single_source.rs`) — a test may compare, never spell it.
+- **Open question 9 (project trust)** has to be *decided*, and the spec says the mechanism is documented,
+  implemented and flagged in the risk table. `pi --approve` exists in this version.
+- The launch line goes into `session.log` (HS-030 built the writer; it is private to `src/exit.rs` today).
+
+After it the rest of the Docker chain in `HS-###` order: `HS-032`–`HS-035` (pi's RPC mapping),
 `HS-036` (the `egress` network and the startup self-test), `HS-037`–`HS-040` (the two proxies and their
 verification), `HS-041` (preview), `HS-042`–`HS-044` (snapshot, delete keep-rules, reconcile),
 `HS-045` (`doctor`), `HS-046` (the phase-1 verification run — the gate for phase 2), then phase 2.
 
-Read §1's sixteen facts first: three of them are the Docker half (mounts and V1, the container and its
-limits, the start lock and `resume`), and the rest are the writer's coalescing, the runner's two turn
-policies, the worktree step, the create's project refusals, compaction, truncated replay, the daily bundle
-and the rendered page.
+Read §1's seventeen facts first: four of them are the Docker half (mounts and V1, the container and its
+limits, the start lock and `resume`, and the expected-stop flag with its classifier), and the rest are the
+writer's coalescing, the runner's two turn policies, the worktree step, the create's project refusals,
+compaction, truncated replay, the daily bundle and the rendered page.
 
 **`HS-075` (`PER-107`, expand/contract migration discipline) is independent of all of that** and can be
 taken at any point — it is the one story whose only blocker is `HS-004`, and §8's own note below carries the
@@ -1352,9 +1460,9 @@ Acceptance, verbatim from `docs/stories/phase-4-self-development.md` (Size M, sp
 
 **Demo:** a CI check rejects a migration that drops or renames a column the previous release still reads.
 
-**Already in place, so nothing here is rebuilt:** `src/schema.rs` (`SCHEMA_VERSION` = 3, `include_dir!`,
+**Already in place, so nothing here is rebuilt:** `src/schema.rs` (`SCHEMA_VERSION` = 4, `include_dir!`,
 `check_embed`, `contract_violations`); `src/db.rs`'s `apply_pending` and the `_contract_` naming rule
-(ADR-0009); `migrations/000{1,2,3}_*.sql`; `tests/db_migrations.rs`; `scripts/check-static.sh`'s byte
+(ADR-0009); `migrations/000{1,2,3,4}_*.sql`; `tests/db_migrations.rs`; `scripts/check-static.sh`'s byte
 grep for the schema SQL; ADR-0009's "older-binary warns" rule.
 
 **The four things to settle before writing code:**
@@ -1394,7 +1502,13 @@ durable record; the review file is the durable review; the commit history is the
 stop before the backlog is empty, say so explicitly, say which issue is next, and leave the tree clean
 and the gates green — a half-finished story is worse than an honest stop.
 
-This session's ledger (three stories shipped — the Docker block is open at last):
+This session's ledger (one story shipped — the Docker chain now starts at HS-031):
+
+| Issue | Story | Commits | Outcome |
+| --- | --- | --- | --- |
+| PER-62 | HS-030 exit classification | `9b79f75`, `a360fcd`, `b3ce038` | Done — schema 4 adds `sessions.expected_stop`, one `stop::Stopper` writes it before every `docker stop` (the sweeper, the eviction and the forced rung all use it, so the ordering has one home), `take_expected_stop` is a compare-and-swap because **SQLite's `RETURNING` on an `UPDATE` answers the row after the write** (measured), `src/exit.rs`'s pure `classify` implements item 6's three answers, the table gains `Trigger::PiExit` (`→ stopped`, reason `pi_exit`), and `Exits::record` applies a verdict and keeps stderr in `<data>/sessions/<id>/session.log`. **`Exits::record` has no production caller**: nothing observes a container's exit until HS-031 attaches pi's stdio, and `--rm` leaves nothing to inspect — recorded in ADR-0038 rather than hidden, which makes the demo half artifact (the flag, read out of `app.db`) and half test (the three outcomes). Review: Standards **PASS with findings** (2 P2, 4 P3), Spec **PASS with findings** (3 P2, 3 P3), 10 fixed and 2 recorded (`docs/review/PER-62.md`): a test named for `record` that never called it, the session log's own doc contradicting itself about HS-031's launch line, three test names claiming an ordering nothing can observe, the ADR's mutation census (four, re-measured), two stale "the flag is HS-030's" sentences, an unguarded id-to-path join (now `is_path_segment` + a unit test), an expected-exit test that could not fail (from `stopped` both arms are no-ops — now split, and the discriminating one starts from a live row), an unclipped multi-line `status_reason` (now `transcript.ts`'s `stateText`: last line, clipped, 2 node tests — the plan's "no UI change" was wrong), the gate reading the flag before the spawned stop wrote it, and `pi_exit` missing from the "no sentence invented" test. The **one thing only documentation can fix**: a forced rung resumes immediately, so the resume's container step can clear the flag before the stopped container's exit is recorded — HS-031 must record that exit first, or key the flag to the container's incarnation. Gate: **50 cases / 390 assertions**; `cargo test` 602; `npm test` 36. |
+
+The session before it, for the shape of a ledger entry:
 
 | Issue | Story | Commits | Outcome |
 | --- | --- | --- | --- |
