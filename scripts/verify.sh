@@ -1727,10 +1727,11 @@ case_history() {
     *history.truncated*) assertions=$((assertions + 1)) ;;
     *) fail "${name}_stream/truncated" "a replay of two messages under a window of one sent no truncation frame: $body" ;;
   esac
-  # One turn boundary sits below the cut, which is what keeps the replay's turn label true.
+  # Both turns' boundaries sit below the cut, because the cut is the second turn's own message: the frame
+  # says two turns came before the replay, which is what keeps its turn labels true.
   case "$body" in
-    *'"turns_before":1'*) assertions=$((assertions + 1)) ;;
-    *) fail "${name}_stream/turns_before" "the truncation frame did not count the turn it skipped: $body" ;;
+    *'"turns_before":2'*) assertions=$((assertions + 1)) ;;
+    *) fail "${name}_stream/turns_before" "the truncation frame did not count the turns it skipped: $body" ;;
   esac
   cut="$(printf '%s\n' "$body" | sed -n 's/.*"before_seq":\([0-9][0-9]*\).*/\1/p' | sed -n '1p')"
   [ -n "$cut" ] || fail "${name}_stream/cursor" "the truncation frame named no cursor: $body"
