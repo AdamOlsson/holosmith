@@ -105,12 +105,20 @@ impl Docker {
 
     /// Stop a running container, waiting spec item 6's ten seconds before it is killed.
     ///
-    /// Answers `false` when there was no container, which is an ordinary answer: a session that was never
+    /// Answers `Ok(false)` when there was no container, which is an ordinary answer: a session that was never
     /// started, or one whose `--rm` container has already gone, is not a failure (ADR-0023's rule, applied to
-    /// the stop policy). HS-030 makes the *flag* that says this stop was expected; the ten seconds are the
-    /// spec's.
-    pub fn stop_container(&self, name: &str) -> bool {
-        self.succeeds(&["stop", "--time", STOP_SECONDS, name])
+    /// the stop policy). It answers `Err` when the daemon could not do it — a wedged daemon and a missing
+    /// container are different facts, and a forced abort that leaves a container running must not be
+    /// reported as a stop of a container that was never there. The existence check is what tells them apart
+    /// without parsing Docker's English.
+    ///
+    /// HS-030 makes the *flag* that says this stop was expected; the ten seconds are the spec's.
+    pub fn stop_container(&self, name: &str) -> Result<bool, DockerError> {
+        if !self.container_exists(name) {
+            return Ok(false);
+        }
+        self.run(&["stop", "--time", STOP_SECONDS, name])
+            .map(|_| true)
     }
 
     /// Start a container from `arguments` (a [`crate::container::SessionContainer`]'s run vector).

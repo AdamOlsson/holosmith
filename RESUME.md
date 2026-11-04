@@ -1,4 +1,4 @@
-# RESUME — orchestrator handoff (cold start, after thirty stories)
+# RESUME — orchestrator handoff (cold start, after thirty-three stories, with a real Docker daemon)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating
 procedure and still governs; this file is the state of the world — what exists, what the environment
@@ -40,10 +40,15 @@ Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is
 commit is **pushed** (see the note on pushing below). `HEAD` is `d2559bc`; any commit after it is
 bookkeeping — this file's own refresh. Confirmed on `origin/master`: `84bc7e7..d2559bc`.
 
-**Linear: 30 Done, 50 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-026`
-(`PER-33` … `PER-58`) **plus `HS-059` (`PER-91`)**, **`HS-060` (`PER-92`)**, **`HS-061` (`PER-93`)** and
-**`HS-065` (`PER-97`)** — the queue is not contiguous any more, because `HS-027` … `HS-058` are blocked
-on a Docker daemon this machine does not have (§8).
+**Linear: 33 Done, 47 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-029`
+(`PER-33` … `PER-61`), `HS-059` (`PER-91`), `HS-060` (`PER-92`), `HS-061` (`PER-93`) and `HS-065`
+(`PER-97`).
+
+**The Docker block is gone.** A real daemon answers on this machine (§2), so `HS-027` … `HS-058` are
+unblocked and the queue is contiguous again from `HS-030` on. Three stories have now been built against a
+real `docker run` — the mounts and V1 (`HS-027`), the container with its limits (`HS-028`) and the start
+lock with `stop`/`resume` (`HS-029`) — and each is proven by a test that runs a container, not by a
+document.
 
 | Story | Linear | Commits | ADR |
 | --- | --- | --- | --- |
@@ -77,18 +82,20 @@ on a Docker daemon this machine does not have (§8).
 | HS-060 message snapshots and compaction | PER-92 | `5c0f960`, `e2a24b6`, `f0ecf8c`, `901b4ef`, `d1cb620` | 0032 |
 | HS-061 history truncation and pagination | PER-93 | `f8c3126`, `315b963`, `0a15876` | 0033 |
 | HS-065 daily project backup | PER-97 | `ea313e4`, `b4d7338` | 0034 |
+| HS-027 hardened `.git` mounts and V1 | PER-59 | `3025360`, `b009320` | 0035 |
+| HS-028 container run with limits | PER-60 | `5aae311`, `b009320` | 0036 |
+| HS-029 name conflicts, `stop`, `resume`, start lock | PER-61 | `e826539` | 0037 |
 
-**Next issue: `PER-107` (HS-075 — expand/contract migration discipline)** — the last story in the queue
-whose blockers are all `Done`. **`HS-027` … `HS-058` are blocked** (no Docker daemon here; PER-59 carries
-the argument, and `PER-74`/`PER-79`/`PER-84`/`PER-94`/`PER-100` carry the pointer), and everything from
-`HS-066` onwards is blocked transitively behind them — `HS-075` is the one exception, because its only
-blocker is `HS-004`. So `HS-###` order now means: skip the blocked run, take the next unblocked story,
-and when there is none left, **stop and report** (§8).
+**Next issue: `PER-62` (HS-030 — exit classification)**, then `HS-031` (real pi, `PER-63`) and so on in
+`HS-###` order. The whole Docker chain `HS-030` … `HS-058` is unblocked now; what remains blocked is
+`HS-066` onwards (phase 2, behind `HS-047`/`HS-056`/`HS-057`) and `HS-075` (`PER-107`), which is
+independent and still unstarted. Its §8 note — the four decisions and three landmines — is still the
+brief for it.
 
 Ranking, per `PROMPT.md`: Linear priority (all are `No priority`) → `HS-###` order in `docs/stories/` →
 anything already `In Progress` first → skip an issue whose `Blocked by` stories are not `Done`.
 
-### Thirteen facts a cold start must know
+### Sixteen facts a cold start must know
 
 1. **A running turn can now be stopped, in two rungs, with or without the way back.** `src/ladder.rs`
    is the shared routine: `clear_queue` then `abort`, wait up to `abort_grace` (the grace *bounds rung
@@ -225,6 +232,35 @@ anything already `In Progress` first → skip an issue whose `Blocked by` storie
     `warn` line that does not block the session**. The repository is `<projects_root>/<project>` whatever
     backend runs — the bundle is of the host checkout, not of anything a backend knows. ADR-0034.
 
+14. **A session's container is real, limited and on a network of its own — and the mounts hold V1.**
+    `src/container.rs` is spec item 1's four mounts as one value (`Mounts`: the worktree at `/work`, the
+    repository's `.git` at **its own host path**, and `.git/hooks`/`.git/config` stacked read-only on top of
+    it) plus the hardening and the `docker run` vector; `src/docker.rs` is the CLI as a program (`-H`, never
+    `DOCKER_HOST`; synchronous, called from `spawn_blocking`). The network step is
+    `docker network create --internal agents_<id>` and the container step is `docker run --detach --rm --init
+    --name s_<id> --network agents_<id> --cap-drop ALL --security-opt no-new-privileges --workdir /work
+    --env HS_SESSION_ID=<id> --cpus/--memory/--pids-limit` + the four mounts. **V1 passes as specified**
+    (`ADR-0035`): three writes refused, three git commands working, remount and umount denied, `id -u` 1000.
+    Three keys bound it — `container_cpus` 2, `container_memory_mb` 4096, `container_pids` 512 — and all
+    three refuse `0` because Docker reads zero as *unlimited*. `Mounts::check` runs **before** every
+    `docker run` (§6's landmine: `-v` creates a missing source as an empty root-owned directory).
+15. **Every start is `rm -f` then `run`, serialised per session, and `stop`/`resume` are real.** Spec item
+    6's first lines, `ADR-0037`: `--rm` removes an exited container a moment **after** `docker stop` has
+    answered (measured — a test that read `container_exists` straight after a stop failed one run in
+    three), so the removal is a call of its own inside the container step. The lock is `DockerBackend`'s: a
+    `tokio` mutex per session id (held across an `await`) over a `std` map that is never held across one;
+    mutation-proved — delete it and seven of eight concurrent starts fail with "the name is already in
+    use". `stop` is `docker stop --time 10`; `resume` re-creates the network and the container and touches
+    no worktree (`ensure` is create-or-adopt, ADR-0029). `SessionBackend::resume` had been uncalled since
+    ADR-0022 and now has a body.
+16. **The `pi` step still refuses, so a Docker create still ends `error` — one step later than before.**
+    The reason is `the pi step: the docker backend does not start the agent yet (HS-031)`. That is the
+    observable the gate asserts (`case_docker_container`, `case_docker_resume`): the row reached the
+    **agent** step, so the network and container steps both went to a real daemon, and the teardown left no
+    container, no network and no worktree. The container runs **detached** with `sleep infinity`
+    (`container::IDLE_COMMAND`) until HS-031 attaches pi's stdio, and that placeholder is what lets
+    `docker inspect` show the flags before there is an agent to run.
+
 Three things HS-014 and HS-015 settled that later stories inherit:
 
 - **The transcript's event contract** (ADR-0018 + ADR-0019), emitted by the backend:
@@ -276,9 +312,19 @@ core.sshCommand='ssh -o IdentityAgent=…'` was not enough either — the config
 git@github.com` with those options answering `Hi AdamOlsson!` is the way to check the agent before
 blaming the remote.
 
-**The reliable form offers ONE key.** The agent holds three, GitHub rejects the first, and the failure is
-intermittent even with the options above. Pin the key that GitHub accepts (the second one here) with
-`IdentitiesOnly`:
+**The reliable form offers ONE key.** The agent holds three, and *which* GitHub accepts changes between
+sessions — in this session it was the **third**, offered by `sed -n '3p'`, after the first two were rejected
+(`ls-remote` succeeded with it once and failed the next time, so retry the loop rather than trusting one
+probe). Loop over the three, offer one at a time, and push as soon as one works:
+
+```bash
+for i in 1 2 3; do ssh-add -L | sed -n "${i}p" > /tmp/k.pub
+  GIT_SSH_COMMAND="ssh -F /dev/null -o IdentitiesOnly=yes -o IdentityFile=/tmp/k.pub \
+    -o IdentityAgent=/run/ssh-agent.sock -o StrictHostKeyChecking=accept-new -o User=git" \
+    git push origin master && break; done
+```
+
+(The older single-key form, for reference:)
 
 ```bash
 ssh-add -L | sed -n '2p' > /tmp/pushkey.pub
@@ -325,13 +371,17 @@ export does not have `chromium` at the top level); and Chromium must be launched
 `--no-sandbox`, because its own namespace sandbox cannot nest inside ours. A third, learned in HS-020:
 **`networkidle` never settles** on the sessions list, because a live row holds an `EventSource` open —
 navigate with `domcontentloaded` and wait for the rows.
-**Not available, and not to be invented:** no Docker daemon, no `sudo`, no `apt`, no `gh`, no ssh key
-or token. There is a **browser now** (see §1 fact 2), but no *gate* may need one.
-**The `docker` CLI (29.9.2) *is* installed but there is no daemon**: `/var/run/docker.sock` does not
-exist and `docker version` answers "failed to connect to the docker API". That is what blocks
-`HS-027` … `HS-058` (§8), and it is a hard block, not an inconvenience: mounts, capabilities and
-containers are the things those stories assert, and a socket that answers `_ping` proves a refusal or a
-host command, not a container. Do not implement them against a fake daemon and call the gate green.
+**Available since this session: a real Docker daemon.** `docker version` shows a 29.9.2 server, `/var/run/docker.sock` exists,
+`docker run` works and images pull over the network. `bwrap.sh` binds the host's socket at
+`/var/run/docker.sock` (`DOCKER=()` … `--bind "$sock" /var/run/docker.sock`), so a `docker` inside the
+sandbox drives the real daemon — that is host root by another name and it is granted deliberately; a
+machine without a socket simply gets no binds. **`pi-agent:local` is loaded and is the image every Docker
+story uses**: its pi version equals `pins/pi.txt` exactly (HS-031 will assert that in code), git 2.39.5,
+node 24, default user `node` (uid **1000**, the host uid) — this is HS-031's agent image in all but name. Everything the Docker chain needs is here, including
+network access for `alpine:3` and friends.
+
+**Not available, and not to be invented:** no `sudo`, no `apt`, no `gh`, no ssh key (the agent has one,
+§pushing), no Tailscale. There is a **browser** (§1 fact 3), but no *gate* may need one.
 **No `awk`** and **no `shellcheck`** on this machine — do not write a script or a gate that needs
 either.
 
@@ -414,7 +464,7 @@ If that fails, **stop and report** — that is a `PROMPT.md` stop condition.
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                     # 244 lib + 33 integration binaries, 569 tests in all (22 in
+cargo test                     # 255 lib + 35 integration binaries, 600 tests in all (22 in
                                # tests/worktree.rs, 16 tests/events.rs, 10 tests/turns.rs, 10
                                # tests/compaction.rs, 14 delete.rs, 8 idle_stop.rs, 9 backup.rs,
                                # 7 history.rs)
@@ -426,12 +476,13 @@ scripts/verify.sh              # THE one-command gate since HS-006
 `scripts/verify.sh` runs six phases, cheapest first: `fmt`, `clippy`, `test`, `build`
 (`scripts/build.sh`, which itself runs `build-web.sh` — `npm test` then Vite — and `check-static.sh`
 last), `embed` (`scripts/check-embed.sh`), then `serve` — the **shipped musl artifact** booted on
-`--port 0` with a temp data dir, running **46 cases plus a CORS sweep (328 assertions)**, then torn down
-with `SIGTERM` and an asserted exit 0. Six cases bring their own boot (`case_token_budget`,
-`case_compaction`, `case_history`, `case_backup`, `case_worktree`, `case_worktree_refusal`, plus
-`case_docker_preflight`, which needs no
-server at all). It takes ~3 min (both musl targets) plus `case_idle_stop`'s real
-minute. `--no-build` skips `build` and `embed`; `--keep` keeps the work dir.
+`--port 0` with a temp data dir, running **49 cases plus a CORS sweep (367 assertions)**, then torn down
+with `SIGTERM` and an asserted exit 0. Eight cases bring their own boot (`case_token_budget`,
+`case_compaction`, `case_history`, `case_backup`, `case_worktree`, `case_worktree_refusal`,
+`case_docker_container`, `case_docker_resume`, plus `case_docker_preflight`, which needs no
+server at all, and `case_container_mounts`, which needs no server *and* no daemon — it skips, one printed
+line, when there is neither a daemon nor an image). It takes ~5 min (both musl targets, the Docker cases
+and `case_idle_stop`'s real minute). `--no-build` skips `build` and `embed`; `--keep` keeps the work dir.
 
 A story is not done until all four are green on a clean tree, and then you run the story's own demo
 yourself and paste its output.
@@ -469,9 +520,12 @@ crates/holosmith/
   src/commands/             version.rs, config.rs, serve.rs
   src/config/               mod.rs (typed Config, KeySpec walk, 26 keys), schema.rs, problem.rs,
                             render.rs, duration.rs, editor.rs
-  src/backend/              mod.rs (Step, SessionBackend, Backends, BackendError, TurnEnd), stub.rs
-                            (the scripted turn; `ignoring_abort`, `failing_at`, `failing_snapshot`),
-                            docker.rs (refuses every operation until HS-025 fills them in)
+  src/backend/              mod.rs (Step, SessionBackend, Backends::for_run(backend, ContainerSettings),
+                            BackendError, TurnEnd, Provisioned), stub.rs (the scripted turn;
+                            `ignoring_abort`, `failing_at`, `failing_snapshot`), docker.rs (the worktree,
+                            network and container steps are real; `start_container` = `rm -f` then `run`;
+                            the per-session start lock; `stop` = `docker stop --time 10`; `resume` = network
+                            + container; `Pi` and the turn's five operations still refuse, naming HS-031)
   src/provisioner.rs        the four-step background task and its five session.status events; stops at
                             a step boundary when the row leaves `starting`
   src/turn.rs               the turn runner (HS-015) and the turn timeout (HS-022): touch → the
@@ -488,6 +542,17 @@ crates/holosmith/
   src/deleter.rs            the delete flow's task (HS-019): revoke_key (a no-op until HS-039) →
                             `backend.delete` → remove the row *and its event log* in one
                             transaction → close the session's streams. `DELETED` is the rung-2 word
+  src/container.rs          the session's container (HS-027/028/029, ADR-0035/0036/0037): `Mounts`
+                            (spec item 1's four, host path == container path except `/work`),
+                            `Mount::argument`/`Mounts::check` (refuses a missing or wrong-kind source
+                            *before* `docker run`), `Limits`, `ContainerSettings` (`of(config)`, `at(root)`,
+                            `docker()`), `SessionContainer::run_args` (the whole `docker run` vector:
+                            `--detach --rm --init --name s_<id> --network agents_<id>`, the hardening, the
+                            three limits, `-w /work`, `-e HS_SESSION_ID`), `network_name`, `IDLE_COMMAND`
+                            (`sleep infinity` until HS-031), `Unmountable`
+  src/docker.rs             the `docker` CLI as a program (HS-028): `Docker{host}`, `run`/`succeeds`,
+                            `create_internal_network`/`remove_network`, `remove_container`/`stop_container`
+                            (`STOP_SECONDS` = 10), `run_container`, `inspect`, `DockerError`
   src/compactor.rs          compaction's task (HS-060, ADR-0032): `SNAPSHOT_AFTER` (24 h, a constant),
                             `TICK` (60 s), `MESSAGES_PER_PASS` (500), `Compactor::{new, with_window,
                             spawn, run, sweep, fold}`. A pass at startup, then a tick; the per-session
@@ -542,7 +607,9 @@ crates/holosmith/
                             streams, provisioning, state_machine, session_list, session_screen,
                             turns, abort, steer, resume, delete, eviction, idle_stop, turn_timeout,
                             token_budget, preflight, backend_contract, worktree, compaction,
-                            history, backup, support/mod.rs
+                            history, backup, container (V1 + the container's flags + stop/remove/resume +
+                            eight concurrent starts; **needs a daemon and `$HOLOSMITH_TEST_IMAGE`,
+                            default `pi-agent:local`, and skips otherwise**), support/mod.rs
                             (the shared harness, which also has `repository`/`git`/`head`/
                             `branch_exists`/`worktrees` helpers for a real git repo in a `TempDir`)
 web/                        Vite 7 + TypeScript, two screens (`/` and `/sessions/<id>`); untouched by HS-025
@@ -578,11 +645,13 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   `message.snapshot`), the Sessions screen with its create form (which prints a project
   refusal's sentence alone) and the "nothing was deleted" notice, the session screen at
   `/sessions/<id>` with a live transcript and a four-action composer.
-- **Not built yet:** anything Docker beyond the preflight and the **worktree step** (HS-026 … HS-046 — the
-  network, container and agent steps still refuse, each naming its story), the drain (HS-044), tool-output files and `output_ref` (HS-033), the **usage totals on the
-  screen** (HS-034 — the columns are now real, the screen only says "no usage reported" when it must), the
-  preview listener (HS-041), the stopped-session expiry (HS-064), `doctor` (HS-045), merge, publish, the hub,
-  releases, and any **delete affordance in `web/`** (the API has the endpoint; the page has no button).
+- **Not built yet:** the **agent step** (HS-031 — the container runs `sleep infinity` until pi's stdio is
+  attached), pi's RPC mapping (HS-032/033/034/035), exit classification and the expected-stop flag (HS-030),
+  the `egress` network and its startup self-test (HS-036), the two proxies (HS-037/039), the preview
+  listener (HS-041), the WIP snapshot (HS-042), the delete's keep-rules (HS-043), startup reconcile (HS-044),
+  `doctor` (HS-045), the phase-1 verification run (HS-046), merge, publish, the hub, releases, the
+  stopped-session expiry (HS-064), and any **delete affordance in `web/`** (the API has the endpoint; the
+  page has no button).
 - **The log is now read in two shapes and written by two producers of two kinds.** The stream replays a
   *window* (`history_window`, default 50) and says so with `history.truncated`; `GET …/events/history`
   answers the frames below that cursor. `events/stream.rs`'s `REPLAY_LIMIT` is still `u32::MAX` — it is
@@ -594,8 +663,9 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   the runner, on one `fired` shared with the timeout so only one climb happens). All of them go through
   `Transitioner::apply`, and the row moves before the container in every one of them.
 - **`runtime::Backend`** has `Stub` and `Docker`; `serve --backend` and the config key `backend` select
-  it. `DockerBackend::new(projects_root)` **provisions the worktree and refuses every other operation**
-  (HS-026 … HS-031 fill them in), and the default backend is `docker`
+  it. `DockerBackend::new(ContainerSettings)` **provisions the worktree, the network and the container, and
+  refuses the agent step and the turn's operations** (HS-030 … HS-035 fill them in), and the default
+  backend is `docker`
   (ADR-0001: the stub is opt-in), so a default build provisions a session to `error` with a reason
   rather than hanging in `starting`. (Since HS-026 a create for a project that is not a plain checkout is
   refused earlier, with a 422; the demo trick HS-019 used still works for a project that *is* one.) That
@@ -614,7 +684,9 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   Full}`; a `Full` makes `slot_for` evict one idle session (through `apply`, which takes the lock
   itself) and try again. Idempotency is checked first, so a retry never evicts anyone. `evict_one`
   moves the row **before** it spawns the backend's `stop`, because the row is what frees the slot.
-- **`config`** already has `abort_grace` (default `10s`, **used** by the ladder), `idle_stop_min`,
+- **`config`** has (`31` keys now) `agent_image` (default `agent-image:<binary version>`; this machine's
+  demos and the gate set `pi-agent:local`), `container_cpus` (2), `container_memory_mb` (4096),
+  `container_pids` (512) — all three **refuse `0`** — plus `abort_grace` (default `10s`, **used** by the ladder), `idle_stop_min`,
   `stopped_ttl_days`, `min_free_gb`, `turn_timeout_min`, `max_session_tokens` and the rest — check
   `config show` before adding a key. The delete flow and **compaction** have **no** config key of their
   own (the 24-hour window is a constant), and `max_live_sessions` (default 3, ≥ 1) is the cap.
@@ -963,6 +1035,50 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   writes shims and nothing else in it forks (8 consecutive runs clean). If another test binary grows the
   same pattern, copy that lock rather than the shim dance.
 
+### Landmines HS-027, HS-028 and HS-029 added (Docker is real now)
+
+- **A path the daemon cannot see is not a mount, and `-v` does not say so.** Docker resolves a bind mount's
+  source in the **host's** mount namespace. This sandbox's `/` and `/tmp` are tmpfs, so `docker run -v
+  /tmp/x:/work` *creates* `/tmp/x` as an empty root-owned directory on the host and mounts that — no error,
+  no warning, and the container comes up with an empty `/work` and a `.git` that is not the repository. The
+  first draft of the V1 test lost a cycle to it. Host-visible paths here are the repo (bind-mounted at its
+  own path), `~/.pi`, `~/.cache`, `~/.ssh`, `~/.gitconfig` and `~/.local/bin`. **Every Docker test and gate
+  case therefore builds its scratch repository under `<repo>/target/…`**, not `mktemp -d`.
+- **`--rm` removes an exited container *after* `docker stop` has answered.** Measured: a test that read
+  `container_exists` the instant a stop returned failed one run in three. Wait for the removal (a bounded
+  poll) or you will chase a phantom. It is also why spec item 6's `rm -f` before every start is load-bearing
+  rather than belt-and-braces, and why the container step does the removal itself (ADR-0037).
+- **Two starts of one session must not interleave**, or the second `run` fails with "the container name is
+  already in use" — which is the *other* start working as designed. The per-session `tokio` lock is in
+  `DockerBackend` (`start_lock`), taken by both the container step and `resume`. Deleting it makes
+  `two_starts_of_one_session_do_not_race` fail on every run tried (seven of eight starts).
+- **The container's image is `agent_image` and must be non-root.** `--user` is deliberately not passed
+  (ADR-0035): the image's own user runs the agent, and V1's probe reads `id -u` and fails on `0`. A test or a
+  case needs an image with `sh`, `git`, `mount`, `umount` and `sleep`; `pi-agent:local` has all of them and
+  its uid **1000** matches the host's, which is what makes the host's files writable from inside.
+- **`docker inspect` is the only place a running container's real flags are visible**, and a container that
+  failed its next provisioning step has already been removed — so the flags are asserted in
+  `tests/container.rs` (which pauses) and the *step order* in the gate's `case_docker_container`/
+  `case_docker_resume`. Do not try to catch a container from the gate by polling; it is a race, not a check.
+- **A container name is `s_<id>` and a network's is `agents_<id>`, so two tests that share a session id
+  collide.** `tests/container.rs` gives each test its own id for exactly that reason (one test's `rm -f`
+  deleted the other's container mid-flight).
+- **`docker run --detach` returns as soon as the container starts**, so the container's stdout is gone; V1's
+  probe strips `--detach` from the production vector and truncates after the image to run its own `sh -c`.
+  `--detach` plus `--rm` plus a command that exits means the container vanishes before it can be inspected,
+  which is why the placeholder is `sleep infinity`.
+- **A case that stops its own server leaves `phase_serve`'s final `stop_serve` with no pid**, and the gate
+  fails at `FAIL serve/sigterm`. A case that needs its own boot stops the shared one and **leaves its own
+  running**; only the last one is stopped by the phase.
+- **A gate case that needs a daemon must guard before it does anything else** and print one `SKIP` line —
+  `case_container_mounts`, `case_docker_container` and `case_docker_resume` all do, because a machine
+  without Docker is a supported machine (a hub). `HOLOSMITH_TEST_IMAGE` overrides the image;
+  `HOLOSMITH_KEEP_SCRATCH=1` keeps `tests/container.rs`'s scratch directory.
+- **The gate's `case_worktree` answers the preflight from a `_ping`-only python socket.** Since HS-028 the
+  network step really runs and fails against that socket, so the row's reason names **the network step**
+  rather than a story number — the assertion was updated, and the fake socket is no longer a stand-in for a
+  whole Docker run.
+
 ### Reviews
 
 - **Reviews are saved verbatim** and a `## Resolution` section is appended afterwards. Do not edit the
@@ -1182,6 +1298,9 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 | **`ahead` is a function, not a column and not an endpoint**, and the story's demo is recorded as half-showable | no column exists, HS-061 owns `GET /changes`, a per-row git call in the list endpoint is a second data path; the step after the worktree refuses, so a live worktree cannot be shown from the artifact | ADR-0029 |
 | **History truncation is the stream's read step and the window is a key**: with no `Last-Event-ID` a replay starts at the **lowest** seq of the `history_window`-th most recent message (a backwards scan over the message-bearing kinds), announced by a `history.truncated` frame carrying `{before_seq, turns_before}` and **no SSE `id`**; a page is `seq < before ORDER BY seq DESC LIMIT n`, `before` is required with `422 bad_query`, and the page shows a button, not infinite scroll | a block must be whole, so the cut is the message's first row; a reconnecting client already has everything below its own seq; `turns_before` is the one number a client cannot compute, because the frames that would say it are the ones it was not sent; seq is strictly increasing, so a page is stable by construction | ADR-0033 |
 | **The project backup is one verified bundle per project per day, taken by the create**: `<data>/backups/<project>-<YYYY-MM-DD>.bundle` (UTC, `--all`), written aside → `git bundle verify` → renamed, the last `KEEP = 7` kept, awaited after the row is inserted and before the provisioner runs, and **every failure is one `warn` that does not block the session**; the repository is `<projects_root>/<project>` whatever backend runs | the name is the state and the prune's sort key; a file under the final name must always be one git could read; the story says "before the first session of each day", so ordering is the requirement, and a broken safety net must not become an outage; the thing an agent can damage is the host checkout | ADR-0034 |
+| **The hardened mounts are one value, kept at their host paths, and V1 passes as specified** (so the spec's narrower fallback is not applied), with `--user` deliberately not passed and the image as the key `agent_image` | the worktree's `.git` *file* holds an absolute `gitdir:`, so any other container path points git at nothing mounted; naming a uid would guess a mapping the deploy step owns, and a wrong guess is "permission denied" mid-turn | ADR-0035 |
+| **HS-028 fills the network step too**, `--internal` because that is the isolation, with the container **detached** on `sleep infinity` until HS-031 and three integer limit keys that refuse `0` | a container cannot join a network that does not exist, and spec item 6's run line names it; an attached process nobody reads is a container that fills its stdout pipe | ADR-0036 |
+| **A start is `rm -f` then `run`, serialised per session by a `tokio` mutex in the backend**; `stop` is `docker stop --time 10` and `resume` re-creates the network and container but no worktree | `--rm` removes an exited container a moment after `docker stop` answers (measured), a container the process lost track of must be replaceable, and interleaved starts fail with a name conflict one caller cannot explain; the worktree step's `ensure` is create-or-adopt | ADR-0037 |
 | **Compaction is a background pass inside the database mutex**, one transaction per session, bounded by `MESSAGES_PER_PASS` after the already-folded filter and by the newest candidate's `message.end` on the delta scan; the 24-hour window is the spec's constant and not a key; the snapshot takes the highest removed seq and `sessions.last_seq` never moves; nothing is broadcast | `Transitioner::apply` takes the same mutex, so the skip of a running turn needs no second lock; the spec names 24 hours and its config list is exhaustive; a client already connected has the deltas and a reconnecting one reads the snapshot from its replay | ADR-0032 |
 
 ---
@@ -1193,23 +1312,31 @@ cd /home/adamolsson/projects/holosmith
 git status --short                          # must be clean
 . ~/.pi/toolchains/env.sh
 python3 /tmp/lin.py issues | grep -v ' Done ' | head   # next unfinished (recreate /tmp/lin.py, §2)
-python3 /tmp/lin.py issue PER-107           # sanity-check Linear is reachable and scoped
-scripts/verify.sh                           # baseline green (~7 min, 46 cases, 328 assertions)
+python3 /tmp/lin.py issue PER-62            # sanity-check Linear is reachable and scoped
+docker version                              # the daemon must answer, or every Docker story is a lie
+docker image inspect pi-agent:local         # the image the Docker stories run
+scripts/verify.sh                           # baseline green (~5-8 min, 49 cases, 367 assertions)
 ```
 
-Then start the cycle at **`PER-107` (HS-075 — expand/contract migration discipline)**. Read §1's thirteen
-facts first: the writer owns the batch (and coalescing), the runner owns both turn policies, the worktree
-step is real and idempotent, the create and the resume refuse a project the machine must not mount,
-compaction folds a day-old message and the log is therefore not append-only, a stream now replays a
-*window* and says where it started, the shared repository gets one verified bundle a day, and the page has
-been rendered (so a DOM claim needs a Chromium run — and a `web/` edit needs a rebuild before that run).
+Then start the cycle at **`PER-62` (HS-030 — exit classification)**, and after it the rest of the Docker
+chain in `HS-###` order: `HS-031` (real pi in the container), `HS-032`–`HS-035` (pi's RPC mapping),
+`HS-036` (the `egress` network and the startup self-test), `HS-037`–`HS-040` (the two proxies and their
+verification), `HS-041` (preview), `HS-042`–`HS-044` (snapshot, delete keep-rules, reconcile),
+`HS-045` (`doctor`), `HS-046` (the phase-1 verification run — the gate for phase 2), then phase 2.
 
-**Do not try `HS-027` … `HS-058` first.** They are blocked on a Docker daemon this machine does not have;
-PER-59 records the argument, and `PER-74`/`PER-79`/`PER-84`/`PER-94`/`PER-100` carry the pointer.
-**`HS-075` (`PER-107`) is the last story in the whole queue whose blockers are all `Done`** — its only
-blocker is `HS-004`. Everything from `HS-066` onwards waits on the Docker chain. So when HS-075 ships,
-**there is nothing left that can be done on this machine**: stop, say so, and leave the tree clean and the
-gate green (§9).
+Read §1's sixteen facts first: three of them are the Docker half (mounts and V1, the container and its
+limits, the start lock and `resume`), and the rest are the writer's coalescing, the runner's two turn
+policies, the worktree step, the create's project refusals, compaction, truncated replay, the daily bundle
+and the rendered page.
+
+**`HS-075` (`PER-107`, expand/contract migration discipline) is independent of all of that** and can be
+taken at any point — it is the one story whose only blocker is `HS-004`, and §8's own note below carries the
+four decisions and three landmines it needs. It is **not shipped**; it was the "next" story before the
+daemon appeared and was never started.
+
+**The remaining true blocker is `HS-066` onwards** (phase 2's deploy/hub stories), which wait on
+`HS-047`/`HS-056`/`HS-057` and the phase-1 verification run. Nothing in the queue is now blocked on the
+machine itself.
 
 ### What HS-075 is about, so the first brief is fast
 
@@ -1266,7 +1393,15 @@ durable record; the review file is the durable review; the commit history is the
 stop before the backlog is empty, say so explicitly, say which issue is next, and leave the tree clean
 and the gates green — a half-finished story is worse than an honest stop.
 
-This session's ledger (the twenty-ninth and thirtieth stories — two shipped, and then the queue ran out):
+This session's ledger (three stories shipped — the Docker block is open at last):
+
+| Issue | Story | Commits | Outcome |
+| --- | --- | --- | --- |
+| PER-59 | HS-027 hardened `.git` mounts and V1 | `3025360`, `b009320` | Done — **V1 measured and passed as specified**, so the spec's narrower fallback is not applied. New `src/container.rs` (the four mounts as one value, the hardening, the `docker run` vector, `Mounts::check`), `agent_image` key, `tests/container.rs` (a real container), `case_container_mounts`. Review: Standards **PASS with findings**, Spec **PASS with findings**, no P1, seven findings all fixed (`docs/review/PER-59-60.md`): dead `docker::absolute` deleted; the teardown's dropped error now a `warn`; the four new keys added to the setter-coverage test; the `0`-refusal tested; two V1 clauses that could pass on a missing `mount`/`id` hardened; a stale doc summary; the sandbox's socket grant documented. Mutation proof: removing the read-only hooks mount makes `hooks_write` succeed. **The one environmental discovery that shaped everything after it:** a path the daemon cannot see is not a mount — `/tmp` is tmpfs here, and `-v` silently creates an empty root-owned directory instead |
+| PER-60 | HS-028 container run with limits | `5aae311`, `b009320` | Done — the **network and container steps are real**: `docker network create --internal agents_<id>` and `docker run --detach --rm --init --name s_<id> --network agents_<id> --cap-drop ALL --security-opt no-new-privileges -w /work -e HS_SESSION_ID --cpus/--memory/--pids-limit` + the four mounts. New `src/docker.rs` (the CLI as a program, `-H` not `DOCKER_HOST`), three limit keys that refuse `0`, `tests/container.rs`'s `docker inspect` case, `case_docker_container`, ADR-0036. Detached with `sleep infinity` until HS-031 — recorded, not papered over. The demo is half artifact (a create ends `error` at the **pi** step, so the two earlier steps reached a real daemon, and nothing is left behind) and half test (`docker inspect`: caps, limits, init, auto-remove, network, workdir, four binds, no socket) |
+| PER-61 | HS-029 name conflicts, `stop`, `resume`, start lock | `e826539` | Done — `--rm` is **not** enough: the daemon removes an exited container a moment *after* `docker stop` answers (measured; a test failed one run in three until it waited), so a start is `rm -f` then `run`, serialised per session by a `tokio` mutex in the backend. `SessionBackend::resume` finally has a body (network + container, no worktree), `stop` is `docker stop --time 10`, and three new container tests + `case_docker_resume` prove it. **Mutation-proved lock:** delete it and seven of eight concurrent starts fail with "the name is already in use" |
+
+The session before it, for the shape of a ledger entry:
 
 | Issue | Story | Commits | Outcome |
 | --- | --- | --- | --- |

@@ -25,7 +25,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::Arc;
 
 use holosmith::backend::{DockerBackend, Provisioned, SessionBackend, Step};
 use holosmith::container::{
@@ -673,10 +672,16 @@ fn a_second_start_never_fails_on_a_leftover_name() {
     );
 
     // The leftover this story is really about: a container this process cannot stop, because it does not
-    // know it is there. Plant one under the name and start anyway.
+    // know it is there. Plant one under the name and start anyway — after waiting out the `--rm` removal the
+    // stop above started, or the plant itself races it (the review of this story caught the second stop
+    // here with no wait, one line after the first one had one).
     runtime().block_on(async {
         backend.stop(&session).await.expect("a stop works");
     });
+    assert!(
+        wait_gone(&docker, &container.name),
+        "the stop before the plant left the container behind for two seconds"
+    );
     let output = Command::new("docker")
         .args(container.run_args())
         .output()
@@ -793,7 +798,7 @@ async fn two_starts_of_one_session_do_not_race() {
     let scratch = Scratch::new("race", ID_RACE);
     scratch.project();
     let settings = settings(&scratch.path);
-    let backend = Arc::new(DockerBackend::new(settings.clone()));
+    let backend = DockerBackend::new(settings.clone());
     let docker = settings.docker();
     let container = SessionContainer::of(&settings, &session(ID_RACE));
     rm_container(&container.name);
@@ -803,9 +808,11 @@ async fn two_starts_of_one_session_do_not_race() {
         .await
         .expect("the network step works");
 
+    // Each task gets its own **clone**, which is what production does (the provisioner consumes a cloned
+    // `Backends`), so a lock that stopped being shared between clones would fail here.
     let mut handles = Vec::new();
     for _ in 0..8 {
-        let backend = Arc::clone(&backend);
+        let backend = backend.clone();
         handles.push(tokio::spawn(async move {
             backend.provision(&session(ID_RACE), Step::Container).await
         }));

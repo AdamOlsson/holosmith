@@ -38,14 +38,22 @@ use crate::worktree::{Refusal, Worktree, refuse, repository_of};
 #[derive(Debug, Clone)]
 pub struct DockerBackend {
     settings: ContainerSettings,
-    /// One `async` mutex per session being started, so two starts of one session cannot interleave.
+    /// One `async` mutex per session this process has started, so two starts of one session cannot
+    /// interleave.
     ///
     /// Spec item 6: "Two starts for the same session cannot race: a per-session lock serialises them." A
     /// start is `docker rm -f` followed by `docker run`, and two of those interleaved produce a
     /// "name already in use" that neither caller can explain. The lock is `tokio`'s rather than `std`'s
     /// because it is held across an `.await`, and the map behind it is a `std` mutex that is never held
-    /// across one — the map is only touched to hand out or drop an `Arc` (the same shape ADR-0012's database
-    /// mutex has, and for the same reason).
+    /// across one — the map is only touched to hand out an `Arc` (the same shape ADR-0012's database mutex
+    /// has, and for the same reason).
+    ///
+    /// **The map keeps one entry per session id this process has started**, and it does not shrink: an
+    /// entry cannot be dropped while anyone may still be waiting on it, and a sweep that guesses when that
+    /// is lets a third caller mint a fresh mutex and walk into the section the lock exists to protect (the
+    /// review of HS-029 found exactly that in the first draft's `strong_count` test). An unlocked
+    /// `tokio::sync::Mutex` plus a 16-byte id is not worth a racy registry, and a process is restarted long
+    /// before this matters.
     starts: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
@@ -77,14 +85,7 @@ impl DockerBackend {
                     .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
             )
         };
-        let guard = lock.clone().lock_owned().await;
-        // Drop the map's entry if this is the only holder left: `strong_count` is 2 when it is (the map's
-        // and the guard's).
-        let mut starts = self.starts.lock().unwrap_or_else(PoisonError::into_inner);
-        if Arc::strong_count(&lock) <= 2 {
-            starts.remove(session_id);
-        }
-        guard
+        lock.lock_owned().await
     }
 
     /// The worktree this session is entitled to, from the machine's projects root.
@@ -268,14 +269,18 @@ impl DockerBackend {
         Self::blocking(Step::Worktree, move || worktree.remove()).await
     }
 
-    /// Remove the session's container, ignoring "no such container" (spec item 6's `--rm` rule, and
+    /// **Remove** the session's container by force, ignoring "no such container" (spec item 6's `--rm` rule,
+    /// and
     /// ADR-0023's: a teardown of something that is not there is not a failure).
+    ///
+    /// Named `remove_container`, not `stop_container`: `Docker::stop_container` is the graceful stop, and a
+    /// reader following [`SessionBackend::stop`] into a force-removal would be following a different story.
     ///
     /// `docker rm --force` is what `docker stop` would be plus the removal, in one call — the container's
     /// data lives in host directories, so there is nothing to lose by removing it (spec item 6). A
     /// *failure* to remove is logged and not propagated: the delete flow's job is to remove the row, and a
     /// container the daemon cannot remove is a machine problem the log names.
-    async fn stop_container(&self, session: &Session) {
+    async fn remove_container(&self, session: &Session) {
         let name = self.container(session).name;
         let removed = Self::docker(Step::Container, self.settings.docker(), move |docker| {
             Ok(docker.remove_container(&name))
@@ -352,7 +357,10 @@ impl SessionBackend for DockerBackend {
             // The container first when it is undone on its own (its network is not a dependency of
             // removing it, but a container holding a network up would make the network's removal fail).
             Step::Container => {
-                self.stop_container(session).await;
+                // The same lock a start takes: a teardown concurrent with a start could otherwise remove the
+                // container the start just made, or the network its `docker run` needs.
+                let _start = self.start_lock(&session.id).await;
+                self.remove_container(session).await;
                 Ok(())
             }
             Step::Network => {
@@ -397,8 +405,10 @@ impl SessionBackend for DockerBackend {
     /// exited, are HS-030's.
     async fn stop(&self, session: &Session) -> Result<(), BackendError> {
         let name = self.container(session).name;
+        // `?` on the outer `Result` is deliberate: a daemon that cannot answer is a failed stop, and the
+        // ladder's `warn` is where that has to become visible.
         let stopped = Self::docker(Step::Container, self.settings.docker(), move |docker| {
-            Ok(docker.stop_container(&name))
+            docker.stop_container(&name)
         })
         .await?;
         if !stopped {
@@ -437,7 +447,12 @@ impl SessionBackend for DockerBackend {
         // the worktree: a container or a network the daemon has already forgotten is a fact, and a
         // remaining row is what ADR-0023 refuses. The order matters — a container still attached to the
         // network keeps it busy.
-        self.stop_container(session).await;
+        //
+        // Under the start lock, because a delete can arrive while a start is in flight (a create's provisioner
+        // and a delete of the same session): without it, the delete removes the network between the start's
+        // `network create` and its `docker run`.
+        let _start = self.start_lock(&session.id).await;
+        self.remove_container(session).await;
         self.remove_network(session).await;
         self.remove_worktree(session).await
     }
