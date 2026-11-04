@@ -93,11 +93,11 @@ the bound address (ADR-0007), so the case for a request that passes the guards s
 the origin the guard compares; `control_listen` and `control_origin` are both read from the
 startup banner, never assumed. The data root is inside the work dir, so a run never touches
 `/var/lib/holosmith` (ADR-0009), and the config file carries `owner`, `max_live_sessions = 1`,
-`backend = "stub"` and `idle_stop_min = 1`: the `bad_owner` case, the create cases, provisioning
-and the idle stop are the only reasons that file exists. The backend comes from the *file* rather
-than from a `--backend` flag on purpose — that is half of HS-011's "selectable by config and by
-`--backend`", and `case_backend_from_config` is what proves it; `tests/serve_cli.rs` covers the
-flag, the override and the default. Every request is a `/dev/tcp` fetch (`fetch` for a body-less request,
+`backend = "stub"`, `idle_stop_min = 1` and `turn_timeout_min = 1`: the `bad_owner` case, the create
+cases, provisioning, the idle stop and the turn timeout's quiet half are the only reasons that file
+exists. The backend comes from the *file* rather than from a `--backend` flag on purpose — that is half
+of HS-011's "selectable by config and by `--backend`", and `case_backend_from_config` is what proves it;
+`tests/serve_cli.rs` covers the flag, the override and the default. Every request is a `/dev/tcp` fetch (`fetch` for a body-less request,
 `fetch_body` when a body is needed, `fetch_stream` for a response that never ends), so the
 harness needs neither `curl` nor `jq`. `fetch_stream` exists because `fetch` reads until EOF:
 an event stream sends its header block at once and then nothing until the first event, so
@@ -130,7 +130,11 @@ session by id (`case_session_detail`, which asserts the row the create made, tha
 prompt (`case_prompt_turn`, which asserts the 202 answers the row `running` and then reads that
 session's stream until the turn settles, asserting the turn's six kinds in order and the
 `idle → running → idle` transitions; `case_prompt_bad_body` and `case_prompt_unknown_session`,
-which assert the `422 bad_body` and `404 not_found` envelopes), and the abort
+which assert the `422 bad_body` and `404 not_found` envelopes), the turn timeout's quiet half
+(`case_turn_timeout`, which prompts the same session twice with `turn_timeout_min = 1` and asserts each
+row comes back `idle` with no `status_reason` and that the runner wrote no deadline line — the gate
+cannot make the deadline *fire*, because the key is whole minutes and the stub's turn lasts a second, so
+that half is `tests/turn_timeout.rs`'s), and the abort
 (`case_abort`, which prompts, aborts, and reads that session's stream until the event carries the
 abort's own reason, asserting the 202 answered the row still `running` and that the turn ended
 `running → idle` with reason `abort_completed`; `case_abort_on_an_idle_session`, which asserts the

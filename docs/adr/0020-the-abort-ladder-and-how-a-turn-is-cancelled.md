@@ -29,7 +29,14 @@ survives an abort starts the prompt the operator no longer wants, and a test can
 ordering if it can observe both calls separately.
 
 There is no cancellation token in the server, no `select!` around `start_turn`, and no per-session
-registry of turn handles in `AppState`. A token would let the server *believe* it had stopped a turn
+registry of turn handles in `AppState`.
+
+**Amended by ADR-0026 (HS-022).** `Turn::run` now races `start_turn` against its own deadline — that is a
+`select!` around it — but nothing is cancelled by it: the deadline's arm hands the ladder a **task of its
+own** (`Ladder::spawn`, the abort handler's entry point) and then keeps awaiting the turn, so rung 1 works
+exactly as it does for an operator's abort and the backend still decides `TurnEnd`. The rule that matters —
+no server-side token, and none of the server's belief about a turn the agent is still running — is
+untouched; what changed is only *when* the ladder is asked. A token would let the server *believe* it had stopped a turn
 the agent is still running, and the whole point of rung 2 is that the agent is not to be trusted to
 honour anything. So the interruption is the backend's own: the stub's turn loop checks a per-session
 stop flag between frames and answers `Aborted` instead of finishing its script; Docker's HS-024

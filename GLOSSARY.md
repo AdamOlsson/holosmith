@@ -121,6 +121,16 @@ _Avoid_: Kill path, escape hatch, force stop, cancel chain
 One numbered step of the abort ladder, as spec item 16 numbers them.
 _Avoid_: Stage, level, attempt
 
+**Turn timeout**:
+The deadline on a single turn: `turn_timeout_min` (45 by default, and `0` is the off switch), after which the
+turn is ended through the **abort ladder** with reason `turn_timeout`. It is the turn's own, not the
+session's: the clock starts when the turn does and dies with it, so a settled turn has no clock to reset and
+a steer cannot extend one. The deadline is the turn runner's (`Turn::run`), because the row keeps no
+per-turn timestamp — `last_active_at` moves on a steer — and both of its endings record the reason: the
+runner's `running → idle` when the agent answers rung 1, and the ladder's `running → stopped` when it does
+not. Its machine names are `Turn`'s `timeout`, `TURN_TIMEOUT` and the ladder's `climb`.
+_Avoid_: Timeout, watchdog, expiry, kill timer
+
 **Grace**:
 The span rung 1 gets before rung 2 fires: the config key `abort_grace`, ten seconds unless the file says otherwise. It is the ladder's only number, and `0s` is refused because a ladder with no grace is rung 2 with extra steps.
 _Avoid_: Timeout, patience, deadline

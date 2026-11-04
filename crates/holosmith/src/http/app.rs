@@ -76,12 +76,16 @@ impl AppState {
     /// A turn runner wired to this state's backend, database and event writer (HS-015).
     ///
     /// Here for the same reason as [`Self::provisioner`]: the prompt handler clones the three
-    /// handles a background turn needs in one place.
+    /// handles a background turn needs in one place. Since HS-022 it also carries the two durations a
+    /// turn's ending needs — the ladder's `abort_grace` and `turn_timeout_min` — so a runner cannot be
+    /// built with a timeout the config did not ask for.
     pub fn turner(&self) -> Turn {
         Turn::new(
             self.backend.clone(),
             Arc::clone(&self.database),
             self.events.clone(),
+            self.config.abort_grace.into(),
+            crate::turn::timeout(self.config.turn_timeout_min),
         )
     }
 
@@ -141,10 +145,9 @@ impl AppState {
             self.backend.clone(),
             Arc::clone(&self.database),
             self.events.clone(),
-            // `saturating_mul`, not `* 60`: the key is a `u64` the config layer accepts without a
-            // ceiling, and a wrapped bound would turn "stop after a week" into "stop immediately" —
-            // the same reasoning the create's own bound is written with (`http/sessions.rs`).
-            std::time::Duration::from_secs(idle_min.saturating_mul(60)),
+            // `clock::minutes`, not `* 60`: the key is a `u64` the config layer accepts without a
+            // ceiling, and a wrapped bound would turn "stop after a week" into "stop immediately".
+            crate::clock::minutes(idle_min),
         ))
     }
 }

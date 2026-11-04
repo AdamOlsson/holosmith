@@ -9,7 +9,8 @@
 # config and a temp data dir, answering /api/health, the schema version, the app shell, the 404
 # envelope, every browser-facing guard refusal (ADR-0010), the create endpoint's 202/422/409
 # answers, the sessions list, one session by id, the session screen's path, the session's event
-# stream, a prompt's turn, an abort down to `abort_completed`, a steer's own frame, a resume's two
+# stream, a prompt's turn, a timeout that does not fire on a short turn, an abort down to
+# `abort_completed`, a steer's own frame, a resume's two
 # refusals, a delete from its 202 to the row that is gone, an idle session stopped by the sweeper with
 # its reason, its event and its log line, and a create at the cap evicting the idle session before it
 # succeeds, with no CORS header on any answer, and stopping on SIGTERM with exit 0.
@@ -216,8 +217,12 @@ fetch_stream() {
 # fetch_sse_until <label> <path> <needle> [Header: value]...: the header block like
 # `fetch_stream`, then body lines until one contains <needle>. An event stream never ends, so
 # "read until the event that settles the question" is the only bounded way to watch a producer:
-# every line has its own three-second timeout and the loop stops after 200 of them, so a stream
-# that never sends the needle fails the case instead of hanging the run.
+# every line has its own three-second timeout, so a stalled stream fails the case after one of them
+# instead of hanging the run. The line budget is 800 rather than 200 because a stream replays the
+# session's whole log from seq 1 and the log grows with every turn this run takes: by the abort and
+# steer cases the shared session has had four or five turns, which is 300-odd lines, so a budget sized
+# for the log as it was at HS-019 would end the read before the frame the case came for. A stream that
+# has not settled after 200 events would be a bug of its own, and 200 events is what 800 lines is.
 fetch_sse_until() {
   local label="$1" path="$2" needle="$3"
   shift 3
@@ -236,7 +241,7 @@ fetch_sse_until() {
       *"$needle"*) break ;;
     esac
     count=$((count + 1))
-    [ "$count" -lt 200 ] || break
+    [ "$count" -lt 800 ] || break
   done
   exec {fd}<&-
   sed '1,/^\r$/d' "$WORK/responses/$label.http" >"$WORK/responses/$label.body"
@@ -282,6 +287,7 @@ serve_cases=(
   case_session_detail
   case_session_screen
   case_prompt_turn
+  case_turn_timeout
   case_prompt_bad_body
   case_prompt_unknown_session
   case_abort
@@ -810,6 +816,51 @@ case_prompt_turn() {
       fail "$name/idle" "no event reports the turn settled: $body"
       ;;
   esac
+}
+
+# HS-022: the turn timeout does not fire on a turn that ends. The gate cannot make it *fire* —
+# `turn_timeout_min` is whole minutes and the stub's turn lasts about a second, so nothing this artifact
+# can be configured with holds a turn open for a minute — and the story's own proof of firing is
+# `tests/turn_timeout.rs`'s. What the shipped binary can prove is the other half: with the key set to its
+# smallest value, two prompts of one session each settle normally with no reason recorded, and the runner
+# wrote no deadline line. Two prompts rather than one because each is a fresh run of the runner: a second
+# turn that could not start would show up as a 409 here.
+case_turn_timeout() {
+  local name=case_turn_timeout response body turn
+
+  for turn in 1 2; do
+    fetch_body "${name}_$turn" POST "/api/sessions/$created_id/prompt" '{"prompt":"read the app shell"}' \
+      "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+      "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+      fail "${name}_$turn/no_answer" "POST /api/sessions/$created_id/prompt did not answer"
+    response="$(answer "${name}_$turn")"
+    expect_status "${name}_$turn" "$response" 202
+
+    # The row, not a stream: every turn's settle frame carries the same payload, so a needle would be
+    # answered by the *previous* turn's replay (docs/build.md's stream rule). The row is this turn's, and
+    # a fired deadline would have written `turn_timeout` into `status_reason` — which is exactly what
+    # `"status_reason":null` rules out.
+    wait_for_idle_id "${name}_idle_$turn" "$created_id"
+    fetch "${name}_row_$turn" GET "/api/sessions/$created_id" "Host: 127.0.0.1" ||
+      fail "${name}_row_$turn/no_answer" "GET /api/sessions/$created_id did not answer"
+    body="$(cat "$WORK/responses/${name}_row_$turn.body")"
+    case "$body" in
+      *'"status":"idle","status_reason":null'*)
+        assertions=$((assertions + 1))
+        ;;
+      *)
+        fail "${name}_row_$turn/reason" \
+          "the turn ended with a reason, and a one-minute deadline cannot have fired: $body"
+        ;;
+    esac
+  done
+
+  # And the runner said nothing about a deadline, which is the runner's own witness.
+  if grep -q 'the turn ran past its timeout' "$WORK/serve.err"; then
+    fail "${name}/fired" \
+      "a deadline of a minute fired on turns that end in a second: $(grep 'holosmith::turn' "$WORK/serve.err" | sed -n '1,5p')"
+  fi
+  assertions=$((assertions + 1))
 }
 
 # HS-015: a prompt's body is one non-empty `prompt`, and a body that is not is 422 `bad_body` — the
@@ -1406,7 +1457,7 @@ phase_serve() {
   # `tests/serve_cli.rs` covers the flag). And the idle stop at its shortest bound, which is one
   # minute: `idle_stop_min` is whole minutes on purpose, so `case_idle_stop` costs that minute rather
   # than a knob that would be a second spelling of the policy (ADR-0025).
-  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "stub"\nidle_stop_min = 1\n' "$owner" \
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "stub"\nidle_stop_min = 1\nturn_timeout_min = 1\n' "$owner"   \
     >"$WORK/config.toml"
 
   start_serve
