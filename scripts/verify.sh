@@ -317,6 +317,7 @@ serve_cases=(
   case_create_at_cap_evicts
   case_create_at_cap_refused
   case_token_budget
+  case_compaction
   case_worktree
   case_docker_preflight
   case_worktree_refusal
@@ -1550,6 +1551,130 @@ case_token_budget() {
     *)
       fail "${name}_row/usage" "the turn's usage was not persisted on the row: $body"
       ;;
+  esac
+}
+
+# age_session_events <database> <session> <seconds>: push one session's whole log into the past.
+#
+# The one thing the gate cannot do through the API. An event's `created_at` is the **producer's**, and the
+# shipped stub writes `now`, so "completed more than 24 hours ago" (spec item 15) cannot be produced by a
+# request. `python3` with stdlib `sqlite3` is the tool this machine has, and it needs no dependency — the
+# case SKIPs without it rather than asserting less (docs/build.md's optional-tool rule).
+age_session_events() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import sqlite3, sys
+connection = sqlite3.connect(sys.argv[1])
+connection.execute(
+    "UPDATE events SET created_at = created_at - ? WHERE session_id = ?",
+    (int(sys.argv[3]), sys.argv[2]))
+connection.commit()
+connection.close()
+PY
+}
+
+# wait_for_snapshot <label> <database> <session>: poll the log until a `message.snapshot` row exists, then
+# print "<snapshots> <deltas>".
+#
+# A poll and not a wait: the pass is immediate at startup but it runs beside the listener, so "the banner
+# printed" does not mean "the fold committed". The counts are printed rather than asserted here so the case
+# can `check` them, which is what keeps a failure's message about the rows.
+wait_for_snapshot() {
+  local label="$1" database="$2" session="$3" counts
+  for _ in $(seq 1 100); do
+    counts="$(python3 - "$database" "$session" <<'PY'
+import sqlite3, sys
+connection = sqlite3.connect(sys.argv[1])
+rows = dict(connection.execute(
+    "SELECT type, count(*) FROM events WHERE session_id = ? GROUP BY type",
+    (sys.argv[2],)).fetchall())
+connection.close()
+print(rows.get("message.snapshot", 0), rows.get("message.delta", 0))
+PY
+)"
+    case "$counts" in
+      0\ *) sleep 0.1 ;;
+      *) printf '%s\n' "$counts" && return 0 ;;
+    esac
+  done
+  fail "$label/snapshot" "no message.snapshot row appeared in $database"
+}
+
+# HS-060's proof from the artifact: a message completed more than a day ago becomes one
+# `message.snapshot`, and a client that connects afterwards is replayed the snapshot instead of the deltas.
+#
+# It boots its own server, like `case_token_budget`, and for a reason the story forces: the window is the
+# spec's fixed 24 hours (ADR-0032 — not a config key), so the only way to show it from a shipped artifact is
+# to stop the server, age the log it wrote, and start it again. That restart is also the story's own demo.
+case_compaction() {
+  local name=case_compaction response body id counts
+  local create_body='{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}'
+  local database="$WORK/data-compaction/app.db"
+  local whole='The shell is the session screen and the list. Reading it now.The composer posts the prompt for real now. Nothing else in it moved.'
+
+  # The guard before `stop_serve`, for the reason `case_worktree` gives: a case that skipped after stopping
+  # the run's server would leave `phase_serve`'s own `stop_serve` with no pid, and `kill -TERM ""` fails the
+  # gate with a message about SIGTERM.
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to age the log and read it back (tests/compaction.rs covers this)\n' "$name"
+    return 0
+  fi
+
+  stop_serve
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "stub"\n' "$owner" \
+    >"$WORK/config-compaction.toml"
+  start_serve "$WORK/config-compaction.toml" "$WORK/data-compaction"
+
+  fetch_body "$name" POST /api/sessions "$create_body" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-compaction-1" ||
+    fail "$name/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 202
+  body="$(cat "$WORK/responses/$name.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id" ] || fail "$name/id" "the response names no id: $body"
+  wait_for_idle_id "${name}_idle" "$id"
+
+  fetch_body "${name}_prompt" POST "/api/sessions/$id/prompt" '{"prompt":"read the app shell"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_prompt/no_answer" "POST /api/sessions/$id/prompt did not answer"
+  expect_status "${name}_prompt" "$(answer "${name}_prompt")" 202
+  # The settle is the last frame of the turn, so waiting for it is waiting for the whole message to be
+  # committed — and it is the needle the replay below uses again.
+  fetch_sse_until "${name}_turn" "/api/sessions/$id/events" '"from":"running","to":"idle"' \
+    "Host: 127.0.0.1" ||
+    fail "${name}_turn/no_answer" "GET /api/sessions/$id/events did not answer"
+
+  stop_serve
+  age_session_events "$database" "$id" 90000
+  start_serve "$WORK/config-compaction.toml" "$WORK/data-compaction"
+  counts="$(wait_for_snapshot "$name" "$database" "$id")"
+  # One snapshot, no deltas left: the story's first two acceptance lines, on the rows.
+  check "$name/rows" "1 0" "$counts"
+
+  # The wire half: a client connecting after the boundary is replayed one snapshot holding the whole
+  # message, and the frames compaction must not touch are still there.
+  fetch_sse_until "${name}_replay" "/api/sessions/$id/events" '"from":"running","to":"idle"' \
+    "Host: 127.0.0.1" ||
+    fail "${name}_replay/no_answer" "GET /api/sessions/$id/events did not answer"
+  expect_status "${name}_replay" "$(answer "${name}_replay")" 200
+  body="$(cat "$WORK/responses/${name}_replay.body")"
+  case "$body" in
+    *message.snapshot*) assertions=$((assertions + 1)) ;;
+    *) fail "${name}_replay/snapshot" "the replay carries no snapshot frame: $body" ;;
+  esac
+  case "$body" in
+    *"\"text\":\"$whole\""*) assertions=$((assertions + 1)) ;;
+    *) fail "${name}_replay/text" "the snapshot does not hold the whole message: $body" ;;
+  esac
+  case "$body" in
+    *message.delta*) fail "${name}_replay/delta" "a delta frame reached a client after compaction: $body" ;;
+    *) assertions=$((assertions + 1)) ;;
+  esac
+  case "$body" in
+    *message.end*) assertions=$((assertions + 1)) ;;
+    *) fail "${name}_replay/end" "compaction took the message's end frame with it: $body" ;;
   esac
 }
 
