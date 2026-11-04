@@ -67,6 +67,21 @@ if [ -S "${SSH_AUTH_SOCK:-/nonexistent}" ]; then
   )
 fi
 
+# The Docker daemon: the host's socket is bound in at its canonical path, so `docker` inside the
+# sandbox drives the real daemon (`/usr` already carries the CLI and its cli-plugins). This is
+# host root by another name - anything that can reach the socket can start a container with `/`
+# mounted - so it is granted deliberately, like the ssh-agent socket above. A machine without a
+# daemon is the normal hub, so a missing socket is not an error. The socket is group-owned by
+# `docker` on the host; the sandbox's supplementary groups are unmapped (they read as `nogroup`
+# in `id`) but the kernel still matches the gids, so no group juggling is needed here.
+DOCKER=()
+for sock in /run/docker.sock "/run/user/$UID/docker.sock"; do
+  if [ -S "$sock" ]; then
+    DOCKER+=(--bind "$sock" /var/run/docker.sock)
+    break
+  fi
+done
+
 MOAT=(
     --ro-bind   $HOME/.config/agent-moat/skills/code-review     $AGENT_HOME/.agents/skills/code-review
     --ro-bind   $HOME/.config/agent-moat/skills/grill-with-docs $AGENT_HOME/.agents/skills/grill-with-docs
@@ -91,6 +106,7 @@ exec bwrap \
   "${PI[@]}" \
   "${BROWSER[@]}" \
   "${GIT[@]}" \
+  "${DOCKER[@]}" \
   "${MOAT[@]}" \
   --bind "$PWD" "$PWD" \
   --chdir "$PWD" \
