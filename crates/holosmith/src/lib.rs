@@ -23,3 +23,4 @@ pub mod sweeper;
 pub mod turn;
 pub mod version;
 pub mod web;
+pub mod worktree;

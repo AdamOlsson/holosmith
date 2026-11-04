@@ -13,12 +13,15 @@
 # `abort_completed`, a steer's own frame, a resume's two
 # refusals, a delete from its 202 to the row that is gone, an idle session stopped by the sweeper with
 # its reason, its event and its log line, a create at the cap evicting the idle session before it
-# succeeds, a token budget on a boot of its own ending the turn that spends it, and a Docker preflight that
-refuses to start with one sentence naming the fix, with no CORS header
+# succeeds, a token budget on a boot of its own ending the turn that spends it, a worktree made in a real
+# repository and taken back when the next step refuses, and a Docker preflight that
+# refuses to start with one sentence naming the fix, with no CORS header
 # on any answer, and stopping on SIGTERM with exit 0.
 # --no-build skips the two artifact phases; --keep keeps the work dir of a successful run. On
 # failure this prints FAIL <assertion> and keeps the work dir (config, banner, every answer).
-# Downloads nothing and needs neither curl nor jq: every request is a /dev/tcp fetch. Put the
+# Downloads nothing and needs neither curl nor jq: every request is a /dev/tcp fetch. `case_worktree`
+# answers the Docker preflight from a python3 socket, and prints one SKIP line and passes without
+# python3 (tests/worktree.rs covers what that case asserts). Put the
 # toolchains on PATH first (docs/build.md).
 
 set -euo pipefail
@@ -61,6 +64,7 @@ owner="verify@example"
 WORK="$(mktemp -d)"
 mkdir -p "$WORK/responses"
 serve_pid=""
+socket_pid=""
 serve_err="$WORK/serve.err"
 created_id=""
 assertions=0
@@ -72,6 +76,10 @@ cleanup() {
   if [ -n "$serve_pid" ] && kill -0 "$serve_pid" 2>/dev/null; then
     kill -TERM "$serve_pid" 2>/dev/null || true
     wait "$serve_pid" 2>/dev/null || true
+  fi
+  if [ -n "$socket_pid" ] && kill -0 "$socket_pid" 2>/dev/null; then
+    kill "$socket_pid" 2>/dev/null || true
+    wait "$socket_pid" 2>/dev/null || true
   fi
   if [ "$status" -ne 0 ] || [ "$keep" -eq 1 ]; then
     printf 'work dir kept: %s\n' "$WORK" >&2
@@ -306,6 +314,7 @@ serve_cases=(
   case_create_at_cap_evicts
   case_create_at_cap_refused
   case_token_budget
+  case_worktree
   case_docker_preflight
 )
 
@@ -1464,6 +1473,129 @@ case_token_budget() {
       fail "${name}_row/usage" "the turn's usage was not persisted on the row: $body"
       ;;
   esac
+}
+
+# fake_docker_ping <socket>: a unix socket that answers the preflight's `GET /_ping` with `200 OK`, and then
+# keeps listening for the next one. Prints the pid it left behind.
+#
+# The gate's only use of python3, and it exists because of one order of events: the Docker preflight refuses a
+# machine with no daemon *before* anything can be provisioned, and the worktree step `case_worktree` is about
+# runs on the host and never talks to Docker. A socket that says what dockerd says is the smallest thing that
+# gets past the gate without inventing a flag that skips the check (which ADR-0028 forbids). A machine without
+# python3 gets one SKIP line from that case and the rest of the gate runs on: `cargo test` covers the behaviour
+# either way, and `tests/worktree.rs` is where it is asserted.
+fake_docker_ping() {
+  python3 - "$1" <<'PY' >/dev/null 2>&1 &
+import os, socket, sys
+
+path = sys.argv[1]
+try:
+    os.unlink(path)
+except FileNotFoundError:
+    pass
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind(path)
+server.listen(8)
+while True:
+    connection, _ = server.accept()
+    connection.recv(4096)
+    connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+    connection.close()
+PY
+  echo $!
+}
+
+# HS-025's proof from the artifact: the worktree step is host git, so a create makes `.worktrees/<id>` on
+# branch `agent/<id>` from the repository's HEAD, records both on the row, and — because the *next* step is
+# HS-027's and refuses — the provisioner takes the worktree back, leaving the registration clean.
+#
+# It boots its own server, like `case_token_budget`: the backend is `docker` and the projects root has to be a
+# real repository, which the shared boot's stub neither needs nor should carry.
+case_worktree() {
+  local name=case_worktree response body id base
+  local projects="$WORK/projects" repo="$WORK/projects/holosmith"
+  stop_serve
+  mkdir -p "$repo"
+  git -C "$repo" init --quiet || fail "$name/git" "git init did not work in $repo"
+  git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet --allow-empty \
+    -m "the first commit" || fail "$name/git" "git commit did not work in $repo"
+  base="$(git -C "$repo" rev-parse HEAD)" || fail "$name/git" "git rev-parse did not work in $repo"
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to answer the docker preflight (tests/worktree.rs covers this)\n' "$name"
+    return 0
+  fi
+  socket_pid="$(fake_docker_ping "$WORK/docker.sock")"
+  for _ in $(seq 1 100); do
+    [ -S "$WORK/docker.sock" ] && break
+    sleep 0.05
+  done
+  # `min_free_gb = 1` because this machine's own free space is not the case's subject, and
+  # `idle_stop_min = 0` because this boot lasts a second and a sweeper would only be noise.
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\ndocker_host = "unix://%s/docker.sock"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
+    "$owner" "$projects" "$WORK" >"$WORK/config-worktree.toml"
+  start_serve "$WORK/config-worktree.toml" "$WORK/data-worktree"
+
+  fetch_body "${name}_create" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-worktree-1" ||
+    fail "${name}_create/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "${name}_create")"
+  expect_status "${name}_create" "$response" 202
+  body="$(cat "$WORK/responses/${name}_create.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id" ] || fail "${name}_create/id" "the response names no id: $body"
+
+  # The row is the record: the path, the base commit and the reason the next step refused. The step itself is
+  # a background task's, so the row is what the wait is on.
+  body=""
+  for _ in $(seq 1 100); do
+    fetch "${name}_row" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "${name}_row/no_answer" "GET /api/sessions/$id did not answer"
+    body="$(cat "$WORK/responses/${name}_row.body")"
+    case "$body" in
+      *'"status":"starting"'*) sleep 0.1 ;;
+      *) break ;;
+    esac
+  done
+  expect_status "${name}_row" "$(answer "${name}_row")" 200
+  printf '%s\n' "$body" | grep -qF "\"worktree\":\"$projects/.worktrees/$id\"" ||
+    fail "${name}_row/worktree" "the row does not record the worktree path: $body"
+  assertions=$((assertions + 1))
+  printf '%s\n' "$body" | grep -qF "\"base_commit\":\"$base\"" ||
+    fail "${name}_row/base" "the row does not record the branch's base commit: $body"
+  assertions=$((assertions + 1))
+  printf '%s\n' "$body" | grep -qF '"status":"error"' ||
+    fail "${name}_row/status" "the session did not end error after the network step refused: $body"
+  assertions=$((assertions + 1))
+  printf '%s\n' "$body" | grep -qF 'HS-027' ||
+    fail "${name}_row/reason" "the failure is not the network step's: $body"
+  assertions=$((assertions + 1))
+
+  # Teardown, which the provisioner runs because the network step failed: the directory, the branch and the
+  # registration are all gone. `<projects>` holds only the repository again.
+  [ ! -d "$projects/.worktrees/$id" ] ||
+    fail "${name}/worktree_left" "the refused session left its worktree at $projects/.worktrees/$id"
+  assertions=$((assertions + 1))
+  if git -C "$repo" rev-parse --verify --quiet "refs/heads/agent/$id" >/dev/null; then
+    fail "${name}/branch_left" "the refused session left branch agent/$id behind"
+  fi
+  assertions=$((assertions + 1))
+  check "${name}/registration" 1 "$(git -C "$repo" worktree list --porcelain | grep -c '^worktree ')"
+
+  # A delete whose worktree is already gone is not a failure: `force` turns the snapshot refusal (HS-033's)
+  # into the removal, and the teardown runs over an absent worktree and branch.
+  fetch "${name}_delete" DELETE "/api/sessions/$id?force=true" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_delete/no_answer" "DELETE /api/sessions/$id did not answer"
+  expect_status "${name}_delete" "$(answer "${name}_delete")" 202
+  wait_for_gone "${name}_gone" "$id"
+
+  kill "$socket_pid" 2>/dev/null || true
+  wait "$socket_pid" 2>/dev/null || true
+  socket_pid=""
 }
 
 # HS-024's proof from the artifact: a machine that cannot run Docker sessions refuses *at startup*, with

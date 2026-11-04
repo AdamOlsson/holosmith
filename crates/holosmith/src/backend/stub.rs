@@ -25,7 +25,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 
-use super::{BackendError, SessionBackend, Step, TurnEnd};
+use super::{BackendError, Provisioned, SessionBackend, Step, TurnEnd};
 use crate::clock;
 use crate::events::{
     EventWriter, MESSAGE_DELTA, MESSAGE_END, NewEvent, TOOL_END, TOOL_START, TURN_END, TURN_START,
@@ -335,13 +335,17 @@ impl StubBackend {
 }
 
 impl SessionBackend for StubBackend {
-    async fn provision(&self, session: &Session, step: Step) -> Result<(), BackendError> {
+    async fn provision(&self, session: &Session, step: Step) -> Result<Provisioned, BackendError> {
         // Recorded before the wait, so a test can observe a step in flight — and so the failure
         // is ordered after the delay a real step would have spent: a stub that failed instantly
         // would hide a provisioner that assumed the step had taken time.
         let outcome = self.note(Call::Provision(step), session, "");
         tokio::time::sleep(self.state.step_delay).await;
-        outcome
+        // Nothing the row records, not even for the worktree step: the stub's job is the lifecycle, and
+        // a worktree under it would make every test that provisions need a git repository (ADR-0015).
+        // The Docker backend is where the worktree is real, and `tests/backend_contract.rs` is where the
+        // two are asked the same questions.
+        outcome.map(|()| Provisioned::Nothing)
     }
 
     async fn undo(&self, session: &Session, step: Step) -> Result<(), BackendError> {

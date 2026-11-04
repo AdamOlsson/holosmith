@@ -37,6 +37,12 @@ const UPDATE_STATUS: &str =
 /// HS-017's steer).
 const TOUCH: &str = "UPDATE sessions SET last_active_at = ?2 WHERE id = ?1";
 
+/// What the worktree step made (HS-025): where the session's files are, and the commit its branch starts
+/// from. Written once per provision, by the provisioner, because a backend cannot write the row
+/// (ADR-0019) and because the base commit has to stay the one the branch started at even after the
+/// branch has moved — `ahead` is measured from it (HS-061).
+const SET_WORKTREE: &str = "UPDATE sessions SET worktree = ?2, base_commit = ?3 WHERE id = ?1";
+
 /// What one `message.end` adds to the tally (HS-023). An add rather than a set, because the counts
 /// accumulate over the session's life and a turn reports only its own; a column that was *set* would
 /// lose every turn but the last.
@@ -257,6 +263,27 @@ impl<'a> SessionRepository<'a> {
         self.connection
             .execute(TOUCH, params![id, now])
             .map_err(|error| RepoError::sqlite("touch", error))?;
+        Ok(())
+    }
+
+    /// Record what the worktree step made: the session's worktree path and the commit its branch starts
+    /// from (HS-025).
+    ///
+    /// Not a state change, so this is the repository's and not the transitioner's. The one production
+    /// caller is [`crate::provisioner::Provisioner`], which writes it the moment the backend answers —
+    /// the backend never sees a `SessionRepository` (ADR-0019).
+    ///
+    /// A row that has gone is not an error, for [`Self::touch`]'s reason: a session deleted while it was
+    /// starting has nothing to record, and the worktree the step made was removed with it.
+    pub fn set_worktree(
+        &self,
+        id: &str,
+        worktree: &str,
+        base_commit: &str,
+    ) -> Result<(), RepoError> {
+        self.connection
+            .execute(SET_WORKTREE, params![id, worktree, base_commit])
+            .map_err(|error| RepoError::sqlite("set_worktree", error))?;
         Ok(())
     }
 

@@ -163,7 +163,7 @@ pub fn run(args: ServeArgs) -> ExitCode {
             database,
             events,
             streams: StreamRegistry::new(),
-            backend: Backends::for_run(backend),
+            backend: Backends::for_run(backend, loaded.config.projects_root.clone()),
         };
         // Built before the state is handed to the router, because the sweeper is a task rather than a
         // route: `None` means `idle_stop_min = 0` turned it off. Both facts are `debug` lines and not

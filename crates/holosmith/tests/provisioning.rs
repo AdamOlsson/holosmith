@@ -342,9 +342,16 @@ async fn the_docker_backend_fails_honestly_and_leaves_the_session_resumable() {
     // Without HS-024 there is no Docker backend, and `--backend` defaults to it. A session created
     // under it must not sit in `starting` forever: it ends `error` with a reason naming the step,
     // and it stops counting towards the cap, because `error` is not a live state.
+    //
+    // This boot uses the default config, whose `projects_root` is a directory this machine does not
+    // have, so the *first* step is the one that fails — since HS-025 the worktree step is real, which is
+    // why the reason is git's sentence about a missing repository rather than "this backend refuses".
     let dir = TempDir::new("provisioning-docker");
     let mut state = state_in(&dir, Config::default());
-    state.backend = Backends::for_run(holosmith::runtime::Backend::Docker);
+    state.backend = Backends::for_run(
+        holosmith::runtime::Backend::Docker,
+        Config::default().projects_root,
+    );
     assert_eq!(
         state.backend.as_str(),
         "docker",
@@ -358,9 +365,12 @@ async fn the_docker_backend_fails_honestly_and_leaves_the_session_resumable() {
     assert_eq!(failed.status, Status::Error);
     let reason = failed.status_reason.expect("an error carries a reason");
     assert!(
-        reason.contains("worktree") && reason.contains("docker"),
-        "the reason does not name the step and the backend: {reason}"
+        reason.starts_with("the worktree step: ") && reason.contains("git"),
+        "the reason does not name the step and what failed: {reason}"
     );
+    // The step recorded nothing, because it made nothing: the row keeps the columns a create writes.
+    assert_eq!(failed.worktree, "");
+    assert_eq!(failed.base_commit, None);
     let events = committed_status_events(&state, &id, 2).await;
     assert_eq!(steps(&events), ["worktree", "-"], "{events:?}");
     let live = {

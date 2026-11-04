@@ -164,7 +164,11 @@ key is whole minutes and there is no shorter lever, ADR-0025), and the cap
 row, its replayed transcript and the eviction's own `idle → stopped` event; and
 `case_create_at_cap_refused`, the last case, which makes a session and asks for one more while that
 session is still `starting` — live and not evictable — and asserts the `409 cap_reached` envelope and
-the sentence that says nothing was idle). A case that must assert
+the sentence that says nothing was idle), and the worktree (`case_worktree`, which boots its own
+server — `backend = "docker"`, a real repository under `projects_root`, and a socket that answers the
+preflight's `_ping` — creates a session, and asserts the row's `worktree` and `base_commit`, the network
+step's refusal, the worktree and branch gone afterwards, the registration back to one entry, and then a
+`DELETE ?force=true` to `404` over the worktree that is already absent). A case that must assert
 one code keeps every higher guard check correct, or it asserts another guard's code under its own
 name.
 
@@ -256,7 +260,13 @@ default.
   needs native type stripping: **node 22.18 or later** (22.6 through 22.17 need
   `--experimental-strip-types`, and 23.6+ is fine). Without node and npm `scripts/build.sh`
   stops before cargo with a message naming this file. A bare `cargo build` never runs npm.
-- **git** for `scripts/build.sh`. Not required by `cargo build` itself.
+- **git** for `scripts/build.sh`, and for a Docker run at runtime: the worktree step runs
+  `git worktree`, `git rev-list` and `git branch` against the project repository on the host
+  (HS-025). Not required by `cargo build` itself, and not required by `--backend stub`.
+- Optional: **`python3`** for `scripts/verify.sh`'s `case_worktree`, which answers the Docker
+  preflight from a socket that says `200 OK` so a Docker boot can be driven on a machine with
+  no daemon. Without it that case prints one `SKIP` line and the run passes; `cargo test` and
+  `tests/worktree.rs` cover the behaviour either way.
 - Optional: **`qemu-aarch64-static`** (or point `HOLOSMITH_QEMU_AARCH64` at one) to run
   the aarch64 artifact on an x86_64 machine. It is a machine-local dev tool installed
   outside this repo; no script here downloads it. Without it the check prints one
@@ -275,6 +285,18 @@ so does `role = "hub"`, which runs no sessions at all: item 10 §6's `hub deploy
 runs "without the Docker and git checks", and a hub without a daemon is the normal hub. The check
 at startup is why `scripts/check-static.sh`'s empty-container run passes `--backend stub`: that
 run is about the artifact's own linking, and its sandbox has no `git`, no `df` and no daemon.
+
+**A session's files live at `<projects_root>/.worktrees/<id>`, on branch `agent/<id>`** (HS-025,
+spec item 1). The projects root is the config key `projects_root` (default `/srv/holosmith/projects`),
+and each project is a repository directly inside it: `<projects_root>/<project>` with a `.git` directory.
+The provisioner makes the worktree with `git worktree add -b agent/<id> <projects_root>/.worktrees/<id>
+HEAD`, records both the path and that commit on the session's row, and takes them back with
+`git worktree remove --force`, `git branch -D agent/<id>`, `git worktree prune` when the session is
+deleted or a later step fails. **No fetch and no remote**: the session branch is created from a commit
+the project repository already has. Two consequences worth knowing before you point this at a real
+repository: a repository with **no commit** cannot be provisioned from (there is no `HEAD`), and a
+project whose `.git` is a *file* (a submodule checkout, or a worktree of a repository) is HS-026's to
+refuse — this build tries it and git says what it thinks in the session's reason.
 
 Three things bite on a real machine:
 

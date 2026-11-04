@@ -5,20 +5,22 @@
 //! trait makes, not a story's demo, so a backend that adds a step adds its case here and the other backend
 //! is asked the same question.
 //!
-//! Today it holds the two promises that survive this early a stage — **`undo` is infallible for every
-//! step**, because teardown of work that was never done is not a failure, and **a failure names the thing
-//! it could not do**, because that sentence reaches the row's `status_reason` and the transcript. HS-025
-//! (worktree), HS-028 (container) and HS-031 (pi) add the cases their behaviour needs; a case that only one
-//! backend can satisfy today is written with a `Failures` table saying so, never silently skipped.
+//! Today it holds three promises: **`undo` and `delete` are infallible for a session nothing was
+//! provisioned for** (teardown of work that was never done is not a failure), **a failure names the thing
+//! it could not do** (that sentence reaches the row's `status_reason` and the transcript), and **a worktree
+//! step that fails names the worktree**. HS-028 (container) and HS-031 (pi) add the cases their behaviour
+//! needs; a case that only one backend can satisfy is written with a note saying so, never silently
+//! skipped — and so far there is none: the worktree step's *effects* are one backend's, and they are
+//! tested in `tests/worktree.rs`, while the promise both backends keep about it is the sentence.
 //!
 //! The suite is generic over the trait rather than `&dyn SessionBackend`, because `async fn` in a trait is
 //! not object-safe (ADR-0015).
 
-use holosmith::backend::{BackendError, DockerBackend, SessionBackend, Step};
+use holosmith::backend::{BackendError, DockerBackend, Provisioned, SessionBackend, Step};
 use holosmith::sessions::{Session, Status};
 
 mod support;
-use support::fast_stub;
+use support::{TempDir, fast_stub};
 
 /// A session, spelled once: every case needs one and none of them may create a row.
 fn session() -> Session {
@@ -41,51 +43,107 @@ fn session() -> Session {
     }
 }
 
-/// The whole suite, run against one backend.
+/// The one refusal each backend is asked about, and the word the answer must name.
 ///
-/// `refused` is the caller's proof that a failing call *does* fail, and `named` is the word its error must
-/// contain: a backend refuses differently (the stub fails only where it is told to, the Docker backend
-/// refuses everything), so the case is "the error names what it could not do" and the caller supplies the
-/// call that makes one.
-async fn conformance<B: SessionBackend>(
-    backend: &B,
-    label: &str,
-    refused: Result<(), BackendError>,
-    named: &str,
-) {
-    // Case 1: `undo` is infallible, for every step, on a session nothing was ever provisioned for.
+/// The two backends refuse differently — the stub fails only where it is told to, the Docker backend
+/// refuses every step it has not implemented — so a case cannot spell the call itself.
+struct Failures {
+    /// A call the backend answers with an error.
+    any: Result<(), BackendError>,
+    /// The word that error must contain: the step or operation it could not do.
+    named: &'static str,
+    /// A call to the worktree step that the backend answers with an error.
+    worktree: Result<(), BackendError>,
+}
+
+/// The whole suite, run against one backend.
+async fn conformance<B: SessionBackend>(backend: &B, label: &str, failures: Failures) {
+    // Case 1: teardown is infallible, for every step, twice — the provisioner undoes what completed and
+    // the delete flow removes what the session owns, and either can be reached for a step that never ran.
     for step in Step::ALL {
-        backend
-            .undo(&session(), step)
-            .await
-            .unwrap_or_else(|error| {
-                panic!("{label}: undo of a {step} step that never ran failed: {error}")
-            });
+        for _ in 0..2 {
+            backend
+                .undo(&session(), step)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{label}: undo of a {step} step that never ran failed: {error}")
+                });
+        }
+    }
+    for _ in 0..2 {
+        backend.delete(&session()).await.unwrap_or_else(|error| {
+            panic!("{label}: deleting a session that owns nothing failed: {error}")
+        });
     }
     // Case 2: a failure names the step or operation it could not do, because the sentence is what the row
     // and the transcript show the operator.
-    let error = match refused {
-        Ok(()) => panic!("{label}: the backend was expected to refuse, and answered Ok"),
+    let error = match failures.any {
+        Ok(_) => panic!("{label}: the backend was expected to refuse, and answered Ok"),
         Err(error) => error,
     };
     assert!(
-        error.to_string().contains(named),
-        "{label}: the refusal does not name {named:?}: {error}"
+        error.to_string().contains(failures.named),
+        "{label}: the refusal does not name {:?}: {error}",
+        failures.named
+    );
+    // Case 3: a worktree step that fails says so in its own sentence. Both backends can answer this — the
+    // stub by being told to fail there, the Docker backend by having no repository — and the sentence is
+    // what the row keeps.
+    let error = match failures.worktree {
+        Ok(_) => panic!("{label}: the worktree step was expected to refuse, and answered Ok"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("worktree"),
+        "{label}: a worktree failure does not name the worktree: {error}"
     );
 }
 
 #[tokio::test]
 async fn the_stub_backend_passes_the_conformance_suite() {
+    // Two stubs, because a stub is told to fail at *one* step: one answers case 2's refusal and the other
+    // case 3's. Everything else about them is the same backend.
     let session = session();
-    let stub = fast_stub().failing_at(Step::Container);
-    let refused = stub.provision(&session, Step::Container).await;
-    conformance(&stub, "stub", refused, "container").await;
+    let container = fast_stub().failing_at(Step::Container);
+    let worktree = fast_stub().failing_at(Step::Worktree);
+    let failures = Failures {
+        any: container
+            .provision(&session, Step::Container)
+            .await
+            .map(|_| ()),
+        named: "container",
+        worktree: worktree
+            .provision(&session, Step::Worktree)
+            .await
+            .map(|_| ()),
+    };
+    conformance(&container, "stub", failures).await;
+}
+
+#[tokio::test]
+async fn the_stub_backend_records_no_worktree() {
+    // The stub provisions nothing the row names, not even for the worktree step: its job is the lifecycle
+    // and a worktree under it would make every test that provisions need a repository (ADR-0015).
+    let stub = fast_stub();
+    assert_eq!(
+        stub.provision(&session(), Step::Worktree)
+            .await
+            .expect("the stub provisions every step"),
+        Provisioned::Nothing
+    );
 }
 
 #[tokio::test]
 async fn the_docker_backend_passes_the_conformance_suite() {
+    // A projects root with no repository in it: the worktree step's own failure is what case 3 reads, and
+    // the network step is this build's named refusal.
+    let dir = TempDir::new("contract-docker");
+    let docker = DockerBackend::new(dir.file("projects"));
     let session = session();
-    let docker = DockerBackend;
-    let refused = docker.provision(&session, Step::Network).await;
-    conformance(&docker, "docker", refused, "network").await;
+    let failures = Failures {
+        any: docker.provision(&session, Step::Network).await.map(|_| ()),
+        named: "network",
+        worktree: docker.provision(&session, Step::Worktree).await.map(|_| ()),
+    };
+    conformance(&docker, "docker", failures).await;
 }

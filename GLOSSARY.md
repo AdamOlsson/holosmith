@@ -339,16 +339,20 @@ _Avoid_: Log, archive, transcript
 ### Work and results
 
 **Worktree**:
-The git worktree that holds a session's files, on its own branch.
+The git worktree that holds a session's files, on its own branch: `<projects>/.worktrees/<id>`, on branch `agent/<id>`, made from the project repository's `HEAD`. Its machine name is `Worktree` in `src/worktree.rs`, which is also where the creating, counting and removing live.
 _Avoid_: Checkout, copy, clone
 
 **Session branch**:
-The branch `agent/<id>` that a session commits to.
+The branch `agent/<id>` that a session commits to, in the project repository.
 _Avoid_: Agent branch, feature branch
 
 **Base commit**:
 The commit a session branch started from. "Ahead" is measured from here.
 _Avoid_: Parent, origin, fork point
+
+**Ahead**:
+The number of commits a session branch has that its base commit does not: `git rev-list --count <base_commit>..agent/<id>`. It is computed when it is asked for, and never stored.
+_Avoid_: Distance, progress, delta
 
 **Target branch**:
 The branch a session's work is merged into.

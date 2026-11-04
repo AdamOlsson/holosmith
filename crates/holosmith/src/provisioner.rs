@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::task::JoinHandle;
 
-use crate::backend::{Backends, SessionBackend, Step};
+use crate::backend::{Backends, Provisioned, SessionBackend, Step};
 use crate::clock;
 use crate::db::Database;
 use crate::events::{EventWriter, NewEvent};
@@ -83,7 +83,10 @@ impl Provisioner {
             }
             self.announce(&session, step).await;
             match self.backend.provision(&session, step).await {
-                Ok(()) => completed.push(step),
+                Ok(provisioned) => {
+                    self.record(&session, provisioned);
+                    completed.push(step);
+                }
                 Err(error) => {
                     let reason = error.to_string();
                     tracing::warn!(
@@ -100,6 +103,35 @@ impl Provisioner {
             }
         }
         self.settle(&session).await;
+    }
+
+    /// Write what a step made into the row, before the next step runs.
+    ///
+    /// A backend cannot write the row (ADR-0019), so a step that creates something the row names answers
+    /// with it and this is the writer. The worktree step is the only one so far: its path and the commit
+    /// its branch starts from are the row's `worktree` and `base_commit`, and every reader of a session's
+    /// work — the changes sheet (HS-061), the mounts (HS-027) and the delete's teardown — names one of
+    /// them.
+    ///
+    /// A failed write is logged and provisioning carries on. The resource exists either way, so failing
+    /// the session over a row that could not be written would undo work that succeeded; a row without the
+    /// path is a reader's problem, and the next provision recomputes it from the naming rule anyway.
+    fn record(&self, session: &Session, provisioned: Provisioned) {
+        let Provisioned::Worktree { path, base_commit } = provisioned else {
+            return;
+        };
+        let database = self.database.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Err(error) = database
+            .sessions()
+            .set_worktree(&session.id, &path, &base_commit)
+        {
+            tracing::warn!(
+                target: "holosmith::provisioner",
+                session = %session.id,
+                %error,
+                "the worktree step's record was not written to the row"
+            );
+        }
     }
 
     /// Whether `session_id` is still `starting`, which is the only state this task provisions.

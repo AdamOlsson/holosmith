@@ -471,3 +471,76 @@ impl Sse {
 /// How long a test waits for something the server does before calling it stuck. One value for
 /// every socket-level test, so no two of them disagree about what "slow" means.
 pub const PATIENCE: Duration = Duration::from_secs(10);
+
+/// A git repository at `dir` with one empty commit, and nothing else: no remote, no configuration, no
+/// hooks (HS-025).
+///
+/// The identity is passed on the commit's own command line rather than written into the repository's
+/// config, because a test must not depend on the machine's `user.email` having been set — and because a
+/// repository whose config this harness wrote would be a second thing to keep clean.
+pub fn repository(dir: &Path) {
+    std::fs::create_dir_all(dir).expect("the repository directory is creatable");
+    git(dir, &["init", "--quiet"]);
+    git(
+        dir,
+        &[
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "the first commit",
+        ],
+    );
+}
+
+/// Run `git` in `dir` and answer its trimmed stdout; a non-zero exit panics with git's own words.
+///
+/// `-c user.*` on every call, so a commit needs no repository configuration (see [`repository`]).
+pub fn git(dir: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=holosmith-test",
+            "-c",
+            "user.email=test@example",
+        ])
+        .args(args)
+        .output()
+        .expect("git runs");
+    assert!(
+        output.status.success(),
+        "git {args:?} in {} failed: {}",
+        dir.display(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// The commit `HEAD` names in `dir`.
+pub fn head(dir: &Path) -> String {
+    git(dir, &["rev-parse", "HEAD"])
+}
+
+/// Whether `dir` still holds a branch called `branch`.
+pub fn branch_exists(dir: &Path, branch: &str) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--verify", "--quiet", branch])
+        .output()
+        .expect("git runs")
+        .status
+        .success()
+}
+
+/// Every worktree git has registered in `dir`, as paths — the repository's own first, then one per
+/// session.
+pub fn worktrees(dir: &Path) -> Vec<String> {
+    git(dir, &["worktree", "list", "--porcelain"])
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .map(str::to_string)
+        .collect()
+}

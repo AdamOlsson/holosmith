@@ -1,50 +1,157 @@
 //! The Docker backend: the real one, from HS-025.
 //!
-//! It exists now so the trait has the implementation the product actually ships with, and so
-//! `--backend docker` — which is the default (ADR-0001) — answers honestly instead of pretending
-//! a session is provisioned. Every operation refuses with [`BackendError::Unsupported`], which
-//! the provisioner turns into a `session.status` event and a `status_reason` on the row: an
-//! operator who runs this build without `--backend stub` sees `error` with a reason naming the
-//! step, not a session that says `starting` forever. Whether the machine *can* run Docker sessions at
-//! all is not this file's question: [`crate::preflight`] answers it once, at startup, and `serve` refuses
-//! to bring up a Docker run that fails it (HS-024). A backend that reported its own preflight would be a
-//! second opinion about the same machine.
+//! It exists so the trait has the implementation the product actually ships with, and so `--backend
+//! docker` — which is the default (ADR-0001) — answers honestly instead of pretending a session is
+//! provisioned. **The worktree step is real from HS-025 on**; every other operation still refuses with
+//! [`BackendError::Unsupported`] or [`BackendError::unsupported_step`], which the provisioner turns into
+//! a `session.status` event and a `status_reason` on the row: an operator who runs this build without
+//! `--backend stub` sees `error` with a reason naming the step, not a session that says `starting`
+//! forever.
 //!
-//! Nothing else lives here yet. HS-025 fills `provision` and its four steps — the worktree,
-//! HS-028 the container, HS-031 the agent; the mount, network and proxy stories add their own.
-//! Writing them now would mean guessing at `docker_host`, the projects root and the image tags
-//! that those stories own.
+//! Whether the machine *can* run Docker sessions at all is not this file's question: [`crate::preflight`]
+//! answers it once, at startup, and `serve` refuses to bring up a Docker run that fails it (HS-024). A
+//! backend that reported its own preflight would be a second opinion about the same machine.
+//!
+//! What is left, and who owns it: the session's network and its proxies (HS-027), the container (HS-028)
+//! and the agent inside it (HS-031). The mount, network and proxy stories add their own work to the same
+//! three steps. Nothing in this file talks to the daemon yet — the worktree is a host program.
 
-use super::{BackendError, SessionBackend, Step, TurnEnd};
+use std::path::PathBuf;
+
+use super::{BackendError, Provisioned, SessionBackend, Step, TurnEnd};
 use crate::events::EventWriter;
 use crate::sessions::Session;
+use crate::worktree::Worktree;
 
-/// The Docker backend. No state yet: the CLI path and the image tags arrive with the stories that first
-/// need them, and `docker_host` is read by the preflight rather than here — nothing in this file talks to
-/// the daemon until HS-025 does.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct DockerBackend;
+/// The Docker backend: the machine's projects root, and nothing else.
+///
+/// The projects root is the one setting every host path hangs off (item 1: `<projects>/.worktrees/<id>`,
+/// `<projects>/<project>/.git`), so it arrives through the constructor rather than being read from the
+/// config at each call: a backend built without a path would have to guess one. `docker_host` stays the
+/// preflight's and HS-028's; nothing here reads it.
+#[derive(Debug, Clone)]
+pub struct DockerBackend {
+    projects_root: PathBuf,
+}
 
 impl DockerBackend {
+    /// The backend for a machine whose projects root is `projects_root`.
+    pub fn new(projects_root: impl Into<PathBuf>) -> Self {
+        Self {
+            projects_root: projects_root.into(),
+        }
+    }
+
+    /// The worktree this session is entitled to, from the machine's projects root.
+    ///
+    /// Derived rather than read back from the row: the naming rule lives in one function
+    /// ([`Worktree::of`]), and the row's copy of the path is for readers, not for the code that makes it.
+    fn worktree(&self, session: &Session) -> Worktree {
+        Worktree::of(&self.projects_root, &session.project, &session.id)
+    }
+
     /// Every operation's refusal, in one place so the reason always names the operation.
     fn refuse(operation: &str) -> BackendError {
         BackendError::unsupported("docker", operation)
     }
+
+    /// A step this build does not provision yet, naming the story that will.
+    ///
+    /// One sentence per step, because the row's `status_reason` is where an operator reads it: "the
+    /// container step: the docker backend does not provision the container yet (HS-028)" says what is
+    /// wrong, whose work it is, and that the session is not broken — it is a build that cannot run it.
+    fn not_yet(step: Step) -> BackendError {
+        match step {
+            Step::Worktree => BackendError::unsupported_step(
+                step,
+                "the docker backend does not provision the worktree yet",
+            ),
+            Step::Network => BackendError::unsupported_step(
+                step,
+                "the docker backend does not provision the network yet (HS-027)",
+            ),
+            Step::Container => BackendError::unsupported_step(
+                step,
+                "the docker backend does not provision the container yet (HS-028)",
+            ),
+            Step::Pi => BackendError::unsupported_step(
+                step,
+                "the docker backend does not start the agent yet (HS-031)",
+            ),
+        }
+    }
+
+    /// Run `git` for one step off the runtime's worker, since a subprocess is not a future.
+    ///
+    /// The provisioner is a `tokio` task and a `git worktree add` on a large repository takes as long as
+    /// it takes; blocking a worker for that would stall every other task it carries. A `JoinError` is not
+    /// a git failure — the task panicked or was cancelled — so it says so rather than pretending git
+    /// refused.
+    async fn blocking<T, F>(step: Step, work: F) -> Result<T, BackendError>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T, crate::worktree::GitError> + Send + 'static,
+    {
+        tokio::task::spawn_blocking(work)
+            .await
+            .map_err(|error| {
+                BackendError::failed(format!("the {step} step: git did not finish ({error})"))
+            })?
+            .map_err(|error| BackendError::failed(format!("the {step} step: {error}")))
+    }
+
+    /// `git worktree add` (or the adoption of one that is already there), and the record it makes.
+    async fn provision_worktree(&self, session: &Session) -> Result<Provisioned, BackendError> {
+        let worktree = self.worktree(session);
+        // The row's base commit is the branch's starting point, and it has to win over the branch's
+        // current head: a resumed session may have committed since, and `ahead` is measured from where
+        // it started (HS-061).
+        let base = session.base_commit.clone();
+        let (worktree, base_commit) = Self::blocking(Step::Worktree, move || {
+            let base_commit = worktree.ensure(base.as_deref())?;
+            Ok((worktree, base_commit))
+        })
+        .await?;
+        tracing::debug!(
+            target: "holosmith::backend",
+            session = %session.id,
+            worktree = %worktree.path.display(),
+            branch = %worktree.branch,
+            %base_commit,
+            "the worktree is ready"
+        );
+        Ok(Provisioned::Worktree {
+            path: worktree.path.to_string_lossy().into_owned(),
+            base_commit,
+        })
+    }
+
+    /// The worktree's teardown: the directory, the branch and the registration (HS-025).
+    ///
+    /// Shared by [`SessionBackend::undo`] and [`SessionBackend::delete`], because "this step is being
+    /// taken back" and "this session is going away" leave the same thing behind. The container and the
+    /// network join this call when HS-028 has made them.
+    async fn remove_worktree(&self, session: &Session) -> Result<(), BackendError> {
+        let worktree = self.worktree(session);
+        Self::blocking(Step::Worktree, move || worktree.remove()).await
+    }
 }
 
 impl SessionBackend for DockerBackend {
-    async fn provision(&self, _session: &Session, step: Step) -> Result<(), BackendError> {
-        Err(BackendError::unsupported_step(
-            step,
-            "the docker backend does not provision yet (HS-025)",
-        ))
+    async fn provision(&self, session: &Session, step: Step) -> Result<Provisioned, BackendError> {
+        match step {
+            Step::Worktree => self.provision_worktree(session).await,
+            Step::Network | Step::Container | Step::Pi => Err(Self::not_yet(step)),
+        }
     }
 
-    async fn undo(&self, _session: &Session, step: Step) -> Result<(), BackendError> {
-        // Teardown of a step that never ran: there is nothing to remove, and reporting a
-        // failure here would turn one refusal into two events.
-        let _ = step;
-        Ok(())
+    async fn undo(&self, session: &Session, step: Step) -> Result<(), BackendError> {
+        match step {
+            Step::Worktree => self.remove_worktree(session).await,
+            // Teardown of a step that never ran: there is nothing to remove, and reporting a failure
+            // here would turn one refusal into two events.
+            Step::Network | Step::Container | Step::Pi => Ok(()),
+        }
     }
 
     async fn start_turn(
@@ -76,8 +183,13 @@ impl SessionBackend for DockerBackend {
         Err(Self::refuse("resume"))
     }
 
-    async fn delete(&self, _session: &Session) -> Result<(), BackendError> {
-        Err(Self::refuse("delete"))
+    /// Remove everything the session owns: the worktree and its branch, from HS-025.
+    ///
+    /// The container, the session directory and the network are HS-028/HS-031/HS-027's additions to this
+    /// call. Answering `Ok` for a session nothing was provisioned for is deliberate: teardown of a
+    /// session that never got that far must not leave a `deleting` row behind (ADR-0023).
+    async fn delete(&self, session: &Session) -> Result<(), BackendError> {
+        self.remove_worktree(session).await
     }
 
     async fn snapshot(&self, _session: &Session) -> Result<(), BackendError> {
@@ -89,7 +201,9 @@ impl SessionBackend for DockerBackend {
 mod tests {
     use super::*;
     use crate::sessions::Status;
+    use std::path::Path;
 
+    /// A session with no row behind it, in a projects root that does not exist.
     fn session() -> Session {
         Session {
             id: "0123456789abcdef".to_string(),
@@ -110,21 +224,40 @@ mod tests {
         }
     }
 
+    fn backend() -> DockerBackend {
+        DockerBackend::new("/nonexistent/projects")
+    }
+
     #[tokio::test]
-    async fn every_operation_refuses_and_says_which_one_it_was() {
-        let backend = DockerBackend;
+    async fn the_steps_this_build_does_not_provision_refuse_and_name_their_story() {
+        for (step, story) in [
+            (Step::Network, "HS-027"),
+            (Step::Container, "HS-028"),
+            (Step::Pi, "HS-031"),
+        ] {
+            let error = backend()
+                .provision(&session(), step)
+                .await
+                .expect_err("a step with no implementation refuses");
+            let sentence = error.to_string();
+            assert!(
+                sentence.starts_with(&format!("the {step} step: ")),
+                "the sentence does not name the step: {sentence}"
+            );
+            assert!(
+                sentence.contains(story),
+                "the sentence does not name the story that fills it: {sentence}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn every_lifecycle_operation_refuses_and_says_which_one_it_was() {
+        let backend = backend();
         let session = session();
         // `start_turn` answers how the turn ended; it refuses before it would append anything, so
         // the outcome is discarded and only the refusal is asserted.
         let (_scratch, events) = crate::events::scratch_writer();
-        let error = backend
-            .provision(&session, Step::Network)
-            .await
-            .expect_err("the docker backend provisions nothing yet");
-        assert_eq!(
-            error.to_string(),
-            "the network step: the docker backend does not provision yet (HS-025)"
-        );
         let start_turn = backend
             .start_turn(&session, "a prompt", &events)
             .await
@@ -136,7 +269,6 @@ mod tests {
             ("abort", backend.abort(&session).await),
             ("stop", backend.stop(&session).await),
             ("resume", backend.resume(&session).await),
-            ("delete", backend.delete(&session).await),
             ("snapshot", backend.snapshot(&session).await),
         ] {
             let error = error.expect_err("every operation refuses");
@@ -149,11 +281,42 @@ mod tests {
 
     #[tokio::test]
     async fn undoing_a_step_that_never_ran_is_not_a_failure() {
-        // The provisioner undoes what completed; with the docker backend nothing completes, so
-        // this path is only reached by a caller that undoes a step anyway.
-        DockerBackend
+        // The provisioner undoes what completed, so with the docker backend only the worktree ever
+        // does; the other three are reached by a caller that undoes a step anyway, and a teardown of
+        // nothing is `Ok`.
+        for step in [Step::Network, Step::Container, Step::Pi] {
+            backend()
+                .undo(&session(), step)
+                .await
+                .expect("undoing nothing succeeds");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_worktree_whose_project_is_gone_is_nothing_to_tear_down() {
+        // The projects root here does not exist at all. A delete must not be blocked by that: the
+        // delete flow keeps the row `deleting` when a backend fails (ADR-0023).
+        backend()
             .undo(&session(), Step::Worktree)
             .await
-            .expect("undoing nothing succeeds");
+            .expect("nothing to remove is not a failure");
+        backend()
+            .delete(&session())
+            .await
+            .expect("a session whose repository is gone can still be removed");
+    }
+
+    #[test]
+    fn the_worktree_is_named_from_the_projects_root_and_the_session() {
+        let worktree = backend().worktree(&session());
+        assert_eq!(
+            worktree.repository,
+            Path::new("/nonexistent/projects/holosmith")
+        );
+        assert_eq!(
+            worktree.path,
+            Path::new("/nonexistent/projects/.worktrees/0123456789abcdef")
+        );
+        assert_eq!(worktree.branch, "agent/0123456789abcdef");
     }
 }

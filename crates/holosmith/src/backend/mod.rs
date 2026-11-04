@@ -16,6 +16,7 @@ mod stub;
 
 use std::borrow::Cow;
 use std::fmt;
+use std::path::PathBuf;
 
 use serde::Serialize;
 
@@ -154,6 +155,30 @@ pub enum TurnEnd {
     Aborted,
 }
 
+/// What one provisioning step made that the row records (HS-025).
+///
+/// A backend **emits** frames and cannot write the row (ADR-0019), so a step that creates something the
+/// row names answers with it and the provisioner writes it. Three of the four steps record nothing, and
+/// that is the variant they answer: there is no "no worktree" worth writing, because the row's columns
+/// already say what the first provision left there.
+///
+/// An enum rather than a struct of `Option` fields, so a step that records something *cannot* answer
+/// half of it: the worktree's path and its base commit are one fact about one worktree, and `ahead`
+/// (HS-061) is measured from the second.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Provisioned {
+    /// The step built nothing the row names.
+    Nothing,
+    /// The worktree step made this session's worktree: where it is, and the commit its branch starts
+    /// from. The row's `worktree` and `base_commit` columns are these two values (spec item 1).
+    Worktree {
+        /// `<projects>/.worktrees/<id>`, as the row stores it and as HS-027 mounts it at `/work`.
+        path: String,
+        /// The commit `agent/<id>` starts from.
+        base_commit: String,
+    },
+}
+
 /// The eight operations the story names, plus the per-step undo a failed provisioning needs.
 ///
 /// `async fn` in a trait, which is not object-safe: the crate never holds a `dyn SessionBackend`
@@ -161,8 +186,12 @@ pub enum TurnEnd {
 /// alternative — an `async_trait` dependency — would buy a virtual call this code cannot make.
 #[allow(async_fn_in_trait)]
 pub trait SessionBackend {
-    /// Run one provisioning step for `session`.
-    async fn provision(&self, session: &Session, step: Step) -> Result<(), BackendError>;
+    /// Run one provisioning step for `session`, and answer what it made that the row records.
+    ///
+    /// Most steps record nothing and answer [`Provisioned::Nothing`]. The worktree step answers the path
+    /// and the commit its branch starts from, because the provisioner is what writes a row (ADR-0019) —
+    /// the backend has no `SessionRepository` and must not grow one.
+    async fn provision(&self, session: &Session, step: Step) -> Result<Provisioned, BackendError>;
 
     /// Undo one completed provisioning step, leaving no partial resource behind.
     ///
@@ -230,11 +259,15 @@ pub enum Backends {
 }
 
 impl Backends {
-    /// The backend `runtime::Backend` selects.
-    pub fn for_run(backend: Backend) -> Self {
+    /// The backend `runtime::Backend` selects, in the machine's projects root.
+    ///
+    /// The projects root is the one machine setting the Docker backend needs to name anything at all:
+    /// a session's worktree and repository both hang off it (HS-025). The stub needs no path and ignores
+    /// it — it provisions nothing outside the process (ADR-0015).
+    pub fn for_run(backend: Backend, projects_root: PathBuf) -> Self {
         match backend {
             Backend::Stub => Self::Stub(StubBackend::default()),
-            Backend::Docker => Self::Docker(DockerBackend),
+            Backend::Docker => Self::Docker(DockerBackend::new(projects_root)),
         }
     }
 
@@ -247,15 +280,8 @@ impl Backends {
     }
 }
 
-impl Default for Backends {
-    /// The default run's backend, which is the Docker backend (ADR-0001: the stub is opt-in).
-    fn default() -> Self {
-        Self::for_run(Backend::default())
-    }
-}
-
 impl SessionBackend for Backends {
-    async fn provision(&self, session: &Session, step: Step) -> Result<(), BackendError> {
+    async fn provision(&self, session: &Session, step: Step) -> Result<Provisioned, BackendError> {
         match self {
             Self::Stub(backend) => backend.provision(session, step).await,
             Self::Docker(backend) => backend.provision(session, step).await,
@@ -359,10 +385,15 @@ mod tests {
     #[test]
     fn a_for_run_backend_carries_the_word_it_was_chosen_by() {
         for (choice, word) in [(Backend::Stub, "stub"), (Backend::Docker, "docker")] {
-            let backend = Backends::for_run(choice);
+            let backend = Backends::for_run(choice, PathBuf::from("/srv/holosmith/projects"));
             assert_eq!(backend.as_str(), word);
         }
-        assert_eq!(Backends::default().as_str(), "docker");
+        assert_eq!(
+            Backends::for_run(Backend::default(), PathBuf::from("/srv/holosmith/projects"))
+                .as_str(),
+            "docker",
+            "the default run's backend is the Docker one (ADR-0001: the stub is opt-in)"
+        );
     }
 
     #[test]
