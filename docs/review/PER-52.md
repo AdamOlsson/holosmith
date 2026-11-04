@@ -114,8 +114,8 @@ P1 was found exactly where the story's own acceptance bullet lives.
 | **P3** the create's 202 waited for the victim's `backend.stop`, which HS-024's real `docker stop` would turn into a ten-second stall | **fixed (behaviour)** | The stop is spawned, not awaited: the row already moved (which is what frees the slot), so the answer keeps spec item 7's "never wait for container work". ADR-0024 now argues the choice instead of leaving it to be rediscovered, and `tests/eviction.rs` waits for the recorded `Stop` instead of assuming it landed before the 202. |
 | **P3** three sentences the change made false were left standing: `cap_reached`'s "until HS-020 lets it evict", the resume's "the bullet allows either branch — … is HS-020's", and `docs/build.md`'s "nothing in the API produces `stopped` yet" | **fixed** | Each now says what is true: `cap_reached` is the resume's answer, the resume keeps the refusal because HS-020 gave the eviction to the create (ADR-0024), and the build doc names the eviction as the producer of `stopped` and explains why the resume round trip is still `tests/resume.rs`'s. |
 
-After the fixes: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (217 lib
-tests, 25 integration binaries — six in `tests/eviction.rs`), `cd web && npm test` (21) and
+After the fixes: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (213 lib
+tests, 21 integration binaries — six in `tests/eviction.rs`), `cd web && npm test` (21) and
 `cd web && npx tsc --noEmit` are green; `scripts/verify.sh` passes with 36 cases and 169 assertions
 against the rebuilt artifact; and the demo (cap at one, the victim's transcript, the refusal, and the
 Sessions screen in Chromium on both the drawn and the live path) was run against

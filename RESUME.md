@@ -30,18 +30,18 @@ in containers on machines you own, driven from a phone. The work is sliced into 
 read, create, comment on, or close anything there.
 
 **The MVP line** is phase 2's first stories plus, before them, the rest of phase 1: a session can be
-created, prompted, aborted, steered, stopped and resumed, and it is driven from the phone.
+created, prompted, aborted, steered, stopped, resumed and deleted, and it is driven from the phone.
 
 ---
 
 ## 1. Where the work stands
 
 Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is clean, and every
-commit is **pushed** (see the note on pushing below). `HEAD` is `f67eb6f`; any commit after it is
-bookkeeping.
+commit is **pushed** (see the note on pushing below). `HEAD` is `3408c38`; any commit after it is
+bookkeeping — this file's own refresh.
 
 **Linear: 20 Done, 60 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-020`
-(`PER-33` … `PER-50`).
+(`PER-33` … `PER-52`).
 
 | Story | Linear | Commits | ADR |
 | --- | --- | --- | --- |
@@ -66,8 +66,8 @@ bookkeeping.
 | HS-019 delete flow | PER-51 | `3d5c415`, `7c4ea02`, `cd85572`, `db95a3f` | 0023 |
 | HS-020 cap and eviction | PER-52 | `a3c6825`, `4f37211`, `f67eb6f` | 0024 |
 
-**Next issue: `PER-53` (HS-021 — idle stop).** Then `PER-54` (HS-022 — turn timeout), and onward in
-`HS-###` order.
+**Next issue: `PER-53` (HS-021 — idle stop).** Then `PER-54` (HS-022 — turn timeout), `PER-55`
+(HS-023 — token budget), and onward in `HS-###` order.
 
 Ranking, per `PROMPT.md`: Linear priority (all are `No priority`) → `HS-###` order in `docs/stories/` →
 anything already `In Progress` first → skip an issue whose `Blocked by` stories are not `Done`.
@@ -82,15 +82,17 @@ anything already `In Progress` first → skip an issue whose `Blocked by` storie
    resuming it). A turn's end is typed (`TurnEnd::{Settled, Aborted}`) so the runner picks
    `agent_settled` or `abort_completed`; a forced stop has **two owners** and the table decides, which
    is why exactly one `StateError::Illegal` in `turn.rs` is a `debug` line. What is still open: **the
-   turn timeout and the token budget** (HS-022/HS-023), which climb `end_turn` with their own reason
-   (`forced_abort`, `deleted` are the two words so far).
-2. **The web page has now been rendered.** Playwright's Chromium is inside the sandbox (see §2), and
-   HS-016 … HS-018 each drove the shipped artifact in it: the sessions list, the create form, the
+   turn timeout and the token budget** (HS-022/HS-023), which climb `end_turn` with their own reason —
+   the reason words so far are `forced_abort`, `deleted` and `evicted`.
+2. **The web page has now been rendered, including the paths a frame changes.** Playwright's Chromium
+   is inside the sandbox (see §2), and HS-016 … HS-018 drove the sessions list, the create form, the
    session screen, the composer's four actions, the transcript's blocks and boundaries, and the abort /
-   steer / resume round trips. That is still **not** a substitute for a gate — nothing in `scripts/` may
-   require a browser — but "unverified from source" is no longer the honest answer for a screen that has
-   been looked at. What has *not* been looked at: the hub (HS-057+), the changes sheet, and anything
-   phase 2 adds.
+   steer / resume round trips; HS-019 drove the delete's 202 → 404 and the closed stream; HS-020 drove
+   the cap's eviction **both ways** — the row as drawn from the list, and a row turning `stopped` under
+   the operator from a `session.status` frame with no reload (which is where that story's one blocker
+   lived). This is still **not** a substitute for a gate — nothing in `scripts/` may require a browser —
+   but "unverified from source" is no longer the honest answer for a screen that has been looked at.
+   What has *not* been looked at: the hub (HS-057+), the changes sheet, and anything phase 2 adds.
 
 Two things HS-014 and HS-015 settled that later stories inherit:
 
@@ -117,12 +119,16 @@ Two things HS-014 and HS-015 settled that later stories inherit:
   family: `409 session_<state>` for **all six** states — `session_starting`, `session_idle`,
   `session_running`, `session_stopped`, `session_error`, `session_deleting` — built by
   `ApiError::not_in_state(status, sentence)`, where the **sentence is the caller's** so an abort's
-  refusal does not read like a prompt's.
+  refusal does not read like a prompt's. Three refusals are outside that family and each has its own
+  constructor: `unsaved_work` (a delete whose snapshot failed), `unknown_session` (`not_found`
+  with the session's own sentence — a route that exists and a row that does not, HS-019) and
+  `cap_without_idle` (`cap_reached` with the create's sentence — the machine is full *and* nothing is
+  idle, HS-020).
 
 **Pushing works, through the sandbox's ssh-agent.** `origin` is
 `git@github.com:AdamOlsson/holosmith.git`; `bwrap.sh` binds the host's `SSH_AUTH_SOCK` at
 `/run/ssh-agent.sock` (the private key never enters the sandbox), so `git push origin master` signs on
-the host. Confirmed: `700b157` … `ff9d907` are all on `origin/master`. Push after every story, and if a
+the host. Confirmed: `b49f2cd` … `3408c38` are all on `origin/master`. Push after every story, and if a
 push fails, report it — do not fake one.
 
 ---
@@ -155,9 +161,11 @@ types natively, which is what `npm test` relies on); `curl`; `python3` (with std
 `~/.cache/hs-browser/pw/node_modules`. Two quirks, both hit: ESM **ignores `NODE_PATH`**, so a script
 imports the package by its own path — `…/playwright/index.mjs` (the `.js` entry is CJS and its default
 export does not have `chromium` at the top level); and Chromium must be launched with
-`--no-sandbox`, because its own namespace sandbox cannot nest inside ours.
+`--no-sandbox`, because its own namespace sandbox cannot nest inside ours. A third, learned in HS-020:
+**`networkidle` never settles** on the sessions list, because a live row holds an `EventSource` open —
+navigate with `domcontentloaded` and wait for the rows.
 **Not available, and not to be invented:** no Docker daemon, no `sudo`, no `apt`, no `gh`, no ssh key
-or token, no **browser** (so nothing renders `web/` — say "unverified" rather than guessing).
+or token. There is a **browser now** (see §1 fact 2), but no *gate* may need one.
 **No `awk`** and **no `shellcheck`** on this machine — do not write a script or a gate that needs
 either.
 
@@ -240,8 +248,9 @@ If that fails, **stop and report** — that is a `PROMPT.md` stop condition.
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                     # 217 lib + 25 integration binaries (14 delete.rs, 6 eviction.rs)
+cargo test                     # 213 lib + 21 integration binaries (14 delete.rs, 6 eviction.rs)
 cd web && npm test             # 21 transcript tests (node's own runner)
+cd web && npx tsc --noEmit     # not a gate phase, but a web edit that does not typecheck is a bug
 scripts/verify.sh              # THE one-command gate since HS-006
 ```
 
@@ -249,7 +258,7 @@ scripts/verify.sh              # THE one-command gate since HS-006
 (`scripts/build.sh`, which itself runs `build-web.sh` — `npm test` then Vite — and `check-static.sh`
 last), `embed` (`scripts/check-embed.sh`), then `serve` — the **shipped musl artifact** booted on
 `--port 0` with a temp data dir, running **36 cases plus a CORS sweep (169 assertions)**, then torn down
-with `SIGTERM` and an asserted exit 0. It takes ~3 min (both musl targets). `--no-build` skips `build`
+with `SIGTERM` and an asserted exit 0. It takes ~3–4 min (both musl targets). `--no-build` skips `build`
 and `embed`; `--keep` keeps the work dir.
 
 A story is not done until all four are green on a clean tree, and then you run the story's own demo
@@ -262,6 +271,11 @@ gate reported `FAIL build/failed` while the same command passed a minute later, 
 **Rebuild after committing.** `git describe` is baked into the artifact and `check-static.sh` fails on a
 stale `dist/`, so a commit without a rebuild leaves the gate red. Commit, then `scripts/verify.sh`, then
 the demo you paste.
+
+**Rebuild after editing `web/`, before any demo.** The artifact embeds `web/dist`, so a demo run against
+an artifact built before the page changed is a demo of the *old* page — and it will look like your fix
+did nothing. HS-020 lost a demo cycle exactly this way: the fix to `main.ts` was invisible until
+`scripts/build.sh` ran again. `scripts/verify.sh` rebuilds, so "gate green, then demo" is the safe order.
 
 ---
 
@@ -283,9 +297,11 @@ crates/holosmith/
   src/commands/             version.rs, config.rs, serve.rs
   src/config/               mod.rs (typed Config, KeySpec walk, 26 keys), schema.rs, problem.rs,
                             render.rs, duration.rs, editor.rs
-  src/backend/              mod.rs (Step, SessionBackend, Backends, BackendError), stub.rs (the
-                            scripted turn), docker.rs (refuses everything until HS-024)
-  src/provisioner.rs        the four-step background task and its five session.status events
+  src/backend/              mod.rs (Step, SessionBackend, Backends, BackendError, TurnEnd), stub.rs
+                            (the scripted turn; `ignoring_abort`, `failing_at`, `failing_snapshot`),
+                            docker.rs (refuses everything until HS-024)
+  src/provisioner.rs        the four-step background task and its five session.status events; stops at
+                            a step boundary when the row leaves `starting`
   src/turn.rs               the turn runner: touch → the backend's turn → agent_settled + touch,
                             abort_completed (or a `debug` line if the ladder got there first), or
                             unexpected_exit with the reason. `TurnEnd` is the backend's answer
@@ -298,17 +314,21 @@ crates/holosmith/
                             transaction → close the session's streams. `DELETED` is the rung-2 word
   src/runtime.rs            runtime::Backend {Stub,Docker} — which backend this run uses
   src/http/                 mod.rs, app.rs (Routes/App seam, AppState + provisioner()/turner()/
-                            transitioner()/ladder()/deleter(), edge layer, is_guard_exempt), error.rs (the one
-                            envelope, every code, ApiError::not_in_state / bad_prompt / bad_steer /
-                            unsaved_work / unknown_session),
+                            transitioner()/ladder()/deleter(), edge layer, is_guard_exempt), error.rs
+                            (the one envelope, every code, ApiError::not_in_state / bad_prompt /
+                            bad_steer / unsaved_work / unknown_session / cap_without_idle),
                             health.rs, guard.rs (the four checks), sessions.rs (POST+GET
                             /api/sessions, GET /api/sessions/{id}, POST …/prompt, …/abort, …/steer,
-                            …/resume, TURN_STEER), streams.rs (the SSE handler)
+                            …/resume, DELETE /api/sessions/{id}[?force=true], TURN_STEER, EVICTED,
+                            `Slot` + `slot_for` + `evict_one`, `apply_trigger`), streams.rs (the SSE
+                            handler)
   src/sessions/             mod.rs (Status, Session, NewSession, RepoError), repository.rs (every
-                            `sessions` statement + its SQL-location guard; includes touch), state.rs
-                            (the transition table, Transitioner::apply / apply_logged, the set_status
-                            guard), activity.rs (the one `touch`: lock, warn, carry on)
-  src/events/               mod.rs (Event, NewEvent, EventWriter, EventStream), writer.rs, repository.rs,
+                            `sessions` statement + its SQL-location guard; includes touch,
+                            `oldest_idle`, and `remove` — the row and its log in one transaction),
+                            state.rs (the transition table, Transitioner::apply / apply_logged, the
+                            set_status guard), activity.rs (the one `touch`: lock, warn, carry on)
+  src/events/               mod.rs (Event, NewEvent, EventWriter, EventStream), writer.rs, repository.rs
+                            (`insert_batch` drops an event whose session has gone; `delete_session_log`),
                             stream.rs (replay→live, lag), registry.rs (open-stream counts)
   src/db.rs                 pragmas + read-back, apply_pending, Database::sessions()/events()
   src/sql.rs                the one SQL statement scanner + the shared source walk (cfg(test) guard)
@@ -317,11 +337,13 @@ crates/holosmith/
   tests/                    version_cli, config_cli, http_contract, serve_cli, db_migrations,
                             pin_single_source, guards, session_repository, sessions_api, events,
                             streams, provisioning, state_machine, session_list, session_screen,
-                            turns, abort, steer, resume, support/mod.rs (the shared harness)
+                            turns, abort, steer, resume, delete, eviction, support/mod.rs (the shared
+                            harness)
 web/                        Vite 7 + TypeScript, two screens (`/` and `/sessions/<id>`);
                             package-lock COMMITTED; main.ts is the DOM, transcript.ts the renderer's
-                            rules (frame parsing, block model, affordances)
-web/test/transcript.test.ts 18 tests over synthetic frames, node's own runner (`npm test`)
+                            rules (frame parsing, block model, affordances, `stoppedNotice` /
+                            `stoppedDetail`)
+web/test/transcript.test.ts 21 tests over synthetic frames, node's own runner (`npm test`)
 scripts/build-web.sh        npm ci + npm test + npm run build, asserts web/dist/index.html
 scripts/build.sh            web first, HOLOSMITH_REQUIRE_WEB=1, both musl targets → dist/<triple>/,
                             atomic copy, then check-static.sh. Uses `cargo build --locked`.
@@ -330,9 +352,9 @@ scripts/check-static.sh     file/readelf, empty-root serve + cmp against web/dis
 scripts/check-embed.sh      the three embed cases (present / absent warns / required fails)
 scripts/verify.sh           the one-command gate (see §3)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0022          read the recent ones before planning anything
+docs/adr/0001…0024          read the recent ones before planning anything
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-50   each a verbatim review + a `## Resolution` table
+docs/review/PER-33…PER-52   each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -341,37 +363,46 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
 
 - **Working:** `version` (text + `--json`), `config {validate,show,edit}`, `serve` (control listener,
   embedded app, `/api/health`, `POST`/`GET /api/sessions`, `GET /api/sessions/{id}`,
-  `POST /api/sessions/{id}/{prompt,abort,steer,resume}`, `DELETE /api/sessions/{id}`,
-  `GET /api/sessions/{id}/events`), SQLite with
-  three migrations, the guards, the event writer, the SSE stream, the stub backend and its four-step
-  provisioner, the enforced state machine, the abort ladder, the delete flow, the Sessions screen with its create form,
-  the session screen at `/sessions/<id>` with a live transcript and a four-action composer.
-- **Not built yet:** the **idle stop and the drain** (HS-021 idle stop, HS-044 drain — the cap now
-  stops an idle session when a create needs its slot, so `stopped` has one producer), the turn timeout
-  (HS-022), the token budget
-  (HS-023), tool-output files and `output_ref` (HS-033), usage totals (HS-034), the preview listener
-  (HS-041), Docker (HS-024+), merge, publish, the hub, releases, and any **delete affordance in
-  `web/`**.
+  `POST /api/sessions/{id}/{prompt,abort,steer,resume}`, `DELETE /api/sessions/{id}[?force=true]`,
+  `GET /api/sessions/{id}/events`), SQLite with three migrations, the guards, the event writer, the SSE
+  stream, the stub backend and its four-step provisioner, the enforced state machine, the abort ladder,
+  the delete flow, the cap with eviction, the Sessions screen with its create form and the
+  "nothing was deleted" notice, the session screen at `/sessions/<id>` with a live transcript and a
+  four-action composer.
+- **Not built yet:** the **idle stop and the drain** (HS-021 idle stop, HS-044 drain — the cap stops an
+  idle session when a create needs its slot, so `stopped` has one producer), the turn timeout (HS-022),
+  the token budget (HS-023), tool-output files and `output_ref` (HS-033), usage totals (HS-034), the
+  preview listener (HS-041), Docker (HS-024+), merge, publish, the hub, releases, and any **delete
+  affordance in `web/`** (the API has the endpoint; the page has no button).
 - **`runtime::Backend`** has `Stub` and `Docker`; `serve --backend` and the config key `backend` select
   it. `DockerBackend` **refuses every operation** until HS-024, and the default backend is `docker`
   (ADR-0001: the stub is opt-in), so a default build provisions a session to `error` with a reason
-  rather than hanging in `starting`. `scripts/verify.sh` boots with `backend = "stub"` in its config.
+  rather than hanging in `starting`. That refusal is also the demo trick HS-019 used to provoke a real
+  failed snapshot from the shipped artifact. `scripts/verify.sh` boots with `backend = "stub"` in its
+  config.
 - **`AppState`** is `{ config, runtime, database: Arc<std::sync::Mutex<Database>>, events: EventWriter,
-  streams: StreamRegistry, backend: Backends }`, with four wiring helpers — `provisioner()`, `turner()`,
-  `transitioner()`, `ladder()`. The mutex is an explicit stopgap (ADR-0012/0013) — see §6.
+  streams: StreamRegistry, backend: Backends }`, with **five** wiring helpers — `provisioner()`,
+  `turner()`, `transitioner()`, `ladder()`, `deleter()`. The mutex is an explicit stopgap
+  (ADR-0012/0013) — see §6.
 - **`sessions::state::Transitioner::apply`** is the only way a session's state changes; `apply_logged`
   is the runners' wrapper (log, never return). A provisioning step report is `from == to` with `step`
   set and is *not* a table row.
+- **The create is one lock scope plus a loop.** `create_locked` answers `Slot::{Inserted, Existing,
+  Full}`; a `Full` makes `slot_for` evict one idle session (through `apply`, which takes the lock
+  itself) and try again. Idempotency is checked first, so a retry never evicts anyone. `evict_one`
+  moves the row **before** it spawns the backend's `stop`, because the row is what frees the slot.
 - **`config`** already has `abort_grace` (default `10s`, **used** by the ladder), `idle_stop_min`,
   `stopped_ttl_days`, `min_free_gb`, `turn_timeout_min`, `max_session_tokens` and the rest — check
-  `config show` before adding a key. HS-019's delete flow has **no** config key of its own.
+  `config show` before adding a key. The delete flow has **no** config key of its own, and `max_live_sessions`
+  (default 3, ≥ 1) is the cap.
 - **`POST /resume`** takes the transition, then spawns the provisioner, and **touches `last_active_at`**
-  (a resumed session must not be HS-020's first eviction candidate). The cap is checked **before** the
-  transition (ADR-0022). `SessionBackend::resume` is still uncalled.
+  (a resumed session must not be the eviction's first candidate — which is now a real policy, not a
+  future one). The cap is checked **before** the transition, and the resume answers `409 cap_reached`
+  rather than evicting (ADR-0022, ADR-0024). `SessionBackend::resume` is still uncalled.
 
 ---
 
-## 5. The per-issue cycle (what actually worked, fifteen times)
+## 5. The per-issue cycle (what actually worked, twenty times)
 
 Everything is **sequential: one writer at a time**, never two children editing files.
 
@@ -388,29 +419,33 @@ Everything is **sequential: one writer at a time**, never two children editing f
    decisions→precedent table, acceptance restated as testable checks, non-goals, docs touched, the
    demo, and follow-ups; then set the issue `In Progress`.
 4. **Implement.** Two patterns, both proven:
-   - **S/M with the analysis in hand** (HS-011, HS-012, HS-014): implement in-session.
+   - **S/M with the analysis in hand** (HS-011, HS-012, HS-014, and every story since HS-016): implement
+     in-session.
    - **M/L with a lot of new surface** (HS-013's screen, HS-015's turn): hand a fresh `worker` child a
      *written* brief — the plan plus the "how", the ground rules (no commit, no Linear, no new
      dependency, `env.sh` first, don't edit `docs/stories/**`), the exact gate commands, and "budget
      discipline: keep the tree compiling; if you run long, stop green and report which steps remain".
-     Launch it async; native completion wakes you. Twice now the child found a genuine contradiction in
-     my brief — expect that, and verify its claims rather than trusting them.
+     Launch it async; native completion wakes you. Twice a child found a genuine contradiction in my
+     brief — expect that, and verify its claims rather than trusting them.
 5. **Verify yourself.** Never trust a child's pasted output: run the gates and the demo. Do this every
    time; it has caught something each story (a wrong test count, a demo-revealed message bug, a panic
-   path).
+   path, and in HS-020 a demo assertion that passed over an already-stopped row).
 6. **Review** with a fresh `reviewer` child running `~/.agents/skills/code-review/SKILL.md`, read-only,
    against `<fixed-point>...HEAD` plus untracked files, with the spec axis sourced from the Linear body
    + story slice + spec items. `git add -A` first, then `git diff --cached <fp> > /tmp/holosmith/reviews/
    PER-<n>-diff.txt` so new files appear. **The reviewer child has no shell or write tool**: its claims
-   must be checked, and *you* save the review verbatim to `docs/review/PER-<n>.md`.
+   must be checked, and *you* save the review verbatim to `docs/review/PER-<n>.md`. Give it the plan and
+   the ADR path too, so its findings are about what those documents do *not* already own.
 7. **Fix** in the same session (or with a fresh `worker`), triaging every finding as fixed or
    dismissed-with-citation ("the reviewer misread the helper at …"). Re-run the gates. Append a
    `## Resolution` table to the review file and commit it with the fixes.
 8. **Ship**: focused conventional commits naming the issue, the last ending `Closes <IDENT>`. Rebuild
-   after committing. Then `save_comment` with what shipped, the gates, verbatim demo output, acceptance
-   item by item, and follow-ups; set the issue `Done`; re-read it to confirm.
+   after committing (and after any `web/` edit — §3). Then `save_comment` with what shipped, the gates,
+   verbatim demo output, acceptance item by item, and follow-ups; set the issue `Done`; re-read it to
+   confirm.
 9. **Refresh this file** at a natural stopping point (counts, HEAD, next issue, the next story's facts).
-   It is a cold-start snapshot, not a per-story deliverable — one refresh per session is enough.
+   It is a cold-start snapshot. The operator asked for it once at the end of a session; refreshing it
+   after each story is cheap insurance if the session dies.
 
 Commit messages are prose about *why*, not a restatement of the diff. Look at the last twenty for tone.
 
@@ -424,6 +459,8 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 /tmp/holosmith/reviews/PER-<n>-diff.txt   the diff artifact for the reviewer
 /tmp/holosmith/reviews/PER-<n>-review-brief.md
 /tmp/holosmith/reviews/PER-<n>-review-verbatim.md
+/tmp/holosmith/demo-per-<n>.sh|.py        the demo, with its client half
+/tmp/holosmith/web-check*.mjs             the Chromium half, when the story has a screen
 ```
 
 ---
@@ -443,8 +480,10 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   meant, then run the gate.
 - **A bare `cargo build` without `web/dist` succeeds with a placeholder page.** `build.sh` sets
   `HOLOSMITH_REQUIRE_WEB=1` and `check-static.sh` greps the artifact for the marker.
-- **No `awk`, no `shellcheck`, no browser.** Scripts must use `sed`/`grep`/`tr`/`cut`/`cmp`/`find`/
-  `timeout`; UI claims you cannot render are "unverified from source", not "done".
+- **The artifact embeds `web/dist`, so a `web/` edit needs a rebuild before any demo.** `verify.sh`
+  rebuilds; a hand-run demo does not. See §3.
+- **No `awk`, no `shellcheck`.** Scripts must use `sed`/`grep`/`tr`/`cut`/`cmp`/`find`/`timeout`. A
+  browser exists now, but nothing in `scripts/` may require one.
 - **One build at a time**, and **rebuild after every commit** (see §3).
 - **node's test runner needs node 22.18+** (native type stripping); this machine has 24.
 
@@ -467,42 +506,63 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 - **The harness's stub is deliberately slow** (`SLOW_STUB_STEP` = 60 s per step) so no test that is not
   about provisioning loses the race against HS-011's background task. Tests that need provisioning to
   finish use `support::with_stub(state, support::fast_stub())` (1 ms). Waiting for a row to reach `idle`
-  is `wait_until(...)`, never a `sleep`.
+  is `wait_until(...)`, never a `sleep`. That slow stub is also the only way to hold a session in
+  `starting` on purpose (HS-020's cap refusal).
 - **A row can be ahead of its event.** The runner writes first and the writer commits every 25 ms, so
   "the row says `idle`" does not mean the event is committed. Tests read the log by event count, and the
   stream tests take N frames. HS-018 hit the sharper form: a `prefix` assertion over a log captured from
   a row that had just changed was **vacuously true over zero events** — wait for the event you mean, then
-  assert the log is not empty.
+  assert the log is not empty. HS-019 hit it again from the other side: a *before* count taken right
+  after `wait_status(idle)` was zero, so "the removal took the log too" would have passed for the wrong
+  reason.
+- **A background call is not there when the answer is.** HS-020's eviction spawns the backend's `stop`,
+  so a test that asserts the backend call must `wait_until` on the recorded call — the **row** is what
+  the 202 promised, not the container call.
 - **`last_active_at` is whole seconds, so "it moved" is usually the next touch, not yours.** HS-017's
   review proved this by mutation: a steer's `touch` could be deleted and the test stayed green, because
   the turn settled a second later. Push the column into the past first
   (`sessions().touch(id, now - 60)`), then act, then read **immediately** — a `wait_until` reintroduces
   the race. HS-018 changed its stop helper to take a `reason` for the same class of reason: a `None`
-  reason made "the resume clears the reason" untestable.
+  reason made "the resume clears the reason" untestable. HS-020 ages rows the same way to make "least
+  recently active" a fact, and ages **two** rows to the same second to prove the `id ASC` tie-break.
 - **A prompt turns a race into an expected outcome.** Two prompts can both see `idle`; the loser gets
   `StateError::Illegal` and `apply_prompt` retries once when the row is idle again. Do not "fix" that by
   holding the lock across the read and the apply.
+- **A test's claim can be half-strength and still green.** HS-020's review caught one: "rules out the
+  lowest id" over **random** ids is a coin toss. If a test claims to rule out a competing rule, make the
+  competing rule's answer *deterministic* and wrong — or split it into two tests (which is what the fix
+  did). Mutating the rule and watching the test fail is the only proof.
 
 ### HTTP and the envelope
 
 - **Every fallible axum extractor answers `text/plain`, not the envelope** — `axum::Json<T>`'s
   rejection, `Bytes`'s (`UnknownBodyError` 400, `LengthLimitError` 413) and `Path<String>`'s (a `%FF`
   segment is a 400). Take the body and the path as `Result<…, Rejection>` and map them yourself.
+  `RawQuery` is the exception: its rejection is `Infallible`, so a handler can take it directly.
 - **The `Routes`/`App` seam is load-bearing**: `Routes` has no constructor from a bare `Router` and no
   accessor yielding one, `axum::serve` appears once, and `Router::layer` runs in exactly one place —
   `App::new`. `tests/guards.rs` pins the one `.layer(` and the manifest's read-only/mutating kinds.
-- **A `GET` route cannot be mutating.** Use `Routes::get`/`head`/`post`/…; the manifest records the kind.
+- **A `GET` route cannot be mutating.** Use `Routes::get`/`head`/`post`/`delete`/…; the manifest records
+  the kind. `DELETE` is the only non-`GET`/`POST` verb in the table so far (HS-019's route).
 - **Errors are one envelope**, `{"code","message"}` (ADR-0008); codes are constants in `http/error.rs`.
   No test pins a message sentence — but a message must describe *its own* request (HS-015's prompt
-  reused the create's sentence until a demo showed it).
+  reused the create's sentence until a demo showed it; HS-019's `GET` after a delete said "no such
+  endpoint" until a demo showed that too). Two requests may share a code and differ in sentence
+  (`cap_reached` for the resume, `cap_without_idle` for the create).
 - **`is_guard_exempt` is the only exemption list** (true only for `GET`/`HEAD /api/health`).
 - **A mutating request needs `Content-Type: application/json` even with no body.** The `bad_client`
-  guard reads the content type as well as `X-Holosmith-Client`, so `POST /abort` and `POST /resume` must
-  send it — a client (or a test) that omits it gets `403 bad_client` and thinks its endpoint is missing.
+  guard reads the content type as well as `X-Holosmith-Client`, so `POST /abort`, `POST /resume` and
+  `DELETE` must send it — a client (or a test) that omits it gets `403 bad_client` and thinks its
+  endpoint is missing. The guards check the origin **before** the client header, so a test that omits
+  both proves `bad_origin`.
 - **In `scripts/verify.sh`, a stream needle can be answered by the *replay of an earlier turn*.** Every
   turn's settle payload is identical, so "wait for `running → idle`" returns the previous turn's frame.
-  Use a needle unique to the action (`"reason":"abort_completed"`, the steer's text) or poll the row
-  (`wait_for_idle`), which is what the steer case does.
+  Use a needle unique to the action (`"reason":"abort_completed"`, `"reason":"evicted"`, the steer's
+  text) or poll the row (`wait_for_idle`, `wait_for_gone`), which is what the steer and delete cases do.
+- **A `case_*` must own the state it asserts.** HS-020's cap case used to require a session created two
+  cases earlier to still be provisioning — a bet on the host's speed — and was moved last, where it
+  creates the session it depends on. Before adding a case, ask what it leaves behind *and* what it
+  needs from what came before.
 - **Banner line order is pinned by tests** (`log`, version line, `config`, `data_root`, `control_listen`,
   `control_origin`, `preview_listen`, `database … schema n`).
 - **`--port 0` re-derives `control_origin`** from the bound port after `bind`; the guard compares the
@@ -521,7 +581,9 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 - **`id TEXT PRIMARY KEY` is nullable in SQLite.** The invariant is the repository's, not the schema's.
 - **`SCHEMA_VERSION` is a literal**; `check_embed` fails the build if it disagrees with the embedded
   files. Bump it in the same commit as the migration. `ALTER TABLE … ADD COLUMN` goes **last**.
-- **The repository owns every statement against its table**, enforced by a walk over `src/**`.
+- **The repository owns every statement against its table**, enforced by a walk over `src/**`. A new
+  *reader* goes through `select()`/`one()`, never a hand-copied column list — HS-020's review caught one
+  that had re-spelled all fifteen columns, which would have missed a column a migration added.
 - **No state changes outside `sessions::state::Transitioner::apply`.** `set_status` may be *named* only
   in `sessions/repository.rs` and `sessions/state.rs`; a walk over `src/**` enforces it. Integration
   tests outside the crate may still call the raw write (they test the repository).
@@ -537,13 +599,21 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   (assert the before-count while the row still exists, as `tests/delete.rs` does), and the `deleting`
   event is usually dropped rather than delivered because the removal finishes inside the writer's 25 ms
   tick — so never assert that a watcher saw it.
+- **A create evicts outside its own lock scope.** The insert is one scope (`create_locked` →
+  `Slot::{Inserted,Existing,Full}`) and an eviction is `Transitioner::apply`'s, which takes the same
+  lock; the loop in `slot_for` joins them and terminates because each eviction strictly lowers the live
+  count. Do not "simplify" that by writing the status inside the scope.
 
 ### Web
 
 - **No new npm dependency, no framework, no router.** `EventSource`, `crypto`, `fetch` are the platform;
   `package-lock.json` is committed; `npm test` is node's own runner.
 - **`web/src/main.ts` keeps no state beyond the DOM** (plus the create's pending Idempotency-Key). The
-  transcript's rules live in `web/src/transcript.ts` and are tested without a browser.
+  transcript's rules live in `web/src/transcript.ts` and are tested without a browser — including
+  `stoppedNotice`/`stoppedDetail`, because a *sentence* is a rule too.
+- **A row's text is written in two places, and they must be one function.** A row is drawn once
+  (`sessionRow`) and patched per frame (`applyStatus`); HS-020's blocker was a sentence written only in
+  the first. Anything the frame path must show belongs in a pure `transcript.ts` function both call.
 - **A delta is one appended text node; a snapshot is `replaceChildren`.** Never `textContent +=` (O(n)
   per delta ⇒ O(n²) per turn), never a document query per frame — blocks are a `Map<message id, nodes>`,
   tools a `Map<tool id, nodes>`.
@@ -551,7 +621,8 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 - **A form inside a page must swallow its own submit** — with no `action` it is a GET of the current path
   and a full reload, which discards the transcript (HS-014's review caught exactly that).
 - **The session screen keeps its stream open in every state**, unlike a list row (ADR-0017 closes a dead
-  row's source). Both are deliberate; ADR-0018 says why.
+  row's source). Both are deliberate; ADR-0018 says why. A delete's stream is closed by the *server*
+  (`StreamRegistry::close`), so a row for a deleted session ends and a reconnect is `404`.
 - **`turn.steer` is the one frame with no message id** (ADR-0021): its block is created per frame, and
   `order()`/`toolOrder()` do not see it. Do not "fix" that by minting an id without reading ADR-0021's
   price — the log is durable, so two shapes of one kind would live in it forever.
@@ -576,19 +647,19 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   gates, the doc is in scope, and its prose must be reflowed (~100 columns), not just appended to.
 - **Every story adds at least one `case_*` to `scripts/verify.sh`.** The rule is in bold in
   `docs/build.md`, and the reviewer enforces it. The current gate is 36 cases / 169 assertions.
-- **A create evicts outside its own lock scope.** The create's insert is one scope
-  (`create_locked` → `Slot::{Inserted,Existing,Full}`) and an eviction is `Transitioner::apply`'s, which
-  takes the same lock; the loop in `slot_for` is what joins them, and it terminates because each
-  eviction strictly lowers the live count. Do not "simplify" that by writing the status in the scope.
 - **Adding an ADR means updating `docs/stories/README.md`**: the "Decisions taken while slicing" count
-  (now nineteen) and the bullet list. A reviewer will check the links resolve — three did not, once.
+  (now **twenty-four**) and the bullet list. A reviewer will check the links resolve — three did not,
+  once.
 - **An ADR that a later story changes gets a one-line "Superseded by ADR-00xx" note**, not a rewrite
-  (ADR-0012 does this; HS-015 added two to ADR-0018).
+  (ADR-0012 and ADR-0013 do this; HS-015 added two to ADR-0018).
 - **`GLOSSARY.md` is the vocabulary authority.** Check it before inventing a term. Recent entries to
   respect: **Step**, **Backend**, **Trigger**, **Transition**, **Sessions screen**, **Session screen**,
   **Composer**, **Transcript**, **Delta kind**, **Message id**, **Turn boundary**, **Turn runner**,
-  **Tool call**, **Usage**. `Status` in code is **State** in the glossary; a delta's node is a "kind's
-  node", never a "channel"; a second spelling is forbidden, including inside an entry's own prose.
+  **Tool call**, **Usage**, **Evict**, **Cap**, **Delete flow**, **Unsaved work**. `Status` in code is
+  **State** in the glossary; a delta's node is a "kind's node", never a "channel"; a second spelling is
+  forbidden, including inside an entry's own prose.
+- **`RESUME.md` is the one place this file's own claims can rot.** It contains counts, SHAs and "next
+  issue" statements; anything that changes them is a reason to edit it in the same commit.
 
 ### Reviews
 
@@ -596,8 +667,14 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   review body; do not delete a dismissal.
 - **The reviewer has no shell.** Its claims must be checked: HS-014 and HS-015 each had one finding the
   reviewer got right and one it got wrong (it read a helper as the wrong function; it called an
-  `unreachable!()` path unreachable when a race reached it).
-- It reliably finds one real should-fix per story. Take them seriously.
+  `unreachable!()` path unreachable when a race reached it). HS-019's review read a *stale diff artifact*
+  and reported a contradiction that had already been fixed — **regenerate the artifact after any doc edit
+  you make while the reviewer is reading**, and say so in the Resolution if it happens.
+- It reliably finds one real should-fix per story, and since HS-019 usually one **P1-class** one: HS-019's
+  was a refusal that had already ended the turn, HS-020's a sentence written on only one of two DOM
+  paths. Both were found in the *acceptance bullet's* own words. Take them seriously.
+- **Mine its "verification" section.** Its "could not verify without running" list is exactly the
+  checklist to run yourself, and its "verified by reading" table is what to quote in the ship comment.
 
 ### Demos
 
@@ -608,8 +685,16 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   the whole chain in a subshell, so `$!` is not the server's pid and `wait` reports the shell's status.
 - **`scripts/verify.sh`'s `fetch` waits for EOF**, which an SSE stream never sends. Use `fetch_stream`
   or `fetch_sse_until`.
+- **A demo assertion can pass vacuously.** HS-020's first Chromium check waited for "some row is
+  stopped", which an *already stopped* row satisfied instantly, so it proved nothing — it was caught only
+  because a stale artifact then made it fail. Key a wait on the id (or the value) you mean, exactly as a
+  stream needle must be unique.
+- **A `web/` demo needs a rebuild first**, or it is a demo of the previous page (§3).
 - **A create's state is not stable in a demo**: the provisioner runs 200 ms/step under `--backend stub`,
   so a `GET /api/sessions` a second later shows `idle`, not `starting`. Assert what the answer *is*.
+  That pace is also what makes a real 409 `unsaved_work` demonstrable from the shipped artifact: serve
+  with the default `docker` backend, create (the session lands in `error`), and the delete's snapshot is
+  refused.
 
 ---
 
@@ -652,6 +737,7 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 | A steer is `turn.steer` with `{"text"}` and **no** message id; the agent is asked before the record is written | a steer is one frame that nothing continues, so an id would have no second use; the record must claim only what was delivered | ADR-0021 |
 | No stop endpoint; resume is the only way back, the cap is checked before its transition, and `SessionBackend::resume` stays uncalled | the spec has no stop endpoint, and the policies that stop a session are HS-020/021/044 | ADR-0022 |
 | The delete's snapshot is the request's and the removal a task's; the turn is ended by `end_turn` (no resume); the event log goes with the row, so the writer drops an event whose session has gone; idempotency is keyed to the row's state; `force` is the literal `force=true` | only a synchronous snapshot can answer 409 and leave the row intact, and a log nothing can read is dead weight | ADR-0023 |
+| The create evicts the least recently active `idle` session outside its own lock scope; only `idle` is a candidate; the row moves before the container and the `stop` is **spawned**; a create with nothing idle answers `cap_reached` with its own sentence while the resume keeps ADR-0022's refusal | an eviction is a state change, and a state change takes the lock; an answer must not wait for container work (spec item 7); the two requests have different next steps | ADR-0024 |
 
 ---
 
@@ -667,7 +753,8 @@ scripts/verify.sh                           # baseline green (~4 min, 36 cases, 
 ```
 
 Then start the cycle at **`PER-53` (HS-021 — idle stop)**. Read §1's two facts first: the ladder has
-`end_turn` and `climb`, and the page has been rendered (so a DOM claim needs a Chromium run).
+`end_turn` and `climb`, and the page has been rendered (so a DOM claim needs a Chromium run — and a
+`web/` edit needs a rebuild before that run).
 
 ### What HS-021 is about, so the first brief is fast
 
@@ -679,39 +766,40 @@ Acceptance, verbatim from `docs/stories/phase-1-session-lifecycle-stub.md` (Size
 - Stopping frees a cap slot immediately.
 - The sweep is observable: a `session.status` event with the reason, and a log line per stop.
 
-**Already in place:** the config key `idle_stop_min` (default and validation included), the table's
-`idle + idle_stop → stopped` row, `Transitioner::apply`, `SessionBackend::stop`, and HS-020's eviction as
-the exact shape to reuse: `SessionRepository::oldest_idle()` (the LRU candidate), the row-before-container
-order with a best-effort `stop`, `Trigger::IdleStop`, and `stoppedNotice` in `web/src/transcript.ts` if
-the page should say the same "nothing was deleted" sentence for `idle_stop` (HS-020 deliberately left that
-word out of the map, and `idle_stop_min = 0` probably has to mean "off" — check the config's own
-validation before deciding).
+**Already in place:** the config key `idle_stop_min` (default and validation included — read
+`config/schema.rs` for what `0` currently means), the table's `idle + idle_stop → stopped` row,
+`Transitioner::apply`, `SessionBackend::stop`, and HS-020's eviction as the exact shape to reuse: the
+row-before-container order with a **spawned** best-effort `stop` (`evict_one` in `http/sessions.rs`), the
+reason-word convention (`forced_abort`, `deleted`, `evicted`), and `stoppedNotice`/`stoppedDetail` in
+`web/src/transcript.ts` if the page should say the same "nothing was deleted" sentence for `idle_stop`
+(HS-020 deliberately left that word out of the map).
 
-**What is missing:** the sweeper itself (a task on a timer in `serve`, with a shutdown that does not
-wait for it), the candidate query for *elapsed* idleness (``oldest_idle`` is "the least recently active
-idle", which is not the same as "older than `idle_stop_min`" — a clock and a bound are needed), and the
-gate's case (a one-minute config is too slow for `verify.sh`, so the sweep needs a test-only short
-interval, the way `abort_grace` is shortened in tests).
+**What is missing:** the sweeper itself (a task on a timer — `serve` owns the wiring, and its shutdown
+must not wait for a tick), the candidate query for *elapsed* idleness (`oldest_idle` is "the least
+recently active idle", which has no time bound; the sweeper needs `last_active_at < now - idle_stop_min`
+and should probably take **all** such rows, oldest first, not one), and the gate's case — a one-minute
+config is too slow for `verify.sh`, so the sweep needs a test-only short interval the way `abort_grace`
+is shortened in tests, and the case must be self-contained (§6: a case owns the state it asserts).
 
-**Decide canonically and record:** the sweep interval (and that it is not a config key, or that it is);
-whether `idle_stop_min = 0` means disabled or "stop everything"; that a stop is one `apply` plus one
-`stop` per session, never one for the whole sweep; and what the log line says per stop (the story asks
-for one).
+**Decide canonically and record:** the sweep interval and whether it is a config key; whether
+`idle_stop_min = 0` means disabled or "stop everything" (check what the config layer already says);
+whether a sweep stops every expired session or one per tick; that a stop is one `apply` plus one
+`stop` per session; and what the log line per stop says (the story asks for one).
 
 ### What HS-020 settled that HS-021 inherits
 
-- **A stop is one `apply` plus one best-effort `SessionBackend::stop`, the row first** (ADR-0020's
-  order, ADR-0024's precedent). `evict_one` in `http/sessions.rs` is the shape; the reason words so far
-  are `forced_abort`, `deleted` and `evicted`.
-- **The LRU read exists**: `SessionRepository::oldest_idle()` — `idle` only, `last_active_at ASC, id ASC`.
-  HS-021's candidate is *elapsed* idleness, so it needs its own query (a bound, not just an order).
+- **A stop is one `apply` plus one spawned, best-effort `SessionBackend::stop`, the row first**
+  (ADR-0020's order, ADR-0024's precedent).
+- **The LRU read exists**: `SessionRepository::oldest_idle()` — `idle` only, `last_active_at ASC, id ASC`
+  — but HS-021's candidate is *elapsed* idleness, so it needs its own query (a bound, not just an order).
 - **A row can be removed under a background task**, and every runner tolerates it: `touch` ignores a
   missing row, `insert_batch` drops an event whose session has gone, and the provisioner stops when the
   row leaves `starting`.
 - **The page's `stoppedNotice` map is one word wide on purpose** (`evicted`). HS-021 adds `idle_stop` if
-  the same "nothing was deleted" sentence is right for it — with its own test.
+  the same sentence is right for it — with its own test, in `transcript.ts`, not in `main.ts`.
 - **The cap's count is read under the create's one lock scope**, and an eviction must never be written
-  into that scope; HS-021's sweeper has no such constraint (it takes the lock only through `apply`).
+  into that scope; a sweeper has no such constraint (it takes the lock only through `apply`), but it must
+  not hold the lock across its `stop` calls.
 
 ## 9. Reporting
 
