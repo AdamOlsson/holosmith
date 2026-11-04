@@ -22,10 +22,13 @@
 //! recorded in ADR-0038 rather than papered over with a watcher (`docker events`, a `docker wait` race
 //! against `--rm`) that HS-031 would delete.
 //!
-//! **`session.log` holds stderr only** (spec item 15). `<data>/sessions/<id>/session.log` is append-only
-//! and carries the lines the container printed, verbatim; the row's `status_reason` carries only the last
-//! few, because a phone shows one line. HS-031 adds the launch line there, and HS-033's tool output goes
-//! to its own file rather than here.
+//! **`session.log` is the session's stderr and the server's own launch line** — and nothing else.
+//! `<data>/sessions/<id>/session.log` is append-only and carries the lines the container printed, verbatim;
+//! the row's `status_reason` carries only the last few, because a phone shows one line. Spec item 15's
+//! "`session.log` holds stderr only" is what keeps a *tool's* output out of it (HS-033 gives each tool call
+//! its own file) and what makes the file worth reading when a session dies; HS-031 adds the launch line
+//! there, because "which command did we run" is the first question a failed launch asks and there is no row
+//! column for it.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -197,6 +200,17 @@ impl Exits {
         if stderr.is_empty() {
             return;
         }
+        // A guard, not a rule about ids: this is the one place in the crate that turns a string into a path
+        // component, and a future caller with an id from somewhere other than a row must not be able to
+        // write outside `<data>/sessions/`. Every id today is the repository's 16 lowercase hex (ADR-0011).
+        if !is_path_segment(session_id) {
+            tracing::warn!(
+                target: "holosmith::exit",
+                session = %session_id,
+                "the session id is not a path segment, so nothing was logged"
+            );
+            return;
+        }
         let path = self.log_path(session_id);
         let written = (|| -> std::io::Result<()> {
             if let Some(parent) = path.parent() {
@@ -238,8 +252,22 @@ impl Exits {
 }
 
 /// `<data_root>/sessions/<id>`: where a session's own files live.
+///
+/// `session_id` is a row's id — the repository's 16 lowercase hex (ADR-0011) — and nothing here checks it:
+/// a caller that hands this an id from somewhere else has to make it a path segment itself, which is what
+/// [`Exits`]'s writer refuses to do (see `append_log`).
 pub fn session_dir(data_root: &Path, session_id: &str) -> PathBuf {
     data_root.join(SESSIONS).join(session_id)
+}
+
+/// Whether `text` can be one path component: no separators, no `.`/`..`, nothing that a filesystem reads as
+/// more than a name. A guard against writing outside a session's directory, not a second spelling of what
+/// an id is.
+fn is_path_segment(text: &str) -> bool {
+    !text.is_empty()
+        && text.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        })
 }
 
 #[cfg(test)]
@@ -298,6 +326,18 @@ mod tests {
         assert_eq!(classify(true, 0, "boom"), Exit::Expected);
         assert_eq!(classify(false, 0, "boom"), Exit::Clean);
         assert!(matches!(classify(false, 1, "boom"), Exit::Failed { .. }));
+    }
+
+    #[test]
+    fn only_a_bare_name_can_be_a_sessions_path_component() {
+        // The ids the repository makes pass; anything that could escape `<data>/sessions/` does not.
+        assert!(is_path_segment("0123456789abcdef"));
+        for text in ["", ".", "..", "../..", "a/b", "/etc/passwd", "a b", "a\0b"] {
+            assert!(
+                !is_path_segment(text),
+                "{text:?} must not be a path segment"
+            );
+        }
     }
 
     #[test]

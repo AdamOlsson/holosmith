@@ -112,7 +112,9 @@ impl Docker {
     /// reported as a stop of a container that was never there. The existence check is what tells them apart
     /// without parsing Docker's English.
     ///
-    /// HS-030 makes the *flag* that says this stop was expected; the ten seconds are the spec's.
+    /// The flag that says this stop was expected is written by the caller — `stop::Stopper`, before this
+    /// call (HS-030) — because it is a row's column and a backend may not write one; the ten seconds are the
+    /// spec's.
     pub fn stop_container(&self, name: &str) -> Result<bool, DockerError> {
         if !self.container_exists(name) {
             return Ok(false);

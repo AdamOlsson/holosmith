@@ -21,6 +21,7 @@ import {
   parseFrame,
   parseTruncated,
   sessionIdFromPath,
+  stateText,
   stoppedDetail,
   streamPath,
   type Change,
@@ -157,10 +158,6 @@ function field(label: string, input: HTMLInputElement): HTMLLabelElement {
   const element = make("label", "field");
   element.append(make("span", "field-name", label), input);
   return element;
-}
-
-function stateText(state: SessionState, reason: string | null): string {
-  return reason === null ? state : `${state} · ${reason}`;
 }
 
 // "3 min ago", coarse on purpose. It reads `last_active_at` from the row and never from a frame:

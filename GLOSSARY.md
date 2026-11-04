@@ -169,7 +169,7 @@ The row's record that a stop of this session's container was the server's own: `
 _Avoid_: Planned stop, graceful stop, stop flag, stopping flag
 
 **Exit classification**:
-The decision spec item 6 makes about a container that stopped: with the **expected stop** recorded it was our stop, so the session stays `stopped`; without it, exit code `0` is the agent finishing (`stopped`, reason `pi_exit`) and anything else is a failure (`error`, reason = the last lines of stderr). It is a pure function (`exit::classify`) plus the one entry point that applies its answer (`Exits::record`), which also appends what the container printed to the **session log**. `unexpected_exit` is the failure arm's trigger, `pi_exit` the clean one's.
+The decision spec item 6 makes about a container that stopped: with the **expected stop** recorded it was our stop, so the session stays `stopped`; without it, exit code `0` is the agent finishing (`stopped`, reason `pi_exit`) and anything else is a failure (`error`, reason = the last five lines of stderr, which the badge shows as its last line). It is a pure function (`exit::classify`) plus the one entry point that applies its answer (`Exits::record`), which also appends what the container printed to the **session log**. `unexpected_exit` is the failure arm's trigger, `pi_exit` the clean one's. Its observer is HS-031's attached stdio: a detached `--rm` container leaves nothing to inspect.
 _Avoid_: Exit code, exit status, death, crash detection
 
 **Resume**:
@@ -265,9 +265,11 @@ _Avoid_: Offset, id, index
 
 **Session log**:
 `<data>/sessions/<id>/session.log`: the append-only file that holds what a session's process printed on
-stderr, verbatim and with no timestamps. It is the complete record, where the row's `status_reason` keeps
-only the last few lines of a failure; spec item 15 says stderr only, so a tool's output goes to its own file
-rather than here. Its machine names are `exit::LOG_FILE` and `exit::session_dir`.
+stderr, verbatim and with no timestamps, plus the server's own launch line (HS-031). It is the complete
+record, where the row's `status_reason` keeps only the last few lines of a failure; spec item 15's "stderr
+only" is what keeps a **tool's** output out of it — that goes to a file of its own. Its machine names are
+`exit::LOG_FILE` and `exit::session_dir`. The badge a row shows is not this file: a multi-line reason is
+rendered as its last line, clipped, by `transcript.ts`'s `stateText`.
 _Avoid_: Container log, pi log, stderr log, transcript
 
 **Event writer**:

@@ -401,8 +401,9 @@ impl SessionBackend for DockerBackend {
     /// A container that is not there answers `Ok` — a session that was never started, or stopped twice, is
     /// not a failure (ADR-0023).
     ///
-    /// The *flag* that says this stop was expected, and the classification of how the container then
-    /// exited, are HS-030's.
+    /// The flag that says this stop was expected is **not** here: it is the server's row write, and
+    /// [`crate::stop::Stopper`] records it before calling this (HS-030, ADR-0038). The classification of how
+    /// the container then exited is [`crate::exit`]'s, and its observer is HS-031's attached stdio.
     async fn stop(&self, session: &Session) -> Result<(), BackendError> {
         let name = self.container(session).name;
         // `?` on the outer `Result` is deliberate: a daemon that cannot answer is a failed stop, and the

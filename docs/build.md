@@ -389,8 +389,9 @@ run in them.
 per session, because two starts interleaved produce "the container name is already in use" — which is one
 start working as designed being read as the other one failing. `--rm` alone is not enough: it removes an
 exited container a moment *after* `docker stop` has answered (measured), and it does nothing about a
-container the process lost track of. `stop` is `docker stop --time 10`; the ten seconds are the spec's, and
-the *expected-stop* flag that makes a stop distinguishable from a crash is HS-030's.
+container the process lost track of. `stop` is `docker stop --time 10`; the ten seconds are the spec's, and every
+stop goes through `stop::Stopper`, which first records `sessions.expected_stop` — the flag that makes a
+policy stop distinguishable from a crash (HS-030, ADR-0038).
 
 Three things bite on a real machine:
 

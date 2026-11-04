@@ -364,6 +364,35 @@ export function affordances(state: SessionState): Affordances {
   };
 }
 
+// How much of a reason the badge shows, in characters.
+//
+// A reason is normally one word (`evicted`, `idle_stop`) or one short sentence, and fits. An unexpected
+// exit's is not: it is the last few lines the container printed (HS-030, spec item 6), so the badge shows
+// the *last* of them — the error itself, not the oldest line of the tail — on one line and clipped.
+// `session.log` keeps every line; the badge has one ellipsis' worth of room.
+export const REASON_MAX = 48;
+
+// A reason as one line a badge can hold: its last non-empty line, clipped.
+export function headline(reason: string): string {
+  const lines = reason
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  // A reason with no content at all keeps what it was given: an empty badge is the producer's answer, not
+  // this function's to invent.
+  const text = lines.length === 0 ? reason.trim() : lines[lines.length - 1]!;
+  return text.length > REASON_MAX ? `${text.slice(0, REASON_MAX)}…` : text;
+}
+
+// What a row's badge says: the state, and its reason when there is one.
+//
+// One function because the badge is written in five places — the list row, the screen's badge, and the
+// three paths a `session.status` frame takes — and because a reason's *shape* is the renderer's business:
+// the row keeps what happened, and this decides how much of it a phone shows.
+export function stateText(state: SessionState, reason: string | null): string {
+  return reason === null ? state : `${state} · ${headline(reason)}`;
+}
+
 // What a stopped session's row says beyond its state, or `null` when its reason needs no sentence.
 //
 // Two reasons earn one, and they are the two the machine writes without being asked: `evicted` is a

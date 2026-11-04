@@ -14,6 +14,7 @@ import { test } from "node:test";
 import {
   HISTORY_PAGE_LIMIT,
   NO_DETAIL,
+  REASON_MAX,
   Transcript,
   affordances,
   budgetNotice,
@@ -23,6 +24,7 @@ import {
   parseFrame,
   parseTruncated,
   sessionIdFromPath,
+  stateText,
   stoppedDetail,
   stoppedNotice,
   streamPath,
@@ -326,9 +328,43 @@ test("a session stopped for sitting idle says so, and says nothing was deleted",
 test("every other reason is the caller's to show, so no sentence is invented for it", () => {
   // The map is two words wide: a forced abort is not data loss and a delete's own reason must not be
   // softened, so both get `null` and the badge's `state · reason` stands alone.
-  for (const reason of [null, "", "forced_abort", "deleted", "turn_timeout", "server_restart"]) {
+  for (const reason of [
+    null,
+    "",
+    "forced_abort",
+    "deleted",
+    "turn_timeout",
+    "server_restart",
+    // HS-030's clean exit: `stopped · pi_exit` is the whole message, and the badge already carries it.
+    "pi_exit",
+  ]) {
     assert.equal(stoppedNotice(reason), null, String(reason));
   }
+});
+
+test("a badge shows a one-word reason as it is", () => {
+  // The four reason words the machine writes on its own, and the two a client request does. Nothing about a
+  // single-line reason is the renderer's to change.
+  for (const reason of ["evicted", "idle_stop", "forced_abort", "deleted", "turn_timeout", "pi_exit"]) {
+    assert.equal(stateText("stopped", reason), `stopped · ${reason}`);
+  }
+  assert.equal(stateText("idle", null), "idle", "a reasonless row is its state alone");
+});
+
+test("a badge shows a multi-line reason's last line, clipped", () => {
+  // HS-030's unexpected exit is the first reason that is more than a sentence: the last few lines the
+  // container printed, one per line. The badge has room for one of them, and the useful one is the last —
+  // the error itself rather than the oldest line of the tail. `session.log` keeps all of it.
+  const tail = "error: no turn will run\nstack: frame 3\nstack: frame 0";
+  assert.equal(stateText("error", tail), "error · stack: frame 0");
+
+  const long = "".padEnd(REASON_MAX + 20, "x");
+  const clipped = stateText("error", long);
+  assert.equal(clipped, `error · ${"x".repeat(REASON_MAX)}…`);
+  assert.ok(clipped.length < long.length, "the badge clipped nothing");
+
+  // Blank lines are not lines: a tail padded with them still shows its last real one.
+  assert.equal(stateText("error", "boom\n\n  \n"), "error · boom");
 });
 
 test("the detail line says the same thing whether the row was drawn or turned", () => {

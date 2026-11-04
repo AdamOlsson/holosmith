@@ -20,7 +20,7 @@ use std::time::Duration;
 use holosmith::backend::Call;
 use holosmith::clock;
 use holosmith::config::Config;
-use holosmith::exit::{Exit, Exits, LOG_FILE, PI_EXIT, classify};
+use holosmith::exit::{Exits, LOG_FILE, PI_EXIT};
 use holosmith::http::{self, AppState};
 use holosmith::ladder::{FORCED_ABORT, Ladder};
 use holosmith::sessions::state::{Transitioner, Trigger};
@@ -145,9 +145,15 @@ fn log_path(dir: &TempDir, id: &str) -> std::path::PathBuf {
 }
 
 // ---- the flag, at each of the three production stop sites -------------------------------------
+//
+// One test per site, because a single "the flag is set after a stop" test would pass while two of the three
+// policies forgot to record it. What they prove is the **post-condition**: the stop recorded itself. That
+// the write precedes the backend call is a property of `Stopper`'s two lines and is not observable from
+// outside them (ADR-0038) — an earlier version of these names claimed the ordering, which no assertion here
+// could establish.
 
 #[tokio::test]
-async fn the_idle_stops_flag_is_written_before_the_backend_is_asked_to_stop() {
+async fn the_idle_stop_records_the_flag() {
     let dir = TempDir::new("exit-flag-idle");
     let stub = fast_stub();
     let state = with_stub(
@@ -189,7 +195,7 @@ async fn the_idle_stops_flag_is_written_before_the_backend_is_asked_to_stop() {
 }
 
 #[tokio::test]
-async fn the_evictions_flag_is_written_before_the_backend_is_asked_to_stop() {
+async fn the_eviction_records_the_flag() {
     let dir = TempDir::new("exit-flag-evicted");
     let stub = fast_stub();
     let state = with_stub(
@@ -229,7 +235,7 @@ async fn the_evictions_flag_is_written_before_the_backend_is_asked_to_stop() {
 }
 
 #[tokio::test]
-async fn the_forced_rungs_flag_is_written_before_the_backend_is_asked_to_stop() {
+async fn the_forced_rung_records_the_flag() {
     let dir = TempDir::new("exit-flag-forced");
     let stub = fast_stub();
     let state = with_stub(state_in(&dir, Config::default()), stub.clone());
@@ -376,11 +382,46 @@ async fn an_unexpected_exit_is_an_error_with_the_last_lines_and_a_session_log() 
 }
 
 #[tokio::test]
-async fn an_expected_exit_leaves_the_row_the_stop_already_moved() {
+async fn an_expected_exit_leaves_a_live_row_alone() {
+    // The discriminating half of "exit with the flag set means `stopped`": an exit whose flag is set
+    // changes **nothing**, and a *live* row is where "nothing" is visible. (The next test is the
+    // production shape, where the stop's caller has already moved the row to `stopped` — and from there
+    // both arms of the classifier are no-ops, because the table has no `unexpected_exit` row out of
+    // `stopped`, so that test cannot tell them apart. This one can.)
+    let dir = TempDir::new("exit-expected-live");
+    let state = with_stub(state_in(&dir, Config::default()), fast_stub());
+    let session = idle_session(&state, "exit-expected-live").await;
+    set_flag(&state, &session.id, true);
+
+    exits(&state, &dir)
+        .record(&session, 143, "terminated")
+        .await;
+
+    let after = row(&state, &session.id);
+    assert_eq!(
+        after.status,
+        Status::Idle,
+        "an expected exit moved a live row"
+    );
+    assert_eq!(
+        after.status_reason, None,
+        "an expected exit labelled a live row"
+    );
+    // The lines are still kept: the log records what the process printed, not only what failed.
+    assert_eq!(
+        std::fs::read_to_string(log_path(&dir, &session.id)).expect("the session log was written"),
+        "terminated\n"
+    );
+}
+
+#[tokio::test]
+async fn an_expected_exit_leaves_the_stopped_row_its_caller_moved() {
+    // The shape production actually produces (ADR-0020's ordering): the stop's caller moved the row before
+    // it asked the backend, so the exit has nothing left to say and `stopped_at` and the reason stay the
+    // caller's.
     let dir = TempDir::new("exit-expected");
     let state = with_stub(state_in(&dir, Config::default()), fast_stub());
     let session = idle_session(&state, "exit-expected").await;
-    // The stop's caller moved the row first (ADR-0020's ordering), and the process then died.
     drive(&state, &session.id, Trigger::IdleStop, Some("idle_stop")).await;
     set_flag(&state, &session.id, true);
     let before = row(&state, &session.id);
@@ -396,13 +437,7 @@ async fn an_expected_exit_leaves_the_row_the_stop_already_moved() {
         Some("idle_stop"),
         "the exit relabelled a stop the server had already explained"
     );
-    assert_eq!(before.status, after.status);
     assert_eq!(after.stopped_at, before.stopped_at);
-    // The lines are still kept: the log is the record of what the process printed, not of what failed.
-    assert_eq!(
-        std::fs::read_to_string(log_path(&dir, &session.id)).expect("the session log was written"),
-        "terminated\n"
-    );
 }
 
 #[tokio::test]
@@ -425,15 +460,6 @@ async fn the_flag_is_taken_once_so_the_next_exit_is_classified_on_its_own() {
     let failed = row(&state, &session.id);
     assert_eq!(failed.status, Status::Error);
     assert_eq!(failed.status_reason.as_deref(), Some("boom"));
-}
-
-#[tokio::test]
-async fn the_classifier_is_the_one_exit_record_uses() {
-    // The pure function is the decision; `record` must not have a second opinion. One case from each
-    // arm, asserted against `classify` itself, so a change to the table in `record` fails here.
-    assert_eq!(classify(true, 143, "terminated"), Exit::Expected);
-    assert_eq!(classify(false, 0, ""), Exit::Clean);
-    assert!(matches!(classify(false, 2, "boom"), Exit::Failed { .. }));
 }
 
 // ---- the production create path (the two HTTP helpers the eviction test needs) -----------------

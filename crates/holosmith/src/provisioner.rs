@@ -154,6 +154,14 @@ impl Provisioner {
     /// A failed write is logged and provisioning carries on, for [`Self::record`]'s reason: the container
     /// exists either way, and the price of a flag that was not cleared is a misclassified exit rather than
     /// a broken session.
+    ///
+    /// **The ordering it depends on, and which HS-031 has to keep:** the *previous* container's exit must be
+    /// recorded before a new container is provisioned, or this clear consumes the flag first and the old
+    /// exit is classified as a crash. The ladder resumes immediately after its forced rung
+    /// ([`crate::ladder::Ladder::climb`]), so the resume that follows rung 2 is exactly that race; nothing
+    /// in this build observes an exit, which is why no test here can reach it. ADR-0038 records it as
+    /// HS-031's constraint (await the supervisor's report between the rungs and the resume, or key the flag
+    /// to the container's incarnation).
     fn clear_expected_stop(&self, session: &Session) {
         let database = self.database.lock().unwrap_or_else(PoisonError::into_inner);
         if let Err(error) = database.sessions().set_expected_stop(&session.id, false) {

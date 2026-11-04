@@ -69,9 +69,22 @@ bounded at `STDERR_LINES = 5` because the row's reason is read on a phone; a pro
 gets a sentence naming its exit code instead of an empty reason.
 
 `Exits::record(session, code, stderr)` consumes the flag, classifies, appends `stderr` to
-`<data>/sessions/<id>/session.log` (append-only, the lines verbatim, **stderr only** — item 15), and applies
-the verdict through the one state function. Every failure is one `warn` line: the process has already
-stopped, so the row's reason is what an operator needs and a write that failed is not a second incident.
+`<data>/sessions/<id>/session.log` (append-only, the lines verbatim), and applies the verdict through the one
+state function. Every failure is one `warn` line: the process has already stopped, so the row's reason is
+what an operator needs and a write that failed is not a second incident.
+
+The log is the session's **stderr plus the server's own launch line**, and nothing else. Item 15's
+"`session.log` holds stderr only" is what keeps a *tool's* output out of it (HS-033 gives each tool call its
+own file); HS-031 puts the launch line there because "which command did we run" is the first question a
+failed launch asks and there is no row column for it. The writer refuses an id that is not a bare path
+segment, so the one place in the crate that turns a string into a directory cannot be used to write outside
+`<data>/sessions/`.
+
+**The row's reason is one line; the log is the complete record.** A failure's reason is the last five
+non-empty stderr lines joined by newlines — the first `status_reason` in the tree that is not a word or a
+sentence — so the page renders a *headline* rather than the wall: `transcript.ts`'s `stateText` shows the
+last of those lines, clipped, and `session.log` keeps all of it. That is a rendering rule and not an API
+change: the row says what happened, and only the badge decides how much of it fits.
 
 ## What is not built, and which story owns it
 
@@ -86,7 +99,17 @@ stopped, so the row's reason is what an operator needs and a write that failed i
 
 A watcher (`docker events`, a `docker wait` raced against `--rm`) would be a second mechanism HS-031 deletes
 when it attaches the process it is actually supervising. So HS-030 owns **the decision, the flag and the
-record**; **HS-031 owns the observation** and is the caller of `Exits::record`. The demo is therefore
+record**; **HS-031 owns the observation** and is the caller of `Exits::record`.
+
+**And one constraint HS-031 inherits, which is not reachable in this build.** The flag is cleared by a new
+container's provisioning, but a forced rung **resumes immediately** (`Ladder::climb` ends the turn and then
+brings the session back), so the resume's container step can clear the flag *before* the stopped container's
+exit is recorded. `classify` then reads "no flag" and turns an `idle` row `error` over a stop the server
+asked for. The production ordering HS-031 must keep is therefore: **record the previous container's exit
+before the next container is provisioned** — await the supervisor's report between the rungs and the resume
+— or key the flag to the container's incarnation rather than to the session. `provisioner.rs`'s clear cites
+this, and `tests/exit.rs`'s forced-rung test uses `end_turn` rather than the production `climb` for exactly
+that reason: the ladder's own resume is what would reorder it, and there is nothing to observe today. The demo is therefore
 half-showable — the flag from the shipped artifact, the three outcomes from `tests/exit.rs` — which is the
 same honesty ADR-0029 applied to HS-025's `ahead`.
 
@@ -102,9 +125,14 @@ Two consequences recorded rather than papered over:
 
 - `tests/exit.rs` has one flag test per production stop site (the sweeper's `sweep`, an HTTP create that
   evicts, the ladder's forced rung with a spent grace), one test that a provision clears it, one per outcome,
-  and one for "taken once". Removing the flag write reddens four of them; making `classify` ignore the flag
-  reddens two; pointing `PiExit` at `error` reddens the clean one; deleting the provisioner's clear reddens
-  the resume one. All four mutations were run.
+  and one for "taken once". They assert the *post-condition* (the stop recorded itself), not the ordering:
+  see the paragraph above. Removing the flag write reddens all four flag tests; making `classify` ignore the
+  flag reddens four (two lib unit tests, `the_flag_is_taken_once…` and `an_expected_exit_leaves_a_live_row_alone`);
+  pointing `PiExit` at `error` reddens the clean one; deleting the provisioner's clear reddens the resume
+  one. All four mutations were run, and the numbers above are what the runs printed.
+- The "expected exit" pair is split on purpose: `an_expected_exit_leaves_a_live_row_alone` is the
+  discriminating one (from `stopped` both classifier arms are no-ops, so the production-shaped test that
+  follows it would pass with `classify` ignoring the flag entirely).
 - `src/exit.rs`'s unit tests cover the four cells and the tail's edges (fewer lines than the bound, blank
   lines, nothing printed at all).
 - `case_exit_classification` is the artifact's half: schema 4's column, an eviction's flag read out of

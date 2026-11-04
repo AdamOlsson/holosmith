@@ -1865,7 +1865,15 @@ case_exit_classification() {
   [ "$fresh" != "$victim" ] ||
     fail "${name}_fresh/id" "the create answered the session it had to evict: $body"
   wait_for_stopped_id "${name}_victim_stopped" "$victim"
-  flag="$(expected_stop_of "$database" "$victim")"
+  # The row moves before the container does, and the stop — and so the flag's write — is a task of its own
+  # that runs after it (ADR-0024's ordering, ADR-0038's flag). So the flag is *polled*, not read once: a
+  # status that says `stopped` is not a promise that the spawned stop has run yet.
+  flag=""
+  for _ in $(seq 1 50); do
+    flag="$(expected_stop_of "$database" "$victim")"
+    [ "$flag" = 1 ] && break
+    sleep 0.1
+  done
   check "$name/evicted_flag" "1" "$flag"
 
   # And a new container does not inherit it: a resume frees no slot, so the session that took the victim's
