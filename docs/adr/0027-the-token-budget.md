@@ -21,6 +21,11 @@ parses one. The alternatives were both worse. A broadcast subscriber in the runn
 dropped frame is a lost count, silently) and would be a second parser of the same JSON. A second write after
 the commit would be a second writer, which is the thing ADR-0013 exists to prevent.
 
+**Amended by ADR-0032:** "exactly one kind" is no longer true. Compaction has to read a delta's message id
+and fold its text, and to read the id a `message.end` names, so the repository now parses three payload
+shapes and writes one. The *argument* above is unchanged — the repository is still the one place a row and
+the thing derived from it commit together — but the count is three, not one.
+
 The column is added to, never set: a turn reports what *it* spent, and the session's spend is what all of
 its turns spent. `SessionRepository::spend` sums the two columns in SQL, so the ceiling is one comparison
 against one value, and no caller has to remember to add them. A session that is resumed keeps its tally —

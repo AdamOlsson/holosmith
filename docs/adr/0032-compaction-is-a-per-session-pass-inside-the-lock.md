@@ -30,9 +30,16 @@ message for ever, and a bounded pass would then never advance past the messages 
 The fold is strict, and it reuses the writer's parser rather than writing a second one. A `message.delta`
 row whose payload is not the pinned three keys names no message id, so it cannot be attributed — and folding
 the rows that *can* be attributed would delete text this pass cannot account for. Such a row therefore stops
-the whole session for that pass: nothing is written, and the count is reported. Compaction's contract is
-"without losing content", and a payload the contract does not describe is the producer's bug to fix, not a
-reason to guess.
+the whole session for that pass: nothing is written, and the pass logs one `warn` naming the session and the
+count. Compaction's contract is "without losing content", and a payload the contract does not describe is the
+producer's bug to fix, not a reason to guess. The cost is stated rather than hidden: that session stops being
+compacted until the producer is fixed, which is why the line is a `warn` and not a `debug`.
+
+Reusing `parse_delta` has a documentation consequence. ADR-0027 and ADR-0031 both record that "the events
+repository parses exactly one kind's payload", and that is no longer true: `compact` reads a delta's pinned
+shape, reads the `message_id` a `message.end` or a `message.snapshot` names, and *writes* a snapshot payload.
+Three parses and one write, all in the one file that owns the table — the argument ADR-0027 makes (the row
+and the thing derived from it commit together) is unchanged, but the count it states is superseded.
 
 ## The write is one transaction per session, inside the lock the transitioner takes
 
@@ -51,6 +58,14 @@ read a log with some of a message's deltas gone and its snapshot not yet written
 how many messages one pass folds so the mutex is not held for an unbounded time, and the bound is applied
 **after** the already-folded filter, in Rust: a `LIMIT` in the query would keep taking the same oldest
 messages and a limited pass would never advance.
+
+Bounding the number of messages is not the same as bounding the *work*, and the difference matters because
+the mutex is the one the writer and every handler need. So the delta read is bounded too, by the seq of the
+newest candidate's `message.end`: a message's deltas all precede its own end, so that seq is the furthest row
+any fold can reach, and without it a pass would read and parse every delta the session had ever held — on
+HS-061's 200k-event session, hundreds of milliseconds every minute. The bound is on the *scan*, not on the
+deletes: a delta inside the region that belongs to a message this pass is not folding is filtered out by
+message id, and the deletes are exactly the rows the fold read.
 
 ## The snapshot reuses a seq, and nothing is broadcast
 

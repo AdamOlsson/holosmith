@@ -252,7 +252,7 @@ One durable record in a session's stream, identified by a strictly increasing se
 _Avoid_: Log line, message, item
 
 **Seq**:
-The per-session sequence number of an event, assigned by the event writer from the session's `last_seq` counter and never reused. Gaps are legal only where compaction removed rows.
+The per-session sequence number of an event, assigned by the event writer from the session's `last_seq` counter and never reused — except by a **message snapshot**, which takes the highest seq of the delta rows it removed, so gaps are legal exactly where compaction removed rows.
 _Avoid_: Offset, id, index
 
 **Event writer**:
