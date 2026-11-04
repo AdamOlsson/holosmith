@@ -704,6 +704,8 @@ async fn coalescing_never_crosses_a_message_a_kind_a_session_or_a_frame() {
 async fn a_delta_payload_that_is_not_the_pinned_shape_is_not_rewritten() {
     // The writer is not a producer's validator: an event it does not understand goes into the log exactly
     // as the producer wrote it, and it ends the run it sits in — rewriting it would be inventing a shape.
+    // Two shapes of "not the pinned payload": a key of the wrong type, and the three keys plus one more (a
+    // merge would drop that key, which is the same invention in the other direction).
     let dir = TempDir::new("events-coalesce-malformed");
     let mut writer = writer(&dir, INTERVAL);
     let session = writer.create_session("malformed");
@@ -719,15 +721,27 @@ async fn a_delta_payload_that_is_not_the_pinned_shape_is_not_rewritten() {
         .await
         .expect("the writer accepts the event");
     writer.append_delta(&session, "m1", "text", "z").await;
+    writer
+        .handle
+        .append(NewEvent {
+            session_id: session.id.clone(),
+            kind: MESSAGE_DELTA.to_string(),
+            payload: r#"{"message_id":"m1","kind":"text","text":"q","x":1}"#.to_string(),
+            created_at: NOW,
+        })
+        .await
+        .expect("the writer accepts the event");
+    writer.append_delta(&session, "m1", "text", "y").await;
 
-    let events = writer.take(3).await;
+    // Five rows arrive — that is what `take(5)` waits for, so a cross-run merge would time out instead — and
+    // the two the writer does not understand are byte-for-byte the producer's.
+    let events = writer.take(5).await;
     assert_eq!(
         events[1].payload, r#"{"message_id":"m1","kind":"text","text":3}"#,
         "the writer rewrote a payload it did not understand"
     );
     assert_eq!(
-        events.len(),
-        3,
-        "a malformed payload broke the run, as it must"
+        events[3].payload, r#"{"message_id":"m1","kind":"text","text":"q","x":1}"#,
+        "the writer merged a payload with a key it does not know"
     );
 }

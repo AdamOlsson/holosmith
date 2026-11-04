@@ -44,8 +44,14 @@ is unanswerable without reading the payload. The repository's invariant is untou
 exactly one kind.
 
 A payload that is not the pinned shape is **never merged**: it is written exactly as the producer sent it,
-and it ends the run it sits in. The writer is not a validator, and rewriting a payload it does not
-understand would be inventing an event the producer did not emit.
+and it ends the run it sits in. "The pinned shape" is exact — the three keys and nothing else — because
+merging a payload with a fourth key would drop that key, which is the same invention in the other direction.
+The writer is not a validator, and rewriting a payload it does not understand is not its job.
+
+A run's text is accumulated **outside** the rows and serialised **once**, when the run ends, and a run of
+one is never re-serialised at all. That is the same argument ADR-0018 makes against re-reading a message to
+append a delta: a merge that re-parsed and re-wrote the accumulated payload per delta would cost the square
+of a run's length, on the one thread every session's log shares.
 
 ## What the gate can and cannot show
 
@@ -56,5 +62,11 @@ below the window) and `tests/events.rs` (5,000 deltas become three rows, with th
 case (`case_event_coalescing`) asserts the contract a merge must keep — never more rows than the script's
 frames, one message id, no lost or reordered text — and says in its own comment which half it is.
 
-The rendering side of "the transcript is identical" is a node test: three deltas and one merged delta fold
-to the same block and the same text.
+The rendering side of "the transcript is identical" is two node tests: three deltas and one merged delta
+fold to the same block and the same text, and the coalescer's exact payload bytes are fed through the page's
+own frame parser — otherwise each half could be right and the pair wrong.
+
+The live-path test gives the writer a **two-second** commit interval, which is longer than a whole
+zero-paced turn, so "inside one commit" is a fact of that test rather than a hope about the host's speed;
+that is what lets it assert a row count and adjacency. At the production 25 ms the same turn can straddle a
+commit, and then two adjacent rows of one message and kind are correct.

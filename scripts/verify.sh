@@ -9,12 +9,14 @@
 # config and a temp data dir, answering /api/health, the schema version, the app shell, the 404
 # envelope, every browser-facing guard refusal (ADR-0010), the create endpoint's 202/422/409
 # answers, the sessions list, one session by id, the session screen's path, the session's event
-# stream, a prompt's turn, a timeout that does not fire on a short turn, an abort down to
+# stream, a prompt's turn, a turn's deltas coalesced into no more rows than the script's frames, a
+# timeout that does not fire on a short turn, an abort down to
 # `abort_completed`, a steer's own frame, a resume's two
 # refusals, a delete from its 202 to the row that is gone, an idle session stopped by the sweeper with
 # its reason, its event and its log line, a create at the cap evicting the idle session before it
 # succeeds, a token budget on a boot of its own ending the turn that spends it, a worktree made in a real
-# repository and taken back when the next step refuses, and a Docker preflight that
+# repository and taken back when the next step refuses, the three project refusals a create and a resume
+# answer with their own codes, and a Docker preflight that
 # refuses to start with one sentence naming the fix, with no CORS header
 # on any answer, and stopping on SIGTERM with exit 0.
 # --no-build skips the two artifact phases; --keep keeps the work dir of a successful run. On
@@ -812,7 +814,9 @@ case_prompt_turn() {
   kinds="$(printf '%s\n' "$body" | tr -d '\r' | sed -n 's/^event: *//p' |
     grep -E '^(turn\.start|message\.delta|tool\.start|tool\.end|message\.end|turn\.end)$' |
     tr '\n' ' ' | sed 's/ $//')"
-  # Seven deltas: three thinking, then two text, then two more after the tool call.
+  # Seven deltas: three thinking, then two text, then two more after the tool call. Seven because the run's
+  # stub paces one frame per 200 ms and the writer commits every 25 ms, so no two deltas share a commit and
+  # coalescing (HS-059) has nothing to merge; a slower window would make this a shorter list.
   check "$name/kinds" \
     "turn.start message.delta message.delta message.delta message.delta message.delta tool.start tool.end message.delta message.delta message.end turn.end" \
     "$kinds"

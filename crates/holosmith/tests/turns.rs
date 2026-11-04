@@ -15,6 +15,7 @@ use std::time::Duration;
 use axum::http::Method;
 use holosmith::backend::StubBackend;
 use holosmith::config::Config;
+use holosmith::events::WriterOptions;
 use holosmith::http::error::{
     BAD_BODY, NOT_FOUND, SESSION_ERROR, SESSION_RUNNING, SESSION_STARTING, SESSION_STOPPED,
 };
@@ -25,7 +26,8 @@ use serde_json::Value;
 
 mod support;
 use support::{
-    PATIENCE, Response, Served, Sse, TempDir, fast_stub, request, state, state_in, with_stub,
+    PATIENCE, Response, Served, Sse, TempDir, fast_stub, request, state, state_in,
+    state_with_writer, with_stub,
 };
 
 /// The drain deadline a test gives `serve`: a socket it forgot to drop cannot hold the server for
@@ -276,6 +278,10 @@ async fn the_stream_carries_the_scripts_six_kinds_in_order_and_the_turn_settles(
     let deltas: Vec<usize> = (0..turn.len())
         .filter(|index| turn[*index].kind.as_deref() == Some("message.delta"))
         .collect();
+    // Seven, because this test paces one frame per 30 ms and the writer commits every 25 ms: the stub's
+    // scripted deltas each land in their own batch, which is exactly the case coalescing leaves alone. A pace
+    // below the window would make this a smaller number (HS-059), and the assertion would have to say what it
+    // meant instead.
     assert_eq!(deltas.len(), 7, "three thinking, two text, two text again");
     let first = message_id(start + deltas[0]);
     assert!(
@@ -430,12 +436,27 @@ fn the_prompt_route_is_recorded_mutating() {
 
 #[tokio::test]
 async fn a_burst_of_deltas_is_fewer_rows_than_frames_and_keeps_its_text() {
-    // HS-059 on the live path: the stub's script emits seven deltas, and with a pace far below the writer's
-    // 25 ms window they arrive inside a couple of commits — so the log holds the script's three *runs*
-    // (thinking, then text, then text after the tool call) rather than seven rows, and the words are all
-    // still there in the order they were said.
+    // HS-059 on the live path: the stub's script emits seven deltas, and they arrive inside **one** commit —
+    // the writer is given a two-second window here, which is longer than a whole zero-paced turn, so "inside
+    // one commit" is a fact of this test rather than a hope about the host's speed. The log therefore holds
+    // the script's three *runs* (thinking, then text, then text after the tool call) rather than seven rows,
+    // and the words are all still there in the order they were said.
+    //
+    // The window is the assertion's premise: with the production 25 ms the turn can straddle a commit, and
+    // then two rows of one message and kind may legitimately sit next to each other — coalescing is a rule
+    // about one batch, not about the log's adjacency (ADR-0031). A test that asserted adjacency at 25 ms
+    // would fail a correct implementation on a slow machine.
     let dir = TempDir::new("turns-coalescing");
-    let state = with_stub(state_in(&dir, Config::default()), paced(0));
+    let state = with_stub(
+        state_with_writer(
+            &dir,
+            Config::default(),
+            WriterOptions {
+                commit_interval: Duration::from_secs(2),
+            },
+        ),
+        paced(0),
+    );
     let served = Served::start(http::router(state.clone()), GRACE).await;
     let id = created_id(&post_create(served.addr, "turns-coalescing").await);
     wait_idle(&state, &id).await;
@@ -468,10 +489,9 @@ async fn a_burst_of_deltas_is_fewer_rows_than_frames_and_keeps_its_text() {
     let payload = |text: &str| -> serde_json::Value {
         serde_json::from_str(text).expect("a payload is JSON")
     };
-    // Coalescing is *within a commit*, so two rows of one message and kind may still sit next to each
-    // other across a batch boundary (the script's answer is 200 ms of thought and then two sentences, and a
-    // batch can end between them). What must never happen is two **consecutive events** that the rule would
-    // have merged: that would be a batch that failed to coalesce.
+    // One commit, so the log's adjacency *is* batch adjacency here: two consecutive events that the rule
+    // would have merged are a batch that failed to coalesce. (At the production window this loop would be
+    // wrong — see this test's opening comment.)
     for pair in events.windows(2) {
         if pair[0].0 != "message.delta" || pair[1].0 != "message.delta" {
             continue;

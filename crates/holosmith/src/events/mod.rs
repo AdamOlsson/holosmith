@@ -152,14 +152,30 @@ struct Delta {
     text: String,
 }
 
-/// Read `payload` as a delta, or `None` when it is not the pinned shape.
-fn delta(payload: &str) -> Option<Delta> {
+/// Read `payload` as a delta, or `None` when it is not exactly the pinned shape.
+///
+/// Exactly: the three keys and nothing else. A producer that adds a fourth key has invented a payload the
+/// contract does not have, and merging it would drop that key on the floor — the writer is not a producer's
+/// validator and must not silently rewrite what it does not understand (ADR-0031).
+fn parse_delta(payload: &str) -> Option<Delta> {
     let event: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let object = event.as_object()?;
+    if object.len() != 3 {
+        return None;
+    }
     Some(Delta {
         message_id: event.get("message_id")?.as_str()?.to_string(),
         kind: event.get("kind")?.as_str()?.to_string(),
         text: event.get("text")?.as_str()?.to_string(),
     })
+}
+
+/// The run still open at the end of the batch: which row it is, what it has accumulated, and how many
+/// deltas went into it (a run of one is never re-serialised, so a lone delta keeps its producer's bytes).
+struct Open {
+    row: usize,
+    delta: Delta,
+    deltas: usize,
 }
 
 /// Merge the consecutive deltas of one message and kind inside one commit's batch (HS-059).
@@ -176,36 +192,56 @@ fn delta(payload: &str) -> Option<Delta> {
 /// rule is *consecutive* deltas, and a batch that interleaves them has an order the transcript depends on.
 ///
 /// The merged row keeps the **first** event's `created_at`: the row stands for a span, and the span began
-/// there. Its payload is re-serialised; an event whose payload is not the pinned shape is passed through
-/// untouched and ends any run it is part of, because the writer is not a producer's validator.
-pub fn coalesce(batch: Vec<NewEvent>) -> Vec<NewEvent> {
+/// there. Its payload is re-serialised **once, when the run ends** — the open run is accumulated outside the
+/// rows, so a batch of *n* deltas costs *n* appends and one serialise rather than *n* re-writes of the whole
+/// text (the argument ADR-0018 makes against re-reading a message to append a delta). An event whose payload
+/// is not the pinned shape is passed through untouched and ends any run it is part of.
+pub(crate) fn coalesce(batch: Vec<NewEvent>) -> Vec<NewEvent> {
     let mut merged: Vec<NewEvent> = Vec::with_capacity(batch.len());
+    let mut open: Option<Open> = None;
     for event in batch {
-        let this = (event.kind == MESSAGE_DELTA)
-            .then(|| delta(&event.payload))
-            .flatten();
-        if let Some(this) = this
-            && let Some(previous) = merged.last_mut()
-            && previous.kind == MESSAGE_DELTA
-            && previous.session_id == event.session_id
-            && let Some(before) = delta(&previous.payload)
-            && before.message_id == this.message_id
-            && before.kind == this.kind
-        {
-            let mut text = before.text;
-            text.push_str(&this.text);
-            let payload = Delta {
-                message_id: before.message_id,
-                kind: before.kind,
-                text,
-            };
-            previous.payload =
-                serde_json::to_string(&payload).expect("a delta's three strings serialise");
+        let Some(this) = (event.kind == MESSAGE_DELTA)
+            .then(|| parse_delta(&event.payload))
+            .flatten()
+        else {
+            close(&mut merged, open.take());
+            merged.push(event);
             continue;
+        };
+        match open.take() {
+            Some(mut run)
+                if merged[run.row].session_id == event.session_id
+                    && run.delta.message_id == this.message_id
+                    && run.delta.kind == this.kind =>
+            {
+                run.delta.text.push_str(&this.text);
+                run.deltas += 1;
+                open = Some(run);
+            }
+            previous => {
+                close(&mut merged, previous);
+                merged.push(event);
+                open = Some(Open {
+                    row: merged.len() - 1,
+                    delta: this,
+                    deltas: 1,
+                });
+            }
         }
-        merged.push(event);
     }
+    close(&mut merged, open);
     merged
+}
+
+/// Write one finished run's accumulated text into its row, and only when the run really merged something:
+/// a lone delta keeps the bytes its producer wrote.
+fn close(merged: &mut [NewEvent], run: Option<Open>) {
+    if let Some(Open { row, delta, deltas }) = run
+        && deltas > 1
+    {
+        merged[row].payload =
+            serde_json::to_string(&delta).expect("a delta's three strings serialise");
+    }
 }
 
 /// What the writer may vary: only how long a batch waits before it is committed.

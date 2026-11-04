@@ -58,7 +58,11 @@ fn run(
         // One pass over the batch before it becomes rows: the consecutive deltas of one message and kind
         // are one row with one seq (HS-059, spec item 15). The batch is the unit the story names — "inside
         // each 25 ms commit" — and it is the only place the events are still values rather than rows.
-        let batch = coalesce(collect(first, &mut incoming, options.commit_interval));
+        let collected = collect(first, &mut incoming, options.commit_interval);
+        // The batch's length before the merge, so a failure below can say how many events were lost as well
+        // as how many rows carried them: one coalesced row can hold a whole run's text.
+        let appended = collected.len();
+        let batch = coalesce(collected);
         let assigned = match commit(&database, &batch) {
             Ok(assigned) => assigned,
             Err(error) => {
@@ -68,7 +72,8 @@ fn run(
                 tracing::error!(
                     target: "holosmith::events",
                     %error,
-                    count = batch.len(),
+                    appended,
+                    rows = batch.len(),
                     "a batch of events was not committed"
                 );
                 continue;

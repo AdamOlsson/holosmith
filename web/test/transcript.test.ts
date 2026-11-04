@@ -520,8 +520,20 @@ test("a coalesced delta renders exactly like the deltas it replaced", () => {
 
   assert.equal(appended(split, "m1", "text"), appended(merged, "m1", "text"));
   assert.deepEqual(many.order(), one.order(), "one message is one block either way");
-  assert.equal(many.order().length, 1);
-  // And the merged frame is a *replacement-free* one: the renderer's kind nodes do not exist until a delta
-  // arrives, which is why a merge cannot leave an empty node behind either.
-  assert.equal(appended(split, "m1", "thinking"), "");
+  assert.equal(many.order().length, 1, "three deltas made more than one block");
+});
+
+test("the writer's merged payload is a frame the page parses", () => {
+  // The seam between the two halves of "the transcript is identical": the coalescer re-serialises a merged
+  // row's payload (`events::Delta`, field order `message_id`, `kind`, `text`), and this is that exact byte
+  // shape going through the renderer's own parser. Without it, each half could be right and the pair wrong.
+  const frame = parseFrame("message.delta", '{"message_id":"m1","kind":"text","text":"a b"}');
+  assert.notEqual(frame, null, "the coalescer's payload is not a delta frame");
+  const transcript = new Transcript();
+  const changes = transcript.apply(frame as Frame);
+  assert.equal(appended(changes, "m1", "text"), "a b");
+  // And a thinking frame lands in its own node, never in the text one — the merge must not blur the two.
+  const thinking = transcript.apply(delta("m1", "thinking", "hmm"));
+  assert.equal(appended(thinking, "m1", "text"), "", "a thinking delta became text");
+  assert.equal(appended(thinking, "m1", "thinking"), "hmm");
 });
