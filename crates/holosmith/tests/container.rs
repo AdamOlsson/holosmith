@@ -1,6 +1,6 @@
 //! V1 — the hardened `.git` mounts, measured against a real daemon (HS-027).
 //!
-//! `tests/container.rs` is the only place in the tree that runs a real container, and it exists because
+//! `tests/container.rs` is the only *test* that runs a real container (the gate's two cases do too), and it exists because
 //! spec item 1's mounts are a claim about the kernel rather than about our code: three writes must fail,
 //! three git commands must work, and a scripted check is the only thing that can say so. The story calls
 //! this the **V1 gate**.
@@ -213,7 +213,7 @@ fn probe(mounts: &Mounts) -> String {
     let git_dir = mounts.git_dir.host.display();
     format!(
         "set -u\n\
-         id -u\n\
+         id -u 2>/dev/null || echo missing\n\
          ( echo x > {git_dir}/hooks/pre-commit ) >/dev/null 2>&1; echo hooks_write=$?\n\
          ( echo '# x' >> {git_dir}/config ) >/dev/null 2>&1; echo config_append=$?\n\
          ( mv {git_dir}/hooks {git_dir}/hooks2 ) >/dev/null 2>&1; echo hooks_rename=$?\n\
@@ -224,6 +224,8 @@ fn probe(mounts: &Mounts) -> String {
              -m 'a file commit' ) >/dev/null 2>&1; echo commit_file=$?\n\
          git branch agent/v1-probe >/dev/null 2>&1; echo branch=$?\n\
          git worktree list; echo worktree_list=$?\n\
+         command -v mount >/dev/null 2>&1 && command -v umount >/dev/null 2>&1 \
+           && echo tools=present || echo tools=missing\n\
          mount -o remount,rw / >/dev/null 2>&1; echo remount=$?\n\
          umount /work >/dev/null 2>&1; echo umount=$?\n"
     )
@@ -235,7 +237,13 @@ fn reported(stdout: &str) -> (Vec<(String, String)>, Vec<String>) {
     let mut rest = Vec::new();
     for line in stdout.lines() {
         match line.split_once('=') {
-            Some((name, value)) if value.chars().all(|c| c.is_ascii_digit()) => {
+            // A name is a word; the value is whatever the probe printed (an exit code, or `present`). `git
+            // worktree list`'s lines have no `=` at all, which is how they end up in `rest`.
+            Some((name, value))
+                if !name.is_empty()
+                    && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    && !value.is_empty() =>
+            {
                 pairs.push((name.to_string(), value.to_string()))
             }
             _ => rest.push(line.to_string()),
@@ -367,16 +375,32 @@ fn v1_holds_the_hardened_git_mounts_answer_the_way_spec_item_one_says() {
     );
 
     // The process is not root: the image's own user runs the agent, and HS-028's flag list says so
-    // without a `--user` that would have to guess the mapping (the container module's doc).
+    // without a `--user` that would have to guess the mapping (the container module's doc). A missing `id`
+    // prints `missing` and fails here, rather than being read as a uid that happens not to be zero.
     let uid = stdout
         .lines()
-        .find(|line| !line.contains('=') && line.trim().parse::<u32>().is_ok())
+        .find(|line| !line.contains('=') && !line.trim().is_empty())
         .unwrap_or_else(|| panic!("the container did not report its uid: {stdout}"));
+    assert!(
+        uid.trim().parse::<u32>().is_ok(),
+        "the container's uid is not a number, so \"not root\" proves nothing: {uid}"
+    );
     assert_ne!(uid.trim(), "0", "the agent runs as root: {stdout}");
 
-    // And the two privileged operations `--cap-drop ALL` is there to refuse.
+    // And the two privileged operations `--cap-drop ALL` is there to refuse. 127 is "no such file", which
+    // is a missing tool rather than a refused mount, so it fails instead of passing for the wrong reason.
+    assert_eq!(
+        exit("tools"),
+        "present",
+        "the image has no mount/umount, so this clause cannot be measured: {stdout}"
+    );
     for refused in ["remount", "umount"] {
-        assert_ne!(exit(refused), "0", "{refused} was allowed: {stdout}");
+        let code = exit(refused);
+        assert_ne!(code, "0", "{refused} was allowed: {stdout}");
+        assert_ne!(
+            code, "127",
+            "{refused} is not a program in this image: {stdout}"
+        );
     }
     assert!(
         docker.remove_network(&container.network),

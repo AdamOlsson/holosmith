@@ -195,10 +195,11 @@ which needs no server at all: it builds a real repository and worktree under `ta
 container with the spec's four mounts and `--cap-drop ALL`, and asserts the three writes fail on the host
 as well as in the container, the three git commands work, the process is not root and neither `mount
 -o remount,rw /` nor `umount /work` is allowed — V1, see ADR-0035), and the container (`case_docker_container`, which boots a Docker run over a real
-repository and asserts that the row ends `error` at the **agent** step — so the network and container steps
-both reached a real daemon — and that no container, no network and no worktree are left behind; the flags
-themselves are `docker inspect`'s, which only `tests/container.rs` can see, because the provisioner takes
-the container back when the agent step fails, exactly as ADR-0015 says; see ADR-0036). A case that must assert
+repository and asserts that the row ends `error` at the **agent** step — so the network and the container
+steps both reached a real daemon — and that no container, no network and no worktree are left behind; the
+flags themselves are `docker inspect`'s, which only `tests/container.rs` can read, because the provisioner
+takes the container back when the agent step fails, exactly as ADR-0015 says; see ADR-0036). A case that
+must assert
 one code keeps every higher guard check correct, or it asserts another guard's code under its own
 name.
 
@@ -309,6 +310,11 @@ per transaction, and never touches a session whose state is `starting`, `running
   compaction window is the spec's fixed 24 hours rather than a config key (ADR-0032). Without it each
   case prints one `SKIP` line and the run passes; `cargo test`, `tests/worktree.rs` and
   `tests/compaction.rs` cover the behaviour either way.
+- **The development sandbox binds the host's Docker socket**, because every story from HS-027 on is a fact
+  about a real `docker run` (`bwrap.sh`'s `DOCKER` binds). That is host root by another name — anything able
+  to reach the socket can start a container with `/` mounted — so it is granted deliberately and only when
+  the socket exists; a machine without a daemon gets no binds and every Docker check skips. A reviewing
+  agent inside this sandbox can therefore create containers, which is the point and also the risk.
 - Optional: a **Docker daemon and one image** for `scripts/verify.sh`'s `case_container_mounts` and for
   `tests/container.rs`. Both check V1 — the hardened `.git` mounts — against a real container, and both
   print one `SKIP` line and pass without a daemon, because a machine without one is a supported machine
@@ -357,12 +363,13 @@ fallback is not in use. The image is the config key `agent_image` (default `agen
 `--user` is deliberately not passed: the image's own user must be non-root, which the V1 checks assert
 rather than a guessed uid that would hand the agent's files to somebody the host does not own.
 
-**One container per session, detached, limited and on a network of its own** (HS-028, ADR-0036):
+**One container per session, detached, limited and on a network of its own** (HS-028, ADR-0036): a
 `docker run --detach --rm --init --name s_<id> --network agents_<id> --cap-drop ALL --security-opt
-no-new-privileges --workdir /work --cpus … --memory …m --pids-limit …`, the four mounts, and
-`-e HS_SESSION_ID=<id>`. The network is `docker network create --internal agents_<id>` — `--internal` is the
+no-new-privileges --workdir /work --cpus … --memory …m --pids-limit …` with the four mounts and
+`-e HS_SESSION_ID=<id>`. The network is `docker network create --internal agents_<id>`; `--internal` is the
 isolation, and it is why the container can reach nothing but its own network. Three keys bound it, all
-integers because a config value has no decimal and Docker reads `0` as *unlimited*, so all three refuse it:
+integers because a config value has no decimal and Docker reads `0` as *unlimited*, so all three refuse
+zero:
 
 | Key | Default | Flag |
 | --- | --- | --- |
@@ -371,8 +378,8 @@ integers because a config value has no decimal and Docker reads `0` as *unlimite
 | `container_pids` | 512 | `--pids-limit` |
 
 Until HS-031 attaches pi's stdio the container runs `sleep infinity` (the placeholder is
-`container::IDLE_COMMAND`), which is what makes `docker inspect` able to show the flags before there is an
-agent to run in them.
+`container::IDLE_COMMAND`), which is what lets `docker inspect` show the flags before there is an agent to
+run in them.
 
 Three things bite on a real machine:
 

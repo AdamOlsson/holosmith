@@ -15,7 +15,6 @@
 //! `DOCKER_HOST` would be a second opinion about a machine the config already described.
 
 use std::fmt;
-use std::path::Path;
 use std::process::Command;
 
 /// The `docker` command, pointed at the daemon `docker_host` names.
@@ -171,18 +170,6 @@ impl fmt::Display for DockerError {
 
 impl std::error::Error for DockerError {}
 
-/// The absolute form of a path a `docker` argument needs.
-///
-/// Docker resolves a bind mount's source in the **host's** namespace, and it does not report a source it
-/// cannot see: it *creates* it as an empty root-owned directory. A relative path would be resolved against
-/// this process's working directory, which is not the daemon's. Every path in a run argument therefore goes
-/// through here (HS-027 measured the failure this prevents).
-pub fn absolute(path: &Path) -> Result<String, String> {
-    path.to_str()
-        .map(str::to_string)
-        .ok_or_else(|| format!("{} is not UTF-8", path.display()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,13 +223,5 @@ mod tests {
         );
         let plain = format!("{:?}", Docker::new(None).command());
         assert!(!plain.contains("-H"), "{plain}");
-    }
-
-    #[test]
-    fn a_path_that_is_not_utf8_is_refused_rather_than_lossily_converted() {
-        assert_eq!(
-            absolute(Path::new("/srv/holosmith/projects")),
-            Ok("/srv/holosmith/projects".to_string())
-        );
     }
 }

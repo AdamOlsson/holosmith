@@ -341,7 +341,8 @@ serve_cases=(
 case_container_mounts() {
   local name=case_container_mounts
   local id=0123456789abcdef image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
-  local root="$repo_root/target/verify-container-$$" project="$repo_root/target/verify-container-$$/project"
+  local root="$repo_root/target/verify-container-$$" projects="$repo_root/target/verify-container-$$/projects"
+  local project="$repo_root/target/verify-container-$$/projects/holosmith"
   local git_dir hooks wrote
   # The guards come first: a machine without a daemon is a supported machine (a hub), and this case is
   # the shipped gate's share of V1 only because it is cheap here.
@@ -363,7 +364,7 @@ case_container_mounts() {
   git -C "$project" init --quiet -b main . || fail "$name/git" "git init did not work in $project"
   git -C "$project" -c user.name=verify -c user.email=verify@example commit --quiet \
     --allow-empty -m "the first commit" || fail "$name/git" "git commit did not work in $project"
-  git -C "$project" worktree add -b "agent/$id" "$root/project/.worktrees/$id" HEAD >/dev/null \
+  git -C "$project" worktree add -b "agent/$id" "$projects/.worktrees/$id" HEAD >/dev/null \
     2>&1 || fail "$name/worktree" "git worktree add did not work"
   git_dir="$project/.git"
   hooks="$git_dir/hooks"
@@ -373,12 +374,12 @@ case_container_mounts() {
   docker rm --force "s_$id" >/dev/null 2>&1 || true
   wrote="$(docker run --name "s_$id" --cap-drop ALL --security-opt no-new-privileges \
     --workdir /work --env "HS_SESSION_ID=$id" \
-    -v "$root/project/.worktrees/$id":/work \
+    -v "$projects/.worktrees/$id":/work \
     -v "$git_dir":"$git_dir" \
     -v "$hooks":"$hooks":ro \
     -v "$git_dir/config":"$git_dir/config":ro \
     "$image" sh -c "
-      id -u
+      id -u 2>/dev/null || echo missing
       ( echo x > $hooks/pre-commit ) >/dev/null 2>&1; echo hooks_write=\$?
       ( echo '# x' >> $git_dir/config ) >/dev/null 2>&1; echo config_append=\$?
       ( mv $hooks $hooks.renamed ) >/dev/null 2>&1; echo hooks_rename=\$?
@@ -387,15 +388,23 @@ case_container_mounts() {
         >/dev/null 2>&1; echo commit=\$?
       git branch agent/v1-probe >/dev/null 2>&1; echo branch=\$?
       git worktree list; echo worktree_list=\$?
+      command -v mount >/dev/null 2>&1 && command -v umount >/dev/null 2>&1 \
+        && echo tools=present || echo tools=missing
       mount -o remount,rw / >/dev/null 2>&1; echo remount=\$?
       umount /work >/dev/null 2>&1; echo umount=\$?
     " 2>"$WORK/responses/$name.err")" || fail "$name/docker_run" "docker run failed: $(cat "$WORK/responses/$name.err")"
   docker rm --force "s_$id" >/dev/null 2>&1 || true
 
+  # 127 is "no such file": a missing tool is not a refused mount, so it fails rather than passing for the
+  # wrong reason (the review of this story's test found the same hole).
+  printf '%s\n' "$wrote" | grep -qx 'tools=present' ||
+    fail "$name/tools" "the image has no mount/umount, so that clause cannot be measured: $wrote"
+  assertions=$((assertions + 1))
   local refused
   for refused in hooks_write config_append hooks_rename remount umount; do
     case "$wrote" in
       *"$refused=0"*) fail "$name/$refused" "the container was allowed to do it: $wrote" ;;
+      *"$refused=127"*) fail "$name/$refused" "not a program in this image: $wrote" ;;
       *"$refused="*) assertions=$((assertions + 1)) ;;
       *) fail "$name/$refused" "the container reported no $refused: $wrote" ;;
     esac
@@ -426,6 +435,9 @@ case_container_mounts() {
   # Not root: the image's own user runs the agent, and the uid is the first line the container printed.
   local uid
   uid="$(printf '%s\n' "$wrote" | sed -n '1p')"
+  case "$uid" in
+    '' | *[!0-9]*) fail "$name/uid" "the container reported no numeric uid, so \"not root\" proves nothing: $wrote" ;;
+  esac
   [ "$uid" != "0" ] || fail "$name/root" "the agent runs as root: $wrote"
   assertions=$((assertions + 1))
 

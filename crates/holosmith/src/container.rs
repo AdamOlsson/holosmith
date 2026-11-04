@@ -193,7 +193,7 @@ impl Mounts {
     /// between "the session has no worktree" and a container that quietly mounts nothing. The answer is
     /// the whole list of what is wrong, not the first, because a broken projects root is usually broken
     /// in more than one place and the operator should fix it in one edit.
-    pub fn check(&self) -> Result<(), Missing> {
+    pub fn check(&self) -> Result<(), Unmountable> {
         let mut problems = Vec::new();
         for mount in self.all() {
             if !mount.host.exists() {
@@ -209,18 +209,22 @@ impl Mounts {
         if problems.is_empty() {
             Ok(())
         } else {
-            Err(Missing { problems })
+            Err(Unmountable { problems })
         }
     }
 }
 
 /// One or more mount sources that are not what the mounts need.
+///
+/// Named for what it is rather than for the commonest cause: a source can be *missing* or of the *wrong
+/// kind* (a `.git` that is a file, a `.git/config` that is a directory), and both make the same four mounts
+/// unmountable.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Missing {
+pub struct Unmountable {
     problems: Vec<String>,
 }
 
-impl fmt::Display for Missing {
+impl fmt::Display for Unmountable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -230,9 +234,10 @@ impl fmt::Display for Missing {
     }
 }
 
-impl std::error::Error for Missing {}
+impl std::error::Error for Unmountable {}
 
-/// What one container may use, from the config (spec item 6's resource limits).
+/// What one container may use, from the config (the story's "resource limits" line in the spec's
+/// *Known and accepted risks* table, which is where the container's limits actually live).
 ///
 /// Three integers rather than a struct of Docker's own strings: `--cpus 2` and `--memory 4096m` are
 /// spellings of a number, and a config `Kind` has no decimal — asking an operator to write `"2.0"` would
@@ -250,7 +255,8 @@ pub struct Limits {
 }
 
 impl Default for Limits {
-    /// The documented defaults (spec item 6's "resource limits", `docs/build.md`'s flag list).
+    /// The documented defaults (`docs/build.md`'s flag list, and the spec's *Known and accepted risks*
+    /// table's "resource limits").
     fn default() -> Self {
         Self {
             cpus: 2,
@@ -278,13 +284,17 @@ pub struct ContainerSettings {
 
 impl ContainerSettings {
     /// The settings for a machine whose projects root is `projects_root`, everything else default.
+    ///
+    /// The defaults come from [`Config::default`] rather than from a second copy, so a test that builds a
+    /// machine this way is testing the same numbers a served one would use.
     pub fn at(projects_root: impl Into<PathBuf>) -> Self {
-        Self {
-            projects_root: projects_root.into(),
-            image: Config::default().agent_image,
-            docker_host: None,
-            limits: Limits::default(),
-        }
+        Self::of(&Config::default()).with_projects_root(projects_root)
+    }
+
+    /// The same settings on another projects root, for a test that builds its own.
+    pub fn with_projects_root(mut self, projects_root: impl Into<PathBuf>) -> Self {
+        self.projects_root = projects_root.into();
+        self
     }
 
     /// The machine's settings as the config file spells them.
@@ -379,7 +389,7 @@ impl SessionContainer {
             WORKDIR.to_string(),
             "--env".to_string(),
             format!("{SESSION_ID_ENV}={}", self.session_id),
-            // The three limits (spec item 6): a runaway agent is bounded in CPU, memory and processes, so
+            // The three limits: a runaway agent is bounded in CPU, memory and processes, so
             // "it cannot take the machine down" is a kernel fact rather than a hope.
             "--cpus".to_string(),
             self.limits.cpus.to_string(),

@@ -930,6 +930,10 @@ allowed_hosts = ["control.example", "preview.example"]
 owner = "me@example.com"
 data_root = "/var/lib/holosmith"
 projects_root = "/srv/holosmith/projects"
+agent_image = "pi-agent:local"
+container_cpus = 3
+container_memory_mb = 2048
+container_pids = 256
 docker_host = "unix:///run/user/1000/docker.sock"
 hosts_seed = "/etc/holosmith/hosts.toml"
 allowed_hubs = ["hub.example"]
@@ -1008,6 +1012,10 @@ allow = ["crates.io"]
         assert_eq!(config.owner.as_deref(), Some("me@example.com"));
         assert_eq!(config.data_root, Path::new("/var/lib/holosmith"));
         assert_eq!(config.projects_root, Path::new("/srv/holosmith/projects"));
+        assert_eq!(config.agent_image, "pi-agent:local");
+        assert_eq!(config.container_cpus, 3);
+        assert_eq!(config.container_memory_mb, 2048);
+        assert_eq!(config.container_pids, 256);
         assert_eq!(
             config.docker_host.as_deref(),
             Some("unix:///run/user/1000/docker.sock")
@@ -1159,6 +1167,38 @@ allow = ["crates.io"]
             problems_of("history_window = 0\n"),
             "config.toml:1:1: history_window: must be at least 1: a client replayed nothing cannot \
              tell an empty session from a truncated one\n1 problem in config.toml\n"
+        );
+    }
+
+    #[test]
+    fn the_container_limits_must_be_positive() {
+        // Docker reads `--cpus 0` and `--memory 0m` as *unlimited* and `--pids-limit 0` likewise, so a zero
+        // is the opposite of what the key is for and each of the three refuses it (ADR-0036).
+        assert_eq!(
+            problems_of("container_cpus = 0\n"),
+            "config.toml:1:1: container_cpus: must be at least 1 cpu, not 0\n1 problem in config.toml\n"
+        );
+        assert_eq!(
+            problems_of("container_memory_mb = 0\n"),
+            "config.toml:1:1: container_memory_mb: must be at least 1 MiB, not 0\n\
+             1 problem in config.toml\n"
+        );
+        assert_eq!(
+            problems_of("container_pids = 0\n"),
+            "config.toml:1:1: container_pids: must be at least 1 process, not 0\n\
+             1 problem in config.toml\n"
+        );
+    }
+
+    #[test]
+    fn an_empty_agent_image_is_refused() {
+        // An empty string is not a typo this can catch — it is one Docker refuses — but "no image at all"
+        // is a value the validator can name, and naming it beats a container step whose sentence quotes
+        // Docker's opinion about a name nobody meant to write.
+        assert_eq!(
+            problems_of("agent_image = \"  \"\n"),
+            "config.toml:1:1: agent_image: must name an image, not an empty string\n\
+             1 problem in config.toml\n"
         );
     }
 

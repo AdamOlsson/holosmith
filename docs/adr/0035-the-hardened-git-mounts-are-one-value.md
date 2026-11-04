@@ -79,3 +79,7 @@ string, defaulting to `agent-image:<this binary's version>` — the name spec it
 machine setting rather than a constant for the same reason `backend` is: a development machine holds an
 image under whatever name it built it (this one has `pi-agent:local`), and a key is how it says so without
 a rebuild. HS-031 is where the image's *contents* start to matter (its pi version must equal `pins/pi.txt`).
+
+One consequence worth knowing: the default carries the binary's version, so `tests/golden/config-default.toml`
+pins it and **a version bump makes that golden stale** — the same rule as a new config key, for the same
+reason (the golden is the output, and the output changed).

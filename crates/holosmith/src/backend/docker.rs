@@ -223,28 +223,54 @@ impl DockerBackend {
             Ok(docker.remove_container(&name))
         })
         .await;
-        if let Ok(false) = removed {
-            tracing::debug!(
+        match removed {
+            Ok(true) => {}
+            Ok(false) => tracing::debug!(
                 target: "holosmith::backend",
                 session = %session.id,
                 "there was no container to remove"
-            );
+            ),
+            // A daemon that is wedged or a CLI that is gone is *not* "not found", and a teardown that
+            // cannot say which happened is a teardown nobody can debug (the doc above promises this line).
+            Err(error) => tracing::warn!(
+                target: "holosmith::backend",
+                session = %session.id,
+                %error,
+                "the session's container could not be removed"
+            ),
         }
     }
 
     /// Remove the session's network, ignoring "no such network".
+    ///
+    /// The same three-way answer as the container's: "removed", "was not there" (a debug line) and "the
+    /// daemon could not say" (a `warn`), because a wedged daemon and a clean absence are different facts.
     async fn remove_network(&self, session: &Session) {
         let name = self.network(session);
-        let _ = Self::docker(Step::Network, self.settings.docker(), move |docker| {
+        let removed = Self::docker(Step::Network, self.settings.docker(), move |docker| {
             Ok(docker.remove_network(&name))
         })
         .await;
+        match removed {
+            Ok(true) => {}
+            Ok(false) => tracing::debug!(
+                target: "holosmith::backend",
+                session = %session.id,
+                "there was no network to remove"
+            ),
+            Err(error) => tracing::warn!(
+                target: "holosmith::backend",
+                session = %session.id,
+                %error,
+                "the session's network could not be removed"
+            ),
+        }
     }
 }
 
 impl SessionBackend for DockerBackend {
-    /// Run a step that has no implementation yet: one sentence per step, and the sentence names the story
-    /// that fills it.
+    /// Run one provisioning step: the worktree, the network and the container are real (HS-025, HS-028), and
+    /// the agent step refuses in one sentence naming HS-031.
     ///
     /// The row's `status_reason` is where an operator reads this, so "the pi step: the docker backend does
     /// not start the agent yet (HS-031)" says what is wrong, whose work it is, and that the session is not
