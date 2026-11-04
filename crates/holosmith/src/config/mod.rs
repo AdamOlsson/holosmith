@@ -193,6 +193,12 @@ pub struct Config {
     /// image a deployed machine already has: `agent-image:<this binary's version>`. HS-031 compares the
     /// image's pi version with the pinned one, and HS-047 builds it for the machine it deploys to.
     pub agent_image: String,
+    /// What one session's container may use (HS-028, spec item 6's resource limits): whole CPUs,
+    /// mebibytes of memory, and a process count. Three integers because a config value has no decimal
+    /// and Docker's `--cpus` accepts the integer form; the defaults are `docs/build.md`'s flag list.
+    pub container_cpus: u32,
+    pub container_memory_mb: u64,
+    pub container_pids: u64,
     pub docker_host: Option<String>,
     pub hosts_seed: Option<PathBuf>,
     pub allowed_hubs: Vec<String>,
@@ -231,6 +237,9 @@ impl Default for Config {
             data_root: PathBuf::from("/var/lib/holosmith"),
             projects_root: PathBuf::from("/srv/holosmith/projects"),
             agent_image: format!("agent-image:{}", env!("CARGO_PKG_VERSION")),
+            container_cpus: 2,
+            container_memory_mb: 4096,
+            container_pids: 512,
             docker_host: None,
             hosts_seed: None,
             allowed_hubs: Vec::new(),

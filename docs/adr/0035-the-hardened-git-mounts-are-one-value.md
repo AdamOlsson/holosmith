@@ -21,7 +21,7 @@ Measured on a real daemon (29.9.2) with a real worktree and the spec's four moun
                  …/project/.worktrees/abc123 <sha> [agent/abc123]
 7 remount:       mount: /: permission denied … failed mount system call
 8 umount /work:  umount: /work: must be superuser to unmount.
-```
+```text
 
 Stacking the two read-only mounts on top of the writable `.git` works exactly as the spec predicted, and
 `tests/container.rs` plus `case_container_mounts` assert it from now on. The measurement is the reason

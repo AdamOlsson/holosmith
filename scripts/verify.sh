@@ -325,6 +325,7 @@ serve_cases=(
   case_docker_preflight
   case_worktree_refusal
   case_container_mounts
+  case_docker_container
 )
 
 # V1 (HS-027): the hardened `.git` mounts, measured on a real daemon. Three writes must fail, three git
@@ -428,6 +429,99 @@ case_container_mounts() {
   [ "$uid" != "0" ] || fail "$name/root" "the agent runs as root: $wrote"
   assertions=$((assertions + 1))
 
+  rm -rf "$root"
+}
+
+# HS-028's proof from the artifact: a Docker boot runs the session's network and its container, and the row
+# therefore ends `error` at the **agent** step rather than at the network or the container one.
+#
+# The container's own flags are `tests/container.rs`'s (it inspects a real container, which the API cannot
+# show: the provisioner takes the container back the moment the agent step fails, exactly as ADR-0015 says).
+# What this case proves is the *order* — two steps that go to a real daemon succeeded — and the teardown: no
+# container, no network and no worktree are left behind, and the registration list is back to one entry.
+#
+# Its projects root lives under `target/` because the daemon resolves bind-mount sources in the host's
+# namespace and `$WORK` is on `/tmp` (ADR-0035's measurement).
+case_docker_container() {
+  local name=case_docker_container status=0 response body id image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
+  local root="$repo_root/target/verify-docker-$$" projects="$repo_root/target/verify-docker-$$/projects"
+  local repo="$repo_root/target/verify-docker-$$/projects/holosmith"
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    printf 'SKIP %s: no Docker daemon answers (tests/container.rs is the same check)\n' "$name"
+    return 0
+  fi
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    printf 'SKIP %s: no image %s (HOLOSMITH_TEST_IMAGE names another)\n' "$name" "$image"
+    return 0
+  fi
+  stop_serve
+  rm -rf "$root"
+  mkdir -p "$repo" || fail "$name/mkdir" "could not create $repo"
+  git -C "$repo" init --quiet . || fail "$name/git" "git init did not work in $repo"
+  git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet \
+    --allow-empty -m "the first commit" || fail "$name/git" "git commit did not work in $repo"
+  # The limits and the image are keys, so the boot proves the config carries them into a real `docker run`;
+  # `idle_stop_min = 0` because this boot lasts a second and a sweeper would only be noise.
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\nagent_image = "%s"\ncontainer_cpus = 1\ncontainer_memory_mb = 256\ncontainer_pids = 64\nmin_free_gb = 1\nidle_stop_min = 0\n' \
+    "$owner" "$projects" "$image" >"$WORK/config-container.toml"
+  start_serve "$WORK/config-container.toml" "$WORK/data-container"
+
+  fetch_body "${name}_create" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-container-1" ||
+    fail "${name}_create/no_answer" "POST /api/sessions did not answer"
+  expect_status "${name}_create" "$(answer "${name}_create")" 202
+  body="$(cat "$WORK/responses/${name}_create.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id" ] || fail "${name}_create/id" "the response names no id: $body"
+
+  # The row is what the wait is on: the network and container steps go to a real daemon, so they take as
+  # long as `docker run` takes.
+  body=""
+  for _ in $(seq 1 300); do
+    fetch "${name}_row" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "${name}_row/no_answer" "GET /api/sessions/$id did not answer"
+    body="$(cat "$WORK/responses/${name}_row.body")"
+    case "$body" in
+      *'"status":"starting"'*) sleep 0.1 ;;
+      *) break ;;
+    esac
+  done
+  expect_status "${name}_row" "$(answer "${name}_row")" 200
+  printf '%s\n' "$body" | grep -qF '"status":"error"' ||
+    fail "${name}_row/status" "the session did not end error: $body"
+  assertions=$((assertions + 1))
+  # The pi step: proof that the two steps before it succeeded against a real daemon.
+  printf '%s\n' "$body" | grep -qF 'the pi step' ||
+    fail "${name}_row/reason" "the failure is not the agent step's: $body"
+  assertions=$((assertions + 1))
+  printf '%s\n' "$body" | grep -qF 'HS-031' ||
+    fail "${name}_row/story" "the reason does not name the story that fills the agent step: $body"
+  assertions=$((assertions + 1))
+  printf '%s\n' "$body" | grep -qF "\"worktree\":\"$projects/.worktrees/$id\"" ||
+    fail "${name}_row/worktree" "the row does not record the worktree path: $body"
+  assertions=$((assertions + 1))
+
+  # Nothing left behind: the container, its network and the worktree are all gone, and the registration is
+  # back to the repository alone.
+  if docker container inspect "s_$id" >/dev/null 2>&1; then
+    fail "${name}/container_left" "the failed session left its container behind"
+  fi
+  assertions=$((assertions + 1))
+  if docker network inspect "agents_$id" >/dev/null 2>&1; then
+    fail "${name}/network_left" "the failed session left its network behind"
+  fi
+  assertions=$((assertions + 1))
+  [ ! -d "$projects/.worktrees/$id" ] ||
+    fail "${name}/worktree_left" "the failed session left its worktree at $projects/.worktrees/$id"
+  assertions=$((assertions + 1))
+  check "$name/registrations" "1" \
+    "$(git -C "$repo" worktree list --porcelain | grep -c '^worktree ' || true)"
+
+  # Its server is left running: `phase_serve` stops whatever is up after the last case, and a case that
+  # stopped its own would leave that call with no pid to signal (HS-027's review found this shape in
+  # `case_worktree`'s python guard).
   rm -rf "$root"
 }
 
@@ -2003,7 +2097,10 @@ PY
 
 # HS-025's proof from the artifact: the worktree step is host git, so a create makes `.worktrees/<id>` on
 # branch `agent/<id>` from the repository's HEAD, records both on the row, and — because the *next* step is
-# HS-027's and refuses — the provisioner takes the worktree back, leaving the registration clean.
+# the session's network, which from HS-028 runs `docker network create` against the socket this case answers
+# with a `_ping` shim and nothing else — the provisioner takes the worktree back, leaving the registration
+# clean. (Before HS-028 the network step refused outright, naming its story in the reason; now it fails on a
+# daemon that cannot create a network, so the reason names the step instead of a story number.)
 #
 # It boots its own server, like `case_token_budget`: the backend is `docker` and the projects root has to be a
 # real repository, which the shared boot's stub neither needs nor should carry.
@@ -2068,7 +2165,7 @@ case_worktree() {
   printf '%s\n' "$body" | grep -qF '"status":"error"' ||
     fail "${name}_row/status" "the session did not end error after the network step refused: $body"
   assertions=$((assertions + 1))
-  printf '%s\n' "$body" | grep -qF 'HS-027' ||
+  printf '%s\n' "$body" | grep -qF 'the network step' ||
     fail "${name}_row/reason" "the failure is not the network step's: $body"
   assertions=$((assertions + 1))
 

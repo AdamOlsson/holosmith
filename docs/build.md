@@ -194,7 +194,11 @@ session row afterwards and no `.worktrees` directory), and the hardened mounts (
 which needs no server at all: it builds a real repository and worktree under `target/`, runs one real
 container with the spec's four mounts and `--cap-drop ALL`, and asserts the three writes fail on the host
 as well as in the container, the three git commands work, the process is not root and neither `mount
--o remount,rw /` nor `umount /work` is allowed — V1, see ADR-0035). A case that must assert
+-o remount,rw /` nor `umount /work` is allowed — V1, see ADR-0035), and the container (`case_docker_container`, which boots a Docker run over a real
+repository and asserts that the row ends `error` at the **agent** step — so the network and container steps
+both reached a real daemon — and that no container, no network and no worktree are left behind; the flags
+themselves are `docker inspect`'s, which only `tests/container.rs` can see, because the provisioner takes
+the container back when the agent step fails, exactly as ADR-0015 says; see ADR-0036). A case that must assert
 one code keeps every higher guard check correct, or it asserts another guard's code under its own
 name.
 
@@ -352,6 +356,23 @@ writes and the three working git commands — passed as specified on a real daem
 fallback is not in use. The image is the config key `agent_image` (default `agent-image:<version>`), and
 `--user` is deliberately not passed: the image's own user must be non-root, which the V1 checks assert
 rather than a guessed uid that would hand the agent's files to somebody the host does not own.
+
+**One container per session, detached, limited and on a network of its own** (HS-028, ADR-0036):
+`docker run --detach --rm --init --name s_<id> --network agents_<id> --cap-drop ALL --security-opt
+no-new-privileges --workdir /work --cpus … --memory …m --pids-limit …`, the four mounts, and
+`-e HS_SESSION_ID=<id>`. The network is `docker network create --internal agents_<id>` — `--internal` is the
+isolation, and it is why the container can reach nothing but its own network. Three keys bound it, all
+integers because a config value has no decimal and Docker reads `0` as *unlimited*, so all three refuse it:
+
+| Key | Default | Flag |
+| --- | --- | --- |
+| `container_cpus` | 2 | `--cpus` |
+| `container_memory_mb` | 4096 | `--memory <n>m` |
+| `container_pids` | 512 | `--pids-limit` |
+
+Until HS-031 attaches pi's stdio the container runs `sleep infinity` (the placeholder is
+`container::IDLE_COMMAND`), which is what makes `docker inspect` able to show the flags before there is an
+agent to run in them.
 
 Three things bite on a real machine:
 

@@ -17,6 +17,7 @@
 //! not object-safe (ADR-0015).
 
 use holosmith::backend::{BackendError, DockerBackend, Provisioned, SessionBackend, Step};
+use holosmith::container::ContainerSettings;
 use holosmith::sessions::{Session, Status};
 
 mod support;
@@ -135,14 +136,16 @@ async fn the_stub_backend_records_no_worktree() {
 
 #[tokio::test]
 async fn the_docker_backend_passes_the_conformance_suite() {
-    // A projects root with no repository in it: the worktree step's own failure is what case 3 reads, and
-    // the network step is this build's named refusal.
+    // A projects root with no repository in it: the worktree step's own failure is what case 3 reads. The
+    // agent step is this build's named refusal — the worktree, network and container steps are real from
+    // HS-025/HS-028, and each names what it could not do when it fails (`tests/worktree.rs` and
+    // `tests/container.rs` are where their effects are asserted).
     let dir = TempDir::new("contract-docker");
-    let docker = DockerBackend::new(dir.file("projects"));
+    let docker = DockerBackend::new(ContainerSettings::at(dir.file("projects")));
     let session = session();
     let failures = Failures {
-        any: docker.provision(&session, Step::Network).await.map(|_| ()),
-        named: "network",
+        any: docker.provision(&session, Step::Pi).await.map(|_| ()),
+        named: "pi",
         worktree: docker.provision(&session, Step::Worktree).await.map(|_| ()),
     };
     conformance(&docker, "docker", failures).await;

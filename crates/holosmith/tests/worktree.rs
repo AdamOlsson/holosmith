@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use holosmith::backend::{Backends, DockerBackend, Provisioned, SessionBackend, Step};
 use holosmith::config::Config;
+use holosmith::container::ContainerSettings;
 use holosmith::http::{self, AppState};
 use holosmith::runtime::Backend;
 use holosmith::sessions::state::Trigger;
@@ -63,8 +64,24 @@ fn projects(dir: &TempDir) -> (PathBuf, PathBuf) {
     (root, repo)
 }
 
+/// A socket no daemon answers on.
+///
+/// These tests are about where files go on disk, not about a machine that can run containers, and from
+/// HS-028 on the Docker backend really does create networks and containers — against a real daemon, in a
+/// `TempDir` the daemon cannot even see. An absent socket makes the network step fail deterministically,
+/// which is what every one of them asserts (that a later step's refusal takes back what this one made).
+const NO_DAEMON: &str = "unix:///nonexistent/holosmith-test.sock";
+
+/// The machine's container settings with no daemon behind them, for `root`.
+fn settings(root: &Path) -> ContainerSettings {
+    ContainerSettings {
+        docker_host: Some(NO_DAEMON.to_string()),
+        ..ContainerSettings::at(root)
+    }
+}
+
 fn backend(root: &Path) -> DockerBackend {
-    DockerBackend::new(root)
+    DockerBackend::new(settings(root))
 }
 
 /// The `Provisioned` a worktree step that worked answers, as `(path, base_commit, created)`.
@@ -419,8 +436,9 @@ async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
 #[tokio::test]
 async fn a_create_records_the_worktree_and_takes_it_back_when_the_network_step_refuses() {
     // The provisioner is what writes the row, and the worktree step is the only one that has anything to
-    // write. The next step — the session's network — belongs to HS-027 and refuses, so the provisioner
-    // undoes what completed (ADR-0015): the row keeps the record, the disk keeps nothing.
+    // write. The next step — the session's network — is real from HS-028 and has no daemon to talk to here,
+    // so it fails, and the provisioner undoes what completed (ADR-0015): the row keeps the record, the disk
+    // keeps nothing.
     let dir = TempDir::new("worktree-create-flow");
     let (root, repo) = projects(&dir);
     let base = head(&repo);
@@ -430,7 +448,7 @@ async fn a_create_records_the_worktree_and_takes_it_back_when_the_network_step_r
         ..Config::default()
     };
     let mut state = state_in(&dir, config);
-    state.backend = Backends::for_run(Backend::Docker, root.clone());
+    state.backend = Backends::for_run(Backend::Docker, settings(&root));
     let served = Served::start(http::router(state.clone()), GRACE).await;
     let id = created_id(&post_create(served.addr, "verify-worktree-1").await);
 
@@ -453,7 +471,7 @@ async fn a_create_records_the_worktree_and_takes_it_back_when_the_network_step_r
     );
     let reason = failed.status_reason.expect("an error carries a reason");
     assert!(
-        reason.to_string().contains("HS-027"),
+        reason.to_string().contains("the network step"),
         "the failure is not the network step's: {reason}"
     );
     // Undone: the reason is the *next* step's refusal, so the worktree the first step made is gone.
@@ -474,7 +492,7 @@ fn docker_state(dir: &TempDir, root: &Path) -> AppState {
         ..Config::default()
     };
     let mut state = state_in(dir, config);
-    state.backend = Backends::for_run(Backend::Docker, root.to_path_buf());
+    state.backend = Backends::for_run(Backend::Docker, settings(root));
     state
 }
 
@@ -800,7 +818,7 @@ async fn a_refused_create_does_not_evict_anyone() {
         ..Config::default()
     };
     let mut state = state_in(&dir, config);
-    state.backend = Backends::for_run(Backend::Docker, root.clone());
+    state.backend = Backends::for_run(Backend::Docker, settings(&root));
     let live = create_row(&state);
     let served = Served::start(http::router(state.clone()), GRACE).await;
 

@@ -358,7 +358,10 @@ async fn the_docker_backend_refuses_a_project_that_is_not_there() {
         ..Config::default()
     };
     let mut state = state_in(&dir, config);
-    state.backend = Backends::for_run(holosmith::runtime::Backend::Docker, projects);
+    state.backend = Backends::for_run(
+        holosmith::runtime::Backend::Docker,
+        holosmith::container::ContainerSettings::at(projects),
+    );
     assert_eq!(
         state.backend.as_str(),
         "docker",

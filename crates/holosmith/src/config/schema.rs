@@ -131,6 +131,24 @@ pub const KNOWN_KEYS: &[KeySpec] = &[
         set: set_agent_image,
     },
     KeySpec {
+        path: "container_cpus",
+        section: None,
+        kind: Kind::Integer,
+        set: set_container_cpus,
+    },
+    KeySpec {
+        path: "container_memory_mb",
+        section: None,
+        kind: Kind::Integer,
+        set: set_container_memory_mb,
+    },
+    KeySpec {
+        path: "container_pids",
+        section: None,
+        kind: Kind::Integer,
+        set: set_container_pids,
+    },
+    KeySpec {
         path: "docker_host",
         section: None,
         kind: Kind::String,
@@ -524,6 +542,34 @@ fn set_agent_image(config: &mut Config, value: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// A limit of zero is not a limit: Docker reads `--cpus 0` and `--memory 0m` as "unlimited", which is the
+/// opposite of what the key is for, so each of the three refuses it.
+fn positive(value: &Value, what: &str) -> Result<u64, String> {
+    let number = value
+        .as_integer()
+        .ok_or_else(|| "expected an integer".to_string())?;
+    if number < 1 {
+        return Err(format!("must be at least 1 {what}, not {number}"));
+    }
+    Ok(number as u64)
+}
+
+fn set_container_cpus(config: &mut Config, value: &Value) -> Result<(), String> {
+    config.container_cpus = u32::try_from(positive(value, "cpu")?)
+        .map_err(|_| "must fit in a 32-bit count of CPUs".to_string())?;
+    Ok(())
+}
+
+fn set_container_memory_mb(config: &mut Config, value: &Value) -> Result<(), String> {
+    config.container_memory_mb = positive(value, "MiB")?;
+    Ok(())
+}
+
+fn set_container_pids(config: &mut Config, value: &Value) -> Result<(), String> {
+    config.container_pids = positive(value, "process")?;
+    Ok(())
+}
+
 fn set_docker_host(config: &mut Config, value: &Value) -> Result<(), String> {
     config.docker_host = Some(string(value)?.to_string());
     Ok(())
@@ -727,7 +773,7 @@ mod tests {
 
     #[test]
     fn the_table_holds_the_documented_keys() {
-        assert_eq!(KNOWN_KEYS.len(), 28);
+        assert_eq!(KNOWN_KEYS.len(), 31);
     }
 
     #[test]

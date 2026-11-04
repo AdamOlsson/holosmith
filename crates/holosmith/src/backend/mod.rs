@@ -16,13 +16,13 @@ mod stub;
 
 use std::borrow::Cow;
 use std::fmt;
-use std::path::PathBuf;
 
 use serde::Serialize;
 
 pub use docker::DockerBackend;
 pub use stub::{Call, Recorded, StubBackend};
 
+use crate::container::ContainerSettings;
 use crate::events::EventWriter;
 use crate::runtime::Backend;
 use crate::sessions::Session;
@@ -284,15 +284,16 @@ pub enum Backends {
 }
 
 impl Backends {
-    /// The backend `runtime::Backend` selects, in the machine's projects root.
+    /// The backend `runtime::Backend` selects, in the machine `container` describes.
     ///
-    /// The projects root is the one machine setting the Docker backend needs to name anything at all:
-    /// a session's worktree and repository both hang off it (HS-025). The stub needs no path and ignores
-    /// it — it provisions nothing outside the process (ADR-0015).
-    pub fn for_run(backend: Backend, projects_root: PathBuf) -> Self {
+    /// The container settings are what the Docker backend needs to name anything at all: a session's
+    /// worktree and repository hang off the projects root (HS-025), and a container needs an image, a
+    /// daemon's address and its limits (HS-028). The stub needs none of it and ignores it — it provisions
+    /// nothing outside the process (ADR-0015).
+    pub fn for_run(backend: Backend, container: ContainerSettings) -> Self {
         match backend {
             Backend::Stub => Self::Stub(StubBackend::default()),
-            Backend::Docker => Self::Docker(DockerBackend::new(projects_root)),
+            Backend::Docker => Self::Docker(DockerBackend::new(container)),
         }
     }
 
@@ -423,12 +424,16 @@ mod tests {
     #[test]
     fn a_for_run_backend_carries_the_word_it_was_chosen_by() {
         for (choice, word) in [(Backend::Stub, "stub"), (Backend::Docker, "docker")] {
-            let backend = Backends::for_run(choice, PathBuf::from("/srv/holosmith/projects"));
+            let backend =
+                Backends::for_run(choice, ContainerSettings::at("/srv/holosmith/projects"));
             assert_eq!(backend.as_str(), word);
         }
         assert_eq!(
-            Backends::for_run(Backend::default(), PathBuf::from("/srv/holosmith/projects"))
-                .as_str(),
+            Backends::for_run(
+                Backend::default(),
+                ContainerSettings::at("/srv/holosmith/projects"),
+            )
+            .as_str(),
             "docker",
             "the default run's backend is the Docker one (ADR-0001: the stub is opt-in)"
         );

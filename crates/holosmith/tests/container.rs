@@ -26,13 +26,20 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use holosmith::config::Config;
-use holosmith::container::{Mounts, SessionContainer, Source};
+use holosmith::backend::{DockerBackend, Provisioned, SessionBackend, Step};
+use holosmith::container::{
+    ContainerSettings, Limits, Mounts, SessionContainer, Source, network_name,
+};
+use holosmith::docker::Docker;
 use holosmith::sessions::{Session, Status};
 use holosmith::worktree::Worktree;
 
-/// The session id the test uses: 16 lowercase hex, the shape the database generates (ADR-0011).
-const ID: &str = "0123456789abcdef";
+/// The session ids the tests use: 16 lowercase hex, the shape the database generates (ADR-0011).
+///
+/// Two of them, because two tests run at once in one process and a container name or a network name is
+/// `s_<id>`/`agents_<id>`: one id for V1's probe and one for the container run.
+const ID_V1: &str = "0123456789abcdef";
+const ID_RUN: &str = "fedcba9876543210";
 
 /// A scratch repository under the workspace's `target/`, which the daemon can see.
 ///
@@ -40,10 +47,11 @@ const ID: &str = "0123456789abcdef";
 /// failure needs looking at.
 struct Scratch {
     path: PathBuf,
+    id: &'static str,
 }
 
 impl Scratch {
-    fn new(label: &str) -> Self {
+    fn new(label: &str, id: &'static str) -> Self {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
@@ -54,7 +62,7 @@ impl Scratch {
             .join(format!("container-v1-{label}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("the scratch directory is creatable");
-        Self { path }
+        Self { path, id }
     }
 
     fn repository(&self) -> PathBuf {
@@ -86,7 +94,7 @@ impl Scratch {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-        let worktree = Worktree::of(&self.path, "holosmith", ID);
+        let worktree = Worktree::of(&self.path, "holosmith", self.id);
         let output = git(
             &repository,
             &[
@@ -162,9 +170,9 @@ fn ready() -> bool {
     present
 }
 
-fn session() -> Session {
+fn session(id: &str) -> Session {
     Session {
-        id: ID.to_string(),
+        id: id.to_string(),
         project: "holosmith".to_string(),
         model: "claude-sonnet-4.5".to_string(),
         thinking: "high".to_string(),
@@ -182,14 +190,19 @@ fn session() -> Session {
     }
 }
 
-/// The container the mount rule describes, for `projects_root`.
-fn container(projects_root: &Path) -> SessionContainer {
-    let config = Config {
+/// The machine's container settings for `projects_root`, with the defaults' limits.
+fn settings(projects_root: &Path) -> ContainerSettings {
+    ContainerSettings {
         projects_root: projects_root.to_path_buf(),
-        agent_image: image(),
-        ..Config::default()
-    };
-    SessionContainer::of(&config, &session())
+        image: image(),
+        docker_host: None,
+        limits: Limits::default(),
+    }
+}
+
+/// The container the mount rule describes, for `projects_root`.
+fn container(projects_root: &Path, id: &str) -> SessionContainer {
+    SessionContainer::of(&settings(projects_root), &session(id))
 }
 
 /// The script the container runs: the six V1 outcomes, each reported as `name=exit-code`.
@@ -236,9 +249,9 @@ fn v1_holds_the_hardened_git_mounts_answer_the_way_spec_item_one_says() {
     if !ready() {
         return;
     }
-    let scratch = Scratch::new("v1");
+    let scratch = Scratch::new("v1", ID_V1);
     let worktree = scratch.project();
-    let container = container(&scratch.path);
+    let container = container(&scratch.path, ID_V1);
     let mounts = container.mounts.clone();
 
     // The mount check the container step asks before it creates anything: all four sources are there, of
@@ -251,10 +264,28 @@ fn v1_holds_the_hardened_git_mounts_answer_the_way_spec_item_one_says() {
     let config_before =
         std::fs::read_to_string(&mounts.config.host).expect("the config is readable");
 
-    // `--rm` is HS-028's flag, not this story's, so the test removes its own container both before and
-    // after: a name a failed run left behind would otherwise fail the *next* run for the wrong reason.
+    // The run vector now names the session's own network (HS-028), so V1's container joins a real one:
+    // `--internal`, created by the same helper the backend's network step uses.
+    let docker = Docker::new(None);
+    docker
+        .create_internal_network(&container.network)
+        .expect("the session network is creatable");
     rm_container(&container.name);
-    let mut arguments = container.run_args();
+    // The production vector is detached (the container step does not hold a process open until HS-031);
+    // V1 needs the container's stdout, so the same vector runs attached.
+    let mut arguments: Vec<String> = container
+        .run_args()
+        .into_iter()
+        // V1 needs the container's own stdout, so the same vector runs attached.
+        .filter(|argument| argument != "--detach")
+        .collect();
+    // …and the placeholder command is the agent step's, not V1's: the vector is cut after the image, which
+    // is the boundary the container module documents, and the probe replaces what runs.
+    let image = arguments
+        .iter()
+        .position(|argument| argument == &container.image)
+        .expect("the run vector names its image");
+    arguments.truncate(image + 1);
     arguments.push("sh".to_string());
     arguments.push("-c".to_string());
     arguments.push(probe(&mounts));
@@ -313,7 +344,7 @@ fn v1_holds_the_hardened_git_mounts_answer_the_way_spec_item_one_says() {
     );
     let log = git(
         &scratch.repository(),
-        &["log", "--format=%s", &format!("agent/{ID}")],
+        &["log", "--format=%s", &format!("agent/{ID_V1}")],
     );
     let log = String::from_utf8_lossy(&log.stdout).into_owned();
     assert!(
@@ -347,4 +378,161 @@ fn v1_holds_the_hardened_git_mounts_answer_the_way_spec_item_one_says() {
     for refused in ["remount", "umount"] {
         assert_ne!(exit(refused), "0", "{refused} was allowed: {stdout}");
     }
+    assert!(
+        docker.remove_network(&container.network),
+        "the network went away"
+    );
+}
+
+/// The limits the run test asks for: deliberately *not* the defaults, so "the limits come from config" is
+/// what the assertions prove.
+const TEST_LIMITS: Limits = Limits {
+    cpus: 1,
+    memory_mb: 512,
+    pids: 64,
+};
+
+#[test]
+fn the_container_step_runs_a_limited_container_with_no_way_out() {
+    if !ready() {
+        return;
+    }
+    let scratch = Scratch::new("run", ID_RUN);
+    scratch.project();
+    let settings = ContainerSettings {
+        projects_root: scratch.path.clone(),
+        image: image(),
+        docker_host: None,
+        limits: TEST_LIMITS,
+    };
+    let backend = DockerBackend::new(settings.clone());
+    let docker = settings.docker();
+    let session = session(ID_RUN);
+    let container = SessionContainer::of(&settings, &session);
+    rm_container(&container.name);
+    docker.remove_network(&container.network);
+
+    // The two steps, through the real backend: the network first (a container cannot join one that is not
+    // there), then the container. Both are the shipped implementation, not a copy of its arguments.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime is buildable");
+    runtime.block_on(async {
+        assert_eq!(
+            backend
+                .provision(&session, Step::Network)
+                .await
+                .expect("the network step works"),
+            Provisioned::Nothing
+        );
+        assert_eq!(
+            backend
+                .provision(&session, Step::Container)
+                .await
+                .expect("the container step works"),
+            Provisioned::Nothing
+        );
+    });
+    assert_eq!(container.network, network_name(ID_RUN));
+
+    // Everything spec item 6 and HS-028's acceptance name, read out of `docker inspect` — the only place a
+    // running container's real configuration is visible.
+    let field = |format: &str| {
+        docker
+            .inspect(&container.name, format)
+            .unwrap_or_else(|error| panic!("docker inspect {format}: {error}"))
+    };
+    assert_eq!(
+        field("{{.State.Status}}"),
+        "running",
+        "the container is not running"
+    );
+    assert_eq!(field("{{.Config.WorkingDir}}"), "/work");
+    assert_eq!(field("{{.Config.Image}}"), image());
+    assert!(
+        field("{{.Config.Env}}").contains(&format!("HS_SESSION_ID={ID_RUN}")),
+        "the session id is not in the container's environment"
+    );
+    // Spec item 6's run line: `--rm --init`, and the network it joins is its own.
+    assert_eq!(field("{{.HostConfig.AutoRemove}}"), "true", "`--rm`");
+    assert_eq!(field("{{.HostConfig.Init}}"), "true", "`--init`");
+    assert_eq!(field("{{.HostConfig.NetworkMode}}"), container.network);
+    // The hardening spec item 1 and V1 depend on.
+    assert_eq!(field("{{.HostConfig.Privileged}}"), "false");
+    assert_eq!(
+        field("{{len .HostConfig.CapAdd}}"),
+        "0",
+        "a capability was added"
+    );
+    assert!(
+        field("{{.HostConfig.CapDrop}}").contains("ALL"),
+        "capabilities are not dropped: {}",
+        field("{{.HostConfig.CapDrop}}")
+    );
+    assert!(
+        field("{{.HostConfig.SecurityOpt}}").contains("no-new-privileges"),
+        "no-new-privileges is missing: {}",
+        field("{{.HostConfig.SecurityOpt}}")
+    );
+    // The limits, from the config rather than from the image or the defaults.
+    assert_eq!(
+        field("{{.HostConfig.NanoCpus}}"),
+        (u64::from(TEST_LIMITS.cpus) * 1_000_000_000).to_string()
+    );
+    assert_eq!(
+        field("{{.HostConfig.Memory}}"),
+        (TEST_LIMITS.memory_mb * 1024 * 1024).to_string()
+    );
+    assert_eq!(
+        field("{{.HostConfig.PidsLimit}}"),
+        TEST_LIMITS.pids.to_string()
+    );
+    // No way out: no socket, no host network, and the four mounts and nothing else.
+    let binds = field("{{.HostConfig.Binds}}");
+    assert!(
+        !binds.contains("docker.sock"),
+        "the Docker socket is mounted into the session: {binds}"
+    );
+    assert_eq!(
+        field("{{len .HostConfig.Binds}}"),
+        "4",
+        "the mounts are not the four: {binds}"
+    );
+    assert_ne!(field("{{.HostConfig.NetworkMode}}"), "host");
+    assert_eq!(
+        field("{{.HostConfig.PidMode}}"),
+        "",
+        "the container shares the host's pid namespace"
+    );
+
+    // A demo of this story is this line plus the assertions above: the facts a `docker inspect` shows.
+    println!(
+        "container {}: image={} network={} cpus={} memory={}m pids={} caps=drop-all add=0 \
+         privileged=false no-new-privileges=true workdir=/work auto-remove=true init=true binds={}",
+        container.name,
+        image(),
+        container.network,
+        TEST_LIMITS.cpus,
+        TEST_LIMITS.memory_mb,
+        TEST_LIMITS.pids,
+        field("{{len .HostConfig.Binds}}"),
+    );
+
+    // The teardown the delete flow and a failed provision both use, and the promise both make: the
+    // container and the network go away, and asking twice is not a failure.
+    runtime.block_on(async {
+        backend
+            .delete(&session)
+            .await
+            .expect("the delete removes what the session owns");
+    });
+    assert!(
+        !docker.container_exists(&container.name),
+        "the container outlived the delete"
+    );
+    assert!(
+        !docker.succeeds(&["network", "inspect", &container.network]),
+        "the network outlived the delete"
+    );
 }

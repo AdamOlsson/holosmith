@@ -9,6 +9,9 @@ allowed_hosts = []
 data_root = "/var/lib/holosmith"
 projects_root = "/srv/holosmith/projects"
 agent_image = "agent-image:0.1.0"
+container_cpus = 2
+container_memory_mb = 4096
+container_pids = 512
 # docker_host unset
 # hosts_seed unset
 allowed_hubs = []

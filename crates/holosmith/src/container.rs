@@ -38,6 +38,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
+use crate::docker::Docker;
 use crate::sessions::Session;
 use crate::worktree::Worktree;
 
@@ -49,6 +50,22 @@ pub const SESSION_ID_ENV: &str = "HS_SESSION_ID";
 
 /// The prefix of every container name: `s_<id>` (spec item 6).
 pub const NAME_PREFIX: &str = "s_";
+
+/// The prefix of every session network: `agents_<id>` (spec item 2).
+pub const NETWORK_PREFIX: &str = "agents_";
+
+/// The command the container runs until HS-031 attaches the agent's stdio.
+///
+/// A placeholder, and it says so: from this story on the container exists, is mounted, is hardened and is
+/// limited, and nothing inside it is working yet — which is exactly what this build can truthfully claim.
+/// The image must have `sleep` (any POSIX system does). HS-031 replaces this with pi in RPC mode over the
+/// container's stdin, and the `--detach` above with an attached process.
+pub const IDLE_COMMAND: [&str; 2] = ["sleep", "infinity"];
+
+/// The name of a session's private network.
+pub fn network_name(session_id: &str) -> String {
+    format!("{NETWORK_PREFIX}{session_id}")
+}
 
 /// What a mount's source must be on disk.
 ///
@@ -215,6 +232,81 @@ impl fmt::Display for Missing {
 
 impl std::error::Error for Missing {}
 
+/// What one container may use, from the config (spec item 6's resource limits).
+///
+/// Three integers rather than a struct of Docker's own strings: `--cpus 2` and `--memory 4096m` are
+/// spellings of a number, and a config `Kind` has no decimal — asking an operator to write `"2.0"` would
+/// be a string this build then has to parse and refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// `--cpus`. A whole number of CPUs: a fractional share is a tuning decision this system does not
+    /// need to express, and Docker accepts the integer form.
+    pub cpus: u32,
+    /// `--memory`, in mebibytes as Docker spells `m`.
+    pub memory_mb: u64,
+    /// `--pids-limit`: how many processes the container may have. A fork bomb is a fork bomb even with
+    /// `--cap-drop ALL`, and this is the one limit that bounds it.
+    pub pids: u64,
+}
+
+impl Default for Limits {
+    /// The documented defaults (spec item 6's "resource limits", `docs/build.md`'s flag list).
+    fn default() -> Self {
+        Self {
+            cpus: 2,
+            memory_mb: 4096,
+            pids: 512,
+        }
+    }
+}
+
+/// The machine's container settings: everything a container needs that is not the session itself.
+///
+/// One value so the backend takes one argument rather than seven, and so there is exactly one place that
+/// knows where the projects root, the image, the daemon's address and the limits come from
+/// ([`Self::of`]). Tests build one with [`Self::at`], which is the same value with the defaults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerSettings {
+    /// The machine's projects root: `<projects>/.worktrees/<id>` and `<projects>/<project>` hang off it.
+    pub projects_root: PathBuf,
+    /// The image a container runs: `agent_image`.
+    pub image: String,
+    /// The daemon's address, as `docker -H` takes it; `None` is the CLI's own default.
+    pub docker_host: Option<String>,
+    pub limits: Limits,
+}
+
+impl ContainerSettings {
+    /// The settings for a machine whose projects root is `projects_root`, everything else default.
+    pub fn at(projects_root: impl Into<PathBuf>) -> Self {
+        Self {
+            projects_root: projects_root.into(),
+            image: Config::default().agent_image,
+            docker_host: None,
+            limits: Limits::default(),
+        }
+    }
+
+    /// The machine's settings as the config file spells them.
+    pub fn of(config: &Config) -> Self {
+        Self {
+            projects_root: config.projects_root.clone(),
+            image: config.agent_image.clone(),
+            docker_host: config.docker_host.clone(),
+            limits: Limits {
+                cpus: config.container_cpus,
+                memory_mb: config.container_memory_mb,
+                pids: config.container_pids,
+            },
+        }
+    }
+
+    /// The `docker` CLI pointed at this machine's daemon.
+    pub fn docker(&self) -> Docker {
+        Docker::new(self.docker_host.clone())
+    }
+}
+
 /// One session's container: the image it runs, the name it takes, and how it is mounted.
 ///
 /// HS-028 adds the lifecycle flags (`--rm`, `-i`, `--init`), the network and the limits; HS-036 makes the
@@ -228,22 +320,27 @@ pub struct SessionContainer {
     pub name: String,
     /// The session id, as `HS_SESSION_ID` carries it and as the name carries it.
     pub session_id: String,
+    /// `agents_<id>`: the private network this container joins, and the only one it joins (HS-028).
+    pub network: String,
     pub mounts: Mounts,
+    pub limits: Limits,
 }
 
 impl SessionContainer {
-    /// The container for `session`, with the image `config` names.
+    /// The container for `session`, in the machine `settings` describe.
     ///
     /// The mounts are derived from the session row's project and id, never read back from its
     /// `worktree` column: the naming rule has one home, and a row written by an older binary would
     /// otherwise decide where the container's files are.
-    pub fn of(config: &Config, session: &Session) -> Self {
-        let worktree = Worktree::of(&config.projects_root, &session.project, &session.id);
+    pub fn of(settings: &ContainerSettings, session: &Session) -> Self {
+        let worktree = Worktree::of(&settings.projects_root, &session.project, &session.id);
         Self {
-            image: config.agent_image.clone(),
+            image: settings.image.clone(),
             name: format!("{NAME_PREFIX}{}", session.id),
             session_id: session.id.clone(),
+            network: network_name(&session.id),
             mounts: Mounts::of(&worktree),
+            limits: settings.limits,
         }
     }
 
@@ -259,8 +356,18 @@ impl SessionContainer {
     pub fn run_args(&self) -> Vec<String> {
         let mut arguments = vec![
             "run".to_string(),
+            // `--detach` until HS-031: pi speaks RPC over the container's stdin, and an attached process
+            // with piped stdio is that story's change. Everything else in spec item 6's run line is here.
+            "--detach".to_string(),
+            // The two flags that make a stop leave nothing behind and a killed container not become a
+            // zombie: `--rm` is spec item 6's, and `--init` puts a reaping init in as pid 1, so the
+            // agent's own children are not the container's problem.
+            "--rm".to_string(),
+            "--init".to_string(),
             "--name".to_string(),
             self.name.clone(),
+            "--network".to_string(),
+            self.network.clone(),
             // The four list entries of spec item 1's third bullet that no mount can express: a dropped
             // capability set is what makes remount and unmount impossible, and `no-new-privileges` is
             // what keeps a setuid binary in the worktree from getting one back.
@@ -272,9 +379,18 @@ impl SessionContainer {
             WORKDIR.to_string(),
             "--env".to_string(),
             format!("{SESSION_ID_ENV}={}", self.session_id),
+            // The three limits (spec item 6): a runaway agent is bounded in CPU, memory and processes, so
+            // "it cannot take the machine down" is a kernel fact rather than a hope.
+            "--cpus".to_string(),
+            self.limits.cpus.to_string(),
+            "--memory".to_string(),
+            format!("{}m", self.limits.memory_mb),
+            "--pids-limit".to_string(),
+            self.limits.pids.to_string(),
         ];
         arguments.extend(self.mounts.arguments());
         arguments.push(self.image.clone());
+        arguments.extend(IDLE_COMMAND.map(str::to_string));
         arguments
     }
 }
@@ -304,16 +420,17 @@ mod tests {
         }
     }
 
-    fn config() -> Config {
-        Config {
+    fn settings() -> ContainerSettings {
+        ContainerSettings {
             projects_root: PathBuf::from("/srv/holosmith/projects"),
-            agent_image: "agent-image:0.1.0".to_string(),
-            ..Config::default()
+            image: "agent-image:0.1.0".to_string(),
+            docker_host: None,
+            limits: Limits::default(),
         }
     }
 
     fn container() -> SessionContainer {
-        SessionContainer::of(&config(), &session("holosmith", "0123456789abcdef"))
+        SessionContainer::of(&settings(), &session("holosmith", "0123456789abcdef"))
     }
 
     #[test]
@@ -400,10 +517,14 @@ mod tests {
                 .unwrap_or_else(|| panic!("{flag} is missing from {arguments:?}"));
             assert_eq!(arguments[at + 1], value, "{flag}");
         }
+        let image = arguments
+            .iter()
+            .position(|argument| argument == "agent-image:0.1.0")
+            .expect("the image is in the run vector");
         assert_eq!(
-            arguments.last().map(String::as_str),
-            Some("agent-image:0.1.0"),
-            "the image is the last flagless argument, so whatever runs is appended after it"
+            &arguments[image + 1..],
+            IDLE_COMMAND,
+            "the image is followed by the placeholder command until HS-031 runs pi"
         );
         assert!(
             !arguments.iter().any(|argument| argument == "--user"),

@@ -429,8 +429,8 @@ The set of hostnames the egress proxy will connect to.
 _Avoid_: Whitelist, permitted hosts
 
 **Session network**:
-A private internal Docker network that only one session's container and the two proxies join.
-_Avoid_: Sandbox network, bridge
+The private internal Docker network one session's container joins: `agents_<id>`, created `--internal` so nothing on it can reach the host or the internet. Its machine name is `container::network_name`, and the `agents_` prefix is the one string (spec item 2). HS-036 adds the two proxies and the startup self-test that make "only the key proxy answers" a fact rather than a topology.
+_Avoid_: Agent network, container network, sandbox network, bridge
 
 **Internet access**:
 The per-session choice of whether the egress proxy is connected. Off by default.

@@ -10,6 +10,7 @@ pub mod config;
 pub mod container;
 pub mod db;
 pub mod deleter;
+pub mod docker;
 pub mod events;
 pub mod http;
 pub mod ladder;

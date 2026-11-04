@@ -2,44 +2,49 @@
 //!
 //! It exists so the trait has the implementation the product actually ships with, and so `--backend
 //! docker` — which is the default (ADR-0001) — answers honestly instead of pretending a session is
-//! provisioned. **The worktree step is real from HS-025 on**; every other operation still refuses with
-//! [`BackendError::Unsupported`] or [`BackendError::unsupported_step`], which the provisioner turns into
-//! a `session.status` event and a `status_reason` on the row: an operator who runs this build without
-//! `--backend stub` sees `error` with a reason naming the step, not a session that says `starting`
-//! forever.
+//! provisioned. **Three of the four provisioning steps are real:** the worktree (HS-025), the session's
+//! private network (HS-028) and the container itself (HS-028). The **pi** step still refuses, and so does
+//! every lifecycle operation, with [`BackendError::Unsupported`] or [`BackendError::unsupported_step`],
+//! which the provisioner turns into a `session.status` event and a `status_reason` on the row: an operator
+//! who runs this build without `--backend stub` sees `error` with a reason naming the agent step, not a
+//! session that says `starting` forever.
 //!
 //! Whether the machine *can* run Docker sessions at all is not this file's question: [`crate::preflight`]
 //! answers it once, at startup, and `serve` refuses to bring up a Docker run that fails it (HS-024). A
 //! backend that reported its own preflight would be a second opinion about the same machine.
 //!
-//! What is left, and who owns it: the session's network and its proxies (HS-027), the container (HS-028)
-//! and the agent inside it (HS-031). The mount, network and proxy stories add their own work to the same
-//! three steps. Nothing in this file talks to the daemon yet — the worktree is a host program.
-
-use std::path::PathBuf;
+//! What is left, and who owns it: the `egress` network and the startup self-test (HS-036), the egress and
+//! key proxies (HS-037, HS-039) and the agent inside the container (HS-031). HS-028 creates the minimum a
+//! container needs — an **internal** network of its own, which is the isolation — and HS-036 owns the rest
+//! of the network's story. HS-031 replaces the detached launch with pi's RPC over the container's stdio.
 
 use super::{BackendError, Provisioned, SessionBackend, Step, TurnEnd};
+use crate::container::{ContainerSettings, SessionContainer, network_name};
+use crate::docker::{Docker, DockerError};
 use crate::events::EventWriter;
 use crate::sessions::Session;
 use crate::worktree::{Refusal, Worktree, refuse, repository_of};
 
-/// The Docker backend: the machine's projects root, and nothing else.
+/// The Docker backend: one machine's container settings.
 ///
 /// The projects root is the one setting every host path hangs off (item 1: `<projects>/.worktrees/<id>`,
-/// `<projects>/<project>/.git`), so it arrives through the constructor rather than being read from the
-/// config at each call: a backend built without a path would have to guess one. `docker_host` stays the
-/// preflight's and HS-028's; nothing here reads it.
+/// `<projects>/.git`), and the image, the daemon's address and the limits are what a container needs to
+/// exist at all — so they arrive through the constructor rather than being read from the config at each
+/// call: a backend built without them would have to guess, and a guess about an image is a container that
+/// does not start.
 #[derive(Debug, Clone)]
 pub struct DockerBackend {
-    projects_root: PathBuf,
+    settings: ContainerSettings,
 }
 
 impl DockerBackend {
-    /// The backend for a machine whose projects root is `projects_root`.
-    pub fn new(projects_root: impl Into<PathBuf>) -> Self {
-        Self {
-            projects_root: projects_root.into(),
-        }
+    /// The backend for the machine `settings` describe.
+    ///
+    /// One value rather than seven arguments, and one place ([`ContainerSettings::of`]) that knows where the
+    /// projects root, the image, the daemon's address and the limits come from. A backend built without them
+    /// would have to guess, and a guess about an image is a container that does not start.
+    pub fn new(settings: ContainerSettings) -> Self {
+        Self { settings }
     }
 
     /// The worktree this session is entitled to, from the machine's projects root.
@@ -47,7 +52,17 @@ impl DockerBackend {
     /// Derived rather than read back from the row: the naming rule lives in one function
     /// ([`Worktree::of`]), and the row's copy of the path is for readers, not for the code that makes it.
     fn worktree(&self, session: &Session) -> Worktree {
-        Worktree::of(&self.projects_root, &session.project, &session.id)
+        Worktree::of(&self.settings.projects_root, &session.project, &session.id)
+    }
+
+    /// This session's container, from the machine's settings and the row.
+    fn container(&self, session: &Session) -> SessionContainer {
+        SessionContainer::of(&self.settings, session)
+    }
+
+    /// This session's private network name: `agents_<id>`.
+    fn network(&self, session: &Session) -> String {
+        network_name(&session.id)
     }
 
     /// Whether `project`'s repository may be mounted, and why not when it may not (HS-026).
@@ -56,7 +71,7 @@ impl DockerBackend {
     /// the repository is named by the projects root and the project alone. It is a host read like every
     /// other in this backend, and [`crate::worktree::refuse`] is where the rules are.
     pub fn refuse_project(&self, project: &str) -> Result<(), Refusal> {
-        refuse(&repository_of(&self.projects_root, project))
+        refuse(&repository_of(&self.settings.projects_root, project))
     }
 
     /// Every operation's refusal, in one place so the reason always names the operation.
@@ -81,6 +96,80 @@ impl DockerBackend {
                 BackendError::failed(format!("the {step} step: git did not finish ({error})"))
             })?
             .map_err(|error| BackendError::failed(format!("the {step} step: {error}")))
+    }
+
+    /// Run one `docker` call off the runtime's worker, mapping its sentence onto the step's.
+    ///
+    /// The same reason as the worktree's [`Self::blocking`]: a subprocess is not a future, and a
+    /// `docker run` that has to pull an image takes as long as it takes. A `JoinError` is not a Docker
+    /// failure — the task panicked or was cancelled — and says so instead of pretending the daemon refused.
+    async fn docker<T, F>(step: Step, docker: Docker, work: F) -> Result<T, BackendError>
+    where
+        T: Send + 'static,
+        F: FnOnce(Docker) -> Result<T, DockerError> + Send + 'static,
+    {
+        tokio::task::spawn_blocking(move || work(docker))
+            .await
+            .map_err(|error| {
+                BackendError::failed(format!("the {step} step: docker did not finish ({error})"))
+            })?
+            .map_err(|error| BackendError::failed(format!("the {step} step: {error}")))
+    }
+
+    /// The session's private network: `docker network create --internal agents_<id>` (spec item 2).
+    ///
+    /// `--internal` is the isolation and the reason this step exists at all: the container joins *only*
+    /// this network, so it has no route to the host and none to the internet. HS-036 adds the `egress`
+    /// network, the two proxies and the startup self-test; what is here is the minimum a container needs
+    /// to be started on a network of its own rather than on the default bridge.
+    ///
+    /// A network of the same name that is already there is reused (the teardown failed, or the process
+    /// died, and HS-044 is what reconciles that at startup) — creating one twice is not an error worth
+    /// failing a session over.
+    async fn provision_network(&self, session: &Session) -> Result<Provisioned, BackendError> {
+        let network = self.network(session);
+        Self::docker(Step::Network, self.settings.docker(), move |docker| {
+            docker.create_internal_network(&network)
+        })
+        .await?;
+        tracing::debug!(
+            target: "holosmith::backend",
+            session = %session.id,
+            network = %self.network(session),
+            "the session's network is up"
+        );
+        Ok(Provisioned::Nothing)
+    }
+
+    /// The container itself (spec item 6).
+    ///
+    /// The mounts are checked *before* the daemon is asked, because `docker run -v` creates a missing
+    /// source as an empty root-owned directory: a broken projects root would otherwise give the agent an
+    /// empty `/work` and a `.git` that is not the repository, with no error anywhere (ADR-0035).
+    ///
+    /// HS-031 replaces this launch with an attached one and pipes pi's RPC through the container's stdio;
+    /// until then the container is detached and runs the image's own command, which is what makes
+    /// "the flags are right" inspectable before there is an agent to run.
+    async fn provision_container(&self, session: &Session) -> Result<Provisioned, BackendError> {
+        let container = self.container(session);
+        container
+            .mounts
+            .check()
+            .map_err(|missing| BackendError::failed(format!("the container step: {missing}")))?;
+        let arguments = container.run_args();
+        let name = container.name.clone();
+        let id = Self::docker(Step::Container, self.settings.docker(), move |docker| {
+            docker.run_container(&arguments)
+        })
+        .await?;
+        tracing::debug!(
+            target: "holosmith::backend",
+            session = %session.id,
+            container = %name,
+            container_id = %id,
+            "the container is running"
+        );
+        Ok(Provisioned::Nothing)
     }
 
     /// `git worktree add` (or the adoption of one that is already there), and the record it makes.
@@ -115,10 +204,41 @@ impl DockerBackend {
     ///
     /// Shared by [`SessionBackend::undo`] and [`SessionBackend::delete`], because "this step is being
     /// taken back" and "this session is going away" leave the same thing behind. The container and the
-    /// network join this call when HS-028 has made them.
+    /// network are removed by their own callers, in that order.
     async fn remove_worktree(&self, session: &Session) -> Result<(), BackendError> {
         let worktree = self.worktree(session);
         Self::blocking(Step::Worktree, move || worktree.remove()).await
+    }
+
+    /// Remove the session's container, ignoring "no such container" (spec item 6's `--rm` rule, and
+    /// ADR-0023's: a teardown of something that is not there is not a failure).
+    ///
+    /// `docker rm --force` is what `docker stop` would be plus the removal, in one call — the container's
+    /// data lives in host directories, so there is nothing to lose by removing it (spec item 6). A
+    /// *failure* to remove is logged and not propagated: the delete flow's job is to remove the row, and a
+    /// container the daemon cannot remove is a machine problem the log names.
+    async fn stop_container(&self, session: &Session) {
+        let name = self.container(session).name;
+        let removed = Self::docker(Step::Container, self.settings.docker(), move |docker| {
+            Ok(docker.remove_container(&name))
+        })
+        .await;
+        if let Ok(false) = removed {
+            tracing::debug!(
+                target: "holosmith::backend",
+                session = %session.id,
+                "there was no container to remove"
+            );
+        }
+    }
+
+    /// Remove the session's network, ignoring "no such network".
+    async fn remove_network(&self, session: &Session) {
+        let name = self.network(session);
+        let _ = Self::docker(Step::Network, self.settings.docker(), move |docker| {
+            Ok(docker.remove_network(&name))
+        })
+        .await;
     }
 }
 
@@ -126,21 +246,15 @@ impl SessionBackend for DockerBackend {
     /// Run a step that has no implementation yet: one sentence per step, and the sentence names the story
     /// that fills it.
     ///
-    /// The row's `status_reason` is where an operator reads this, so "the container step: the docker
-    /// backend does not provision the container yet (HS-028)" says what is wrong, whose work it is, and
-    /// that the session is not broken — it is a build that cannot run it. Written out per arm rather than
-    /// through a helper: a helper would need an arm for the worktree step, and that arm could never run.
+    /// The row's `status_reason` is where an operator reads this, so "the pi step: the docker backend does
+    /// not start the agent yet (HS-031)" says what is wrong, whose work it is, and that the session is not
+    /// broken — it is a build that cannot run it. Written out per arm rather than through a helper: a
+    /// helper would need an arm for the steps that *are* filled, and those arms could never run.
     async fn provision(&self, session: &Session, step: Step) -> Result<Provisioned, BackendError> {
         match step {
             Step::Worktree => self.provision_worktree(session).await,
-            Step::Network => Err(BackendError::unsupported_step(
-                step,
-                "the docker backend does not provision the network yet (HS-027)",
-            )),
-            Step::Container => Err(BackendError::unsupported_step(
-                step,
-                "the docker backend does not provision the container yet (HS-028)",
-            )),
+            Step::Network => self.provision_network(session).await,
+            Step::Container => self.provision_container(session).await,
             Step::Pi => Err(BackendError::unsupported_step(
                 step,
                 "the docker backend does not start the agent yet (HS-031)",
@@ -151,9 +265,19 @@ impl SessionBackend for DockerBackend {
     async fn undo(&self, session: &Session, step: Step) -> Result<(), BackendError> {
         match step {
             Step::Worktree => self.remove_worktree(session).await,
-            // Teardown of a step that never ran: there is nothing to remove, and reporting a failure
-            // here would turn one refusal into two events.
-            Step::Network | Step::Container | Step::Pi => Ok(()),
+            // The container first when it is undone on its own (its network is not a dependency of
+            // removing it, but a container holding a network up would make the network's removal fail).
+            Step::Container => {
+                self.stop_container(session).await;
+                Ok(())
+            }
+            Step::Network => {
+                self.remove_network(session).await;
+                Ok(())
+            }
+            // Teardown of the agent step is the container's: there is no separate process to stop, and
+            // reporting a failure here would turn one refusal into two events.
+            Step::Pi => Ok(()),
         }
     }
 
@@ -186,12 +310,18 @@ impl SessionBackend for DockerBackend {
         Err(Self::refuse("resume"))
     }
 
-    /// Remove everything the session owns: the worktree and its branch, from HS-025.
+    /// Remove everything the session owns: the container, its network, the worktree and its branch.
     ///
-    /// The container, the session directory and the network are HS-028/HS-031/HS-027's additions to this
-    /// call. Answering `Ok` for a session nothing was provisioned for is deliberate: teardown of a
-    /// session that never got that far must not leave a `deleting` row behind (ADR-0023).
+    /// The session *directory* (`<data>/sessions/<id>`) joins this call in HS-031, which is what makes one.
+    /// Answering `Ok` for a session nothing was provisioned for is deliberate: teardown of a session that
+    /// never got that far must not leave a `deleting` row behind (ADR-0023).
     async fn delete(&self, session: &Session) -> Result<(), BackendError> {
+        // The container, then its network, then the worktree and the branch. Each is best-effort except
+        // the worktree: a container or a network the daemon has already forgotten is a fact, and a
+        // remaining row is what ADR-0023 refuses. The order matters — a container still attached to the
+        // network keeps it busy.
+        self.stop_container(session).await;
+        self.remove_network(session).await;
         self.remove_worktree(session).await
     }
 
@@ -228,16 +358,12 @@ mod tests {
     }
 
     fn backend() -> DockerBackend {
-        DockerBackend::new("/nonexistent/projects")
+        DockerBackend::new(ContainerSettings::at("/nonexistent/projects"))
     }
 
     #[tokio::test]
-    async fn the_steps_this_build_does_not_provision_refuse_and_name_their_story() {
-        for (step, story) in [
-            (Step::Network, "HS-027"),
-            (Step::Container, "HS-028"),
-            (Step::Pi, "HS-031"),
-        ] {
+    async fn the_step_this_build_does_not_provision_refuses_and_names_its_story() {
+        for (step, story) in [(Step::Pi, "HS-031")] {
             let error = backend()
                 .provision(&session(), step)
                 .await
@@ -293,6 +419,9 @@ mod tests {
                 .await
                 .expect("undoing nothing succeeds");
         }
+        // Two of those three now *do* something (a `docker rm` and a `docker network rm` against a daemon
+        // this test does not have), and both swallow "not there": that is the promise, and it is what
+        // makes teardown of a session that never got that far safe (ADR-0023).
     }
 
     #[tokio::test]
