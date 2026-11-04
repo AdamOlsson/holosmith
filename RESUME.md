@@ -1,4 +1,4 @@
-# RESUME — orchestrator handoff (cold start, after twenty-seven stories)
+# RESUME — orchestrator handoff (cold start, after twenty-eight stories)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating
 procedure and still governs; this file is the state of the world — what exists, what the environment
@@ -85,7 +85,7 @@ blocked run, take the next unblocked story. §8 carries what HS-061 is about.
 Ranking, per `PROMPT.md`: Linear priority (all are `No priority`) → `HS-###` order in `docs/stories/` →
 anything already `In Progress` first → skip an issue whose `Blocked by` stories are not `Done`.
 
-### Ten facts a cold start must know
+### Eleven facts a cold start must know
 
 1. **A running turn can now be stopped, in two rungs, with or without the way back.** `src/ladder.rs`
    is the shared routine: `clear_queue` then `abort`, wait up to `abort_grace` (the grace *bounds rung
@@ -118,7 +118,9 @@ anything already `In Progress` first → skip an issue whose `Blocked by` storie
    `stopped · idle_stop` under the operator with no reload). This is still **not** a substitute for a
    gate — nothing in `scripts/` may require a browser —
    but "unverified from source" is no longer the honest answer for a screen that has been looked at.
-   What has *not* been looked at: the hub (HS-057+), the changes sheet, and anything phase 2 adds.
+   HS-060 drove the session screen again after compaction (one block, the whole text, the whole thinking,
+   no duplication — the snapshot's `replaceChildren` path). What has *not* been looked at: the hub
+   (HS-057+), the changes sheet, and anything phase 2 adds beyond the transcript.
 
 4. **A quiet session stops costing money, on a timer nobody asks for.** `sweeper.rs` reads every `idle`
    session whose `last_active_at` is older than `idle_stop_min` (default 30; **`0` disables it**), applies
@@ -183,6 +185,19 @@ anything already `In Progress` first → skip an issue whose `Blocked by` storie
    HS-045's `doctor` will print. `tests/backend_contract.rs` is the conformance suite both backends must
    pass; each Docker story adds its case.
 
+11. **An old message's deltas become one snapshot, and the log is therefore not append-only.**
+   `src/compactor.rs` is a task (a pass at startup, then a 60 s tick, `SNAPSHOT_AFTER` = the spec's 24 h
+   as a **constant**, not a config key) whose per-session step runs **inside the database mutex the
+   transitioner also takes** — so a turn either started before the pass (the row says `running` and the
+   pass skips it) or after it. `EventRepository::compact` folds a message's `text` and `thinking` deltas
+   into one `message.snapshot` at **the highest seq of the rows it removed**, and `sessions.last_seq` is
+   neither read nor bumped: seq is strictly increasing **with gaps**, and the next seq is `last_seq + 1`,
+   never `MAX(seq) + 1`. Nothing is broadcast (a connected client already has the deltas; a reconnecting
+   one reads the snapshot from its replay). `message.end`, tool frames and turn boundaries are never
+   removed, and a delta whose payload is not the pinned three keys stops that session's compaction with
+   one `warn` rather than losing text. The window is a constructor argument so a test writes its message
+   with an old instant instead of aging a row; the gate case is the one that ages a database. ADR-0032.
+
 Three things HS-014 and HS-015 settled that later stories inherit:
 
 - **The transcript's event contract** (ADR-0018 + ADR-0019), emitted by the backend:
@@ -190,7 +205,7 @@ Three things HS-014 and HS-015 settled that later stories inherit:
   | Kind | Payload |
   | --- | --- |
   | `message.delta` | `{"message_id", "kind": "text"\|"thinking", "text"}` |
-  | `message.snapshot` | `{"message_id", "text", "thinking"}` (nothing emits it yet; HS-060) |
+  | `message.snapshot` | `{"message_id", "text", "thinking"}` (HS-060's compaction is its only producer) |
   | `message.end` | `{"message_id", "usage": {"in", "out"}}` |
   | `tool.start` / `tool.end` | `{"tool_id", "name", "arguments"}` / `{"tool_id", "name", "output"}` |
   | `turn.start` / `turn.end` | `{}` |
@@ -372,8 +387,9 @@ If that fails, **stop and report** — that is a `PROMPT.md` stop condition.
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                     # 228 lib + 32 integration binaries (22 in tests/worktree.rs, 13 in
-                               # tests/events.rs, 10 in tests/turns.rs, 14 delete.rs, 8 idle_stop.rs)
+cargo test                     # 231 lib + 33 integration binaries (22 in tests/worktree.rs, 13 in
+                               # tests/events.rs, 10 in tests/turns.rs, 10 in tests/compaction.rs,
+                               # 14 delete.rs, 8 idle_stop.rs)
 cd web && npm test             # 30 transcript tests (node's own runner)
 cd web && npx tsc --noEmit     # not a gate phase, but a web edit that does not typecheck is a bug
 scripts/verify.sh              # THE one-command gate since HS-006
@@ -382,9 +398,10 @@ scripts/verify.sh              # THE one-command gate since HS-006
 `scripts/verify.sh` runs six phases, cheapest first: `fmt`, `clippy`, `test`, `build`
 (`scripts/build.sh`, which itself runs `build-web.sh` — `npm test` then Vite — and `check-static.sh`
 last), `embed` (`scripts/check-embed.sh`), then `serve` — the **shipped musl artifact** booted on
-`--port 0` with a temp data dir, running **43 cases plus a CORS sweep (268 assertions)**, then torn down
-with `SIGTERM` and an asserted exit 0. Four cases bring their own boot (`case_token_budget`,
-`case_worktree`, `case_worktree_refusal`, and `case_docker_preflight`, which needs no server at all). It takes ~3 min (both musl targets) plus `case_idle_stop`'s real
+`--port 0` with a temp data dir, running **44 cases plus a CORS sweep (284 assertions)**, then torn down
+with `SIGTERM` and an asserted exit 0. Five cases bring their own boot (`case_token_budget`,
+`case_compaction`, `case_worktree`, `case_worktree_refusal`, and `case_docker_preflight`, which needs no
+server at all). It takes ~3 min (both musl targets) plus `case_idle_stop`'s real
 minute. `--no-build` skips `build` and `embed`; `--keep` keeps the work dir.
 
 A story is not done until all four are green on a clean tree, and then you run the story's own demo
@@ -442,9 +459,14 @@ crates/holosmith/
   src/deleter.rs            the delete flow's task (HS-019): revoke_key (a no-op until HS-039) →
                             `backend.delete` → remove the row *and its event log* in one
                             transaction → close the session's streams. `DELETED` is the rung-2 word
+  src/compactor.rs          compaction's task (HS-060, ADR-0032): `SNAPSHOT_AFTER` (24 h, a constant),
+                            `TICK` (60 s), `MESSAGES_PER_PASS` (500), `Compactor::{new, with_window,
+                            spawn, run, sweep, fold}`. A pass at startup, then a tick; the per-session
+                            step holds the database mutex, so a running turn is skipped by the re-read
   src/runtime.rs            runtime::Backend {Stub,Docker} — which backend this run uses
   src/http/                 mod.rs, app.rs (Routes/App seam, AppState + provisioner()/turner()/
-                            transitioner()/ladder()/deleter(), edge layer, is_guard_exempt), error.rs
+                            transitioner()/ladder()/deleter()/sweeper()/compactor(), edge layer,
+                            is_guard_exempt), error.rs
                             (the one envelope, every code, ApiError::not_in_state / bad_prompt /
                             bad_steer / unsaved_work / unknown_session / cap_without_idle /
                             git_not_directory / submodules_present / worktree_config_enabled),
@@ -460,10 +482,13 @@ crates/holosmith/
                             state.rs (the transition table, Transitioner::apply / apply_logged, the
                             set_status guard), activity.rs (the one `touch`: lock, warn, carry on)
   src/events/               mod.rs (Event, NewEvent, EventWriter, EventStream, and since HS-059
-                            `coalesce` + its private `parse_delta`/`Delta`), writer.rs (`collect` →
+                            `coalesce` + its private `parse_delta`/`Delta`, which HS-060's fold reads
+                            too), writer.rs (`collect` →
                             `coalesce` → `commit`; the failure log names appended events *and* rows),
                             repository.rs (`insert_batch` drops an event whose session has gone;
-                            `delete_session_log`), stream.rs (replay→live, lag), registry.rs
+                            `delete_session_log`; `compact`, the fold into one snapshot; and
+                            `usage`/`message_id` — the three payload shapes it parses, ADR-0032),
+                            stream.rs (replay→live, lag), registry.rs
                             (open-stream counts)
   src/worktree.rs           the session's worktree (HS-025, ADR-0029): `Worktree::of` (the naming rule),
                             `ensure` (create or adopt, answers `Ensured { base_commit, created }`), `ahead`
@@ -482,7 +507,8 @@ crates/holosmith/
                             pin_single_source, guards, session_repository, sessions_api, events,
                             streams, provisioning, state_machine, session_list, session_screen,
                             turns, abort, steer, resume, delete, eviction, idle_stop, turn_timeout,
-                            token_budget, preflight, backend_contract, worktree, support/mod.rs
+                            token_budget, preflight, backend_contract, worktree, compaction,
+                            support/mod.rs
                             (the shared harness, which also has `repository`/`git`/`head`/
                             `branch_exists`/`worktrees` helpers for a real git repo in a `TempDir`)
 web/                        Vite 7 + TypeScript, two screens (`/` and `/sessions/<id>`); untouched by HS-025
@@ -498,9 +524,9 @@ scripts/check-static.sh     file/readelf, empty-root serve + cmp against web/dis
 scripts/check-embed.sh      the three embed cases (present / absent warns / required fails)
 scripts/verify.sh           the one-command gate (see §3)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0031          read the recent ones before planning anything
+docs/adr/0001…0032          read the recent ones before planning anything
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-58, PER-91  each a verbatim review + a `## Resolution` table
+docs/review/PER-33…PER-58, PER-91, PER-92  each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -513,14 +539,17 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   `GET /api/sessions/{id}/events`), SQLite with three migrations, the guards, the event writer (which
   coalesces a commit's deltas), the SSE stream, the stub backend and its four-step provisioner, the
   enforced state machine, the abort ladder, the delete flow, the cap with eviction, the create's and the
-  resume's three project refusals, the Sessions screen with its create form (which prints a project
+  resume's three project refusals, the compaction task (which folds a day-old message into one
+  `message.snapshot`), the Sessions screen with its create form (which prints a project
   refusal's sentence alone) and the "nothing was deleted" notice, the session screen at
   `/sessions/<id>` with a live transcript and a four-action composer.
 - **Not built yet:** anything Docker beyond the preflight and the **worktree step** (HS-026 … HS-046 — the
   network, container and agent steps still refuse, each naming its story), the drain (HS-044), tool-output files and `output_ref` (HS-033), the **usage totals on the
   screen** (HS-034 — the columns are now real, the screen only says "no usage reported" when it must), the
   preview listener (HS-041), the stopped-session expiry (HS-064), `doctor` (HS-045), merge, publish, the hub,
-  releases, and any **delete affordance in `web/`** (the API has the endpoint; the page has no button).
+  **history truncation and pagination** (HS-061 — the stream replays all of it today; `events/stream.rs`'s
+  `REPLAY_LIMIT` is `u32::MAX` and says so), releases, and any **delete affordance in `web/`** (the API has
+  the endpoint; the page has no button).
 - **Four policies can now stop something and they must not be confused:** the cap evicts (`evicted`,
   inside a create), the sweeper stops a quiet one (`idle_stop`, on its own tick), the turn timeout ends a
   *turn* (`turn_timeout`, from the runner) and the token budget ends a *turn* (`budget_exceeded`, also from
@@ -536,8 +565,9 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   config, and so does `scripts/check-static.sh`'s empty-root run — a Docker run now refuses at startup on a
   machine that fails the preflight (HS-024), and that sandbox has no daemon, no `git` and no `df`.
 - **`AppState`** is `{ config, runtime, database: Arc<std::sync::Mutex<Database>>, events: EventWriter,
-  streams: StreamRegistry, backend: Backends }`, with **five** wiring helpers — `provisioner()`,
-  `turner()`, `transitioner()`, `ladder()`, `deleter()`. The mutex is an explicit stopgap
+  streams: StreamRegistry, backend: Backends }`, with **seven** wiring helpers — `provisioner()`,
+  `turner()`, `transitioner()`, `ladder()`, `deleter()`, `sweeper()` (an `Option`, `None` when
+  `idle_stop_min` is 0) and `compactor()` (always `Some`). The mutex is an explicit stopgap
   (ADR-0012/0013) — see §6.
 - **`sessions::state::Transitioner::apply`** is the only way a session's state changes; `apply_logged`
   is the runners' wrapper (log, never return). A provisioning step report is `from == to` with `step`
@@ -548,8 +578,8 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   moves the row **before** it spawns the backend's `stop`, because the row is what frees the slot.
 - **`config`** already has `abort_grace` (default `10s`, **used** by the ladder), `idle_stop_min`,
   `stopped_ttl_days`, `min_free_gb`, `turn_timeout_min`, `max_session_tokens` and the rest — check
-  `config show` before adding a key. The delete flow has **no** config key of its own, and `max_live_sessions`
-  (default 3, ≥ 1) is the cap.
+  `config show` before adding a key. The delete flow and **compaction** have **no** config key of their
+  own (the 24-hour window is a constant), and `max_live_sessions` (default 3, ≥ 1) is the cap.
 - **`POST /resume`** takes the transition, then spawns the provisioner, and **touches `last_active_at`**
   (a resumed session must not be the eviction's first candidate — which is now a real policy, not a
   future one). The cap is checked **before** the transition, and the resume answers `409 cap_reached`
@@ -557,7 +587,7 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
 
 ---
 
-## 5. The per-issue cycle (what actually worked, twenty-seven times)
+## 5. The per-issue cycle (what actually worked, twenty-eight times)
 
 Everything is **sequential: one writer at a time**, never two children editing files.
 
@@ -822,18 +852,19 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 - **`docs/build.md` is a story deliverable, not orchestrator-only.** If a story changes prerequisites or
   gates, the doc is in scope, and its prose must be reflowed (~100 columns), not just appended to.
 - **Every story adds at least one `case_*` to `scripts/verify.sh`.** The rule is in bold in
-  `docs/build.md`, and the reviewer enforces it. The current gate is 43 cases / 268 assertions, and a
+  `docs/build.md`, and the reviewer enforces it. The current gate is 44 cases / 284 assertions, and a
   case that makes its own session must run before the shared one exists or delete it at the end (the
   gate's cap is one live session).
 - **Adding an ADR means updating `docs/stories/README.md`**: the "Decisions taken while slicing" count
-  (now **thirty-one**) and the bullet list. A reviewer will check the links resolve — three did not,
+  (now **thirty-two**) and the bullet list. A reviewer will check the links resolve — three did not,
   once.
 - **An ADR that a later story changes gets a one-line "Superseded by ADR-00xx" note**, not a rewrite
   (ADR-0012 and ADR-0013 do this; HS-015 added two to ADR-0018).
 - **`GLOSSARY.md` is the vocabulary authority.** Check it before inventing a term. Recent entries to
   respect: **Step**, **Backend**, **Trigger**, **Transition**, **Sessions screen**, **Session screen**,
-  **Composer**, **Transcript**, **Delta kind**, **Message id**, **Turn boundary**, **Turn runner**,
-  **Tool call**, **Usage**, **Evict**, **Cap**, **Delete flow**, **Unsaved work**. `Status` in code is
+  **Composer**, **Transcript**, **Delta kind**, **Message id**, **Message snapshot**, **Compaction**,
+  **Turn boundary**, **Turn runner**, **Tool call**, **Usage**, **Evict**, **Cap**, **Delete flow**,
+  **Unsaved work**. `Status` in code is
   **State** in the glossary; a delta's node is a "kind's node", never a "channel"; a second spelling is
   forbidden, including inside an entry's own prose.
 - **`RESUME.md` is the one place this file's own claims can rot.** It contains counts, SHAs and "next
@@ -886,11 +917,13 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   from a ten-line `python3` unix socket (`fake_docker_ping`), and its python3 guard must stay **above** its
   `stop_serve`: a skipped case that stopped the server first leaves `phase_serve`'s own `stop_serve` with an
   empty pid, and `kill -TERM ""` exits 1 → the gate fails with a message about SIGTERM.
-- **`tests/preflight.rs` flakes about 3 runs in 40** with `git is not runnable (Text file busy (os error
-  26))`: its shims are written and exec'd while other test threads fork. Serial runs are clean (0/12).
-  Writing the shim aside and renaming it did **not** help (measured) — the forked child inherits the write
-  descriptor of the inode that is then exec'd. Re-run the binary; the real fix is to write the shim from
-  another process or to build every shim once under a lock. **Not fixed yet, and it can redden the gate.**
+- **`tests/preflight.rs` used to flake about 3 runs in 40** with `git is not runnable (Text file busy
+  (os error 26))`: its shims are written and exec'd while other test threads fork, and `exec` of a file any
+  process holds open for writing fails. Writing the shim aside and renaming it did **not** help — the
+  forked child inherits the write descriptor of the inode that is then exec'd. **Fixed in `1fb7454`**: a
+  `one_at_a_time()` mutex held for each whole test body, which works because every test in that binary
+  writes shims and nothing else in it forks (8 consecutive runs clean). If another test binary grows the
+  same pattern, copy that lock rather than the shim dance.
 
 ### Reviews
 
@@ -978,6 +1011,40 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   `docs/review/PER-91.md`, its Linear comment and PER-93's own. Read the issue's title before writing
   `Closes <IDENT>`.
 
+### Landmines HS-060 added
+
+- **Coalescing makes a row count a race, so a test must wait for the row it means.** A message of three
+  text deltas and one thinking delta becomes *two* rows when the writer sees one batch and four when it
+  does not — both correct (ADR-0031). `tests/compaction.rs` therefore waits on a predicate (`wait_for_ends`:
+  "every message id I wrote has its `message.end`") and never on a count. The first draft waited on
+  `log.len() == n` and failed for exactly this reason.
+- **A `LIMIT` in a candidate query is applied before the "already done" filter, so a bounded pass stalls.**
+  `compact` reads the eligible messages *without* a `LIMIT`, filters out the ones already folded, and only
+  then truncates to `MESSAGES_PER_PASS`. With the `LIMIT` in SQL, a session with more old messages than one
+  pass may fold would keep re-reading the same oldest ones and never advance. `one_pass_folds_at_most_the_limit`
+  proves it by running a second pass.
+- **A scan bound is not a delete bound.** `DELTAS` is bounded by `seq < <the newest candidate's
+  message.end>`; rows inside that region that belong to a message the pass is not folding are filtered out
+  by message id, and the deletes are exactly the rows the fold read. The bound also *narrows* the strictness
+  rule to the deltas that could belong to a message being folded — a test that puts a malformed delta after
+  the message's `message.end` now proves nothing.
+- **The `message.snapshot` a test writes by hand must be `last()`, not `first()`.** `fold.seqs` is built in
+  seq order and the snapshot takes the **highest** removed seq; over a message of one delta row (which
+  coalescing produces) `first()` and `last()` are the same number and the assertion cannot fail. The seq test
+  uses two delta kinds for that reason and asserts `removed.len() >= 2`.
+- **A test can age an event without touching the database.** `NewEvent.created_at` is the *producer's*, so
+  `tests/compaction.rs` appends its message with an instant two hours old and passes a one-hour window to
+  `Compactor::with_window`. Only the gate case, which drives the shipped artifact, has to stop the server and
+  rewrite `created_at` with `python3`'s `sqlite3`.
+- **A `warn` on a policy path is not noise when the alternative is a silent stall.** `sweep` first discarded
+  `Compaction::unreadable`, so a session with a payload the contract does not describe stopped being compacted
+  for ever with nothing in the log. The review's P2; the fix is one match arm.
+- **The fold holds no `await`, and that is what makes `abort()` safe.** `Compactor::sweep` is an `async fn`
+  that takes the std database mutex and does its work synchronously — the same shape
+  `Transitioner::apply` has — so `serve`'s `compactor.abort()` can only land at a `yield_now` between
+  sessions, never inside a transaction. An `await` inside the fold would let a shutdown roll a pass back
+  halfway through its deletes and snapshot.
+
 ## 7. Decisions taken on the operator's behalf (do not silently undo)
 
 | Decision | Why | Where recorded |
@@ -1020,13 +1087,14 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 | The create evicts the least recently active `idle` session outside its own lock scope; only `idle` is a candidate; the row moves before the container and the `stop` is **spawned**; a create with nothing idle answers `cap_reached` with its own sentence while the resume keeps ADR-0022's refusal | an eviction is a state change, and a state change takes the lock; an answer must not wait for container work (spec item 7); the two requests have different next steps | ADR-0024 |
 | The idle stop is a sweeper task on a **fixed five-second tick** (a constant, not a config key), its candidates are every `idle` row past `idle_stop_min` from one repository read, each stop is one `apply` plus one spawned best-effort `stop`, and `idle_stop_min = 0` spawns nothing | pacing is not a machine setting (ADR-0015) and the spec's config list is exhaustive (ADR-0006); a policy over rows needs no lock the create holds | ADR-0025 |
 | The turn timeout is the **turn runner's own deadline**, it hands the ladder a task of its own rather than a `select!` branch, and both endings record `turn_timeout` | the row keeps no per-turn timestamp (`last_active_at` moves on a steer, so a watcher would let a steered turn run for ever), and a dropped climb leaves a session stopped with nobody to resume it | ADR-0026, amending ADR-0020 |
-| The **tally is the event writer's** (inside the seq transaction, so the events repository parses exactly one kind's payload) and the **ceiling is the runner's** (a 100 ms poll, `>=`, first policy to fire owns the reason, a settle over the ceiling records the reason instead) | the backend emits `message.end` and the runner never sees the frame; a subscriber would add lag and a second parser; a policy that must record a reason owns the ending | ADR-0027 |
+| The **tally is the event writer's** (inside the seq transaction, so the events repository parses exactly one kind's payload — three since ADR-0032) and the **ceiling is the runner's** (a 100 ms poll, `>=`, first policy to fire owns the reason, a settle over the ceiling records the reason instead) | the backend emits `message.end` and the runner never sees the frame; a subscriber would add lag and a second parser; a policy that must record a reason owns the ending | ADR-0027 |
 | The **Docker preflight is a startup refusal** with `Complaint` values reported all at once, `hub` and `stub` exempt, and no new dependency (`df`, `git --version`, a hand-written `_ping`) | the story says "fail at startup instead of mid-turn", item 10 §5 makes the same check `ExecStartPre`, and `unsafe` is denied so `statvfs` was not reachable | ADR-0028 |
 | The **worktree's five host commands live in one `src/worktree.rs` value**, the backend runs them on `spawn_blocking`, and the **provisioner** writes the two columns the step reports | item 1 names them as host commands that four later stories read, and ADR-0019 forbids a backend writing a row | ADR-0029 |
 | A worktree step that **adopted** a worktree is **not undone** when a later step fails; a delete still removes it | those commits are the agent's work, and deleting them to tidy up after a step that made nothing is data loss; a delete's session is going away and was snapshotted | ADR-0029 |
 | The **project's refusals are the create's and the resume's 422** (`git_not_directory`, `submodules_present`, `worktree_config_enabled`), read by `worktree::refuse` through `Backends::refuse_project` on `spawn_blocking`, raised after the key and before the cap, with the stub answering "no repository" | spec item 1 says "refused with 422 at session creation"; the provisioner has no request to answer; a retry must still answer its row and a refused create must not evict (ADR-0030) |
 | **Coalescing is the writer's**, a pure `coalesce(batch)` between `collect` and `commit`, merging only consecutive deltas of one session, message id and delta kind, serialising once per run | spec item 15 names the 25 ms commit; ADR-0013 makes the writer the one place a seq is assigned; a per-delta re-serialise is ADR-0018's quadratic mistake (ADR-0031) |
 | **`ahead` is a function, not a column and not an endpoint**, and the story's demo is recorded as half-showable | no column exists, HS-061 owns `GET /changes`, a per-row git call in the list endpoint is a second data path; the step after the worktree refuses, so a live worktree cannot be shown from the artifact | ADR-0029 |
+| **Compaction is a background pass inside the database mutex**, one transaction per session, bounded by `MESSAGES_PER_PASS` after the already-folded filter and by the newest candidate's `message.end` on the delta scan; the 24-hour window is the spec's constant and not a key; the snapshot takes the highest removed seq and `sessions.last_seq` never moves; nothing is broadcast | `Transitioner::apply` takes the same mutex, so the skip of a running turn needs no second lock; the spec names 24 hours and its config list is exhaustive; a client already connected has the deltas and a reconnecting one reads the snapshot from its replay | ADR-0032 |
 
 ---
 
@@ -1037,71 +1105,67 @@ cd /home/adamolsson/projects/holosmith
 git status --short                          # must be clean
 . ~/.pi/toolchains/env.sh
 python3 /tmp/lin.py issues | grep -v ' Done ' | head   # next unfinished (recreate /tmp/lin.py, §2)
-python3 /tmp/lin.py issue PER-92            # sanity-check Linear is reachable and scoped
-scripts/verify.sh                           # baseline green (~6 min, 43 cases, 268 assertions)
+python3 /tmp/lin.py issue PER-93            # sanity-check Linear is reachable and scoped
+scripts/verify.sh                           # baseline green (~6 min, 44 cases, 284 assertions)
 ```
 
-Then start the cycle at **`PER-92` (HS-060 — message snapshots and compaction)**. Read §1's ten facts
+Then start the cycle at **`PER-93` (HS-061 — history truncation and pagination)**. Read §1's eleven facts
 first: the writer owns the batch (and coalescing), the runner owns both turn policies, the worktree step is
-real and idempotent, the create and the resume refuse a project the machine must not mount, and the page has
-been rendered (so a DOM claim needs a Chromium run — and a `web/` edit needs a rebuild before that run).
+real and idempotent, the create and the resume refuse a project the machine must not mount, compaction folds
+a day-old message and the log is therefore not append-only, and the page has been rendered (so a DOM claim
+needs a Chromium run — and a `web/` edit needs a rebuild before that run).
 
 **Do not try `HS-027` … `HS-058` first.** They are blocked on a Docker daemon this machine does not have;
-PER-59 records the argument, and the four stories whose blockers are all Done — `HS-060` (`PER-92`),
-`HS-061` (`PER-93`), `HS-065` (`PER-97`), `HS-075` (`PER-107`) — are the queue.
+PER-59 records the argument, and the stories whose blockers are all Done are `HS-061` (`PER-93`),
+`HS-065` (`PER-97`) and `HS-075` (`PER-107`).
 
-### What HS-060 is about, so the first brief is fast
+### What HS-061 is about, so the first brief is fast
+
+**The design is already worked out and filed as a comment on PER-93** (`python3 /tmp/lin.py issue PER-93`);
+read that before planning, and treat it as a proposal to argue rather than a decision. The short version:
 
 Acceptance, verbatim from `docs/stories/phase-2-deployable-mvp.md` (Size M, spec item 15):
 
-- [ ] A compaction job replaces delta rows of messages completed more than 24 hours ago with one
-      `message.snapshot` event holding full text, thinking and message id.
-- [ ] The snapshot takes the highest seq of the removed rows, so seq stays strictly increasing with gaps
-      only where compaction removed rows.
-- [ ] Clients apply a snapshot by message id, replacing rather than appending, and it is safe to receive
-      after partial deltas.
-- [ ] Compaction is per session, batched, and never runs while a turn is running for that session.
-- [ ] A test replays a client through a compaction boundary and asserts an identical transcript.
+- [ ] With no `Last-Event-ID`, the stream starts at the beginning of the 50th most recent message and sends
+      `history.truncated {before_seq}`.
+- [ ] `GET /api/sessions/:id/events/history?before=<seq>&limit=200` returns older events in order.
+- [ ] Pagination is stable under concurrent writes: a page's content does not shift because new events
+      arrived.
+- [ ] The UI loads older history on demand and shows a "load earlier" affordance, not an infinite scroll
+      that thrashes.
+- [ ] The 50-message window is configurable.
 
-**Already in place:** `MESSAGE_SNAPSHOT` is pinned in `events/mod.rs` and the page already *replaces* on a
-snapshot (`message.snapshot` → `Change::Snapshot` → `replaceChildren`), so the renderer owes nothing;
-`session.status`-shaped tasks are the pattern for a job (`src/sweeper.rs` is the closest: a public `sweep`
-for tests, a `run` loop on a constant tick, `spawn`); the events repository owns every statement against
-`events` and already has `read_since`/`delete_session_log`; `sessions.last_seq` is the durable counter and
-must not move; the stub's turn is what writes delta rows to age.
+**Already in place, so nothing here is rebuilt:** `events/stream.rs`'s subscribe → read → forward order and
+its `REPLAY_LIMIT` (whose comment names HS-061); `http/streams.rs`'s `resume_point`, whose doc says HS-061
+replaces "from the beginning" with the 50th message plus `history.truncated`; `web/src/transcript.ts`'s
+tolerance of a `turn.end` with no `turn.start` before it; `events/repository.rs`'s ownership of every
+`events` statement and its `read_since`; `sessions.last_seq` as the counter.
 
-**What the story has to decide (none of it is settled — plan it before coding):**
+**The five decisions to make (the PER-93 comment argues each):** the config key `history_window` (default
+50, refuse 0 — and a new key means the golden `config-default.toml` **and** `KNOWN_KEYS.len()`, currently
+26); what "the 50th most recent message" is (a **backwards** scan over `message.delta`/`message.snapshot`
+collecting distinct ids; the cut is the **lowest** seq of the 50th, because a block must be whole); where
+the cut is computed (the stream's read step, and only when `Last-Event-ID` is absent); the
+`history.truncated` payload (`{"before_seq", "turns_before"}` — the second key is what keeps a windowed
+replay's turn labels true, since the page numbers a turn from the `turn.start` frames it has seen); and the
+history page's shape plus a new `422 bad_query` for a `before` that is not a positive integer.
 
-1. **How "completed more than 24 hours ago" is read.** A `message.end` row's `created_at` is the only
-   durable instant; aging it in a test means writing `created_at` (tests may use the raw connection, as
-   `tests/idle_stop.rs` ages `last_active_at`). Decide whether the window is a config key or the spec's
-   fixed 24 hours (ADR-0006's list is exhaustive — inventing a key is a decision, not a detail).
-2. **Which rows are removed.** The deltas of that message (`message.delta` where the payload's `message_id`
-   matches) — the `message.end`, the tool frames and the turn boundaries stay. The snapshot carries the
-   concatenated `text` and `thinking`, so the read has to fold per delta kind the way the page does.
-3. **The insertion's seq.** Spec says "the highest seq of the removed rows"; that is a *reuse* of a number,
-   which is why the section says gaps are allowed where compaction removed rows. `last_seq` must not move
-   backwards, and a client whose `Last-Event-ID` is that number already has the deltas (ADR-0031's
-   neighbour, ADR-0013's counter rule).
-4. **Never while a turn runs.** Skip `running` (and `starting`/`deleting`) sessions; a session can start a
-   turn between the read and the write, so the skip has to be a predicate the write re-checks or a lock the
-   runner also takes — say which and why.
-5. **How the gate shows it.** The artifact has no aging API; `python3` (with `sqlite3`) is available, so a
-   `case_*` can stop the server, age rows in `$WORK/data/app.db`, restart it (a startup pass), and read the
-   stream for the snapshot. Decide whether compaction runs at startup, on a tick, or both — and keep the
-   gate's own `idle_stop_min = 1` in mind (§6: no case may leave a session idle for a minute).
+**Two traps.** `tests/streams.rs` and `scripts/verify.sh`'s stream readers assume a replay starts at the
+beginning — most tests open the stream with no `Last-Event-ID`, so a test's own log must fit inside the
+window (or the config must say so), and one test must set the window small on purpose. And a `case_history`
+that needs its own `history_window` boots its own server, because the gate's cap is one live session (§6).
 
-**What HS-059 settled that HS-060 inherits:**
+**What HS-060 settled that HS-061 inherits:**
 
-- **Coalescing is the writer's batch, and it is not compaction.** Two rows of one message and kind can sit
-  next to each other across commits; a compaction job that assumed one delta row per message would be wrong.
-- **The writer parses a delta's payload exactly** (`message_id`, `kind`, `text`, three keys, no fourth), and
-  a payload that is not that shape is left alone — a compaction job reading history must be as strict.
-- **The page already replaces on a snapshot** and is safe to receive one mid-stream; the "replay through a
-  compaction boundary" test belongs beside `tests/streams.rs`'s replay cases (`Sse::connect` with a
-  `Last-Event-ID`).
+- **The log is not append-only**, so a page is `seq < before ORDER BY seq DESC LIMIT n` and the only way a
+  page's content shifts is compaction removing rows — which is the documented gap rule, not a bug to test
+  against.
+- **A row count is a race.** Coalescing means "one message" is not "one row", so a test waits for the row it
+  means (a `message.end`, a `message.snapshot`) and never for `log.len() == n`.
+- **A bounded pass must apply its bound after its filter**, or it never advances — the same shape a paged
+  read has.
 - **A new `case_*` per story**, `docs/build.md`'s case paragraph, an ADR when a decision is hard to reverse,
-  and the gate's counts (43 cases / 268 assertions today).
+  and the gate's counts (44 cases / 284 assertions today).
 
 ## 9. Reporting
 
@@ -1111,15 +1175,18 @@ durable record; the review file is the durable review; the commit history is the
 stop before the backlog is empty, say so explicitly, say which issue is next, and leave the tree clean
 and the gates green — a half-finished story is worse than an honest stop.
 
-This session's ledger (the twenty-seventh story — and the first where the queue's order had to be
-reinterpreted, because the Docker-backed run in front of it is blocked):
+This session's ledger (the twenty-eighth story; it also fixed the `tests/preflight.rs` flake, which had
+been reddening the gate at random for several sessions):
 
 | Issue | Story | Commits | Outcome |
 | --- | --- | --- | --- |
+| — | (a flake, not a story) | `1fb7454` | **Fixed**: `tests/preflight.rs` failed ~3 runs in 40 with `Text file busy (os error 26)`. `exec` of a file any process holds open for writing fails, and `std::process::Command` forks on another thread's behalf, inheriting the write descriptor of a shim written a moment earlier. A `one_at_a_time()` mutex around each whole test body is the fix, and it works because every test in that binary writes shims and nothing else in it forks. 8 consecutive runs clean; the first baseline gate run of the session had died on it |
+| PER-92 | HS-060 message snapshots and compaction | `5c0f960`, `e2a24b6`, `f0ecf8c`, `901b4ef`, `d1cb620` | Done — Standards **PASS with findings** (no P1; 3 P2, 5 P3), Spec **PASS**. The three P2s were all real: ADR-0027/0031 both claimed "the repository parses exactly one kind's payload" and compaction makes it three (amended in both, plus the README parenthetical); `sweep` discarded `Compaction::unreadable`, so a session with a payload the contract does not describe would stall for ever with no log line (one `warn` arm); and the fold read **every** delta row the session had ever held while holding the database mutex (now bounded by the newest candidate's `message.end` — which also *narrows* the strictness rule to the deltas that could belong to a message being folded, and the test moved its bad row accordingly). Also fixed: a self-contradicting `GLOSSARY` **Seq** entry, a `pub(super)` that meant the crate root, and two doc comments. New: `src/compactor.rs`, `EventRepository::compact`, `events::Compaction`, the shared `parse_delta`, ADR-0032, 10 `tests/compaction.rs` cases, `case_compaction`. **Four mutation proofs** (state re-read, `first()` for `last()`, the already-folded filter, the unreadable guard) — and one of them taught the story something: the seq test's message had one delta row because of coalescing, so `first()` and `last()` agreed until the test used two delta kinds |
+| PER-93 | HS-061 history truncation and pagination | — | **Not started.** The design was worked out and filed as a comment on the issue (the window key, the backwards scan for the cut, `history.truncated`'s `turns_before`, the page shape, the "Load earlier" prepend), so the next session's plan is a review of that rather than a from-scratch design. §8 carries the summary and the two traps |
 | PER-58 | HS-026 worktree refusal rules | `18e4695`, `c233ab7` | Done — Standards **PASS with findings** (1 P2, 5 P3), Spec **PASS with findings** (1 P2, 3 P3). The spec P2 was real: **a resume bypassed the guard**, so a project that became unsafe could be re-mounted — `resume` now answers the same three codes. The standards P2 was the repo's one log-and-answer pattern (`internal(op, error)`) re-implemented by hand. Also fixed: `git config` needed **`--local`** (a global `extensions.worktreeConfig` would have refused every project on the machine — measured before the fix), an HTTP case for `Unreadable` → `500`, and the `.gitmodules` rule now argues itself in ADR-0030 (the declaration is checked out into `/work`, so `submodule update --init` writes hooks under the mounted `.git/modules`). New: `worktree::refuse`/`Refusal`, three codes + constructors, `Backends::refuse_project`, `createFailure` on the page, ADR-0030, 12 tests, `case_worktree_refusal`. Also **first: the story rewrote HS-025's behaviour** (a project the machine does not hold is now a 422, not an `error` row), recorded rather than papered over |
 | PER-91 | HS-059 event coalescing | `06f506b`, `65f7107`, `5207a97` | Done — Standards **BLOCK** (1 P1, 3 P2, 7 P3), Spec OK with notes. The P1 was real and is the lesson of the session: the live-path test asserted row adjacency **ADR-0031 itself declares false**, and passed only because a zero-paced stub fit one 25 ms window — fixed by giving the test a two-second commit window, not by deleting the assertion. P2s: `coalesce` re-serialised the whole run per delta (quadratic — ADR-0018's own argument), `pub` on an internal helper, and a shape check that would silently drop a fourth key. The **gate case also had to move**: at `max_live_sessions = 1` its create evicted the run's shared session and `case_turn_timeout` failed with `409` where it expected `202`. Measured: 5,000 deltas → 3 rows; the stub's seven → three. New: `events::coalesce`, ADR-0031, 3 `tests/events.rs` cases, a live-path case, 2 node tests, `case_event_coalescing`. **The issue number was wrong** — the commits say `Closes PER-93` (HS-061); `docs/review/PER-91.md` and both Linear issues carry the correction |
 | PER-59 | HS-027 hardened `.git` mounts and V1 | — | **Not done: blocked.** No Docker daemon here (`docker` CLI 29.9.2, no `/var/run/docker.sock`), and every acceptance line is a fact about a **container** (six mounts, `--cap-drop ALL`, `no-new-privileges`, the V1 gate). Not implemented against a fake daemon; PER-59 carries the argument and the exact question, and `HS-028 … HS-058` are blocked transitively (their roots — `PER-74`, `PER-79`, `PER-84`, `PER-94`, `PER-100` — carry a pointer) |
-| — | HS-061, HS-065, HS-075 | — | Not started. They are the rest of the unblocked queue: `PER-93`, `PER-97` and `PER-107`; everything else waits on `HS-027`'s chain |
+| — | HS-065, HS-075 | — | Not started. They are the rest of the unblocked queue after HS-061: `PER-97` and `PER-107`; everything else waits on `HS-027`'s chain |
 
 The session before it, for the shape of a ledger entry:
 
