@@ -1,4 +1,4 @@
-# RESUME — orchestrator handoff (cold start, after twenty stories)
+# RESUME — orchestrator handoff (cold start, after twenty-two stories)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating
 procedure and still governs; this file is the state of the world — what exists, what the environment
@@ -37,11 +37,11 @@ created, prompted, aborted, steered, stopped, resumed and deleted, and it is dri
 ## 1. Where the work stands
 
 Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is clean, and every
-commit is **pushed** (see the note on pushing below). `HEAD` is `3408c38`; any commit after it is
+commit is **pushed** (see the note on pushing below). `HEAD` is `e767757`; any commit after it is
 bookkeeping — this file's own refresh.
 
-**Linear: 20 Done, 60 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-020`
-(`PER-33` … `PER-52`).
+**Linear: 22 Done, 58 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-022`
+(`PER-33` … `PER-54`).
 
 | Story | Linear | Commits | ADR |
 | --- | --- | --- | --- |
@@ -65,14 +65,16 @@ bookkeeping — this file's own refresh.
 | HS-018 stopped state and resume | PER-50 | `dce53c4`, `ff9d907` | 0022 |
 | HS-019 delete flow | PER-51 | `3d5c415`, `7c4ea02`, `cd85572`, `db95a3f` | 0023 |
 | HS-020 cap and eviction | PER-52 | `a3c6825`, `4f37211`, `f67eb6f` | 0024 |
+| HS-021 idle stop | PER-53 | `5da2ae2` | 0025 |
+| HS-022 turn timeout | PER-54 | `e767757` | 0026 (amends 0020) |
 
-**Next issue: `PER-53` (HS-021 — idle stop).** Then `PER-54` (HS-022 — turn timeout), `PER-55`
-(HS-023 — token budget), and onward in `HS-###` order.
+**Next issue: `PER-55` (HS-023 — token budget).** Then `PER-56` (HS-024 — the Docker backend's first
+story) and onward in `HS-###` order. §8 carries the design for HS-023 worked out but not built.
 
 Ranking, per `PROMPT.md`: Linear priority (all are `No priority`) → `HS-###` order in `docs/stories/` →
 anything already `In Progress` first → skip an issue whose `Blocked by` stories are not `Done`.
 
-### Two facts a cold start must know
+### Four facts a cold start must know
 
 1. **A running turn can now be stopped, in two rungs, with or without the way back.** `src/ladder.rs`
    is the shared routine: `clear_queue` then `abort`, wait up to `abort_grace` (the grace *bounds rung
@@ -84,17 +86,34 @@ anything already `In Progress` first → skip an issue whose `Blocked by` storie
    is why exactly one `StateError::Illegal` in `turn.rs` is a `debug` line. What is still open: **the
    turn timeout and the token budget** (HS-022/HS-023), which climb `end_turn` with their own reason —
    the reason words so far are `forced_abort`, `deleted` and `evicted`.
-2. **The web page has now been rendered, including the paths a frame changes.** Playwright's Chromium
+2. **A turn that will not end is ended for it, and the reason says which policy asked.** The deadline is
+   the turn runner's own (`Turn::run`), not a sweeper's, because the row keeps no per-turn timestamp —
+   `last_active_at` is activity, so a steer moves it. It races `start_turn` against a sleep and, when the
+   sleep wins, hands the ladder a **task of its own** (`Ladder::spawn`) and then keeps awaiting the turn,
+   because rung 1 working *is* the agent's `TurnEnd::Aborted`. **A `select!` branch instead of a spawned
+   task is a bug**: it drops the climb, and a climb dropped between rung 2's `stopped` and its resume
+   leaves a session nobody can bring back. Both endings record `turn_timeout` — the runner's
+   `running → idle` and the ladder's `running → stopped`. `turn_timeout_min = 0` builds no timer at all.
+   The reason words are now five: `forced_abort`, `deleted`, `evicted`, `idle_stop`, `turn_timeout`.
+3. **The web page has now been rendered, including the paths a frame changes.** Playwright's Chromium
    is inside the sandbox (see §2), and HS-016 … HS-018 drove the sessions list, the create form, the
    session screen, the composer's four actions, the transcript's blocks and boundaries, and the abort /
    steer / resume round trips; HS-019 drove the delete's 202 → 404 and the closed stream; HS-020 drove
    the cap's eviction **both ways** — the row as drawn from the list, and a row turning `stopped` under
    the operator from a `session.status` frame with no reload (which is where that story's one blocker
-   lived). This is still **not** a substitute for a gate — nothing in `scripts/` may require a browser —
+   lived); HS-021 drove the sweeper's frame path the same way (a row drawn `idle`, then turned
+   `stopped · idle_stop` under the operator with no reload). This is still **not** a substitute for a
+   gate — nothing in `scripts/` may require a browser —
    but "unverified from source" is no longer the honest answer for a screen that has been looked at.
    What has *not* been looked at: the hub (HS-057+), the changes sheet, and anything phase 2 adds.
 
-Two things HS-014 and HS-015 settled that later stories inherit:
+4. **A quiet session stops costing money, on a timer nobody asks for.** `sweeper.rs` reads every `idle`
+   session whose `last_active_at` is older than `idle_stop_min` (default 30; **`0` disables it**), applies
+   `Trigger::IdleStop` with reason `idle_stop`, logs one `info` line per stop, and spawns the backend's
+   `stop`. The tick is a **constant** (5 s), not a config key, so the gate pays a real minute for
+   `case_idle_stop`. Only `idle` is a candidate, and the repository's `idle_before` carries that predicate.
+
+Three things HS-014 and HS-015 settled that later stories inherit:
 
 - **The transcript's event contract** (ADR-0018 + ADR-0019), emitted by the backend:
 
@@ -125,11 +144,21 @@ Two things HS-014 and HS-015 settled that later stories inherit:
   `cap_without_idle` (`cap_reached` with the create's sentence — the machine is full *and* nothing is
   idle, HS-020).
 
-**Pushing works, through the sandbox's ssh-agent.** `origin` is
-`git@github.com:AdamOlsson/holosmith.git`; `bwrap.sh` binds the host's `SSH_AUTH_SOCK` at
-`/run/ssh-agent.sock` (the private key never enters the sandbox), so `git push origin master` signs on
-the host. Confirmed: `b49f2cd` … `3408c38` are all on `origin/master`. Push after every story, and if a
-push fails, report it — do not fake one.
+**Pushing works, through the sandbox's ssh-agent — but the sandbox's own `~/.ssh/config` gets in the
+way.** `origin` is `git@github.com:AdamOlsson/holosmith.git`; `bwrap.sh` binds the host's
+`SSH_AUTH_SOCK` at `/run/ssh-agent.sock` (the private key never enters the sandbox), so a push signs on
+the host. The bound `~/.ssh/config` has a `Host github.com` block with `IdentityFile ~/.ssh/github`, and
+that file is **not** in the sandbox, so a plain `git push` fails with
+`no such identity: /home/adamolsson/.ssh/github: No such file or directory` / `Permission denied
+(publickey)`. It is intermittent — it worked once and failed the next commit — so use the override every
+time:
+
+```bash
+git -c core.sshCommand='ssh -o IdentityAgent=/run/ssh-agent.sock' push origin master
+```
+
+Confirmed on `origin/master`: `b49f2cd` … `e767757`. Push after every story, and if a push fails, report
+it — do not fake one.
 
 ---
 
@@ -248,8 +277,9 @@ If that fails, **stop and report** — that is a `PROMPT.md` stop condition.
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                     # 213 lib + 21 integration binaries (14 delete.rs, 6 eviction.rs)
-cd web && npm test             # 21 transcript tests (node's own runner)
+cargo test                     # 213 lib + 25 integration binaries (8 idle_stop.rs, 6 turn_timeout.rs,
+                               # 14 delete.rs, 6 eviction.rs); `grep -cE 'test result: ok'` is 26
+cd web && npm test             # 22 transcript tests (node's own runner)
 cd web && npx tsc --noEmit     # not a gate phase, but a web edit that does not typecheck is a bug
 scripts/verify.sh              # THE one-command gate since HS-006
 ```
@@ -257,9 +287,9 @@ scripts/verify.sh              # THE one-command gate since HS-006
 `scripts/verify.sh` runs six phases, cheapest first: `fmt`, `clippy`, `test`, `build`
 (`scripts/build.sh`, which itself runs `build-web.sh` — `npm test` then Vite — and `check-static.sh`
 last), `embed` (`scripts/check-embed.sh`), then `serve` — the **shipped musl artifact** booted on
-`--port 0` with a temp data dir, running **36 cases plus a CORS sweep (169 assertions)**, then torn down
-with `SIGTERM` and an asserted exit 0. It takes ~3–4 min (both musl targets). `--no-build` skips `build`
-and `embed`; `--keep` keeps the work dir.
+`--port 0` with a temp data dir, running **38 cases plus a CORS sweep (205 assertions)**, then torn down
+with `SIGTERM` and an asserted exit 0. It takes ~3 min (both musl targets) plus `case_idle_stop`'s real
+minute. `--no-build` skips `build` and `embed`; `--keep` keeps the work dir.
 
 A story is not done until all four are green on a clean tree, and then you run the story's own demo
 yourself and paste its output.
@@ -302,13 +332,17 @@ crates/holosmith/
                             docker.rs (refuses everything until HS-024)
   src/provisioner.rs        the four-step background task and its five session.status events; stops at
                             a step boundary when the row leaves `starting`
-  src/turn.rs               the turn runner: touch → the backend's turn → agent_settled + touch,
-                            abort_completed (or a `debug` line if the ladder got there first), or
-                            unexpected_exit with the reason. `TurnEnd` is the backend's answer
+  src/turn.rs               the turn runner (HS-015) and the turn timeout (HS-022): touch → the
+                            backend's turn → agent_settled + touch, abort_completed (or a `debug` line if
+                            the ladder got there first), or unexpected_exit with the reason. Under a
+                            deadline the ladder is *spawned* and the turn keeps being awaited;
+                            `TURN_TIMEOUT`, `turn::timeout(minutes)`. `TurnEnd` is the backend's answer
   src/ladder.rs             the abort ladder (HS-016): clear_queue → abort → wait out abort_grace →
                             `running → stopped` with the caller's reason → stop. `climb` adds the
                             resume (the abort); `end_turn` returns `Ending::{Asked,Forced}` and does
                             not (the delete, and HS-022/HS-023). `FORCED_ABORT`
+  src/sweeper.rs            the idle stop's task (HS-021): `Sweeper::sweep` (one pass, public for tests),
+                            `run` (the tick loop), `spawn`; `IDLE_STOP`, `TICK` (5 s, a constant)
   src/deleter.rs            the delete flow's task (HS-019): revoke_key (a no-op until HS-039) →
                             `backend.delete` → remove the row *and its event log* in one
                             transaction → close the session's streams. `DELETED` is the rung-2 word
@@ -337,8 +371,8 @@ crates/holosmith/
   tests/                    version_cli, config_cli, http_contract, serve_cli, db_migrations,
                             pin_single_source, guards, session_repository, sessions_api, events,
                             streams, provisioning, state_machine, session_list, session_screen,
-                            turns, abort, steer, resume, delete, eviction, support/mod.rs (the shared
-                            harness)
+                            turns, abort, steer, resume, delete, eviction, idle_stop, turn_timeout,
+                            support/mod.rs (the shared harness)
 web/                        Vite 7 + TypeScript, two screens (`/` and `/sessions/<id>`);
                             package-lock COMMITTED; main.ts is the DOM, transcript.ts the renderer's
                             rules (frame parsing, block model, affordances, `stoppedNotice` /
@@ -352,9 +386,9 @@ scripts/check-static.sh     file/readelf, empty-root serve + cmp against web/dis
 scripts/check-embed.sh      the three embed cases (present / absent warns / required fails)
 scripts/verify.sh           the one-command gate (see §3)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0024          read the recent ones before planning anything
+docs/adr/0001…0026          read the recent ones before planning anything
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-52   each a verbatim review + a `## Resolution` table
+docs/review/PER-33…PER-54   each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -369,11 +403,15 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   the delete flow, the cap with eviction, the Sessions screen with its create form and the
   "nothing was deleted" notice, the session screen at `/sessions/<id>` with a live transcript and a
   four-action composer.
-- **Not built yet:** the **idle stop and the drain** (HS-021 idle stop, HS-044 drain — the cap stops an
-  idle session when a create needs its slot, so `stopped` has one producer), the turn timeout (HS-022),
-  the token budget (HS-023), tool-output files and `output_ref` (HS-033), usage totals (HS-034), the
-  preview listener (HS-041), Docker (HS-024+), merge, publish, the hub, releases, and any **delete
-  affordance in `web/`** (the API has the endpoint; the page has no button).
+- **Not built yet:** the **token budget** (HS-023 — §8 carries the design), the drain (HS-044), tool-output
+  files and `output_ref` (HS-033), usage totals on the screen (HS-034 — the columns `usage_in`/`usage_out`
+  exist and are still always 0, because nothing persists usage yet: HS-023 does), the preview listener
+  (HS-041), the stopped-session expiry (HS-064), Docker (HS-024+), merge, publish, the hub, releases, and
+  any **delete affordance in `web/`** (the API has the endpoint; the page has no button).
+- **Three policies can now stop a session and they must not be confused:** the cap evicts (`evicted`,
+  inside a create), the sweeper stops a quiet one (`idle_stop`, on its own tick), and the turn timeout
+  ends a *turn* (`turn_timeout`, from the runner). All four stop-shaped reasons go through
+  `Transitioner::apply`, and the row moves before the container in every one of them.
 - **`runtime::Backend`** has `Stub` and `Docker`; `serve --backend` and the config key `backend` select
   it. `DockerBackend` **refuses every operation** until HS-024, and the default backend is `docker`
   (ADR-0001: the stub is opt-in), so a default build provisions a session to `error` with a reason
@@ -402,7 +440,7 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
 
 ---
 
-## 5. The per-issue cycle (what actually worked, twenty times)
+## 5. The per-issue cycle (what actually worked, twenty-two times)
 
 Everything is **sequential: one writer at a time**, never two children editing files.
 
@@ -447,7 +485,7 @@ Everything is **sequential: one writer at a time**, never two children editing f
    It is a cold-start snapshot. The operator asked for it once at the end of a session; refreshing it
    after each story is cheap insurance if the session dies.
 
-Commit messages are prose about *why*, not a restatement of the diff. Look at the last twenty for tone.
+Commit messages are prose about *why*, not a restatement of the diff. Look at the last twenty-two for tone.
 
 Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/review/` + `git log`):
 
@@ -564,7 +602,18 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   creates the session it depends on. Before adding a case, ask what it leaves behind *and* what it
   needs from what came before.
 - **Banner line order is pinned by tests** (`log`, version line, `config`, `data_root`, `control_listen`,
-  `control_origin`, `preview_listen`, `database … schema n`).
+  `control_origin`, `preview_listen`, `database … schema n`) — and `tests/serve_cli.rs` asserts stderr has
+  **exactly eight lines** at default filter. A new `info!` at startup therefore fails a gate test; HS-021
+  and HS-022's startup facts are `debug!` for that reason. A *per-event* `info!` line is fine (the gate
+  greps for it) because it happens after the banner and only when the thing happens.
+- **A `select!` branch that awaits a ladder climb is a bug.** `select!` drops the loser, and a climb
+  dropped after rung 2 moved the row leaves the session `stopped` with nobody to resume it — silently,
+  because the runner's own ending is the documented `debug` line. `Ladder::spawn` is the entry point
+  (HS-022's review caught this).
+- **`fetch_sse_until`'s line budget is 800, not 200**, because the shared session's log grows with every
+  turn this run takes (four or five turns is ~300 lines of replay). A story that adds turns should re-check
+  it; a needle that a *previous* turn's frame can satisfy is still the more common trap (see the stream
+  rule above).
 - **`--port 0` re-derives `control_origin`** from the bound port after `bind`; the guard compares the
   browser's `Origin` as text, which is what makes it work in tests and demos.
 - **`{id}` is axum 0.8's capture syntax**; the spec writes `:id`.
@@ -614,6 +663,10 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 - **A row's text is written in two places, and they must be one function.** A row is drawn once
   (`sessionRow`) and patched per frame (`applyStatus`); HS-020's blocker was a sentence written only in
   the first. Anything the frame path must show belongs in a pure `transcript.ts` function both call.
+  `stoppedNotice` is now **two words wide** (`evicted` "to make room", `idle_stop` "sitting idle"), each
+  with its own test and neither shared with `forced_abort`, `deleted` or `turn_timeout` — a stopped row
+  for those keeps the dash, and `turn_timeout` is resumed at once anyway so it shows as `idle ·
+  turn_timeout`. Adding a third word means a third sentence *and* a test that it is not another's.
 - **A delta is one appended text node; a snapshot is `replaceChildren`.** Never `textContent +=` (O(n)
   per delta ⇒ O(n²) per turn), never a document query per frame — blocks are a `Map<message id, nodes>`,
   tools a `Map<tool id, nodes>`.
@@ -648,7 +701,7 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 - **Every story adds at least one `case_*` to `scripts/verify.sh`.** The rule is in bold in
   `docs/build.md`, and the reviewer enforces it. The current gate is 36 cases / 169 assertions.
 - **Adding an ADR means updating `docs/stories/README.md`**: the "Decisions taken while slicing" count
-  (now **twenty-four**) and the bullet list. A reviewer will check the links resolve — three did not,
+  (now **twenty-six**) and the bullet list. A reviewer will check the links resolve — three did not,
   once.
 - **An ADR that a later story changes gets a one-line "Superseded by ADR-00xx" note**, not a rewrite
   (ADR-0012 and ADR-0013 do this; HS-015 added two to ADR-0018).
@@ -673,6 +726,15 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 - It reliably finds one real should-fix per story, and since HS-019 usually one **P1-class** one: HS-019's
   was a refusal that had already ended the turn, HS-020's a sentence written on only one of two DOM
   paths. Both were found in the *acceptance bullet's* own words. Take them seriously.
+- **HS-022 came back `BLOCK`, with a P1 on each axis, and both were real.** The spec one was a
+  concurrency bug the *plan and the ADR had argued for* (a `select!` around the ladder) — a good plan is
+  not a defence. The standards one was a **scripted-edit bug of mine**: a Python insertion into
+  `docs/stories/README.md` duplicated a bullet onto one line. After any scripted doc edit, `git diff` the
+  file's changed lines and read them; `cargo`/`npm` would never catch it.
+- **The reviewer's cheapest useful ask is usually a test that cannot fail.** Two stories running, it
+  named one (`each_turn_gets_its_own_clock` built a fresh object per case; `the_bound_is_the_config_key_in_minutes`
+  bracketed too loosely) and the fix was to make the wrong design fail. Do that, then mutate the
+  behaviour and watch the test go red.
 - **Mine its "verification" section.** Its "could not verify without running" list is exactly the
   checklist to run yourself, and its "verified by reading" table is what to quote in the ship comment.
 
@@ -732,12 +794,14 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 | `message.end`, `tool.start`, `tool.end` payloads are pinned now; `output_ref` and usage persistence wait | HS-033/HS-034 own their full treatment, and the screen renders them minimally meanwhile | ADR-0019 |
 | Story docs in `docs/stories/` are not edited — they are the source the Linear issues were imported from | editing them drifts from Linear; the ADR carries the contract instead | PER-34 plan comment |
 | S/M stories are implemented in-session; M/L with new surface goes to a worker child with a written brief | the orchestrator already holds the plan for small ones; a fresh context is better for a large slice | §5, and every Linear note since HS-011 |
-| A turn's end is typed (`TurnEnd`), and cancellation is the backend's — no server token, no `select!` | the agent process is what must stop, and a token would let the server believe it had stopped a turn still running | ADR-0020 |
-| Abort climbs two rungs, the row moves before the container is killed, and the ladder's reason is a parameter | the other order leaves a row saying `idle` over a dead container; HS-022/HS-023 pass their own word | ADR-0020 |
+| A turn's end is typed (`TurnEnd`), and cancellation is the backend's — no server token, no `select!` (the `select!` half is amended by ADR-0026: one exists, but it cancels nothing and the ladder is spawned) | the agent process is what must stop, and a token would let the server believe it had stopped a turn still running | ADR-0020 |
+| Abort climbs two rungs, the row moves before the container is killed, and the ladder's reason is a parameter | the other order leaves a row saying `idle` over a dead container; HS-022 passes `turn_timeout` and HS-023 `budget_exceeded` | ADR-0020 |
 | A steer is `turn.steer` with `{"text"}` and **no** message id; the agent is asked before the record is written | a steer is one frame that nothing continues, so an id would have no second use; the record must claim only what was delivered | ADR-0021 |
 | No stop endpoint; resume is the only way back, the cap is checked before its transition, and `SessionBackend::resume` stays uncalled | the spec has no stop endpoint, and the policies that stop a session are HS-020/021/044 | ADR-0022 |
 | The delete's snapshot is the request's and the removal a task's; the turn is ended by `end_turn` (no resume); the event log goes with the row, so the writer drops an event whose session has gone; idempotency is keyed to the row's state; `force` is the literal `force=true` | only a synchronous snapshot can answer 409 and leave the row intact, and a log nothing can read is dead weight | ADR-0023 |
 | The create evicts the least recently active `idle` session outside its own lock scope; only `idle` is a candidate; the row moves before the container and the `stop` is **spawned**; a create with nothing idle answers `cap_reached` with its own sentence while the resume keeps ADR-0022's refusal | an eviction is a state change, and a state change takes the lock; an answer must not wait for container work (spec item 7); the two requests have different next steps | ADR-0024 |
+| The idle stop is a sweeper task on a **fixed five-second tick** (a constant, not a config key), its candidates are every `idle` row past `idle_stop_min` from one repository read, each stop is one `apply` plus one spawned best-effort `stop`, and `idle_stop_min = 0` spawns nothing | pacing is not a machine setting (ADR-0015) and the spec's config list is exhaustive (ADR-0006); a policy over rows needs no lock the create holds | ADR-0025 |
+| The turn timeout is the **turn runner's own deadline**, it hands the ladder a task of its own rather than a `select!` branch, and both endings record `turn_timeout` | the row keeps no per-turn timestamp (`last_active_at` moves on a steer, so a watcher would let a steered turn run for ever), and a dropped climb leaves a session stopped with nobody to resume it | ADR-0026, amending ADR-0020 |
 
 ---
 
@@ -748,58 +812,77 @@ cd /home/adamolsson/projects/holosmith
 git status --short                          # must be clean
 . ~/.pi/toolchains/env.sh
 python3 /tmp/lin.py issues | grep -v ' Done ' | head   # next unfinished (recreate /tmp/lin.py, §2)
-python3 /tmp/lin.py issue PER-53            # sanity-check Linear is reachable and scoped
-scripts/verify.sh                           # baseline green (~4 min, 36 cases, 169 assertions)
+python3 /tmp/lin.py issue PER-55            # sanity-check Linear is reachable and scoped
+scripts/verify.sh                           # baseline green (~4 min, 38 cases, 205 assertions)
 ```
 
-Then start the cycle at **`PER-53` (HS-021 — idle stop)**. Read §1's two facts first: the ladder has
-`end_turn` and `climb`, and the page has been rendered (so a DOM claim needs a Chromium run — and a
-`web/` edit needs a rebuild before that run).
+Then start the cycle at **`PER-55` (HS-023 — token budget)**. Read §1's four facts first: the turn
+timeout is the runner's own deadline, and the page has been rendered (so a DOM claim needs a Chromium run
+— and a `web/` edit needs a rebuild before that run).
 
-### What HS-021 is about, so the first brief is fast
+### What HS-023 is about, so the first brief is fast
 
-Acceptance, verbatim from `docs/stories/phase-1-session-lifecycle-stub.md` (Size S, spec item 13):
+Acceptance, verbatim from `docs/stories/phase-1-session-lifecycle-stub.md` (Size S, spec item 13, V3):
 
-- A sweeper moves `idle` sessions whose `last_active_at` is older than `idle_stop_min` to `stopped` with
-  reason `idle_stop`.
-- It never touches `running`, `starting`, `error` or `deleting`.
-- Stopping frees a cap slot immediately.
-- The sweep is observable: a `session.status` event with the reason, and a log line per stop.
+- `usage_in` and `usage_out` are updated from `usage` on `message.end` and persisted per session.
+- At `max_session_tokens` the turn is aborted through the shared ladder with reason `budget_exceeded`.
+- Unset means unlimited; the key is optional and absence is not an error.
+- If the backend reports no usage, the budget is disabled and the UI says so — this is the spec's stated
+  contingency, exercised with a stub mode that omits usage.
 
-**Already in place:** the config key `idle_stop_min` (default and validation included — read
-`config/schema.rs` for what `0` currently means), the table's `idle + idle_stop → stopped` row,
-`Transitioner::apply`, `SessionBackend::stop`, and HS-020's eviction as the exact shape to reuse: the
-row-before-container order with a **spawned** best-effort `stop` (`evict_one` in `http/sessions.rs`), the
-reason-word convention (`forced_abort`, `deleted`, `evicted`), and `stoppedNotice`/`stoppedDetail` in
-`web/src/transcript.ts` if the page should say the same "nothing was deleted" sentence for `idle_stop`
-(HS-020 deliberately left that word out of the map).
+**Already in place:** the config key `max_session_tokens: Option<u64>` (unset by default, validated
+`≥ 1` when set, in `config/mod.rs`), the columns `usage_in`/`usage_out` (migration 0002, always 0, read by
+the row's serializer but written by nobody), the stub's `message.end` frame with
+`usage: {"in": 1200, "out": 340}` at the end of every scripted turn, `Ladder::spawn`, `Turn`'s deadline
+machinery and its `finished(…, reason)` seam, and `Transitioner::apply`.
 
-**What is missing:** the sweeper itself (a task on a timer — `serve` owns the wiring, and its shutdown
-must not wait for a tick), the candidate query for *elapsed* idleness (`oldest_idle` is "the least
-recently active idle", which has no time bound; the sweeper needs `last_active_at < now - idle_stop_min`
-and should probably take **all** such rows, oldest first, not one), and the gate's case — a one-minute
-config is too slow for `verify.sh`, so the sweep needs a test-only short interval the way `abort_grace`
-is shortened in tests, and the case must be self-contained (§6: a case owns the state it asserts).
+**The design worked out but not built** (this is the cheapest shape that keeps the reason on the row):
 
-**Decide canonically and record:** the sweep interval and whether it is a config key; whether
-`idle_stop_min = 0` means disabled or "stop everything" (check what the config layer already says);
-whether a sweep stops every expired session or one per tick; that a stop is one `apply` plus one
-`stop` per session; and what the log line per stop says (the story asks for one).
+1. **Persist usage in the event writer's transaction.** `EventRepository::insert_batch` already borrows the
+   sessions repository *through its own transaction* to bump `last_seq` — the same seam takes a new
+   `SessionRepository::add_usage(id, in, out)` (`UPDATE sessions SET usage_in = usage_in + ?2, usage_out =
+   usage_out + ?3 WHERE id = ?1`) for a `message.end` event. One funnel, durable before the broadcast, no
+   second writer. Cost: the events repository learns one kind's payload (parse `usage.in`/`usage.out` with
+   `serde_json`), which is a contract change worth its own ADR paragraph — the alternative, a broadcast
+   subscriber in the runner, has lag semantics and a second parser.
+2. **Enforce in the turn runner, next to the deadline.** `Turn` gains `budget: Option<u64>` and a third
+   arm in its `select!` (a ~100 ms tick that reads the row's `usage_in + usage_out` and compares). Over the
+   limit → `Ladder::spawn(session, BUDGET_EXCEEDED)` and keep awaiting the turn, exactly as the timeout
+   does — **not** a `select!` branch (see §1 fact 2: a dropped climb can leave a row stopped). The runner
+   then records `budget_exceeded` on the ending it writes, which is the only way the reason reaches
+   `status_reason` when rung 1 works.
+3. **`0`/unset** are different: unset is unlimited (no timer, no reads); `0` is refused by the config
+   validator already, so nothing to decide.
+4. **The stub needs a mode that omits usage** (`StubBackend::omitting_usage()` next to `ignoring_abort`),
+   and bullet 4's "the UI says so" is a `transcript.ts` rule: a settled session whose totals are 0 says
+   "usage not reported" where it would otherwise show tokens. Keep it a pure function with a test in
+   `web/test/transcript.test.ts`, and remember both DOM paths (HS-020's lesson).
+5. **Gate case**, and this one *can* fire cheaply: `max_session_tokens = 1000` in the gate config is under
+   the stub's 1540-per-turn, so a prompt trips it inside a turn. Assert the row's reason, the
+   `session.status` frame's reason, and that the session comes back (`idle`), and remember the turn is
+   nearly over when `message.end` arrives, so the abort may race the settle — assert the *reason* on
+   whichever ending wins, or make the stub emit usage earlier.
 
-### What HS-020 settled that HS-021 inherits
+**Decide canonically and record:** whether the writer or the runner parses `message.end` (and if the
+writer, that the events repository may name one kind's fields); the poll interval for the budget; whether
+a trip on the *last* frame of a turn is worth aborting at all (it is: the next turn would otherwise run
+over budget); and how the UI distinguishes "no turns yet" from "the backend reports no usage" (an
+inference from `usage_in + usage_out == 0` on a settled session is the cheap one, and it must be written
+down).
 
-- **A stop is one `apply` plus one spawned, best-effort `SessionBackend::stop`, the row first**
-  (ADR-0020's order, ADR-0024's precedent).
-- **The LRU read exists**: `SessionRepository::oldest_idle()` — `idle` only, `last_active_at ASC, id ASC`
-  — but HS-021's candidate is *elapsed* idleness, so it needs its own query (a bound, not just an order).
-- **A row can be removed under a background task**, and every runner tolerates it: `touch` ignores a
-  missing row, `insert_batch` drops an event whose session has gone, and the provisioner stops when the
-  row leaves `starting`.
-- **The page's `stoppedNotice` map is one word wide on purpose** (`evicted`). HS-021 adds `idle_stop` if
-  the same sentence is right for it — with its own test, in `transcript.ts`, not in `main.ts`.
-- **The cap's count is read under the create's one lock scope**, and an eviction must never be written
-  into that scope; a sweeper has no such constraint (it takes the lock only through `apply`), but it must
-  not hold the lock across its `stop` calls.
+### What HS-021 and HS-022 settled that HS-023 inherits
+
+- **A policy that must record a reason owns the ending.** HS-022's lesson: the ladder's reason only reaches
+  `status_reason` on rung 2, so the *runner* must know why it ended a turn. A check that lives in another
+  task can only ever produce `abort_completed`.
+- **A climb is spawned, never a `select!` branch** (HS-022's review, P1). Dropping a climb between rung 2's
+  `stopped` and its resume leaves a session nobody can bring back.
+- **`apply` per candidate, the row before the container, the container's `stop` best effort** (ADR-0020,
+  ADR-0024, ADR-0025).
+- **A gate case that must wait a real minute should be avoided**: `turn_timeout_min` and `idle_stop_min`
+  are whole minutes, but `max_session_tokens` is a count, so HS-023's case can fire in a second.
+- **The event writer commits every 25 ms**, so a test that reads usage from the row right after a frame
+  races the commit — wait for the value, never sample once.
 
 ## 9. Reporting
 
@@ -818,3 +901,5 @@ Last session's ledger, for the shape of it:
 | PER-50 | HS-018 stopped/resume | `dce53c4`, `ff9d907` | Done — 1 P2 fixed (abort retried a dead path, provisioning a session nobody asked for), 16 findings |
 | PER-51 | HS-019 delete flow | `3d5c415`, `7c4ea02`, `cd85572`, `db95a3f` | Done — 1 spec P2 fixed (a refused delete of a running session has already ended the turn; now pinned by a test and by the glossary), 4 doc contradictions, 2 nits; also closed PER-41's recorded batch-collateral nit |
 | PER-52 | HS-020 cap and eviction | `a3c6825`, `4f37211`, `f67eb6f` | Done — 1 P1 fixed (the "nothing was deleted" sentence was written only where a row is built, so the frame path an eviction arrives by showed a dash; now one function both call sites use, proved in Chromium on the live path), 2 P2 test/gate fixes (a random-id claim; a cap case that bet on the host's speed), 1 P2 duplicate column list, 1 mangled doc comment, 3 stale sentences; the eviction's `stop` is spawned, not awaited |
+| PER-53 | HS-021 idle stop | `5da2ae2` | Done — no P1; 5 P2s and 3 nits, all fixed. The two test-claim findings were settled by mutation (the bound now brackets `(90s, 130s]`, and the candidate query's `status = 'idle'` has a test that reads the query); two review claims about the *plan* and the *ADR* were fixed as documentation, and the gate's process-wide `idle_stop_min = 1` is now a written rule for later cases |
+| PER-54 | HS-022 turn timeout | `e767757` | Done — **BLOCK on both axes, both real**: 1 spec P1 (the nested `select!` could cancel the climb between rung 2 and the resume, leaving a session stopped forever — now `Ladder::spawn` plus a resume assertion), 1 standards P1 (`docs/stories/README.md` carried the ADR-0025 bullet twice, this session's scripted-edit bug), plus ADR-0020's amendment note, 3 stale-doc fixes, and a "per turn" test that could not fail (now a second fast turn under the same deadline) |
