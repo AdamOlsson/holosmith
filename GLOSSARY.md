@@ -264,7 +264,7 @@ The HTTP response at `GET /api/sessions/:id/events`: one session's committed eve
 _Avoid_: Event stream, connection, feed, socket
 
 **Last-Event-ID**:
-The request header a reconnecting client sends: the last SSE `id` it received, which is a seq. The replay starts at that seq plus one; absent or unusable, it starts at the beginning.
+The request header a reconnecting client sends: the last SSE `id` it received, which is a seq. The replay starts at that seq plus one; absent or unusable, it starts at the newest `history_window` messages — a **Truncated history** — or at the beginning when the log fits the window.
 _Avoid_: Cursor, offset, resume token, since
 
 **Stream registry**:

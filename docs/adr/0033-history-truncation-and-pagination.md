@@ -23,6 +23,14 @@ cut is the **lowest** seq belonging to a message inside the window.
 Lowest, not last: a block must be whole. Cutting at a message's final row would replay half of it, and the
 renderer's append rule has no way to say "this text is incomplete".
 
+**That rule rests on one producer property, stated here rather than assumed:** a message's
+`message.delta`/`message.snapshot` rows are contiguous in seq. ADR-0018 pins one block per message id and
+every producer today writes a message's frames together, so the first row of a message older than the
+window is also the last row of the window's oldest message plus one. A producer that interleaved two
+messages would be cut mid-block, with no `message.end` inside the replay to repair it. Closing that would
+mean scanning down to the window's lowest `message.end` — a second rule about what a message *is*, in the
+one place that currently reads only message ids — and no story asks for it.
+
 The scan stops the moment a row belongs to a message older than the window, so its cost is the newest
 `window` messages' rows rather than the session's log — which is the whole point, since the log is the thing
 that got too big to send. A row whose payload names no message id belongs to no block, so it neither
@@ -98,3 +106,10 @@ a page does not shift when events arrive above it.
 
 What no test here can show is a phone: the story's premise is a client that would have hung, and the
 measurement that matters — a 200k-event session opening quickly — is the operator's, on their device.
+
+The **"Load earlier" affordance itself** is proved by reading rather than by a test, and that is the
+repository's own division of labour: no script may require a browser (`docs/build.md`), so the button's
+reveal, its one-page-per-click fold and its hiding when `has_more` is false live in `web/src/main.ts`
+where nothing without a DOM can reach them. Everything about them that *is* a rule — the frame's payload,
+the turn base, the page size, the path — is in `web/src/transcript.ts` and is tested with node's own
+runner.

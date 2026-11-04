@@ -232,10 +232,11 @@ fetch_stream() {
 # "read until the event that settles the question" is the only bounded way to watch a producer:
 # every line has its own three-second timeout, so a stalled stream fails the case after one of them
 # instead of hanging the run. The line budget is 800 rather than 200 because a stream replays the
-# session's whole log from seq 1 and the log grows with every turn this run takes: by the abort and
-# steer cases the shared session has had four or five turns, which is 300-odd lines, so a budget sized
-# for the log as it was at HS-019 would end the read before the frame the case came for. A stream that
-# has not settled after 200 events would be a bug of its own, and 200 events is what 800 lines is.
+# session's log from its beginning — the shared boot keeps the default `history_window`, so nothing it
+# reads is truncated (HS-061) — and the log grows with every turn this run takes: by the abort and steer
+# cases the shared session has had four or five turns, which is 300-odd lines, so a budget sized for the
+# log as it was at HS-019 would end the read before the frame the case came for. A stream that has not
+# settled after 200 events would be a bug of its own, and 200 events is what 800 lines is.
 fetch_sse_until() {
   local label="$1" path="$2" needle="$3"
   shift 3

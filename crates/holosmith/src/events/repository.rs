@@ -782,7 +782,9 @@ mod tests {
     fn a_delta_that_names_no_message_neither_opens_a_message_nor_ends_the_scan() {
         // A producer bug is not a message: a row with no `message_id` cannot be attributed to a block,
         // so it must not consume a place in the window (which would cut too late) and must not stop the
-        // scan (which would cut too early).
+        // scan (which would cut too early). One stray sits **between** the window's messages, which is
+        // the only placement that tells those two bugs apart: a slot-consuming stray would cut at m3's
+        // row, and a scan-ending one would answer `None`.
         let connection = database();
         let session = create_session(&connection, "unattributable");
         let repository = EventRepository::new(&connection);
@@ -795,8 +797,8 @@ mod tests {
         let batch = vec![
             stray.clone(),
             delta(&session, "m1", "one"),
-            stray,
             delta(&session, "m2", "two"),
+            stray,
             delta(&session, "m3", "three"),
         ];
         repository
@@ -806,10 +808,11 @@ mod tests {
         let cut = repository
             .truncation_point(&session.id, 2)
             .expect("the cut is computed")
-            .expect("m3 is older than the window's oldest message");
-        // Seqs: stray 1, m1 2, stray 3, m2 4, m3 5. The window of two is m2 and m3, so the cut is m2's
-        // row — a stray row above it changed nothing.
-        assert_eq!(cut.before_seq, 4);
+            .expect("m1 is older than the window's oldest message");
+        // Seqs: stray 1, m1 2, m2 3, stray 4, m3 5. The window of two is m2 and m3, so the cut is m2's
+        // row: a stray above it changed nothing, and one *between* the window's messages did not take a
+        // place in it.
+        assert_eq!(cut.before_seq, 3);
     }
 
     #[test]

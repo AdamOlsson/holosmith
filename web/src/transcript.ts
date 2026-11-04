@@ -333,7 +333,10 @@ export type Spend = { settled: number; usage: boolean };
 // is the row's total: a *settled turn* is what makes usage expected at all ("no turn has run yet" is
 // not "the backend reports nothing"), and *a usage frame* is what makes it reported. Both are read
 // from the log, which the page replays on every load, so the sentence is the same after a reload as it
-// was live — and a row whose two columns are 0 cannot say which of the two cases it is in.
+// was live — and a row whose two columns are 0 cannot say which of the two cases it is in. A replay
+// truncated to the newest messages (HS-061) carries the settled turns *inside* the window, which is
+// why `history.truncated`'s `turns_before` exists: a turn count that started at zero would say "no turn
+// has run yet" about a session that has run forty.
 export function budgetNotice(spend: Spend): string | null {
   if (spend.settled === 0 || spend.usage) {
     return null;

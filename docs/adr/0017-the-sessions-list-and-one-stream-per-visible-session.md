@@ -52,8 +52,9 @@ is 3 by default, and `stopped`, `error` and `deleting` are the states the cap do
 - **Polling the list.** A second way to learn a state, disagreeing with the stream whenever both
   are in flight, and it turns a phone's screen into a load source. The stream is the one path.
 
-The page's frame rule follows from the stream's own rule. A stream replays from the beginning when
-the client has no last-seen seq (ADR-0014), so the first frames a page sees are history and the last
+The page's frame rule follows from the stream's own rule. A stream replays history when the client
+has no last-seen seq (ADR-0014) — the whole log here, and since ADR-0033 the newest `history_window`
+messages plus a `history.truncated` frame — so the first frames a page sees are history and the last
 frame is the truth: frames are applied **in arrival order** and a later one overwrites an earlier
 one. A page cannot send that header itself — `EventSource` resends the last SSE `id` it saw, which is
 the seq — so the reconnect rule is the browser's, not the page's. The page never has to know where

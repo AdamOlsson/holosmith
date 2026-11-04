@@ -220,8 +220,9 @@ function secondsNow(): number {
 }
 
 // One source exactly while the row is live, and none otherwise: the row that comes back to a live
-// state (HS-018's resume) opens one again. The server replays a stream from the beginning, so a
-// frame applied later always overwrites an earlier one and the last frame wins.
+// state (HS-018's resume) opens one again. The server replays a stream's history first — the newest
+// messages, since HS-061 — so a frame applied later always overwrites an earlier one and the last
+// frame wins.
 function syncStream(row: HTMLLIElement, state: SessionState): void {
   const open = rowSources.get(row);
   if (LIVE_STATES.has(state)) {

@@ -186,8 +186,9 @@ async fn the_steps_reach_a_browser_over_the_event_stream() {
     let served = Served::start(http::router(state.clone()), GRACE).await;
     let id = created_id(&post_create(served.addr, "stream").await);
 
-    // A client that connects after provisioning finished still sees everything: the stream
-    // replays from the beginning when it has no `Last-Event-ID` (ADR-0014).
+    // A client that connects after provisioning finished still sees everything: with no
+    // `Last-Event-ID` the stream replays the log from its start when the log fits the window
+    // (ADR-0014, ADR-0033), and this session has four provisioning steps and nothing else.
     settled(&state, &id).await;
     let mut stream = Sse::connect(served.addr, &id, None).await;
     assert_eq!(stream.status, 200);
