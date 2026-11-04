@@ -84,7 +84,10 @@ impl Backups {
     /// midnight.
     ///
     /// `Ok(None)` is "today's bundle already existed" — the ordinary answer for every session after the
-    /// first on a day, and not a failure.
+    /// first on a day, and not a failure. `Err` means today's bundle is not in place, **or** that the
+    /// retention rule could not be applied: two operations with two outcomes, reported as one because
+    /// both leave the directory not the one this machine promises. The caller logs the error's sentence,
+    /// which names which of the two it was.
     pub fn take(
         &self,
         repository: &Path,
@@ -93,6 +96,10 @@ impl Backups {
     ) -> Result<Option<PathBuf>, BackupError> {
         let bundle = self.root.join(format!("{project}-{}.bundle", day(now)));
         if bundle.exists() {
+            // The retention rule is applied on this path too, and not only where a bundle is written: it
+            // is one `read_dir`, and it is what makes a prune that failed yesterday repair itself today
+            // instead of staying stuck until a new day arrives.
+            self.prune(project)?;
             return Ok(None);
         }
         std::fs::create_dir_all(&self.root).map_err(|error| {

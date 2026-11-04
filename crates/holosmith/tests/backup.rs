@@ -41,8 +41,9 @@ fn project(dir: &TempDir, name: &str) -> std::path::PathBuf {
     root
 }
 
-/// The names of the bundles in `root`, sorted.
-fn bundles(root: &Path) -> Vec<String> {
+/// Every name in `root`, sorted — the bundles, and any half-written one a failure left behind, which is
+/// what "nothing was left behind" has to look at.
+fn names_in(root: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
     };
@@ -52,11 +53,6 @@ fn bundles(root: &Path) -> Vec<String> {
         .collect();
     names.sort();
     names
-}
-
-/// Every file in `root`, including a half-written one: what "nothing was left behind" means.
-fn files(root: &Path) -> Vec<String> {
-    bundles(root)
 }
 
 #[test]
@@ -81,7 +77,7 @@ fn a_day_is_bundled_once_and_the_second_attempt_finds_it() {
             .expect("a second attempt is not a failure"),
         None
     );
-    assert_eq!(bundles(&backups.root), ["holosmith-2026-11-04.bundle"]);
+    assert_eq!(names_in(&backups.root), ["holosmith-2026-11-04.bundle"]);
 }
 
 #[test]
@@ -131,7 +127,7 @@ fn a_repository_with_nothing_to_bundle_leaves_nothing_behind() {
             .is_err(),
         "an empty repository produced a bundle"
     );
-    assert_eq!(files(&backups.root), Vec::<String>::new());
+    assert_eq!(names_in(&backups.root), Vec::<String>::new());
 }
 
 #[test]
@@ -149,7 +145,7 @@ fn the_last_seven_days_are_kept() {
             .expect("each day is bundled")
             .expect("each day is a new bundle");
     }
-    let kept = bundles(&backups.root);
+    let kept = names_in(&backups.root);
     assert_eq!(kept.len(), KEEP, "the prune kept {kept:?}");
     // Nine days taken, seven kept: the two oldest go, and the week that remains is the newest one.
     assert_eq!(
@@ -159,6 +155,37 @@ fn the_last_seven_days_are_kept() {
     assert_eq!(
         kept.last().map(String::as_str),
         Some("holosmith-2026-11-12.bundle")
+    );
+}
+
+#[test]
+fn a_day_whose_bundle_is_already_there_still_applies_the_retention_rule() {
+    let dir = TempDir::new("backup-repair");
+    let projects = project(&dir, "holosmith");
+    let backups = Backups::new(dir.path());
+    let repository = projects.join("holosmith");
+
+    // Today's bundle is there and eight older ones are too — the state a prune that failed yesterday
+    // leaves. The ordinary second-session call must repair it rather than return early, or the rule would
+    // stay broken until a new day arrived.
+    std::fs::create_dir_all(&backups.root).expect("the backups directory is creatable");
+    for name in (1..=8)
+        .map(|day| format!("holosmith-2026-10-{day:02}.bundle"))
+        .chain(std::iter::once("holosmith-2026-11-04.bundle".to_string()))
+    {
+        std::fs::write(backups.root.join(name), b"").expect("a planted bundle is writable");
+    }
+    assert_eq!(
+        backups
+            .take(&repository, "holosmith", DAY_2026_11_04)
+            .expect("the day is bundled"),
+        None
+    );
+    let kept = names_in(&backups.root);
+    assert_eq!(kept.len(), KEEP, "the repair path kept {kept:?}");
+    assert_eq!(
+        kept.first().map(String::as_str),
+        Some("holosmith-2026-10-03.bundle")
     );
 }
 
@@ -185,7 +212,7 @@ fn one_projects_prune_is_not_another_projects() {
             .expect("holosmith2 is bundled");
     }
     assert_eq!(
-        bundles(&backups.root),
+        names_in(&backups.root),
         [
             "holosmith-2026-11-04.bundle",
             "holosmith-2026-11-05.bundle",
@@ -221,7 +248,7 @@ async fn a_create_takes_the_days_bundle_before_the_session_runs() {
 
     // Two sessions on one day are one bundle, and it is of the repository the create named.
     let root = dir.path().join("backups");
-    let kept = bundles(&root);
+    let kept = names_in(&root);
     assert_eq!(kept.len(), 1, "two creates produced {kept:?}");
     assert!(
         kept[0].starts_with("holosmith-") && kept[0].ends_with(".bundle"),
@@ -248,7 +275,7 @@ async fn a_bundle_that_cannot_be_taken_does_not_block_the_create() {
     let row: serde_json::Value = serde_json::from_str(&answer.body).expect("the answer is JSON");
     assert_eq!(row["project"].as_str(), Some("holosmith"));
     // And nothing was left behind under a name an operator would trust.
-    assert_eq!(files(&dir.path().join("backups")), Vec::<String>::new());
+    assert_eq!(names_in(&dir.path().join("backups")), Vec::<String>::new());
 }
 
 #[tokio::test]

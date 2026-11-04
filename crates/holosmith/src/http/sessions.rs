@@ -329,7 +329,7 @@ async fn back_up(state: &AppState, project: &str) {
             target: "holosmith::http::sessions",
             project = %project,
             %error,
-            "the day's project bundle could not be taken; the session is created anyway"
+            "the project's backups are not up to date; the session is created anyway"
         ),
         Err(error) => tracing::warn!(
             target: "holosmith::http::sessions",
