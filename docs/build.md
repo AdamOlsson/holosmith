@@ -178,7 +178,11 @@ ADR-0032), and history (`case_history`, which boots its own server with `history
 two turns, and asserts the `history.truncated` frame's cursor and turn count, that the replay's first
 `id:` is that cursor, that the page below it carries the first turn with `has_more` false and
 `turns_before` 0, and that a `before=0` answers `422 bad_query` with the envelope's content type — the
-window is a key, so the shared boot must keep the default one; see ADR-0033), and the worktree (`case_worktree`, which boots its own
+window is a key, so the shared boot must keep the default one; see ADR-0033), the project backup
+(`case_backup`, which boots its own server with `project_backup = true` over a real repository, plants
+eight day-named bundles, drives two creates, and asserts seven kept with the two oldest gone, exactly one
+bundle for today, `git bundle verify` accepting it and it carrying a branch — the setting is a key, so the
+shared boot must keep it off; see ADR-0034), and the worktree (`case_worktree`, which boots its own
 server — `backend = "docker"`, a real repository under `projects_root`, and a socket that answers the
 preflight's `_ping` — creates a session, and asserts the row's `worktree` and `base_commit`, the network
 step's refusal, the worktree and branch gone afterwards, the registration back to one entry, and then a
@@ -199,7 +203,7 @@ remember to place the new case before it.
 is what makes this a growing gate rather than a snapshot: a story that adds a route or a
 behaviour has one obvious place to prove the shipped binary does it. A case that needs a setting the
 rest of the run must not carry gets a boot of its own (see `case_token_budget`, `case_compaction`,
-`case_history`, `case_worktree` and `case_worktree_refusal`), and
+`case_history`, `case_backup`, `case_worktree` and `case_worktree_refusal`), and
 takes a place at the end of the array: nothing after it may assume the first boot's state, and a case
 that stops the server leaves the run with whatever boot it started.
 

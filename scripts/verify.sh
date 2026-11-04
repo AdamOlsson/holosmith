@@ -320,6 +320,7 @@ serve_cases=(
   case_token_budget
   case_compaction
   case_history
+  case_backup
   case_worktree
   case_docker_preflight
   case_worktree_refusal
@@ -1778,6 +1779,77 @@ case_history() {
   expect_status "${name}_bad_before" "$response" 422
   expect_header "${name}_bad_before" "$response" content-type application/json
   expect_code "${name}_bad_before" "$response" bad_query
+}
+
+# HS-065's proof from the artifact: with `project_backup` on, the first session of a day bundles the
+# project repository once, a second session on the same day adds nothing, the bundle is one git can
+# restore, and the prune keeps the last seven days per project.
+#
+# It boots its own server, like `case_history`: `project_backup` is a config key, and the shared boot must
+# keep the default (off) so its creates cost nothing. The backend is `stub`, so the create needs no daemon
+# and no worktree — the bundle is of the host checkout, which is the same path a Docker run would use.
+case_backup() {
+  local name=case_backup response body backups id
+  local create_body='{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}'
+  # Two statements, not one `local`: with `set -u`, `local a=... b="$a"` expands `$a` before `local`
+  # runs, so the second name would be unbound.
+  local projects="$WORK/projects-backup"
+  local repo="$projects/holosmith"
+  backups="$WORK/data-backup/backups"
+
+  stop_serve
+  mkdir -p "$repo" "$backups"
+  git -C "$repo" init --quiet || fail "$name/git" "git init did not work in $repo"
+  git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet --allow-empty \
+    -m "the first commit" || fail "$name/git" "git commit did not work in $repo"
+
+  # Eight days of bundles that are already there, so the prune has something to remove. They are named
+  # like bundles rather than being bundles: the retention rule is the *name*, which is what makes it
+  # cheap on a machine that is short of space, and a test of it should not pretend otherwise.
+  local day
+  for day in 1 2 3 4 5 6 7 8; do
+    : >"$backups/holosmith-2020-01-0$day.bundle"
+  done
+
+  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "stub"\nproject_backup = true\nprojects_root = "%s"\nidle_stop_min = 0\n' \
+    "$owner" "$projects" >"$WORK/config-backup.toml"
+  start_serve "$WORK/config-backup.toml" "$WORK/data-backup"
+
+  # Two sessions on one day. The second must find the first's bundle and add nothing.
+  local key
+  for key in verify-backup-1 verify-backup-2; do
+    fetch_body "${name}_$key" POST /api/sessions "$create_body" \
+      "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+      "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: $key" ||
+      fail "${name}_$key/no_answer" "POST /api/sessions did not answer"
+    expect_status "${name}_$key" "$(answer "${name}_$key")" 202
+  done
+
+  # Eight stale days plus today's is nine, so the two oldest go and the week that remains ends today.
+  check "$name/kept" 7 "$(ls "$backups" | wc -l | tr -d ' ')"
+  if [ -f "$backups/holosmith-2020-01-01.bundle" ]; then
+    fail "$name/prune_oldest" "the oldest bundle survived the prune"
+  fi
+  if [ -f "$backups/holosmith-2020-01-02.bundle" ]; then
+    fail "$name/prune_second" "the second oldest bundle survived the prune"
+  fi
+  if [ ! -f "$backups/holosmith-2020-01-03.bundle" ]; then
+    fail "$name/prune_kept" "the prune took a bundle inside the seven it keeps"
+  fi
+  assertions=$((assertions + 3))
+
+  # Exactly one bundle that is not one of the eight planted ones: the day's.
+  check "$name/one_for_the_day" 1 \
+    "$(ls "$backups" | { grep -v '^holosmith-2020-' || true; } | wc -l | tr -d ' ')"
+  id="$(ls "$backups" | { grep -v '^holosmith-2020-' || true; } | sed -n '1p')"
+  git -C "$repo" bundle verify "$backups/$id" >/dev/null 2>&1 ||
+    fail "$name/verify" "git could not read the bundle the create kept: $id"
+
+  # The bundle is a recovery point, so it carries the branch: `--all` is the story's own flag.
+  if ! git -C "$repo" bundle list-heads "$backups/$id" | grep -q 'refs/heads/'; then
+    fail "$name/heads" "the bundle carries no branch: $(git -C "$repo" bundle list-heads "$backups/$id")"
+  fi
+  assertions=$((assertions + 1))
 }
 
 # fake_docker_ping <socket>: a unix socket that answers the preflight's `GET /_ping` with `200 OK`, and then

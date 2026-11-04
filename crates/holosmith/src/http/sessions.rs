@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::backend::SessionBackend;
+use crate::backup::Backups;
 use crate::clock;
 use crate::deleter;
 use crate::events::NewEvent;
@@ -278,11 +279,64 @@ pub async fn create(
             // session is provisioned once.
             let response = created(session.clone());
             if inserted {
+                // Spec item 1's `project_backup`: the day's bundle is taken **before** the session can
+                // touch the repository, because the whole point of the recovery point is that it predates
+                // the agent. It is awaited rather than spawned so that ordering is a fact, and it is
+                // awaited *here* rather than on the request's first line so a retry, a refusal and a
+                // full machine do not pay for it.
+                back_up(state, &session.project).await;
                 state.provisioner().spawn(session);
             }
             response
         }
         Err(error) => error.into_response(),
+    }
+}
+
+/// Take today's bundle of the project's repository, if this machine keeps one and has not today (HS-065).
+///
+/// Spec item 1's `project_backup` is a safety net under the shared repository: several sessions work in
+/// one checkout's branches, so an agent that damages it damages every session's base. The bundle is taken
+/// once per project per day, on the host, before the session that first needs it can run.
+///
+/// **Every failure is logged and swallowed.** The story says so — "failure to create a bundle is logged
+/// and does not block session creation" — and the alternative would be a machine whose disk is full
+/// refusing to start work, which turns a safety net into an outage. The repository is
+/// `<projects_root>/<project>` whatever backend this run uses: the bundle is of the host checkout, which
+/// is where every session's branch lives.
+async fn back_up(state: &AppState, project: &str) {
+    if !state.config.project_backup {
+        return;
+    }
+    let backups = Backups::new(&state.config.data_root);
+    let repository = crate::worktree::repository_of(&state.config.projects_root, project);
+    let project = project.to_string();
+    let named = project.clone();
+    // On a blocking task for the reason the project's refusals are: a bundle is a subprocess, and a
+    // create's request path must not park a runtime worker on one.
+    let taken =
+        tokio::task::spawn_blocking(move || backups.take(&repository, &named, clock::unix_now()))
+            .await;
+    match taken {
+        Ok(Ok(Some(bundle))) => tracing::info!(
+            target: "holosmith::http::sessions",
+            project = %project,
+            bundle = %bundle.display(),
+            "took the day's project bundle"
+        ),
+        Ok(Ok(None)) => {}
+        Ok(Err(error)) => tracing::warn!(
+            target: "holosmith::http::sessions",
+            project = %project,
+            %error,
+            "the day's project bundle could not be taken; the session is created anyway"
+        ),
+        Err(error) => tracing::warn!(
+            target: "holosmith::http::sessions",
+            project = %project,
+            %error,
+            "the backup task did not run; the session is created anyway"
+        ),
     }
 }
 

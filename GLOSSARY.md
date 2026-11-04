@@ -378,6 +378,10 @@ _Avoid_: Main, trunk, destination
 A commit of a session's uncommitted work, stored under a hidden ref, that never touches the branch or working tree.
 _Avoid_: Stash, backup, autosave, checkpoint
 
+**Project backup**:
+One git bundle of a project repository — every branch and tag, `--all` — taken at most once per calendar day (UTC) when `project_backup` is on: `<data>/backups/<project>-<YYYY-MM-DD>.bundle`. It is written aside, verified with `git bundle verify`, then renamed into place, and the last seven days per project are kept; the create takes it before the session can touch the repository, and a failure is a log line that does not block the session. Its machine names are `backup::Backups` and `Backups::take`.
+_Avoid_: Snapshot (that is the message snapshot and the WIP snapshot), archive, dump, checkpoint
+
 **DB backup**:
 A copy of the database file taken before a promotion.
 _Avoid_: Snapshot
