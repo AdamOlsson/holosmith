@@ -27,7 +27,9 @@ use serde_json::json;
 
 use super::{BackendError, SessionBackend, Step, TurnEnd};
 use crate::clock;
-use crate::events::{EventWriter, NewEvent};
+use crate::events::{
+    EventWriter, MESSAGE_DELTA, MESSAGE_END, NewEvent, TOOL_END, TOOL_START, TURN_END, TURN_START,
+};
 use crate::sessions::Session;
 
 /// The stub's pace: how long one provisioning step, and one frame of a turn, takes under
@@ -35,15 +37,10 @@ use crate::sessions::Session;
 /// are visible moments on a phone, short enough that a session is idle in a couple of seconds.
 pub const DEFAULT_STEP_DELAY: Duration = Duration::from_millis(200);
 
-/// The six kinds a turn's script emits, in the order [`StubBackend::script`] emits them. Three are
-/// ADR-0018's (`turn.start`, `message.delta`, `turn.end`); `tool.start`, `tool.end` and
-/// `message.end` are HS-015's payloads for the rendering paths HS-033 and HS-034 fill in.
-const TURN_START: &str = "turn.start";
-const MESSAGE_DELTA: &str = "message.delta";
-const TOOL_START: &str = "tool.start";
-const TOOL_END: &str = "tool.end";
-const MESSAGE_END: &str = "message.end";
-const TURN_END: &str = "turn.end";
+// The kinds a turn's script emits, in the order `StubBackend::script` emits them: three are
+// ADR-0018's (`turn.start`, `message.delta`, `turn.end`), and `tool.start`, `tool.end` and
+// `message.end` are HS-015's payloads for the rendering paths HS-033 and HS-034 fill in. The names
+// themselves live in `crate::events`, because the writer reads `message.end`'s usage (HS-023).
 
 /// The stub's turn counter, and the instant it was first asked to mint one.
 ///
@@ -114,6 +111,9 @@ struct StubState {
     ignores_abort: bool,
     /// Whether a `snapshot` fails, which is how a test produces HS-019's `409 unsaved_work`.
     fails_snapshot: bool,
+    /// Whether a turn's `message.end` carries no usage, which is how a test produces the backend
+    /// spec item 13 says the token budget cannot count (HS-023).
+    omits_usage: bool,
     recorded: Mutex<Vec<Recorded>>,
 }
 
@@ -133,6 +133,7 @@ impl StubBackend {
                 stopping: Mutex::new(HashSet::new()),
                 ignores_abort: false,
                 fails_snapshot: false,
+                omits_usage: false,
                 recorded: Mutex::new(Vec::new()),
             }),
         }
@@ -175,6 +176,22 @@ impl StubBackend {
         Arc::get_mut(&mut self.state)
             .expect("a stub that has not been cloned yet is mutable")
             .fails_snapshot = true;
+        self
+    }
+
+    /// The same stub, with turns that report no usage — the backend spec item 13's contingency is
+    /// about, where the agent cannot say what a message cost (HS-023).
+    ///
+    /// The frame is still emitted, with its message id and without the `usage` object, which is what a
+    /// real backend mapping a protocol that reports nothing would send: the message ended, and its cost
+    /// is unknown. The screen then says so rather than showing zeros, and the budget has nothing to
+    /// count. Like [`Self::failing_at`], [`Self::ignoring_abort`] and [`Self::failing_snapshot`] this is
+    /// a constructor argument and not a config key: nothing an operator runs should be able to blind the
+    /// budget.
+    pub fn omitting_usage(mut self) -> Self {
+        Arc::get_mut(&mut self.state)
+            .expect("a stub that has not been cloned yet is mutable")
+            .omits_usage = true;
         self
     }
 
@@ -256,8 +273,9 @@ impl StubBackend {
     ///
     /// The payloads are `serde_json`'s, so the words an event carries live once. `turn` is the
     /// counter's value: it names the message (`msg-<turn>`) and the tool call (`tool-<turn>`), so a
-    /// second turn is a second block in the transcript.
-    fn script(turn: u64) -> Vec<(&'static str, String)> {
+    /// second turn is a second block in the transcript. `usage` is `false` for
+    /// [`StubBackend::omitting_usage`]'s stub, whose `message.end` carries no counts at all.
+    fn script(turn: u64, usage: bool) -> Vec<(&'static str, String)> {
         // `<process instant>-<turn>`: unique within the session's log (the counter) and disjoint
         // across restarts (the instant), which is the whole of what ADR-0018 asks of an id.
         let message = format!("msg-{}-{turn}", minted_instant());
@@ -305,7 +323,11 @@ impl StubBackend {
             (MESSAGE_DELTA, delta("text", " Nothing else in it moved.")),
             (
                 MESSAGE_END,
-                json!({"message_id": message, "usage": {"in": 1200, "out": 340}}).to_string(),
+                if usage {
+                    json!({"message_id": message, "usage": {"in": 1200, "out": 340}}).to_string()
+                } else {
+                    json!({"message_id": message}).to_string()
+                },
             ),
             (TURN_END, json!({}).to_string()),
         ]
@@ -343,7 +365,8 @@ impl SessionBackend for StubBackend {
         // wrong. Keeping it instead would abort the *next* turn of the session instantly, which is
         // wrong and instant.
         self.take_stop_request(&session.id);
-        for (kind, payload) in Self::script(NEXT_TURN.fetch_add(1, Ordering::Relaxed)) {
+        let turn = NEXT_TURN.fetch_add(1, Ordering::Relaxed);
+        for (kind, payload) in Self::script(turn, !self.state.omits_usage) {
             tokio::time::sleep(self.state.step_delay).await;
             // The one place a turn can be cut short: between frames, because a frame already
             // emitted is a frame the screen has, and a real agent's abort lands between messages
@@ -447,8 +470,8 @@ mod tests {
         // text into the previous turn's block. The process's own instant is what makes the two
         // ranges disjoint, so it must be part of each id — this test would fail on the first
         // version of the script, whose ids were `msg-<n>` and `tool-<n>`.
-        let first = StubBackend::script(1);
-        let second = StubBackend::script(2);
+        let first = StubBackend::script(1, true);
+        let second = StubBackend::script(2, true);
         let payload = |script: &[(&'static str, String)], kind: &str| {
             script
                 .iter()

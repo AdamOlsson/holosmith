@@ -279,8 +279,29 @@ _Avoid_: Tool use, function call, invocation, action
 **Usage**:
 The token counts a message ends with: `in`, the tokens the message consumed, and `out`, the tokens it
 produced. They arrive on `message.end` as `{"usage": {"in": …, "out": …}}`, and the screen shows them as
-one `in N · out N` line inside the message's block. Persisting them on the session is HS-034's.
+one `in N · out N` line inside the message's block. They are added to the session's **spend** by the event
+writer, inside the transaction that assigns the event its seq, and a `message.end` that carries none is a
+message whose cost is unknown — never a free one. Drawing the totals on the session screen is HS-034's.
 _Avoid_: Cost, tokens, billing, price
+
+**Spend**:
+What a session has cost so far: its two `usage` columns summed, `usage_in + usage_out`, which is the one
+number the **token budget** compares with its ceiling. It accumulates over the session's life — every
+`message.end` adds its own counts — and a resume does not reset it, because the spec's ceiling is per
+session and a resumed session is the same work. Its machine name is `SessionRepository::spend`, and the add
+is `SessionRepository::add_usage`, whose one caller is the event writer's batch.
+_Avoid_: Total cost, running total, counter, budget used
+
+**Token budget**:
+The ceiling `max_session_tokens` puts on a session's **spend**, so one runaway loop cannot drain the quota.
+At or over it — reached, not overshot — the turn runner ends the turn through the shared ladder with reason
+`budget_exceeded`, from a task of its own; a turn that settles between two polls instead records the reason
+on its own ending, and the next turn trips on its first poll. Unset is unlimited, and it is the one key in
+item 13's table whose absence is the off switch, where the timers use `0` instead. A backend that reports no
+**usage** leaves the budget with nothing to count, so what it counts is what was *reported*, and the
+session screen says so in a sentence rather than showing a zero. Its machine names are
+`max_session_tokens`, `Turn::over_budget` and the reason `BUDGET_EXCEEDED`.
+_Avoid_: Limit, quota, cap (the cap is `max_live_sessions`), ceiling
 
 **Delta kind**:
 Which of a message's two kinds of output a delta belongs to: `text`, the answer, or `thinking`, the agent's reasoning, which the screen renders apart from it. Its machine name is `kind` in a `message.delta` payload; it is not an event kind, because one message holds both kinds. On screen, each kind has its own node inside the message's block, and that node is never called anything else.

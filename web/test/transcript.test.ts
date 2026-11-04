@@ -15,6 +15,7 @@ import {
   NO_DETAIL,
   Transcript,
   affordances,
+  budgetNotice,
   parseFrame,
   sessionIdFromPath,
   stoppedDetail,
@@ -408,4 +409,75 @@ test("10k deltas are 10k appends into one block, never a re-render", () => {
   assert.equal(replacements, 0, "a delta never replaces what is already on screen");
   assert.equal(written, piece.repeat(total), "the appends reconstruct the message exactly");
   assert.deepEqual(transcript.order(), ["m1"]);
+});
+
+test("the budget's sentence needs a settled turn and no reported usage", () => {
+  // Spec item 13's contingency, as a rule (HS-023). Four cases, and the two that must stay silent are
+  // the two a row's totals cannot tell apart: "no turn has run yet" and "the agent did report usage".
+  assert.equal(
+    budgetNotice({ settled: 0, usage: false }),
+    null,
+    "a session no turn has run in says nothing about usage",
+  );
+  assert.equal(
+    budgetNotice({ settled: 1, usage: true }),
+    null,
+    "a session whose usage was reported says nothing",
+  );
+  assert.equal(budgetNotice({ settled: 2, usage: true }), null);
+  assert.equal(
+    budgetNotice({ settled: 1, usage: false }),
+    "no usage reported — the token budget has nothing to count",
+    "a settled turn that reported no usage is what the screen says so about",
+  );
+});
+
+test("the budget's sentence is not one of the stopped row's sentences", () => {
+  // Two vocabularies, one screen: `stoppedNotice` reassures about work that was preserved, and this
+  // one is about a guard that cannot count. Sharing a word would conflate the two policies.
+  const budget = budgetNotice({ settled: 1, usage: false });
+  assert.notEqual(budget, stoppedNotice("evicted"));
+  assert.notEqual(budget, stoppedNotice("idle_stop"));
+  assert.notEqual(budget, stoppedNotice("forced_abort"));
+});
+
+test("the model counts settled turns and notices a usage frame", () => {
+  // The two facts `budgetNotice` reads, folded from the stream: a `turn.start` is not a settle, a
+  // `message.end` with counts is what "usage was reported" means, and a `message.end` without them
+  // never becomes a frame at all.
+  const transcript = new Transcript();
+  assert.deepEqual(transcript.spend(), { settled: 0, usage: false });
+
+  transcript.apply({ type: "boundary", boundary: "start" });
+  assert.deepEqual(transcript.spend(), { settled: 0, usage: false }, "a turn that started has not settled");
+
+  transcript.apply({ type: "usage", messageId: "m1", input: 1200, output: 340 });
+  transcript.apply({ type: "boundary", boundary: "end" });
+  assert.deepEqual(transcript.spend(), { settled: 1, usage: true });
+  assert.equal(budgetNotice(transcript.spend()), null, "a turn that reported usage says nothing");
+
+  const quiet = new Transcript();
+  quiet.apply({ type: "boundary", boundary: "start" });
+  quiet.apply({ type: "boundary", boundary: "end" });
+  assert.deepEqual(quiet.spend(), { settled: 1, usage: false });
+  assert.equal(budgetNotice(quiet.spend()), "no usage reported — the token budget has nothing to count");
+});
+
+test("a message.end with no usage is dropped, so it cannot claim a spend of zero", () => {
+  // The parse rule the writer's tally and the screen share: no `usage` object is no frame, not a
+  // frame of zeros. A screen that rendered `in 0 · out 0` would say the message was free.
+  assert.equal(parseFrame("message.end", '{"message_id":"m1"}'), null);
+  assert.equal(parseFrame("message.end", '{"message_id":"m1","usage":{}}'), null);
+  assert.equal(parseFrame("message.end", '{"message_id":"m1","usage":{"in":"1","out":2}}'), null);
+  // A count is a non-negative integer, the same rule the writer's tally applies in Rust (HS-023): a
+  // negative or fractional cost is not a cost, and rendering one would show a number the budget never
+  // added.
+  assert.equal(parseFrame("message.end", '{"message_id":"m1","usage":{"in":-5,"out":340}}'), null);
+  assert.equal(parseFrame("message.end", '{"message_id":"m1","usage":{"in":1.5,"out":340}}'), null);
+  assert.deepEqual(parseFrame("message.end", '{"message_id":"m1","usage":{"in":1200,"out":340}}'), {
+    type: "usage",
+    messageId: "m1",
+    input: 1200,
+    output: 340,
+  });
 });

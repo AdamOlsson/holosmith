@@ -13,6 +13,7 @@ import {
   TRANSCRIPT_EVENTS,
   Transcript,
   affordances,
+  budgetNotice,
   parseFrame,
   sessionIdFromPath,
   stoppedDetail,
@@ -20,6 +21,7 @@ import {
   type Change,
   type DeltaKind,
   type SessionState,
+  type Spend,
 } from "./transcript";
 
 type Health = {
@@ -820,6 +822,7 @@ function openSessionStream(
   placeholder: HTMLElement,
   badge: HTMLElement,
   updateComposer: (state: SessionState) => void,
+  showSpend: (spend: Spend) => void,
 ): void {
   const model = new Transcript();
   const blocks = new Map<string, MessageBlock>();
@@ -838,6 +841,9 @@ function openSessionStream(
       for (const change of model.apply(frame)) {
         applyChange(change, transcript, blocks, tools);
       }
+      // One pure rule over what the stream has said about cost, applied after every frame: the
+      // sentence is the same one the screen builds with (HS-023).
+      showSpend(model.spend());
     });
   }
   source.addEventListener("session.status", (event) => {
@@ -869,6 +875,16 @@ function sessionScreen(health: Health, session: SessionDetail): void {
   const badge = make("span", "state", stateText(session.status, session.status_reason));
   head.append(make("span", "project", session.project), badge);
 
+  // What the stream says about the cost of the turns, and nothing else: the totals themselves are
+  // HS-034's. The span is drawn by the same function the stream patches it with, so an operator who
+  // reloads sees what a live one saw (HS-020's rule about a sentence in two places).
+  const budget = make("span", "budget");
+  const showSpend = (spend: Spend): void => {
+    const notice = budgetNotice(spend);
+    budget.textContent = notice ?? "";
+    budget.hidden = notice === null;
+  };
+
   const meta = make("div", "session-meta");
   meta.append(
     make("span", "id", session.id),
@@ -876,7 +892,9 @@ function sessionScreen(health: Health, session: SessionDetail): void {
     make("span", "level", `thinking ${session.thinking}`),
     make("span", "network", session.network ? "internet on" : "internet off"),
     make("span", "activity", `active ${relativeTime(session.last_active_at, secondsNow())}`),
+    budget,
   );
+  showSpend({ settled: 0, usage: false });
 
   const transcript = make("div", "transcript");
   transcript.id = "transcript";
@@ -897,7 +915,7 @@ function sessionScreen(health: Health, session: SessionDetail): void {
   section.dataset.session = session.id;
   section.append(back, head, meta, transcript, composer.element);
   app.replaceChildren(header(health), section);
-  openSessionStream(session.id, transcript, placeholder, badge, composer.update);
+  openSessionStream(session.id, transcript, placeholder, badge, composer.update, showSpend);
 }
 
 function sessionPath(id: string): string {

@@ -95,7 +95,12 @@ startup banner, never assumed. The data root is inside the work dir, so a run ne
 `/var/lib/holosmith` (ADR-0009), and the config file carries `owner`, `max_live_sessions = 1`,
 `backend = "stub"`, `idle_stop_min = 1` and `turn_timeout_min = 1`: the `bad_owner` case, the create
 cases, provisioning, the idle stop and the turn timeout's quiet half are the only reasons that file
-exists. The backend comes from the *file* rather than from a `--backend` flag on purpose — that is half
+exists. One case brings a second boot of its own: `case_token_budget` stops the server and starts the
+same artifact with `config-budget.toml` and `data-budget/`, because `max_session_tokens` is
+process-wide and every other case prompts a session of its own — with a ceiling under the stub's
+per-turn spend, a dozen assertions would be reading the budget instead of what they are named for. That
+boot's banner and log live in `serve-data-budget.out` / `.err`, which `start_serve` names after its
+data dir precisely so a case cannot read the other boot's. The backend comes from the *file* rather than from a `--backend` flag on purpose — that is half
 of HS-011's "selectable by config and by `--backend`", and `case_backend_from_config` is what proves it;
 `tests/serve_cli.rs` covers the flag, the override and the default. Every request is a `/dev/tcp` fetch (`fetch` for a body-less request,
 `fetch_body` when a body is needed, `fetch_stream` for a response that never ends), so the
@@ -170,7 +175,9 @@ remember to place the new case before it.
 
 **Every later story adds at least one `case_*` function and one line in `serve_cases`.** That
 is what makes this a growing gate rather than a snapshot: a story that adds a route or a
-behaviour has one obvious place to prove the shipped binary does it.
+behaviour has one obvious place to prove the shipped binary does it. A case that needs a setting the
+rest of the run must not carry gets a boot of its own (see `case_token_budget`), and takes the last
+place in the array: nothing after it may assume the first boot's state.
 
 **The idle stop runs for the whole `serve` phase.** `idle_stop_min = 1` is the process's setting, so
 every case from `start_serve` on has a sweeper behind it and **no case may leave a session `idle` for a

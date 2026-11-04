@@ -77,8 +77,8 @@ impl AppState {
     ///
     /// Here for the same reason as [`Self::provisioner`]: the prompt handler clones the three
     /// handles a background turn needs in one place. Since HS-022 it also carries the two durations a
-    /// turn's ending needs — the ladder's `abort_grace` and `turn_timeout_min` — so a runner cannot be
-    /// built with a timeout the config did not ask for.
+    /// turn's ending needs — the ladder's `abort_grace` and `turn_timeout_min` — and since HS-023 the
+    /// ceiling, so a runner cannot be built with a bound, or with a budget, the config did not ask for.
     pub fn turner(&self) -> Turn {
         Turn::new(
             self.backend.clone(),
@@ -86,6 +86,7 @@ impl AppState {
             self.events.clone(),
             self.config.abort_grace.into(),
             crate::turn::timeout(self.config.turn_timeout_min),
+            self.config.max_session_tokens,
         )
     }
 

@@ -37,6 +37,16 @@ const UPDATE_STATUS: &str =
 /// HS-017's steer).
 const TOUCH: &str = "UPDATE sessions SET last_active_at = ?2 WHERE id = ?1";
 
+/// What one `message.end` adds to the tally (HS-023). An add rather than a set, because the counts
+/// accumulate over the session's life and a turn reports only its own; a column that was *set* would
+/// lose every turn but the last.
+const ADD_USAGE: &str =
+    "UPDATE sessions SET usage_in = usage_in + ?2, usage_out = usage_out + ?3 WHERE id = ?1";
+
+/// The one number the token budget compares: the two counts summed in SQL, so the ceiling is one
+/// comparison against one value and no reader has to add two columns and remember to.
+const SPEND: &str = "SELECT usage_in + usage_out FROM sessions WHERE id = ?1";
+
 /// The row's removal: what `deleting` means once the session owns nothing any more (HS-019).
 const REMOVE: &str = "DELETE FROM sessions WHERE id = ?1";
 
@@ -248,6 +258,37 @@ impl<'a> SessionRepository<'a> {
             .execute(TOUCH, params![id, now])
             .map_err(|error| RepoError::sqlite("touch", error))?;
         Ok(())
+    }
+
+    /// Add one message's token counts to the session's tally (HS-023).
+    ///
+    /// The one production caller is [`crate::events::EventRepository::insert_batch`], which runs this
+    /// inside the transaction that assigns the seq: the event log and the row's tally therefore commit
+    /// together, and the tally is durable before the frame is broadcast (ADR-0013). That is why this
+    /// is not a state change and does not go through the transitioner — nothing about the state moves,
+    /// and the row is what a client reads the spend from.
+    ///
+    /// A row that has gone is not an error: the events writer drops an event whose session was removed
+    /// under it (HS-019), and this is called for an event that survived.
+    pub fn add_usage(&self, id: &str, input: u64, output: u64) -> Result<(), RepoError> {
+        self.connection
+            .execute(ADD_USAGE, params![id, input, output])
+            .map_err(|error| RepoError::sqlite("add_usage", error))?;
+        Ok(())
+    }
+
+    /// What the session has spent, `usage_in + usage_out`, or `None` when there is no such row
+    /// (HS-023).
+    ///
+    /// One number rather than the two columns, because the token budget's question is "is the session
+    /// over its ceiling" and the answer is a comparison, not two counts a caller has to add. A session
+    /// the backend reports no usage for answers `Some(0)`, which is different from `None`: the first is
+    /// a session that has spent nothing, the second is a row that is not there.
+    pub fn spend(&self, id: &str) -> Result<Option<u64>, RepoError> {
+        self.connection
+            .query_row(SPEND, [id], |row| row.get(0))
+            .optional()
+            .map_err(|error| RepoError::sqlite("spend", error))
     }
 
     /// Remove this session's row and its event log, in **one** transaction (HS-019).

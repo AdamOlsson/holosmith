@@ -132,7 +132,8 @@ async fn running(state: &AppState, key: &str) -> Session {
     row(state, &session.id)
 }
 
-/// The runner a served process would build, with the deadline a test chooses.
+/// The runner a served process would build, with the deadline a test chooses and no token ceiling: this
+/// file is about the clock, and `tests/token_budget.rs` owns the budget (HS-023).
 fn runner(state: &AppState, stub: &StubBackend, limit: Option<Duration>) -> Turn {
     Turn::new(
         holosmith::backend::Backends::Stub(stub.clone()),
@@ -140,6 +141,7 @@ fn runner(state: &AppState, stub: &StubBackend, limit: Option<Duration>) -> Turn
         state.events.clone(),
         GRACE,
         limit,
+        None,
     )
 }
 

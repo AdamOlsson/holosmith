@@ -65,13 +65,13 @@ const NOT_RESUMABLE: &str =
 /// (ADR-0019) rather than a panic on a path a future row could open.
 const NOT_DELETABLE: &str = "the session is in a state that cannot be deleted";
 
-/// The event a steer is recorded as (HS-017, ADR-0021).
-///
-/// `<subject>.<verb>`, like `turn.start`, and the subject is the turn: the operator's guidance is
-/// something that happened *to a turn*, not a message the agent produced. The payload is
-/// `{"text": "…"}` — no message id, because a steer is one frame that is never continued or
-/// replaced, so the block the renderer draws has nothing to be keyed by.
-pub const TURN_STEER: &str = "turn.steer";
+/// The event a steer is recorded as (HS-017, ADR-0021), under the name it has with every other kind:
+/// `<subject>.<verb>`, like `turn.start`, and the subject is the turn, because the operator's guidance
+/// is something that happened *to a turn* rather than a message the agent produced. The payload is
+/// `{"text": "…"}` — no message id, because a steer is one frame that is never continued or replaced,
+/// so the block the renderer draws has nothing to be keyed by. The name lives in [`crate::events`];
+/// this is an import so the handler reads a word, not a literal.
+use crate::events::TURN_STEER;
 
 /// How many characters a key may hold. Generous for a UUID, small enough that the unique column
 /// cannot become a payload.

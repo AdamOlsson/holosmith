@@ -8,13 +8,28 @@
 
 use rusqlite::{Connection, Row, params};
 
-use super::{Event, NewEvent, RepoError};
+use super::{Event, MESSAGE_END, NewEvent, RepoError};
 use crate::sessions::repository::SessionRepository;
 
 /// One row. `seq` was assigned by `bump_last_seq` inside this same transaction, so the row and
 /// the counter commit together.
 const INSERT: &str =
     "INSERT INTO events (session_id, seq, type, payload, created_at) VALUES (?1, ?2, ?3, ?4, ?5)";
+
+/// The tokens one `message.end` reports, from its payload: `{"usage": {"in", "out"}}`.
+///
+/// The **only** kind whose payload this file looks inside, and it does so for one reason: a session's
+/// spend is the sum of what its messages cost, and the writer's transaction is the one place where the
+/// event's row and the session's tally can commit together (HS-023, ADR-0013). Every other kind is
+/// opaque here. A payload that carries no `usage`, or one that is not two non-negative integers, is a
+/// message whose cost is unknown — reported as `None` rather than as zeros, because a backend that
+/// cannot say what it spent must not look like one that spent nothing. The budget's own `None` handling
+/// and the screen's sentence are what say so.
+fn usage(payload: &str) -> Option<(u64, u64)> {
+    let event: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let counts = event.get("usage")?;
+    Some((counts.get("in")?.as_u64()?, counts.get("out")?.as_u64()?))
+}
 
 /// The read a client makes with its last-seen seq (HS-010): one session, after `?2`, in order.
 const SELECT_SINCE: &str = "SELECT session_id, seq, type, payload, created_at FROM events \
@@ -65,9 +80,12 @@ impl<'a> EventRepository<'a> {
         // and cannot take `&mut` without handing the connection out. The writer holds the
         // database's mutex across this call, so nothing else in the process is writing.
         let transaction = self.connection.unchecked_transaction().map_err(sqlite)?;
+        // One borrow for the whole batch: the counter bump and the tally are both statements against
+        // the sessions table, run through this transaction (HS-023 added the second).
+        let sessions = SessionRepository::new(&transaction);
         let mut assigned = Vec::with_capacity(events.len());
         for event in events {
-            let Some(seq) = SessionRepository::new(&transaction)
+            let Some(seq) = sessions
                 .bump_last_seq(&event.session_id)
                 .map_err(RepoError::Sessions)?
             else {
@@ -94,6 +112,15 @@ impl<'a> EventRepository<'a> {
                     ],
                 )
                 .map_err(sqlite)?;
+            // The session's spend follows from its log, so the two commit together (HS-023). After the
+            // insert, so a batch that fails on an event leaves neither the row nor the tally behind.
+            if event.kind == MESSAGE_END
+                && let Some((input, output)) = usage(&event.payload)
+            {
+                sessions
+                    .add_usage(&event.session_id, input, output)
+                    .map_err(RepoError::Sessions)?;
+            }
             assigned.push(Event::of(event, seq));
         }
         transaction.commit().map_err(sqlite)?;

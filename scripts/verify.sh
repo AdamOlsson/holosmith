@@ -12,8 +12,9 @@
 # stream, a prompt's turn, a timeout that does not fire on a short turn, an abort down to
 # `abort_completed`, a steer's own frame, a resume's two
 # refusals, a delete from its 202 to the row that is gone, an idle session stopped by the sweeper with
-# its reason, its event and its log line, and a create at the cap evicting the idle session before it
-# succeeds, with no CORS header on any answer, and stopping on SIGTERM with exit 0.
+# its reason, its event and its log line, a create at the cap evicting the idle session before it
+# succeeds, and a token budget on a boot of its own ending the turn that spends it, with no CORS header
+# on any answer, and stopping on SIGTERM with exit 0.
 # --no-build skips the two artifact phases; --keep keeps the work dir of a successful run. On
 # failure this prints FAIL <assertion> and keeps the work dir (config, banner, every answer).
 # Downloads nothing and needs neither curl nor jq: every request is a /dev/tcp fetch. Put the
@@ -59,6 +60,7 @@ owner="verify@example"
 WORK="$(mktemp -d)"
 mkdir -p "$WORK/responses"
 serve_pid=""
+serve_err="$WORK/serve.err"
 created_id=""
 assertions=0
 
@@ -302,6 +304,7 @@ serve_cases=(
   case_delete_unknown_session
   case_create_at_cap_evicts
   case_create_at_cap_refused
+  case_token_budget
 )
 
 # The health payload: exactly four keys, and the uptime is not predictable, so the assertion is
@@ -333,7 +336,7 @@ case_health() {
 case_schema_version() {
   local name=case_schema_version banner database
   database="$WORK/data/app.db"
-  banner="$(grep -m1 '^database ' "$WORK/serve.err" || true)"
+  banner="$(grep -m1 '^database ' "$serve_err" || true)"
   check "$name/banner" "database $database schema $schema_version" "$banner"
   [ -f "$database" ] ||
     fail "$name/app_db" "serve did not write $database: $(ls -A "$WORK/data" 2>/dev/null)"
@@ -604,7 +607,7 @@ case_events_stream() {
 # below is what proves the stub is the backend that actually provisioned the session.
 case_backend_from_config() {
   local name=case_backend_from_config banner
-  banner="$(sed -n 's/^holosmith .* backend \([a-z]*\)$/\1/p' "$WORK/serve.err" | sed -n '1p')"
+  banner="$(sed -n 's/^holosmith .* backend \([a-z]*\)$/\1/p' "$serve_err" | sed -n '1p')"
   check "$name/banner" "stub" "$banner"
 }
 
@@ -856,9 +859,9 @@ case_turn_timeout() {
   done
 
   # And the runner said nothing about a deadline, which is the runner's own witness.
-  if grep -q 'the turn ran past its timeout' "$WORK/serve.err"; then
+  if grep -q 'the turn ran past its timeout' "$serve_err"; then
     fail "${name}/fired" \
-      "a deadline of a minute fired on turns that end in a second: $(grep 'holosmith::turn' "$WORK/serve.err" | sed -n '1,5p')"
+      "a deadline of a minute fired on turns that end in a second: $(grep 'holosmith::turn' "$serve_err" | sed -n '1,5p')"
   fi
   assertions=$((assertions + 1))
 }
@@ -1098,6 +1101,28 @@ wait_for_gone() {
   fail "$label/status" "the session was never removed: $response"
 }
 
+# wait_for_reason_id <label> <id> <reason>: poll one session's row until it is `idle` *and* carries
+# that reason, bounded and counted once.
+#
+# The writer commits every 25 ms, so "the row answered" and "the log can be read" are different
+# moments; this waits on the pair the case goes on to assert, so a passing case cannot have read a
+# body it did not mean. The reason is a word, not a sentence: no test pins a message (`http/error.rs`).
+wait_for_reason_id() {
+  local label="$1" id="$2" reason="$3" body
+  for _ in $(seq 1 100); do
+    fetch "$label" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "$label/no_answer" "GET /api/sessions/$id did not answer"
+    body="$(cat "$WORK/responses/$label.body")"
+    if printf '%s\n' "$body" | grep -q '"status":"idle"' &&
+      printf '%s\n' "$body" | grep -q "\"status_reason\":\"$reason\""; then
+      assertions=$((assertions + 1))
+      return 0
+    fi
+    sleep 0.1
+  done
+  fail "$label/reason" "the session never reached idle with reason $reason: $body"
+}
+
 # wait_for_stopped_id <label> <id>: poll one session's row until it says stopped, bounded and counted
 # once. The idle stop is a timer's, not a request's (HS-021), so its budget is the config's bound plus
 # one tick rather than a fraction of a second: 100 seconds for the gate's one-minute `idle_stop_min`.
@@ -1239,11 +1264,11 @@ case_idle_stop() {
 
   # And the second half: one log line per stop, naming the session, for an operator reading journald.
   if grep -q "holosmith::sweeper: the session sat idle for too long and was stopped session=$idle" \
-    "$WORK/serve.err"; then
+    "$serve_err"; then
     assertions=$((assertions + 1))
   else
     fail "${name}/log" \
-      "the sweeper wrote no line for $idle: $(grep 'holosmith::sweeper' "$WORK/serve.err" | sed -n '1,5p')"
+      "the sweeper wrote no line for $idle: $(grep 'holosmith::sweeper' "$serve_err" | sed -n '1,5p')"
   fi
 
   # The slot is free: a create at the cap of one is accepted, and the session it did not have to evict
@@ -1380,6 +1405,65 @@ case_create_at_cap_evicts() {
   wait_for_idle_id "${name}_fresh" "$fresh"
 }
 
+# HS-023's proof from the artifact: a ceiling under one turn's spend ends the turn that spends it, and
+# the spend is persisted on the row.
+#
+# The ceiling cannot live in the one config the cases above share — with `max_session_tokens` set there,
+# every prompt above would end `budget_exceeded` and a dozen assertions would be reading the budget
+# instead of what they are named for. So this case stops the server and boots the same artifact again on
+# a config and a data root of its own, which is also what makes it own every row it asserts: nothing
+# before it is on that machine, and nothing after it may assume the first boot's state.
+case_token_budget() {
+  local name=case_token_budget response body id
+  local create_body='{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}'
+
+  stop_serve
+  # The stub's turn reports 1540 tokens (1200 in, 340 out), so 1000 is spent by its `message.end` and
+  # the turn that reported it is the one that ends. No `turn_timeout_min` and no `idle_stop_min`: this
+  # boot is about one policy, and the two timers would only make the wait longer.
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "stub"\nmax_session_tokens = 1000\n' "$owner" \
+    >"$WORK/config-budget.toml"
+  start_serve "$WORK/config-budget.toml" "$WORK/data-budget"
+
+  fetch_body "$name" POST /api/sessions "$create_body" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-budget-1" ||
+    fail "$name/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 202
+  body="$(cat "$WORK/responses/$name.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id" ] || fail "$name/id" "the response names no id: $body"
+  wait_for_idle_id "${name}_idle" "$id"
+
+  fetch_body "${name}_prompt" POST "/api/sessions/$id/prompt" '{"prompt":"read the app shell"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_prompt/no_answer" "POST /api/sessions/$id/prompt did not answer"
+  expect_status "${name}_prompt" "$(answer "${name}_prompt")" 202
+
+  # The reason reaches the log, which is the transcript's copy of it. Which of the two endings records
+  # it is the poll's to decide (it may not fall between the message's end and the turn's), so the case
+  # asserts the reason and not the path it took — that half is `tests/token_budget.rs`.
+  fetch_sse_until "${name}_stream" "/api/sessions/$id/events" '"reason":"budget_exceeded"' \
+    "Host: 127.0.0.1" ||
+    fail "${name}_stream/no_answer" "GET /api/sessions/$id/events did not answer"
+  expect_status "${name}_stream" "$(answer "${name}_stream")" 200
+
+  # The row: the reason, the session back in `idle`, and the two counts the writer persisted from the
+  # `message.end` the turn reported.
+  wait_for_reason_id "${name}_row" "$id" budget_exceeded
+  body="$(cat "$WORK/responses/${name}_row.body")"
+  case "$body" in
+    *'"usage_in":1200'*'"usage_out":340'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "${name}_row/usage" "the turn's usage was not persisted on the row: $body"
+      ;;
+  esac
+}
+
 # Box 4, over every answer the cases above saved: none of them carries a CORS header, and none
 # carries a `Vary` that would imply one. Runs after the case loop rather than as a member of it,
 # so nothing answered above is missed and a case appended later is covered automatically.
@@ -1391,28 +1475,35 @@ case_no_cors_header() {
   done
 }
 
+# start_serve [config] [data dir]: boot the artifact and read the two values the cases need from its
+# banner. `case_token_budget` boots a second time with a config of its own, so both files are
+# parameters, and so is the banner it reads: a case that ran against the first boot must not read the
+# second's.
 start_serve() {
+  local config="${1:-$WORK/config.toml}" data="${2:-$WORK/data}" tag=serve
+  [ "$data" = "$WORK/data" ] || tag="serve-$(basename "$data")"
+  serve_err="$WORK/$tag.err"
   # --port 0 asks the kernel for the port, and it is also what makes serve re-derive
   # control_origin from the bound address (ADR-0007): the passing case can then send exactly
   # the origin the guard compares. --data-dir keeps the run out of /var/lib/holosmith.
-  "$artifact" serve --config "$WORK/config.toml" --port 0 --data-dir "$WORK/data" \
-    >"$WORK/serve.out" 2>"$WORK/serve.err" &
+  "$artifact" serve --config "$config" --port 0 --data-dir "$data" \
+    >"$WORK/$tag.out" 2>"$serve_err" &
   serve_pid=$!
   for _ in $(seq 1 200); do
-    grep -q '^control_listen ' "$WORK/serve.err" 2>/dev/null && break
+    grep -q '^control_listen ' "$serve_err" 2>/dev/null && break
     kill -0 "$serve_pid" 2>/dev/null || break
     sleep 0.05
   done
 
   # Both read from the banner, never assumed: the port the kernel gave, and the origin the
   # guard compares.
-  control_listen="$(sed -n 's/^control_listen //p' "$WORK/serve.err" | sed -n '1p')"
+  control_listen="$(sed -n 's/^control_listen //p' "$serve_err" | sed -n '1p')"
   [ -n "$control_listen" ] ||
-    fail "serve/banner" "serve printed no control_listen line: $(cat "$WORK/serve.err")"
+    fail "serve/banner" "serve printed no control_listen line: $(cat "$serve_err")"
   port="${control_listen##*:}"
-  control_origin="$(sed -n 's/^control_origin //p' "$WORK/serve.err" | sed -n '1p')"
+  control_origin="$(sed -n 's/^control_origin //p' "$serve_err" | sed -n '1p')"
   [ -n "$control_origin" ] ||
-    fail "serve/banner" "serve printed no control_origin line: $(cat "$WORK/serve.err")"
+    fail "serve/banner" "serve printed no control_origin line: $(cat "$serve_err")"
   printf 'ok serve/banner: listening on %s, control origin %s\n' "$control_listen" "$control_origin"
 }
 

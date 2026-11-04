@@ -13,7 +13,7 @@ use std::time::Duration;
 use axum::http::Method;
 use holosmith::backend::{Call, StubBackend};
 use holosmith::config::Config;
-use holosmith::http::TURN_STEER;
+use holosmith::events::TURN_STEER;
 use holosmith::http::error::{BAD_BODY, NOT_FOUND, SESSION_IDLE, SESSION_STOPPED};
 use holosmith::http::{self, AppState, Guards, RouteKind};
 use holosmith::sessions::state::{Transitioner, Trigger};

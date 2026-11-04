@@ -88,6 +88,11 @@ function toolId(payload: Record<string, unknown>): string | null {
   return typeof id === "string" && id !== "" ? id : null;
 }
 
+// One token count: a non-negative integer, which is what the API's own tally adds up (HS-023).
+function count(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
 // A message's usage: the two counts `message.end` carries. A `message.end` without them names no
 // usage, so it is dropped rather than rendered as `in 0 · out 0`.
 function usage(payload: Record<string, unknown>): { input: number; output: number } | null {
@@ -98,7 +103,11 @@ function usage(payload: Record<string, unknown>): { input: number; output: numbe
   const fields = counts as Record<string, unknown>;
   const input = fields["in"];
   const output = fields["out"];
-  if (typeof input !== "number" || typeof output !== "number") {
+  // A count is a count: a negative or fractional value is refused rather than rendered, and the writer
+  // that adds the same numbers to the session's spend refuses exactly these (`as_u64`, HS-023). One rule
+  // in two languages is a second spelling, so the two are written the same way on purpose — a screen that
+  // showed `in -5` would be showing a cost the budget never counted.
+  if (!count(input) || !count(output)) {
     return null;
   }
   return { input, output };
@@ -195,12 +204,18 @@ export class Transcript {
   private readonly tools: string[] = [];
   private readonly toolsSeen = new Set<string>();
   private turn = 0;
+  // What the stream has said about cost (HS-023): the turns that closed and whether any message
+  // declared what it spent. Both are facts about the log, so a replay re-establishes them.
+  private settled = 0;
+  private usage = false;
 
   // The changes `frame` implies, in the order the page must apply them.
   apply(frame: Frame): Change[] {
     if (frame.type === "boundary") {
       if (frame.boundary === "start") {
         this.turn += 1;
+      } else {
+        this.settled += 1;
       }
       return [{ op: "boundary", boundary: frame.boundary, turn: this.turn }];
     }
@@ -246,6 +261,9 @@ export class Transcript {
       return changes;
     }
     if (frame.type === "usage") {
+      // A `message.end` without usage never becomes a frame (`parseFrame` drops it), so reaching here
+      // is the only way the model learns the agent said what a message cost.
+      this.usage = true;
       changes.push({
         op: "usage",
         messageId: frame.messageId,
@@ -274,6 +292,32 @@ export class Transcript {
   toolOrder(): readonly string[] {
     return this.tools;
   }
+
+  // What the stream has said about cost, for `budgetNotice`.
+  spend(): Spend {
+    return { settled: this.settled, usage: this.usage };
+  }
+}
+
+// What the stream has said about what the agent spent (HS-023): how many turns have closed, and
+// whether any message declared what it cost.
+export type Spend = { settled: number; usage: boolean };
+
+// The sentence a session screen says when the backend told it nothing about usage, or `null` when it
+// has nothing to say.
+//
+// The token budget counts `usage_in + usage_out`, which the writer accumulates from `message.end`
+// (HS-023); a backend that sends no `usage` leaves the budget nothing to count, and spec item 13's
+// contingency says the operator is told so rather than shown a zero. Two facts decide it, and neither
+// is the row's total: a *settled turn* is what makes usage expected at all ("no turn has run yet" is
+// not "the backend reports nothing"), and *a usage frame* is what makes it reported. Both are read
+// from the log, which the page replays on every load, so the sentence is the same after a reload as it
+// was live — and a row whose two columns are 0 cannot say which of the two cases it is in.
+export function budgetNotice(spend: Spend): string | null {
+  if (spend.settled === 0 || spend.usage) {
+    return null;
+  }
+  return "no usage reported — the token budget has nothing to count";
 }
 
 // Which of the composer's actions this state offers. Steer and Abort belong to a running turn

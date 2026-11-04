@@ -21,6 +21,34 @@ pub use registry::{StreamGuard, StreamRegistry};
 pub use repository::EventRepository;
 pub use writer::spawn;
 
+// The kinds whose payload ADR-0018 and ADR-0019 pin, and the only spelling of each.
+//
+// They live here rather than next to their producer because two modules now name one of them: the stub
+// emits every kind, and the writer reads a `message.end`'s `usage` to keep the session's tally (HS-023).
+// A kind its own producer alone names would not need a constant; these do, and a second literal is how
+// the renderer and the producer drift apart. `session.status` is not here: the transitioner is its only
+// producer and `sessions::state::SESSION_STATUS` is its name.
+
+/// A turn beginning: `{}`.
+pub const TURN_START: &str = "turn.start";
+/// One appended piece of a message: `{"message_id", "kind": "text"|"thinking", "text"}`.
+pub const MESSAGE_DELTA: &str = "message.delta";
+/// A message's whole state, the only replacing frame: `{"message_id", "text", "thinking"}`.
+pub const MESSAGE_SNAPSHOT: &str = "message.snapshot";
+/// A tool call beginning: `{"tool_id", "name", "arguments"}`.
+pub const TOOL_START: &str = "tool.start";
+/// A tool call finishing: `{"tool_id", "name", "output"}`.
+pub const TOOL_END: &str = "tool.end";
+/// A message finishing: `{"message_id", "usage": {"in", "out"}}`. The `usage` is what the writer
+/// adds to the session's tally, and it is optional: a backend that cannot report it emits the frame
+/// without it (HS-023).
+pub const MESSAGE_END: &str = "message.end";
+/// A turn ending: `{}`.
+pub const TURN_END: &str = "turn.end";
+/// The operator's guidance reaching a running turn: `{"text"}`, and the one kind with no message id
+/// (ADR-0021).
+pub const TURN_STEER: &str = "turn.steer";
+
 /// One durable record in a session's stream: the row in `events`, with the seq the writer gave it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Event {
