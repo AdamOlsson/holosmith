@@ -1,4 +1,4 @@
-# RESUME — orchestrator handoff (cold start, after twenty-four stories)
+# RESUME — orchestrator handoff (cold start, after twenty-five stories)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating
 procedure and still governs; this file is the state of the world — what exists, what the environment
@@ -37,11 +37,11 @@ created, prompted, aborted, steered, stopped, resumed and deleted, and it is dri
 ## 1. Where the work stands
 
 Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is clean, and every
-commit is **pushed** (see the note on pushing below). `HEAD` is `0b7d50e`; any commit after it is
+commit is **pushed** (see the note on pushing below). `HEAD` is `ce4dc82`; any commit after it is
 bookkeeping — this file's own refresh.
 
-**Linear: 24 Done, 56 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-024`
-(`PER-33` … `PER-56`).
+**Linear: 25 Done, 55 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-025`
+(`PER-33` … `PER-57`).
 
 | Story | Linear | Commits | ADR |
 | --- | --- | --- | --- |
@@ -69,14 +69,15 @@ bookkeeping — this file's own refresh.
 | HS-022 turn timeout | PER-54 | `e767757` | 0026 (amends 0020) |
 | HS-023 token budget | PER-55 | `2e902c2`, `fbc0659` | 0027 |
 | HS-024 Docker preflight | PER-56 | `f241ced`, `0b7d50e` | 0028 |
+| HS-025 worktree provisioning | PER-57 | `7e36bde`, `1fe7f6e`, `ce4dc82` | 0029 |
 
-**Next issue: `PER-57` (HS-025 — worktree provisioning, the Docker backend's first real work).** Then
-onward in `HS-###` order. §8 carries what HS-025 is about and the facts it inherits.
+**Next issue: `PER-58` (HS-026 — worktree refusal rules).** Then onward in `HS-###` order. §8 carries
+what HS-026 is about and the facts it inherits.
 
 Ranking, per `PROMPT.md`: Linear priority (all are `No priority`) → `HS-###` order in `docs/stories/` →
 anything already `In Progress` first → skip an issue whose `Blocked by` stories are not `Done`.
 
-### Six facts a cold start must know
+### Eight facts a cold start must know
 
 1. **A running turn can now be stopped, in two rungs, with or without the way back.** `src/ladder.rs`
    is the shared routine: `clear_queue` then `abort`, wait up to `abort_grace` (the grace *bounds rung
@@ -127,7 +128,24 @@ anything already `In Progress` first → skip an issue whose `Blocked by` storie
    count, and the session screen says so in one sentence (`budgetNotice` in `transcript.ts`) rather than
    showing a zero. The tally survives a resume; that is the spec's "per session".
 
-6. **A Docker run does not start on a machine that cannot carry it.** `src/preflight.rs` checks the
+6. **A session's worktree is real now, and the row records where it is.** `src/worktree.rs` holds spec
+   item 1's five host commands as one value (`repository`, `path`, `branch`) with `ensure`, `ahead` and
+   `remove`; the Docker backend runs them on `spawn_blocking` and answers
+   `Provisioned::Worktree { path, base_commit, created }`; the *provisioner* writes the row, because a
+   backend may not (ADR-0019). `ensure` is create-**or-adopt** (a resume re-provisions a worktree that is
+   still there) and the row's `base_commit` wins over the branch's head. Teardown treats a missing
+   worktree, branch *and* project repository as success, so a delete cannot wedge on ADR-0023's `deleting`
+   row. **A step that only adopted is not undone** when a later step fails (`Provisioned::undoable`):
+   those commits are the agent's, and deleting them would be data loss dressed as cleanliness.
+
+7. **The step after the worktree is still the one that refuses**, so a Docker-backed create ends `error`
+   with `the network step: … (HS-027)` and the provisioner takes the worktree back. That is why
+   `case_worktree` asserts the worktree is *gone*, and why the story's "commit in it, see `ahead`
+   increment" half is only shown by `tests/worktree.rs` (ADR-0029 records this). The `Session` value a
+   later step is handed is the **create's**, so `session.worktree` is still `''` even after the row has
+   the path — HS-027's mounts must derive it (`DockerBackend::worktree`) rather than read it.
+
+8. **A Docker run does not start on a machine that cannot carry it.** `src/preflight.rs` checks the
    daemon's `_ping` over `docker_host`, git ≥ 2.38 and `df -Pk <data root>` against `min_free_gb`, and
    `serve --backend docker` refuses **before the database is opened** with one sentence per failure that
    names the fix (all failures at once). `role = "hub"` is exempt — a hub runs no sessions (item 10 §6) —
@@ -319,8 +337,8 @@ If that fails, **stop and report** — that is a `PROMPT.md` stop condition.
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                     # 213 lib + 25 integration binaries (8 idle_stop.rs, 6 turn_timeout.rs,
-                               # 14 delete.rs, 6 eviction.rs); `grep -cE 'test result: ok'` is 26
+cargo test                     # 223 lib + 30 test results (10 in tests/worktree.rs, 3 in
+                               # backend_contract.rs, 8 idle_stop.rs, 6 turn_timeout.rs, 14 delete.rs)
 cd web && npm test             # 22 transcript tests (node's own runner)
 cd web && npx tsc --noEmit     # not a gate phase, but a web edit that does not typecheck is a bug
 scripts/verify.sh              # THE one-command gate since HS-006
@@ -329,8 +347,9 @@ scripts/verify.sh              # THE one-command gate since HS-006
 `scripts/verify.sh` runs six phases, cheapest first: `fmt`, `clippy`, `test`, `build`
 (`scripts/build.sh`, which itself runs `build-web.sh` — `npm test` then Vite — and `check-static.sh`
 last), `embed` (`scripts/check-embed.sh`), then `serve` — the **shipped musl artifact** booted on
-`--port 0` with a temp data dir, running **38 cases plus a CORS sweep (205 assertions)**, then torn down
-with `SIGTERM` and an asserted exit 0. It takes ~3 min (both musl targets) plus `case_idle_stop`'s real
+`--port 0` with a temp data dir, running **41 cases plus a CORS sweep (237 assertions)**, then torn down
+with `SIGTERM` and an asserted exit 0. Three cases bring their own boot (`case_token_budget`,
+`case_worktree`, and `case_docker_preflight`, which needs no server at all). It takes ~3 min (both musl targets) plus `case_idle_stop`'s real
 minute. `--no-build` skips `build` and `embed`; `--keep` keeps the work dir.
 
 A story is not done until all four are green on a clean tree, and then you run the story's own demo
@@ -406,6 +425,10 @@ crates/holosmith/
   src/events/               mod.rs (Event, NewEvent, EventWriter, EventStream), writer.rs, repository.rs
                             (`insert_batch` drops an event whose session has gone; `delete_session_log`),
                             stream.rs (replay→live, lag), registry.rs (open-stream counts)
+  src/worktree.rs           the session's worktree (HS-025, ADR-0029): `Worktree::of` (the naming rule),
+                            `ensure` (create or adopt, answers `Ensured { base_commit, created }`), `ahead`
+                            (`rev-list --count`), `remove` (registered? → remove → branch −D → prune), and
+                            `GitError`. Sync and std-only; the backend calls it on `spawn_blocking`
   src/preflight.rs          the three startup checks and their sentences (HS-024, ADR-0028):
                             `check`/`check_with` (the `Tools` seam is the test's shim for git/df),
                             `Complaint { check, sentence }`, `socket_sentence`
@@ -417,9 +440,10 @@ crates/holosmith/
                             pin_single_source, guards, session_repository, sessions_api, events,
                             streams, provisioning, state_machine, session_list, session_screen,
                             turns, abort, steer, resume, delete, eviction, idle_stop, turn_timeout,
-                            token_budget, preflight, backend_contract, support/mod.rs (the shared
-                            harness)
-web/                        Vite 7 + TypeScript, two screens (`/` and `/sessions/<id>`);
+                            token_budget, preflight, backend_contract, worktree, support/mod.rs
+                            (the shared harness, which also has `repository`/`git`/`head`/
+                            `branch_exists`/`worktrees` helpers for a real git repo in a `TempDir`)
+web/                        Vite 7 + TypeScript, two screens (`/` and `/sessions/<id>`); untouched by HS-025
                             package-lock COMMITTED; main.ts is the DOM, transcript.ts the renderer's
                             rules (frame parsing, block model, affordances, `stoppedNotice` /
                             `stoppedDetail`)
@@ -432,9 +456,9 @@ scripts/check-static.sh     file/readelf, empty-root serve + cmp against web/dis
 scripts/check-embed.sh      the three embed cases (present / absent warns / required fails)
 scripts/verify.sh           the one-command gate (see §3)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0028          read the recent ones before planning anything
+docs/adr/0001…0029          read the recent ones before planning anything
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-54   each a verbatim review + a `## Resolution` table
+docs/review/PER-33…PER-57   each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -449,8 +473,8 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   the delete flow, the cap with eviction, the Sessions screen with its create form and the
   "nothing was deleted" notice, the session screen at `/sessions/<id>` with a live transcript and a
   four-action composer.
-- **Not built yet:** anything Docker beyond the preflight (HS-025 … HS-046 — the backend still refuses every
-  operation), the drain (HS-044), tool-output files and `output_ref` (HS-033), the **usage totals on the
+- **Not built yet:** anything Docker beyond the preflight and the **worktree step** (HS-026 … HS-046 — the
+  network, container and agent steps still refuse, each naming its story), the drain (HS-044), tool-output files and `output_ref` (HS-033), the **usage totals on the
   screen** (HS-034 — the columns are now real, the screen only says "no usage reported" when it must), the
   preview listener (HS-041), the stopped-session expiry (HS-064), `doctor` (HS-045), merge, publish, the hub,
   releases, and any **delete affordance in `web/`** (the API has the endpoint; the page has no button).
@@ -460,7 +484,8 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   the runner, on one `fired` shared with the timeout so only one climb happens). All of them go through
   `Transitioner::apply`, and the row moves before the container in every one of them.
 - **`runtime::Backend`** has `Stub` and `Docker`; `serve --backend` and the config key `backend` select
-  it. `DockerBackend` **refuses every operation** until HS-025 fills them in, and the default backend is `docker`
+  it. `DockerBackend::new(projects_root)` **provisions the worktree and refuses every other operation**
+  (HS-026 … HS-031 fill them in), and the default backend is `docker`
   (ADR-0001: the stub is opt-in), so a default build provisions a session to `error` with a reason
   rather than hanging in `starting`. That refusal is also the demo trick HS-019 used to provoke a real
   failed snapshot from the shipped artifact. `scripts/verify.sh` boots with `backend = "stub"` in its
@@ -792,6 +817,33 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 - **`awk` is still absent** and a `command -v awk` guard caught me using it in a shell one-liner. Use
   `git`/`grep`/`sed`/`cut`/`while read`.
 
+### Landmines HS-025 added
+
+- **`git worktree add` resolves a *relative* path against the repository**, not the caller's directory
+  (measured, git 2.43): `git -C repo worktree add ../x` lands inside the repository. Every path in
+  `src/worktree.rs` is absolute, and `projects_root` is validated absolute.
+- **`git worktree list --porcelain` prints the *resolved* path and does NOT quote it** — a projects root
+  reached through a symlink compares equal only after `canonicalize`, and one with a space or non-ASCII
+  bytes is printed raw (measured; `core.quotepath` does not change `--porcelain`). `tests/worktree.rs`'s
+  adoption test uses a temp dir with a space in its name so this cannot regress.
+- **"Already gone" is an exit code, not an exception**: `git worktree remove` on an unregistered path exits
+  128 and `git branch -D` of a missing branch exits 1. `remove()` asks `registered()`/`branch_exists()`
+  *before* running either, instead of reading git's English.
+- **A teardown must succeed when the project repository is missing too** (a delete keeps a row `deleting`
+  on a backend failure, ADR-0023). A *directory* that exists but is not registered is left alone — HS-044's.
+- **The provisioner only undoes what a provision made.** `Provisioned::undoable` is the rule: an adopted
+  worktree's commits survive a later step's failure. Mutating it back to "always undo" makes
+  `a_later_step_failure_does_not_take_an_adopted_worktree_back` go red — that test is the guard.
+- **`case_worktree` needs a Docker boot on a machine with no daemon.** It answers the preflight's `_ping`
+  from a ten-line `python3` unix socket (`fake_docker_ping`), and its python3 guard must stay **above** its
+  `stop_serve`: a skipped case that stopped the server first leaves `phase_serve`'s own `stop_serve` with an
+  empty pid, and `kill -TERM ""` exits 1 → the gate fails with a message about SIGTERM.
+- **`tests/preflight.rs` flakes about 3 runs in 40** with `git is not runnable (Text file busy (os error
+  26))`: its shims are written and exec'd while other test threads fork. Serial runs are clean (0/12).
+  Writing the shim aside and renaming it did **not** help (measured) — the forked child inherits the write
+  descriptor of the inode that is then exec'd. Re-run the binary; the real fix is to write the shim from
+  another process or to build every shim once under a lock. **Not fixed yet, and it can redden the gate.**
+
 ### Reviews
 
 - **Reviews are saved verbatim** and a `## Resolution` section is appended afterwards. Do not edit the
@@ -885,6 +937,9 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 | The turn timeout is the **turn runner's own deadline**, it hands the ladder a task of its own rather than a `select!` branch, and both endings record `turn_timeout` | the row keeps no per-turn timestamp (`last_active_at` moves on a steer, so a watcher would let a steered turn run for ever), and a dropped climb leaves a session stopped with nobody to resume it | ADR-0026, amending ADR-0020 |
 | The **tally is the event writer's** (inside the seq transaction, so the events repository parses exactly one kind's payload) and the **ceiling is the runner's** (a 100 ms poll, `>=`, first policy to fire owns the reason, a settle over the ceiling records the reason instead) | the backend emits `message.end` and the runner never sees the frame; a subscriber would add lag and a second parser; a policy that must record a reason owns the ending | ADR-0027 |
 | The **Docker preflight is a startup refusal** with `Complaint` values reported all at once, `hub` and `stub` exempt, and no new dependency (`df`, `git --version`, a hand-written `_ping`) | the story says "fail at startup instead of mid-turn", item 10 §5 makes the same check `ExecStartPre`, and `unsafe` is denied so `statvfs` was not reachable | ADR-0028 |
+| The **worktree's five host commands live in one `src/worktree.rs` value**, the backend runs them on `spawn_blocking`, and the **provisioner** writes the two columns the step reports | item 1 names them as host commands that four later stories read, and ADR-0019 forbids a backend writing a row | ADR-0029 |
+| A worktree step that **adopted** a worktree is **not undone** when a later step fails; a delete still removes it | those commits are the agent's work, and deleting them to tidy up after a step that made nothing is data loss; a delete's session is going away and was snapshotted | ADR-0029 |
+| **`ahead` is a function, not a column and not an endpoint**, and the story's demo is recorded as half-showable | no column exists, HS-061 owns `GET /changes`, a per-row git call in the list endpoint is a second data path; the step after the worktree refuses, so a live worktree cannot be shown from the artifact | ADR-0029 |
 
 ---
 
@@ -895,64 +950,72 @@ cd /home/adamolsson/projects/holosmith
 git status --short                          # must be clean
 . ~/.pi/toolchains/env.sh
 python3 /tmp/lin.py issues | grep -v ' Done ' | head   # next unfinished (recreate /tmp/lin.py, §2)
-python3 /tmp/lin.py issue PER-57            # sanity-check Linear is reachable and scoped
-scripts/verify.sh                           # baseline green (~4 min, 40 cases, 221 assertions)
+python3 /tmp/lin.py issue PER-58            # sanity-check Linear is reachable and scoped
+scripts/verify.sh                           # baseline green (~6 min, 41 cases, 237 assertions)
 ```
 
-Then start the cycle at **`PER-57` (HS-025 — worktree provisioning)**. Read §1's six facts first: the
-runner owns both turn policies, the spend is a column the writer adds to, and the page has been rendered
-(so a DOM claim needs a Chromium run — and a `web/` edit needs a rebuild before that run).
+Then start the cycle at **`PER-58` (HS-026 — worktree refusal rules)**. Read §1's facts first: the runner
+owns both turn policies, the spend is a column the writer adds to, the worktree step is real and idempotent,
+and the page has been rendered (so a DOM claim needs a Chromium run — and a `web/` edit needs a rebuild
+before that run).
 
-### What HS-025 is about, so the first brief is fast
+### What HS-026 is about, so the first brief is fast
 
-Acceptance, verbatim from `docs/stories/phase-1b-docker-backend.md` (Size M, spec item 1):
+Acceptance, verbatim from `docs/stories/phase-1b-docker-backend.md` (Size S, spec item 1):
 
-- [ ] Provision runs `git worktree add -b agent/<id> <projects>/.worktrees/<id> HEAD` and records the
-      worktree path and `base_commit`.
-- [ ] `ahead` is computed as `git rev-list --count <base_commit>..agent/<id>`.
-- [ ] Teardown runs `git worktree remove --force`, `git branch -D agent/<id>`, `git worktree prune`; a
-      missing worktree is not an error.
-- [ ] Orphaned worktrees from a crashed run are pruned at startup (HS-044).
-- [ ] No fetch step anywhere: the branch and its refs already live in the project repository.
+- [ ] 422 `git_not_directory` when the project's `.git` is not a directory.
+- [ ] 422 `submodules_present` when submodules exist (their hooks live under `.git/modules`).
+- [ ] 422 `worktree_config_enabled` when `extensions.worktreeConfig` is on.
+- [ ] Checks run before `git worktree add`, so a refused session leaves nothing behind.
+- [ ] The UI explains the refusal in one sentence rather than showing a code.
 
-**Already in place:** `Step::Worktree` is the first step the provisioner runs, the `worktree` and
-`base_commit` columns exist on the row (migration 0002) and are written by nobody, `DockerBackend` refuses
-`provision` with a sentence while the stub fakes the step, `tests/backend_contract.rs` is where the new
-behaviour's cases belong, and `docs/build.md`'s Docker section is where its prerequisites go.
+**Already in place:** `DockerBackend::provision_worktree` is the one place a refusal can be raised before the
+first git command; `BackendError::failed(reason)` is how a sentence reaches the row and the transcript;
+`src/worktree.rs` holds `Worktree::of` (the repository path), so a `refusal()`-style check belongs beside it
+as `Worktree::refusal(&self) -> Result<(), Refusal>` or in the backend, decided by where the reading happens;
+`tests/worktree.rs` is where the cases go (a real repository in a `TempDir`); `ApiError`'s constructors are in
+`http/error.rs` and its codes are constants.
 
 **What the story has to decide (none of it is settled — plan it before coding):**
 
-1. **Where the projects root comes from.** There is no `projects_root` config key today; the spec (item 1)
-   and HS-025's path both say `<projects>`. Either a key is added (with the golden config file and the
-   `KNOWN_KEYS` count — §6) or it is derived. Decide with item 1's words and the config validator's rules.
-2. **How a git failure becomes a `BackendError`.** The step's failure reaches the row's `status_reason` and
-   a `session.status` frame, and the sentence must name what to fix (`BackendError::failed(reason)` exists).
-   The refusal shape for a session that is not `starting` any more is ADR-0016's, already handled.
-3. **Where the `ahead` count lives.** The row has no `ahead` column and HS-061/HS-064 do not add one. It is
-   either computed on read (the list endpoint would run `git` per row — expensive and a second data path) or
-   added by a migration. Read HS-061/HS-063 before choosing; a column costs a schema bump (SCHEMA_VERSION,
-   a migration file, the check-static SQL grep).
-4. **Whether the worktree step runs at all under the stub.** The stub currently reports every step as done
-   without touching a repository. Keep that: the stub's job is the lifecycle, and the conformance suite is
-   where the two backends are compared (ADR-0028), so a real worktree under `--backend stub` would make the
-   gate depend on git.
-5. **How a test gets a repository.** `TempDir` + `git init` + one commit is enough; `support/mod.rs` is the
-   shared home. No fetch, no remote, no network.
+1. **422 is an HTTP answer, but the refusal is discovered inside the provisioner's background task**, where
+   there is no request to answer. Read the story's wording against the flow: `POST /api/sessions` answers 202
+   *before* provisioning. The honest options are (a) the refusal happens in the **create handler**, before the
+   202 (a `git` read per create — that is a synchronous check on the request's path and it is what "refused at
+   session creation" means), or (b) it stays in the step and reaches the operator through the row's reason
+   and a 409-shaped sentence instead of a 422. The spec (item 1) says "Refused with 422 at session creation",
+   so (a) is canonical — and the sentence must then not be a `BackendError` but the create's own `ApiError`.
+2. **Three new error codes** (`git_not_directory`, `submodules_present`, `worktree_config_enabled`) means
+   `http/error.rs` constants, the story's distinct-code acceptance, and a case each — plus the sentence rule
+   ("the UI explains the refusal in one sentence rather than showing a code"), which with today's page means a
+   sentence in the *create form's* error area (`web/src/main.ts` renders `bad_project` today — find it first).
+3. **How to detect each condition without a new dependency**: `.git` is a directory (`Path::is_dir`, but a
+   `.git` *file* means a worktree/submodule checkout); submodules (`git -C repo submodule status` is a read,
+   or `.gitmodules` existing — decide from what item 1 says the hole is); `extensions.worktreeConfig`
+   (`git -C repo config --get extensions.worktreeConfig` is a read that answers non-zero when unset).
+4. **Where the check runs so it costs nothing when it can be avoided**: a project that has been created from
+   before is checked again on every create unless it is cached, and a cache is a second source of truth for a
+   repository that can change under it. Simplest canonical answer: check on every create (one or two `git`
+   calls beside a `worktree add` that costs the same order), and say so.
+5. **Whether the stub is affected.** A stub create has no repository, so the check must be the Docker backend's
+   (or the handler's, gated on `runtime.backend`) — otherwise every stub test and the whole gate would need a
+   repository. Read §1 fact 7 and ADR-0015/0028 before choosing.
 
-### What HS-023 and HS-024 settled that HS-025 inherits
+### What HS-025 and HS-024 settled that HS-026 inherits
 
-- **A machine's state is checked once, at startup, and the sentence is data** (ADR-0028). A git failure
-  mid-provision is the *operation's*, not the machine's: it goes through `BackendError::failed`, not a
-  `Complaint`.
-- **The conformance suite is the definition of "the backend works"**: a new Docker behaviour adds its case
-  to `tests/backend_contract.rs`, and the stub is asked the same question.
-- **A policy that must record a reason owns the ending** (ADR-0026/0027), and **a climb is spawned, never a
-  `select!` branch**.
-- **A test never reads a row right after the operation that wrote it**: the writer commits every 25 ms.
-  `wait_until` on the value (HS-023's `wait_for_usage` is the shape).
-- **Every story adds one `case_*`** to `scripts/verify.sh`, and one that needs a machine state the rest of
-  the run must not carry gets its own boot (`case_token_budget`) or needs no server at all
-  (`case_docker_preflight`) — and then goes last.
+- **The worktree step is real and idempotent** (ADR-0029): create-or-adopt, the row's base wins over the
+  branch's head, and a step that only adopted is not undone when a later step fails
+  (`Provisioned::undoable`). A refusal must therefore run **before** `ensure`, so a refused create leaves
+  nothing behind — that is the story's fourth acceptance line.
+- **A backend cannot write the row** (ADR-0019); the provisioner writes what a step made. A refusal is not a
+  record, so it needs no `Provisioned` variant.
+- **The sentence is the deliverable**, not the code: `BackendError::failed` and `ApiError::not_in_state` both
+  exist because the operator reads one sentence, and no test pins prose — only that the code names its own
+  request.
+- **A new `case_*` per story**, and a case that needs a real repository puts one in a `TempDir` (as
+  `tests/worktree.rs` does) or boots its own server with `case_worktree`'s fake-`_ping` trick.
+- **One build at a time, commit then `verify.sh` then the demo** — and a `web/` edit needs the rebuild before
+  any browser check (§3).
 
 ## 9. Reporting
 
@@ -962,11 +1025,12 @@ durable record; the review file is the durable review; the commit history is the
 stop before the backlog is empty, say so explicitly, say which issue is next, and leave the tree clean
 and the gates green — a half-finished story is worse than an honest stop.
 
-This session's ledger (the twenty-third and twenty-fourth stories):
+This session's ledger (the twenty-fifth story):
 
 | Issue | Story | Commits | Outcome |
 | --- | --- | --- | --- |
 | PER-55 | HS-023 token budget | `2e902c2`, `fbc0659` | Done — no P1; 1 spec P2 (the two-turn tally the ADR claimed was never tested, and a `SET` mutant stayed green), 2 spec P3s (the no-usage contingency is "counts what was reported", not "disabled"; a glossary overclaim), 8 standards P3s (a mangled doc comment, a helper spliced into another's heading, a variable with no reader, `WRITER_TICK` restated instead of derived, two parsers disagreeing about what a token count is, a middle-man re-export). The gate also caught a flake in the slice: three tests read the tally right after the turn and went red 2 runs in 5 |
+| PER-57 | HS-025 worktree provisioning | `7e36bde`, `1fe7f6e`, `ce4dc82` | Done — Standards **PASS with findings** (1 P1, 4 P2/P3), Spec **PASS with findings** (1 P2). The P1 was real: `case_worktree`'s python3 guard sat after its `stop_serve`, so a machine without python3 failed the gate at `FAIL serve/sigterm` while three sentences promised it passed. The valuable one was **the plan's gap, not the code's**: the provisioner undoes every completed step, and the worktree step's undo deletes the worktree *and* `branch -D`s the branch — so a resumed session's adopted worktree (with the agent's commits on it) would be destroyed when the next step refused. Fixed with `Ensured::created` → `Provisioned::undoable`, proved by mutation. Also fixed: the unreachable `not_yet` arm, four doc sentences, and a host-dependent Docker test. New: `src/worktree.rs`, `tests/worktree.rs` (10 cases), `case_worktree`, ADR-0029 |
 | PER-56 | HS-024 Docker preflight | `f241ced`, `0b7d50e` | Done — **BLOCK on the spec axis, and it was right**: the preflight ran *after* `Database::open`, so a refused startup had already migrated (my own scripted block move; the gate case now asserts no `app.db`). Plus 5 real P2s (a `hub` was refused, `permission denied` got the `systemctl` advice, `df`'s own words were dropped, HS-046 misattributed as owning ssh in four places, three documents disagreeing about the stub) and 2 standards P2s (a duplicated fake-daemon fixture, two tests that depended on the host's free space). The first gate run also found that `check-static.sh`'s empty-root run needs `--backend stub` |
 
 The session before it, for the shape of a ledger entry:
