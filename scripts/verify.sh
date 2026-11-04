@@ -1811,7 +1811,7 @@ case_backup() {
     : >"$backups/holosmith-2020-01-0$day.bundle"
   done
 
-  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "stub"\nproject_backup = true\nprojects_root = "%s"\nidle_stop_min = 0\n' \
+  printf 'owner = "%s"\nmax_live_sessions = 3\nbackend = "stub"\nproject_backup = true\nprojects_root = "%s"\nidle_stop_min = 0\n' \
     "$owner" "$projects" >"$WORK/config-backup.toml"
   start_serve "$WORK/config-backup.toml" "$WORK/data-backup"
 
@@ -1848,6 +1848,20 @@ case_backup() {
   # The bundle is a recovery point, so it carries the branch: `--all` is the story's own flag.
   if ! git -C "$repo" bundle list-heads "$backups/$id" | grep -q 'refs/heads/'; then
     fail "$name/heads" "the bundle carries no branch: $(git -C "$repo" bundle list-heads "$backups/$id")"
+  fi
+  assertions=$((assertions + 1))
+
+  # A project with no repository at all: the story's third line is that the failure is **logged** and the
+  # session is created anyway. Both halves are asserted, because a `warn` nothing greps is a `warn` that
+  # can be deleted without a test noticing.
+  fetch_body "${name}_missing" POST /api/sessions \
+    '{"project":"absent","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-backup-absent" ||
+    fail "${name}_missing/no_answer" "POST /api/sessions did not answer"
+  expect_status "${name}_missing" "$(answer "${name}_missing")" 202
+  if ! grep -q "the project's backups are not up to date" "$serve_err"; then
+    fail "$name/logged" "a failed bundle was not logged: $(tail -5 "$serve_err")"
   fi
   assertions=$((assertions + 1))
 }

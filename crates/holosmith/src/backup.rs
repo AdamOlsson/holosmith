@@ -18,7 +18,9 @@
 //! - **Verified before it is kept.** The bundle is written to a temporary name, verified with
 //!   `git bundle verify`, and only then renamed into place. A bundle git cannot read is deleted rather
 //!   than kept, because a recovery point that cannot be restored is worse than none: it is a file an
-//!   operator would trust.
+//!   operator would trust. The temporary name is **per attempt**, not per day: two creates on one project
+//!   run at once on this runtime, and a shared temporary name would let the second truncate the file the
+//!   first is about to rename — which would put a rewritten file under the name that verified.
 //! - **The last seven are kept.** One week of days per project, pruned by name — the date is the sort
 //!   key, so no file has to be read to know which are oldest.
 //!
@@ -30,12 +32,17 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The directory under the data root that holds every project's bundles: `<data>/backups`.
 pub const BACKUPS: &str = "backups";
 
 /// How many days of bundles one project keeps: a week.
 pub const KEEP: usize = 7;
+
+/// How many bundles this process has written. Only used to give each attempt its own temporary name, so
+/// two creates that race on one project cannot truncate each other's file.
+static ATTEMPT: AtomicU64 = AtomicU64::new(0);
 
 /// How many seconds are in a day, which is what turns an instant into a calendar day.
 const DAY: i64 = 86_400;
@@ -62,6 +69,11 @@ impl fmt::Display for BackupError {
     }
 }
 
+/// Neither variant wraps another error: git's words are text and a filesystem error is rendered into
+/// one, so there is nothing to walk to. The impl exists because [`crate::worktree::GitError`] has one and
+/// a caller that boxes a backup failure should not have to special-case it.
+impl std::error::Error for BackupError {}
+
 /// The backups of one machine: the directory they live in, and the day they are named after.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Backups {
@@ -71,6 +83,11 @@ pub struct Backups {
 
 impl Backups {
     /// The backups of the machine whose data root is `data_root`.
+    ///
+    /// Every path this module hands git is absolute, and it has to be: `git -C <repository>` resolves a
+    /// relative bundle path against the *repository*, so a relative `root` would write the bundle inside
+    /// the checkout and then fail to rename it (ADR-0029 measured the same trap for worktree paths). The
+    /// config layer refuses a relative `data_root`, which is what makes the invariant hold.
     pub fn new(data_root: &Path) -> Self {
         Self {
             root: data_root.join(BACKUPS),
@@ -108,37 +125,51 @@ impl Backups {
 
         // Written aside and renamed into place, so the name that exists is always a bundle that
         // verified: a half-written file under the final name would be a recovery point an operator
-        // would trust and git would refuse.
-        let partial = bundle.with_extension("bundle.tmp");
-        let created = git(repository, &["bundle", "create", &path(&partial), "--all"]);
-        if let Err(error) = created {
+        // would trust and git would refuse. The name is per **attempt**, because two creates on one
+        // project can run at once: a name shared by the day would let the second `git bundle create`
+        // truncate the file the first is about to rename, and the name that verified would then hold a
+        // file rewritten after the check.
+        let partial = bundle.with_extension(format!(
+            "bundle.{}.{}.tmp",
+            std::process::id(),
+            ATTEMPT.fetch_add(1, Ordering::Relaxed)
+        ));
+        if let Err(error) = git(repository, &["bundle", "create", &path(&partial), "--all"]) {
             let _ = std::fs::remove_file(&partial);
             return Err(error);
         }
-        if let Err(error) = git(repository, &["bundle", "verify", &path(&partial)]) {
-            // A corrupt bundle is deleted rather than kept (the story's fourth line): a file that cannot
-            // be restored must not sit in the directory looking like one that can.
-            let _ = std::fs::remove_file(&partial);
-            return Err(error);
-        }
-        std::fs::rename(&partial, &bundle).map_err(|error| {
-            let _ = std::fs::remove_file(&partial);
-            BackupError::Files(format!("renaming {}: {error}", partial.display()))
-        })?;
+        self.keep(repository, &partial, &bundle)?;
         self.prune(project)?;
         Ok(Some(bundle))
     }
 
-    /// Delete all but the newest [`KEEP`] bundles of `project`, answering how many went.
+    /// Verify the bundle written aside and, only if git can read it, rename it into place.
+    ///
+    /// A corrupt bundle is deleted rather than kept (the story's fourth line): a file that cannot be
+    /// restored must not sit in the directory looking like one that can. Split out from [`Self::take`]
+    /// so that branch has a test — nothing else in this module can make git produce an unreadable bundle
+    /// from a readable repository.
+    fn keep(&self, repository: &Path, partial: &Path, bundle: &Path) -> Result<(), BackupError> {
+        if let Err(error) = git(repository, &["bundle", "verify", &path(partial)]) {
+            let _ = std::fs::remove_file(partial);
+            return Err(error);
+        }
+        std::fs::rename(partial, bundle).map_err(|error| {
+            let _ = std::fs::remove_file(partial);
+            BackupError::Files(format!("renaming {}: {error}", partial.display()))
+        })
+    }
+
+    /// Delete all but the newest [`KEEP`] bundles of `project`.
     ///
     /// By name, because the name carries the day and a date sorts as text: no bundle is opened to decide
     /// which are oldest, which matters because the point of the prune is to be cheap on a machine that
     /// is already short of space.
-    pub fn prune(&self, project: &str) -> Result<usize, BackupError> {
+    pub fn prune(&self, project: &str) -> Result<(), BackupError> {
         let entries = match std::fs::read_dir(&self.root) {
             Ok(entries) => entries,
             // Nothing to prune: a machine whose backups directory has never been made has none.
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => {
                 return Err(BackupError::Files(format!(
                     "reading {}: {error}",
@@ -160,7 +191,7 @@ impl Backups {
                 BackupError::Files(format!("removing {}: {error}", bundle.display()))
             })?;
         }
-        Ok(excess)
+        Ok(())
     }
 }
 
@@ -282,6 +313,53 @@ mod tests {
         ] {
             assert!(!is_bundle_of(name, prefix), "{name}");
         }
+    }
+
+    /// A directory that removes itself, for the one test here that touches a filesystem. The crate's
+    /// integration tests share `tests/support`'s `TempDir`; a unit test cannot reach it, and this is the
+    /// only filesystem test in the module.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("holosmith-backup-{label}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("the scratch directory is creatable");
+            Self(path)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_bundle_git_cannot_read_is_deleted_rather_than_kept() {
+        // The story's fourth line, and the one branch of `take` a test cannot otherwise reach: git always
+        // writes a bundle it can verify, so the only way to see the delete is to hand `keep` a file that
+        // is not one. Deleting the `remove_file` there leaves the whole suite green, which is why this
+        // exists.
+        let scratch = Scratch::new("corrupt");
+        let backups = Backups::new(&scratch.0);
+        let repository = scratch.0.join("repository");
+        std::fs::create_dir_all(&repository).expect("the repository directory is creatable");
+        let bundle = backups.root.join("holosmith-2026-11-04.bundle");
+        let partial = bundle.with_extension("bundle.tmp");
+        std::fs::create_dir_all(&backups.root).expect("the backups directory is creatable");
+        std::fs::write(&partial, b"not a bundle").expect("the junk file is writable");
+
+        assert!(
+            backups.keep(&repository, &partial, &bundle).is_err(),
+            "a file that is not a bundle verified"
+        );
+        assert!(!partial.exists(), "the corrupt bundle was kept aside");
+        assert!(
+            !bundle.exists(),
+            "a corrupt bundle took the name git trusts"
+        );
     }
 
     #[test]

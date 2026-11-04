@@ -18,11 +18,17 @@ the prune exists on a machine that is already short of space.
 
 ## The bundle is verified before it is kept, and a corrupt one is deleted
 
-Written aside as `<name>.bundle.tmp`, then `git bundle verify`, then renamed into place. A file under the
-final name is therefore always a file git could read — which is the whole of the story's fourth line. The
-alternative order (write it, verify it, delete it if it fails) leaves a window in which a half-written
-file sits under a name an operator would trust, and the recovery point is exactly the thing that must not
-lie.
+Written aside, then `git bundle verify`, then renamed into place. A file under the final name is
+therefore always a file git could read — which is the whole of the story's fourth line. The alternative
+order (write it, verify it, delete it if it fails) leaves a window in which a half-written file sits under
+a name an operator would trust, and the recovery point is exactly the thing that must not lie.
+
+**The temporary name is per attempt, not per day**, and the review is why: the create's `back_up` runs
+outside the create's lock scope, so two creates on one project can be in flight at once. A temporary name
+derived from the project and the day alone would let the second `git bundle create` open and truncate the
+file the first is about to rename — and if the second then failed, the name that verified would hold a
+file rewritten after the check. `<name>.bundle.<pid>.<n>.tmp` costs one atomic counter, and the prune is
+unaffected because `is_bundle_of` accepts only exactly `<prefix><day>.bundle`.
 
 A repository with nothing to bundle is a failure, not an empty bundle: `git bundle create --all` refuses
 an empty repository, and the module deletes its temporary file and answers an error.
