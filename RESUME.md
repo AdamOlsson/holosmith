@@ -37,8 +37,8 @@ created, prompted, aborted, steered, stopped, resumed and deleted, and it is dri
 ## 1. Where the work stands
 
 Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is clean, and every
-commit is **pushed** (see the note on pushing below). `HEAD` is `b4d7338`; any commit after it is
-bookkeeping — this file's own refresh.
+commit is **pushed** (see the note on pushing below). `HEAD` is `d2559bc`; any commit after it is
+bookkeeping — this file's own refresh. Confirmed on `origin/master`: `84bc7e7..d2559bc`.
 
 **Linear: 30 Done, 50 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-026`
 (`PER-33` … `PER-58`) **plus `HS-059` (`PER-91`)**, **`HS-060` (`PER-92`)**, **`HS-061` (`PER-93`)** and
@@ -414,7 +414,7 @@ If that fails, **stop and report** — that is a `PROMPT.md` stop condition.
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                     # 243 lib + 33 integration binaries, 567 tests in all (22 in
+cargo test                     # 244 lib + 33 integration binaries, 569 tests in all (22 in
                                # tests/worktree.rs, 16 tests/events.rs, 10 tests/turns.rs, 10
                                # tests/compaction.rs, 14 delete.rs, 8 idle_stop.rs, 9 backup.rs,
                                # 7 history.rs)
@@ -426,7 +426,7 @@ scripts/verify.sh              # THE one-command gate since HS-006
 `scripts/verify.sh` runs six phases, cheapest first: `fmt`, `clippy`, `test`, `build`
 (`scripts/build.sh`, which itself runs `build-web.sh` — `npm test` then Vite — and `check-static.sh`
 last), `embed` (`scripts/check-embed.sh`), then `serve` — the **shipped musl artifact** booted on
-`--port 0` with a temp data dir, running **46 cases plus a CORS sweep (325 assertions)**, then torn down
+`--port 0` with a temp data dir, running **46 cases plus a CORS sweep (328 assertions)**, then torn down
 with `SIGTERM` and an asserted exit 0. Six cases bring their own boot (`case_token_budget`,
 `case_compaction`, `case_history`, `case_backup`, `case_worktree`, `case_worktree_refusal`, plus
 `case_docker_preflight`, which needs no
@@ -561,7 +561,7 @@ scripts/verify.sh           the one-command gate (see §3)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
 docs/adr/0001…0034          read the recent ones before planning anything
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-58, PER-91, PER-92, PER-93  each a verbatim review + a `## Resolution` table
+docs/review/PER-33…PER-58, PER-91, PER-92, PER-93, PER-97  each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -1122,6 +1122,10 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   a machine would quietly keep every bundle it ever made. The prune now runs on the already-there path
   too — one `read_dir`, once per create — and `take`'s contract says `Err` covers "the retention rule
   could not be applied" as well as "the bundle is not in place".
+- **Commit before you review.** HS-065's first `reviewer` child stalled for eleven minutes and had to be
+  interrupted: it was reading a working tree that was changing under it, because the fixes it was
+  reviewing were uncommitted. The child reads files, not a diff artifact alone, so a moving tree is a
+  moving target. Commit, then launch the reviewer.
 - **A "verified before it is kept" rule means write aside and rename.** Verifying after the final name
   exists leaves a window where a half-written file sits under a name an operator would trust — and the
   recovery point is the one thing that must not lie. The same shape is worth copying wherever a file must
@@ -1190,7 +1194,7 @@ git status --short                          # must be clean
 . ~/.pi/toolchains/env.sh
 python3 /tmp/lin.py issues | grep -v ' Done ' | head   # next unfinished (recreate /tmp/lin.py, §2)
 python3 /tmp/lin.py issue PER-107           # sanity-check Linear is reachable and scoped
-scripts/verify.sh                           # baseline green (~7 min, 46 cases, 325 assertions)
+scripts/verify.sh                           # baseline green (~7 min, 46 cases, 328 assertions)
 ```
 
 Then start the cycle at **`PER-107` (HS-075 — expand/contract migration discipline)**. Read §1's thirteen
@@ -1267,7 +1271,7 @@ This session's ledger (the twenty-ninth and thirtieth stories — two shipped, a
 | Issue | Story | Commits | Outcome |
 | --- | --- | --- | --- |
 | PER-93 | HS-061 history truncation and pagination | `f8c3126`, `315b963`, `0a15876` | Done — Standards **PASS with findings** (2 P2, 2 P3), Spec **PASS with findings** (1 P2, 2 P3); no P1 and no behaviour defect. All five findings real and all fixed: the ADR-0033 bullet had been scripted to the **end** of `docs/stories/README.md` (after the "Importing into Linear" section), `GLOSSARY.md`'s **Last-Event-ID** still promised a replay "from the beginning" 80 lines above the new **Truncated history** entry, five comments/ADRs claimed the same thing (including `budgetNotice`'s, where a settled-turn count from zero would say "no turn has run yet" about a session that has run forty — which is *why* the frame carries `turns_before`), and the spec P2 was the best of the session: `a_delta_that_names_no_message_neither_opens_a_message_nor_ends_the_scan` **could not fail for either bug it named**, because its strays sat above the window where both mutations still gave the right cut; they now sit between the window's messages and **both mutations go red** (`left: 4, right: 3`, and a panic on the `expect`). Two spec P3s dismissed with the reason recorded (the affordance is proved by reading only — no script may require a browser; and "a block is always whole" rests on a producer property now written into ADR-0033). New: `events/repository.rs`'s `truncation_point`/`turns_before`/`read_before`, `Item::Truncated` + `HISTORY_TRUNCATED`, `http/history.rs`, `bad_query`, `history_window` (27th key), `web/src/transcript.ts`'s `parseTruncated`/`setTurnBase`/`historyPath`, the "Load earlier" button, ADR-0033, 7 `tests/history.rs` + 3 repository + 4 node tests, `case_history`. **The gate caught the turn arithmetic twice** (the unit test and the case both said 1 where 2 is right) |
-| PER-97 | HS-065 daily project backup | `ea313e4`, `b4d7338` | Done — **no reviewer verdict**: the first `reviewer` child stalled on a working tree that was changing under it (11 minutes, no output) and was interrupted; the second was launched after the fixes and its result is recorded in `docs/review/PER-97.md` if it landed, otherwise the self-review below is the record. Self-review found two real things before the gate: the prune only ran where a bundle was written, so one transient `remove_file` error meant a machine would quietly keep every bundle for ever (now the already-there path prunes too, and `take`'s `Err` covers both halves); and `case_backup` failed the gate on `local projects=… repo="$projects/…"`, which is **unbound under `set -u`** because `local` is a command and `$projects` is expanded before it runs. New: `src/backup.rs`, the create's `back_up` on `spawn_blocking`, ADR-0034, 9 `tests/backup.rs` cases, `case_backup`, `GLOSSARY.md`'s **Project backup** |
+| PER-97 | HS-065 daily project backup | `ea313e4`, `b4d7338`, `d2559bc` | Done — Standards **PASS with findings** (3 P3), Spec **PASS with findings** (2 P2, 2 P3). The two P2s were the valuable ones: the temporary bundle name was a function of project and day while `back_up` runs **outside** the create's lock scope, so two creates on one project could have the second `git bundle create` truncate the file the first was about to rename — and if the second then failed, the name that verified held a file rewritten after the check (now per attempt, `<name>.bundle.<pid>.<n>.tmp`); and "a corrupt bundle is deleted rather than kept" had **no test that could fail**, because git always writes a bundle it can verify, so the delete branch was unreachable (now `Backups::keep` with a junk-file unit test, **mutation-proved**). Also fixed: "is logged" was asserted nowhere (`case_backup` now creates a session for a project with no repository and greps the boot's stderr), `prune` returned a count nobody read, `BackupError` did not implement `Error`, and `Backups::new`'s doc restated its signature instead of the absolute-path invariant. Self-review before the gate had already found two things: the prune only ran where a bundle was written (one transient `remove_file` error and a machine keeps every bundle for ever), and `case_backup` failed on `local projects=… repo="$projects/…"`, **unbound under `set -u`** because `local` is a command. New: `src/backup.rs`, the create's `back_up` on `spawn_blocking`, ADR-0034, 9 `tests/backup.rs` + 1 unit case, `case_backup`, `GLOSSARY.md`'s **Project backup** |
 | PER-107 | HS-075 expand/contract migration discipline | — | **Not started.** It is the last unblocked story; §8 carries the four decisions to settle first, the three landmines, and the one acceptance line (`doctor`) that belongs to the blocked HS-045 |
 
 The session before it, for the shape of a ledger entry:
