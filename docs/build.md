@@ -167,7 +167,13 @@ session is still `starting` — live and not evictable — and asserts the `409 
 the sentence that says nothing was idle), the prompt's turn coalesced (`case_event_coalescing`, which
 makes its own session, prompts it, and asserts the replay holds no more delta rows than the script's
 frames, one message id and the script's first and last sentences in order — the merge itself cannot be
-shown here, because the stub paces eight commit windows apart; see ADR-0031), and the worktree (`case_worktree`, which boots its own
+shown here, because the stub paces eight commit windows apart; see ADR-0031), and compaction
+(`case_compaction`, which boots its own server, prompts a turn, stops the artifact, pushes that session's
+whole log 25 hours into the past with `python3`'s `sqlite3`, starts it again, and asserts one
+`message.snapshot` row and no `message.delta` row, and a replay that carries the snapshot holding the
+whole message, no delta frame, and the message's `end` frame still there — the window is the spec's fixed
+24 hours rather than a key, so aging a database the artifact wrote is the only way to show it; see
+ADR-0032), and the worktree (`case_worktree`, which boots its own
 server — `backend = "docker"`, a real repository under `projects_root`, and a socket that answers the
 preflight's `_ping` — creates a session, and asserts the row's `worktree` and `base_commit`, the network
 step's refusal, the worktree and branch gone afterwards, the registration back to one entry, and then a
@@ -187,7 +193,8 @@ remember to place the new case before it.
 **Every later story adds at least one `case_*` function and one line in `serve_cases`.** That
 is what makes this a growing gate rather than a snapshot: a story that adds a route or a
 behaviour has one obvious place to prove the shipped binary does it. A case that needs a setting the
-rest of the run must not carry gets a boot of its own (see `case_token_budget`, `case_worktree` and `case_worktree_refusal`), and
+rest of the run must not carry gets a boot of its own (see `case_token_budget`, `case_compaction`,
+`case_worktree` and `case_worktree_refusal`), and
 takes a place at the end of the array: nothing after it may assume the first boot's state, and a case
 that stops the server leaves the run with whatever boot it started.
 
@@ -255,6 +262,14 @@ test names a data root inside its own temporary directory, because `serve` now c
 migrates whatever root the config resolves to, and an omitted key resolves to the built-in
 default.
 
+**The event log is not append-only for ever.** Compaction (HS-060, ADR-0032) replaces the delta
+rows of messages completed more than 24 hours ago with one `message.snapshot` each, so an `events`
+row can disappear while `sessions.last_seq` stays where it was. Two consequences for anyone
+writing a statement against either table: a seq is **strictly increasing with gaps**, and the next
+seq is `last_seq + 1` rather than `MAX(seq) + 1` — deriving it from the rows would reuse a seq a
+snapshot already holds. Compaction runs in the background on a one-minute tick, folds one session
+per transaction, and never touches a session whose state is `starting`, `running` or `deleting`.
+
 ## Prerequisites
 
 - **rustc 1.99.1** (the version in `~/.pi/toolchains`). There is no `rust-toolchain.toml`:
@@ -271,10 +286,12 @@ default.
 - **git** for `scripts/build.sh`, and for a Docker run at runtime: the worktree step runs
   `git worktree`, `git rev-list` and `git branch` against the project repository on the host
   (HS-025). Not required by `cargo build` itself, and not required by `--backend stub`.
-- Optional: **`python3`** for `scripts/verify.sh`'s `case_worktree`, which answers the Docker
-  preflight from a socket that says `200 OK` so a Docker boot can be driven on a machine with
-  no daemon. Without it that case prints one `SKIP` line and the run passes; `cargo test` and
-  `tests/worktree.rs` cover the behaviour either way.
+- Optional: **`python3`** for `scripts/verify.sh`'s `case_worktree` and `case_compaction`. The first
+  answers the Docker preflight from a socket that says `200 OK` so a Docker boot can be driven on a
+  machine with no daemon; the second ages a session's event log with stdlib `sqlite3`, because the
+  compaction window is the spec's fixed 24 hours rather than a config key (ADR-0032). Without it each
+  case prints one `SKIP` line and the run passes; `cargo test`, `tests/worktree.rs` and
+  `tests/compaction.rs` cover the behaviour either way.
 - Optional: **`qemu-aarch64-static`** (or point `HOLOSMITH_QEMU_AARCH64` at one) to run
   the aarch64 artifact on an x86_64 machine. It is a machine-local dev tool installed
   outside this repo; no script here downloads it. Without it the check prints one

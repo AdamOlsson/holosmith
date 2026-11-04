@@ -325,8 +325,12 @@ The identifier a delta and a snapshot name, and the key a transcript holds one b
 _Avoid_: Message key, uuid, index
 
 **Message snapshot**:
-A single event that replaces the deltas of an old message with its full text.
-_Avoid_: Compaction record, rollup
+One event that replaces the deltas of an old message with its whole state: `{"message_id", "text", "thinking"}`. It is the transcript's only replacing frame — a client applies it by message id, so receiving one after partial deltas is safe — and it takes the highest seq among the delta rows it replaces, which is the one place a seq is reused. Its machine name is `MESSAGE_SNAPSHOT` and its event kind is `message.snapshot`.
+_Avoid_: Compaction record, rollup, summary
+
+**Compaction**:
+Replacing the delta rows of messages completed more than a day ago with one **message snapshot** each. A message is eligible when it has a `message.end` older than the 24-hour window — the spec's number, and deliberately not a config key — still has delta rows and has no snapshot yet; the fold is per session and inside one transaction, it never runs for a session whose turn is running, and `message.end`, tool frames and turn boundaries are never removed. Its machine names are `compactor::Compactor` (with `sweep` and `fold`) and `EventRepository::compact`.
+_Avoid_: Cleanup, pruning, archiving, summarising
 
 **Message**:
 A completed unit of conversation output (text plus thinking) that deltas accumulate into.
