@@ -37,8 +37,8 @@ created, prompted, aborted, steered, stopped, resumed and deleted, and it is dri
 ## 1. Where the work stands
 
 Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is clean, and every
-commit is **pushed** (see the note on pushing below). `HEAD` is `d2559bc`; any commit after it is
-bookkeeping — this file's own refresh. Confirmed on `origin/master`: `84bc7e7..d2559bc`.
+commit is **pushed** (see the note on pushing below). `HEAD` is `0851325`; any commit after it is
+bookkeeping — this file's own refresh. Confirmed on `origin/master`: `0402d8f..0851325`.
 
 **Linear: 33 Done, 47 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-029`
 (`PER-33` … `PER-61`), `HS-059` (`PER-91`), `HS-060` (`PER-92`), `HS-061` (`PER-93`) and `HS-065`
@@ -336,8 +336,8 @@ GIT_SSH_COMMAND='ssh -F /dev/null -o IdentitiesOnly=yes -o IdentityFile=/tmp/pus
 
 (`-i` names a `.pub` that is in the agent: ssh offers exactly that one and signs with the agent's copy.)
 `git ls-remote` with the same options is the cheap way to tell "pushed" from "the agent refused again".
-Confirmed on `origin/master`: `b49f2cd` … `0b7d50e`. Push after every story, and if a push fails, report
-it — do not fake one.
+Confirmed on `origin/master`: `b49f2cd` … `0851325`. Push after every story, and if a push fails,
+report it — do not fake one.
 
 ---
 
