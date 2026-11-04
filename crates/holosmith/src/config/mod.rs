@@ -189,6 +189,10 @@ pub struct Config {
     pub owner: Option<String>,
     pub data_root: PathBuf,
     pub projects_root: PathBuf,
+    /// The image a session's container runs (HS-027). Item 10 §3 builds it, so the default names the
+    /// image a deployed machine already has: `agent-image:<this binary's version>`. HS-031 compares the
+    /// image's pi version with the pinned one, and HS-047 builds it for the machine it deploys to.
+    pub agent_image: String,
     pub docker_host: Option<String>,
     pub hosts_seed: Option<PathBuf>,
     pub allowed_hubs: Vec<String>,
@@ -226,6 +230,7 @@ impl Default for Config {
             owner: None,
             data_root: PathBuf::from("/var/lib/holosmith"),
             projects_root: PathBuf::from("/srv/holosmith/projects"),
+            agent_image: format!("agent-image:{}", env!("CARGO_PKG_VERSION")),
             docker_host: None,
             hosts_seed: None,
             allowed_hubs: Vec::new(),

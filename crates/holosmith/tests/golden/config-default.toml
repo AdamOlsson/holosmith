@@ -8,6 +8,7 @@ allowed_hosts = []
 # owner unset
 data_root = "/var/lib/holosmith"
 projects_root = "/srv/holosmith/projects"
+agent_image = "agent-image:0.1.0"
 # docker_host unset
 # hosts_seed unset
 allowed_hubs = []

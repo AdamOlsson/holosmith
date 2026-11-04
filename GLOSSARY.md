@@ -354,6 +354,14 @@ _Avoid_: Partial log, clipped history, head cut
 The git worktree that holds a session's files, on its own branch: `<projects>/.worktrees/<id>`, on branch `agent/<id>`, made from the project repository's `HEAD`. Its machine name is `Worktree` in `crates/holosmith/src/worktree.rs`, which is also where the creating, counting and removing live.
 _Avoid_: Checkout, copy, clone
 
+**Session container**:
+The container one session runs in: the name `s_<id>`, the image `agent_image` names, and the mounts the session needs. Its machine name is `SessionContainer` in `crates/holosmith/src/container.rs`.
+_Avoid_: Agent container, sandbox, box
+
+**Mounts**:
+The four bind mounts of spec item 1 that make a session's files reachable: the worktree at `/work` (writable), the project repository's `.git` at its own host path (writable, because `objects`, `refs`, `logs` and `worktrees/<id>` are what a commit writes), and `.git/hooks` and `.git/config` stacked on top of it **read-only**, because each is a way a repository could run a program on the host. Each keeps its host path inside the container except `/work`, because a worktree's `.git` file holds an absolute `gitdir:`. Its machine name is `Mounts` in `crates/holosmith/src/container.rs`.
+_Avoid_: Volumes, binds, mounts list
+
 **Refused project**:
 A project repository the machine will not mount into a container, answered by the create (and by a resume) with one sentence and one of three codes: `git_not_directory` (a `.git` that is not a directory, or no checkout at all), `submodules_present` (`.gitmodules` or `.git/modules`), `worktree_config_enabled` (`extensions.worktreeConfig`). Its machine name is `Refusal` and `worktree::refuse`, asked through `Backends::refuse`; nothing is written for it, and a stub run refuses nothing because it mounts no repository.
 _Avoid_: Invalid project, bad repo, unsafe project

@@ -324,7 +324,112 @@ serve_cases=(
   case_worktree
   case_docker_preflight
   case_worktree_refusal
+  case_container_mounts
 )
+
+# V1 (HS-027): the hardened `.git` mounts, measured on a real daemon. Three writes must fail, three git
+# commands must work, the process must not be root and the container must not be able to remount or
+# unmount. This case needs no server: it is a fact about `docker run` and the mounts, so it never touches
+# the booted artifact — `tests/container.rs` asserts that the arguments the binary builds are these.
+#
+# Two environment facts, both measured (ADR-0035): the daemon resolves host paths in the *host's* mount
+# namespace, so the scratch repository lives under `target/` rather than in `$WORK` (`mktemp -d` is on
+# `/tmp`, which a sandbox can put on a tmpfs the daemon cannot see, and `-v` then silently creates an
+# empty root-owned directory instead of mounting anything); and Docker's own English is never parsed — the
+# case reads exit codes and the host's files.
+case_container_mounts() {
+  local name=case_container_mounts
+  local id=0123456789abcdef image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
+  local root="$repo_root/target/verify-container-$$" project="$repo_root/target/verify-container-$$/project"
+  local git_dir hooks wrote
+  # The guards come first: a machine without a daemon is a supported machine (a hub), and this case is
+  # the shipped gate's share of V1 only because it is cheap here.
+  if ! command -v docker >/dev/null 2>&1; then
+    printf 'SKIP %s: no docker CLI (tests/container.rs is the same check)\n' "$name"
+    return 0
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    printf 'SKIP %s: no Docker daemon answers (tests/container.rs is the same check)\n' "$name"
+    return 0
+  fi
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    printf 'SKIP %s: no image %s (HOLOSMITH_TEST_IMAGE names another)\n' "$name" "$image"
+    return 0
+  fi
+
+  rm -rf "$root"
+  mkdir -p "$project" || fail "$name/mkdir" "could not create $project"
+  git -C "$project" init --quiet -b main . || fail "$name/git" "git init did not work in $project"
+  git -C "$project" -c user.name=verify -c user.email=verify@example commit --quiet \
+    --allow-empty -m "the first commit" || fail "$name/git" "git commit did not work in $project"
+  git -C "$project" worktree add -b "agent/$id" "$root/project/.worktrees/$id" HEAD >/dev/null \
+    2>&1 || fail "$name/worktree" "git worktree add did not work"
+  git_dir="$project/.git"
+  hooks="$git_dir/hooks"
+  cp "$git_dir/config" "$WORK/config-before"
+
+  # The four mounts of spec item 1, spelled the way the spec spells them.
+  docker rm --force "s_$id" >/dev/null 2>&1 || true
+  wrote="$(docker run --name "s_$id" --cap-drop ALL --security-opt no-new-privileges \
+    --workdir /work --env "HS_SESSION_ID=$id" \
+    -v "$root/project/.worktrees/$id":/work \
+    -v "$git_dir":"$git_dir" \
+    -v "$hooks":"$hooks":ro \
+    -v "$git_dir/config":"$git_dir/config":ro \
+    "$image" sh -c "
+      id -u
+      ( echo x > $hooks/pre-commit ) >/dev/null 2>&1; echo hooks_write=\$?
+      ( echo '# x' >> $git_dir/config ) >/dev/null 2>&1; echo config_append=\$?
+      ( mv $hooks $hooks.renamed ) >/dev/null 2>&1; echo hooks_rename=\$?
+      ( echo two > second.txt && git add second.txt &&
+        git -c user.email=verify@example -c user.name=verify commit --quiet -m second ) \
+        >/dev/null 2>&1; echo commit=\$?
+      git branch agent/v1-probe >/dev/null 2>&1; echo branch=\$?
+      git worktree list; echo worktree_list=\$?
+      mount -o remount,rw / >/dev/null 2>&1; echo remount=\$?
+      umount /work >/dev/null 2>&1; echo umount=\$?
+    " 2>"$WORK/responses/$name.err")" || fail "$name/docker_run" "docker run failed: $(cat "$WORK/responses/$name.err")"
+  docker rm --force "s_$id" >/dev/null 2>&1 || true
+
+  local refused
+  for refused in hooks_write config_append hooks_rename remount umount; do
+    case "$wrote" in
+      *"$refused=0"*) fail "$name/$refused" "the container was allowed to do it: $wrote" ;;
+      *"$refused="*) assertions=$((assertions + 1)) ;;
+      *) fail "$name/$refused" "the container reported no $refused: $wrote" ;;
+    esac
+  done
+  local worked
+  for worked in commit branch worktree_list; do
+    case "$wrote" in
+      *"$worked=0"*) assertions=$((assertions + 1)) ;;
+      *) fail "$name/$worked" "git $worked failed inside the container: $wrote" ;;
+    esac
+  done
+  # The host is where a refusal is observable: no hook arrived, the config is unchanged and the hooks
+  # directory was not moved.
+  [ ! -e "$hooks/pre-commit" ] || fail "$name/hook_reached_host" "a hook reached the host"
+  assertions=$((assertions + 1))
+  [ -d "$hooks" ] || fail "$name/hooks_moved" "the hooks directory was moved out from under the host"
+  assertions=$((assertions + 1))
+  cmp -s "$WORK/config-before" "$git_dir/config" ||
+    fail "$name/config_changed" "the repository's config was rewritten through a read-only mount"
+  assertions=$((assertions + 1))
+  # The commit is in the host's repository, on the session's branch.
+  git -C "$project" log --format=%s "agent/$id" | grep -q second ||
+    fail "$name/commit_lost" "the container's commit is not on agent/$id"
+  assertions=$((assertions + 1))
+  git -C "$project" branch --list agent/v1-probe | grep -q agent/v1-probe ||
+    fail "$name/branch_lost" "the branch the container created is not in the host's repository"
+  assertions=$((assertions + 1))
+  # Not root: the image's own user runs the agent, and the uid is the first line the container printed.
+  local uid
+  uid="$(printf '%s\n' "$wrote" | sed -n '1p')"
+  [ "$uid" != "0" ] || fail "$name/root" "the agent runs as root: $wrote"
+  assertions=$((assertions + 1))
+
+  rm -rf "$root"
+}
 
 # The health payload: exactly four keys, and the uptime is not predictable, so the assertion is
 # the prefix and the closing brace (the shape tests/http_contract.rs uses).

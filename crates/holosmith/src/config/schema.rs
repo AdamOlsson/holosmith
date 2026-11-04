@@ -125,6 +125,12 @@ pub const KNOWN_KEYS: &[KeySpec] = &[
         set: set_projects_root,
     },
     KeySpec {
+        path: "agent_image",
+        section: None,
+        kind: Kind::String,
+        set: set_agent_image,
+    },
+    KeySpec {
         path: "docker_host",
         section: None,
         kind: Kind::String,
@@ -507,6 +513,17 @@ fn set_projects_root(config: &mut Config, value: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// The image a session's container runs (HS-027). A name Docker resolves, so an empty string is not a
+/// typo this can catch — it is one Docker refuses with its own sentence, which is the honest place for it.
+fn set_agent_image(config: &mut Config, value: &Value) -> Result<(), String> {
+    let image = string(value)?;
+    if image.trim().is_empty() {
+        return Err("must name an image, not an empty string".to_string());
+    }
+    config.agent_image = image.to_string();
+    Ok(())
+}
+
 fn set_docker_host(config: &mut Config, value: &Value) -> Result<(), String> {
     config.docker_host = Some(string(value)?.to_string());
     Ok(())
@@ -710,7 +727,7 @@ mod tests {
 
     #[test]
     fn the_table_holds_the_documented_keys() {
-        assert_eq!(KNOWN_KEYS.len(), 27);
+        assert_eq!(KNOWN_KEYS.len(), 28);
     }
 
     #[test]

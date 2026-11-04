@@ -7,6 +7,7 @@ pub mod clock;
 pub mod commands;
 pub mod compactor;
 pub mod config;
+pub mod container;
 pub mod db;
 pub mod deleter;
 pub mod events;

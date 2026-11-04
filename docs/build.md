@@ -190,7 +190,11 @@ step's refusal, the worktree and branch gone afterwards, the registration back t
 absent), and the project's refusals (`case_worktree_refusal`, which boots a Docker run of its own over
 a projects root holding a `.git` file, a repository with `.gitmodules` and one with
 `extensions.worktreeConfig`, and asserts each create's `422` with its own code, `application/json`, no
-session row afterwards and no `.worktrees` directory). A case that must assert
+session row afterwards and no `.worktrees` directory), and the hardened mounts (`case_container_mounts`,
+which needs no server at all: it builds a real repository and worktree under `target/`, runs one real
+container with the spec's four mounts and `--cap-drop ALL`, and asserts the three writes fail on the host
+as well as in the container, the three git commands work, the process is not root and neither `mount
+-o remount,rw /` nor `umount /work` is allowed — V1, see ADR-0035). A case that must assert
 one code keeps every higher guard check correct, or it asserts another guard's code under its own
 name.
 
@@ -301,6 +305,12 @@ per transaction, and never touches a session whose state is `starting`, `running
   compaction window is the spec's fixed 24 hours rather than a config key (ADR-0032). Without it each
   case prints one `SKIP` line and the run passes; `cargo test`, `tests/worktree.rs` and
   `tests/compaction.rs` cover the behaviour either way.
+- Optional: a **Docker daemon and one image** for `scripts/verify.sh`'s `case_container_mounts` and for
+  `tests/container.rs`. Both check V1 — the hardened `.git` mounts — against a real container, and both
+  print one `SKIP` line and pass without a daemon, because a machine without one is a supported machine
+  (a hub). The image is `$HOLOSMITH_TEST_IMAGE`, default `pi-agent:local`; it needs `sh` and `git`, and
+  its default user must not be root. A development machine can build one, or tag the image it has:
+  `docker tag pi-agent:local agent-image:<version>`.
 - Optional: **`qemu-aarch64-static`** (or point `HOLOSMITH_QEMU_AARCH64` at one) to run
   the aarch64 artifact on an x86_64 machine. It is a machine-local dev tool installed
   outside this repo; no script here downloads it. Without it the check prints one
@@ -333,6 +343,16 @@ repository: a repository with **no commit** cannot be provisioned from (there is
 project whose `.git` is a *file* (a submodule checkout, or a worktree of a repository) is HS-026's to
 refuse — this build tries it and git says what it thinks in the session's reason.
 
+**The container's mounts are spec item 1's four** (HS-027, ADR-0035): the worktree at `/work`, the
+repository's `.git` at its own host path (so the worktree's `.git` file, which holds an absolute
+`gitdir:`, still resolves), and `.git/hooks` and `.git/config` stacked on top of it **read-only** so that
+a hook or a `core.fsmonitor` cannot be planted. Host paths are kept identical inside the container for
+exactly that reason; `container::Mounts` is the one value that spells them, and V1 — the three refused
+writes and the three working git commands — passed as specified on a real daemon, so the spec's narrower
+fallback is not in use. The image is the config key `agent_image` (default `agent-image:<version>`), and
+`--user` is deliberately not passed: the image's own user must be non-root, which the V1 checks assert
+rather than a guessed uid that would hand the agent's files to somebody the host does not own.
+
 Three things bite on a real machine:
 
 - **`docker_host`**: unset means `unix:///var/run/docker.sock`, the rootful socket. A
@@ -344,6 +364,14 @@ Three things bite on a real machine:
 - **git 2.38 or newer**, because the merge check runs `git merge-tree --write-tree` (V2).
   macOS' `/usr/bin/git` is a shim for the Command Line Tools and reports 2.20 until they are
   installed; the preflight says which version it found.
+- **A mount source must be a path the daemon can see, and `-v` does not say when it is not.** Docker
+  resolves a bind mount's source in the *host's* mount namespace, so a path that exists only inside a
+  sandbox — a `mktemp -d` under a tmpfs `/tmp`, a namespace's private mount — is not a path the daemon has.
+  `docker run -v` does not fail on that: it **creates** the source as an empty root-owned directory and
+  mounts that, so the agent gets an empty `/work` and a `.git` that is not the repository, with no error
+  anywhere. `container::Mounts::check` is the answer (`case_container_mounts` and `tests/container.rs`
+  therefore keep their scratch repositories under `target/`, which is a real host path wherever `cargo
+  test` runs).
 - **Docker Desktop's published ports are the VM's, not the container's.** On a dev machine
   the Desktop VM forwards a `-p` port to the host, so a port a container "publishes" is
   reachable from that machine and not from your phone or the hub — and the forwarder is a
