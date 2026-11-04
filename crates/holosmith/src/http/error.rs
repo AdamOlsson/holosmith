@@ -103,6 +103,20 @@ impl ApiError {
         Self::new(StatusCode::NOT_FOUND, NOT_FOUND, "no such endpoint")
     }
 
+    /// What a request naming a session the table does not hold answers (HS-019).
+    ///
+    /// The same code — the spec names one `not_found` — and a sentence about the *request*: after a
+    /// delete, `GET /api/sessions/{id}` is a route that exists and a row that does not, so answering
+    /// "no such endpoint" described the wrong thing. ADR-0008 keeps the code stable and the sentence
+    /// free for exactly this (the same lesson HS-015's prompt learned from its own demo).
+    pub fn unknown_session() -> Self {
+        Self::new(
+            StatusCode::NOT_FOUND,
+            NOT_FOUND,
+            "there is no session with that id",
+        )
+    }
+
     /// What a request whose `Host` is not in the allow-list answers.
     pub fn bad_host() -> Self {
         Self::new(
@@ -314,6 +328,21 @@ pub fn internal(operation: &'static str, error: impl Display) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unknown_session_is_the_same_code_with_its_own_sentence() {
+        // One code (the spec's), two sentences: an unknown *path* is not an unknown *session*, and a
+        // client after a delete reads the second one.
+        let error = ApiError::unknown_session();
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+        assert_eq!(error.body.code, NOT_FOUND);
+        assert_ne!(error.body.message, ApiError::not_found().body.message);
+        assert!(
+            error.body.message.contains("session"),
+            "the sentence does not describe the request: {}",
+            error.body.message
+        );
+    }
 
     #[test]
     fn the_envelope_is_two_keys_in_order() {

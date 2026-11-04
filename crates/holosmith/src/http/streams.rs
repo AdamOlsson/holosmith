@@ -33,7 +33,7 @@ pub const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(15);
 pub(crate) async fn respond(state: &AppState, session_id: &str, headers: &HeaderMap) -> Response {
     match known(state, session_id) {
         Ok(true) => {}
-        Ok(false) => return ApiError::not_found().into_response(),
+        Ok(false) => return ApiError::unknown_session().into_response(),
         Err(error) => return internal("get", error).into_response(),
     }
     let after = resume_point(headers);

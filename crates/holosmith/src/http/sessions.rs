@@ -395,7 +395,7 @@ fn list_locked(state: &AppState) -> Result<SessionList, ApiError> {
 pub async fn one(state: &AppState, id: &str) -> Response {
     match one_locked(state, id) {
         Ok(Some(session)) => Json(session).into_response(),
-        Ok(None) => ApiError::not_found().into_response(),
+        Ok(None) => ApiError::unknown_session().into_response(),
         Err(error) => error.into_response(),
     }
 }
@@ -447,7 +447,7 @@ pub async fn prompt(state: &AppState, id: &str, body: Result<Bytes, BytesRejecti
     };
     let current = match one_locked(state, id) {
         Ok(Some(session)) => session,
-        Ok(None) => return ApiError::not_found().into_response(),
+        Ok(None) => return ApiError::unknown_session().into_response(),
         Err(error) => return error.into_response(),
     };
     // Refused before the transition is asked for, so the code names the state the client can see
@@ -487,7 +487,7 @@ pub async fn prompt(state: &AppState, id: &str, body: Result<Bytes, BytesRejecti
 pub async fn abort(state: &AppState, id: &str) -> Response {
     let current = match one_locked(state, id) {
         Ok(Some(session)) => session,
-        Ok(None) => return ApiError::not_found().into_response(),
+        Ok(None) => return ApiError::unknown_session().into_response(),
         Err(error) => return error.into_response(),
     };
     if current.status != Status::Running {
@@ -531,7 +531,7 @@ pub async fn steer(state: &AppState, id: &str, body: Result<Bytes, BytesRejectio
     };
     let current = match one_locked(state, id) {
         Ok(Some(session)) => session,
-        Ok(None) => return ApiError::not_found().into_response(),
+        Ok(None) => return ApiError::unknown_session().into_response(),
         Err(error) => return error.into_response(),
     };
     if current.status != Status::Running {
@@ -589,7 +589,7 @@ async fn record_steer(state: &AppState, id: &str, guidance: &str) {
 pub async fn resume(state: &AppState, id: &str) -> Response {
     let current = match one_locked(state, id) {
         Ok(Some(session)) => session,
-        Ok(None) => return ApiError::not_found().into_response(),
+        Ok(None) => return ApiError::unknown_session().into_response(),
         Err(error) => return error.into_response(),
     };
     if !matches!(current.status, Status::Stopped | Status::Error) {
@@ -632,10 +632,10 @@ async fn apply_resume(state: &AppState, id: &str) -> Result<(), ApiError> {
         Err(StateError::Unreported(_)) => Ok(()),
         Err(StateError::Illegal { .. }) => match one_locked(state, id) {
             Ok(Some(session)) => Err(ApiError::not_in_state(session.status, NOT_RESUMABLE)),
-            Ok(None) => Err(ApiError::not_found()),
+            Ok(None) => Err(ApiError::unknown_session()),
             Err(error) => Err(error),
         },
-        Err(StateError::UnknownSession(_)) => Err(ApiError::not_found()),
+        Err(StateError::UnknownSession(_)) => Err(ApiError::unknown_session()),
         Err(error) => Err(internal("resume", error)),
     }
 }
@@ -685,7 +685,7 @@ pub async fn delete(state: &AppState, id: &str, query: RawQuery) -> Response {
     let force = force_requested(query.0.as_deref());
     let mut current = match one_locked(state, id) {
         Ok(Some(session)) => session,
-        Ok(None) => return ApiError::not_found().into_response(),
+        Ok(None) => return ApiError::unknown_session().into_response(),
         Err(error) => return error.into_response(),
     };
     if current.status == Status::Deleting {
@@ -761,10 +761,10 @@ async fn apply_delete(state: &AppState, id: &str) -> Result<(), ApiError> {
         Err(StateError::Unreported(_)) => Ok(()),
         Err(StateError::Illegal { .. }) => match one_locked(state, id) {
             Ok(Some(session)) => Err(ApiError::not_in_state(session.status, NOT_DELETABLE)),
-            Ok(None) => Err(ApiError::not_found()),
+            Ok(None) => Err(ApiError::unknown_session()),
             Err(error) => Err(error),
         },
-        Err(StateError::UnknownSession(_)) => Err(ApiError::not_found()),
+        Err(StateError::UnknownSession(_)) => Err(ApiError::unknown_session()),
         Err(error) => Err(internal("delete", error)),
     }
 }
@@ -783,7 +783,7 @@ async fn apply_prompt(state: &AppState, id: &str) -> Result<(), ApiError> {
             // The row is what a client acts on, so this is the prompt succeeding, not failing.
             Err(StateError::Unreported(_)) => return Ok(()),
             Err(StateError::Illegal { .. }) => {}
-            Err(StateError::UnknownSession(_)) => return Err(ApiError::not_found()),
+            Err(StateError::UnknownSession(_)) => return Err(ApiError::unknown_session()),
             Err(error) => return Err(internal("prompt", error)),
         }
         match one_locked(state, id) {
@@ -791,7 +791,7 @@ async fn apply_prompt(state: &AppState, id: &str) -> Result<(), ApiError> {
             Ok(Some(session)) => {
                 return Err(ApiError::not_in_state(session.status, NOT_IDLE_PROMPT));
             }
-            Ok(None) => return Err(ApiError::not_found()),
+            Ok(None) => return Err(ApiError::unknown_session()),
             Err(error) => return Err(error),
         }
     }
