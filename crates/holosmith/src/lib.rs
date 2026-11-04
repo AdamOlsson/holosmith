@@ -12,6 +12,7 @@ pub mod http;
 pub mod ladder;
 pub mod logging;
 pub mod pins;
+pub mod preflight;
 pub mod provisioner;
 pub mod runtime;
 pub mod schema;

@@ -71,7 +71,7 @@ impl Provisioner {
             // `deleting` (HS-019) whatever state it was in, and this task must then stop building
             // resources for a session that is going away. Nothing is undone — the delete's
             // `SessionBackend::delete` is what removes them, and undoing here would race it. A
-            // step already in flight when the row moved is HS-024's to make safe.
+            // step already in flight when the row moved is HS-044's to make safe.
             if !self.still_starting(&session.id) {
                 tracing::info!(
                     target: "holosmith::provisioner",

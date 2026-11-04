@@ -2,7 +2,7 @@
 //!
 //! Two backends exist from this story on: the in-process **stub backend** that runs the whole
 //! lifecycle with no Docker, git or agent binary (ADR-0001), and the **Docker backend** that
-//! HS-024 fills in. `runtime::Backend` is which one *this run* uses — a choice — and
+//! HS-025 fills in. `runtime::Backend` is which one *this run* uses — a choice — and
 //! [`SessionBackend`] is the behaviour both must provide. The two are different things with
 //! similar names, so the selector stays in [`crate::runtime`] and the trait lives here.
 //!
@@ -80,8 +80,9 @@ impl Serialize for Step {
 /// Why a backend could not do something.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendError {
-    /// The backend does not implement this operation in this build: the Docker backend before
-    /// HS-024, and nothing else. Carrying the step keeps the reason specific.
+    /// The backend does not implement this operation in this build: the Docker backend until the
+    /// story that fills the operation in (HS-025 and after), and nothing else. Carrying the step keeps
+    /// the reason specific.
     Unsupported {
         step: Option<Step>,
         detail: Cow<'static, str>,

@@ -14,7 +14,7 @@ use tokio::net::TcpListener;
 
 use crate::backend::Backends;
 use crate::clock;
-use crate::config::{Config, LoadError, LoadedConfig, Overrides};
+use crate::config::{Config, LoadError, LoadedConfig, Overrides, Role};
 use crate::db::{self, Database, OpenOptions};
 use crate::events::{self, StreamRegistry, WriterOptions};
 use crate::http::{self, App, AppState, Guards};
@@ -63,6 +63,43 @@ pub fn run(args: ServeArgs) -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
+    // The CLI wins over the file, the same rule `--port` and `--data-dir` follow: the file is the
+    // machine's setting and the flag is this run's (ADR-0006, ADR-0015). It is written back into
+    // the loaded value as well as used here, because an override ADR-0006 applies is applied to
+    // the value every later reader sees — otherwise `config.backend` and `runtime.backend` would
+    // disagree for exactly one run.
+    if let Some(backend) = args.backend {
+        loaded.config.backend = backend;
+    }
+    let backend = loaded.config.backend;
+    // The preflight, once, before anything is opened or bound: a machine that cannot run a Docker
+    // session must fail here rather than mid-turn (HS-024, spec item 10 §1), and the sentence it fails
+    // with is the fix. Every complaint is reported at once — the rule `config validate` follows, because
+    // a machine missing two things should take two edits and one restart. A stub run needs no daemon and
+    // no free space beyond its own database, so only a Docker run is checked; `doctor` (HS-045) runs the
+    // same `preflight::check` on demand, which is what makes the two print the same words.
+    //
+    // A `hub` is not checked at all: it runs no sessions, and spec item 10 §6's `hub deploy` runs "steps
+    // 1 (without the Docker and git checks), 2 (without the docker group), 5, 6 and 7". A hub without a
+    // daemon is the normal hub.
+    //
+    // It comes after the data root is created because one check is about that filesystem, and before the
+    // database is opened because a machine that cannot run sessions should not migrate one.
+    if backend == Backend::Docker && loaded.config.role != Role::Hub {
+        let complaints = crate::preflight::check(&loaded.config);
+        if !complaints.is_empty() {
+            for complaint in &complaints {
+                eprintln!("holosmith: serve: {complaint}");
+            }
+            return ExitCode::FAILURE;
+        }
+        tracing::debug!(
+            target: "holosmith::serve",
+            docker_host = loaded.config.docker_host.as_deref().unwrap_or(crate::preflight::DEFAULT_DOCKER_HOST),
+            min_free_gb = loaded.config.min_free_gb,
+            "the docker preflight passed"
+        );
+    }
     // Held for the process lifetime. ADR-0012's lock is kept (ADR-0013): the event writer is the
     // single writer for events and takes the lock only for its own transaction, so a handler's
     // guard is still taken for one synchronous block and never held across an `.await`.
@@ -77,15 +114,6 @@ pub fn run(args: ServeArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // The CLI wins over the file, the same rule `--port` and `--data-dir` follow: the file is the
-    // machine's setting and the flag is this run's (ADR-0006, ADR-0015). It is written back into
-    // the loaded value as well as used here, because an override ADR-0006 applies is applied to
-    // the value every later reader sees — otherwise `config.backend` and `runtime.backend` would
-    // disagree for exactly one run.
-    if let Some(backend) = args.backend {
-        loaded.config.backend = backend;
-    }
-    let backend = loaded.config.backend;
     // `--port 0` asks the kernel for a port, so the origin a browser will send is not knowable
     // until after `bind`; the flag decides, because a port written in the file may deliberately
     // name a proxied address rather than the local one.

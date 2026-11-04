@@ -36,7 +36,7 @@
 //! The resume after rung 2 goes through the provisioner — `stopped -> starting` by `resume`, then
 //! the four steps back to `idle` — which is the flow HS-018's `POST /resume` reuses. It does not
 //! call [`SessionBackend::resume`]: whether a resumed session runs every provisioning step or only
-//! the container's is HS-018's and HS-024's question, and answering it here would be a guess.
+//! the container's is HS-025's and HS-028's question, and answering it here would be a guess.
 
 use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};

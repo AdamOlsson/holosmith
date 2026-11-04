@@ -10,6 +10,15 @@ A single-operator system that runs coding agents in containers on machines you o
 One computer running the `holosmith` binary.
 _Avoid_: Node, box, instance
 
+**Preflight**:
+The checks a machine must pass before it can run a **session**: the Docker daemon answering `_ping` on
+`docker_host`, git 2.38 or newer, and `min_free_gb` free on the data root. Its failures are sentences that
+name the fix, printed by `serve` at startup (which then refuses) and, from HS-045, by `doctor`. A check that
+cannot run — an `ssh://` daemon, a missing `git` — is a complaint rather than a pass. Its machine names are
+`preflight::check`, `Complaint` and `Check`.
+_Avoid_: Sanity check, health check, smoke test (a **preflight** is not `doctor`, which is the command that
+prints one)
+
 **Role**:
 Which parts of the system a machine runs: `hub`, `server`, or `both`.
 _Avoid_: Mode, type

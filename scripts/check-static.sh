@@ -125,9 +125,11 @@ check_serve_in_empty_root() {
   mkdir -p "$dir/data"
 
   # --share-net puts the sandbox beside the host's loopback, which is the only way to fetch
-  # the port it bound; the filesystem is still empty.
+  # the port it bound; the filesystem is still empty. `--backend stub` because this run is about the
+  # artifact's own linking, not about a machine's choice: a Docker run checks the host first (HS-024),
+  # and this sandbox has no daemon, no `git` and no `df` — which is the point of the empty root.
   bwrap "${prefix[@]}" --bind "$dir/data" /data --share-net "${inner[@]}" \
-    serve --port 0 --data-dir /data >"$dir/serve.log" 2>"$dir/serve.err" &
+    serve --backend stub --port 0 --data-dir /data >"$dir/serve.log" 2>"$dir/serve.err" &
   local pid=$!
   local i
   for i in $(seq 1 200); do

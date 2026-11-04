@@ -1,13 +1,16 @@
-//! The Docker backend: the real one, in HS-024.
+//! The Docker backend: the real one, from HS-025.
 //!
 //! It exists now so the trait has the implementation the product actually ships with, and so
 //! `--backend docker` — which is the default (ADR-0001) — answers honestly instead of pretending
 //! a session is provisioned. Every operation refuses with [`BackendError::Unsupported`], which
 //! the provisioner turns into a `session.status` event and a `status_reason` on the row: an
 //! operator who runs this build without `--backend stub` sees `error` with a reason naming the
-//! step, not a session that says `starting` forever.
+//! step, not a session that says `starting` forever. Whether the machine *can* run Docker sessions at
+//! all is not this file's question: [`crate::preflight`] answers it once, at startup, and `serve` refuses
+//! to bring up a Docker run that fails it (HS-024). A backend that reported its own preflight would be a
+//! second opinion about the same machine.
 //!
-//! Nothing else lives here yet. HS-024 fills `provision` and its four steps, HS-025 the worktree,
+//! Nothing else lives here yet. HS-025 fills `provision` and its four steps — the worktree,
 //! HS-028 the container, HS-031 the agent; the mount, network and proxy stories add their own.
 //! Writing them now would mean guessing at `docker_host`, the projects root and the image tags
 //! that those stories own.
@@ -16,8 +19,9 @@ use super::{BackendError, SessionBackend, Step, TurnEnd};
 use crate::events::EventWriter;
 use crate::sessions::Session;
 
-/// The Docker backend. No state yet: `docker_host`, the CLI path and the image tags arrive with
-/// HS-024, and an unused field would be dead code until then.
+/// The Docker backend. No state yet: the CLI path and the image tags arrive with the stories that first
+/// need them, and `docker_host` is read by the preflight rather than here — nothing in this file talks to
+/// the daemon until HS-025 does.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DockerBackend;
 
@@ -32,7 +36,7 @@ impl SessionBackend for DockerBackend {
     async fn provision(&self, _session: &Session, step: Step) -> Result<(), BackendError> {
         Err(BackendError::unsupported_step(
             step,
-            "the docker backend does not provision yet (HS-024)",
+            "the docker backend does not provision yet (HS-025)",
         ))
     }
 
@@ -119,7 +123,7 @@ mod tests {
             .expect_err("the docker backend provisions nothing yet");
         assert_eq!(
             error.to_string(),
-            "the network step: the docker backend does not provision yet (HS-024)"
+            "the network step: the docker backend does not provision yet (HS-025)"
         );
         let start_turn = backend
             .start_turn(&session, "a prompt", &events)

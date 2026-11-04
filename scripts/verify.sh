@@ -13,7 +13,8 @@
 # `abort_completed`, a steer's own frame, a resume's two
 # refusals, a delete from its 202 to the row that is gone, an idle session stopped by the sweeper with
 # its reason, its event and its log line, a create at the cap evicting the idle session before it
-# succeeds, and a token budget on a boot of its own ending the turn that spends it, with no CORS header
+# succeeds, a token budget on a boot of its own ending the turn that spends it, and a Docker preflight that
+refuses to start with one sentence naming the fix, with no CORS header
 # on any answer, and stopping on SIGTERM with exit 0.
 # --no-build skips the two artifact phases; --keep keeps the work dir of a successful run. On
 # failure this prints FAIL <assertion> and keeps the work dir (config, banner, every answer).
@@ -305,6 +306,7 @@ serve_cases=(
   case_create_at_cap_evicts
   case_create_at_cap_refused
   case_token_budget
+  case_docker_preflight
 )
 
 # The health payload: exactly four keys, and the uptime is not predictable, so the assertion is
@@ -1460,6 +1462,45 @@ case_token_budget() {
       ;;
     *)
       fail "${name}_row/usage" "the turn's usage was not persisted on the row: $body"
+      ;;
+  esac
+}
+
+# HS-024's proof from the artifact: a machine that cannot run Docker sessions refuses *at startup*, with
+# one sentence that names the fix, and binds nothing.
+#
+# The case points `docker_host` at a socket that cannot exist, so it is deterministic on every machine —
+# including one with a running daemon, which is what a case that waited for "no docker here" would depend
+# on. It boots nothing that serves, so it needs no `start_serve`: exit code, stderr, and no banner.
+case_docker_preflight() {
+  local name=case_docker_preflight status=0
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\ndocker_host = "unix://%s/absent.sock"\n' \
+    "$owner" "$WORK" >"$WORK/config-docker.toml"
+  "$artifact" serve --config "$WORK/config-docker.toml" --port 0 --data-dir "$WORK/data-docker" \
+    >"$WORK/$name.out" 2>"$WORK/$name.err" || status=$?
+  check "$name/exit" 1 "$status"
+  if grep -q '^control_listen ' "$WORK/$name.err"; then
+    fail "$name/banner" "a refused startup printed a banner: $(cat "$WORK/$name.err")"
+  fi
+  assertions=$((assertions + 1))
+  # No migration either: the preflight runs before the database is opened, so a machine that cannot run
+  # sessions does not get one (the review of this story found the order was the other way round).
+  if [ -f "$WORK/data-docker/app.db" ]; then
+    fail "$name/database" "a refused startup created the database: $WORK/data-docker"
+  fi
+  assertions=$((assertions + 1))
+  # The sentence names the daemon, what went wrong and the two fixes. Asserted by its parts, because the
+  # rule is "one sentence naming the fix" and not this wording.
+  local line
+  line="$(grep 'docker: the docker daemon at unix://' "$WORK/$name.err" || true)"
+  [ -n "$line" ] ||
+    fail "$name/sentence" "no sentence about the daemon: $(cat "$WORK/$name.err")"
+  case "$line" in
+    *"start it with"*"docker_host"*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "$name/fix" "the sentence names no fix: $line"
       ;;
   esac
 }

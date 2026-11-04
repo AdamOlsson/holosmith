@@ -264,6 +264,36 @@ default.
 - Optional: **`bwrap`** (bubblewrap) for the empty-root run. Also machine-local; without
   it the check prints one `SKIP` line and still passes.
 
+## Running with Docker
+
+`backend = "docker"` is the default (ADR-0001), and `serve` will not start one on a machine
+that cannot run it: the preflight checks the daemon, git and the disk before the listener
+binds, prints one sentence per failure that names the fix, and exits 1 (HS-024, ADR-0028).
+`--backend stub` skips all of it — the stub needs no daemon, no container and no free space
+beyond its own database, which is what the gate uses and what a phone-only demo can use — and
+so does `role = "hub"`, which runs no sessions at all: item 10 §6's `hub deploy` says the startup
+runs "without the Docker and git checks", and a hub without a daemon is the normal hub. The check
+at startup is why `scripts/check-static.sh`'s empty-container run passes `--backend stub`: that
+run is about the artifact's own linking, and its sandbox has no `git`, no `df` and no daemon.
+
+Three things bite on a real machine:
+
+- **`docker_host`**: unset means `unix:///var/run/docker.sock`, the rootful socket. A
+  rootless daemon lives at `unix:///run/user/<$UID>/docker.sock`, and `tcp://host:port` and
+  `ssh://` are the other spellings the config validator accepts; `ssh://` is reported as *not
+  checked* rather than passed, because this build cannot reach into another machine's daemon yet. Put yourself in the `docker` group or
+  the socket answers `permission denied` — the preflight's sentence names the group fix, not
+  `systemctl`.
+- **git 2.38 or newer**, because the merge check runs `git merge-tree --write-tree` (V2).
+  macOS' `/usr/bin/git` is a shim for the Command Line Tools and reports 2.20 until they are
+  installed; the preflight says which version it found.
+- **Docker Desktop's published ports are the VM's, not the container's.** On a dev machine
+  the Desktop VM forwards a `-p` port to the host, so a port a container "publishes" is
+  reachable from that machine and not from your phone or the hub — and the forwarder is a
+  second hop that `docker inspect` does not describe. That is why the control listener is
+  the host's own process, why the preview listener (HS-041) is on the host too, and why
+  `docker_host` on a development machine is a socket rather than a TCP endpoint.
+
 ## Where the target settings live
 
 `.cargo/config.toml` names the two linkers and sets

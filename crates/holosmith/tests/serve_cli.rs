@@ -21,16 +21,40 @@ use support::TempDir;
 ///
 /// It names a data root inside the directory: without one, `serve` would create and migrate the
 /// default `/var/lib/holosmith`, so the tests would write machine state and fail wherever that
-/// path is not writable (ADR-0009). `serve`-specific, so it stays here rather than in `support`.
+/// path is not writable (ADR-0009). It names the **stub** backend for the same reason: a Docker run
+/// runs the preflight first and refuses on a machine without a daemon (HS-024), and these tests are
+/// about the banner, the signals, the data root and the health payload, not about which backend a
+/// machine would pick — `the_default_backend_is_docker_and_the_log_line_says_so` is the one that asks
+/// that, and it gives itself a daemon. `serve`-specific, so it stays here rather than in `support`.
 fn config(dir: &TempDir) -> PathBuf {
     dir.write(
         "config.toml",
         &format!(
-            "control_listen = \"127.0.0.1:0\"\npreview_listen = \"127.0.0.1:8081\"\n\
+            "backend = \"stub\"\ncontrol_listen = \"127.0.0.1:0\"\npreview_listen = \"127.0.0.1:8081\"\n\
              data_root = \"{}\"\n",
             dir.file("data").display()
         ),
     )
+}
+
+/// A socket that answers one `GET /_ping` the way a real daemon does, and its path.
+///
+/// The tests that must boot a **Docker** run need a machine that passes the preflight, and the daemon is the
+/// only check this sandbox can satisfy without trusting the host (`docker_ping_socket` is the fixture
+/// `tests/preflight.rs` also builds for its own cases). One connection, one answer, then the thread ends:
+/// `serve` asks once.
+fn docker_ping_socket(dir: &TempDir) -> PathBuf {
+    use std::io::{Read, Write};
+    let socket = dir.file("docker.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).expect("the test socket binds");
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut request = [0_u8; 512];
+            let _ = stream.read(&mut request);
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\n\r\nOK");
+        }
+    });
+    socket
 }
 
 /// A `serve` process, started and waited for until it says where it listens.
@@ -224,7 +248,8 @@ fn the_role_in_the_config_file_reaches_the_health_payload() {
     let config = dir.write(
         "config.toml",
         &format!(
-            "role = \"hub\"\ncontrol_listen = \"127.0.0.1:0\"\ndata_root = \"{}\"\n",
+            "role = \"hub\"\nbackend = \"stub\"\ncontrol_listen = \"127.0.0.1:0\"\n\
+             data_root = \"{}\"\n",
             dir.file("data").display()
         ),
     );
@@ -267,12 +292,19 @@ fn the_backend_comes_from_the_config_file() {
 
 #[test]
 fn a_flag_backend_wins_over_the_config_file() {
+    // The override this asserts *is* the Docker backend, so the machine has to pass the preflight: a
+    // socket that answers `_ping`, and `min_free_gb = 0` so the real `df` on this sandbox's small disk
+    // cannot fail a test that is about which backend the flag chose (HS-024). The `git` check still runs
+    // against the host's own git, which is what a Docker run on this machine would use.
     let dir = TempDir::new("backend-flag");
+    let socket = docker_ping_socket(&dir);
     let config = dir.write(
         "config.toml",
         &format!(
-            "backend = \"stub\"\ncontrol_listen = \"127.0.0.1:0\"\ndata_root = \"{}\"\n",
-            dir.file("data").display()
+            "backend = \"stub\"\ncontrol_listen = \"127.0.0.1:0\"\ndata_root = \"{}\"\n\
+             docker_host = \"unix://{}\"\nmin_free_gb = 1\n",
+            dir.file("data").display(),
+            socket.display()
         ),
     );
     let mut server = Server::start(
@@ -297,9 +329,20 @@ fn a_flag_backend_wins_over_the_config_file() {
 #[test]
 fn the_default_backend_is_docker_and_the_log_line_says_so() {
     // ADR-0001: the stub is opt-in, so a machine that says nothing about the backend runs the
-    // Docker one.
+    // Docker one — and since HS-024 a Docker run checks the machine first, so this test brings a daemon
+    // that answers `_ping` and sets `min_free_gb = 0` so the real `df` on this sandbox's small disk cannot
+    // fail it. That the banner appears at all is therefore half the assertion: the preflight passed.
     let dir = TempDir::new("backend-default");
-    let config = config(&dir);
+    let socket = docker_ping_socket(&dir);
+    let config = dir.write(
+        "config.toml",
+        &format!(
+            "control_listen = \"127.0.0.1:0\"\npreview_listen = \"127.0.0.1:8081\"\n\
+             data_root = \"{}\"\ndocker_host = \"unix://{}\"\nmin_free_gb = 0\n",
+            dir.file("data").display(),
+            socket.display()
+        ),
+    );
     let mut server = Server::start(
         dir,
         &build(&["serve", "--config", config.to_str().expect("UTF-8")]),
@@ -309,6 +352,34 @@ fn the_default_backend_is_docker_and_the_log_line_says_so() {
     assert!(
         said.contains(" role both backend docker\n"),
         "the default backend is not docker: {said}"
+    );
+    assert_eq!(server.signal("TERM"), 0);
+}
+
+#[test]
+fn a_hub_is_not_checked_for_docker_because_it_runs_no_sessions() {
+    // Spec item 10 §6: `hub deploy` runs the startup steps "without the Docker and git checks". A hub with
+    // the default `backend = "docker"` and no daemon anywhere is the normal hub, so it must boot — and it
+    // boots even though `min_free_gb` is the default 20 and this sandbox has 3 (HS-024).
+    let dir = TempDir::new("hub-no-docker");
+    let config = dir.write(
+        "config.toml",
+        &format!(
+            "role = \"hub\"\ncontrol_listen = \"127.0.0.1:0\"\ndata_root = \"{}\"\n\
+             docker_host = \"unix://{}/absent.sock\"\n",
+            dir.file("data").display(),
+            dir.path().display()
+        ),
+    );
+    let mut server = Server::start(
+        dir,
+        &build(&["serve", "--config", config.to_str().expect("UTF-8")]),
+    )
+    .wait_until_listening();
+    let said = server.said();
+    assert!(
+        said.contains(" role hub backend docker\n"),
+        "a hub did not boot on the default backend: {said}"
     );
     assert_eq!(server.signal("TERM"), 0);
 }
@@ -494,7 +565,10 @@ fn the_binary_serves_the_app_from_a_directory_that_holds_only_the_binary() {
     fs::copy(env!("CARGO_BIN_EXE_holosmith"), &binary).expect("the binary is copyable");
 
     let elsewhere = TempDir::new("empty-dir-state");
-    let config = elsewhere.write("config.toml", "control_listen = \"127.0.0.1:0\"\n");
+    let config = elsewhere.write(
+        "config.toml",
+        "backend = \"stub\"\ncontrol_listen = \"127.0.0.1:0\"\n",
+    );
     let stderr = elsewhere.file("serve.err");
     let mut child = Command::new(&binary)
         .args([
