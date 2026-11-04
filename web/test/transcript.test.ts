@@ -506,3 +506,22 @@ test("the three project refusals are three codes, not one code and three sentenc
     ["git_not_directory", "submodules_present", "worktree_config_enabled"],
   );
 });
+
+test("a coalesced delta renders exactly like the deltas it replaced", () => {
+  // HS-059 merges the deltas of one message and kind inside one commit into one row. The page must not be
+  // able to tell: a delta is one appended text node, so one frame of the whole sentence and three frames of
+  // its parts are the same block, the same order and the same text (ADR-0018).
+  const many = new Transcript();
+  const split = ["The shell is ", "the session screen ", "and the list."].flatMap((text) =>
+    many.apply(delta("m1", "text", text)),
+  );
+  const one = new Transcript();
+  const merged = one.apply(delta("m1", "text", "The shell is the session screen and the list."));
+
+  assert.equal(appended(split, "m1", "text"), appended(merged, "m1", "text"));
+  assert.deepEqual(many.order(), one.order(), "one message is one block either way");
+  assert.equal(many.order().length, 1);
+  // And the merged frame is a *replacement-free* one: the renderer's kind nodes do not exist until a delta
+  // arrives, which is why a merge cannot leave an empty node behind either.
+  assert.equal(appended(split, "m1", "thinking"), "");
+});

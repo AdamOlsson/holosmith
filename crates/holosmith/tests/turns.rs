@@ -427,3 +427,114 @@ fn the_prompt_route_is_recorded_mutating() {
         .expect("the prompt is a registered route");
     assert_eq!(entry.kind, RouteKind::Mutating);
 }
+
+#[tokio::test]
+async fn a_burst_of_deltas_is_fewer_rows_than_frames_and_keeps_its_text() {
+    // HS-059 on the live path: the stub's script emits seven deltas, and with a pace far below the writer's
+    // 25 ms window they arrive inside a couple of commits — so the log holds the script's three *runs*
+    // (thinking, then text, then text after the tool call) rather than seven rows, and the words are all
+    // still there in the order they were said.
+    let dir = TempDir::new("turns-coalescing");
+    let state = with_stub(state_in(&dir, Config::default()), paced(0));
+    let served = Served::start(http::router(state.clone()), GRACE).await;
+    let id = created_id(&post_create(served.addr, "turns-coalescing").await);
+    wait_idle(&state, &id).await;
+
+    let accepted = post_prompt(served.addr, &id, PROMPT).await;
+    assert_eq!(accepted.status, 202, "{}", accepted.body);
+    wait_idle(&state, &id).await;
+    // The row can be ahead of the writer's commit (ADR-0013), so wait for the turn's last event.
+    wait_until("the turn's frames are committed", || {
+        let database = state.database.lock().expect("the lock is not poisoned");
+        database
+            .events()
+            .read_since(&id, 0, 100)
+            .expect("the log reads")
+            .iter()
+            .any(|event| event.kind == "turn.end")
+    })
+    .await;
+
+    let events: Vec<(String, String)> = {
+        let database = state.database.lock().expect("the lock is not poisoned");
+        database
+            .events()
+            .read_since(&id, 0, 100)
+            .expect("the log reads")
+            .into_iter()
+            .map(|event| (event.kind, event.payload))
+            .collect()
+    };
+    let payload = |text: &str| -> serde_json::Value {
+        serde_json::from_str(text).expect("a payload is JSON")
+    };
+    // Coalescing is *within a commit*, so two rows of one message and kind may still sit next to each
+    // other across a batch boundary (the script's answer is 200 ms of thought and then two sentences, and a
+    // batch can end between them). What must never happen is two **consecutive events** that the rule would
+    // have merged: that would be a batch that failed to coalesce.
+    for pair in events.windows(2) {
+        if pair[0].0 != "message.delta" || pair[1].0 != "message.delta" {
+            continue;
+        }
+        let (one, two) = (payload(&pair[0].1), payload(&pair[1].1));
+        assert!(
+            one["message_id"] != two["message_id"] || one["kind"] != two["kind"],
+            "two consecutive events are deltas of one message and kind: {pair:?}"
+        );
+    }
+    let deltas: Vec<(String, String, String)> = events
+        .iter()
+        .filter(|(kind, _)| kind == "message.delta")
+        .map(|(_, text)| {
+            let payload = payload(text);
+            (
+                payload["message_id"]
+                    .as_str()
+                    .expect("a delta names its message")
+                    .to_string(),
+                payload["kind"]
+                    .as_str()
+                    .expect("a delta names its kind")
+                    .to_string(),
+                payload["text"]
+                    .as_str()
+                    .expect("a delta carries its text")
+                    .to_string(),
+            )
+        })
+        .collect();
+    assert!(
+        deltas.len() < 7,
+        "seven scripted deltas are {} rows, so nothing coalesced",
+        deltas.len()
+    );
+    assert_eq!(
+        deltas.len(),
+        3,
+        "the script's three runs are not three rows: {deltas:#?}"
+    );
+    assert!(
+        deltas.iter().all(|(id, _, _)| *id == deltas[0].0),
+        "one turn is one message id: {deltas:#?}"
+    );
+    assert_eq!(
+        deltas
+            .iter()
+            .map(|(_, kind, _)| kind.as_str())
+            .collect::<Vec<_>>(),
+        ["thinking", "text", "text"],
+        "the runs are the script's three"
+    );
+    // The first and last things the script says survived the merge, in order.
+    assert!(
+        deltas[0].2.starts_with("The prompt names the app shell."),
+        "the first thinking sentence was lost: {:?}",
+        deltas[0].2
+    );
+    assert!(
+        deltas[2].2.ends_with("Nothing else in it moved."),
+        "the last text sentence was lost: {:?}",
+        deltas[2].2
+    );
+    served.finish().await.expect("a clean shutdown");
+}

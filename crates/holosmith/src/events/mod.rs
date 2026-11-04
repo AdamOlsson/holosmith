@@ -141,6 +141,73 @@ impl EventStream {
     }
 }
 
+/// The pinned payload of one delta, as the writer's coalescer reads it (HS-059).
+///
+/// Field order is the contract's: serialising this spells a merged row exactly like the one a producer
+/// wrote (`{"message_id":…,"kind":…,"text":…}`, ADR-0018), so a replay cannot tell which rows were merged.
+#[derive(Debug, serde::Serialize)]
+struct Delta {
+    message_id: String,
+    kind: String,
+    text: String,
+}
+
+/// Read `payload` as a delta, or `None` when it is not the pinned shape.
+fn delta(payload: &str) -> Option<Delta> {
+    let event: serde_json::Value = serde_json::from_str(payload).ok()?;
+    Some(Delta {
+        message_id: event.get("message_id")?.as_str()?.to_string(),
+        kind: event.get("kind")?.as_str()?.to_string(),
+        text: event.get("text")?.as_str()?.to_string(),
+    })
+}
+
+/// Merge the consecutive deltas of one message and kind inside one commit's batch (HS-059).
+///
+/// Spec item 15: "inside each 25 ms commit, consecutive deltas of the same kind and message become one row
+/// with one seq". A streaming agent emits far more deltas than the log should hold, and the transcript
+/// cannot tell the difference: a delta is one appended text node, so appending one row's text and appending
+/// ten rows' texts in order are the same rendering (ADR-0018).
+///
+/// Four things must all match, and each one is a boundary the story names: the **session** (one batch can
+/// carry two sessions' events), the **kind** (`message.delta` and nothing else), the **message id** (a
+/// message's block is keyed by it), and the delta's own **kind** (`text` or `thinking`, which are separate
+/// nodes in one block). Anything between two deltas — a tool call, a `message.end` — ends the run: the
+/// rule is *consecutive* deltas, and a batch that interleaves them has an order the transcript depends on.
+///
+/// The merged row keeps the **first** event's `created_at`: the row stands for a span, and the span began
+/// there. Its payload is re-serialised; an event whose payload is not the pinned shape is passed through
+/// untouched and ends any run it is part of, because the writer is not a producer's validator.
+pub fn coalesce(batch: Vec<NewEvent>) -> Vec<NewEvent> {
+    let mut merged: Vec<NewEvent> = Vec::with_capacity(batch.len());
+    for event in batch {
+        let this = (event.kind == MESSAGE_DELTA)
+            .then(|| delta(&event.payload))
+            .flatten();
+        if let Some(this) = this
+            && let Some(previous) = merged.last_mut()
+            && previous.kind == MESSAGE_DELTA
+            && previous.session_id == event.session_id
+            && let Some(before) = delta(&previous.payload)
+            && before.message_id == this.message_id
+            && before.kind == this.kind
+        {
+            let mut text = before.text;
+            text.push_str(&this.text);
+            let payload = Delta {
+                message_id: before.message_id,
+                kind: before.kind,
+                text,
+            };
+            previous.payload =
+                serde_json::to_string(&payload).expect("a delta's three strings serialise");
+            continue;
+        }
+        merged.push(event);
+    }
+    merged
+}
+
 /// What the writer may vary: only how long a batch waits before it is committed.
 #[derive(Debug, Clone, Copy)]
 pub struct WriterOptions {
@@ -241,4 +308,56 @@ pub(crate) fn scratch_writer() -> (crate::sql::guard::TempDir, EventWriter) {
     )
     .0;
     (dir, handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One delta, spelt the way a producer must spell it.
+    fn delta(message_id: &str, kind: &str, text: &str, at: i64) -> NewEvent {
+        NewEvent {
+            session_id: "session".to_string(),
+            kind: MESSAGE_DELTA.to_string(),
+            payload: serde_json::json!({
+                "message_id": message_id,
+                "kind": kind,
+                "text": text,
+            })
+            .to_string(),
+            created_at: at,
+        }
+    }
+
+    #[test]
+    fn a_merged_row_begins_when_its_run_began_and_speaks_the_contract() {
+        // Two facts about a merge that a replay can see: the row stands for the span, so its instant is the
+        // first delta's, and its payload is the pinned three keys in the contract's order — a client must
+        // not be able to tell a merged row from one a producer wrote (ADR-0018).
+        let merged = coalesce(vec![
+            delta("m1", "text", "one ", 10),
+            delta("m1", "text", "two", 11),
+        ]);
+        assert_eq!(merged.len(), 1, "two consecutive deltas are one row");
+        assert_eq!(
+            merged[0].created_at, 10,
+            "the row begins when its run began"
+        );
+        assert_eq!(
+            merged[0].payload, r#"{"message_id":"m1","kind":"text","text":"one two"}"#,
+            "the merged payload is not the pinned shape"
+        );
+    }
+
+    #[test]
+    fn a_delta_of_another_message_or_kind_is_not_merged_into_the_row_before_it() {
+        // The two boundaries that are one field apart: the id a block is keyed by, and the node inside it.
+        let merged = coalesce(vec![
+            delta("m1", "text", "a", 1),
+            delta("m2", "text", "b", 2),
+            delta("m2", "thinking", "c", 3),
+            delta("m1", "text", "d", 4),
+        ]);
+        assert_eq!(merged.len(), 4, "a boundary was crossed: {merged:#?}");
+    }
 }

@@ -298,6 +298,7 @@ serve_cases=(
   case_session_detail
   case_session_screen
   case_prompt_turn
+  case_event_coalescing
   case_turn_timeout
   case_prompt_bad_body
   case_prompt_unknown_session
@@ -831,6 +832,76 @@ case_prompt_turn() {
       fail "$name/idle" "no event reports the turn settled: $body"
       ;;
   esac
+}
+
+# HS-059's proof from the artifact: a turn's log holds one delta row per run of deltas the writer
+# committed together — never more rows than the script emitted — and every word the script said is still
+# there, in order, under one message id.
+#
+# What this case cannot show is the merge itself. The stub paces one frame per 200 ms, eight commit windows
+# apart, so nothing here is coalesced: the merge is `tests/turns.rs`'s (seven scripted deltas -> three rows
+# at a pace below the window) and `tests/events.rs`'s (5,000 -> three). What the shipped artifact can prove
+# is the contract a merge must keep, which is what a burst producer (HS-032's container output) is held to.
+#
+# It creates its own session and deletes it, so nothing it asserts depends on a row an earlier case made and
+# nothing it leaves can be somebody else's idle candidate.
+case_event_coalescing() {
+  local name=case_event_coalescing response body id deltas texts
+  fetch_body "${name}_create" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-coalescing-1" ||
+    fail "${name}_create/no_answer" "POST /api/sessions did not answer"
+  expect_status "${name}_create" "$(answer "${name}_create")" 202
+  body="$(cat "$WORK/responses/${name}_create.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id" ] || fail "${name}_create/id" "the response names no id: $body"
+  wait_for_idle_id "${name}_idle" "$id"
+
+  fetch_body "${name}_prompt" POST "/api/sessions/$id/prompt" '{"prompt":"read the app shell"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_prompt/no_answer" "POST /api/sessions/$id/prompt did not answer"
+  expect_status "${name}_prompt" "$(answer "${name}_prompt")" 202
+  fetch_sse_until "${name}_stream" "/api/sessions/$id/events" '"from":"running","to":"idle"' \
+    "Host: 127.0.0.1" || fail "${name}_stream/no_answer" "the stream did not answer"
+  body="$(cat "$WORK/responses/${name}_stream.body")"
+
+  # The replay is the log, so an empty one would make every assertion below vacuous.
+  deltas="$(printf '%s\n' "$body" | tr -d '\r' | grep -c '^event: *message\.delta' || true)"
+  [ "${deltas:-0}" -gt 0 ] ||
+    fail "${name}/deltas" "the replay holds no delta, so nothing below can say anything"
+  assertions=$((assertions + 1))
+  # A merge can only ever remove rows: more delta rows than the script's seven deltas would be a coalescer
+  # that invented events.
+  [ "$deltas" -le 7 ] ||
+    fail "${name}/rows" "the turn wrote $deltas delta rows for seven scripted deltas"
+  assertions=$((assertions + 1))
+  # One message id per turn, on every delta's payload — the shape a merge must keep (ADR-0018).
+  texts="$(printf '%s\n' "$body" | tr -d '\r' | grep '^data: ' | sed -n 's/^data: .*"message_id":"\([^"]*\)".*/\1/p' | sort -u | wc -l | tr -d ' ')"
+  [ "$texts" = "1" ] ||
+    fail "${name}/message_id" "the turn's deltas name $texts message ids, not one"
+  assertions=$((assertions + 1))
+  # Nothing is lost and nothing is reordered: the first thinking sentence and the last text sentence are in
+  # the replay, in that order, once the text is read back the way the transcript reads it.
+  texts="$(printf '%s\n' "$body" | tr -d '\r' | grep '^data: ' |
+    sed -n 's/^data: .*"text":"\(.*\)"}$/\1/p' | tr -d '\n')"
+  case "$texts" in
+    *"The prompt names the app shell."*"Nothing else in it moved."*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "${name}/text" "the replay's text is not the script's, in order: $texts"
+      ;;
+  esac
+
+  # Leave nothing behind: this session is the case's, not a candidate for a later case's eviction.
+  fetch "${name}_delete" DELETE "/api/sessions/$id?force=true" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_delete/no_answer" "DELETE /api/sessions/$id did not answer"
+  expect_status "${name}_delete" "$(answer "${name}_delete")" 202
+  wait_for_gone "${name}_gone" "$id"
 }
 
 # HS-022: the turn timeout does not fire on a turn that ends. The gate cannot make it *fire* —

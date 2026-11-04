@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{broadcast, mpsc};
 
-use super::{Event, EventStream, EventWriter, NewEvent, RepoError, WriterOptions};
+use super::{Event, EventStream, EventWriter, NewEvent, RepoError, WriterOptions, coalesce};
 use crate::db::Database;
 
 /// How many appends may queue before a producer waits: backpressure on the producer, never on
@@ -55,7 +55,10 @@ fn run(
     events: broadcast::Sender<Event>,
 ) {
     while let Some(first) = incoming.blocking_recv() {
-        let batch = collect(first, &mut incoming, options.commit_interval);
+        // One pass over the batch before it becomes rows: the consecutive deltas of one message and kind
+        // are one row with one seq (HS-059, spec item 15). The batch is the unit the story names — "inside
+        // each 25 ms commit" — and it is the only place the events are still values rather than rows.
+        let batch = coalesce(collect(first, &mut incoming, options.commit_interval));
         let assigned = match commit(&database, &batch) {
             Ok(assigned) => assigned,
             Err(error) => {

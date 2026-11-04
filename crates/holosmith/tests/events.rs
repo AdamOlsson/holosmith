@@ -12,7 +12,9 @@ use rusqlite::Connection;
 use tokio::sync::broadcast::error::RecvError;
 
 use holosmith::db::{Database, OpenOptions};
-use holosmith::events::{self, Event, EventStream, EventWriter, NewEvent, WriterOptions};
+use holosmith::events::{
+    self, Event, EventStream, EventWriter, MESSAGE_DELTA, NewEvent, WriterOptions,
+};
 use holosmith::sessions::{NewSession, Session};
 
 mod support;
@@ -74,6 +76,24 @@ impl Writer {
                 session_id: session.id.clone(),
                 kind: kind.to_string(),
                 payload: format!("{{\"kind\":\"{kind}\"}}"),
+                created_at: NOW,
+            })
+            .await
+            .expect("the writer accepts the event");
+    }
+
+    /// One delta, spelt the way a producer must spell it (ADR-0018).
+    async fn append_delta(&self, session: &Session, message_id: &str, kind: &str, text: &str) {
+        self.handle
+            .append(NewEvent {
+                session_id: session.id.clone(),
+                kind: MESSAGE_DELTA.to_string(),
+                payload: serde_json::json!({
+                    "message_id": message_id,
+                    "kind": kind,
+                    "text": text,
+                })
+                .to_string(),
                 created_at: NOW,
             })
             .await
@@ -560,5 +580,154 @@ async fn the_durability_rule_holds_across_a_reopen() {
         committed(&connection, &session.id),
         4,
         "the appended event is not the fourth row"
+    );
+}
+
+// ---- coalescing (HS-059, spec item 15) ---------------------------------------------------------
+//
+// Two claims, and the second is the one that makes the first safe: a burst becomes far fewer rows, and
+// nothing the transcript shows is lost or reordered while it does.
+
+#[tokio::test]
+async fn a_five_thousand_delta_burst_is_a_handful_of_rows_and_the_same_text() {
+    let dir = TempDir::new("events-coalesce-burst");
+    let mut writer = writer(&dir, INTERVAL);
+    let session = writer.create_session("burst");
+    const DELTAS: usize = 5_000;
+    const TEXT: &str = "0123456789";
+    for _ in 0..DELTAS {
+        writer.append_delta(&session, "msg-1", "text", TEXT).await;
+    }
+
+    // Read the burst back off the broadcast: one committed event is one row, and the run ends when the
+    // whole text has arrived. That makes the assertion about what a subscriber sees, not about an
+    // internal count.
+    let mut rows = 0_usize;
+    let mut text = 0_usize;
+    while text < DELTAS * TEXT.len() {
+        let event = tokio::time::timeout(PATIENCE, writer.stream.recv())
+            .await
+            .expect("the writer commits within the deadline")
+            .expect("a committed event arrives");
+        let payload: serde_json::Value =
+            serde_json::from_str(&event.payload).expect("a delta payload is JSON");
+        text += payload["text"]
+            .as_str()
+            .expect("a delta carries its text")
+            .len();
+        rows += 1;
+    }
+    eprintln!("coalescing: {DELTAS} deltas -> {rows} rows");
+    assert!(
+        rows * 10 <= DELTAS,
+        "{DELTAS} deltas became {rows} rows, which is not a coalescing"
+    );
+
+    // And the file agrees with the broadcast: the log's rows are the rows a subscriber saw, and the text
+    // is the whole burst.
+    let connection = reader(&dir);
+    assert_eq!(
+        committed(&connection, &session.id) as usize,
+        rows,
+        "the log holds a different number of rows than the broadcast delivered"
+    );
+    assert_eq!(
+        text,
+        DELTAS * TEXT.len(),
+        "the burst's text was not preserved"
+    );
+    let stored: Vec<String> = connection
+        .prepare("SELECT payload FROM events WHERE session_id = ?1 AND type = 'message.delta' ORDER BY seq")
+        .expect("the read is preparable")
+        .query_map([&session.id], |row| row.get(0))
+        .expect("the read answers")
+        .collect::<rusqlite::Result<Vec<String>>>()
+        .expect("every row reads");
+    let concatenated: String = stored
+        .iter()
+        .map(|payload| {
+            let payload: serde_json::Value = serde_json::from_str(payload).expect("it is JSON");
+            payload["text"]
+                .as_str()
+                .expect("the text is a string")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        concatenated.len(),
+        DELTAS * TEXT.len(),
+        "the log's rows do not spell the whole burst"
+    );
+}
+
+#[tokio::test]
+async fn coalescing_never_crosses_a_message_a_kind_a_session_or_a_frame() {
+    // Each pair below is a boundary the story names. The last two merge, so the test shows both answers:
+    // what must not merge, and what must.
+    let dir = TempDir::new("events-coalesce-boundaries");
+    let mut writer = writer(&dir, INTERVAL);
+    let one = writer.create_session("boundaries-1");
+    let two = writer.create_session("boundaries-2");
+
+    writer.append_delta(&one, "m1", "text", "a").await;
+    writer.append_delta(&one, "m1", "thinking", "b").await;
+    writer.append_delta(&two, "m1", "text", "c").await;
+    writer.append_delta(&one, "m1", "text", "d").await;
+    writer.append(&one, "tool.start").await;
+    writer.append_delta(&one, "m1", "text", "e").await;
+    writer.append_delta(&one, "m1", "text", "f").await;
+
+    let events = writer.take(6).await;
+    let texts: Vec<String> = events
+        .iter()
+        .map(|event| {
+            let payload: serde_json::Value =
+                serde_json::from_str(&event.payload).expect("a payload is JSON");
+            match payload.get("text").and_then(|text| text.as_str()) {
+                Some(text) => text.to_string(),
+                None => event.kind.clone(),
+            }
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        ["a", "b", "c", "d", "tool.start", "ef"],
+        "a run crossed a boundary, or two deltas that should have merged did not"
+    );
+    assert_eq!(
+        events[2].session_id, two.id,
+        "the batch carried two sessions and the rows lost track of which"
+    );
+}
+
+#[tokio::test]
+async fn a_delta_payload_that_is_not_the_pinned_shape_is_not_rewritten() {
+    // The writer is not a producer's validator: an event it does not understand goes into the log exactly
+    // as the producer wrote it, and it ends the run it sits in — rewriting it would be inventing a shape.
+    let dir = TempDir::new("events-coalesce-malformed");
+    let mut writer = writer(&dir, INTERVAL);
+    let session = writer.create_session("malformed");
+    writer.append_delta(&session, "m1", "text", "a").await;
+    writer
+        .handle
+        .append(NewEvent {
+            session_id: session.id.clone(),
+            kind: MESSAGE_DELTA.to_string(),
+            payload: r#"{"message_id":"m1","kind":"text","text":3}"#.to_string(),
+            created_at: NOW,
+        })
+        .await
+        .expect("the writer accepts the event");
+    writer.append_delta(&session, "m1", "text", "z").await;
+
+    let events = writer.take(3).await;
+    assert_eq!(
+        events[1].payload, r#"{"message_id":"m1","kind":"text","text":3}"#,
+        "the writer rewrote a payload it did not understand"
+    );
+    assert_eq!(
+        events.len(),
+        3,
+        "a malformed payload broke the run, as it must"
     );
 }

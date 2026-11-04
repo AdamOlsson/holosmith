@@ -164,7 +164,10 @@ key is whole minutes and there is no shorter lever, ADR-0025), and the cap
 row, its replayed transcript and the eviction's own `idle → stopped` event; and
 `case_create_at_cap_refused`, which makes a session and asks for one more while that
 session is still `starting` — live and not evictable — and asserts the `409 cap_reached` envelope and
-the sentence that says nothing was idle), and the worktree (`case_worktree`, which boots its own
+the sentence that says nothing was idle), the prompt's turn coalesced (`case_event_coalescing`, which
+makes its own session, prompts it, and asserts the replay holds no more delta rows than the script's
+frames, one message id and the script's first and last sentences in order — the merge itself cannot be
+shown here, because the stub paces eight commit windows apart; see ADR-0031), and the worktree (`case_worktree`, which boots its own
 server — `backend = "docker"`, a real repository under `projects_root`, and a socket that answers the
 preflight's `_ping` — creates a session, and asserts the row's `worktree` and `base_commit`, the network
 step's refusal, the worktree and branch gone afterwards, the registration back to one entry, and then a

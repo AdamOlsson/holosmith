@@ -342,6 +342,10 @@ _Avoid_: Log, archive, transcript
 The git worktree that holds a session's files, on its own branch: `<projects>/.worktrees/<id>`, on branch `agent/<id>`, made from the project repository's `HEAD`. Its machine name is `Worktree` in `crates/holosmith/src/worktree.rs`, which is also where the creating, counting and removing live.
 _Avoid_: Checkout, copy, clone
 
+**Coalescing**:
+Merging the consecutive deltas of one message and kind inside one event-writer commit into a single row with one seq, so a streaming turn does not make the log grow one row per token: `events::coalesce`, applied to the writer's batch before it becomes rows. The merged row keeps the first event's `created_at`, and the transcript cannot tell it from the deltas it replaced.
+_Avoid_: Batching, debounce, dedupe, aggregation
+
 **Refused project**:
 A project repository the machine will not mount into a container, answered by the create (and by a resume) with one sentence and one of three codes: `git_not_directory` (a `.git` that is not a directory, or no checkout at all), `submodules_present` (`.gitmodules` or `.git/modules`), `worktree_config_enabled` (`extensions.worktreeConfig`). Its machine name is `Refusal` and `worktree::refuse`, asked through `Backends::refuse`; nothing is written for it, and a stub run refuses nothing because it mounts no repository.
 _Avoid_: Invalid project, bad repo, unsafe project
