@@ -16,9 +16,12 @@
 //!    still be there, so the row stays `deleting` and a repeat request retries this task.
 //! 3. **Remove the row and its event log**, in one transaction: the row is what names the
 //!    resources, so nothing before it may claim the session is gone.
-//! 4. **Close the session's streams.** Last, so a client already watching has had its chance at the
-//!    `deleting` frame; a client that reconnects afterwards opens a stream for a row that is gone
-//!    and is answered `not_found`.
+//! 4. **Close the session's streams.** Last, so that a backend whose teardown outlives the writer's
+//!    25 ms tick still lets a client already watching see `deleting` before the stream ends; a client
+//!    that reconnects afterwards opens a stream for a row that is gone and is answered `not_found`.
+//!    (With the stub, and with today's Docker backend, the removal finishes inside that tick, so the
+//!    frame is usually dropped by the writer rather than delivered — the ordering is for the backend
+//!    that takes real time, not for these.)
 //!
 //! This is not a state machine: the row is `deleting` before this task exists, and the table has no
 //! way out of `deleting` — the only exit is the removal, which is step 3.

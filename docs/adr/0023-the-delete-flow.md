@@ -9,9 +9,11 @@ instead. Five decisions follow from that, and one more from what a delete does t
 
 ## The snapshot is the request's, and everything after it is a task's
 
-The split is the point of no return. Before it the row is untouched, so a refusal leaves the session
-exactly where it was; after it the row says `deleting`, which the table has no way out of, so the only
-honest exit is the removal.
+The split is the point of no return. Before it the session is not being deleted: its row, its event
+log and everything the backend owns are untouched, so a refusal leaves the session where the operator
+found it — a running turn may have been ended by step 2, which is work the abort ladder would have
+done anyway. After the transition the row says `deleting`, which the table has no way out of, so the
+only honest exit is the removal.
 
 So the handler, in order: read the row (`404` when there is none), end a running turn, take the
 snapshot (`409 unsaved_work` unless `?force=true`), apply `any + delete → deleting`, answer 202 with
@@ -131,15 +133,18 @@ refs/holosmith/wip/<id>` in the shared repository, which HS-024's Docker teardow
 ## Consequences
 
 - `crates/holosmith/tests/delete.rs` proves: the 202 with `status: "deleting"` and the row gone
-  afterwards (one row, the list, and the stream all answering as if it never existed); the stream
-  ending when the removal finishes; `409 unsaved_work` leaving the row `idle`, no `delete` call and no
-  `deleting` event; `?force=true` removing it with the snapshot still attempted; the call order
-  `clear_queue → abort → stop → snapshot → delete` for a running session; a repeat `DELETE` on a
-  `deleting` row re-running the removal without a second snapshot; `404` after the removal and for an
-  unknown id; `403 bad_client` without the client header; and the route recorded `Mutating`.
+  afterwards (one row, the list, and the stream all answering as if it never existed, and the event
+  log the removal took with it); the stream ending when the removal finishes; `409 unsaved_work`
+  leaving the row `idle`, no `delete` call and no `deleting` event; `?force=true` removing it with the
+  snapshot still attempted; the call order `clear_queue → abort → stop → snapshot → delete` for a
+  running session; a delete of a session caught mid-provision, with no provisioning step after it; a
+  repeat `DELETE` on a `deleting` row re-running the removal without a second snapshot; `404` after the
+  removal and for an unknown id; `403 bad_client` without the client header; and the route recorded
+  `Mutating`.
 - `Ladder::end_turn` is the shape HS-022's turn timeout and HS-023's budget climb, and
   `the_ladder_ends_a_turn_without_bringing_the_session_back` pins both halves of its contract.
 - `scripts/verify.sh` grows three cases — the round trip, the unknown id and the missing client header
   — for 35 cases; it also grows `wait_for_gone`, because a 202 is a promise and the row is the proof.
-- The delete produces no `stopped` session, so HS-020's eviction is still the first producer of that
-  state.
+- The delete can leave a `stopped` row behind — a running turn it had to stop (reason `deleted`) and
+then would not remove — but a delete that succeeds leaves no row at all, and HS-020's eviction is
+still the first producer of a stop the operator did not ask for.

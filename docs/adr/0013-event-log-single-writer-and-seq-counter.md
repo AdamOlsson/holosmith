@@ -110,6 +110,12 @@ drops it, so no client sees a seq the batch did not commit and no seq is consume
 event naming a session that does not exist — there is no counter to bump, so the batch is refused
 with `RepoError::UnknownSession` rather than inventing a seq.
 
+**Superseded in part by ADR-0023.** HS-019's delete removes a session's row while its events may still
+be queued, which makes "an event for a session that has gone" an ordinary race rather than a producer
+bug — and refusing the batch for it would also discard every other session's event in the same 25 ms
+window. So `insert_batch` now drops that one event and commits the rest; `RepoError::UnknownSession`
+is gone with its last constructor. The all-or-nothing rule for every *other* failure stands.
+
 ## Bounded on both sides
 
 Producers append over a bounded `mpsc(1024)`; a full queue slows the producer and never the writer.

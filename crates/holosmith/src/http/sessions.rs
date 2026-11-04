@@ -600,7 +600,7 @@ pub async fn resume(state: &AppState, id: &str) -> Response {
         Ok(false) => {}
         Err(error) => return error.into_response(),
     }
-    if let Err(error) = apply_resume(state, id).await {
+    if let Err(error) = apply_trigger(state, id, Trigger::Resume, NOT_RESUMABLE, "resume").await {
         return error.into_response();
     }
     // A resume is the operator acting on the session, so the row's activity moves with it: without
@@ -620,23 +620,34 @@ pub async fn resume(state: &AppState, id: &str) -> Response {
     (StatusCode::ACCEPTED, Json(starting)).into_response()
 }
 
-/// Move the row to `starting`, or the refusal to answer.
+/// Move the row with `trigger`, or the refusal to answer.
 ///
-/// The table is the authority (ADR-0016); the read above only chose the fast refusal. A lost race — the
-/// row moved between the read and the apply — is refused with the code of the state it moved to, so a
-/// client never gets a 202 for a session that is not starting.
-async fn apply_resume(state: &AppState, id: &str) -> Result<(), ApiError> {
-    match state.transitioner().apply(id, Trigger::Resume, None).await {
+/// The callers that use it — the resume and the delete — differ only in their trigger, the sentence a
+/// refusal carries and the operation a 500 names; the four arms underneath are the same decision every
+/// time. The table is the authority (ADR-0016) and the handler's earlier read only chose the fast
+/// refusal, so a lost race is refused with the code of the state the row *moved to*: a client never
+/// gets a 202 for a session that is not in the state the answer promised.
+///
+/// `Unreported` is `Ok` because the row is already right and only the report of it was lost (a process
+/// on its way down); the caller's work must still run, or a `deleting` row would have nothing deleting
+/// it and a `starting` one nothing provisioning it.
+async fn apply_trigger(
+    state: &AppState,
+    id: &str,
+    trigger: Trigger,
+    refusal: &'static str,
+    operation: &'static str,
+) -> Result<(), ApiError> {
+    match state.transitioner().apply(id, trigger, None).await {
         Ok(_) => Ok(()),
-        // The row moved and only the report of it was lost: the provisioner must still run.
         Err(StateError::Unreported(_)) => Ok(()),
         Err(StateError::Illegal { .. }) => match one_locked(state, id) {
-            Ok(Some(session)) => Err(ApiError::not_in_state(session.status, NOT_RESUMABLE)),
+            Ok(Some(session)) => Err(ApiError::not_in_state(session.status, refusal)),
             Ok(None) => Err(ApiError::unknown_session()),
             Err(error) => Err(error),
         },
         Err(StateError::UnknownSession(_)) => Err(ApiError::unknown_session()),
-        Err(error) => Err(internal("resume", error)),
+        Err(error) => Err(internal(operation, error)),
     }
 }
 
@@ -722,7 +733,7 @@ pub async fn delete(state: &AppState, id: &str, query: RawQuery) -> Response {
             "deleting a session past a failed snapshot because the request forced it"
         );
     }
-    if let Err(error) = apply_delete(state, id).await {
+    if let Err(error) = apply_trigger(state, id, Trigger::Delete, NOT_DELETABLE, "delete").await {
         return error.into_response();
     }
     // `deleting` now, and the removal runs off this task: the answer is the row as the table has
@@ -749,24 +760,6 @@ fn force_requested(query: Option<&str>) -> bool {
         .unwrap_or_default()
         .split('&')
         .any(|pair| pair == "force=true")
-}
-
-/// Move the row to `deleting`, or the refusal to answer.
-///
-async fn apply_delete(state: &AppState, id: &str) -> Result<(), ApiError> {
-    match state.transitioner().apply(id, Trigger::Delete, None).await {
-        Ok(_) => Ok(()),
-        // The row moved and only the report of it was lost: the removal must still run, or the
-        // session would be `deleting` with nothing deleting it.
-        Err(StateError::Unreported(_)) => Ok(()),
-        Err(StateError::Illegal { .. }) => match one_locked(state, id) {
-            Ok(Some(session)) => Err(ApiError::not_in_state(session.status, NOT_DELETABLE)),
-            Ok(None) => Err(ApiError::unknown_session()),
-            Err(error) => Err(error),
-        },
-        Err(StateError::UnknownSession(_)) => Err(ApiError::unknown_session()),
-        Err(error) => Err(internal("delete", error)),
-    }
 }
 
 /// Move the row to `running`, or the refusal to answer.

@@ -114,7 +114,7 @@ Ending a turn early, on request or by timeout. The work is the abort ladder's.
 _Avoid_: Cancel, kill, stop
 
 **Abort ladder**:
-The two-rung routine that ends a turn which will not end itself: rung 1 clears the agent's queue and then asks it to abort; rung 2 is reached when the row is still `running` after the grace, and kills the container, records the reason, and resumes the session at once. Its machine name is the `Ladder` type, and the reason rung 2 records is the caller's — `forced_abort` for an abort, and the turn timeout's and the token budget's own words.
+The two-rung routine that ends a turn which will not end itself: rung 1 clears the agent's queue and then asks it to abort; rung 2 is reached when the row is still `running` after the grace, and kills the container and records the reason. Its machine names are the `Ladder` type and its two entry points: `Ladder::climb` (the rungs and then the way back, so rung 2 resumes the session at once) and `Ladder::end_turn` (the rungs alone, which is what a delete climbs, because resuming a session that is being removed would provision a container in order to delete it). The reason rung 2 records is the caller's — `forced_abort` for an abort, `deleted` for a delete, and the turn timeout's and the token budget's own words.
 _Avoid_: Kill path, escape hatch, force stop, cancel chain
 
 **Rung**:
@@ -142,7 +142,7 @@ One legal state change: a from, a trigger and a to, held as data in the transiti
 _Avoid_: Move, step, change, migration
 
 **Stopped**:
-A session whose container is gone but whose history, worktree and events are kept, and which can be resumed. Reached from `idle` by `evict`, `idle_stop` and `drain`, and from a killed `running` turn by the abort ladder; never a dead end.
+A session whose container is gone but whose history, worktree and events are kept, and which can be resumed. Reached from `idle` by `evict`, `idle_stop` and `drain`, and from a killed `running` turn by the abort ladder; never a dead end, because resume always accepts it. A delete can leave one on its way past: a running turn it had to stop (reason `deleted`) and then would not remove, which is a `stopped` session with nothing wrong with it.
 _Avoid_: Ended, closed, paused, evicted
 
 **Resume**:
@@ -170,10 +170,12 @@ The one way a session is removed, and the only thing here that destroys work. `D
 /api/sessions/:id` ends a running turn first, takes a **WIP snapshot**, moves the row to `deleting` and
 answers 202; a background task then revokes the session's key, removes what the backend owns, and
 removes the row and its event log. A snapshot that fails answers 409 **unsaved work** unless the
-request carried `?force=true`, and the row is left exactly as it was. Repeating the request while the
-row exists re-runs the removal; once the row is gone the answer is 404. Its machine names are
-`Deleter`, `Trigger::Delete` and the state `deleting`.
-_Avoid_: Removal, purge, drop, cleanup, destruction
+request carried `?force=true`, and the session is left where the delete found it — except that a
+running turn has already been ended by then, which is the order the spec asks for and the price of
+learning that the work could not be saved. Repeating the request while the row exists re-runs the
+removal; once the row is gone the answer is 404. Its machine names are `Deleter` (and the task's
+`Deleter::remove`), `Trigger::Delete` and the state `deleting`.
+_Avoid_: Purge, drop, cleanup, destruction
 
 **Unsaved work**:
 A session's uncommitted changes that no **WIP snapshot** could record, which is what makes a delete

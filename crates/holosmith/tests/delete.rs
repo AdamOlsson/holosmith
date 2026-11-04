@@ -132,6 +132,16 @@ async fn wait_gone(state: &AppState, id: &str) {
     wait_until("the session's row was removed", || row(state, id).is_none()).await;
 }
 
+/// How many committed events the session's log holds.
+fn log_len(state: &AppState, id: &str) -> usize {
+    let database = state.database.lock().expect("the lock is not poisoned");
+    database
+        .events()
+        .read_since(id, 0, 500)
+        .expect("the log reads")
+        .len()
+}
+
 /// One state change through the one state function, as the policies that will move a session will.
 async fn drive(state: &AppState, id: &str, trigger: Trigger, reason: Option<&str>) {
     Transitioner::new(Arc::clone(&state.database), state.events.clone())
@@ -156,12 +166,31 @@ async fn a_delete_answers_the_deleting_row_and_then_removes_it() {
     let served = Served::start(http::router(state.clone()), GRACE).await;
     let id = created_id(&post_create(served.addr, "delete-round-trip").await);
     wait_status(&state, &id, Status::Idle).await;
+    // The row can be ahead of its events (the writer commits on its own tick), so the log is waited
+    // for rather than sampled: the count the removal has to take is the count that exists.
+    wait_until("the provisioning's events are committed", || {
+        log_len(&state, &id) > 0
+    })
+    .await;
+    let before = log_len(&state, &id);
+    assert!(
+        before > 0,
+        "the log was empty before the delete, so nothing would prove it was removed"
+    );
 
     let accepted = delete(served.addr, &id, "").await;
     assert_deleting(&accepted, &id);
 
     // The removal is a task's, so the row is the thing to wait for — never the answer.
     wait_gone(&state, &id).await;
+
+    // The log goes with the row (ADR-0023): a removed session's transcript is not left behind as
+    // rows nothing can read.
+    assert_eq!(
+        log_len(&state, &id),
+        0,
+        "{before} events of a removed session survived it"
+    );
 
     // Nothing a client can read names the session any more: one row, the list, and its stream.
     let one = support::fetch(served.addr, &format!("/api/sessions/{id}")).await;
@@ -401,6 +430,62 @@ async fn the_ladder_ends_a_turn_without_bringing_the_session_back() {
         resumed.is_empty(),
         "the ladder resumed the session it had just stopped: {resumed:?}"
     );
+}
+
+#[tokio::test]
+async fn a_failing_snapshot_on_a_running_session_stops_the_turn_and_still_refuses() {
+    // The one case where a refusal is *not* harmless, pinned rather than assumed: the spec's order is
+    // "abort if running; snapshot", so by the time the snapshot fails the turn is over and rung 2 has
+    // written `running -> stopped` with the delete's own reason. The work is lost because it could not
+    // be saved, and the row says so — what the operator must *not* get is a 409 that claims nothing
+    // happened while the session sits stopped behind it.
+    let dir = TempDir::new("delete-running-unsaved");
+    let stub = fast_stub().failing_snapshot();
+    let state = with_stub(state_in(&dir, impatient_grace(100)), stub.clone());
+    let served = Served::start(http::router(state.clone()), GRACE).await;
+    let id = created_id(&post_create(served.addr, "delete-running-unsaved").await);
+    wait_status(&state, &id, Status::Idle).await;
+    drive(&state, &id, Trigger::Prompt, None).await;
+
+    let refused = delete(served.addr, &id, "").await;
+    assert_envelope(&refused, 409, UNSAVED_WORK);
+
+    let session = row(&state, &id).expect("the session was not removed");
+    assert_eq!(session.status, Status::Stopped, "{}", refused.body);
+    assert_eq!(
+        session.status_reason.as_deref(),
+        Some(DELETED),
+        "the row does not say why it stopped"
+    );
+    // …and nothing was removed: the session is still there, `stopped`, and resumable.
+    assert_eq!(
+        lifecycle(&stub),
+        [Call::ClearQueue, Call::Abort, Call::Stop, Call::Snapshot]
+    );
+}
+
+#[tokio::test]
+async fn a_delete_of_a_session_that_is_still_provisioning_removes_it() {
+    // The table admits `delete` from every state, so a session caught mid-provision can be removed.
+    // The removal is the delete's; the provisioner must not resurrect it (see the step-boundary test
+    // below), and the stream must close like any other.
+    let dir = TempDir::new("delete-starting");
+    let stub = support::slow_stub();
+    let state = with_stub(state_in(&dir, Config::default()), stub.clone());
+    let served = Served::start(http::router(state.clone()), GRACE).await;
+    let id = created_id(&post_create(served.addr, "delete-starting").await);
+    // A minute per step: the row is still `starting` when the delete arrives.
+    assert_eq!(
+        row(&state, &id).map(|session| session.status),
+        Some(Status::Starting)
+    );
+
+    let accepted = delete(served.addr, &id, "").await;
+    assert_deleting(&accepted, &id);
+    wait_gone(&state, &id).await;
+
+    // Nothing the endpoint refused: the delete is not a state it has to wait for.
+    assert_eq!(lifecycle(&stub), [Call::Snapshot, Call::Delete]);
 }
 
 #[tokio::test]
