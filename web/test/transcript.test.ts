@@ -16,6 +16,7 @@ import {
   affordances,
   parseFrame,
   sessionIdFromPath,
+  stoppedNotice,
   streamPath,
   type Change,
   type Frame,
@@ -292,6 +293,22 @@ test("Resume exists in exactly the two states the transition table resumes from"
 test("the stream is the ADR-0014 path and no resume parameter is invented", () => {
   assert.equal(streamPath("0123456789abcdef"), "/api/sessions/0123456789abcdef/events");
   assert.ok(!streamPath("abc").includes("since="), "the browser sends Last-Event-ID, not the page");
+});
+
+test("an evicted session's row says nothing was deleted", () => {
+  // HS-020's reason word, and spec item 9's promise: the cap stops a session, it never removes one.
+  const notice = stoppedNotice("evicted");
+  assert.ok(notice !== null, "an evicted row said nothing");
+  assert.match(notice, /nothing was deleted/);
+  assert.match(notice, /resume/);
+});
+
+test("every other reason is the caller's to show, so no sentence is invented for it", () => {
+  // The map is deliberately one word wide: a forced abort is not data loss and a delete's own reason
+  // must not be softened, so both get `null` and the badge's `state · reason` stands alone.
+  for (const reason of [null, "", "forced_abort", "deleted", "idle_stop", "server_restart"]) {
+    assert.equal(stoppedNotice(reason), null, String(reason));
+  }
 });
 
 test("the screen reads its id from /sessions/<id> and from nowhere else", () => {

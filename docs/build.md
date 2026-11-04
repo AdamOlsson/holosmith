@@ -145,7 +145,11 @@ against a row the transition table stopped), and the delete (`case_delete_sessio
 list no longer holds it — the removal is a background task's, so the row is the proof;
 `case_delete_unknown_session` and `case_delete_without_the_client_header`, which assert the `404
 not_found` and `403 bad_client` envelopes, the latter because this is the crate's first `DELETE`
-route and the guards must be shown to apply to it as they do to a `POST`). A case that must assert
+route and the guards must be shown to apply to it as they do to a `POST`), and the cap
+(`case_create_cap_reached`, which asserts the `409 cap_reached` envelope when the live session is not
+idle — and asserts that precondition, because since HS-020 the machine evicts an idle session instead;
+`case_create_at_cap_evicts`, which makes its own pair, creates at the cap, and asserts the victim's
+row, its replayed transcript and the eviction's own `idle → stopped` event). A case that must assert
 one code keeps every higher guard check correct, or it asserts another guard's code under its own
 name.
 

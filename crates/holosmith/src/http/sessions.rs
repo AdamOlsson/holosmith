@@ -65,8 +65,7 @@ const NOT_RESUMABLE: &str =
 /// (ADR-0019) rather than a panic on a path a future row could open.
 const NOT_DELETABLE: &str = "the session is in a state that cannot be deleted";
 
-/// The event a steer is recorded as (HS-017, ADR-0021).
-///
+/// The event a steer is recorded as (HS-017, ADR-0021).///
 /// `<subject>.<verb>`, like `turn.start`, and the subject is the turn: the operator's guidance is
 /// something that happened *to a turn*, not a message the agent produced. The payload is
 /// `{"text": "…"}` — no message id, because a steer is one frame that is never continued or
@@ -76,6 +75,12 @@ pub const TURN_STEER: &str = "turn.steer";
 /// How many characters a key may hold. Generous for a UUID, small enough that the unique column
 /// cannot become a payload.
 const MAX_KEY_CHARS: usize = 200;
+
+/// The reason recorded when a create stops an idle session to free its slot (HS-020, spec item 9).
+///
+/// The row is `stopped` with this word, which is what the Sessions screen turns into "nothing was
+/// deleted, resume it to continue": an eviction is the machine making room, never data loss.
+pub const EVICTED: &str = "evicted";
 
 /// The body's fields, exactly: any other key is `unknown_field`.
 const FIELDS: [&str; 4] = ["project", "model", "thinking", "network"];
@@ -257,7 +262,7 @@ pub async fn create(
         Ok(parts) => parts,
         Err(error) => return error.into_response(),
     };
-    match create_locked(state, &parsed, key) {
+    match slot_for(state, &parsed, key).await {
         Ok((session, inserted)) => {
             // The handoff, and the only place this story spawns anything. The answer is built
             // first, from the `starting` row this call just wrote, and only then does the
@@ -275,35 +280,151 @@ pub async fn create(
     }
 }
 
-/// The one lock scope: lookup, cap count and insert, with no `.await` inside so the guard cannot
-/// outlive a synchronous statement. `live_count` and `create` share it, so two creates cannot
-/// both see a free slot (ADR-0012).
+/// What one attempt at the create's single lock scope found.
 ///
-/// `true` as the second element means this call inserted the row, so it is the caller's to
-/// provision; `false` means the idempotency key already named a session.
-fn create_locked(
+/// Three answers rather than an `Option` or a sentinel: the machine can have room (insert), the key can
+/// already name a session (a retry, answered from the row it has), or it can be full (evict, then try
+/// again) — and each has a different next step, which is why the handler cannot guess from a `bool`.
+enum Slot {
+    /// A free slot was found and the row written: this call owns provisioning it.
+    Inserted(Session),
+    /// The idempotency key named a session already: nothing was inserted and nothing is provisioned.
+    Existing(Session),
+    /// The machine runs `max_live_sessions` sessions already: no row was written.
+    Full,
+}
+
+/// Insert the session, stopping the least recently active idle one while the machine is full (HS-020).
+///
+/// The loop is the handler's and not the insert scope's: an eviction moves a row through
+/// [`Transitioner::apply`](crate::sessions::state::Transitioner::apply), which takes the database lock
+/// itself, so it cannot run inside `create_locked`'s one scope without a second way to write a state
+/// (ADR-0016). Each successful eviction strictly lowers the live count, so the loop terminates; the
+/// bound is there for a create racing another create, where the honest answer is the refusal rather
+/// than a wait that has no end.
+///
+async fn slot_for(
     state: &AppState,
     body: &CreateBody,
     key: &str,
 ) -> Result<(Session, bool), ApiError> {
+    let bound = usize::try_from(state.config.max_live_sessions).unwrap_or(usize::MAX) + 1;
+    for _ in 0..bound {
+        match create_locked(state, body, key)? {
+            Slot::Inserted(session) => return Ok((session, true)),
+            Slot::Existing(session) => return Ok((session, false)),
+            Slot::Full => {
+                if !evict_one(state).await {
+                    return Err(ApiError::cap_without_idle());
+                }
+            }
+        }
+    }
+    // Every attempt evicted and the machine was still full: only two creates racing each other can
+    // reach this, and `cap_without_idle` is the answer a client can act on.
+    Err(ApiError::cap_without_idle())
+}
+
+/// Stop the least recently active idle session to free a slot, and say whether one was stopped.
+///
+/// The row moves before the container (ADR-0020) with the reason [`EVICTED`], and the backend's stop
+/// is best effort: the slot is free either way, and a container that outlives a `stopped` row is
+/// something the operator can still delete. Nothing else about the session is touched — its events,
+/// its worktree path and its history are what a stop leaves alone (spec item 9).
+///
+/// `false` means no slot was freed: nothing was idle, or the candidate started a turn between the read
+/// and the move, or the database refused. The caller answers the cap's refusal in every case, which is
+/// the sentence that is still true.
+async fn evict_one(state: &AppState) -> bool {
+    let candidate = {
+        let database = state
+            .database
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match database.sessions().oldest_idle() {
+            Ok(Some(session)) => session,
+            Ok(None) => {
+                tracing::debug!(
+                    target: "holosmith::http",
+                    operation = "evict",
+                    "the machine is full and no session is idle"
+                );
+                return false;
+            }
+            Err(error) => {
+                tracing::error!(
+                    target: "holosmith::http",
+                    operation = "oldest_idle",
+                    %error,
+                    "the eviction candidate could not be read"
+                );
+                return false;
+            }
+        }
+    };
+    match state
+        .transitioner()
+        .apply(&candidate.id, Trigger::Evict, Some(EVICTED))
+        .await
+    {
+        Ok(_) => {}
+        // The row is `stopped` and only the report of it was lost (a process on its way down), so the
+        // container must still be stopped.
+        Err(StateError::Unreported(_)) => {}
+        Err(error) => {
+            // `Illegal` here is the ordinary race — the session was prompted between the read and the
+            // move — and a repository failure is the database's. Both answer the same way.
+            tracing::info!(
+                target: "holosmith::http",
+                session = %candidate.id,
+                %error,
+                "the eviction did not happen"
+            );
+            return false;
+        }
+    }
+    if let Err(error) = state.backend.stop(&candidate).await {
+        tracing::warn!(
+            target: "holosmith::http",
+            session = %candidate.id,
+            %error,
+            "the evicted session's backend was not stopped"
+        );
+    }
+    tracing::info!(
+        target: "holosmith::http",
+        session = %candidate.id,
+        "evicted the least recently active idle session"
+    );
+    true
+}
+
+/// The one lock scope: lookup, cap count and insert, with no `.await` inside so the guard cannot
+/// outlive a synchronous statement. `live_count` and `create` share it, so two creates cannot
+/// both see a free slot (ADR-0012).
+///
+/// `Slot::Existing` means the idempotency key already named a session; `Slot::Full` means the caller
+/// may evict one and try again.
+fn create_locked(state: &AppState, body: &CreateBody, key: &str) -> Result<Slot, ApiError> {
     let database = state
         .database
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     let repository = database.sessions();
     // The lookup runs before the cap: a retry whose first attempt filled the last slot must get
-    // its own session, not 409.
+    // its own session, not 409 — and, since HS-020, must not evict a session on the way to finding
+    // out it already had one.
     if let Some(existing) = repository
         .by_client_key(key)
         .map_err(|error| internal("by_client_key", error))?
     {
-        return Ok((existing, false));
+        return Ok(Slot::Existing(existing));
     }
     let live = repository
         .live_count()
         .map_err(|error| internal("live_count", error))?;
     if live >= u64::from(state.config.max_live_sessions) {
-        return Err(ApiError::cap_reached());
+        return Ok(Slot::Full);
     }
     let new = NewSession {
         project: body.project.clone(),
@@ -314,9 +435,9 @@ fn create_locked(
         base_commit: None,
     };
     match repository.create(&new, clock::unix_now()) {
-        Ok(session) => Ok((session, true)),
+        Ok(session) => Ok(Slot::Inserted(session)),
         Err(RepoError::DuplicateClientKey) => match repository.by_client_key(key) {
-            Ok(Some(winner)) => Ok((winner, false)),
+            Ok(Some(winner)) => Ok(Slot::Existing(winner)),
             Ok(None) => {
                 // The insert said the key exists and the re-read says it does not; a retry must
                 // never see an error for a race it cannot fix, so this is not a client error.

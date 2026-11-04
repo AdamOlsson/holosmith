@@ -154,11 +154,11 @@ A session in `starting`, `idle` or `running` — the only states the cap counts.
 _Avoid_: Active session, running session, open session
 
 **Cap**:
-`max_live_sessions`: how many live sessions a machine allows at once. A create at the cap answers 409 `cap_reached` until HS-020 lets it evict instead.
+`max_live_sessions`: how many live sessions a machine allows at once, and never fewer than one. A create at the cap stops the least recently active `idle` session and takes its slot, and answers 409 `cap_reached` only when nothing is idle to stop; a resume at the cap refuses (ADR-0022).
 _Avoid_: Limit, quota, maximum sessions
 
 **Evict**:
-Stopping the least recently active idle session to free a slot. Loses nothing.
+Stopping the least recently active `idle` session so a create can take its slot: the row becomes `stopped` with reason `evicted` and the container is stopped, while history, worktree and events stay. "Least recently active" is `last_active_at`, and a `starting` or `running` session is never a candidate — it is live and its turn is nobody's to end. Its machine names are `Trigger::Evict`, `SessionRepository::oldest_idle` and the reason `EVICTED`.
 _Avoid_: Kill, delete, prune
 
 **Idle stop**:

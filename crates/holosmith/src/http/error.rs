@@ -268,6 +268,22 @@ impl ApiError {
         )
     }
 
+    /// What a create at the cap answers when there is nothing to evict (HS-020).
+    ///
+    /// The same code and the create's own sentence: since the machine evicts an idle session instead
+    /// of refusing, a caller that got the refusal is owed the reason it could not — a `running` or
+    /// `starting` session is live and not evictable, so the operator's next move is to wait for the
+    /// turn rather than to tap again. A resume keeps [`Self::cap_reached`]'s shorter sentence, because
+    /// it is a different request with a different next step (ADR-0022, ADR-0024).
+    pub fn cap_without_idle() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            CAP_REACHED,
+            "this machine already runs the maximum number of live sessions and none of them is \
+             idle to stop",
+        )
+    }
+
     /// What a create that failed for an unplanned reason answers.
     ///
     /// The message is one fixed sentence: a rusqlite error can carry the database path, so it

@@ -55,6 +55,14 @@ const ORDER: &str = "ORDER BY last_active_at DESC, id ASC";
 /// the enum, over the `sessions_status` index (ADR-0012).
 const LIVE_COUNT: &str = "SELECT count(*) FROM sessions WHERE status IN (?1, ?2, ?3)";
 
+/// The eviction candidate: the least recently active `idle` session, which is what HS-020 stops to
+/// free a slot. `status = ?1` is supplied from `Status::as_str`, and `id ASC` makes the order total so
+/// two rows touched in the same second still have one answer.
+const OLDEST_IDLE: &str = "SELECT \
+     id, project, model, thinking, worktree, base_commit, status, status_reason, client_key, \
+     network, created_at, last_active_at, stopped_at, usage_in, usage_out \
+     FROM sessions WHERE status = ?1 ORDER BY last_active_at ASC, id ASC LIMIT 1";
+
 /// The only way to read or write a `sessions` row. Obtained from `Database::sessions`.
 pub struct SessionRepository<'a> {
     connection: &'a Connection,
@@ -152,6 +160,22 @@ impl<'a> SessionRepository<'a> {
                 |row| row.get(0),
             )
             .map_err(|error| RepoError::sqlite("live_count", error))
+    }
+
+    /// The least recently active `idle` session: the cap's victim (HS-020), or `None` when nothing is
+    /// evictable.
+    ///
+    /// One statement rather than `list(Some(Status::Idle)).last()`: the answer is one row, and the
+    /// ordering is the same `last_active_at` the list uses, so "least recently active" has one
+    /// definition. A `starting` or `running` session is live but never a candidate — stopping one
+    /// would destroy a turn nobody asked to end (the story's third bullet), and `stopped`, `error` and
+    /// `deleting` hold no slot to free.
+    pub fn oldest_idle(&self) -> Result<Option<Session>, RepoError> {
+        self.connection
+            .query_row(OLDEST_IDLE, [Status::Idle.as_str()], row_to_session)
+            .optional()
+            .map_err(|error| RepoError::sqlite("oldest_idle", error))?
+            .transpose()
     }
 
     /// Set the status and its reason, and move `stopped_at` with it: `now` when the new status is

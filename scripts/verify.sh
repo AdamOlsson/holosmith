@@ -10,8 +10,8 @@
 # envelope, every browser-facing guard refusal (ADR-0010), the create endpoint's 202/422/409
 # answers, the sessions list, one session by id, the session screen's path, the session's event
 # stream, a prompt's turn, an abort down to `abort_completed`, a steer's own frame, a resume's two
-# refusals, and a delete from its 202 to the row that is gone, with no CORS header on any answer, and
-# stopping on SIGTERM with exit 0.
+# refusals, a delete from its 202 to the row that is gone, and a create at the cap evicting the idle
+# session before it succeeds, with no CORS header on any answer, and stopping on SIGTERM with exit 0.
 # --no-build skips the two artifact phases; --keep keeps the work dir of a successful run. On
 # failure this prints FAIL <assertion> and keeps the work dir (config, banner, every answer).
 # Downloads nothing and needs neither curl nor jq: every request is a /dev/tcp fetch. Put the
@@ -293,6 +293,7 @@ serve_cases=(
   case_delete_without_the_client_header
   case_delete_session
   case_delete_unknown_session
+  case_create_at_cap_evicts
 )
 
 # The health payload: exactly four keys, and the uptime is not predictable, so the assertion is
@@ -525,8 +526,26 @@ case_create_bad_project() {
 
 # HS-008: one live session against the boot config's cap of one, so a fresh create is refused
 # with 409 `cap_reached` (nothing is evictable until HS-020).
+# HS-008/HS-020: a create at the cap is refused when there is nothing to evict. Since HS-020 the
+# machine evicts the least recently active idle session instead, so this answer needs a live session
+# that is not idle — which is what a session still provisioning is. The precondition is asserted rather
+# than assumed: a run slow enough to let `created_id` settle would otherwise prove the *eviction* path
+# here and fail three cases later with no hint why.
 case_create_cap_reached() {
-  local name=case_create_cap_reached response
+  local name=case_create_cap_reached response body
+  fetch "${name}_filler" GET "/api/sessions/$created_id" "Host: 127.0.0.1" ||
+    fail "${name}_filler/no_answer" "GET /api/sessions/$created_id did not answer"
+  body="$(cat "$WORK/responses/${name}_filler.body")"
+  case "$body" in
+    *'"status":"starting"'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "${name}_filler/status" \
+        "the cap's refusal needs a live session that is not idle, and this one is not starting: $body"
+      ;;
+  esac
+
   fetch_body "$name" POST /api/sessions \
     '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
     "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
@@ -535,6 +554,16 @@ case_create_cap_reached() {
   response="$(answer "$name")"
   expect_status "$name" "$response" 409
   expect_code "$name" "$response" cap_reached
+  # The sentence says why nothing was evicted, which is the create's own answer since HS-020.
+  body="$(cat "$WORK/responses/$name.body")"
+  case "$body" in
+    *idle*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "$name/message" "the refusal does not say that nothing was idle: $body"
+      ;;
+  esac
 }
 
 # HS-010: the `events` URL a create answers with is a server-sent event stream. No producer exists
@@ -930,14 +959,20 @@ case_steer_on_an_idle_session() {
   expect_code "$name" "$response" session_idle
 }
 
-# wait_for_idle <label>: poll one session's row until it says idle, bounded and counted once. A case
-# that needs the session idle before it acts cannot use a stream needle: every turn's settle carries
-# the same payload, and the replay would answer with an earlier turn's.
+# wait_for_idle <label>: poll `created_id`'s row until it says idle, bounded and counted once.
 wait_for_idle() {
-  local label="$1" body
+  wait_for_idle_id "$1" "$created_id"
+}
+
+# wait_for_idle_id <label> <id>: the same for any session, which HS-020's eviction case needs because
+# it makes its own pair rather than using `created_id`. A case that needs a session idle before it
+# acts cannot use a stream needle: every turn's settle carries the same payload, and the replay would
+# answer with an earlier turn's.
+wait_for_idle_id() {
+  local label="$1" id="$2" body
   for _ in $(seq 1 100); do
-    fetch "$label" GET "/api/sessions/$created_id" "Host: 127.0.0.1" ||
-      fail "$label/no_answer" "GET /api/sessions/$created_id did not answer"
+    fetch "$label" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "$label/no_answer" "GET /api/sessions/$id did not answer"
     body="$(cat "$WORK/responses/$label.body")"
     case "$body" in
       *'"status":"idle"'*)
@@ -1068,6 +1103,75 @@ case_delete_without_the_client_header() {
   expect_status "$name" "$response" 403
   expect_header "$name" "$response" content-type "application/json"
   expect_code "$name" "$response" bad_client
+}
+
+# HS-020: at the cap, a create stops the least recently active idle session and takes its slot. The
+# case makes its own pair — by the time it runs, the session the earlier cases used has been deleted,
+# so the slot is free — and it is the last case, so nothing after it depends on what it leaves.
+#
+# "Nothing is deleted by the cap" is asserted twice: the row is still there and `stopped`, and its
+# stream still replays its transcript, whose last event is the eviction itself.
+case_create_at_cap_evicts() {
+  local name=case_create_at_cap_evicts response body victim fresh
+  local create_body='{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}'
+
+  fetch_body "${name}_victim" POST /api/sessions "$create_body" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-evict-1" ||
+    fail "${name}_victim/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "${name}_victim")"
+  expect_status "${name}_victim" "$response" 202
+  body="$(cat "$WORK/responses/${name}_victim.body")"
+  victim="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$victim" ] || fail "${name}_victim/id" "the response names no id: $body"
+  wait_for_idle_id "${name}_victim" "$victim"
+
+  # The cap is one, so this create finds the machine full — and the session holding the slot is idle,
+  # which is exactly the case that evicts instead of refusing.
+  fetch_body "${name}_fresh" POST /api/sessions "$create_body" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-evict-2" ||
+    fail "${name}_fresh/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "${name}_fresh")"
+  expect_status "${name}_fresh" "$response" 202
+  body="$(cat "$WORK/responses/${name}_fresh.body")"
+  fresh="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$fresh" ] || fail "${name}_fresh/id" "the response names no id: $body"
+  [ "$fresh" != "$victim" ] ||
+    fail "${name}_fresh/id" "the create answered the session it had to replace: $body"
+  assertions=$((assertions + 1))
+
+  fetch "${name}_victim_row" GET "/api/sessions/$victim" "Host: 127.0.0.1" ||
+    fail "${name}_victim_row/no_answer" "GET /api/sessions/$victim did not answer"
+  response="$(answer "${name}_victim_row")"
+  expect_status "${name}_victim_row" "$response" 200
+  body="$(cat "$WORK/responses/${name}_victim_row.body")"
+  case "$body" in
+    *'"status":"stopped"'*'"status_reason":"evicted"'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "${name}_victim_row/status" \
+        "the evicted session is not stopped with its reason: $body"
+      ;;
+  esac
+
+  fetch_sse_until "${name}_victim_stream" "/api/sessions/$victim/events" '"reason":"evicted"' \
+    "Host: 127.0.0.1" ||
+    fail "${name}_victim_stream/no_answer" "GET /api/sessions/$victim/events did not answer"
+  response="$(answer "${name}_victim_stream")"
+  expect_status "${name}_victim_stream" "$response" 200
+  expect_header "${name}_victim_stream" "$response" content-type "text/event-stream"
+  body="$(cat "$WORK/responses/${name}_victim_stream.body")"
+  case "$body" in
+    *'"from":"idle","to":"stopped","step":null,"reason":"evicted"'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "${name}_victim_stream/transition" \
+        "the eviction's transition is not in the victim's transcript: $body"
+      ;;
+  esac
 }
 
 # Box 4, over every answer the cases above saved: none of them carries a CORS header, and none

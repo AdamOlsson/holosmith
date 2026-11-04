@@ -14,6 +14,7 @@ import {
   affordances,
   parseFrame,
   sessionIdFromPath,
+  stoppedNotice,
   streamPath,
   type Change,
   type DeltaKind,
@@ -189,9 +190,17 @@ function sessionRow(session: Session): HTMLLIElement {
   );
 
   const step = make("span", "step");
+  // The retention placeholder (HS-064's days-remaining line) and, while there is one, the sentence a
+  // stopped session's reason earns: an eviction lost nothing, and the badge alone would read like a
+  // loss (HS-020). One span, because both are "what this row's state means", never both at once.
   const retention = make("span", "retention", "—");
   retention.title = "Days remaining until auto-delete arrives with HS-064";
   retention.hidden = session.status !== "stopped";
+  const notice = stoppedNotice(session.status_reason);
+  if (notice !== null) {
+    retention.textContent = notice;
+    retention.title = notice;
+  }
 
   row.append(head, meta, step, retention);
   syncStream(row, session.status);

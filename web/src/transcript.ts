@@ -296,6 +296,21 @@ export function affordances(state: SessionState): Affordances {
   };
 }
 
+// What a stopped session's row says beyond its state, or `null` when its reason needs no sentence.
+//
+// The one word here is the one the machine writes: `evicted` is a create stopping the least recently
+// active idle session to take its slot (HS-020), and spec item 9 is emphatic that it costs nothing —
+// "history, worktree, events and images are kept. Nothing is deleted by the cap." So the row says so,
+// because a badge reading `stopped · evicted` alone reads like a loss. Every other reason is the
+// caller's to show as it is: a forced abort and a delete's own word are not this sentence, and
+// inventing a reassuring line for them would be a claim about work nobody preserved.
+export function stoppedNotice(reason: string | null): string | null {
+  if (reason === "evicted") {
+    return "stopped to make room — nothing was deleted, resume it to continue";
+  }
+  return null;
+}
+
 // Where the stream is. One spelling, so the list and the screen cannot ask for different paths,
 // and no `since=` parameter is invented: the browser resends the last SSE `id` (a seq) as
 // `Last-Event-ID` and the server replays after it (ADR-0014).
