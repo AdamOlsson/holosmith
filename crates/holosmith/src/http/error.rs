@@ -72,6 +72,10 @@ pub const SESSION_DELETING: &str = "session_deleting";
 /// An abort was refused because there is no turn to abort (HS-016; HS-017 names it).
 pub const SESSION_IDLE: &str = "session_idle";
 
+/// A delete was refused because the session's uncommitted work could not be snapshotted, so removing
+/// it would lose work no client asked to lose (HS-019, spec item 9).
+pub const UNSAVED_WORK: &str = "unsaved_work";
+
 /// The body of every error response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ErrorBody {
@@ -226,6 +230,21 @@ impl ApiError {
         )
     }
 
+    /// What a delete answers when the session's work could not be snapshotted (HS-019).
+    ///
+    /// The sentence names the escape hatch, because the operator's next tap is the one that has to
+    /// carry `?force=true`: an envelope that said only "it did not work" would leave a mis-tap
+    /// with no way forward, and the spec's whole point here is that the *second* answer destroys
+    /// work deliberately.
+    pub fn unsaved_work() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            UNSAVED_WORK,
+            "the session's uncommitted work could not be snapshotted, so the session was not \
+             deleted; repeat the delete with `?force=true` to discard it",
+        )
+    }
+
     /// What a create at the cap answers until HS-020 lets it evict.
     pub fn cap_reached() -> Self {
         Self::new(
@@ -377,6 +396,22 @@ mod tests {
             StatusCode::UNPROCESSABLE_ENTITY,
             BAD_BODY,
         );
+    }
+
+    #[test]
+    fn unsaved_work_is_a_409_that_names_the_way_past_it() {
+        // The code is the spec's (item 9) and the sentence is the operator's only pointer to
+        // `?force=true`: a message that named no escape hatch would leave a refused delete with
+        // nothing to do next, and the spec's whole point is that the second answer discards work
+        // deliberately.
+        let error = ApiError::unsaved_work();
+        assert_eq!(error.body.code, UNSAVED_WORK);
+        assert!(
+            error.body.message.contains("?force=true"),
+            "the message does not name the escape hatch: {}",
+            error.body.message
+        );
+        assert_answer(error, StatusCode::CONFLICT, UNSAVED_WORK);
     }
 
     #[test]

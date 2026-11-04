@@ -155,8 +155,6 @@ pub enum RepoError {
         operation: &'static str,
         source: rusqlite::Error,
     },
-    /// An event named a session that does not exist, so there is no counter to bump.
-    UnknownSession(String),
     /// The counter bump lives in the sessions repository, and this is its failure.
     Sessions(crate::sessions::RepoError),
 }
@@ -173,9 +171,6 @@ impl fmt::Display for RepoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Sqlite { operation, source } => write!(f, "{operation}: {source}"),
-            Self::UnknownSession(id) => {
-                write!(f, "there is no session \"{id}\" to append an event to")
-            }
             Self::Sessions(error) => write!(f, "{error}"),
         }
     }
@@ -186,7 +181,6 @@ impl std::error::Error for RepoError {
         match self {
             Self::Sqlite { source, .. } => Some(source),
             Self::Sessions(error) => Some(error),
-            Self::UnknownSession(_) => None,
         }
     }
 }

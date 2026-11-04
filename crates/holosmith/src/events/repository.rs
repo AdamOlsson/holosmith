@@ -25,6 +25,9 @@ const SELECT_SINCE: &str = "SELECT session_id, seq, type, payload, created_at FR
 /// `sessions.last_seq`, and seq assignment never reads this (ADR-0013).
 const LATEST: &str = "SELECT max(seq) FROM events WHERE session_id = ?1";
 
+/// Every event of one session: the delete flow's half of removing it (HS-019).
+const DELETE_LOG: &str = "DELETE FROM events WHERE session_id = ?1";
+
 /// The only way to read or write an `events` row. Obtained from `Database::events`.
 pub struct EventRepository<'a> {
     connection: &'a Connection,
@@ -45,6 +48,14 @@ impl<'a> EventRepository<'a> {
     /// transaction. All or nothing: a failure anywhere rolls the batch back, so no client ever
     /// sees a seq the batch did not commit.
     ///
+    /// **An event whose session has gone is dropped, and the rest of the batch still commits**
+    /// (HS-019). A row can vanish between a producer's append and this commit — the delete flow
+    /// moves a session to `deleting` and then removes its row — and an event with no counter to
+    /// bump is unrepresentable rather than an error. Refusing the batch for it would also drop
+    /// every *other* session's event in the same window, which is the failure this rule prevents;
+    /// the precedent is `SessionRepository::touch`'s "a session it can no longer touch has nothing
+    /// to record".
+    ///
     /// `pub(crate)` because the writer thread is the only caller: anything else inserting a row
     /// here could assign a seq outside the one writer, which is what "exactly one writer assigns
     /// seq" forbids (ADR-0013, PER-41 S3).
@@ -56,10 +67,21 @@ impl<'a> EventRepository<'a> {
         let transaction = self.connection.unchecked_transaction().map_err(sqlite)?;
         let mut assigned = Vec::with_capacity(events.len());
         for event in events {
-            let seq = SessionRepository::new(&transaction)
+            let Some(seq) = SessionRepository::new(&transaction)
                 .bump_last_seq(&event.session_id)
                 .map_err(RepoError::Sessions)?
-                .ok_or_else(|| RepoError::UnknownSession(event.session_id.clone()))?;
+            else {
+                // The session was removed under this event: nothing can carry its seq, so it is
+                // dropped. `debug`, not `warn`: since HS-019 this is an ordinary race with a
+                // delete, not a producer bug.
+                tracing::debug!(
+                    target: "holosmith::events",
+                    session = %event.session_id,
+                    kind = %event.kind,
+                    "an event was dropped because its session is gone"
+                );
+                continue;
+            };
             transaction
                 .execute(
                     INSERT,
@@ -76,6 +98,17 @@ impl<'a> EventRepository<'a> {
         }
         transaction.commit().map_err(sqlite)?;
         Ok(assigned)
+    }
+
+    /// Delete every event of one session, inside the caller's transaction (HS-019).
+    ///
+    /// One statement and no transaction of its own: the delete flow removes the log and the
+    /// session row together, so the transaction is
+    /// [`SessionRepository::remove`](crate::sessions::repository::SessionRepository::remove)'s.
+    /// It answers SQLite's own error rather than [`RepoError`] for that reason: the operation the
+    /// caller reports is the removal, and this statement has exactly one way to fail.
+    pub(crate) fn delete_session_log(&self, session_id: &str) -> Result<usize, rusqlite::Error> {
+        self.connection.execute(DELETE_LOG, [session_id])
     }
 
     /// Up to `limit` events of one session, after `after`, in seq order — the page a client that
@@ -131,7 +164,6 @@ mod tests {
     /// The `created_at` and `applied_at` these tests write, so a timestamp is asserted rather
     /// than raced.
     const NOW: i64 = 1_760_000_000;
-
     /// The one file allowed to name the table in a statement.
     const REPOSITORY: &str = "events/repository.rs";
 
@@ -322,30 +354,57 @@ mod tests {
     }
 
     #[test]
-    fn an_event_for_an_unknown_session_commits_nothing() {
+    fn an_event_for_a_gone_session_is_dropped_and_the_rest_of_the_batch_commits() {
+        // HS-019: a delete can remove a row between an append and this commit. The event has no
+        // counter to bump, so it is unrepresentable — and refusing the batch would throw away the
+        // *other* sessions' events that share the same 25 ms window.
         let connection = database();
+        let kept = create_session(&connection, "batch-kept");
+        let gone = create_session(&connection, "batch-gone");
         let repository = EventRepository::new(&connection);
-        let error = repository
-            .insert_batch(&[NewEvent {
-                session_id: "0123456789abcdef".to_string(),
-                kind: "status".to_string(),
-                payload: "{}".to_string(),
-                created_at: NOW,
-            }])
-            .expect_err("an event needs a session to carry its counter");
         assert!(
-            matches!(error, RepoError::UnknownSession(ref id) if id == "0123456789abcdef"),
-            "{error}"
+            SessionRepository::new(&connection)
+                .remove(&gone.id)
+                .expect("the row is removed"),
+            "the session was there to remove"
         );
-        assert!(
-            error.to_string().contains("no session"),
-            "the error does not name the cause: {error}"
+
+        let assigned = repository
+            .insert_batch(&[
+                new_event(&gone, "session.status"),
+                new_event(&kept, "session.status"),
+                new_event(&gone, "turn.start"),
+            ])
+            .expect("the batch commits");
+        assert_eq!(
+            assigned
+                .iter()
+                .map(|event| (event.session_id.as_str(), event.seq))
+                .collect::<Vec<(&str, i64)>>(),
+            [(kept.id.as_str(), 1)],
+            "only the live session's event was assigned a seq"
         );
         assert!(
             repository
-                .read_since("0123456789abcdef", 0, 10)
+                .read_since(&gone.id, 0, 10)
                 .expect("the read answers")
-                .is_empty()
+                .is_empty(),
+            "a removed session has no log"
         );
+    }
+
+    #[test]
+    fn a_batch_of_nothing_but_gone_sessions_still_commits() {
+        // The empty case has its own assertion because an early `Err` would pass the test above
+        // for the wrong reason (a half-committed batch would look like a drop).
+        let connection = database();
+        let gone = create_session(&connection, "only-gone");
+        SessionRepository::new(&connection)
+            .remove(&gone.id)
+            .expect("the row is removed");
+        let assigned = EventRepository::new(&connection)
+            .insert_batch(&[new_event(&gone, "turn.end")])
+            .expect("the batch commits nothing rather than failing");
+        assert!(assigned.is_empty(), "{assigned:?}");
     }
 }

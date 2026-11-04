@@ -37,6 +37,9 @@ const UPDATE_STATUS: &str =
 /// HS-017's steer).
 const TOUCH: &str = "UPDATE sessions SET last_active_at = ?2 WHERE id = ?1";
 
+/// The row's removal: what `deleting` means once the session owns nothing any more (HS-019).
+const REMOVE: &str = "DELETE FROM sessions WHERE id = ?1";
+
 /// The event counter's bump: one per event, inside the event insert's transaction, returning the
 /// value it assigned (HS-009). A column, not `MAX(seq)`, because compaction deletes rows and a
 /// derived counter would rewind and reuse a seq (ADR-0013).
@@ -196,6 +199,33 @@ impl<'a> SessionRepository<'a> {
             .execute(TOUCH, params![id, now])
             .map_err(|error| RepoError::sqlite("touch", error))?;
         Ok(())
+    }
+
+    /// Remove this session's row and its event log, in **one** transaction (HS-019).
+    ///
+    /// The log goes first and through the events repository's own statement, so no `events` SQL
+    /// lives here; that statement borrows the transaction this call opened, exactly as
+    /// `EventRepository::insert_batch` borrows it for the sessions repository's counter bump. One
+    /// transaction, because a session whose log was half-removed is a session whose transcript
+    /// would jump backwards on a reconnect.
+    ///
+    /// **The last thing a delete does**, and only after the backend has said it owns nothing any
+    /// more: the row is what names the resources, so removing it first would hide them.
+    ///
+    /// `false` when there is no such row — a second delete after the first finished, which the
+    /// caller answers as `not_found`.
+    pub fn remove(&self, id: &str) -> Result<bool, RepoError> {
+        let sqlite = |error| RepoError::sqlite("remove", error);
+        let transaction = self.connection.unchecked_transaction().map_err(sqlite)?;
+        // The events statement answers SQLite's own error rather than this module's, because it is
+        // the other repository's and its one failure is the database's; the operation the caller
+        // asked for is this one, so the error names it.
+        crate::events::repository::EventRepository::new(&transaction)
+            .delete_session_log(id)
+            .map_err(sqlite)?;
+        let removed = transaction.execute(REMOVE, [id]).map_err(sqlite)?;
+        transaction.commit().map_err(sqlite)?;
+        Ok(removed > 0)
     }
 
     /// Bump and return this session's event counter (HS-009).

@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::rejection::{BytesRejection, PathRejection};
-use axum::extract::{Path, Request};
+use axum::extract::{Path, RawQuery, Request};
 use axum::handler::Handler;
 use axum::http::{HeaderMap, Method, Uri, header};
 use axum::middleware::{self, Next};
@@ -23,6 +23,7 @@ use axum::routing::{MethodRouter, get};
 use crate::backend::Backends;
 use crate::config::Config;
 use crate::db::Database;
+use crate::deleter::Deleter;
 use crate::events::{EventWriter, StreamRegistry};
 use crate::http::error::ApiError;
 use crate::http::guard::{self, Guards};
@@ -104,6 +105,20 @@ impl AppState {
             Arc::clone(&self.database),
             self.events.clone(),
             self.config.abort_grace.into(),
+        )
+    }
+
+    /// The delete flow's removal task, wired to this state's backend, database and stream registry
+    /// (HS-019).
+    ///
+    /// Here for the same reason as the three above: the delete handler clones the three handles a
+    /// background removal needs in one place. The registry is the state's own, so a session's open
+    /// streams are the ones it closes.
+    pub fn deleter(&self) -> Deleter {
+        Deleter::new(
+            self.backend.clone(),
+            Arc::clone(&self.database),
+            self.streams.clone(),
         )
     }
 }
@@ -349,6 +364,7 @@ pub fn router(state: AppState) -> Routes {
     let abort_state = Arc::clone(&state);
     let steer_state = Arc::clone(&state);
     let resume_state = Arc::clone(&state);
+    let delete_state = Arc::clone(&state);
     Routes::new()
         .get("/api/health", move || {
             let state = Arc::clone(&health_state);
@@ -439,6 +455,18 @@ pub fn router(state: AppState) -> Routes {
                 let state = Arc::clone(&resume_state);
                 let id = id.map(|Path(id)| id).unwrap_or_default();
                 async move { sessions::resume(&state, &id).await }
+            },
+        )
+        // The delete (HS-019): the one route in this table whose method is not `GET` or `POST`, and
+        // `Routes::delete` already records it `Mutating`, so the guards apply as they do to a
+        // prompt. The query is taken as `RawQuery`, whose rejection is `Infallible`: `?force=true`
+        // is the only thing a delete's query can say, and it is the handler's to read.
+        .delete(
+            "/api/sessions/{id}",
+            move |id: Result<Path<String>, PathRejection>, query: RawQuery| {
+                let state = Arc::clone(&delete_state);
+                let id = id.map(|Path(id)| id).unwrap_or_default();
+                async move { sessions::delete(&state, &id, query).await }
             },
         )
         .fallback(fallback)

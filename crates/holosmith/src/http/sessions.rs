@@ -7,7 +7,8 @@
 //! ladder ends the turn off-request (HS-016); `POST /api/sessions/{id}/steer` hands guidance to the
 //! running turn and records it as the event the transcript reads (HS-017); and
 //! `POST /api/sessions/{id}/resume` brings a stopped (or failed) session back through the provisioner
-//! (HS-018).
+//! (HS-018); and `DELETE /api/sessions/{id}` removes a session once its uncommitted work is safe
+//! (HS-019).
 //!
 //! The body is parsed by hand rather than through `axum::Json<T>`: that extractor rejects a bad
 //! body with its own `text/plain` answer, which would break ADR-0008's envelope on exactly the
@@ -19,6 +20,7 @@ use std::sync::PoisonError;
 
 use axum::Json;
 use axum::body::Bytes;
+use axum::extract::RawQuery;
 use axum::extract::rejection::BytesRejection;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -27,6 +29,7 @@ use serde_json::Value;
 
 use crate::backend::SessionBackend;
 use crate::clock;
+use crate::deleter;
 use crate::events::NewEvent;
 use crate::http::app::AppState;
 use crate::http::error::{ApiError, internal};
@@ -54,6 +57,13 @@ const NOT_RUNNING_STEER: &str = "the session is not running, so there is no turn
 /// and from `error` — so those are the two states that accept one (HS-018).
 const NOT_RESUMABLE: &str =
     "the session is neither stopped nor in error, so there is nothing to resume";
+
+/// What a delete is refused with when the table has no delete row for the row's state.
+///
+/// The table's row is `any + delete`, so today this sentence is unreachable; it exists because a
+/// refusal must answer *something*, and a code derived from the state is the family's rule
+/// (ADR-0019) rather than a panic on a path a future row could open.
+const NOT_DELETABLE: &str = "the session is in a state that cannot be deleted";
 
 /// The event a steer is recorded as (HS-017, ADR-0021).
 ///
@@ -648,6 +658,117 @@ fn live_at_cap(state: &AppState) -> Result<bool, ApiError> {
     Ok(live >= u64::from(state.config.max_live_sessions))
 }
 
+/// Answer `DELETE /api/sessions/{id}`: 202 and the row, now `deleting`, or ADR-0008's envelope.
+///
+/// The delete flow's request half, in four steps, and the order is the decision (ADR-0023):
+///
+/// 1. **The row** (`not_found`), and whether it is already `deleting`. A repeat request for a row in
+///    that state answers 202 and re-runs the removal, which is how a removal that failed half way is
+///    retried; a request after the row is gone is `not_found`. Both are deterministic on the row a
+///    client can see.
+/// 2. **The turn**, if the session is running: the ladder's [`Ladder::end_turn`](crate::ladder) with
+///    the reason `deleted`. The snapshot must not race an agent that is still writing files, and the
+///    end is bounded by `abort_grace` — a delete is the one request allowed to wait for a turn, and
+///    only because the alternative is discarding work it did not snapshot.
+/// 3. **The snapshot**, which is why this endpoint can answer `409 unsaved_work` at all: the row is
+///    still whatever step 2 left it, so a refused snapshot leaves nothing half-done. `?force=true`
+///    forgives the failure but does not skip the attempt — spec item 9 says the snapshot runs before
+///    a delete, and a caller asking to force has already been told it fails.
+/// 4. **The transition** (`any + delete → deleting`), the answer, and then the removal off the
+///    request's task. From here the client has a `deleting` row and the 202 never waits for a
+///    `docker rm`.
+///
+/// A `deleting` row is the one state no other request in this file accepts, so a delete cannot race
+/// a prompt, an abort or a resume: those are refused with `409 session_deleting`.
+pub async fn delete(state: &AppState, id: &str, query: RawQuery) -> Response {
+    // Read before anything else, so a typo in the query cannot delete work it was not forced to.
+    let force = force_requested(query.0.as_deref());
+    let mut current = match one_locked(state, id) {
+        Ok(Some(session)) => session,
+        Ok(None) => return ApiError::not_found().into_response(),
+        Err(error) => return error.into_response(),
+    };
+    if current.status == Status::Deleting {
+        // Already asked, not yet removed: answer the row the client can see and give the removal
+        // another run. No snapshot and no second event — the point of no return was crossed by the
+        // request that moved the row here.
+        state.deleter().spawn(current.clone());
+        return (StatusCode::ACCEPTED, Json(current)).into_response();
+    }
+    if current.status == Status::Running {
+        let ending = state.ladder().end_turn(&current, deleter::DELETED).await;
+        tracing::info!(
+            target: "holosmith::http::sessions",
+            session = id,
+            ending = ?ending,
+            "ended a running turn so the session could be deleted"
+        );
+        // The row the snapshot and the backend are handed is the one the turn's end left behind,
+        // not the `running` row read above: its reason and its state are what the removal is about.
+        if let Ok(Some(row)) = one_locked(state, id) {
+            current = row;
+        }
+    }
+    if let Err(error) = state.backend.snapshot(&current).await {
+        if !force {
+            return ApiError::unsaved_work().into_response();
+        }
+        // Forced: the operator asked for the work to go anyway. The failure is still the log's,
+        // because a snapshot that fails every time is a broken image rather than a decision.
+        tracing::warn!(
+            target: "holosmith::http::sessions",
+            session = id,
+            %error,
+            "deleting a session past a failed snapshot because the request forced it"
+        );
+    }
+    if let Err(error) = apply_delete(state, id).await {
+        return error.into_response();
+    }
+    // `deleting` now, and the removal runs off this task: the answer is the row as the table has
+    // just written it, and the refetch only makes sure nothing about it is stale.
+    let mut deleting = current.clone();
+    deleting.status = Status::Deleting;
+    deleting.status_reason = None;
+    if let Ok(Some(row)) = one_locked(state, id) {
+        deleting = row;
+    }
+    state.deleter().spawn(deleting.clone());
+    (StatusCode::ACCEPTED, Json(deleting)).into_response()
+}
+
+/// Whether the request carried `force=true`.
+///
+/// The spec names one spelling, `?force=true`, and this accepts exactly that among the query's
+/// pairs. Everything else — no query, a bare `?force`, `?force=1`, `?force=TRUE`, a typo — is not
+/// force, so a mistake fails safe with the 409 rather than discarding uncommitted work. There is no
+/// error code for an unrecognised query in the spec, and inventing one would make a typo louder
+/// than the work it was about to destroy.
+fn force_requested(query: Option<&str>) -> bool {
+    query
+        .unwrap_or_default()
+        .split('&')
+        .any(|pair| pair == "force=true")
+}
+
+/// Move the row to `deleting`, or the refusal to answer.
+///
+async fn apply_delete(state: &AppState, id: &str) -> Result<(), ApiError> {
+    match state.transitioner().apply(id, Trigger::Delete, None).await {
+        Ok(_) => Ok(()),
+        // The row moved and only the report of it was lost: the removal must still run, or the
+        // session would be `deleting` with nothing deleting it.
+        Err(StateError::Unreported(_)) => Ok(()),
+        Err(StateError::Illegal { .. }) => match one_locked(state, id) {
+            Ok(Some(session)) => Err(ApiError::not_in_state(session.status, NOT_DELETABLE)),
+            Ok(None) => Err(ApiError::not_found()),
+            Err(error) => Err(error),
+        },
+        Err(StateError::UnknownSession(_)) => Err(ApiError::not_found()),
+        Err(error) => Err(internal("delete", error)),
+    }
+}
+
 /// Move the row to `running`, or the refusal to answer.
 ///
 /// The table is the authority (ADR-0016); the read above only chose the fast refusal. A lost race is
@@ -902,6 +1023,39 @@ mod tests {
                 error.body.message.contains("guidance"),
                 "the sentence must name the steer's own field: {text:?}"
             );
+        }
+    }
+
+    /// HS-019: a delete's only query is `force=true`, and everything else fails safe.
+    #[test]
+    fn force_is_the_literal_force_true_and_nothing_else() {
+        for query in [
+            "force=true",
+            "force=true&x=y",
+            "x=y&force=true",
+            // A repeated parameter is a client bug either way; one `force=true` among them is the
+            // caller saying it, which is what the matcher reads.
+            "force=true&force=false",
+        ] {
+            assert!(force_requested(Some(query)), "{query:?}");
+        }
+        // A typo must not delete uncommitted work: `?force`, `?force=1` and a case variant are all
+        // "not forced", so the answer is the 409 rather than the removal.
+        for query in [
+            None,
+            Some(""),
+            Some("force"),
+            Some("force="),
+            Some("force=false"),
+            Some("force=1"),
+            Some("force=TRUE"),
+            Some("Force=true"),
+            Some("FORCE=true"),
+            Some("force=truex"),
+            Some("notforce=true"),
+            Some("force=false&force=false"),
+        ] {
+            assert!(!force_requested(query), "{query:?}");
         }
     }
 

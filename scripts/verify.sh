@@ -9,8 +9,9 @@
 # config and a temp data dir, answering /api/health, the schema version, the app shell, the 404
 # envelope, every browser-facing guard refusal (ADR-0010), the create endpoint's 202/422/409
 # answers, the sessions list, one session by id, the session screen's path, the session's event
-# stream, a prompt's turn, an abort down to `abort_completed`, a steer's own frame, and a resume's two
-# refusals, with no CORS header on any answer, and stopping on SIGTERM with exit 0.
+# stream, a prompt's turn, an abort down to `abort_completed`, a steer's own frame, a resume's two
+# refusals, and a delete from its 202 to the row that is gone, with no CORS header on any answer, and
+# stopping on SIGTERM with exit 0.
 # --no-build skips the two artifact phases; --keep keeps the work dir of a successful run. On
 # failure this prints FAIL <assertion> and keeps the work dir (config, banner, every answer).
 # Downloads nothing and needs neither curl nor jq: every request is a /dev/tcp fetch. Put the
@@ -289,6 +290,9 @@ serve_cases=(
   case_steer_on_an_idle_session
   case_resume_on_an_idle_session
   case_resume_unknown_session
+  case_delete_without_the_client_header
+  case_delete_session
+  case_delete_unknown_session
 )
 
 # The health payload: exactly four keys, and the uptime is not predictable, so the assertion is
@@ -972,6 +976,98 @@ case_resume_unknown_session() {
   expect_status "$name" "$response" 404
   expect_header "$name" "$response" content-type "application/json"
   expect_code "$name" "$response" not_found
+}
+
+# wait_for_gone <label> <id>: poll one session's row until it answers `404 not_found`, bounded.
+#
+# The removal is a background task's (HS-019), so the 202 is not the proof that it happened: the row
+# is. Counted once, like every other wait here, so a passing case adds one assertion rather than one
+# per poll.
+wait_for_gone() {
+  local label="$1" id="$2" response
+  for _ in $(seq 1 100); do
+    fetch "$label" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "$label/no_answer" "GET /api/sessions/$id did not answer"
+    response="$(answer "$label")"
+    if printf '%s\n' "$response" | sed -n '1s/^HTTP\/1\.[01] 404.*/found/p' | grep -q found; then
+      assertions=$((assertions + 1))
+      return 0
+    fi
+    sleep 0.1
+  done
+  fail "$label/status" "the session was never removed: $response"
+}
+
+# HS-019: the delete flow's happy path, against the stub backend whose snapshot and delete both
+# succeed. The 202 promises a `deleting` row and the removal happens off the request, so the proof is
+# two answers: the 202 itself, and the 404 that follows it. This case runs last among the cases that
+# name `created_id`, because it is the one that removes it.
+case_delete_session() {
+  local name=case_delete_session response body
+  fetch "$name" DELETE "/api/sessions/$created_id" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "$name/no_answer" "DELETE /api/sessions/$created_id did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 202
+  expect_header "$name" "$response" content-type "application/json"
+  body="$(cat "$WORK/responses/$name.body")"
+  case "$body" in
+    *'"status":"deleting"'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "$name/status" "the answer is not the deleting row a 202 promises: $body"
+      ;;
+  esac
+
+  wait_for_gone "${name}_gone" "$created_id"
+
+  # Nothing a client can read names the session any more: not one row, and not the list.
+  fetch "$name" GET /api/sessions "Host: 127.0.0.1" ||
+    fail "$name/no_answer" "GET /api/sessions did not answer"
+  expect_status "$name" "$(answer "$name")" 200
+  body="$(cat "$WORK/responses/$name.body")"
+  case "$body" in
+    *"$created_id"*)
+      fail "$name/listed" "the removed session is still listed: $body"
+      ;;
+    *'"sessions":[]'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "$name/listed" "the list is not the empty collection: $body"
+      ;;
+  esac
+}
+
+# HS-019: a delete for a session the table does not hold is ADR-0008's 404 `not_found` — the
+# deterministic half of "a second call returns 202/404": while the row exists a repeat is a 202, and
+# once it is gone it is this.
+case_delete_unknown_session() {
+  local name=case_delete_unknown_session response
+  fetch "$name" DELETE /api/sessions/0000000000000000 \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "$name/no_answer" "DELETE an unknown session did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 404
+  expect_header "$name" "$response" content-type "application/json"
+  expect_code "$name" "$response" not_found
+}
+
+# HS-019: the first `DELETE` route in this crate passes the guards like every other request that
+# changes something. The origin is right and the client header is missing, because the guards check
+# the origin first and a request missing both would prove `bad_origin` instead.
+case_delete_without_the_client_header() {
+  local name=case_delete_without_the_client_header response
+  fetch "$name" DELETE /api/sessions/0000000000000000 \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" ||
+    fail "$name/no_answer" "DELETE without the client header did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 403
+  expect_header "$name" "$response" content-type "application/json"
+  expect_code "$name" "$response" bad_client
 }
 
 # Box 4, over every answer the cases above saved: none of them carries a CORS header, and none

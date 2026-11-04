@@ -114,7 +114,7 @@ Every section of `HolosmithSpec.md` maps to at least one story. If a spec item g
 
 ## Decisions taken while slicing
 
-Twenty-two decisions were made that the spec does not make. Each has an ADR because each is hard to reverse, surprising to a later reader, and the result of a real trade-off.
+Twenty-three decisions were made that the spec does not make. Each has an ADR because each is hard to reverse, surprising to a later reader, and the result of a real trade-off.
 
 - [ADR-0001](../adr/0001-build-session-lifecycle-before-docker.md) — the session lifecycle is built against the stub backend before Docker exists. Consequence: there are two fakes, the in-process stub backend and the in-container fake pi, and they are not the same thing.
 - [ADR-0002](../adr/0002-security-guards-before-endpoints.md) — the browser guards and network isolation land before the features they protect.
@@ -138,6 +138,7 @@ Twenty-two decisions were made that the spec does not make. Each has an ADR beca
 - [ADR-0020](../adr/0020-the-abort-ladder-and-how-a-turn-is-cancelled.md) — abort climbs two rungs (clear the queue and ask the agent, then kill the container after `abort_grace`), the backend reports how its turn ended (`TurnEnd`) while the runner still chooses the table row, and the ladder is one routine whose reason is a parameter. Consequence: `running` has two owners on a forced stop and the table decides between them, the resume after rung 2 goes through the provisioner, and the refusal family gains `session_idle`.
 - [ADR-0021](../adr/0021-a-steers-frame-and-what-was-delivered.md) — a steer is recorded as a `turn.steer` frame with no message id, the agent is asked before the record is written so the log holds what was delivered, and a `409 session_idle` keeps the guidance in the box rather than resending it. Consequence: a steer block is created per frame (the one exception to ADR-0018's "a message id keys a block"), and the composer's third button is wired.
 - [ADR-0022](../adr/0022-the-way-back-and-no-stop-endpoint.md) — resume is the only way back, the cap is checked before its transition so a refused resume never strands a row in `starting`, and `SessionBackend::resume` is still uncalled because the provisioner is what brings a session back. Consequence: nothing in the API produces `stopped` until the eviction, idle-stop and drain stories do, and the page resumes once and retries the refused request once.
+- [ADR-0023](../adr/0023-the-delete-flow.md) — the delete flow's snapshot is the request's (so a failed one can answer 409 `unsaved_work` and leave the row untouched) and the removal is a task's; the turn is ended first by the ladder's `end_turn`, which stops and does not resume; the event log goes with the row, which makes the writer drop an event whose session has gone instead of refusing its batch. Consequence: a delete of a running session can take up to `abort_grace` to answer, and a backend failure leaves the row `deleting` for a repeated request to retry.
 
 Gaps in the spec that had to be filled to write these stories, all reversible and all flagged in the story that fills them:
 

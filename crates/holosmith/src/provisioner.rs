@@ -21,7 +21,7 @@
 //!   (`ProvisioningFailed`) and emits the four step reports itself, because a step beginning is
 //!   not a state change: its payload says `from: starting, to: starting, step: …`.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::task::JoinHandle;
 
@@ -67,6 +67,20 @@ impl Provisioner {
     pub async fn run(&self, session: Session) {
         let mut completed: Vec<Step> = Vec::new();
         for step in Step::ALL {
+            // Somebody else may have ended this session's provisioning: a delete moves the row to
+            // `deleting` (HS-019) whatever state it was in, and this task must then stop building
+            // resources for a session that is going away. Nothing is undone — the delete's
+            // `SessionBackend::delete` is what removes them, and undoing here would race it. A
+            // step already in flight when the row moved is HS-024's to make safe.
+            if !self.still_starting(&session.id) {
+                tracing::info!(
+                    target: "holosmith::provisioner",
+                    session = %session.id,
+                    step = step.as_str(),
+                    "the session left starting, so provisioning stopped"
+                );
+                return;
+            }
             self.announce(&session, step).await;
             match self.backend.provision(&session, step).await {
                 Ok(()) => completed.push(step),
@@ -86,6 +100,28 @@ impl Provisioner {
             }
         }
         self.settle(&session).await;
+    }
+
+    /// Whether `session_id` is still `starting`, which is the only state this task provisions.
+    ///
+    /// A read that fails answers `true`: an unreadable row is not evidence that somebody ended the
+    /// session, and stopping on it would turn a transient lock into a session that never provisions.
+    /// A row that is gone answers `false` — there is nothing left to provision.
+    fn still_starting(&self, session_id: &str) -> bool {
+        let database = self.database.lock().unwrap_or_else(PoisonError::into_inner);
+        match database.sessions().get(session_id) {
+            Ok(Some(session)) => session.status == Status::Starting,
+            Ok(None) => false,
+            Err(error) => {
+                tracing::warn!(
+                    target: "holosmith::provisioner",
+                    session = session_id,
+                    %error,
+                    "the provisioner could not read the session"
+                );
+                true
+            }
+        }
     }
 
     /// Undo the steps that completed, most recent first.

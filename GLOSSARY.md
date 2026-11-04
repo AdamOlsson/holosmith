@@ -165,6 +165,22 @@ _Avoid_: Kill, delete, prune
 Stopping a session that has been idle too long. Loses nothing.
 _Avoid_: Reap, timeout, expiry
 
+**Delete flow**:
+The one way a session is removed, and the only thing here that destroys work. `DELETE
+/api/sessions/:id` ends a running turn first, takes a **WIP snapshot**, moves the row to `deleting` and
+answers 202; a background task then revokes the session's key, removes what the backend owns, and
+removes the row and its event log. A snapshot that fails answers 409 **unsaved work** unless the
+request carried `?force=true`, and the row is left exactly as it was. Repeating the request while the
+row exists re-runs the removal; once the row is gone the answer is 404. Its machine names are
+`Deleter`, `Trigger::Delete` and the state `deleting`.
+_Avoid_: Removal, purge, drop, cleanup, destruction
+
+**Unsaved work**:
+A session's uncommitted changes that no **WIP snapshot** could record, which is what makes a delete
+answer 409 `unsaved_work` instead of removing the session. `?force=true` is the operator saying the
+work may go anyway; it forgives the failure, it does not skip the attempt.
+_Avoid_: Dirty worktree, lost changes, uncommitted state
+
 **Drain**:
 Refusing new work and waiting for running turns to finish, so the machine can restart.
 _Avoid_: Shutdown, quiesce

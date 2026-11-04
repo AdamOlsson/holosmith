@@ -6,6 +6,7 @@ pub mod clock;
 pub mod commands;
 pub mod config;
 pub mod db;
+pub mod deleter;
 pub mod events;
 pub mod http;
 pub mod ladder;

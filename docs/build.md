@@ -137,11 +137,17 @@ abort's own reason, asserting the 202 answered the row still `running` and that 
 `409 session_idle` envelope), and the steer (`case_steer`, which prompts, steers, asserts the 202
 answered the row still `running`, reads the stream for the `turn.steer` frame carrying the guidance,
 and then polls the row until it says `idle`, which is what proves the turn continued;
-`case_steer_on_an_idle_session`, which asserts the `409 session_idle` envelope), and the resume's two
+`case_steer_on_an_idle_session`, which asserts the `409 session_idle` envelope), the resume's two
 refusals (`case_resume_on_an_idle_session` and `case_resume_unknown_session`; the round trip itself
 cannot be driven here because nothing in the API produces `stopped` yet — `tests/resume.rs` proves it
-against a row the transition table stopped). A case that must assert one code keeps every higher guard
-check correct, or it asserts another guard's code under its own name.
+against a row the transition table stopped), and the delete (`case_delete_session`, which asserts the
+202 answered the row `deleting`, then polls the row until it is the `404 not_found` envelope and the
+list no longer holds it — the removal is a background task's, so the row is the proof;
+`case_delete_unknown_session` and `case_delete_without_the_client_header`, which assert the `404
+not_found` and `403 bad_client` envelopes, the latter because this is the crate's first `DELETE`
+route and the guards must be shown to apply to it as they do to a `POST`). A case that must assert
+one code keeps every higher guard check correct, or it asserts another guard's code under its own
+name.
 
 The CORS sweep is deliberately **not** in that array: it runs once after every case and checks
 that no answer the run saved carries an `access-control-*` header or `vary: origin`. Being

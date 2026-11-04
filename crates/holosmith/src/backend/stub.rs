@@ -112,6 +112,8 @@ struct StubState {
     stopping: Mutex<HashSet<String>>,
     /// Whether an `abort` is ignored, which is how a test produces a rung-2 ladder (HS-016).
     ignores_abort: bool,
+    /// Whether a `snapshot` fails, which is how a test produces HS-019's `409 unsaved_work`.
+    fails_snapshot: bool,
     recorded: Mutex<Vec<Recorded>>,
 }
 
@@ -130,6 +132,7 @@ impl StubBackend {
                 fail_at: None,
                 stopping: Mutex::new(HashSet::new()),
                 ignores_abort: false,
+                fails_snapshot: false,
                 recorded: Mutex::new(Vec::new()),
             }),
         }
@@ -158,6 +161,20 @@ impl StubBackend {
         Arc::get_mut(&mut self.state)
             .expect("a stub that has not been cloned yet is mutable")
             .ignores_abort = true;
+        self
+    }
+
+    /// The same stub, told to fail its `snapshot` — the session with uncommitted work the delete flow
+    /// refuses to remove (HS-019, spec item 9).
+    ///
+    /// `delete` still works, so a test can prove that `?force=true` is what turns the refusal into a
+    /// removal. Like [`Self::failing_at`] and [`Self::ignoring_abort`] this is a constructor argument
+    /// and not a config key: nothing an operator runs should be able to sabotage a snapshot, and the
+    /// refusal's path is proved by a test rather than by a demo.
+    pub fn failing_snapshot(mut self) -> Self {
+        Arc::get_mut(&mut self.state)
+            .expect("a stub that has not been cloned yet is mutable")
+            .fails_snapshot = true;
         self
     }
 
@@ -223,6 +240,12 @@ impl StubBackend {
             )),
             _ => Ok(()),
         }
+        .and_then(|()| match call {
+            Call::Snapshot if self.state.fails_snapshot => Err(BackendError::failed(
+                "the stub backend was told to fail its snapshot",
+            )),
+            _ => Ok(()),
+        })
     }
 }
 
