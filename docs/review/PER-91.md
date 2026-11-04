@@ -1,15 +1,21 @@
-# PER-93 — HS-059 event coalescing
+# PER-91 — HS-059 event coalescing
 
 **Fixed point:** `c233ab7` (the PER-58 fix commit). **Change reviewed:** `c233ab7...65f7107` (`06f506b`, `65f7107`).
 **Verdicts:** Standards — **BLOCK on S1** (1 P1, 3 P2, 7 P3); Spec — OK with notes (2 P3).
 
 Saved verbatim from the `reviewer` child, then triaged below.
 
+**Identifier correction.** The work shipped is HS-059, whose issue is **PER-91**; the two code commits and
+this file were first written against **PER-93**, which is HS-061 (history truncation). The reviewer's text
+below said `PER-93` throughout for the same reason — the brief it was given carried the wrong identifier —
+and it is filed here, under the story it actually reviews. The commit trailers still say `Closes PER-93`;
+the Linear record is PER-91, with a correction note on PER-93.
+
 ---
 
 ## Review
 
-**Target:** PER-93 (HS-059 — event coalescing), fixed point `c233ab7`, diff artifact `/tmp/holosmith/reviews/PER-93-diff.txt` (`c233ab7...HEAD`, commits `06f506b`, `65f7107`).
+**Target:** PER-91 (HS-059 — event coalescing), fixed point `c233ab7`, diff artifact `/tmp/holosmith/reviews/PER-91-diff.txt` (`c233ab7...HEAD`, commits `06f506b`, `65f7107`).
 Working tree is identical to reviewer-launch HEAD `65f7107` (watchdog: no diff), so the artifact is the shipped change.
 
 I read in full: the diff; `crates/holosmith/src/events/{mod.rs,writer.rs,repository.rs}`; `crates/holosmith/tests/{events.rs,turns.rs,streams.rs}`; `crates/holosmith/src/backend/stub.rs`; `web/test/transcript.test.ts`; `docs/adr/0018`, `0027`, `0030`, `0031`; `HolosmithSpec.md` item 15; `docs/stories/phase-2-deployable-mvp.md` HS-059/HS-060; `GLOSSARY.md`; `docs/build.md`; `scripts/verify.sh`; `AGENTS.md`; `PROMPT.md`.
@@ -94,8 +100,8 @@ Spec item 15, first bullet (`HolosmithSpec.md:256`): *"Coalescing: inside each 2
 - Whether `tests/turns.rs:475`/`511`/`517` actually flake: I can prove the assertion is wrong (S1) from ADR-0031's text, but the probability needs a run under load. A cheap repro: `cargo test --test turns` with the tree's other test binaries running concurrently, or temporarily inserting a `std::thread::sleep(30ms)` in `StubBackend::start_turn`'s frame loop.
 - The quadratic cost in S2 as wall-clock: `cargo test --test events a_five_thousand_delta_burst` is green, so the claim is analytical (bytes processed per batch), not measured. A measurement would need a batch of one long run, e.g. 5,000 × 1 KB deltas with a 1 s commit interval.
 - That `scripts/verify.sh`'s new case passes end to end (43 cases / 268 assertions is the brief's report, not mine): `scripts/verify.sh`.
-- Whether the phase-2 story's acceptance #4 has been reported in Linear (SP2): that is PER-93's comment, not the repository.
-- Process note for the orchestrator: `docs/review/PER-93.md` does not exist yet; PROMPT.md §4 requires the review persisted there, committed with the fixes. I have no write tool (read-only review), so this text is the artifact to persist.
+- Whether the phase-2 story's acceptance #4 has been reported in Linear (SP2): that is PER-91's comment, not the repository.
+- Process note for the orchestrator: `docs/review/PER-91.md` does not exist yet; PROMPT.md §4 requires the review persisted there, committed with the fixes. I have no write tool (read-only review), so this text is the artifact to persist.
 
 ## Summary
 - **Standards:** 11 findings — 1 × P1 (S1, `tests/turns.rs` asserts an invariant ADR-0031 declares false), 3 × P2 (S2 quadratic re-serialisation, S3 `pub` on an internal helper, S4 shape check weaker than the ADR's "never merged"), 7 × P3. Worst: **S1**.
@@ -123,7 +129,7 @@ the story on the live path asserted an invariant the ADR this change ships decla
 | **S10 P3** — two pre-existing assertions became pace-dependent without saying so | **Fixed** | Comments at `tests/turns.rs`'s seven-delta assertion and at `case_prompt_turn`'s kinds assertion name the 200 ms stub pace against the 25 ms window as the reason the numbers are what they are. |
 | **S11 P3** — `assert.equal(appended(split, "m1", "thinking"), "")` holds for every input | **Fixed** | Replaced by a falsifiable pair: a thinking delta appends to `thinking` and leaves `text` empty. |
 | **SP1 P3** — nothing fed the coalescer's bytes through the page's parser; the two halves of "byte-identical" were pinned separately | **Fixed** | New node test `the writer's merged payload is a frame the page parses` feeds `{"message_id":"m1","kind":"text","text":"a b"}` — the coalescer's exact output shape — through `parseFrame` and `Transcript.apply`; ADR-0031 says so. |
-| **SP2 P3** — the reduction is reported in the ADR and `docs/build.md`, not in the story or Linear | **Fixed in the ship comment** | The PER-93 closing comment carries "5,000 → 3 rows" and "seven scripted deltas → three rows"; the story slice is not edited (it is the Linear body's source, per the PER-34 decision). |
+| **SP2 P3** — the reduction is reported in the ADR and `docs/build.md`, not in the story or Linear | **Fixed in the ship comment** | The PER-91 closing comment carries "5,000 → 3 rows" and "seven scripted deltas → three rows"; the story slice is not edited (it is the Linear body's source, per the PER-34 decision). |
 
 Re-run after the fixes: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`
 (228 lib, 13 `tests/events.rs`, 10 `tests/turns.rs`), `cd web && npm test` (30) and `npx tsc --noEmit`, and
