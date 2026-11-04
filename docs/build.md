@@ -92,12 +92,12 @@ asks the kernel for the port and is also what makes `serve` re-derive `control_o
 the bound address (ADR-0007), so the case for a request that passes the guards sends exactly
 the origin the guard compares; `control_listen` and `control_origin` are both read from the
 startup banner, never assumed. The data root is inside the work dir, so a run never touches
-`/var/lib/holosmith` (ADR-0009), and the config file carries `owner`, `max_live_sessions = 1`
-and `backend = "stub"`: the `bad_owner` case, the create cases and provisioning are the only
-reasons that file exists. The backend comes from the *file* rather than from a `--backend` flag
-on purpose — that is half of HS-011's "selectable by config and by `--backend`", and
-`case_backend_from_config` is what proves it; `tests/serve_cli.rs` covers the flag, the override
-and the default. Every request is a `/dev/tcp` fetch (`fetch` for a body-less request,
+`/var/lib/holosmith` (ADR-0009), and the config file carries `owner`, `max_live_sessions = 1`,
+`backend = "stub"` and `idle_stop_min = 1`: the `bad_owner` case, the create cases, provisioning
+and the idle stop are the only reasons that file exists. The backend comes from the *file* rather
+than from a `--backend` flag on purpose — that is half of HS-011's "selectable by config and by
+`--backend`", and `case_backend_from_config` is what proves it; `tests/serve_cli.rs` covers the
+flag, the override and the default. Every request is a `/dev/tcp` fetch (`fetch` for a body-less request,
 `fetch_body` when a body is needed, `fetch_stream` for a response that never ends), so the
 harness needs neither `curl` nor `jq`. `fetch_stream` exists because `fetch` reads until EOF:
 an event stream sends its header block at once and then nothing until the first event, so
@@ -145,7 +145,12 @@ only `stopped` row of this run, and it is created last), and the delete (`case_d
 list no longer holds it — the removal is a background task's, so the row is the proof;
 `case_delete_unknown_session` and `case_delete_without_the_client_header`, which assert the `404
 not_found` and `403 bad_client` envelopes, the latter because this is the crate's first `DELETE`
-route and the guards must be shown to apply to it as they do to a `POST`), and the cap
+route and the guards must be shown to apply to it as they do to a `POST`), the idle stop
+(`case_idle_stop`, which leaves a session alone for the config's one-minute `idle_stop_min` and
+asserts the row is `stopped` with reason `idle_stop`, the transition in its replayed transcript, the
+sweeper's one log line in `serve.err`, and that the next create at the cap is accepted without
+evicting it — the slot the sweep freed; it is the only case that costs a real minute, because the
+key is whole minutes and there is no shorter lever, ADR-0025), and the cap
 (`case_create_at_cap_evicts`, which makes its own pair, creates at the cap, and asserts the victim's
 row, its replayed transcript and the eviction's own `idle → stopped` event; and
 `case_create_at_cap_refused`, the last case, which makes a session and asks for one more while that
@@ -162,6 +167,12 @@ remember to place the new case before it.
 **Every later story adds at least one `case_*` function and one line in `serve_cases`.** That
 is what makes this a growing gate rather than a snapshot: a story that adds a route or a
 behaviour has one obvious place to prove the shipped binary does it.
+
+**The idle stop runs for the whole `serve` phase.** `idle_stop_min = 1` is the process's setting, so
+every case from `start_serve` on has a sweeper behind it and **no case may leave a session `idle` for a
+minute** — a later case that did would see its own subject turn `stopped` under it, and the failure
+would blame the wrong case (ADR-0025). `case_idle_stop` is the one case that waits that minute, and it
+runs where the table is otherwise empty.
 
 `--no-build` skips `build` and `embed`, for a loop on the cases against an artifact already
 in `dist/`; it does not skip `fmt`, `clippy`, `test` or `serve`. `--keep` keeps the work dir

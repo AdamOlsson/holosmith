@@ -34,6 +34,7 @@ use crate::ladder::Ladder;
 use crate::provisioner::Provisioner;
 use crate::runtime::Runtime;
 use crate::sessions::state::Transitioner;
+use crate::sweeper::Sweeper;
 use crate::turn::Turn;
 use crate::web;
 
@@ -120,6 +121,31 @@ impl AppState {
             Arc::clone(&self.database),
             self.streams.clone(),
         )
+    }
+
+    /// The idle stop's sweeper, wired to this state's backend, database and event writer (HS-021).
+    ///
+    /// `None` when `idle_stop_min` is 0, which is the key's off switch: an operator who wants no idle
+    /// stop should not have to pay for a task that sweeps and finds nothing. The decision lives here
+    /// rather than in `serve` so there is one place that reads the key, and it is the same shape as
+    /// HS-022's turn timeout (ADR-0025).
+    ///
+    /// Here for the same reason as the four above: the handles a background policy needs are cloned in
+    /// one place.
+    pub fn sweeper(&self) -> Option<Sweeper> {
+        let idle_min = self.config.idle_stop_min;
+        if idle_min == 0 {
+            return None;
+        }
+        Some(Sweeper::new(
+            self.backend.clone(),
+            Arc::clone(&self.database),
+            self.events.clone(),
+            // `saturating_mul`, not `* 60`: the key is a `u64` the config layer accepts without a
+            // ceiling, and a wrapped bound would turn "stop after a week" into "stop immediately" —
+            // the same reasoning the create's own bound is written with (`http/sessions.rs`).
+            std::time::Duration::from_secs(idle_min.saturating_mul(60)),
+        ))
     }
 }
 

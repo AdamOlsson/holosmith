@@ -162,8 +162,21 @@ Stopping the least recently active `idle` session so a create can take its slot:
 _Avoid_: Kill, delete, prune
 
 **Idle stop**:
-Stopping a session that has been idle too long. Loses nothing.
+Stopping an `idle` session whose `last_active_at` is older than `idle_stop_min`, so a machine the operator
+forgot about is not a bill. The row becomes `stopped` with reason `idle_stop`, `stopped_at` moves with it,
+and the slot is free at once; the container is stopped after the row, and history, worktree and events stay,
+so a resume continues the session. Only `idle` is a candidate — a `starting` or `running` session is working,
+and `error` and `deleting` belong to flows of their own — and `0` is the key's off switch. Its machine names
+are `Sweeper`, `Trigger::IdleStop` and the reason `IDLE_STOP`.
 _Avoid_: Reap, timeout, expiry
+
+**Sweeper**:
+The background task that applies the **idle stop**: on a fixed tick it reads every session that has been
+`idle` for longer than `idle_stop_min`, moves each one to `stopped` with reason `idle_stop`, and hands the
+container's `stop` to a task of its own. It is a policy rather than an endpoint — nothing a client sends
+starts it — and a process has one, spawned by `serve` unless the key is `0`. Its machine names are
+`Sweeper` and `Sweeper::sweep` (one pass, which a test awaits).
+_Avoid_: Reaper, janitor, cron, garbage collector
 
 **Delete flow**:
 The one way a session is removed, and the only thing here that destroys work. `DELETE

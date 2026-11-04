@@ -129,18 +129,45 @@ pub fn run(args: ServeArgs) -> ExitCode {
         // with `EventWriter::subscribe`, because a stream cannot be cloned into an `AppState`
         // and each one starts at the point of the broadcast (ADR-0013, ADR-0014).
         let (events, _stream) = events::spawn(Arc::clone(&database), WriterOptions::default());
-        let app = App::new(
-            http::router(AppState {
-                config: loaded.config.clone(),
-                runtime,
-                database,
-                events,
-                streams: StreamRegistry::new(),
-                backend: Backends::for_run(backend),
-            }),
-            guards,
-        );
-        match serve::run(listener, app, ServeOptions::default(), stop.recv()).await {
+        let state = AppState {
+            config: loaded.config.clone(),
+            runtime,
+            database,
+            events,
+            streams: StreamRegistry::new(),
+            backend: Backends::for_run(backend),
+        };
+        // Built before the state is handed to the router, because the sweeper is a task rather than a
+        // route: `None` means `idle_stop_min = 0` turned it off. Both facts are `debug` lines and not
+        // banner lines: the startup contract is the eight lines `tests/serve_cli.rs` pins byte for
+        // byte, and a policy's own state is diagnostics, which `HOLOSMITH_LOG` decides whether to show.
+        let sweeper = match state.sweeper() {
+            Some(sweeper) => {
+                tracing::debug!(
+                    target: "holosmith::serve",
+                    idle_min = loaded.config.idle_stop_min,
+                    tick_s = crate::sweeper::TICK.as_secs(),
+                    "the idle stop sweeper is running"
+                );
+                Some(sweeper.spawn())
+            }
+            None => {
+                tracing::debug!(
+                    target: "holosmith::serve",
+                    "idle_stop_min is 0, so no session is stopped for being idle"
+                );
+                None
+            }
+        };
+        let app = App::new(http::router(state), guards);
+        let served = serve::run(listener, app, ServeOptions::default(), stop.recv()).await;
+        // The sweeper is a policy over rows, not part of serving: when the listener's drain is over,
+        // the process has no more questions to ask, so its next tick must not hold anything up. The
+        // runtime drops the task anyway; aborting says so, and makes the handle's purpose its comment.
+        if let Some(sweeper) = sweeper {
+            sweeper.abort();
+        }
+        match served {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("holosmith: serve: {error}");

@@ -305,10 +305,22 @@ test("an evicted session's row says nothing was deleted", () => {
   assert.match(notice, /resume/);
 });
 
+test("a session stopped for sitting idle says so, and says nothing was deleted", () => {
+  // HS-021's reason word. The cap's sentence is wrong here — an idle stop did not run out of room —
+  // but the promise is the same one, and spec item 9's "nothing is deleted" covers this stop too:
+  // the worktree, the transcript and the row are all still there, and a resume continues the session.
+  const notice = stoppedNotice("idle_stop");
+  assert.ok(notice !== null, "an idle-stopped row said nothing");
+  assert.match(notice, /nothing was deleted/);
+  assert.match(notice, /resume/);
+  assert.doesNotMatch(notice, /make room/, "an idle stop is not the cap's sentence");
+  assert.notEqual(notice, stoppedNotice("evicted"), "two reasons, one sentence");
+});
+
 test("every other reason is the caller's to show, so no sentence is invented for it", () => {
-  // The map is deliberately one word wide: a forced abort is not data loss and a delete's own reason
-  // must not be softened, so both get `null` and the badge's `state · reason` stands alone.
-  for (const reason of [null, "", "forced_abort", "deleted", "idle_stop", "server_restart"]) {
+  // The map is two words wide: a forced abort is not data loss and a delete's own reason must not be
+  // softened, so both get `null` and the badge's `state · reason` stands alone.
+  for (const reason of [null, "", "forced_abort", "deleted", "turn_timeout", "server_restart"]) {
     assert.equal(stoppedNotice(reason), null, String(reason));
   }
 });
@@ -319,6 +331,8 @@ test("the detail line says the same thing whether the row was drawn or turned", 
   // which is how an eviction arrives while the operator watches. One function, so they cannot differ.
   assert.equal(stoppedDetail("stopped", "evicted"), stoppedNotice("evicted"));
   assert.notEqual(stoppedDetail("stopped", "evicted"), NO_DETAIL);
+  assert.equal(stoppedDetail("stopped", "idle_stop"), stoppedNotice("idle_stop"));
+  assert.notEqual(stoppedDetail("stopped", "idle_stop"), NO_DETAIL);
 
   // A stopped row whose reason earns no sentence keeps the dash, and so does every other state: the
   // span is only visible on a stopped row anyway, and a stale sentence under `running` would be a

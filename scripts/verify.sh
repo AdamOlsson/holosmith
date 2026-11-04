@@ -10,8 +10,9 @@
 # envelope, every browser-facing guard refusal (ADR-0010), the create endpoint's 202/422/409
 # answers, the sessions list, one session by id, the session screen's path, the session's event
 # stream, a prompt's turn, an abort down to `abort_completed`, a steer's own frame, a resume's two
-# refusals, a delete from its 202 to the row that is gone, and a create at the cap evicting the idle
-# session before it succeeds, with no CORS header on any answer, and stopping on SIGTERM with exit 0.
+# refusals, a delete from its 202 to the row that is gone, an idle session stopped by the sweeper with
+# its reason, its event and its log line, and a create at the cap evicting the idle session before it
+# succeeds, with no CORS header on any answer, and stopping on SIGTERM with exit 0.
 # --no-build skips the two artifact phases; --keep keeps the work dir of a successful run. On
 # failure this prints FAIL <assertion> and keeps the work dir (config, banner, every answer).
 # Downloads nothing and needs neither curl nor jq: every request is a /dev/tcp fetch. Put the
@@ -291,6 +292,7 @@ serve_cases=(
   case_resume_unknown_session
   case_delete_without_the_client_header
   case_delete_session
+  case_idle_stop
   case_delete_unknown_session
   case_create_at_cap_evicts
   case_create_at_cap_refused
@@ -1045,6 +1047,39 @@ wait_for_gone() {
   fail "$label/status" "the session was never removed: $response"
 }
 
+# wait_for_stopped_id <label> <id>: poll one session's row until it says stopped, bounded and counted
+# once. The idle stop is a timer's, not a request's (HS-021), so its budget is the config's bound plus
+# one tick rather than a fraction of a second: 100 seconds for the gate's one-minute `idle_stop_min`.
+wait_for_stopped_id() {
+  local label="$1" id="$2" body
+  for _ in $(seq 1 100); do
+    fetch "$label" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "$label/no_answer" "GET /api/sessions/$id did not answer"
+    body="$(cat "$WORK/responses/$label.body")"
+    case "$body" in
+      *'"status":"stopped"'*)
+        assertions=$((assertions + 1))
+        return 0
+        ;;
+    esac
+    sleep 1
+  done
+  fail "$label/status" "the session never reached stopped: $body"
+}
+
+# remove_session <label> <id>: delete a session and wait for its row to be gone, so a case that made
+# one of its own leaves the machine as it found it.
+remove_session() {
+  local label="$1" id="$2" response
+  fetch "$label" DELETE "/api/sessions/$id" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "$label/no_answer" "DELETE /api/sessions/$id did not answer"
+  response="$(answer "$label")"
+  expect_status "$label" "$response" 202
+  wait_for_gone "${label}_gone" "$id"
+}
+
 # HS-019: the delete flow's happy path, against the stub backend whose snapshot and delete both
 # succeed. The 202 promises a `deleting` row and the removal happens off the request, so the proof is
 # two answers: the 202 itself, and the 404 that follows it. This case runs last among the cases that
@@ -1086,6 +1121,110 @@ case_delete_session() {
       fail "$name/listed" "the list is not the empty collection: $body"
       ;;
   esac
+}
+
+# HS-021: the idle stop. A session left alone stops costing money, and it is the artifact's *own*
+# timer that does it — no request asks for this — so the case creates one session, waits out the
+# one-minute `idle_stop_min` the config sets, and asserts four things: the row is `stopped` with the
+# reason, the transition is in the transcript a client replays, the sweeper wrote its one log line, and
+# the slot the session held is free.
+#
+# "Frees a slot" is asserted *without* a second policy in the way: a `stopped` row holds no slot, so the
+# next create at the cap of one simply inserts. If the sweep had not run, that row would still be `idle`,
+# the create would evict it with reason `evicted`, and the re-read below would say so — which is why the
+# re-read is the assertion.
+#
+# `idle_stop_min = 1` is the *process's* setting, so every case in this run has a sweeper behind it: no
+# case may leave a session idle for a minute (ADR-0025). This one waits a minute on purpose, which is
+# why it runs where the table is otherwise empty.
+#
+# It costs about a minute: `idle_stop_min` is whole minutes and there is deliberately no shorter lever
+# (ADR-0025). It runs right after `case_delete_session`, which is the first moment the table is empty,
+# because the cap is one; it removes what it made, so the cap cases that follow still find the free
+# slot they assume.
+case_idle_stop() {
+  local name=case_idle_stop response body idle fresh
+  local create_body='{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}'
+
+  fetch_body "${name}_created" POST /api/sessions "$create_body" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-idle-1" ||
+    fail "${name}_created/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "${name}_created")"
+  expect_status "${name}_created" "$response" 202
+  body="$(cat "$WORK/responses/${name}_created.body")"
+  idle="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$idle" ] || fail "${name}_created/id" "the response names no id: $body"
+  wait_for_idle_id "${name}_created" "$idle"
+
+  wait_for_stopped_id "${name}_stopped" "$idle"
+  body="$(cat "$WORK/responses/${name}_stopped.body")"
+  case "$body" in
+    *'"status_reason":"idle_stop"'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "${name}_stopped/reason" "the stopped row does not say why: $body"
+      ;;
+  esac
+
+  # The fourth bullet's first half: the transition, in the transcript, with the reason.
+  fetch_sse_until "${name}_stream" "/api/sessions/$idle/events" '"reason":"idle_stop"' \
+    "Host: 127.0.0.1" ||
+    fail "${name}_stream/no_answer" "GET /api/sessions/$idle/events did not answer"
+  response="$(answer "${name}_stream")"
+  expect_status "${name}_stream" "$response" 200
+  expect_header "${name}_stream" "$response" content-type "text/event-stream"
+  body="$(cat "$WORK/responses/${name}_stream.body")"
+  case "$body" in
+    *'"from":"idle","to":"stopped","step":null,"reason":"idle_stop"'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "${name}_stream/transition" \
+        "the idle stop's transition is not in the session's transcript: $body"
+      ;;
+  esac
+
+  # And the second half: one log line per stop, naming the session, for an operator reading journald.
+  if grep -q "holosmith::sweeper: the session sat idle for too long and was stopped session=$idle" \
+    "$WORK/serve.err"; then
+    assertions=$((assertions + 1))
+  else
+    fail "${name}/log" \
+      "the sweeper wrote no line for $idle: $(grep 'holosmith::sweeper' "$WORK/serve.err" | sed -n '1,5p')"
+  fi
+
+  # The slot is free: a create at the cap of one is accepted, and the session it did not have to evict
+  # still says `idle_stop` rather than `evicted`.
+  fetch_body "${name}_fresh" POST /api/sessions "$create_body" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-idle-2" ||
+    fail "${name}_fresh/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "${name}_fresh")"
+  expect_status "${name}_fresh" "$response" 202
+  body="$(cat "$WORK/responses/${name}_fresh.body")"
+  fresh="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$fresh" ] || fail "${name}_fresh/id" "the response names no id: $body"
+  [ "$fresh" != "$idle" ] ||
+    fail "${name}_fresh/id" "the create answered the session the sweep had stopped: $body"
+
+  fetch "${name}_stopped_row" GET "/api/sessions/$idle" "Host: 127.0.0.1" ||
+    fail "${name}_stopped_row/no_answer" "GET /api/sessions/$idle did not answer"
+  body="$(cat "$WORK/responses/${name}_stopped_row.body")"
+  case "$body" in
+    *'"status":"stopped"'*'"status_reason":"idle_stop"'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "${name}_stopped_row/status" \
+        "the create evicted the session the sweep had already stopped: $body"
+      ;;
+  esac
+
+  # Nothing left behind: the cap is one, and the cases after this one assume a free slot.
+  remove_session "${name}_removed_idle" "$idle"
+  remove_session "${name}_removed_fresh" "$fresh"
 }
 
 # HS-019: a delete for a session the table does not hold is ADR-0008's 404 `not_found` — the
@@ -1262,10 +1401,13 @@ phase_serve() {
     fail "serve/version" "cannot read version and schema_version from: $json"
   fi
 
-  # The owner the bad_owner case needs, the cap the create cases need, and the backend: `stub`
-  # from the *file*, so `--backend` is not what makes this boot work (HS-011's acceptance is both
-  # spellings; `tests/serve_cli.rs` covers the flag).
-  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "stub"\n' "$owner" >"$WORK/config.toml"
+  # The owner the bad_owner case needs, the cap the create cases need, the backend: `stub` from the
+  # *file*, so `--backend` is not what makes this boot work (HS-011's acceptance is both spellings;
+  # `tests/serve_cli.rs` covers the flag). And the idle stop at its shortest bound, which is one
+  # minute: `idle_stop_min` is whole minutes on purpose, so `case_idle_stop` costs that minute rather
+  # than a knob that would be a second spelling of the policy (ADR-0025).
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "stub"\nidle_stop_min = 1\n' "$owner" \
+    >"$WORK/config.toml"
 
   start_serve
   local case_fn

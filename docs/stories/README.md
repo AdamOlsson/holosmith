@@ -114,7 +114,7 @@ Every section of `HolosmithSpec.md` maps to at least one story. If a spec item g
 
 ## Decisions taken while slicing
 
-Twenty-four decisions were made that the spec does not make. Each has an ADR because each is hard to reverse, surprising to a later reader, and the result of a real trade-off.
+Twenty-five decisions were made that the spec does not make. Each has an ADR because each is hard to reverse, surprising to a later reader, and the result of a real trade-off.
 
 - [ADR-0001](../adr/0001-build-session-lifecycle-before-docker.md) — the session lifecycle is built against the stub backend before Docker exists. Consequence: there are two fakes, the in-process stub backend and the in-container fake pi, and they are not the same thing.
 - [ADR-0002](../adr/0002-security-guards-before-endpoints.md) — the browser guards and network isolation land before the features they protect.
@@ -140,6 +140,7 @@ Twenty-four decisions were made that the spec does not make. Each has an ADR bec
 - [ADR-0022](../adr/0022-the-way-back-and-no-stop-endpoint.md) — resume is the only way back, the cap is checked before its transition so a refused resume never strands a row in `starting`, and `SessionBackend::resume` is still uncalled because the provisioner is what brings a session back. Consequence: nothing in the API produces `stopped` until the eviction, idle-stop and drain stories do, and the page resumes once and retries the refused request once.
 - [ADR-0023](../adr/0023-the-delete-flow.md) — the delete flow's snapshot is the request's (so a failed one can answer 409 `unsaved_work` and leave the row untouched) and the removal is a task's; the turn is ended first by the ladder's `end_turn`, which stops and does not resume; the event log goes with the row, which makes the writer drop an event whose session has gone instead of refusing its batch. Consequence: a delete of a running session can take up to `abort_grace` to answer, and a backend failure leaves the row `deleting` for a repeated request to retry.
 - [ADR-0024](../adr/0024-the-cap-and-eviction.md) — the create evicts the least recently active `idle` session outside its own lock scope, because a state change is `Transitioner::apply`'s and that takes the lock itself; only `idle` is a candidate, and the victim is `last_active_at`'s. Consequence: a create at the cap with nothing idle still refuses with `cap_reached`, a resume on a full machine still refuses rather than evicting, and the page says in one word that nothing was deleted.
+- [ADR-0025](../adr/0025-the-idle-stop-sweeper.md) — the idle stop is a sweeper task on a fixed five-second tick, its candidates are one repository read of every `idle` row past `idle_stop_min`, each stop is one `apply` and one spawned best-effort `stop`, and `idle_stop_min = 0` turns the task off. Consequence: the tick is not a config key (so the gate waits a real minute), the reason vocabulary gains `idle_stop`, and the page says what happened in that reason's own words rather than the cap's.
 
 Gaps in the spec that had to be filled to write these stories, all reversible and all flagged in the story that fills them:
 

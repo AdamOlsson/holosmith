@@ -298,24 +298,30 @@ export function affordances(state: SessionState): Affordances {
 
 // What a stopped session's row says beyond its state, or `null` when its reason needs no sentence.
 //
-// The one word here is the one the machine writes: `evicted` is a create stopping the least recently
-// active idle session to take its slot (HS-020), and spec item 9 is emphatic that it costs nothing —
-// "history, worktree, events and images are kept. Nothing is deleted by the cap." So the row says so,
-// because a badge reading `stopped · evicted` alone reads like a loss. Every other reason is the
-// caller's to show as it is: a forced abort and a delete's own word are not this sentence, and
-// inventing a reassuring line for them would be a claim about work nobody preserved.
+// Two reasons earn one, and they are the two the machine writes without being asked: `evicted` is a
+// create stopping the least recently active idle session to take its slot (HS-020), and `idle_stop` is
+// a session left alone for longer than `idle_stop_min` (HS-021). Spec item 9 is emphatic that neither
+// costs anything — "history, worktree, events and images are kept. Nothing is deleted by the cap." — so
+// the row says so, because a badge reading `stopped · evicted` alone reads like a loss. The two
+// sentences differ in *why* (making room, or sitting idle) and share the promise that matters, which
+// is why they stay in one function. Every other reason is the caller's to show as it is: a forced
+// abort and a delete's own word are not this sentence, and inventing a reassuring line for them would
+// be a claim about work nobody preserved.
 export function stoppedNotice(reason: string | null): string | null {
   if (reason === "evicted") {
     return "stopped to make room — nothing was deleted, resume it to continue";
+  }
+  if (reason === "idle_stop") {
+    return "stopped after sitting idle — nothing was deleted, resume it to continue";
   }
   return null;
 }
 
 // What the row's detail span holds: the notice when the state and its reason earn one, and a dash
 // otherwise. One function because the span is written in two places — when the row is built, and when
-// a `session.status` frame turns a live row into a stopped one, which is how an eviction arrives
-// (HS-020) — and two spellings there would show the operator different things depending on whether
-// they were watching.
+// a `session.status` frame turns a live row into a stopped one, which is how an eviction (HS-020) or
+// an idle stop (HS-021) arrives — and two spellings there would show the operator different things
+// depending on whether they were watching.
 export const NO_DETAIL = "—";
 
 export function stoppedDetail(state: SessionState, reason: string | null): string {

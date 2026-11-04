@@ -55,10 +55,24 @@ const ORDER: &str = "ORDER BY last_active_at DESC, id ASC";
 /// the enum, over the `sessions_status` index (ADR-0012).
 const LIVE_COUNT: &str = "SELECT count(*) FROM sessions WHERE status IN (?1, ?2, ?3)";
 
-/// The eviction candidate's filter: the only row it may be chosen from, and the order that makes the
-/// choice total. A filter rather than a whole statement, so the reader stays [`select`]'s and a column
-/// added by a migration cannot be missed here while every other read keeps working.
-const OLDEST_IDLE: &str = "WHERE status = ?1 ORDER BY last_active_at ASC, id ASC LIMIT 1";
+/// The order both `idle` readers use: quietest first, and the id after it so two rows touched in the
+/// same second still have one answer. One constant, because `oldest_idle`'s doc says its order *is* the
+/// sweep's and a re-typed clause would make that claim false the day one of them changed.
+const QUIETEST_FIRST: &str = "ORDER BY last_active_at ASC, id ASC";
+
+/// The cap's victim: the one row it may be chosen from. A filter rather than a whole statement, so the
+/// reader stays [`select`]'s and a column added by a migration cannot be missed here while every other
+/// read keeps working.
+fn oldest_idle_filter() -> String {
+    format!("WHERE status = ?1 {QUIETEST_FIRST} LIMIT 1")
+}
+
+/// The idle stop's candidates (HS-021): the only status a sweep may choose from, and the bound that
+/// makes "quiet for too long" one comparison rather than a filter in Rust. `last_active_at` is whole
+/// seconds, so `<` is "strictly older than the cutoff".
+fn idle_before_filter() -> String {
+    format!("WHERE status = ?1 AND last_active_at < ?2 {QUIETEST_FIRST}")
+}
 
 /// The only way to read or write a `sessions` row. Obtained from `Database::sessions`.
 pub struct SessionRepository<'a> {
@@ -127,19 +141,33 @@ impl<'a> SessionRepository<'a> {
 
     /// Every session, or every session in one status, in `ORDER`.
     pub fn list(&self, status: Option<Status>) -> Result<Vec<Session>, RepoError> {
-        let sqlite = |error| RepoError::sqlite("list", error);
-        let sql = match status {
-            Some(_) => select(&format!("WHERE status = ?1 {ORDER}")),
-            None => select(ORDER),
-        };
-        let mut statement = self.connection.prepare(&sql).map_err(sqlite)?;
-        let rows = match status {
-            Some(status) => statement.query_map([status.as_str()], row_to_session),
-            None => statement.query_map([], row_to_session),
+        match status {
+            Some(status) => self.many(
+                "list",
+                &format!("WHERE status = ?1 {ORDER}"),
+                &[&status.as_str() as &dyn ToSql],
+            ),
+            None => self.many("list", ORDER, &[]),
         }
-        .map_err(sqlite)?;
-        let rows = rows.collect::<rusqlite::Result<Vec<_>>>().map_err(sqlite)?;
-        rows.into_iter().collect()
+    }
+
+    /// Every `idle` session whose `last_active_at` is older than `cutoff`: the idle stop's candidates
+    /// (HS-021), quietest first.
+    ///
+    /// **All of them, not one.** `oldest_idle` (HS-020) answers the cap's question — "whose slot can I
+    /// have?" — and has no time bound; a sweep is a policy over every session that has been quiet for
+    /// too long, so a tick that stopped one and waited for the next would make the stop interval a
+    /// function of how many sessions sat idle.
+    ///
+    /// The `status = 'idle'` predicate is the whole of the story's second bullet: a `starting`,
+    /// `running`, `error` or `deleting` row is not a candidate, so no sweep can end a turn nobody asked
+    /// to end.
+    pub fn idle_before(&self, cutoff: i64) -> Result<Vec<Session>, RepoError> {
+        self.many(
+            "idle_before",
+            &idle_before_filter(),
+            &[&Status::Idle.as_str() as &dyn ToSql, &cutoff as &dyn ToSql],
+        )
     }
 
     /// How many sessions are live — `starting`, `idle` or `running` — the set item 8's cap
@@ -170,7 +198,7 @@ impl<'a> SessionRepository<'a> {
     pub fn oldest_idle(&self) -> Result<Option<Session>, RepoError> {
         self.one(
             "oldest_idle",
-            OLDEST_IDLE,
+            &oldest_idle_filter(),
             &[&Status::Idle.as_str() as &dyn ToSql],
         )
     }
@@ -264,6 +292,27 @@ impl<'a> SessionRepository<'a> {
             .query_row(BUMP_LAST_SEQ, [id], |row| row.get(0))
             .optional()
             .map_err(|error| RepoError::sqlite("bump_last_seq", error))
+    }
+
+    /// The rows a filter matches, in the filter's own order. The collection readers' one statement,
+    /// so `list` and `idle_before` differ in their filter and not in how they read a row.
+    /// `operation` is the public method the statement belongs to, so the error names it.
+    fn many(
+        &self,
+        operation: &'static str,
+        filter: &str,
+        parameters: &[&dyn ToSql],
+    ) -> Result<Vec<Session>, RepoError> {
+        let sqlite = |error| RepoError::sqlite(operation, error);
+        let mut statement = self.connection.prepare(&select(filter)).map_err(sqlite)?;
+        let rows = statement
+            .query_map(parameters, row_to_session)
+            .map_err(sqlite)?;
+        let mut sessions = Vec::new();
+        for row in rows {
+            sessions.push(row.map_err(sqlite)??);
+        }
+        Ok(sessions)
     }
 
     /// The row a filter matches, or `None`: the reads that must not fail on "no such row".
