@@ -87,10 +87,11 @@ document.
 | HS-029 name conflicts, `stop`, `resume`, start lock | PER-61 | `e826539` | 0037 |
 
 **Next issue: `PER-62` (HS-030 — exit classification)**, then `HS-031` (real pi, `PER-63`) and so on in
-`HS-###` order. The whole Docker chain `HS-030` … `HS-058` is unblocked now; what remains blocked is
-`HS-066` onwards (phase 2, behind `HS-047`/`HS-056`/`HS-057`) and `HS-075` (`PER-107`), which is
-independent and still unstarted. Its §8 note — the four decisions and three landmines — is still the
-brief for it.
+`HS-###` order. The whole Docker chain `HS-030` … `HS-058` is unblocked now. What is still behind something
+is phase 2 (`HS-047` … `HS-058` are `HS-046`'s, the phase-1 verification run, which is the story that gates
+the phase; `HS-066` … `HS-074` sit behind those and behind `HS-049`/`HS-050`), and `HS-075` (`PER-107`),
+which is independent of all of it and **still unstarted** — §8's own note carries its four decisions and
+three landmines.
 
 Ranking, per `PROMPT.md`: Linear priority (all are `No priority`) → `HS-###` order in `docs/stories/` →
 anything already `In Progress` first → skip an issue whose `Blocked by` stories are not `Done`.
