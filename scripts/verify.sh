@@ -326,6 +326,7 @@ serve_cases=(
   case_worktree_refusal
   case_container_mounts
   case_docker_container
+  case_docker_resume
 )
 
 # V1 (HS-027): the hardened `.git` mounts, measured on a real daemon. Three writes must fail, three git
@@ -534,6 +535,95 @@ case_docker_container() {
   # Its server is left running: `phase_serve` stops whatever is up after the last case, and a case that
   # stopped its own would leave that call with no pid to signal (HS-027's review found this shape in
   # `case_worktree`'s python guard).
+  rm -rf "$root"
+}
+
+# HS-029's proof from the artifact: a session can be resumed, and the resume replaces whatever container the
+# first create left. The API has no `stop` (ADR-0022), so the observable sequence is create → error at the
+# agent step → `POST /resume` → 202 → error at the agent step again, with nothing left behind either time.
+#
+# Its projects root lives under `target/` for the same reason `case_docker_container`'s does: the daemon
+# resolves bind-mount sources in the host's namespace and `$WORK` is on `/tmp` (ADR-0035).
+case_docker_resume() {
+  local name=case_docker_resume response body id image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
+  local root="$repo_root/target/verify-resume-$$" projects="$repo_root/target/verify-resume-$$/projects"
+  local repo="$repo_root/target/verify-resume-$$/projects/holosmith"
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    printf 'SKIP %s: no Docker daemon answers (tests/container.rs is the same check)\n' "$name"
+    return 0
+  fi
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    printf 'SKIP %s: no image %s (HOLOSMITH_TEST_IMAGE names another)\n' "$name" "$image"
+    return 0
+  fi
+  stop_serve
+  rm -rf "$root"
+  mkdir -p "$repo" || fail "$name/mkdir" "could not create $repo"
+  git -C "$repo" init --quiet . || fail "$name/git" "git init did not work in $repo"
+  git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet \
+    --allow-empty -m "the first commit" || fail "$name/git" "git commit did not work in $repo"
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\nagent_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
+    "$owner" "$projects" "$image" >"$WORK/config-resume.toml"
+  start_serve "$WORK/config-resume.toml" "$WORK/data-resume"
+
+  fetch_body "${name}_create" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-resume-1" ||
+    fail "${name}_create/no_answer" "POST /api/sessions did not answer"
+  expect_status "${name}_create" "$(answer "${name}_create")" 202
+  body="$(cat "$WORK/responses/${name}_create.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id" ] || fail "${name}_create/id" "the response names no id: $body"
+
+  # Wait for the first provisioning attempt to finish: its teardown is what makes a leftover impossible, and
+  # the resume is what must work anyway.
+  body=""
+  for _ in $(seq 1 300); do
+    fetch "${name}_row1" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "${name}_row1/no_answer" "GET /api/sessions/$id did not answer"
+    body="$(cat "$WORK/responses/${name}_row1.body")"
+    case "$body" in
+      *'"status":"starting"'*) sleep 0.1 ;;
+      *) break ;;
+    esac
+  done
+  printf '%s\n' "$body" | grep -qF 'the pi step' ||
+    fail "${name}_row1/reason" "the first attempt did not reach the agent step: $body"
+  assertions=$((assertions + 1))
+
+  # A resume of an `error` session: 202, then `starting`, then the agent step again — which means the
+  # network and container steps ran a second time over a session whose container the first attempt removed.
+  fetch_body "${name}_resume" POST "/api/sessions/$id/resume" '' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_resume/no_answer" "POST /api/sessions/$id/resume did not answer"
+  expect_status "${name}_resume" "$(answer "${name}_resume")" 202
+
+  body=""
+  for _ in $(seq 1 300); do
+    fetch "${name}_row2" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "${name}_row2/no_answer" "GET /api/sessions/$id did not answer"
+    body="$(cat "$WORK/responses/${name}_row2.body")"
+    case "$body" in
+      *'"status":"starting"'*) sleep 0.1 ;;
+      *'"status":"error"'*) break ;;
+      *) break ;;
+    esac
+  done
+  printf '%s\n' "$body" | grep -qF 'the pi step' ||
+    fail "${name}_row2/reason" "the resumed attempt did not reach the agent step: $body"
+  assertions=$((assertions + 1))
+  # Nothing left behind after the second teardown either.
+  if docker container inspect "s_$id" >/dev/null 2>&1; then
+    fail "${name}/container_left" "the resumed session left its container behind"
+  fi
+  assertions=$((assertions + 1))
+  if docker network inspect "agents_$id" >/dev/null 2>&1; then
+    fail "${name}/network_left" "the resumed session left its network behind"
+  fi
+  assertions=$((assertions + 1))
+  # Its server is left running: `phase_serve` stops whatever is up after the last case.
   rm -rf "$root"
 }
 

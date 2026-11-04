@@ -25,6 +25,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::Arc;
 
 use holosmith::backend::{DockerBackend, Provisioned, SessionBackend, Step};
 use holosmith::container::{
@@ -40,6 +41,9 @@ use holosmith::worktree::Worktree;
 /// `s_<id>`/`agents_<id>`: one id for V1's probe and one for the container run.
 const ID_V1: &str = "0123456789abcdef";
 const ID_RUN: &str = "fedcba9876543210";
+const ID_RESUME: &str = "aaaabbbbccccdddd";
+const ID_START: &str = "1111222233334444";
+const ID_RACE: &str = "9999888877776666";
 
 /// A scratch repository under the workspace's `target/`, which the daemon can see.
 ///
@@ -559,4 +563,284 @@ fn the_container_step_runs_a_limited_container_with_no_way_out() {
         !docker.succeeds(&["network", "inspect", &container.network]),
         "the network outlived the delete"
     );
+}
+
+/// A runtime for the tests that drive the backend's `async` methods.
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .expect("a runtime is buildable")
+}
+
+/// A started session: worktree, network and container, through the real backend.
+fn start(backend: &DockerBackend, session: &Session) {
+    runtime().block_on(async {
+        backend
+            .provision(session, Step::Network)
+            .await
+            .expect("the network step works");
+        backend
+            .provision(session, Step::Container)
+            .await
+            .expect("the container step works");
+    });
+}
+
+/// Wait for a container to be gone, up to two seconds.
+///
+/// `--rm` removes a container when it exits, and the daemon does that *after* `docker stop` has answered —
+/// measured, and the reason spec item 6 asks for `rm -f` before every start rather than trusting the flag.
+/// A test that reads `container_exists` the instant a stop returns races that removal (this test did, one
+/// run in three).
+fn wait_gone(docker: &Docker, name: &str) -> bool {
+    for _ in 0..100 {
+        if !docker.container_exists(name) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    false
+}
+
+/// `docker exec s_<id> sh -c <script>`, answering its stdout.
+fn exec(container: &str, script: &str) -> String {
+    let output = Command::new("docker")
+        .args(["exec", container, "sh", "-c", script])
+        .output()
+        .expect("docker exec runs");
+    assert!(
+        output.status.success(),
+        "docker exec failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+#[test]
+fn a_second_start_never_fails_on_a_leftover_name() {
+    // Spec item 6's first line, and the reason it exists: `--rm` covers a container that *stopped*, and
+    // nothing covers one this process lost track of — a `kill -9`, a crash, a row removed while its
+    // container lived (HS-044 reconciles those at startup). So a start removes any container of its name
+    // first, and asking twice is boring.
+    if !ready() {
+        return;
+    }
+    let scratch = Scratch::new("start", ID_START);
+    scratch.project();
+    let settings = settings(&scratch.path);
+    let backend = DockerBackend::new(settings.clone());
+    let docker = settings.docker();
+    let session = session(ID_START);
+    let container = SessionContainer::of(&settings, &session);
+    rm_container(&container.name);
+    docker.remove_network(&container.network);
+
+    start(&backend, &session);
+    let first = docker
+        .inspect(&container.name, "{{.Id}}")
+        .expect("the first container");
+    assert_eq!(
+        docker
+            .inspect(&container.name, "{{.State.Status}}")
+            .expect("the container answers for its status"),
+        "running"
+    );
+
+    // Stop it: `--rm` makes the daemon remove it — but not before `docker stop` returns. Measured here: the
+    // removal is the daemon's own work after the process has exited, so it lands a moment later. That window
+    // is exactly why the spec asks for `rm -f` before every start rather than trusting the flag.
+    runtime().block_on(async {
+        backend.stop(&session).await.expect("a stop works");
+    });
+    assert!(
+        wait_gone(&docker, &container.name),
+        "`--rm` left the container behind for two seconds"
+    );
+
+    // …and a start after that — the "leftover" case the spec's `rm -f` is for — succeeds.
+    start(&backend, &session);
+    let second = docker
+        .inspect(&container.name, "{{.Id}}")
+        .expect("the second container");
+    assert_ne!(first, second, "the second start reused the first container");
+    assert_eq!(
+        docker
+            .inspect(&container.name, "{{.State.Status}}")
+            .expect("the container answers for its status"),
+        "running"
+    );
+
+    // The leftover this story is really about: a container this process cannot stop, because it does not
+    // know it is there. Plant one under the name and start anyway.
+    runtime().block_on(async {
+        backend.stop(&session).await.expect("a stop works");
+    });
+    let output = Command::new("docker")
+        .args(container.run_args())
+        .output()
+        .expect("docker runs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        docker
+            .inspect(&container.name, "{{.Id}}")
+            .expect("the container has an id"),
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "the planted container is not the one under the name"
+    );
+    start(&backend, &session);
+    assert_ne!(
+        docker
+            .inspect(&container.name, "{{.Id}}")
+            .expect("the container has an id"),
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "the start did not replace the leftover container"
+    );
+
+    runtime().block_on(async {
+        backend.delete(&session).await.expect("the teardown works");
+    });
+}
+
+#[test]
+fn removing_the_container_loses_nothing_the_worktree_holds() {
+    // The acceptance's third line, and the one claim this system rests on: session data lives in host
+    // directories, so a container is disposable. The probe is a commit the *container* makes — if the host's
+    // branch still has it after a stop, a removal and a resume, the claim is a fact.
+    if !ready() {
+        return;
+    }
+    let scratch = Scratch::new("resume", ID_RESUME);
+    scratch.project();
+    let settings = settings(&scratch.path);
+    let backend = DockerBackend::new(settings.clone());
+    let docker = settings.docker();
+    let session = session(ID_RESUME);
+    let container = SessionContainer::of(&settings, &session);
+    rm_container(&container.name);
+    docker.remove_network(&container.network);
+
+    start(&backend, &session);
+    exec(
+        &container.name,
+        "cd /work && echo written-by-the-container > from-container.txt && \
+         git add from-container.txt && \
+         git -c user.email=verify@example -c user.name=verify commit --quiet -m from-container",
+    );
+    let head = exec(&container.name, &format!("git rev-parse agent/{ID_RESUME}"));
+
+    // The container goes away entirely — stopped, then removed — and comes back.
+    runtime().block_on(async {
+        backend.stop(&session).await.expect("a stop works");
+    });
+    assert!(
+        wait_gone(&docker, &container.name),
+        "the stop left the container behind for two seconds"
+    );
+    assert!(
+        docker.remove_container(&container.name) || !docker.container_exists(&container.name),
+        "the removal is idempotent"
+    );
+
+    runtime().block_on(async {
+        backend.resume(&session).await.expect("a resume works");
+    });
+    assert_eq!(
+        docker
+            .inspect(&container.name, "{{.State.Status}}")
+            .expect("the container answers for its status"),
+        "running",
+        "the resume did not start a container"
+    );
+    // The container the resume made finds the work: the commit, the branch, and the file.
+    assert_eq!(
+        exec(&container.name, &format!("git rev-parse agent/{ID_RESUME}")),
+        head,
+        "the branch moved when the container was replaced"
+    );
+    assert_eq!(
+        exec(&container.name, "cat /work/from-container.txt"),
+        "written-by-the-container"
+    );
+    assert!(
+        scratch
+            .path
+            .join(".worktrees")
+            .join(ID_RESUME)
+            .join("from-container.txt")
+            .is_file(),
+        "the file the container wrote is not on the host"
+    );
+
+    runtime().block_on(async {
+        backend.delete(&session).await.expect("the teardown works");
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_starts_of_one_session_do_not_race() {
+    // Spec item 6's fourth line. Without the lock these eight starts interleave `rm -f` and `run` and some
+    // fail with "the container name is already in use" — the failure is timing-dependent by nature, so the
+    // assertion is the invariant that matters: every start succeeded and exactly one container is running.
+    if !ready() {
+        return;
+    }
+    let scratch = Scratch::new("race", ID_RACE);
+    scratch.project();
+    let settings = settings(&scratch.path);
+    let backend = Arc::new(DockerBackend::new(settings.clone()));
+    let docker = settings.docker();
+    let container = SessionContainer::of(&settings, &session(ID_RACE));
+    rm_container(&container.name);
+    docker.remove_network(&container.network);
+    backend
+        .provision(&session(ID_RACE), Step::Network)
+        .await
+        .expect("the network step works");
+
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let backend = Arc::clone(&backend);
+        handles.push(tokio::spawn(async move {
+            backend.provision(&session(ID_RACE), Step::Container).await
+        }));
+    }
+    let mut failures = Vec::new();
+    for handle in handles {
+        match handle.await.expect("the task does not panic") {
+            Ok(_) => {}
+            Err(error) => failures.push(error.to_string()),
+        }
+    }
+    assert!(failures.is_empty(), "a start raced another: {failures:?}");
+    assert_eq!(
+        docker
+            .inspect(&container.name, "{{.State.Status}}")
+            .expect("the container answers for its status"),
+        "running"
+    );
+    let running = Command::new("docker")
+        .args([
+            "ps",
+            "--quiet",
+            "--filter",
+            &format!("name=^{}$", container.name),
+        ])
+        .output()
+        .expect("docker ps runs");
+    assert_eq!(
+        String::from_utf8_lossy(&running.stdout).lines().count(),
+        1,
+        "more than one container answers to the session's name"
+    );
+
+    backend
+        .delete(&session(ID_RACE))
+        .await
+        .expect("the teardown works");
 }

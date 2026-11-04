@@ -17,6 +17,9 @@
 use std::fmt;
 use std::process::Command;
 
+/// How long a stopped container has before it is killed: spec item 6's `docker stop -t 10`.
+pub const STOP_SECONDS: &str = "10";
+
 /// The `docker` command, pointed at the daemon `docker_host` names.
 ///
 /// `None` leaves the choice to the CLI's own default (the rootful socket), which is what `docker_host`
@@ -98,6 +101,16 @@ impl Docker {
     /// not-found", which HS-029 uses before every start and the teardown uses after a failure).
     pub fn remove_container(&self, name: &str) -> bool {
         self.succeeds(&["rm", "--force", name])
+    }
+
+    /// Stop a running container, waiting spec item 6's ten seconds before it is killed.
+    ///
+    /// Answers `false` when there was no container, which is an ordinary answer: a session that was never
+    /// started, or one whose `--rm` container has already gone, is not a failure (ADR-0023's rule, applied to
+    /// the stop policy). HS-030 makes the *flag* that says this stop was expected; the ten seconds are the
+    /// spec's.
+    pub fn stop_container(&self, name: &str) -> bool {
+        self.succeeds(&["stop", "--time", STOP_SECONDS, name])
     }
 
     /// Start a container from `arguments` (a [`crate::container::SessionContainer`]'s run vector).

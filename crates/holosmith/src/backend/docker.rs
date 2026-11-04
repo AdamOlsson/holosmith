@@ -18,6 +18,9 @@
 //! container needs — an **internal** network of its own, which is the isolation — and HS-036 owns the rest
 //! of the network's story. HS-031 replaces the detached launch with pi's RPC over the container's stdio.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, PoisonError};
+
 use super::{BackendError, Provisioned, SessionBackend, Step, TurnEnd};
 use crate::container::{ContainerSettings, SessionContainer, network_name};
 use crate::docker::{Docker, DockerError};
@@ -35,6 +38,15 @@ use crate::worktree::{Refusal, Worktree, refuse, repository_of};
 #[derive(Debug, Clone)]
 pub struct DockerBackend {
     settings: ContainerSettings,
+    /// One `async` mutex per session being started, so two starts of one session cannot interleave.
+    ///
+    /// Spec item 6: "Two starts for the same session cannot race: a per-session lock serialises them." A
+    /// start is `docker rm -f` followed by `docker run`, and two of those interleaved produce a
+    /// "name already in use" that neither caller can explain. The lock is `tokio`'s rather than `std`'s
+    /// because it is held across an `.await`, and the map behind it is a `std` mutex that is never held
+    /// across one — the map is only touched to hand out or drop an `Arc` (the same shape ADR-0012's database
+    /// mutex has, and for the same reason).
+    starts: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl DockerBackend {
@@ -44,7 +56,35 @@ impl DockerBackend {
     /// projects root, the image, the daemon's address and the limits come from. A backend built without them
     /// would have to guess, and a guess about an image is a container that does not start.
     pub fn new(settings: ContainerSettings) -> Self {
-        Self { settings }
+        Self {
+            settings,
+            starts: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// The session's start lock, taken for the whole of `start`/`resume`.
+    ///
+    /// The entry is dropped when it is the last one holding it, so the map is swept rather than grown by
+    /// one entry per session this process ever served. `Arc::strong_count` is the refcount of the mutex
+    /// plus the map's own, so `<= 2` means "nobody else is waiting" — the pattern a `Weak`-based registry
+    /// would need a second map for.
+    async fn start_lock(&self, session_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut starts = self.starts.lock().unwrap_or_else(PoisonError::into_inner);
+            Arc::clone(
+                starts
+                    .entry(session_id.to_string())
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+            )
+        };
+        let guard = lock.clone().lock_owned().await;
+        // Drop the map's entry if this is the only holder left: `strong_count` is 2 when it is (the map's
+        // and the guard's).
+        let mut starts = self.starts.lock().unwrap_or_else(PoisonError::into_inner);
+        if Arc::strong_count(&lock) <= 2 {
+            starts.remove(session_id);
+        }
+        guard
     }
 
     /// The worktree this session is entitled to, from the machine's projects root.
@@ -151,6 +191,22 @@ impl DockerBackend {
     /// until then the container is detached and runs the image's own command, which is what makes
     /// "the flags are right" inspectable before there is an agent to run.
     async fn provision_container(&self, session: &Session) -> Result<Provisioned, BackendError> {
+        // Serialised with a resume of the same session: both are "remove any leftover container, then start
+        // one", and interleaving them is a name conflict neither caller could explain (HS-029).
+        let _start = self.start_lock(&session.id).await;
+        self.start_container(session)
+            .await
+            .map(|_| Provisioned::Nothing)
+    }
+
+    /// Remove any container of this name, then start one: the body a create's container step and a resume
+    /// share.
+    ///
+    /// Spec item 6: "Before every start, `docker rm -f s_<id>` runs and not-found is ignored." `--rm` already
+    /// means a stopped container leaves no name behind, so the removal is for the case the flag cannot
+    /// cover: a container the process lost track of — a crash, a `kill -9`, a session removed from the row
+    /// while its container lived (HS-044 reconciles that at startup; this makes the next start boring).
+    async fn start_container(&self, session: &Session) -> Result<(), BackendError> {
         let container = self.container(session);
         container
             .mounts
@@ -158,7 +214,9 @@ impl DockerBackend {
             .map_err(|missing| BackendError::failed(format!("the container step: {missing}")))?;
         let arguments = container.run_args();
         let name = container.name.clone();
+        let leftover = name.clone();
         let id = Self::docker(Step::Container, self.settings.docker(), move |docker| {
+            docker.remove_container(&leftover);
             docker.run_container(&arguments)
         })
         .await?;
@@ -169,7 +227,7 @@ impl DockerBackend {
             container_id = %id,
             "the container is running"
         );
-        Ok(Provisioned::Nothing)
+        Ok(())
     }
 
     /// `git worktree add` (or the adoption of one that is already there), and the record it makes.
@@ -328,12 +386,45 @@ impl SessionBackend for DockerBackend {
         Err(Self::refuse("abort"))
     }
 
-    async fn stop(&self, _session: &Session) -> Result<(), BackendError> {
-        Err(Self::refuse("stop"))
+    /// Stop the container, keeping the worktree, the history and the events (spec item 6).
+    ///
+    /// `docker stop --time 10` and not `rm --force`: the ten seconds are what lets pi flush a frame it is
+    /// writing, and `--rm` is what removes the container afterwards, so a stop needs no removal of its own.
+    /// A container that is not there answers `Ok` — a session that was never started, or stopped twice, is
+    /// not a failure (ADR-0023).
+    ///
+    /// The *flag* that says this stop was expected, and the classification of how the container then
+    /// exited, are HS-030's.
+    async fn stop(&self, session: &Session) -> Result<(), BackendError> {
+        let name = self.container(session).name;
+        let stopped = Self::docker(Step::Container, self.settings.docker(), move |docker| {
+            Ok(docker.stop_container(&name))
+        })
+        .await?;
+        if !stopped {
+            tracing::debug!(
+                target: "holosmith::backend",
+                session = %session.id,
+                "there was no container to stop"
+            );
+        }
+        Ok(())
     }
 
-    async fn resume(&self, _session: &Session) -> Result<(), BackendError> {
-        Err(Self::refuse("resume"))
+    /// Bring a stopped session back with the same id.
+    ///
+    /// The container and the network, nothing else: the worktree is the provisioner's step, and its `ensure`
+    /// is create-or-adopt (ADR-0029), so a resumed session's commits are still on its branch. This is the
+    /// story that gives `SessionBackend::resume` a body — it has been uncalled since ADR-0022 — because a
+    /// start that cannot cope with a leftover container is not a start (HS-029).
+    async fn resume(&self, session: &Session) -> Result<(), BackendError> {
+        let _start = self.start_lock(&session.id).await;
+        let network = self.network(session);
+        Self::docker(Step::Network, self.settings.docker(), move |docker| {
+            docker.create_internal_network(&network)
+        })
+        .await?;
+        self.start_container(session).await
     }
 
     /// Remove everything the session owns: the container, its network, the worktree and its branch.
@@ -407,7 +498,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_lifecycle_operation_refuses_and_says_which_one_it_was() {
+    async fn the_operations_this_build_does_not_implement_refuse_and_say_which_one_it_was() {
+        // `stop` and `resume` left this list in HS-029: both are real now (a `docker stop`, and a network
+        // plus a container). What is left is the turn's own machinery — pi's RPC is HS-031/HS-032, the
+        // ladder's three rungs are HS-016's on top of them, and the WIP snapshot is HS-042's.
         let backend = backend();
         let session = session();
         // `start_turn` answers how the turn ended; it refuses before it would append anything, so
@@ -422,8 +516,6 @@ mod tests {
             ("steer", backend.steer(&session, "more").await),
             ("clear_queue", backend.clear_queue(&session).await),
             ("abort", backend.abort(&session).await),
-            ("stop", backend.stop(&session).await),
-            ("resume", backend.resume(&session).await),
             ("snapshot", backend.snapshot(&session).await),
         ] {
             let error = error.expect_err("every operation refuses");

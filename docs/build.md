@@ -381,6 +381,13 @@ Until HS-031 attaches pi's stdio the container runs `sleep infinity` (the placeh
 `container::IDLE_COMMAND`), which is what lets `docker inspect` show the flags before there is an agent to
 run in them.
 
+**Every start is `docker rm -f s_<id>` then `docker run`** (HS-029, ADR-0037), and the two are serialised
+per session, because two starts interleaved produce "the container name is already in use" — which is one
+start working as designed being read as the other one failing. `--rm` alone is not enough: it removes an
+exited container a moment *after* `docker stop` has answered (measured), and it does nothing about a
+container the process lost track of. `stop` is `docker stop --time 10`; the ten seconds are the spec's, and
+the *expected-stop* flag that makes a stop distinguishable from a crash is HS-030's.
+
 Three things bite on a real machine:
 
 - **`docker_host`**: unset means `unix:///var/run/docker.sock`, the rootful socket. A

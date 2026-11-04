@@ -354,6 +354,10 @@ _Avoid_: Partial log, clipped history, head cut
 The git worktree that holds a session's files, on its own branch: `<projects>/.worktrees/<id>`, on branch `agent/<id>`, made from the project repository's `HEAD`. Its machine name is `Worktree` in `crates/holosmith/src/worktree.rs`, which is also where the creating, counting and removing live.
 _Avoid_: Checkout, copy, clone
 
+**Start lock**:
+The per-session mutex a container start holds, so two starts of one session cannot interleave `rm -f` with `run` and make one of them fail with "the name is already in use". It is `DockerBackend`'s, and it is `tokio`'s because it is held across an `await`.
+_Avoid_: Create lock, session mutex, start guard
+
 **Session container**:
 The container one session runs in: the name `s_<id>`, the image `agent_image` names, and the mounts the session needs. Its machine name is `SessionContainer` in `crates/holosmith/src/container.rs`.
 _Avoid_: Agent container, sandbox, box
