@@ -280,7 +280,7 @@ impl ApiError {
             StatusCode::CONFLICT,
             CAP_REACHED,
             "this machine already runs the maximum number of live sessions and none of them is \
-             idle to stop",
+             idle, so there is no session to stop",
         )
     }
 

@@ -308,7 +308,11 @@ async fn slot_for(
     body: &CreateBody,
     key: &str,
 ) -> Result<(Session, bool), ApiError> {
-    let bound = usize::try_from(state.config.max_live_sessions).unwrap_or(usize::MAX) + 1;
+    // `saturating_add`, not `+ 1`: the bound is a safety net, and an arithmetic panic in a request
+    // path for a number nobody can reach is still a panic waiting for a 32-bit build.
+    let bound = usize::try_from(state.config.max_live_sessions)
+        .unwrap_or(usize::MAX)
+        .saturating_add(1);
     for _ in 0..bound {
         match create_locked(state, body, key)? {
             Slot::Inserted(session) => return Ok((session, true)),

@@ -1,4 +1,4 @@
-# RESUME — orchestrator handoff (cold start, after nineteen stories)
+# RESUME — orchestrator handoff (cold start, after twenty stories)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating
 procedure and still governs; this file is the state of the world — what exists, what the environment
@@ -40,7 +40,7 @@ Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is
 commit is **pushed** (see the note on pushing below). `HEAD` is `db95a3f`; any commit after it is
 bookkeeping.
 
-**Linear: 19 Done, 61 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-019`
+**Linear: 20 Done, 60 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-020`
 (`PER-33` … `PER-50`).
 
 | Story | Linear | Commits | ADR |
@@ -64,9 +64,10 @@ bookkeeping.
 | HS-017 steer a running turn | PER-49 | `0099ca3`, `8ff1d77` | 0021 |
 | HS-018 stopped state and resume | PER-50 | `dce53c4`, `ff9d907` | 0022 |
 | HS-019 delete flow | PER-51 | `3d5c415`, `7c4ea02`, `cd85572`, `db95a3f` | 0023 |
+| HS-020 cap and eviction | PER-52 | `a3c6825` | 0024 |
 
-**Next issue: `PER-52` (HS-020 — cap and eviction).** Then `PER-53` (HS-021 — idle stop), `PER-54`
-(HS-022 — turn timeout), and onward in `HS-###` order.
+**Next issue: `PER-53` (HS-021 — idle stop).** Then `PER-54` (HS-022 — turn timeout), and onward in
+`HS-###` order.
 
 Ranking, per `PROMPT.md`: Linear priority (all are `No priority`) → `HS-###` order in `docs/stories/` →
 anything already `In Progress` first → skip an issue whose `Blocked by` stories are not `Done`.
@@ -239,15 +240,15 @@ If that fails, **stop and report** — that is a `PROMPT.md` stop condition.
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                     # 212 lib + 24 integration binaries (14 in tests/delete.rs)
-cd web && npm test             # 18 transcript tests (node's own runner)
+cargo test                     # 217 lib + 25 integration binaries (14 delete.rs, 5 eviction.rs)
+cd web && npm test             # 20 transcript tests (node's own runner)
 scripts/verify.sh              # THE one-command gate since HS-006
 ```
 
 `scripts/verify.sh` runs six phases, cheapest first: `fmt`, `clippy`, `test`, `build`
 (`scripts/build.sh`, which itself runs `build-web.sh` — `npm test` then Vite — and `check-static.sh`
 last), `embed` (`scripts/check-embed.sh`), then `serve` — the **shipped musl artifact** booted on
-`--port 0` with a temp data dir, running **35 cases plus a CORS sweep (150 assertions)**, then torn down
+`--port 0` with a temp data dir, running **36 cases plus a CORS sweep (166 assertions)**, then torn down
 with `SIGTERM` and an asserted exit 0. It takes ~3 min (both musl targets). `--no-build` skips `build`
 and `embed`; `--keep` keeps the work dir.
 
@@ -345,9 +346,9 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   three migrations, the guards, the event writer, the SSE stream, the stub backend and its four-step
   provisioner, the enforced state machine, the abort ladder, the delete flow, the Sessions screen with its create form,
   the session screen at `/sessions/<id>` with a live transcript and a four-action composer.
-- **Not built yet:** the **cap's eviction** and the **idle/drain stop** (HS-020 evict, HS-021 idle
-  stop, HS-044 drain — the delete can leave a session `stopped`, but nothing stops one on purpose
-  yet), the turn timeout (HS-022), the token budget
+- **Not built yet:** the **idle stop and the drain** (HS-021 idle stop, HS-044 drain — the cap now
+  stops an idle session when a create needs its slot, so `stopped` has one producer), the turn timeout
+  (HS-022), the token budget
   (HS-023), tool-output files and `output_ref` (HS-033), usage totals (HS-034), the preview listener
   (HS-041), Docker (HS-024+), merge, publish, the hub, releases, and any **delete affordance in
   `web/`**.
@@ -574,7 +575,11 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 - **`docs/build.md` is a story deliverable, not orchestrator-only.** If a story changes prerequisites or
   gates, the doc is in scope, and its prose must be reflowed (~100 columns), not just appended to.
 - **Every story adds at least one `case_*` to `scripts/verify.sh`.** The rule is in bold in
-  `docs/build.md`, and the reviewer enforces it. The current gate is 35 cases / 150 assertions.
+  `docs/build.md`, and the reviewer enforces it. The current gate is 36 cases / 166 assertions.
+- **A create evicts outside its own lock scope.** The create's insert is one scope
+  (`create_locked` → `Slot::{Inserted,Existing,Full}`) and an eviction is `Transitioner::apply`'s, which
+  takes the same lock; the loop in `slot_for` is what joins them, and it terminates because each
+  eviction strictly lowers the live count. Do not "simplify" that by writing the status in the scope.
 - **Adding an ADR means updating `docs/stories/README.md`**: the "Decisions taken while slicing" count
   (now nineteen) and the bullet list. A reviewer will check the links resolve — three did not, once.
 - **An ADR that a later story changes gets a one-line "Superseded by ADR-00xx" note**, not a rewrite
@@ -657,53 +662,56 @@ cd /home/adamolsson/projects/holosmith
 git status --short                          # must be clean
 . ~/.pi/toolchains/env.sh
 python3 /tmp/lin.py issues | grep -v ' Done ' | head   # next unfinished (recreate /tmp/lin.py, §2)
-python3 /tmp/lin.py issue PER-52            # sanity-check Linear is reachable and scoped
-scripts/verify.sh                           # baseline green (~4 min, 35 cases, 150 assertions)
+python3 /tmp/lin.py issue PER-53            # sanity-check Linear is reachable and scoped
+scripts/verify.sh                           # baseline green (~4 min, 36 cases, 166 assertions)
 ```
 
-Then start the cycle at **`PER-52` (HS-020 — cap and eviction)**. Read §1's two facts first: the
-ladder has `end_turn` and `climb`, and the page has been rendered (so a DOM claim needs a Chromium run).
+Then start the cycle at **`PER-53` (HS-021 — idle stop)**. Read §1's two facts first: the ladder has
+`end_turn` and `climb`, and the page has been rendered (so a DOM claim needs a Chromium run).
 
-### What HS-020 is about, so the first brief is fast
+### What HS-021 is about, so the first brief is fast
 
-Acceptance, verbatim from `docs/stories/phase-1-session-lifecycle-stub.md`:
+Acceptance, verbatim from `docs/stories/phase-1-session-lifecycle-stub.md` (Size S, spec item 13):
 
-- The cap counts live sessions only: `starting`, `idle`, `running`. `stopped`, `error`, `deleting` do not count.
-- Create at cap evicts the least recently active `idle` session → `stopped` with reason `evicted`, then proceeds.
-- If nothing is evictable (all live sessions are `running` or `starting`) → 409 `cap_reached`.
-- Eviction deletes nothing: history, worktree, events and images survive, and the UI says so.
-- `max_live_sessions` is configurable and validated as ≥ 1.
+- A sweeper moves `idle` sessions whose `last_active_at` is older than `idle_stop_min` to `stopped` with
+  reason `idle_stop`.
+- It never touches `running`, `starting`, `error` or `deleting`.
+- Stopping frees a cap slot immediately.
+- The sweep is observable: a `session.status` event with the reason, and a log line per stop.
 
-**Already in place:** `live_count()` (the three live states, over `sessions_status`), `list()`'s
-`ORDER BY last_active_at DESC, id ASC` over the same index (`sessions_last_active` serves an ascending
-read too), the table's `idle + evict → stopped` row, `409 cap_reached`, `cap_reached()` in
-`http/error.rs`, the `create_locked` one-scope lookup/count/insert, `SessionBackend::stop`, and the
-ladder's `end_turn` shape (eviction does **not** climb the ladder at all — an idle session has no turn).
+**Already in place:** the config key `idle_stop_min` (default and validation included), the table's
+`idle + idle_stop → stopped` row, `Transitioner::apply`, `SessionBackend::stop`, and HS-020's eviction as
+the exact shape to reuse: `SessionRepository::oldest_idle()` (the LRU candidate), the row-before-container
+order with a best-effort `stop`, `Trigger::IdleStop`, and `stoppedNotice` in `web/src/transcript.ts` if
+the page should say the same "nothing was deleted" sentence for `idle_stop` (HS-020 deliberately left that
+word out of the map, and `idle_stop_min = 0` probably has to mean "off" — check the config's own
+validation before deciding).
 
-**What is missing:** the eviction itself (nothing calls `Trigger::Evict`), a repository read for “the
-least recently active idle session” (``list(Some(Status::Idle))`` is descending; the eviction wants the
-*last* one or a new `oldest_idle()`), the create's new branch (at cap → evict → re-count → insert), and
-the UI's “stopped because the machine was full” message (the page renders `status_reason` already, so
-check `web/src/main.ts` before adding anything).
+**What is missing:** the sweeper itself (a task on a timer in `serve`, with a shutdown that does not
+wait for it), the candidate query for *elapsed* idleness (``oldest_idle`` is "the least recently active
+idle", which is not the same as "older than `idle_stop_min`" — a clock and a bound are needed), and the
+gate's case (a one-minute config is too slow for `verify.sh`, so the sweep needs a test-only short
+interval, the way `abort_grace` is shortened in tests).
 
-**Decide canonically and record:** whether the create evicts one session or loops until it has a slot;
-whether the eviction's `stopped` write and the create's insert share the one lock scope (they must not
-strand a `starting` row — ADR-0022's lesson); what happens when the evicted session's `stop` call
-fails (the row is already `stopped`; the ladder's “best effort” precedent applies); whether a create
-that evicts and then fails still leaves the victim stopped (and what the answer says); and whether
-`?force`-style opt-out is needed (the story says no).
+**Decide canonically and record:** the sweep interval (and that it is not a config key, or that it is);
+whether `idle_stop_min = 0` means disabled or "stop everything"; that a stop is one `apply` plus one
+`stop` per session, never one for the whole sweep; and what the log line says per stop (the story asks
+for one).
 
-### What HS-019 settled that HS-020 inherits
+### What HS-020 settled that HS-021 inherits
 
-- **A row can be removed under a background task**, and every runner must tolerate it: `touch` treats a
-  missing row as nothing to record, `insert_batch` drops an event whose session has gone, and the
-  provisioner stops when the row leaves `starting`. Eviction stops rather than removes, so these are
-  precedent rather than obstacles.
-- **`SessionBackend::stop` is the only container call an eviction needs**, and the row moves **before**
-  it (ADR-0020's order), with the reason `evicted` — the third of the reason words (`forced_abort`,
-  `deleted`, `evicted`).
-- **The cap's count is read under the create's one lock scope.** Evicting inside that scope is what a
-  later story must not turn into two scopes; ADR-0012 is where that is written down.
+- **A stop is one `apply` plus one best-effort `SessionBackend::stop`, the row first** (ADR-0020's
+  order, ADR-0024's precedent). `evict_one` in `http/sessions.rs` is the shape; the reason words so far
+  are `forced_abort`, `deleted` and `evicted`.
+- **The LRU read exists**: `SessionRepository::oldest_idle()` — `idle` only, `last_active_at ASC, id ASC`.
+  HS-021's candidate is *elapsed* idleness, so it needs its own query (a bound, not just an order).
+- **A row can be removed under a background task**, and every runner tolerates it: `touch` ignores a
+  missing row, `insert_batch` drops an event whose session has gone, and the provisioner stops when the
+  row leaves `starting`.
+- **The page's `stoppedNotice` map is one word wide on purpose** (`evicted`). HS-021 adds `idle_stop` if
+  the same "nothing was deleted" sentence is right for it — with its own test.
+- **The cap's count is read under the create's one lock scope**, and an eviction must never be written
+  into that scope; HS-021's sweeper has no such constraint (it takes the lock only through `apply`).
 
 ## 9. Reporting
 
@@ -721,3 +729,4 @@ Last session's ledger, for the shape of it:
 | PER-49 | HS-017 steer | `0099ca3`, `8ff1d77` | Done — 1 P1 fixed (a `last_active_at` assertion the *settle* satisfied, proved by mutation), 11 notes |
 | PER-50 | HS-018 stopped/resume | `dce53c4`, `ff9d907` | Done — 1 P2 fixed (abort retried a dead path, provisioning a session nobody asked for), 16 findings |
 | PER-51 | HS-019 delete flow | `3d5c415`, `7c4ea02`, `cd85572`, `db95a3f` | Done — 1 spec P2 fixed (a refused delete of a running session has already ended the turn; now pinned by a test and by the glossary), 4 doc contradictions, 2 nits; also closed PER-41's recorded batch-collateral nit |
+| PER-52 | HS-020 cap and eviction | `a3c6825` | REVIEW_PLACEHOLDER |
