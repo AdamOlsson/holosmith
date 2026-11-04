@@ -52,8 +52,10 @@ const DELETE_LOG: &str = "DELETE FROM events WHERE session_id = ?1";
 /// load-bearing: the bound is applied *after* the already-folded filter in Rust, because a `LIMIT` before
 /// it would keep re-reading the same oldest messages for ever once a session had more old messages than one
 /// pass may fold — a limited pass would then never advance. The scan is over one session's seq range, which
-/// the `LIMIT` never shortened anyway.
-const COMPLETED: &str = "SELECT payload, created_at FROM events \
+/// the `LIMIT` never shortened anyway. `seq` is selected because it is what bounds the delta scan
+/// below: a message's deltas all sit before its `message.end`, so the newest candidate's seq is the
+/// furthest row a fold can possibly want.
+const COMPLETED: &str = "SELECT seq, payload, created_at FROM events \
      WHERE session_id = ?1 AND type = ?2 AND created_at < ?3 ORDER BY seq ASC";
 
 /// The message ids this session has already folded into a snapshot (HS-060).
@@ -63,9 +65,17 @@ const COMPLETED: &str = "SELECT payload, created_at FROM events \
 /// row.
 const SNAPSHOTS: &str = "SELECT payload FROM events WHERE session_id = ?1 AND type = ?2";
 
-/// Every delta row of one session, in seq order: what a fold reads (HS-060).
+/// The delta rows a fold reads, in seq order, below `?3`.
+///
+/// The bound is what keeps a pass cheap on a large session: without it this reads and parses every
+/// delta row the session has ever held — including the ones inside the window, which the fold does not
+/// want — while holding the database mutex the writer and every handler need. It is a *scan* bound and
+/// not a delete bound: a delta above it is not folded, and one inside it that belongs to a message the
+/// pass is not folding is filtered out by message id. It also narrows the strictness rule below: a delta
+/// whose payload is not the pinned shape stops the session only when it sits inside this region, i.e.
+/// when it could belong to a message being folded.
 const DELTAS: &str = "SELECT seq, payload FROM events \
-     WHERE session_id = ?1 AND type = ?2 ORDER BY seq ASC";
+     WHERE session_id = ?1 AND type = ?2 AND seq < ?3 ORDER BY seq ASC";
 
 /// Remove one row that a snapshot has replaced. One seq at a time, because the seqs are the fold's
 /// own and an `IN` list of them would be a second spelling of what the read already answered.
@@ -282,22 +292,27 @@ impl<'a> EventRepository<'a> {
         };
 
         // The candidates, oldest completion first, so the bound takes the messages that have waited
-        // longest rather than an arbitrary set.
-        let mut candidates: Vec<(String, i64)> = Vec::new();
+        // longest rather than an arbitrary set. `seq` is the message's `message.end`, which bounds the
+        // delta scan.
+        let mut candidates: Vec<(String, i64, i64)> = Vec::new();
         {
             let mut statement = transaction.prepare(COMPLETED).map_err(sqlite)?;
             let rows = statement
                 .query_map(params![session_id, MESSAGE_END, cutoff], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
                 })
                 .map_err(sqlite)?;
             for row in rows {
-                let (payload, completed_at) = row.map_err(sqlite)?;
+                let (end_seq, payload, completed_at) = row.map_err(sqlite)?;
                 let Some(id) = message_id(&payload) else {
                     continue;
                 };
                 if !folded.contains(&id) {
-                    candidates.push((id, completed_at));
+                    candidates.push((id, completed_at, end_seq));
                 }
             }
         }
@@ -307,13 +322,19 @@ impl<'a> EventRepository<'a> {
         }
 
         let wanted: std::collections::HashSet<&str> =
-            candidates.iter().map(|(id, _)| id.as_str()).collect();
+            candidates.iter().map(|(id, _, _)| id.as_str()).collect();
+        // Every candidate's deltas sit before its own `message.end`, and the candidates are in seq
+        // order, so the last one's end is the furthest row any of them can reach.
+        let furthest = candidates
+            .last()
+            .map(|(_, _, seq)| *seq)
+            .unwrap_or(i64::MAX);
         let mut folds: std::collections::HashMap<String, Fold> = std::collections::HashMap::new();
         let mut unreadable = 0;
         {
             let mut statement = transaction.prepare(DELTAS).map_err(sqlite)?;
             let rows = statement
-                .query_map(params![session_id, MESSAGE_DELTA], |row| {
+                .query_map(params![session_id, MESSAGE_DELTA, furthest], |row| {
                     Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
                 })
                 .map_err(sqlite)?;
@@ -350,7 +371,7 @@ impl<'a> EventRepository<'a> {
         }
 
         let mut compaction = Compaction::default();
-        for (message_id, completed_at) in &candidates {
+        for (message_id, completed_at, _) in &candidates {
             let Some(fold) = folds.remove(message_id) else {
                 // A completed message with no delta rows: already folded by an earlier pass, or a
                 // message that never had any. Nothing to replace.

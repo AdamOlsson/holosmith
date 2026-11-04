@@ -155,9 +155,9 @@ impl AppState {
 
     /// The compaction task, wired to this state's database (HS-060).
     ///
-    /// `Some` always: the window is the spec's 24 hours rather than a config key, so there is no key that
-    /// could turn it off (ADR-0032). It needs neither the backend nor the event writer — compaction folds
-    /// rows and emits nothing.
+    /// Always present, unlike [`Self::sweeper`]: the window is the spec's 24 hours rather than a config
+    /// key, so there is no key that could turn it off (ADR-0032). It needs neither the backend nor the event
+    /// writer — compaction folds rows and emits nothing.
     ///
     /// Here for the same reason as the five above: a background policy's handles are cloned in one place,
     /// so a test can drive the wiring `serve` uses rather than a second one.

@@ -207,9 +207,9 @@ pub fn run(args: ServeArgs) -> ExitCode {
         if let Some(sweeper) = sweeper {
             sweeper.abort();
         }
-        // Same argument, one step further: compaction writes, so a pass that started must not be cut off in
-        // the middle of a transaction. `abort` is what the runtime would do anyway, and it makes the handle's
-        // purpose its comment.
+        // Same argument, one step further: compaction writes, so a pass that started must not be allowed to
+        // leave a half-written transaction behind. `abort` drops the task at its next await point, and the
+        // transaction it was in rolls back on drop — which is also why the fold itself holds no await.
         compactor.abort();
         match served {
             Ok(()) => ExitCode::SUCCESS,

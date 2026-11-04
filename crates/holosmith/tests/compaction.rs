@@ -461,7 +461,10 @@ async fn a_delta_the_contract_does_not_describe_stops_the_whole_session() {
     // to — so folding the rows that *can* be attributed would delete text this pass cannot account for.
     let dir = TempDir::new("compaction-unreadable");
     let (state, id) = idle_session(&dir).await;
-    message(&state, &id, "m1", &["readable"], &[], OLD).await;
+    // The bad row sits **before** the message's `message.end`, which is where a delta that could belong to a
+    // message being folded is: a message's deltas all precede its own end, and the scan is bounded by the
+    // newest candidate's end. A malformed delta above that bound belongs to a message still inside the
+    // window, and a later pass will see it.
     append(
         &state,
         &id,
@@ -470,6 +473,7 @@ async fn a_delta_the_contract_does_not_describe_stops_the_whole_session() {
         clock::unix_now() - OLD,
     )
     .await;
+    message(&state, &id, "m1", &["readable"], &[], OLD).await;
     wait_for_ends(&state, &id, &["m1"]).await;
     let before = log(&state, &id);
 

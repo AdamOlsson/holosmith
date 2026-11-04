@@ -129,6 +129,17 @@ impl Compactor {
                         "old messages were compacted into snapshots"
                     );
                 }
+                Ok(compaction) if compaction.unreadable > 0 => {
+                    // The session-wide guard wrote nothing, so nothing is lost — but the policy has
+                    // stopped for this session until the producer is fixed, and silence would make
+                    // that look like "there was nothing to fold". One line per pass is the point.
+                    tracing::warn!(
+                        target: "holosmith::compactor",
+                        session = %id,
+                        unreadable = compaction.unreadable,
+                        "a delta the contract does not describe stopped this session's compaction"
+                    );
+                }
                 Ok(_) => {}
                 Err(error) => {
                     tracing::error!(

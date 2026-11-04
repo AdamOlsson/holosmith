@@ -149,12 +149,13 @@ impl EventStream {
 ///
 /// One parser, two readers: the writer merges a batch with it and the compactor folds a history with it.
 /// A second reading of "what a delta is" is how the two would drift apart about a payload neither
-/// producer wrote.
+/// producer wrote. Both readers live in `events`, so the struct stays private to the module — a child
+/// module sees it already, and `pub(super)` here would mean the crate root.
 #[derive(Debug, serde::Serialize)]
-pub(super) struct Delta {
-    pub(super) message_id: String,
-    pub(super) kind: String,
-    pub(super) text: String,
+struct Delta {
+    message_id: String,
+    kind: String,
+    text: String,
 }
 
 /// Read `payload` as a delta, or `None` when it is not exactly the pinned shape.
