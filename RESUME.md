@@ -37,12 +37,13 @@ created, prompted, aborted, steered, stopped, resumed and deleted, and it is dri
 ## 1. Where the work stands
 
 Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is clean, and every
-commit is **pushed** (see the note on pushing below). `HEAD` is `ef0784a`; any commit after it is
+commit is **pushed** (see the note on pushing below). `HEAD` is `d1cb620`; any commit after it is
 bookkeeping — this file's own refresh.
 
-**Linear: 27 Done, 53 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-026`
-(`PER-33` … `PER-58`) **plus `HS-059` (`PER-91`)** — the queue is not contiguous any more, because
-`HS-027` … `HS-058` are blocked on a Docker daemon this machine does not have (§8).
+**Linear: 28 Done, 52 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-026`
+(`PER-33` … `PER-58`) **plus `HS-059` (`PER-91`)** and **`HS-060` (`PER-92`)** — the queue is not
+contiguous any more, because `HS-027` … `HS-058` are blocked on a Docker daemon this machine does not
+have (§8).
 
 | Story | Linear | Commits | ADR |
 | --- | --- | --- | --- |
@@ -73,12 +74,13 @@ bookkeeping — this file's own refresh.
 | HS-025 worktree provisioning | PER-57 | `7e36bde`, `1fe7f6e`, `ce4dc82` | 0029 |
 | HS-026 worktree refusal rules | PER-58 | `18e4695`, `c233ab7` | 0030 |
 | HS-059 event coalescing | PER-91 | `06f506b`, `65f7107`, `5207a97` | 0031 |
+| HS-060 message snapshots and compaction | PER-92 | `5c0f960`, `e2a24b6`, `f0ecf8c`, `901b4ef`, `d1cb620` | 0032 |
 
-**Next issue: `PER-92` (HS-060 — message snapshots and compaction)**, now that HS-059 is Done. Then
-`HS-061` (`PER-93`), `HS-065` (`PER-97`), `HS-075` (`PER-107`) — the four stories whose blockers are all
-Done. **`HS-027` … `HS-058` are blocked** (no Docker daemon here; PER-59 carries the argument, and
+**Next issue: `PER-93` (HS-061 — history truncation and pagination)**, now that HS-060 is Done. Then
+`HS-065` (`PER-97`) and `HS-075` (`PER-107`) — the stories whose blockers are all Done. **`HS-027` …
+`HS-058` are blocked** (no Docker daemon here; PER-59 carries the argument, and
 `PER-74`/`PER-79`/`PER-84`/`PER-94`/`PER-100` carry the pointer), so `HS-###` order now means: skip the
-blocked run, take the next unblocked story. §8 carries what HS-060 is about.
+blocked run, take the next unblocked story. §8 carries what HS-061 is about.
 
 Ranking, per `PROMPT.md`: Linear priority (all are `No priority`) → `HS-###` order in `docs/stories/` →
 anything already `In Progress` first → skip an issue whose `Blocked by` stories are not `Done`.
