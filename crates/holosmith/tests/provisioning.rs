@@ -343,15 +343,19 @@ async fn the_docker_backend_fails_honestly_and_leaves_the_session_resumable() {
     // under it must not sit in `starting` forever: it ends `error` with a reason naming the step,
     // and it stops counting towards the cap, because `error` is not a live state.
     //
-    // This boot uses the default config, whose `projects_root` is a directory this machine does not
-    // have, so the *first* step is the one that fails — since HS-025 the worktree step is real, which is
-    // why the reason is git's sentence about a missing repository rather than "this backend refuses".
+    // Since HS-025 the worktree step is real, so with a projects root that holds no repository the *first*
+    // step is the one that fails, with git's own sentence. The root is this test's own empty directory
+    // rather than the config's default: a test that ran against `/srv/holosmith/projects` would pass or
+    // fail depending on what the host happens to keep there.
     let dir = TempDir::new("provisioning-docker");
-    let mut state = state_in(&dir, Config::default());
-    state.backend = Backends::for_run(
-        holosmith::runtime::Backend::Docker,
-        Config::default().projects_root,
-    );
+    let projects = dir.file("projects");
+    std::fs::create_dir_all(&projects).expect("the projects root is creatable");
+    let config = Config {
+        projects_root: projects.clone(),
+        ..Config::default()
+    };
+    let mut state = state_in(&dir, config);
+    state.backend = Backends::for_run(holosmith::runtime::Backend::Docker, projects);
     assert_eq!(
         state.backend.as_str(),
         "docker",

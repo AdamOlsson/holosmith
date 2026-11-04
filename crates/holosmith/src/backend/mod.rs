@@ -176,7 +176,32 @@ pub enum Provisioned {
         path: String,
         /// The commit `agent/<id>` starts from.
         base_commit: String,
+        /// `true` when this provision **created** the worktree, `false` when it adopted one that was
+        /// already there. It is the difference between work this step owns and work it found, which is
+        /// what [`Self::undoable`] answers.
+        created: bool,
     },
+}
+
+impl Provisioned {
+    /// Whether the provisioner has anything to undo for this step.
+    ///
+    /// A step that completed is undone when a later step fails (ADR-0015: a provision leaves no partial
+    /// resource behind), with one exception: **a worktree the step adopted is not its to take back.** The
+    /// files and the commits on it were the session's before this provision ran — a resume arrives with
+    /// them (ADR-0022), and the step re-attaches rather than recreates — so deleting them because the
+    /// *network* step refused would throw away an agent's work to tidy up after a step that never made
+    /// anything.
+    ///
+    /// [`Self::Nothing`] is undoable: a step that built nothing outside the process still ran, and the
+    /// stub's teardown is recorded (and asserted) so a backend that does build something has a shape to
+    /// fill.
+    pub fn undoable(&self) -> bool {
+        match self {
+            Self::Nothing => true,
+            Self::Worktree { created, .. } => *created,
+        }
+    }
 }
 
 /// The eight operations the story names, plus the per-step undo a failed provisioning needs.

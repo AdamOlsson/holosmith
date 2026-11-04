@@ -24,8 +24,8 @@ wedges any caller. A repository on NFS is not something this build has met.
 ## The backend makes it; the provisioner writes the row
 
 `SessionBackend::provision` answers `Provisioned` — `Nothing` for the three steps that record nothing, and
-`Worktree { path, base_commit }` for the one that does — and the provisioner writes the two columns through
-one new statement, `SessionRepository::set_worktree`.
+`Worktree { path, base_commit, created }` for the one that does — and the provisioner writes the two columns
+through one new statement, `SessionRepository::set_worktree`.
 
 ADR-0019 is the reason: a backend emits frames and cannot write the row, and that rule is what keeps a
 forged `session.status` frame from being a state change. A backend with a `SessionRepository` would be able
@@ -52,6 +52,21 @@ each:
 keep pointing `ahead` at where it started; taking the head would silently reset the number the changes sheet
 shows (HS-061).
 
+**And a step that adopted has nothing to undo.** A provision that creates work is undone when a later step
+fails, because a provision must not leave a partial resource behind (ADR-0015) — but a worktree the step only
+*adopted* was the session's before this provision ran, with the commits the agent has made on it. Deleting it
+because the *network* step refused would be data loss dressed as cleanliness: the undo would take back
+something it never made, and the branch — the actual work — would go with it. So `ensure` reports which of the
+two happened and the provisioner records only the steps that made something (`Provisioned::undoable`). A
+**delete** is a different matter and removes an adopted worktree like any other: the session is going away,
+and its work was snapshotted first (ADR-0023).
+
+This is the one place where the plan was incomplete rather than wrong: HS-025's own acceptance says teardown
+runs when a session is deleted, and the resume-ban consequence of undoing an adoption only becomes reachable
+at HS-027, when the step *after* the worktree can succeed. It is fixed here because the failure is silent, and
+`tests/worktree.rs`'s `a_later_step_failure_does_not_take_an_adopted_worktree_back` fails when the rule is
+removed.
+
 ## Teardown cannot wedge a delete, so "already gone" is success
 
 `remove` asks git whether the worktree is registered and whether the branch exists *before* running either
@@ -77,3 +92,16 @@ a symlink only compares equal after `canonicalize`.
 every commit the agent makes, which nothing observes; computing it per row in the list endpoint would be a
 git call per row on a page with a cap of three, and a second read path over the same repository. Its readers
 today are its test and that endpoint, which is the same shape as ADR-0028's `Complaint` and HS-045's `doctor`.
+
+## The story's demo is only half showable, and that is recorded rather than papered over
+
+HS-025's demo is "create a session, see `.worktrees/<id>` with branch `agent/<id>`, commit in it, see `ahead`
+increment, delete and see it gone". Nothing can show the middle: the step after the worktree is the session's
+network, it belongs to HS-027 and it refuses, so the provisioner undoes the worktree milliseconds after making
+it. What the shipped artifact *can* show — and `scripts/verify.sh`'s `case_worktree` asserts — is the row's two
+columns, the refusal's own reason, the worktree and branch gone afterwards, the registration pruned, and a
+`DELETE ?force=true` that answers 202 and leaves a `404`. What it cannot show is a live worktree with commits
+on it, and `ahead` has no publisher until HS-061's `GET /changes`. `tests/worktree.rs` is where those two are
+proven, against a real repository: `the_worktree_step_makes_the_branch_and_names_the_commit_it_starts_from`
+and `ahead_counts_the_commits_the_branch_has_that_the_base_does_not`. A later reader should not read "HS-025
+Done" as "the demo was performed end to end".

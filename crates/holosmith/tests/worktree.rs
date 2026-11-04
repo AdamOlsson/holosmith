@@ -17,6 +17,7 @@ use holosmith::backend::{Backends, DockerBackend, Provisioned, SessionBackend, S
 use holosmith::config::Config;
 use holosmith::http::{self, AppState};
 use holosmith::runtime::Backend;
+use holosmith::sessions::state::Trigger;
 use holosmith::sessions::{Session, Status};
 use holosmith::worktree::Worktree;
 use serde_json::Value;
@@ -65,10 +66,14 @@ fn backend(root: &Path) -> DockerBackend {
     DockerBackend::new(root)
 }
 
-/// The `Provisioned` a worktree step that worked answers, as `(path, base_commit)`.
-fn made(provisioned: Provisioned) -> (String, String) {
+/// The `Provisioned` a worktree step that worked answers, as `(path, base_commit, created)`.
+fn made(provisioned: Provisioned) -> (String, String, bool) {
     match provisioned {
-        Provisioned::Worktree { path, base_commit } => (path, base_commit),
+        Provisioned::Worktree {
+            path,
+            base_commit,
+            created,
+        } => (path, base_commit, created),
         Provisioned::Nothing => panic!("the worktree step recorded nothing"),
     }
 }
@@ -80,11 +85,15 @@ async fn the_worktree_step_makes_the_branch_and_names_the_commit_it_starts_from(
     let backend = backend(&root);
     let session = session("0123456789abcdef", None);
 
-    let (path, base_commit) = made(
+    let (path, base_commit, created) = made(
         backend
             .provision(&session, Step::Worktree)
             .await
             .expect("the worktree step works on a repository"),
+    );
+    assert!(
+        created,
+        "the first provision did not say it made the worktree"
     );
 
     // The story's own command, spelled out: `<projects>/.worktrees/<id>` on branch `agent/<id>`.
@@ -116,11 +125,14 @@ async fn a_second_provision_adopts_the_worktree_and_keeps_the_base_the_row_has()
     // A resume re-provisions: the worktree, the branch and every commit on it are still there, so the
     // step must adopt rather than fail on a branch that already exists — and the base it answers must
     // stay the one the session started from, because `ahead` is measured from there (HS-061).
-    let dir = TempDir::new("worktree-adopt");
+    // The label carries a space on purpose: `git worktree list --porcelain` prints the resolved path and
+    // `registered()` compares it after `canonicalize`, so a projects root with a space in it is the case
+    // that would break if either half were wrong.
+    let dir = TempDir::new("worktree adopt with a space");
     let (root, repo) = projects(&dir);
     let backend = backend(&root);
     let first = session("0123456789abcdef", None);
-    let (path, base_commit) = made(
+    let (path, base_commit, _) = made(
         backend
             .provision(&first, Step::Worktree)
             .await
@@ -141,11 +153,15 @@ async fn a_second_provision_adopts_the_worktree_and_keeps_the_base_the_row_has()
     assert_ne!(moved, base_commit);
 
     let resumed = session("0123456789abcdef", Some(&base_commit));
-    let (again_path, again_base) = made(
+    let (again_path, again_base, created) = made(
         backend
             .provision(&resumed, Step::Worktree)
             .await
             .expect("a provision over an existing worktree adopts it"),
+    );
+    assert!(
+        !created,
+        "an adopted worktree was reported as made: undoing it would delete the session's commits"
     );
     assert_eq!(again_path, path);
     assert_eq!(
@@ -169,7 +185,7 @@ async fn a_session_whose_worktree_is_gone_is_attached_to_its_existing_branch() {
     let (root, repo) = projects(&dir);
     let backend = backend(&root);
     let first = session("0123456789abcdef", None);
-    let (path, base_commit) = made(
+    let (path, base_commit, _) = made(
         backend
             .provision(&first, Step::Worktree)
             .await
@@ -185,11 +201,15 @@ async fn a_session_whose_worktree_is_gone_is_attached_to_its_existing_branch() {
     assert_eq!(support::worktrees(&repo).len(), 1);
 
     let resumed = session("0123456789abcdef", Some(&base_commit));
-    let (again_path, again_base) = made(
+    let (again_path, again_base, created) = made(
         backend
             .provision(&resumed, Step::Worktree)
             .await
             .expect("a worktree is made again from the branch that survived"),
+    );
+    assert!(
+        !created,
+        "a branch that survived a half-teardown was reported as made: undoing it would delete its commits"
     );
     assert_eq!(again_path, path);
     assert_eq!(
@@ -208,7 +228,8 @@ async fn ahead_counts_the_commits_the_branch_has_that_the_base_does_not() {
     let worktree = Worktree::of(&root, "holosmith", "0123456789abcdef");
     let base = worktree
         .ensure(None)
-        .expect("the worktree is made from the repository's HEAD");
+        .expect("the worktree is made from the repository's HEAD")
+        .base_commit;
 
     assert_eq!(worktree.ahead(&base).expect("ahead reads"), 0);
     for (count, message) in [(1, "second"), (2, "third")] {
@@ -242,7 +263,7 @@ async fn undo_removes_the_worktree_the_branch_and_the_registration() {
     let (root, repo) = projects(&dir);
     let backend = backend(&root);
     let session = session("0123456789abcdef", None);
-    let (path, _) = made(
+    let (path, _, _) = made(
         backend
             .provision(&session, Step::Worktree)
             .await
@@ -277,7 +298,7 @@ async fn deleting_a_session_removes_its_worktree_too() {
     let (root, repo) = projects(&dir);
     let backend = backend(&root);
     let session = session("0123456789abcdef", None);
-    let (path, _) = made(
+    let (path, _, _) = made(
         backend
             .provision(&session, Step::Worktree)
             .await
@@ -435,4 +456,124 @@ async fn a_create_records_the_worktree_and_takes_it_back_when_the_network_step_r
     assert!(!support::branch_exists(&repo, &format!("agent/{id}")));
 
     served.finish().await.expect("a clean shutdown");
+}
+
+/// A state whose backend is the Docker one, in a projects root the caller built.
+fn docker_state(dir: &TempDir, root: &Path) -> AppState {
+    let config = Config {
+        projects_root: root.to_path_buf(),
+        max_live_sessions: 2,
+        ..Config::default()
+    };
+    let mut state = state_in(dir, config);
+    state.backend = Backends::for_run(Backend::Docker, root.to_path_buf());
+    state
+}
+
+/// One session row, written the way the create handler writes it, with no server in between.
+fn create_row(state: &AppState) -> Session {
+    let database = state.database.lock().expect("the lock is not poisoned");
+    database
+        .sessions()
+        .create(
+            &holosmith::sessions::NewSession {
+                project: "holosmith".to_string(),
+                model: "claude-sonnet-4.5".to_string(),
+                thinking: "high".to_string(),
+                network: false,
+                client_key: None,
+                base_commit: None,
+            },
+            holosmith::clock::unix_now(),
+        )
+        .expect("a session is creatable")
+}
+
+#[tokio::test]
+async fn a_later_step_failure_does_not_take_an_adopted_worktree_back() {
+    // The state a resume meets: the row records the worktree, and the files and the commits on it are
+    // still on disk. The worktree step adopts it, the network step refuses, and the provisioner must not
+    // undo a step that **made** nothing — the commits are the agent's work, and deleting them to tidy up
+    // after a step that failed would be data loss dressed as cleanliness (ADR-0029).
+    let dir = TempDir::new("worktree-adopted-undo");
+    let (root, repo) = projects(&dir);
+    let state = docker_state(&dir, &root);
+    let session = create_row(&state);
+
+    // The first provision: it makes the worktree, the network step refuses, and the undo takes the
+    // worktree back with it.
+    state.provisioner().run(session.clone()).await;
+    let failed = row(&state, &session.id);
+    assert_eq!(failed.status, Status::Error, "{:?}", failed.status_reason);
+    let base = failed
+        .base_commit
+        .clone()
+        .expect("the worktree step recorded its base");
+    let path = root.join(".worktrees").join(&session.id);
+    assert!(
+        !path.exists(),
+        "the first provision's undo left the worktree"
+    );
+
+    // What a crashed or resumed session looks like: the worktree is there again, with a commit on it and
+    // the row's record intact.
+    Worktree::of(&root, &session.project, &session.id)
+        .ensure(Some(&base))
+        .expect("the worktree is made again");
+    support::git(
+        &path,
+        &[
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "the agent's work",
+        ],
+    );
+    let committed = head(&path);
+    {
+        let database = state.database.lock().expect("the lock is not poisoned");
+        database
+            .sessions()
+            .set_worktree(&session.id, &path.display().to_string(), &base)
+            .expect("the row records the worktree again");
+    }
+    // `error → starting` is the resume's own row (the table's), which is what the provisioner waits for.
+    state
+        .transitioner()
+        .apply_logged(&session.id, Trigger::Resume, None)
+        .await;
+    let resumed = row(&state, &session.id);
+    assert_eq!(resumed.status, Status::Starting);
+
+    state.provisioner().run(resumed).await;
+
+    let after = row(&state, &session.id);
+    assert_eq!(
+        after.status,
+        Status::Error,
+        "the network step refused again"
+    );
+    assert!(
+        path.exists(),
+        "the adopted worktree was removed when the next step refused"
+    );
+    assert_eq!(
+        head(&path),
+        committed,
+        "the agent's commit was lost with the adopted worktree"
+    );
+    assert!(
+        support::branch_exists(&repo, &format!("agent/{}", session.id)),
+        "the adopted worktree's branch was deleted when the next step refused"
+    );
+
+    // And a delete still removes it: "an adopted worktree is not this provision's to undo" is not "a
+    // delete cannot remove it".
+    state
+        .backend
+        .delete(&row(&state, &session.id))
+        .await
+        .expect("the delete removes what the session owns");
+    assert!(!path.exists(), "the delete left the worktree behind");
 }

@@ -55,32 +55,6 @@ impl DockerBackend {
         BackendError::unsupported("docker", operation)
     }
 
-    /// A step this build does not provision yet, naming the story that will.
-    ///
-    /// One sentence per step, because the row's `status_reason` is where an operator reads it: "the
-    /// container step: the docker backend does not provision the container yet (HS-028)" says what is
-    /// wrong, whose work it is, and that the session is not broken — it is a build that cannot run it.
-    fn not_yet(step: Step) -> BackendError {
-        match step {
-            Step::Worktree => BackendError::unsupported_step(
-                step,
-                "the docker backend does not provision the worktree yet",
-            ),
-            Step::Network => BackendError::unsupported_step(
-                step,
-                "the docker backend does not provision the network yet (HS-027)",
-            ),
-            Step::Container => BackendError::unsupported_step(
-                step,
-                "the docker backend does not provision the container yet (HS-028)",
-            ),
-            Step::Pi => BackendError::unsupported_step(
-                step,
-                "the docker backend does not start the agent yet (HS-031)",
-            ),
-        }
-    }
-
     /// Run `git` for one step off the runtime's worker, since a subprocess is not a future.
     ///
     /// The provisioner is a `tokio` task and a `git worktree add` on a large repository takes as long as
@@ -107,9 +81,9 @@ impl DockerBackend {
         // current head: a resumed session may have committed since, and `ahead` is measured from where
         // it started (HS-061).
         let base = session.base_commit.clone();
-        let (worktree, base_commit) = Self::blocking(Step::Worktree, move || {
-            let base_commit = worktree.ensure(base.as_deref())?;
-            Ok((worktree, base_commit))
+        let (worktree, ensured) = Self::blocking(Step::Worktree, move || {
+            let ensured = worktree.ensure(base.as_deref())?;
+            Ok((worktree, ensured))
         })
         .await?;
         tracing::debug!(
@@ -117,12 +91,14 @@ impl DockerBackend {
             session = %session.id,
             worktree = %worktree.path.display(),
             branch = %worktree.branch,
-            %base_commit,
+            base_commit = %ensured.base_commit,
+            created = ensured.created,
             "the worktree is ready"
         );
         Ok(Provisioned::Worktree {
             path: worktree.path.to_string_lossy().into_owned(),
-            base_commit,
+            base_commit: ensured.base_commit,
+            created: ensured.created,
         })
     }
 
@@ -138,10 +114,28 @@ impl DockerBackend {
 }
 
 impl SessionBackend for DockerBackend {
+    /// Run a step that has no implementation yet: one sentence per step, and the sentence names the story
+    /// that fills it.
+    ///
+    /// The row's `status_reason` is where an operator reads this, so "the container step: the docker
+    /// backend does not provision the container yet (HS-028)" says what is wrong, whose work it is, and
+    /// that the session is not broken — it is a build that cannot run it. Written out per arm rather than
+    /// through a helper: a helper would need an arm for the worktree step, and that arm could never run.
     async fn provision(&self, session: &Session, step: Step) -> Result<Provisioned, BackendError> {
         match step {
             Step::Worktree => self.provision_worktree(session).await,
-            Step::Network | Step::Container | Step::Pi => Err(Self::not_yet(step)),
+            Step::Network => Err(BackendError::unsupported_step(
+                step,
+                "the docker backend does not provision the network yet (HS-027)",
+            )),
+            Step::Container => Err(BackendError::unsupported_step(
+                step,
+                "the docker backend does not provision the container yet (HS-028)",
+            )),
+            Step::Pi => Err(BackendError::unsupported_step(
+                step,
+                "the docker backend does not start the agent yet (HS-031)",
+            )),
         }
     }
 

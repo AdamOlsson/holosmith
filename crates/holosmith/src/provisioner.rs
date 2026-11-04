@@ -84,8 +84,13 @@ impl Provisioner {
             self.announce(&session, step).await;
             match self.backend.provision(&session, step).await {
                 Ok(provisioned) => {
+                    // Only what this provision made is this provision's to take back: a worktree step that
+                    // adopted the session's existing worktree leaves it (and the commits on it) alone when
+                    // a later step fails. See `Provisioned::undoable`.
+                    if provisioned.undoable() {
+                        completed.push(step);
+                    }
                     self.record(&session, provisioned);
-                    completed.push(step);
                 }
                 Err(error) => {
                     let reason = error.to_string();
@@ -117,7 +122,10 @@ impl Provisioner {
     /// the session over a row that could not be written would undo work that succeeded; a row without the
     /// path is a reader's problem, and the next provision recomputes it from the naming rule anyway.
     fn record(&self, session: &Session, provisioned: Provisioned) {
-        let Provisioned::Worktree { path, base_commit } = provisioned else {
+        let Provisioned::Worktree {
+            path, base_commit, ..
+        } = provisioned
+        else {
             return;
         };
         let database = self.database.lock().unwrap_or_else(PoisonError::into_inner);

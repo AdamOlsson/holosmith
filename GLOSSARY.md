@@ -339,7 +339,7 @@ _Avoid_: Log, archive, transcript
 ### Work and results
 
 **Worktree**:
-The git worktree that holds a session's files, on its own branch: `<projects>/.worktrees/<id>`, on branch `agent/<id>`, made from the project repository's `HEAD`. Its machine name is `Worktree` in `src/worktree.rs`, which is also where the creating, counting and removing live.
+The git worktree that holds a session's files, on its own branch: `<projects>/.worktrees/<id>`, on branch `agent/<id>`, made from the project repository's `HEAD`. Its machine name is `Worktree` in `crates/holosmith/src/worktree.rs`, which is also where the creating, counting and removing live.
 _Avoid_: Checkout, copy, clone
 
 **Session branch**:

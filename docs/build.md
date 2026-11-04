@@ -162,13 +162,14 @@ evicting it — the slot the sweep freed; it is the only case that costs a real 
 key is whole minutes and there is no shorter lever, ADR-0025), and the cap
 (`case_create_at_cap_evicts`, which makes its own pair, creates at the cap, and asserts the victim's
 row, its replayed transcript and the eviction's own `idle → stopped` event; and
-`case_create_at_cap_refused`, the last case, which makes a session and asks for one more while that
+`case_create_at_cap_refused`, which makes a session and asks for one more while that
 session is still `starting` — live and not evictable — and asserts the `409 cap_reached` envelope and
 the sentence that says nothing was idle), and the worktree (`case_worktree`, which boots its own
 server — `backend = "docker"`, a real repository under `projects_root`, and a socket that answers the
 preflight's `_ping` — creates a session, and asserts the row's `worktree` and `base_commit`, the network
 step's refusal, the worktree and branch gone afterwards, the registration back to one entry, and then a
-`DELETE ?force=true` to `404` over the worktree that is already absent). A case that must assert
+`DELETE ?force=true` — a 202 and then a row that answers `404` — over the worktree that is already
+absent). A case that must assert
 one code keeps every higher guard check correct, or it asserts another guard's code under its own
 name.
 
@@ -180,8 +181,9 @@ remember to place the new case before it.
 **Every later story adds at least one `case_*` function and one line in `serve_cases`.** That
 is what makes this a growing gate rather than a snapshot: a story that adds a route or a
 behaviour has one obvious place to prove the shipped binary does it. A case that needs a setting the
-rest of the run must not carry gets a boot of its own (see `case_token_budget`), and takes the last
-place in the array: nothing after it may assume the first boot's state.
+rest of the run must not carry gets a boot of its own (see `case_token_budget` and `case_worktree`), and
+takes a place at the end of the array: nothing after it may assume the first boot's state, and a case
+that stops the server leaves the run with whatever boot it started.
 
 **The idle stop runs for the whole `serve` phase.** `idle_stop_min = 1` is the process's setting, so
 every case from `start_serve` on has a sweeper behind it and **no case may leave a session `idle` for a
@@ -289,10 +291,11 @@ run is about the artifact's own linking, and its sandbox has no `git`, no `df` a
 **A session's files live at `<projects_root>/.worktrees/<id>`, on branch `agent/<id>`** (HS-025,
 spec item 1). The projects root is the config key `projects_root` (default `/srv/holosmith/projects`),
 and each project is a repository directly inside it: `<projects_root>/<project>` with a `.git` directory.
-The provisioner makes the worktree with `git worktree add -b agent/<id> <projects_root>/.worktrees/<id>
-HEAD`, records both the path and that commit on the session's row, and takes them back with
-`git worktree remove --force`, `git branch -D agent/<id>`, `git worktree prune` when the session is
-deleted or a later step fails. **No fetch and no remote**: the session branch is created from a commit
+The **backend** makes the worktree with `git worktree add -b agent/<id> <projects_root>/.worktrees/<id>
+HEAD` and the **provisioner** writes the path and that commit to the session's row; the teardown —
+`git worktree remove --force`, `git branch -D agent/<id>`, `git worktree prune` — runs when the session
+is deleted, and when a later provisioning step fails *and this provision made the worktree*: a worktree
+the step only adopted (a resumed session's, with commits on it) is never taken back by a failure. **No fetch and no remote**: the session branch is created from a commit
 the project repository already has. Two consequences worth knowing before you point this at a real
 repository: a repository with **no commit** cannot be provisioned from (there is no `HEAD`), and a
 project whose `.git` is a *file* (a submodule checkout, or a worktree of a repository) is HS-026's to

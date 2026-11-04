@@ -1514,6 +1514,13 @@ PY
 case_worktree() {
   local name=case_worktree response body id base
   local projects="$WORK/projects" repo="$WORK/projects/holosmith"
+  # The guard comes first, before `stop_serve`: a case that skipped after stopping the run's server would
+  # leave `phase_serve`'s own `stop_serve` with no pid to signal, and a blessed configuration (python3 is
+  # optional) would fail the gate at the last assertion with a message about SIGTERM.
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to answer the docker preflight (tests/worktree.rs covers this)\n' "$name"
+    return 0
+  fi
   stop_serve
   mkdir -p "$repo"
   git -C "$repo" init --quiet || fail "$name/git" "git init did not work in $repo"
@@ -1521,10 +1528,6 @@ case_worktree() {
     -m "the first commit" || fail "$name/git" "git commit did not work in $repo"
   base="$(git -C "$repo" rev-parse HEAD)" || fail "$name/git" "git rev-parse did not work in $repo"
 
-  if ! command -v python3 >/dev/null 2>&1; then
-    printf 'SKIP %s: no python3 to answer the docker preflight (tests/worktree.rs covers this)\n' "$name"
-    return 0
-  fi
   socket_pid="$(fake_docker_ping "$WORK/docker.sock")"
   for _ in $(seq 1 100); do
     [ -S "$WORK/docker.sock" ] && break
