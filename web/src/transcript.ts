@@ -311,6 +311,20 @@ export function stoppedNotice(reason: string | null): string | null {
   return null;
 }
 
+// What the row's detail span holds: the notice when the state and its reason earn one, and a dash
+// otherwise. One function because the span is written in two places — when the row is built, and when
+// a `session.status` frame turns a live row into a stopped one, which is how an eviction arrives
+// (HS-020) — and two spellings there would show the operator different things depending on whether
+// they were watching.
+export const NO_DETAIL = "—";
+
+export function stoppedDetail(state: SessionState, reason: string | null): string {
+  if (state !== "stopped") {
+    return NO_DETAIL;
+  }
+  return stoppedNotice(reason) ?? NO_DETAIL;
+}
+
 // Where the stream is. One spelling, so the list and the screen cannot ask for different paths,
 // and no `since=` parameter is invented: the browser resends the last SSE `id` (a seq) as
 // `Last-Event-ID` and the server replays after it (ADR-0014).

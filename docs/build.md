@@ -114,7 +114,7 @@ that holds the session list and the new-session form, byte-for-byte against
 `web/dist/index.html`, the `404` envelope of ADR-0008, one case per guard refusal (`bad_host`,
 `bad_origin`, `bad_client`, `bad_owner`), the request that passes all four, the exempt health
 probe, the create endpoint (`case_create_session`, `case_create_is_idempotent`,
-`case_create_bad_project`, `case_create_cap_reached`), the sessions list (`case_sessions_list`,
+`case_create_bad_project`), the sessions list (`case_sessions_list`,
 which asserts `200`, `application/json`, the session `case_create_session` made and a
 `network_default` field the create form's checkbox starts from), the session's event stream
 (`case_events_stream`, which reads the stream's header block with `fetch_stream` and asserts
@@ -138,18 +138,19 @@ abort's own reason, asserting the 202 answered the row still `running` and that 
 answered the row still `running`, reads the stream for the `turn.steer` frame carrying the guidance,
 and then polls the row until it says `idle`, which is what proves the turn continued;
 `case_steer_on_an_idle_session`, which asserts the `409 session_idle` envelope), the resume's two
-refusals (`case_resume_on_an_idle_session` and `case_resume_unknown_session`; the round trip itself
-cannot be driven here because nothing in the API produces `stopped` yet — `tests/resume.rs` proves it
-against a row the transition table stopped), and the delete (`case_delete_session`, which asserts the
+refusals (`case_resume_on_an_idle_session` and `case_resume_unknown_session`; the round trip itself is
+`tests/resume.rs`'s, because the session these two cases name is `idle` — HS-020's eviction leaves the
+only `stopped` row of this run, and it is created last), and the delete (`case_delete_session`, which asserts the
 202 answered the row `deleting`, then polls the row until it is the `404 not_found` envelope and the
 list no longer holds it — the removal is a background task's, so the row is the proof;
 `case_delete_unknown_session` and `case_delete_without_the_client_header`, which assert the `404
 not_found` and `403 bad_client` envelopes, the latter because this is the crate's first `DELETE`
 route and the guards must be shown to apply to it as they do to a `POST`), and the cap
-(`case_create_cap_reached`, which asserts the `409 cap_reached` envelope when the live session is not
-idle — and asserts that precondition, because since HS-020 the machine evicts an idle session instead;
-`case_create_at_cap_evicts`, which makes its own pair, creates at the cap, and asserts the victim's
-row, its replayed transcript and the eviction's own `idle → stopped` event). A case that must assert
+(`case_create_at_cap_evicts`, which makes its own pair, creates at the cap, and asserts the victim's
+row, its replayed transcript and the eviction's own `idle → stopped` event; and
+`case_create_at_cap_refused`, the last case, which makes a session and asks for one more while that
+session is still `starting` — live and not evictable — and asserts the `409 cap_reached` envelope and
+the sentence that says nothing was idle). A case that must assert
 one code keeps every higher guard check correct, or it asserts another guard's code under its own
 name.
 

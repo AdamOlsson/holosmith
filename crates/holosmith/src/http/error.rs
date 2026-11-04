@@ -259,7 +259,11 @@ impl ApiError {
         )
     }
 
-    /// What a create at the cap answers until HS-020 lets it evict.
+    /// What a resume at the cap answers (HS-018, spec item 8's "or returns 409").
+    ///
+    /// The create no longer uses this: since HS-020 it evicts an idle session instead, and answers
+    /// [`Self::cap_without_idle`] only when there is nothing to evict (ADR-0024). Two requests, two
+    /// next steps, so two sentences on one code.
     pub fn cap_reached() -> Self {
         Self::new(
             StatusCode::CONFLICT,

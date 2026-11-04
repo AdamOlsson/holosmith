@@ -12,10 +12,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  NO_DETAIL,
   Transcript,
   affordances,
   parseFrame,
   sessionIdFromPath,
+  stoppedDetail,
   stoppedNotice,
   streamPath,
   type Change,
@@ -308,6 +310,23 @@ test("every other reason is the caller's to show, so no sentence is invented for
   // must not be softened, so both get `null` and the badge's `state · reason` stands alone.
   for (const reason of [null, "", "forced_abort", "deleted", "idle_stop", "server_restart"]) {
     assert.equal(stoppedNotice(reason), null, String(reason));
+  }
+});
+
+test("the detail line says the same thing whether the row was drawn or turned", () => {
+  // HS-020's lesson from the review: the span is written twice — by `sessionRow` when the list is
+  // drawn, and by `applyStatus` when a `session.status` frame turns a live row into a stopped one,
+  // which is how an eviction arrives while the operator watches. One function, so they cannot differ.
+  assert.equal(stoppedDetail("stopped", "evicted"), stoppedNotice("evicted"));
+  assert.notEqual(stoppedDetail("stopped", "evicted"), NO_DETAIL);
+
+  // A stopped row whose reason earns no sentence keeps the dash, and so does every other state: the
+  // span is only visible on a stopped row anyway, and a stale sentence under `running` would be a
+  // claim about a session that is working.
+  assert.equal(stoppedDetail("stopped", null), NO_DETAIL);
+  assert.equal(stoppedDetail("stopped", "forced_abort"), NO_DETAIL);
+  for (const state of ["starting", "idle", "running", "error", "deleting"] as SessionState[]) {
+    assert.equal(stoppedDetail(state, "evicted"), NO_DETAIL, state);
   }
 });
 

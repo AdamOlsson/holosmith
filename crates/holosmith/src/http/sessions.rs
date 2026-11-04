@@ -65,7 +65,8 @@ const NOT_RESUMABLE: &str =
 /// (ADR-0019) rather than a panic on a path a future row could open.
 const NOT_DELETABLE: &str = "the session is in a state that cannot be deleted";
 
-/// The event a steer is recorded as (HS-017, ADR-0021).///
+/// The event a steer is recorded as (HS-017, ADR-0021).
+///
 /// `<subject>.<verb>`, like `turn.start`, and the subject is the turn: the operator's guidance is
 /// something that happened *to a turn*, not a message the agent produced. The payload is
 /// `{"text": "…"}` — no message id, because a steer is one frame that is never continued or
@@ -387,14 +388,23 @@ async fn evict_one(state: &AppState) -> bool {
             return false;
         }
     }
-    if let Err(error) = state.backend.stop(&candidate).await {
-        tracing::warn!(
-            target: "holosmith::http",
-            session = %candidate.id,
-            %error,
-            "the evicted session's backend was not stopped"
-        );
-    }
+    // The row is `stopped`, which is what frees the slot, so the create must not wait for the
+    // container: spec item 7's rule (an answer never waits for container work) applies here exactly
+    // as it does to provisioning. The order still holds — the row moved first — and the stop is best
+    // effort in a task of its own, like the ladder's second rung, with the same "a container that
+    // outlived its row is still deletable" reason.
+    let stopping = state.backend.clone();
+    let victim = candidate.clone();
+    tokio::spawn(async move {
+        if let Err(error) = stopping.stop(&victim).await {
+            tracing::warn!(
+                target: "holosmith::http",
+                session = %victim.id,
+                %error,
+                "the evicted session's backend was not stopped"
+            );
+        }
+    });
     tracing::info!(
         target: "holosmith::http",
         session = %candidate.id,
@@ -402,7 +412,6 @@ async fn evict_one(state: &AppState) -> bool {
     );
     true
 }
-
 /// The one lock scope: lookup, cap count and insert, with no `.await` inside so the guard cannot
 /// outlive a synchronous statement. `live_count` and `create` share it, so two creates cannot
 /// both see a free slot (ADR-0012).
@@ -703,9 +712,10 @@ async fn record_steer(state: &AppState, id: &str, guidance: &str) {
 /// `stopped` and `error`; everything else is refused with its own code), the cap, then the transition.
 ///
 /// **The cap is checked before the transition**, unlike the create's lookup: a resume takes a slot, and
-/// refusing after the row moved would leave a session `starting` with nothing provisioning it. The
-/// bullet allows either branch — evicting the least recently active idle session is HS-020's — so this
-/// answers `409 cap_reached` and touches nothing.
+/// refusing after the row moved would leave a session `starting` with nothing provisioning it. Spec
+/// item 8 allows either branch — "evicts the least recently active idle session first, **or** returns
+/// 409" — and HS-020 gave the eviction to the **create**, which is the request that asks for a new
+/// slot; a resume keeps the refusal, so the two answers stay one policy each (ADR-0022, ADR-0024).
 ///
 /// The provisioner does the work, as it does for a create: `stopped -> starting` is the table's, and
 /// the four steps are the way back (spec item 8's resume row, item 16's "the same session id reopens

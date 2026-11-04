@@ -273,7 +273,6 @@ serve_cases=(
   case_create_session
   case_create_is_idempotent
   case_create_bad_project
-  case_create_cap_reached
   case_events_stream
   case_backend_from_config
   case_provisioning_steps
@@ -294,6 +293,7 @@ serve_cases=(
   case_delete_session
   case_delete_unknown_session
   case_create_at_cap_evicts
+  case_create_at_cap_refused
 )
 
 # The health payload: exactly four keys, and the uptime is not predictable, so the assertion is
@@ -526,30 +526,42 @@ case_create_bad_project() {
 
 # HS-008: one live session against the boot config's cap of one, so a fresh create is refused
 # with 409 `cap_reached` (nothing is evictable until HS-020).
-# HS-008/HS-020: a create at the cap is refused when there is nothing to evict. Since HS-020 the
-# machine evicts the least recently active idle session instead, so this answer needs a live session
-# that is not idle — which is what a session still provisioning is. The precondition is asserted rather
-# than assumed: a run slow enough to let `created_id` settle would otherwise prove the *eviction* path
-# here and fail three cases later with no hint why.
-case_create_cap_reached() {
-  local name=case_create_cap_reached response body
-  fetch "${name}_filler" GET "/api/sessions/$created_id" "Host: 127.0.0.1" ||
-    fail "${name}_filler/no_answer" "GET /api/sessions/$created_id did not answer"
-  body="$(cat "$WORK/responses/${name}_filler.body")"
+# HS-008/HS-020: a create at the cap is refused when there is nothing to evict, and since HS-020 it is
+# the *last* case because it owns the session whose state it depends on: a session that is still
+# provisioning is live and not evictable, and leaving one behind would break any case that came after.
+# The first create evicts the previous case's idle session (the cap is one), so the session that holds
+# the slot is the one this case just made — one round trip old, against a first provisioning step of
+# 200 ms.
+case_create_at_cap_refused() {
+  local name=case_create_at_cap_refused response body holder
+  local create_body='{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}'
+
+  fetch_body "${name}_holder" POST /api/sessions "$create_body" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-cap-1" ||
+    fail "${name}_holder/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "${name}_holder")"
+  expect_status "${name}_holder" "$response" 202
+  body="$(cat "$WORK/responses/${name}_holder.body")"
+  holder="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$holder" ] || fail "${name}_holder/id" "the response names no id: $body"
+
+  fetch "${name}_holder_row" GET "/api/sessions/$holder" "Host: 127.0.0.1" ||
+    fail "${name}_holder_row/no_answer" "GET /api/sessions/$holder did not answer"
+  body="$(cat "$WORK/responses/${name}_holder_row.body")"
   case "$body" in
     *'"status":"starting"'*)
       assertions=$((assertions + 1))
       ;;
     *)
-      fail "${name}_filler/status" \
-        "the cap's refusal needs a live session that is not idle, and this one is not starting: $body"
+      fail "${name}_holder_row/status" \
+        "the refusal needs a live session that is not idle, and this one is not starting: $body"
       ;;
   esac
 
-  fetch_body "$name" POST /api/sessions \
-    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+  fetch_body "$name" POST /api/sessions "$create_body" \
     "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
-    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-create-3" ||
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-cap-2" ||
     fail "$name/no_answer" "POST /api/sessions did not answer"
   response="$(answer "$name")"
   expect_status "$name" "$response" 409
@@ -1172,6 +1184,10 @@ case_create_at_cap_evicts() {
         "the eviction's transition is not in the victim's transcript: $body"
       ;;
   esac
+
+  # Settle the session that took the victim's slot, so the next case knows the state it starts from:
+  # the cap is one, and a refusal needs the live session to be *not* idle.
+  wait_for_idle_id "${name}_fresh" "$fresh"
 }
 
 # Box 4, over every answer the cases above saved: none of them carries a CORS header, and none

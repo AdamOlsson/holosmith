@@ -55,13 +55,10 @@ const ORDER: &str = "ORDER BY last_active_at DESC, id ASC";
 /// the enum, over the `sessions_status` index (ADR-0012).
 const LIVE_COUNT: &str = "SELECT count(*) FROM sessions WHERE status IN (?1, ?2, ?3)";
 
-/// The eviction candidate: the least recently active `idle` session, which is what HS-020 stops to
-/// free a slot. `status = ?1` is supplied from `Status::as_str`, and `id ASC` makes the order total so
-/// two rows touched in the same second still have one answer.
-const OLDEST_IDLE: &str = "SELECT \
-     id, project, model, thinking, worktree, base_commit, status, status_reason, client_key, \
-     network, created_at, last_active_at, stopped_at, usage_in, usage_out \
-     FROM sessions WHERE status = ?1 ORDER BY last_active_at ASC, id ASC LIMIT 1";
+/// The eviction candidate's filter: the only row it may be chosen from, and the order that makes the
+/// choice total. A filter rather than a whole statement, so the reader stays [`select`]'s and a column
+/// added by a migration cannot be missed here while every other read keeps working.
+const OLDEST_IDLE: &str = "WHERE status = ?1 ORDER BY last_active_at ASC, id ASC LIMIT 1";
 
 /// The only way to read or write a `sessions` row. Obtained from `Database::sessions`.
 pub struct SessionRepository<'a> {
@@ -171,11 +168,11 @@ impl<'a> SessionRepository<'a> {
     /// would destroy a turn nobody asked to end (the story's third bullet), and `stopped`, `error` and
     /// `deleting` hold no slot to free.
     pub fn oldest_idle(&self) -> Result<Option<Session>, RepoError> {
-        self.connection
-            .query_row(OLDEST_IDLE, [Status::Idle.as_str()], row_to_session)
-            .optional()
-            .map_err(|error| RepoError::sqlite("oldest_idle", error))?
-            .transpose()
+        self.one(
+            "oldest_idle",
+            OLDEST_IDLE,
+            &[&Status::Idle.as_str() as &dyn ToSql],
+        )
     }
 
     /// Set the status and its reason, and move `stopped_at` with it: `now` when the new status is

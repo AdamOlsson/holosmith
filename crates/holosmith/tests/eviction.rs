@@ -196,7 +196,13 @@ async fn a_create_at_the_cap_stops_the_idle_session_and_takes_its_slot() {
     );
 
     // Nothing was deleted: the backend stopped the victim and touched nothing else, and the
-    // transcript is the one it had plus the eviction's own transition.
+    // transcript is the one it had plus the eviction's own transition. The stop runs in a task of its
+    // own (an answer must not wait for container work), so it is waited for — the *row*, above, is
+    // what the 202 already promised.
+    wait_until("the eviction stopped the victim's backend", || {
+        lifecycle(&stub, &first).contains(&Call::Stop)
+    })
+    .await;
     assert_eq!(lifecycle(&stub, &first), [Call::Stop]);
     assert_eq!(lifecycle(&stub, &second), []);
     wait_until("the eviction's event is committed", || {
@@ -236,8 +242,9 @@ async fn the_victim_is_the_least_recently_active_idle_session() {
     wait_status(&state, &older, Status::Idle).await;
     wait_status(&state, &newer, Status::Idle).await;
 
-    // The *newer* row is pushed into the past. Creation order and id order both say "older", so a
-    // candidate chosen by either would pick the wrong session: only `last_active_at` answers this.
+    // The *later-created* row is pushed into the past, which rules out "the oldest row" by
+    // construction: `created_at` says the other one, and only `last_active_at` answers this. The
+    // `id ASC` half of the order needs two rows of the same age, and has its own test below.
     age(&state, &newer, 600);
     let _third = created_id(&post_create(served.addr, "evict-third").await);
 
@@ -252,6 +259,40 @@ async fn the_victim_is_the_least_recently_active_idle_session() {
         "the create evicted a session that was more recently active"
     );
     assert_eq!(live(&state), 2, "the cap is two, so two sessions are live");
+}
+
+#[tokio::test]
+async fn two_idle_sessions_of_the_same_age_are_ordered_by_id() {
+    // `last_active_at` is whole seconds, so two rows touched in the same second tie — which is why the
+    // candidate's order is `last_active_at ASC, id ASC` and not the time alone. Ids are random hex
+    // (ADR-0011), so the test reads them and asserts against whichever sorts first rather than
+    // assuming; what it proves is that the tie-break exists and is the id.
+    let dir = TempDir::new("evict-tie");
+    let state = with_stub(state_in(&dir, cap(2)), fast_stub());
+    let served = Served::start(http::router(state.clone()), GRACE).await;
+    let first = created_id(&post_create(served.addr, "evict-tie-1").await);
+    let second = created_id(&post_create(served.addr, "evict-tie-2").await);
+    wait_status(&state, &first, Status::Idle).await;
+    wait_status(&state, &second, Status::Idle).await;
+
+    // The same instant for both, an hour ago: not "who was touched last" either.
+    age(&state, &first, 3600);
+    age(&state, &second, 3600);
+    let (smallest, other) = if first < second {
+        (first.clone(), second.clone())
+    } else {
+        (second.clone(), first.clone())
+    };
+    assert_ne!(smallest, other, "the two creates answered one id");
+
+    let _third = created_id(&post_create(served.addr, "evict-tie-3").await);
+
+    assert_eq!(
+        row(&state, &smallest).status,
+        Status::Stopped,
+        "the tie-break is not `id ASC`: {smallest} should have gone and {other} should have stayed"
+    );
+    assert_eq!(row(&state, &other).status, Status::Idle);
 }
 
 #[tokio::test]

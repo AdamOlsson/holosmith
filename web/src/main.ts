@@ -9,12 +9,13 @@
 // nodes, which is why every delta is one appended text node and nothing is ever re-rendered.
 
 import {
+  NO_DETAIL,
   TRANSCRIPT_EVENTS,
   Transcript,
   affordances,
   parseFrame,
   sessionIdFromPath,
-  stoppedNotice,
+  stoppedDetail,
   streamPath,
   type Change,
   type DeltaKind,
@@ -111,6 +112,10 @@ const MINUTE = 60;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
+// HS-064's placeholder: a stopped row's detail line once auto-delete gives it a number. It is also the
+// title of that span while the span holds a reason's sentence instead.
+const RETAINED = "Days remaining until auto-delete arrives with HS-064";
+
 const app = document.querySelector<HTMLElement>("#app");
 
 // The open stream per row, and every open stream: a row that leaves a live state lets go of its
@@ -193,15 +198,10 @@ function sessionRow(session: Session): HTMLLIElement {
   // The retention placeholder (HS-064's days-remaining line) and, while there is one, the sentence a
   // stopped session's reason earns: an eviction lost nothing, and the badge alone would read like a
   // loss (HS-020). One span, because both are "what this row's state means", never both at once.
-  const retention = make("span", "retention", "—");
-  retention.title = "Days remaining until auto-delete arrives with HS-064";
+  const detail = stoppedDetail(session.status, session.status_reason);
+  const retention = make("span", "retention", detail);
+  retention.title = detail === NO_DETAIL ? RETAINED : detail;
   retention.hidden = session.status !== "stopped";
-  const notice = stoppedNotice(session.status_reason);
-  if (notice !== null) {
-    retention.textContent = notice;
-    retention.title = notice;
-  }
-
   row.append(head, meta, step, retention);
   syncStream(row, session.status);
   return row;
@@ -277,7 +277,13 @@ function applyStatus(row: HTMLLIElement, frame: StatusFrame): void {
   }
   const retention = row.querySelector<HTMLElement>(".retention");
   if (retention !== null) {
+    // The frame is the only path by which a row *becomes* stopped while the operator is looking at
+    // it — an eviction lands exactly this way — so the detail line is written here too, not only
+    // where the row was built (HS-020). One function, so the two paths cannot say different things.
+    const detail = stoppedDetail(frame.to, frame.reason);
     retention.hidden = frame.to !== "stopped";
+    retention.textContent = detail;
+    retention.title = detail === NO_DETAIL ? RETAINED : detail;
   }
 }
 

@@ -40,9 +40,13 @@ slot, so they are not candidates; a session that stopped itself is not stopped t
 
 ADR-0020's order, for its reason: a row that says `idle` over a dead container is the one lie a client
 cannot detect. Here the direction is even cheaper — the row becomes `stopped` and the slot is free
-whatever the container does — so a failed `backend.stop` is logged and the create proceeds. The operator
-can still delete a session whose container outlived it, and HS-024's Docker backend is where "stop
-actually stops" is proved.
+whatever the container does — so the `stop` is **spawned**, not awaited, and its failure is logged.
+
+Spawning is spec item 7's rule, not laziness: an answer never waits for container work, which is why
+provisioning, the turn and the ladder are tasks too. It matters the day HS-024 makes `stop` a real
+`docker stop`: ten seconds of it between a tap and its 202 is exactly the stall item 7 removed. The
+order still holds — the row moves before the task is spawned — and the operator can still delete a
+session whose container outlived it.
 
 `EVICTED` is the third reason word (`forced_abort`, `deleted`, `evicted`), and it is a *reason* rather
 than a state because a stopped session is a stopped session: what differs is why, and only the reason
@@ -53,6 +57,10 @@ carries that.
 Spec item 9 is emphatic — "Nothing is deleted by the cap" — but a badge reading `stopped · evicted` reads
 like a loss. So `web/src/transcript.ts` gained `stoppedNotice(reason)`: `evicted` becomes "stopped to
 make room — nothing was deleted, resume it to continue", and **every other reason returns `null`**.
+`stoppedDetail(state, reason)` is the same rule plus the dash for everything else, because the span it
+fills is written in **two** places: when the list is drawn, and when a `session.status` frame turns a
+live row into a stopped one. That second path is the demo's own — the operator watches a session be
+evicted — and the review of this story caught the first draft writing the sentence only on the first.
 
 One word wide, deliberately. A forced abort did not preserve work in the same sense, and a delete's own
 reason must not be softened by a sentence written for the cap; inventing reassurance for either would be
@@ -78,15 +86,17 @@ stops them all.
   `stopped` with `evicted` and its `stopped_at` moved, the live count is one, the victim's worktree path
   is untouched, the backend was asked to `Stop` and never to `Delete` or `Snapshot`, the transcript is
   the old log with the eviction appended, and the row still answers `200 stopped`); the victim is the
-  least recently active, proved in the direction that rules out "oldest created" and "lowest id" by
-  ageing the *newer* session and watching it die; the two refusals (`starting` and `running`, with the
+  least recently active, proved against "oldest created" by ageing the *later-created* session and
+  watching it die, and the `id ASC` tie-break proved separately by ageing two sessions to the same
+  second and asserting that the smaller id goes; the two refusals (`starting` and `running`, with the
   sentence that says nothing was idle and a backend that was never called); and that `error` takes no
   slot.
 - The bits the story did not build are now evidence rather than assumption: the cap counts the three
   live states (`live_count`, HS-008) and `max_live_sessions` is validated `≥ 1` by the config's semantic
   pass — both hold, and the tests above depend on the first and run on the second.
-- `web/test/transcript.test.ts` grows two cases for `stoppedNotice`, and `npm test` is 20.
+- `web/test/transcript.test.ts` grows three cases for `stoppedNotice`/`stoppedDetail`, and
+  `npm test` is 21.
 - `scripts/verify.sh` grows `case_create_at_cap_evicts` (a self-contained pair, run last, asserting the
-  victim's row, its replayed transcript and the eviction's own event) and makes `case_create_cap_reached`
-  assert its own precondition, because since this story a create at the cap is only refused when the live
-  session is not idle.
+  victim's row, its replayed transcript and the eviction's own event) and `case_create_at_cap_refused`,
+  the last case, which owns the session whose state its refusal depends on: the old early case leaned on
+  a session two cases older having not yet finished provisioning, which is a bet on the host's speed.
