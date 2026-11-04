@@ -21,6 +21,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{MethodRouter, get};
 
 use crate::backend::Backends;
+use crate::compactor::Compactor;
 use crate::config::Config;
 use crate::db::Database;
 use crate::deleter::Deleter;
@@ -150,6 +151,18 @@ impl AppState {
             // ceiling, and a wrapped bound would turn "stop after a week" into "stop immediately".
             crate::clock::minutes(idle_min),
         ))
+    }
+
+    /// The compaction task, wired to this state's database (HS-060).
+    ///
+    /// `Some` always: the window is the spec's 24 hours rather than a config key, so there is no key that
+    /// could turn it off (ADR-0032). It needs neither the backend nor the event writer — compaction folds
+    /// rows and emits nothing.
+    ///
+    /// Here for the same reason as the five above: a background policy's handles are cloned in one place,
+    /// so a test can drive the wiring `serve` uses rather than a second one.
+    pub fn compactor(&self) -> Compactor {
+        Compactor::new(Arc::clone(&self.database))
     }
 }
 

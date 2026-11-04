@@ -18,7 +18,7 @@ use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 
 pub use registry::{StreamGuard, StreamRegistry};
-pub use repository::EventRepository;
+pub use repository::{Compaction, EventRepository};
 pub use writer::spawn;
 
 // The kinds whose payload ADR-0018 and ADR-0019 pin, and the only spelling of each.
@@ -141,15 +141,20 @@ impl EventStream {
     }
 }
 
-/// The pinned payload of one delta, as the writer's coalescer reads it (HS-059).
+/// The pinned payload of one delta, as the writer's coalescer and the compactor's fold read it
+/// (HS-059, HS-060).
 ///
 /// Field order is the contract's: serialising this spells a merged row exactly like the one a producer
 /// wrote (`{"message_id":…,"kind":…,"text":…}`, ADR-0018), so a replay cannot tell which rows were merged.
+///
+/// One parser, two readers: the writer merges a batch with it and the compactor folds a history with it.
+/// A second reading of "what a delta is" is how the two would drift apart about a payload neither
+/// producer wrote.
 #[derive(Debug, serde::Serialize)]
-struct Delta {
-    message_id: String,
-    kind: String,
-    text: String,
+pub(super) struct Delta {
+    pub(super) message_id: String,
+    pub(super) kind: String,
+    pub(super) text: String,
 }
 
 /// Read `payload` as a delta, or `None` when it is not exactly the pinned shape.

@@ -8,7 +8,9 @@
 
 use rusqlite::{Connection, Row, params};
 
-use super::{Event, MESSAGE_END, NewEvent, RepoError};
+use super::{
+    Event, MESSAGE_DELTA, MESSAGE_END, MESSAGE_SNAPSHOT, NewEvent, RepoError, parse_delta,
+};
 use crate::sessions::repository::SessionRepository;
 
 /// One row. `seq` was assigned by `bump_last_seq` inside this same transaction, so the row and
@@ -42,6 +44,71 @@ const LATEST: &str = "SELECT max(seq) FROM events WHERE session_id = ?1";
 
 /// Every event of one session: the delete flow's half of removing it (HS-019).
 const DELETE_LOG: &str = "DELETE FROM events WHERE session_id = ?1";
+
+/// The `message.end` rows of one session that are past the cutoff, oldest first (HS-060).
+///
+/// `type` and `created_at` are filtered in SQL rather than in Rust so a session that has nothing to
+/// compact costs one index range scan and no payload parsing. **No `LIMIT` here**, and that is
+/// load-bearing: the bound is applied *after* the already-folded filter in Rust, because a `LIMIT` before
+/// it would keep re-reading the same oldest messages for ever once a session had more old messages than one
+/// pass may fold — a limited pass would then never advance. The scan is over one session's seq range, which
+/// the `LIMIT` never shortened anyway.
+const COMPLETED: &str = "SELECT payload, created_at FROM events \
+     WHERE session_id = ?1 AND type = ?2 AND created_at < ?3 ORDER BY seq ASC";
+
+/// The message ids this session has already folded into a snapshot (HS-060).
+///
+/// Read so an old message is not folded twice: its `message.end` row stays — compaction removes deltas
+/// and nothing else — so without this a pass would keep re-reading a message whose text is already one
+/// row.
+const SNAPSHOTS: &str = "SELECT payload FROM events WHERE session_id = ?1 AND type = ?2";
+
+/// Every delta row of one session, in seq order: what a fold reads (HS-060).
+const DELTAS: &str = "SELECT seq, payload FROM events \
+     WHERE session_id = ?1 AND type = ?2 ORDER BY seq ASC";
+
+/// Remove one row that a snapshot has replaced. One seq at a time, because the seqs are the fold's
+/// own and an `IN` list of them would be a second spelling of what the read already answered.
+const DELETE_ROW: &str = "DELETE FROM events WHERE session_id = ?1 AND seq = ?2";
+
+/// What one compaction pass did to one session (HS-060).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Compaction {
+    /// Messages whose delta rows became one snapshot.
+    pub messages: usize,
+    /// Delta rows the snapshots replaced.
+    pub rows: usize,
+    /// Delta rows whose payload is not the pinned shape. **Non-zero means the pass wrote nothing**:
+    /// see [`EventRepository::compact`].
+    pub unreadable: usize,
+}
+
+/// A snapshot's payload: the pinned three keys, in the contract's order (ADR-0018).
+#[derive(Debug, serde::Serialize)]
+struct Snapshot<'a> {
+    message_id: &'a str,
+    text: String,
+    thinking: String,
+}
+
+/// One message's fold in progress: the two kinds accumulated separately, and the seqs that carried
+/// them, in order.
+#[derive(Default)]
+struct Fold {
+    text: String,
+    thinking: String,
+    seqs: Vec<i64>,
+}
+
+/// The `message_id` a `message.end` or `message.snapshot` payload names, or `None` when it names
+/// none.
+///
+/// Deliberately weaker than [`parse_delta`]: compaction needs the id and nothing else from these two
+/// kinds, and a stricter reading would refuse a payload whose only fault is a key it does not use.
+fn message_id(payload: &str) -> Option<String> {
+    let event: serde_json::Value = serde_json::from_str(payload).ok()?;
+    Some(event.get("message_id")?.as_str()?.to_string())
+}
 
 /// The only way to read or write an `events` row. Obtained from `Database::events`.
 pub struct EventRepository<'a> {
@@ -164,6 +231,156 @@ impl<'a> EventRepository<'a> {
         self.connection
             .query_row(LATEST, [session_id], |row| row.get(0))
             .map_err(|error| RepoError::sqlite("newest_visible_seq", error))
+    }
+
+    /// Fold this session's old messages into one snapshot each (HS-060, spec item 15).
+    ///
+    /// A message is eligible when it has a `message.end` row older than `cutoff`; it is folded when it
+    /// still has delta rows and no snapshot already. The fold concatenates the `text` deltas and the
+    /// `thinking` deltas separately, in seq order, and writes one `message.snapshot` at **the highest
+    /// seq among the rows it removes** — the spec's own rule, which is why a seq may be *reused* here
+    /// and nowhere else. `sessions.last_seq` is not read and not bumped: it is the counter that must
+    /// never rewind, and compaction only ever removes seqs below the newest ones (ADR-0013).
+    ///
+    /// **One transaction for the whole session**, which is the story's "batched": the alternative is
+    /// one transaction per message, and a client would then be able to read a log with some of a
+    /// message's deltas gone and its snapshot not yet written. `limit` bounds how many messages one
+    /// pass folds, so a long-neglected log costs a bounded transaction rather than an unbounded one; the
+    /// next pass continues where this one stopped, which is why the bound is applied after the
+    /// already-folded filter rather than in the query.
+    ///
+    /// **A delta whose payload is not the pinned shape stops the whole session.** Such a row names no
+    /// message id, so it cannot be attributed, and folding the rows that can be attributed would delete
+    /// text it cannot account for. The count is reported and nothing is written: compaction's contract is
+    /// "without losing content", and a producer bug is the producer's to fix.
+    pub fn compact(
+        &self,
+        session_id: &str,
+        cutoff: i64,
+        limit: u32,
+    ) -> Result<Compaction, RepoError> {
+        let sqlite = |error| RepoError::sqlite("compact", error);
+        // `unchecked_transaction` for the reason `insert_batch` gives: the repository borrows the
+        // database's one connection, and the caller holds the database's mutex across this call, so
+        // nothing else in the process is writing.
+        let transaction = self.connection.unchecked_transaction().map_err(sqlite)?;
+
+        let folded = {
+            let mut statement = transaction.prepare(SNAPSHOTS).map_err(sqlite)?;
+            let rows = statement
+                .query_map(params![session_id, MESSAGE_SNAPSHOT], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(sqlite)?;
+            let mut folded = std::collections::HashSet::new();
+            for payload in rows {
+                if let Some(id) = message_id(&payload.map_err(sqlite)?) {
+                    folded.insert(id);
+                }
+            }
+            folded
+        };
+
+        // The candidates, oldest completion first, so the bound takes the messages that have waited
+        // longest rather than an arbitrary set.
+        let mut candidates: Vec<(String, i64)> = Vec::new();
+        {
+            let mut statement = transaction.prepare(COMPLETED).map_err(sqlite)?;
+            let rows = statement
+                .query_map(params![session_id, MESSAGE_END, cutoff], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map_err(sqlite)?;
+            for row in rows {
+                let (payload, completed_at) = row.map_err(sqlite)?;
+                let Some(id) = message_id(&payload) else {
+                    continue;
+                };
+                if !folded.contains(&id) {
+                    candidates.push((id, completed_at));
+                }
+            }
+        }
+        candidates.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+        if candidates.is_empty() {
+            return Ok(Compaction::default());
+        }
+
+        let wanted: std::collections::HashSet<&str> =
+            candidates.iter().map(|(id, _)| id.as_str()).collect();
+        let mut folds: std::collections::HashMap<String, Fold> = std::collections::HashMap::new();
+        let mut unreadable = 0;
+        {
+            let mut statement = transaction.prepare(DELTAS).map_err(sqlite)?;
+            let rows = statement
+                .query_map(params![session_id, MESSAGE_DELTA], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(sqlite)?;
+            for row in rows {
+                let (seq, payload) = row.map_err(sqlite)?;
+                let Some(delta) = parse_delta(&payload) else {
+                    unreadable += 1;
+                    continue;
+                };
+                // A third kind is a payload the contract does not describe: folding it would have to
+                // guess which node it belonged to.
+                if !matches!(delta.kind.as_str(), "text" | "thinking") {
+                    unreadable += 1;
+                    continue;
+                }
+                if !wanted.contains(delta.message_id.as_str()) {
+                    continue;
+                }
+                let fold = folds.entry(delta.message_id.clone()).or_default();
+                if delta.kind == "text" {
+                    fold.text.push_str(&delta.text);
+                } else {
+                    fold.thinking.push_str(&delta.text);
+                }
+                fold.seqs.push(seq);
+            }
+        }
+        if unreadable > 0 {
+            // Nothing has been written yet, and the transaction rolls back on drop.
+            return Ok(Compaction {
+                unreadable,
+                ..Compaction::default()
+            });
+        }
+
+        let mut compaction = Compaction::default();
+        for (message_id, completed_at) in &candidates {
+            let Some(fold) = folds.remove(message_id) else {
+                // A completed message with no delta rows: already folded by an earlier pass, or a
+                // message that never had any. Nothing to replace.
+                continue;
+            };
+            let Some(&highest) = fold.seqs.last() else {
+                continue;
+            };
+            for seq in &fold.seqs {
+                transaction
+                    .execute(DELETE_ROW, params![session_id, seq])
+                    .map_err(sqlite)?;
+            }
+            let payload = serde_json::to_string(&Snapshot {
+                message_id,
+                text: fold.text,
+                thinking: fold.thinking,
+            })
+            .expect("a snapshot's three fields serialise");
+            transaction
+                .execute(
+                    INSERT,
+                    params![session_id, highest, MESSAGE_SNAPSHOT, payload, completed_at],
+                )
+                .map_err(sqlite)?;
+            compaction.messages += 1;
+            compaction.rows += fold.seqs.len();
+        }
+        transaction.commit().map_err(sqlite)?;
+        Ok(compaction)
     }
 }
 

@@ -4,6 +4,7 @@ pub mod backend;
 pub mod cli;
 pub mod clock;
 pub mod commands;
+pub mod compactor;
 pub mod config;
 pub mod db;
 pub mod deleter;

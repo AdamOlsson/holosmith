@@ -187,6 +187,18 @@ pub fn run(args: ServeArgs) -> ExitCode {
                 None
             }
         };
+        // Compaction is a policy over rows, like the sweeper, and it is wired the same way: built before the
+        // state is handed to the router, and its own state is a `debug` line rather than a banner line, for
+        // the reason above. Unlike the sweeper it is never absent — the window is the spec's 24 hours and no
+        // key turns it off (ADR-0032) — and its first pass is immediate, so a restart folds a day-old log at
+        // once rather than a tick later.
+        tracing::debug!(
+            target: "holosmith::serve",
+            after_h = crate::compactor::SNAPSHOT_AFTER.as_secs() / 3600,
+            tick_s = crate::compactor::TICK.as_secs(),
+            "the compaction task is running"
+        );
+        let compactor = state.compactor().spawn();
         let app = App::new(http::router(state), guards);
         let served = serve::run(listener, app, ServeOptions::default(), stop.recv()).await;
         // The sweeper is a policy over rows, not part of serving: when the listener's drain is over,
@@ -195,6 +207,10 @@ pub fn run(args: ServeArgs) -> ExitCode {
         if let Some(sweeper) = sweeper {
             sweeper.abort();
         }
+        // Same argument, one step further: compaction writes, so a pass that started must not be cut off in
+        // the middle of a transaction. `abort` is what the runtime would do anyway, and it makes the handle's
+        // purpose its comment.
+        compactor.abort();
         match served {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
