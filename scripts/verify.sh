@@ -287,6 +287,7 @@ serve_cases=(
   case_guard_bad_owner
   case_guard_passes
   case_health_is_exempt
+  case_event_coalescing
   case_create_session
   case_create_is_idempotent
   case_create_bad_project
@@ -298,7 +299,6 @@ serve_cases=(
   case_session_detail
   case_session_screen
   case_prompt_turn
-  case_event_coalescing
   case_turn_timeout
   case_prompt_bad_body
   case_prompt_unknown_session
@@ -843,8 +843,10 @@ case_prompt_turn() {
 # at a pace below the window) and `tests/events.rs`'s (5,000 -> three). What the shipped artifact can prove
 # is the contract a merge must keep, which is what a burst producer (HS-032's container output) is held to.
 #
-# It creates its own session and deletes it, so nothing it asserts depends on a row an earlier case made and
-# nothing it leaves can be somebody else's idle candidate.
+# It creates its own session and deletes it, and it runs **before** `case_create_session`: the run's cap is one
+# live session, so a create here after the shared one exists would evict it and every later case that prompts
+# `created_id` would answer `409 session_stopped` (measured: exactly that, the first time this case was
+# placed after `case_prompt_turn`).
 case_event_coalescing() {
   local name=case_event_coalescing response body id deltas texts
   fetch_body "${name}_create" POST /api/sessions \
