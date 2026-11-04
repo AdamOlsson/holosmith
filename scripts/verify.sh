@@ -315,6 +315,7 @@ serve_cases=(
   case_create_at_cap_refused
   case_token_budget
   case_worktree
+  case_worktree_refusal
   case_docker_preflight
 )
 
@@ -1595,6 +1596,90 @@ case_worktree() {
     fail "${name}_delete/no_answer" "DELETE /api/sessions/$id did not answer"
   expect_status "${name}_delete" "$(answer "${name}_delete")" 202
   wait_for_gone "${name}_gone" "$id"
+
+  kill "$socket_pid" 2>/dev/null || true
+  wait "$socket_pid" 2>/dev/null || true
+  socket_pid=""
+}
+
+# HS-026's proof from the artifact: three unsafe repositories, each refused with its own code before a row
+# exists. The three checks are read on the create's own path, so what this case asserts is the 422 itself
+# and the absence of everything a create would have left behind.
+#
+# It boots its own Docker run over its own projects root, because the run's server was started over a
+# projects root with no repository at all and a case must own the state it asserts.
+case_worktree_refusal() {
+  local name=case_worktree_refusal response body pair project code
+  local projects="$WORK/projects-refusal"
+  # The guard comes first, before `stop_serve`, for the reason `case_worktree` gives: a skipped case that
+  # stopped the server leaves the phase's own teardown with no pid to signal.
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to answer the docker preflight (tests/worktree.rs covers this)\n' "$name"
+    return 0
+  fi
+  stop_serve
+
+  # 1. A `.git` that is a file: a linked worktree's or a submodule checkout's shape.
+  local linked="$projects/linked"
+  mkdir -p "$linked"
+  git -C "$linked" init --quiet || fail "$name/git" "git init did not work in $linked"
+  mv "$linked/.git" "$linked/moved.git" || fail "$name/git" "the .git directory is not movable"
+  printf 'gitdir: moved.git\n' >"$linked/.git" || fail "$name/git" "the .git file is not writable"
+  # 2. A repository with submodules declared: the hooks they carry would live under `.git/modules`.
+  local submodules="$projects/submodules"
+  mkdir -p "$submodules"
+  git -C "$submodules" init --quiet || fail "$name/git" "git init did not work in $submodules"
+  printf '[submodule "dep"]\n\tpath = dep\n\turl = ../dep\n' >"$submodules/.gitmodules" ||
+    fail "$name/git" ".gitmodules is not writable"
+  # 3. `extensions.worktreeConfig`, which would let the agent write a per-worktree config.
+  local configured="$projects/configured"
+  mkdir -p "$configured"
+  git -C "$configured" init --quiet || fail "$name/git" "git init did not work in $configured"
+  git -C "$configured" config extensions.worktreeConfig true ||
+    fail "$name/git" "extensions.worktreeConfig is not settable"
+
+  socket_pid="$(fake_docker_ping "$WORK/docker-refusal.sock")"
+  for _ in $(seq 1 100); do
+    [ -S "$WORK/docker-refusal.sock" ] && break
+    sleep 0.05
+  done
+  # `min_free_gb = 1` because this machine's free space is not the case's subject, and `idle_stop_min = 0`
+  # because this boot lasts a second and a sweeper would only be noise.
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\ndocker_host = "unix://%s/docker-refusal.sock"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
+    "$owner" "$projects" "$WORK" >"$WORK/config-refusal.toml"
+  start_serve "$WORK/config-refusal.toml" "$WORK/data-refusal"
+
+  for pair in "linked:git_not_directory" "submodules:submodules_present" \
+    "configured:worktree_config_enabled"; do
+    project="${pair%%:*}"
+    code="${pair##*:}"
+    fetch_body "${name}_$project" POST /api/sessions \
+      "{\"project\":\"$project\",\"model\":\"claude-sonnet-4.5\",\"thinking\":\"high\"}" \
+      "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+      "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" \
+      "Idempotency-Key: verify-refusal-$project" ||
+      fail "${name}_$project/no_answer" "POST /api/sessions did not answer for $project"
+    response="$(answer "${name}_$project")"
+    expect_status "${name}_$project" "$response" 422
+    expect_header "${name}_$project" "$response" "Content-Type" "application/json"
+    body="$(cat "$WORK/responses/${name}_$project.body")"
+    printf '%s\n' "$body" | grep -qF "\"code\":\"$code\"" ||
+      fail "${name}_$project/code" "the answer is not $code: $body"
+    assertions=$((assertions + 1))
+  done
+
+  # Nothing was written. The list is the artifact's own answer, so a refused create that had inserted a row
+  # would show up here; the directory check is the fourth acceptance line's other half.
+  fetch "${name}_list" GET /api/sessions "Host: 127.0.0.1" ||
+    fail "${name}_list/no_answer" "GET /api/sessions did not answer"
+  body="$(cat "$WORK/responses/${name}_list.body")"
+  printf '%s\n' "$body" | grep -qF '"sessions":[]' ||
+    fail "${name}_list/empty" "a refused create wrote a session: $body"
+  assertions=$((assertions + 1))
+  if [ -d "$projects/.worktrees" ]; then
+    fail "${name}/worktrees" "a refused create made a worktree directory: $projects/.worktrees"
+  fi
+  assertions=$((assertions + 1))
 
   kill "$socket_pid" 2>/dev/null || true
   wait "$socket_pid" 2>/dev/null || true

@@ -169,7 +169,10 @@ server — `backend = "docker"`, a real repository under `projects_root`, and a 
 preflight's `_ping` — creates a session, and asserts the row's `worktree` and `base_commit`, the network
 step's refusal, the worktree and branch gone afterwards, the registration back to one entry, and then a
 `DELETE ?force=true` — a 202 and then a row that answers `404` — over the worktree that is already
-absent). A case that must assert
+absent), and the project's refusals (`case_worktree_refusal`, which boots a Docker run of its own over
+a projects root holding a `.git` file, a repository with `.gitmodules` and one with
+`extensions.worktreeConfig`, and asserts each create's `422` with its own code, `application/json`, no
+session row afterwards and no `.worktrees` directory). A case that must assert
 one code keeps every higher guard check correct, or it asserts another guard's code under its own
 name.
 
@@ -181,7 +184,7 @@ remember to place the new case before it.
 **Every later story adds at least one `case_*` function and one line in `serve_cases`.** That
 is what makes this a growing gate rather than a snapshot: a story that adds a route or a
 behaviour has one obvious place to prove the shipped binary does it. A case that needs a setting the
-rest of the run must not carry gets a boot of its own (see `case_token_budget` and `case_worktree`), and
+rest of the run must not carry gets a boot of its own (see `case_token_budget`, `case_worktree` and `case_worktree_refusal`), and
 takes a place at the end of the array: nothing after it may assume the first boot's state, and a case
 that stops the server leaves the run with whatever boot it started.
 

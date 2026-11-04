@@ -50,6 +50,18 @@ impl DockerBackend {
         Worktree::of(&self.projects_root, &session.project, &session.id)
     }
 
+    /// Whether `project`'s repository may be mounted, and why not when it may not (HS-026).
+    ///
+    /// The create asks this **before** the session row exists, so it cannot go through [`Self::worktree`]:
+    /// the repository is named by the projects root and the project alone. It is a host read like every
+    /// other in this backend, and [`crate::worktree::refuse`] is where the rules are.
+    pub fn refuse_project(&self, project: &str) -> Result<(), crate::worktree::Refusal> {
+        crate::worktree::refuse(&crate::worktree::repository_of(
+            &self.projects_root,
+            project,
+        ))
+    }
+
     /// Every operation's refusal, in one place so the reason always names the operation.
     fn refuse(operation: &str) -> BackendError {
         BackendError::unsupported("docker", operation)

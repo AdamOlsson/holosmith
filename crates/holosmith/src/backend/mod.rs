@@ -303,6 +303,19 @@ impl Backends {
             Self::Docker(_) => "docker",
         }
     }
+
+    /// Whether the project this create names may be mounted, and why not when it may not (HS-026).
+    ///
+    /// The question belongs to the backend that mounts a repository: a stub session has no repository at
+    /// all, so it refuses nothing and every stub test and the gate's stub boot need no project on disk
+    /// (ADR-0015). It is answered here rather than in the handler for that reason — one place knows which
+    /// backend runs, and it is the one that already holds the projects root.
+    pub fn refuse(&self, project: &str) -> Result<(), crate::worktree::Refusal> {
+        match self {
+            Self::Stub(_) => Ok(()),
+            Self::Docker(backend) => backend.refuse_project(project),
+        }
+    }
 }
 
 impl SessionBackend for Backends {

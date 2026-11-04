@@ -47,6 +47,15 @@ pub const BAD_MODEL: &str = "bad_model";
 /// A create's `thinking` is not one thinking level (HS-008).
 pub const BAD_THINKING: &str = "bad_thinking";
 
+/// A create named a project whose `.git` is not a directory (HS-026, spec item 1).
+pub const GIT_NOT_DIRECTORY: &str = "git_not_directory";
+
+/// A create named a project that has submodules (HS-026, spec item 1).
+pub const SUBMODULES_PRESENT: &str = "submodules_present";
+
+/// A create named a project with `extensions.worktreeConfig` enabled (HS-026, spec item 1).
+pub const WORKTREE_CONFIG_ENABLED: &str = "worktree_config_enabled";
+
 /// A create was refused because the machine already runs the maximum number of live sessions
 /// (HS-008; HS-020 refines the branch with eviction).
 pub const CAP_REACHED: &str = "cap_reached";
@@ -241,6 +250,41 @@ impl ApiError {
             BAD_THINKING,
             "`thinking` must be 1–32 lowercase letters, digits, `_` and `-`, starting with a \
              letter",
+        )
+    }
+
+    /// What a create naming a project whose `.git` is not a directory answers (HS-026, spec item 1).
+    ///
+    /// Three sentences rather than one per code, because the operator's next step depends on which
+    /// hole was found: a checkout that is not a plain one, submodules whose hooks would live inside the
+    /// mount, or a per-worktree config the agent could write. The page prints the sentence alone
+    /// (`createFailure` in `web/src/transcript.ts`): the story asks for an explanation, not a code.
+    pub fn git_not_directory() -> Self {
+        Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            GIT_NOT_DIRECTORY,
+            "the project's .git is not a directory, so it was refused: a session needs a plain \
+             checkout, not a linked worktree, a submodule or a missing repository",
+        )
+    }
+
+    /// What a create naming a project with submodules answers (HS-026, spec item 1).
+    pub fn submodules_present() -> Self {
+        Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            SUBMODULES_PRESENT,
+            "the project has submodules, whose hooks would live under .git/modules inside the \
+             session's mount, so it was refused",
+        )
+    }
+
+    /// What a create naming a project with `extensions.worktreeConfig` answers (HS-026, spec item 1).
+    pub fn worktree_config_enabled() -> Self {
+        Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            WORKTREE_CONFIG_ENABLED,
+            "the project enables extensions.worktreeConfig, which would let the agent write a \
+             per-worktree config, so it was refused",
         )
     }
 
@@ -505,6 +549,39 @@ mod tests {
             ApiError::bad_model(),
             StatusCode::UNPROCESSABLE_ENTITY,
             BAD_MODEL,
+        );
+    }
+
+    #[test]
+    fn every_project_refusal_is_a_422_with_its_own_code_and_its_own_sentence() {
+        // HS-026's three refusals. Three codes because the operator's next step differs per hole, and a
+        // sentence each because the page prints the sentence alone: a shared sentence would make the
+        // codes indistinguishable to the human even though the machine can tell them apart.
+        let mut sentences = std::collections::BTreeSet::new();
+        for (error, code) in [
+            (ApiError::git_not_directory(), GIT_NOT_DIRECTORY),
+            (ApiError::submodules_present(), SUBMODULES_PRESENT),
+            (ApiError::worktree_config_enabled(), WORKTREE_CONFIG_ENABLED),
+        ] {
+            assert!(
+                !error.body.message.contains(code),
+                "a message repeats its code: {}",
+                error.body.message
+            );
+            sentences.insert(error.body.message);
+            assert_answer(error, StatusCode::UNPROCESSABLE_ENTITY, code);
+        }
+        assert_eq!(sentences.len(), 3, "two project refusals share a sentence");
+    }
+
+    #[test]
+    fn a_project_refusal_is_not_the_code_a_bad_project_name_answers() {
+        // `bad_project` is the request's shape and `git_not_directory` is the repository's: one is fixed
+        // by correcting what the client sent, the other by fixing the checkout on the machine.
+        assert_ne!(ApiError::bad_project().body.code, GIT_NOT_DIRECTORY);
+        assert_ne!(
+            ApiError::bad_project().body.message,
+            ApiError::git_not_directory().body.message
         );
     }
 

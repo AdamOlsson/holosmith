@@ -338,15 +338,17 @@ async fn a_failure_at_a_named_step_undoes_what_completed_and_ends_error() {
 }
 
 #[tokio::test]
-async fn the_docker_backend_fails_honestly_and_leaves_the_session_resumable() {
-    // Without HS-024 there is no Docker backend, and `--backend` defaults to it. A session created
-    // under it must not sit in `starting` forever: it ends `error` with a reason naming the step,
-    // and it stops counting towards the cap, because `error` is not a live state.
+async fn the_docker_backend_refuses_a_project_that_is_not_there() {
+    // Without HS-024 there is no Docker backend, and `--backend` defaults to it. HS-025 asked a create
+    // against a projects root holding no repository to end `error` with git's sentence; HS-026 moved that
+    // question to the create, so the answer is now the create's own 422 and no row at all — a session that
+    // never existed cannot be resumed, and the operator reads the fix before anything is written. What a
+    // Docker create of a *safe* project then does (the worktree step, then the network step's refusal) is
+    // `tests/worktree.rs`'s end-to-end case.
     //
-    // Since HS-025 the worktree step is real, so with a projects root that holds no repository the *first*
-    // step is the one that fails, with git's own sentence. The root is this test's own empty directory
-    // rather than the config's default: a test that ran against `/srv/holosmith/projects` would pass or
-    // fail depending on what the host happens to keep there.
+    // The root is this test's own empty directory rather than the config's default: a test that ran
+    // against `/srv/holosmith/projects` would pass or fail depending on what the host happens to keep
+    // there.
     let dir = TempDir::new("provisioning-docker");
     let projects = dir.file("projects");
     std::fs::create_dir_all(&projects).expect("the projects root is creatable");
@@ -362,26 +364,24 @@ async fn the_docker_backend_fails_honestly_and_leaves_the_session_resumable() {
         "the run's backend did not reach the state"
     );
     let served = Served::start(http::router(state.clone()), GRACE).await;
-    let id = created_id(&post_create(served.addr, "docker").await);
+    let response = post_create(served.addr, "docker").await;
 
-    settled(&state, &id).await;
-    let failed = row(&state, &id);
-    assert_eq!(failed.status, Status::Error);
-    let reason = failed.status_reason.expect("an error carries a reason");
-    assert!(
-        reason.starts_with("the worktree step: ") && reason.contains("git"),
-        "the reason does not name the step and what failed: {reason}"
+    assert_eq!(response.status, 422, "{}", response.body);
+    let body: Value = serde_json::from_str(&response.body).expect("an envelope is JSON");
+    assert_eq!(
+        body["code"], "git_not_directory",
+        "the refusal does not name the hole: {}",
+        response.body
     );
-    // The step recorded nothing, because it made nothing: the row keeps the columns a create writes.
-    assert_eq!(failed.worktree, "");
-    assert_eq!(failed.base_commit, None);
-    let events = committed_status_events(&state, &id, 2).await;
-    assert_eq!(steps(&events), ["worktree", "-"], "{events:?}");
     let live = {
         let database = state.database.lock().expect("the lock is not poisoned");
-        database.sessions().live_count().expect("the count reads")
+        database
+            .sessions()
+            .list(None)
+            .expect("the list reads")
+            .len()
     };
-    assert_eq!(live, 0, "a failed session still counts as live");
+    assert_eq!(live, 0, "a refused create wrote a row");
 
     served.finish().await.expect("a clean shutdown");
 }

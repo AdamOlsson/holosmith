@@ -375,6 +375,23 @@ export function stoppedDetail(state: SessionState, reason: string | null): strin
   return stoppedNotice(reason) ?? NO_DETAIL;
 }
 
+// What a create's refusal says in the form's error area (HS-026).
+//
+// Spec item 1's three refusals are the project's, not the request's: the operator has to be told what is
+// wrong with the repository, and a `git_not_directory:` prefix in front of that sentence is a machine
+// word the phone cannot act on. The story asks for exactly this — "the UI explains the refusal in one
+// sentence rather than showing a code" — so the three codes drop the prefix and every other answer keeps
+// the `code: message` shape the rest of the page uses.
+export const PROJECT_REFUSALS: readonly string[] = [
+  "git_not_directory",
+  "submodules_present",
+  "worktree_config_enabled",
+];
+
+export function createFailure(code: string, message: string): string {
+  return PROJECT_REFUSALS.includes(code) ? message : `${code}: ${message}`;
+}
+
 // Where the stream is. One spelling, so the list and the screen cannot ask for different paths,
 // and no `since=` parameter is invented: the browser resends the last SSE `id` (a seq) as
 // `Last-Event-ID` and the server replays after it (ADR-0014).

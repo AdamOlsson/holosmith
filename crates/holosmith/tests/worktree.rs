@@ -19,7 +19,7 @@ use holosmith::http::{self, AppState};
 use holosmith::runtime::Backend;
 use holosmith::sessions::state::Trigger;
 use holosmith::sessions::{Session, Status};
-use holosmith::worktree::Worktree;
+use holosmith::worktree::{Refusal, Worktree, repository_of};
 use serde_json::Value;
 
 mod support;
@@ -29,7 +29,8 @@ use support::{PATIENCE, Response, Served, TempDir, head, repository, request, st
 /// production ten seconds.
 const GRACE: Duration = Duration::from_millis(100);
 
-const BODY: &str = r#"{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}"#;
+/// A `.gitmodules` with one entry: the declaration of a submodule, whether or not it is initialised.
+const GITMODULES: &str = "[submodule \"dep\"]\n\tpath = dep\n\turl = ../dep\n";
 
 const ORIGIN: &str = "http://localhost:8080";
 
@@ -368,15 +369,22 @@ async fn a_project_that_is_not_a_repository_is_refused_with_its_path() {
     );
 }
 
-/// One create, the way the app's own client sends it.
-async fn post_create(addr: SocketAddr, key: &str) -> Response {
+/// One create for `project`, the way the app's own client sends it (HS-026).
+async fn post_create_for(addr: SocketAddr, project: &str, key: &str) -> Response {
+    let body =
+        format!(r#"{{"project":"{project}","model":"claude-sonnet-4.5","thinking":"high"}}"#);
     let text = format!(
         "POST /api/sessions HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: {ORIGIN}\r\n\
          Content-Type: application/json\r\nX-Holosmith-Client: 1\r\nIdempotency-Key: {key}\r\n\
-         Content-Length: {}\r\nConnection: close\r\n\r\n{BODY}",
-        BODY.len()
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
     );
     request(addr, &text).await
+}
+
+/// One create, the way the app's own client sends it.
+async fn post_create(addr: SocketAddr, key: &str) -> Response {
+    post_create_for(addr, "holosmith", key).await
 }
 
 fn created_id(response: &Response) -> String {
@@ -576,4 +584,276 @@ async fn a_later_step_failure_does_not_take_an_adopted_worktree_back() {
         .await
         .expect("the delete removes what the session owns");
     assert!(!path.exists(), "the delete left the worktree behind");
+}
+
+// ---- the project's refusals (HS-026, spec item 1) ---------------------------------------------
+//
+// The three rules that say a repository must not be mounted at all. They are read on the create's own
+// path, before any row exists, so each test here asserts two things: which code the operator gets, and
+// that the refusal left nothing behind.
+
+/// `refuse`'s answer as a value a test can compare, or `None` when the repository may be mounted.
+fn refused(repo: &Path) -> Option<Refusal> {
+    holosmith::worktree::refuse(repo).err()
+}
+
+/// The rule that names a repository is one rule: the create's `refuse` and `Worktree::of` agree.
+#[test]
+fn a_plain_checkout_is_not_refused() {
+    let dir = TempDir::new("refusal-plain");
+    let (root, repo) = projects(&dir);
+    assert_eq!(refused(&repo), None, "a plain checkout was refused");
+    assert_eq!(
+        repository_of(&root, "holosmith"),
+        repo,
+        "the create and the worktree name the repository differently"
+    );
+}
+
+#[test]
+fn a_git_file_is_refused_because_it_is_not_a_directory() {
+    // The shape a linked worktree or a submodule checkout has: the repository lives somewhere this mount
+    // would not cover, so the hooks and config the spec protects would be elsewhere on disk.
+    let dir = TempDir::new("refusal-git-file");
+    let (_, repo) = projects(&dir);
+    std::fs::rename(repo.join(".git"), repo.join("moved.git"))
+        .expect("the repository's .git is movable");
+    std::fs::write(repo.join(".git"), "gitdir: moved.git\n").expect("a .git file is writable");
+
+    assert_eq!(refused(&repo), Some(Refusal::NotADirectory));
+}
+
+#[test]
+fn a_project_that_is_not_there_is_refused_as_not_a_directory() {
+    // A directory the projects root does not hold has no `.git` either, and it is one sentence: "there
+    // is no plain checkout here". The provisioner never sees it, so no row is written for it either.
+    let dir = TempDir::new("refusal-missing");
+    let root = dir.file("projects");
+    std::fs::create_dir_all(&root).expect("the projects root is creatable");
+
+    assert_eq!(
+        refused(&root.join("holosmith")),
+        Some(Refusal::NotADirectory)
+    );
+}
+
+#[test]
+fn a_repository_with_submodules_is_refused_in_both_of_its_shapes() {
+    // Two facts, one refusal. `.gitmodules` is the declaration — an agent inside the mount can run
+    // `submodule update --init` and make the hooks itself — and `.git/modules` is where those hooks then
+    // live, which is the hole spec item 1 names.
+    let declared = TempDir::new("refusal-gitmodules");
+    let (_, repo) = projects(&declared);
+    std::fs::write(repo.join(".gitmodules"), GITMODULES).expect(".gitmodules is writable");
+    assert_eq!(refused(&repo), Some(Refusal::SubmodulesPresent));
+
+    let initialised = TempDir::new("refusal-git-modules");
+    let (_, repo) = projects(&initialised);
+    std::fs::create_dir_all(repo.join(".git/modules/dep/hooks"))
+        .expect("the modules directory is creatable");
+    assert_eq!(refused(&repo), Some(Refusal::SubmodulesPresent));
+}
+
+#[test]
+fn extensions_worktree_config_is_refused_only_when_git_says_it_is_on() {
+    // `--type=bool` is why this is one rule and not three spellings: git's own words for "on" all answer
+    // `true`, and an explicit `false` is a repository that may be mounted.
+    let dir = TempDir::new("refusal-worktree-config");
+    let (_, repo) = projects(&dir);
+    for (value, expected) in [
+        ("true", Some(Refusal::WorktreeConfigEnabled)),
+        ("on", Some(Refusal::WorktreeConfigEnabled)),
+        ("false", None),
+        ("off", None),
+    ] {
+        support::git(&repo, &["config", "extensions.worktreeConfig", value]);
+        assert_eq!(
+            refused(&repo),
+            expected,
+            "extensions.worktreeConfig = {value}"
+        );
+    }
+}
+
+#[test]
+fn a_repository_git_cannot_read_is_not_called_safe() {
+    // Not a policy but the absence of an answer: git refuses a boolean key it cannot parse, so nothing
+    // about this repository can be promised. The create answers `500 internal` and logs git's words —
+    // the assertion here is that the fourth variant carries them rather than claiming the project is fine.
+    let dir = TempDir::new("refusal-unreadable");
+    let (_, repo) = projects(&dir);
+    let config = std::fs::read_to_string(repo.join(".git/config")).expect("the config reads");
+    std::fs::write(
+        repo.join(".git/config"),
+        format!("{config}[extensions]\n\tworktreeConfig = maybe\n"),
+    )
+    .expect("the config is writable");
+
+    match refused(&repo) {
+        Some(Refusal::Unreadable(error)) => assert!(
+            error.detail.contains("bad boolean config value"),
+            "git's own words are not carried: {error}"
+        ),
+        other => panic!("a repository git cannot read answered {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_refused_create_answers_422_with_its_own_code_and_writes_nothing() {
+    // The story's demo, one project per hole: three codes, each 422 in ADR-0008's envelope, and no
+    // session, no worktree directory and no registration left behind — the fourth acceptance line.
+    let dir = TempDir::new("refusal-api");
+    let root = dir.file("projects");
+
+    let linked = root.join("linked");
+    repository(&linked);
+    std::fs::rename(linked.join(".git"), linked.join("moved.git"))
+        .expect("the repository's .git is movable");
+    std::fs::write(linked.join(".git"), "gitdir: moved.git\n").expect("a .git file is writable");
+
+    let submodule = root.join("submodule");
+    repository(&submodule);
+    std::fs::write(submodule.join(".gitmodules"), GITMODULES).expect(".gitmodules is writable");
+
+    let configured = root.join("configured");
+    repository(&configured);
+    support::git(
+        &configured,
+        &["config", "extensions.worktreeConfig", "true"],
+    );
+
+    let state = docker_state(&dir, &root);
+    let served = Served::start(http::router(state.clone()), GRACE).await;
+
+    for (project, code) in [
+        ("linked", "git_not_directory"),
+        ("submodule", "submodules_present"),
+        ("configured", "worktree_config_enabled"),
+    ] {
+        let response = post_create_for(served.addr, project, &format!("refusal-{project}")).await;
+        assert_eq!(response.status, 422, "{project}: {}", response.body);
+        assert_eq!(
+            response.header("content-type"),
+            Some("application/json"),
+            "{project}: {}",
+            response.body
+        );
+        let body: Value = serde_json::from_str(&response.body).expect("an envelope is JSON");
+        assert_eq!(body["code"], code, "{project}: {}", response.body);
+        let sentence = body["message"]
+            .as_str()
+            .expect("the envelope has a sentence");
+        assert!(
+            !sentence.contains(code),
+            "the sentence repeats the code instead of explaining it: {sentence}"
+        );
+        assert!(
+            sentence.contains("refused"),
+            "the sentence does not say the project was refused: {sentence}"
+        );
+    }
+
+    // "so a refused session leaves nothing behind": no row, no worktree directory, and every project
+    // still holds exactly its own checkout.
+    {
+        let database = state.database.lock().expect("the lock is not poisoned");
+        assert!(
+            database
+                .sessions()
+                .list(None)
+                .expect("the list reads")
+                .is_empty(),
+            "a refused create wrote a session row"
+        );
+    }
+    assert!(
+        !root.join(".worktrees").exists(),
+        "a refused create made a worktree directory"
+    );
+    for project in ["linked", "submodule", "configured"] {
+        let repo = root.join(project);
+        // One entry: the repository's own checkout. A session's would be a second, and the id it is named
+        // after never existed — so the count is the whole claim, not the path (a `.git` file's repository
+        // reports its gitdir's path, which is the fixture's second name).
+        assert_eq!(
+            support::worktrees(&repo).len(),
+            1,
+            "{project} holds a worktree registration a refused create made"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_refused_create_does_not_evict_anyone() {
+    // The refusal is answered before the cap, so a full machine does not stop an idle session to make
+    // room for work that will not happen. The refused create's code is the project's, not `cap_reached`,
+    // and the live session is untouched.
+    let dir = TempDir::new("refusal-before-cap");
+    let root = dir.file("projects");
+    let repo = root.join("holosmith");
+    repository(&repo);
+    std::fs::write(repo.join(".gitmodules"), GITMODULES).expect(".gitmodules is writable");
+
+    let config = Config {
+        projects_root: root.clone(),
+        max_live_sessions: 1,
+        ..Config::default()
+    };
+    let mut state = state_in(&dir, config);
+    state.backend = Backends::for_run(Backend::Docker, root.clone());
+    let live = create_row(&state);
+    let served = Served::start(http::router(state.clone()), GRACE).await;
+
+    let response = post_create(served.addr, "refusal-at-the-cap").await;
+    assert_eq!(response.status, 422, "{}", response.body);
+    let body: Value = serde_json::from_str(&response.body).expect("an envelope is JSON");
+    assert_eq!(
+        body["code"], "submodules_present",
+        "a refused create answered the cap instead of the project: {}",
+        response.body
+    );
+    assert_eq!(
+        row(&state, &live.id).status,
+        Status::Starting,
+        "a refused create moved a session on its way to saying no"
+    );
+}
+
+#[tokio::test]
+async fn a_retry_is_answered_from_its_row_even_after_the_project_became_unsafe() {
+    // ADR-0012's promise is that a retry creates nothing and is answered from the row it already has.
+    // The repository is read on every create (a project can change under the server), but the refusal is
+    // only an *answer* where a row would be written — so a retry after the project was made unsafe
+    // still gets the session it asked for.
+    let dir = TempDir::new("refusal-retry");
+    let root = dir.file("projects");
+    let repo = root.join("holosmith");
+    repository(&repo);
+    let state = docker_state(&dir, &root);
+    let served = Served::start(http::router(state.clone()), GRACE).await;
+
+    let id = created_id(&post_create(served.addr, "refusal-retry-1").await);
+    std::fs::write(repo.join(".gitmodules"), GITMODULES).expect(".gitmodules is writable");
+
+    let again = post_create(served.addr, "refusal-retry-1").await;
+    assert_eq!(again.status, 202, "{}", again.body);
+    assert_eq!(created_id(&again), id, "the retry created a second session");
+}
+
+#[tokio::test]
+async fn a_stub_create_has_no_repository_to_refuse() {
+    // The refusal is the backend's because the *repository* is the backend's: a stub session provisions
+    // nothing outside the process, so a machine with no projects root at all still creates sessions —
+    // which is what every stub test and the gate's own boot look like (ADR-0015).
+    let dir = TempDir::new("refusal-stub");
+    let state = state_in(&dir, Config::default());
+    assert_eq!(
+        state.runtime.backend,
+        Backend::Stub,
+        "this test is the stub's"
+    );
+    let served = Served::start(http::router(state.clone()), GRACE).await;
+
+    let response = post_create(served.addr, "refusal-stub-1").await;
+    assert_eq!(response.status, 202, "{}", response.body);
 }

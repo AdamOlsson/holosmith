@@ -14,6 +14,7 @@ import {
   Transcript,
   affordances,
   budgetNotice,
+  createFailure,
   parseFrame,
   sessionIdFromPath,
   stoppedDetail,
@@ -345,7 +346,9 @@ function createSection(networkDefault: boolean): HTMLElement {
   let pendingKey: string | null = null;
 
   const fail = (code: string, message: string): void => {
-    error.textContent = `${code}: ${message}`;
+    // A project's refusal is a sentence about the repository and the operator reads it as one: the code
+    // in front of it would be a word to act on and this is not one (HS-026, `createFailure`).
+    error.textContent = createFailure(code, message);
     error.hidden = false;
   };
 

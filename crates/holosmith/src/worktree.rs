@@ -13,6 +13,11 @@
 //! **No fetch, anywhere.** The session branch is created from a commit the project repository already
 //! has, so there is nothing to bring in from a remote and nothing here names one.
 //!
+//! Since HS-026 the module also holds the readings that say a repository must not be mounted at all
+//! ([`refuse`]): they are the same kind of question — what does this repository say about itself — and
+//! they run before the first `worktree add`, so a refused create leaves nothing behind. They are not
+//! one of the five commands, and they write nothing.
+//!
 //! Three things this module measured, and each of them is a bug if it is forgotten:
 //!
 //! - **Every path is absolute.** `git worktree add` resolves a relative `<path>` against the
@@ -73,7 +78,7 @@ impl Worktree {
     /// `Worktree` variant, and `GLOSSARY.md`'s **Worktree** entry.
     pub fn of(projects_root: &Path, project: &str, id: &str) -> Self {
         Self {
-            repository: projects_root.join(project),
+            repository: repository_of(projects_root, project),
             path: projects_root.join(WORKTREES).join(id),
             branch: format!("{BRANCH_PREFIX}{id}"),
         }
@@ -228,45 +233,134 @@ impl Worktree {
 
     /// Run one git command in the repository and answer its trimmed stdout; a non-zero exit is a failure.
     fn run(&self, args: &[&str]) -> Result<String, GitError> {
-        let output = self.output(args)?;
-        if !output.status.success() {
-            return Err(self.error(args, &output));
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        git_run(&self.repository, args)
     }
 
     /// Spawn git in the repository. Only an inability to start it is checked here; the exit status is the
     /// caller's question, because "no such branch" is an answer and not a failure.
     fn output(&self, args: &[&str]) -> Result<std::process::Output, GitError> {
-        Command::new("git")
-            .arg("-C")
-            .arg(&self.repository)
-            .args(args)
-            .output()
-            .map_err(|error| GitError {
-                command: self.command(args),
-                detail: format!("git is not runnable ({error}): install git 2.38 or newer"),
-            })
+        git_output(&self.repository, args)
     }
 
     /// What git said about `args`, as the operator reads it: the command, then git's own last words.
     fn error(&self, args: &[&str], output: &std::process::Output) -> GitError {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let detail = stderr.trim();
-        GitError {
-            command: self.command(args),
-            detail: if detail.is_empty() {
-                format!("git exited {} without saying why", output.status)
-            } else {
-                detail.to_string()
-            },
-        }
+        git_error(&self.repository, args, output)
     }
 
     /// The command as an operator would type it, for a failure's sentence.
     fn command(&self, args: &[&str]) -> String {
-        format!("git -C {} {}", self.repository.display(), args.join(" "))
+        git_command(&self.repository, args)
     }
+}
+/// The project repository `project` lives in, under the machine's projects root: `<projects>/<project>`.
+///
+/// A function rather than a second `join` at each site, because a create needs the repository *before* a
+/// session — and the id [`Worktree::of`] would build a worktree from — exists (HS-026).
+///
+/// `project` is one path segment: the create's `validate_project` is what keeps it inside the projects
+/// root, so this is the naming rule and not the guard.
+pub fn repository_of(projects_root: &Path, project: &str) -> PathBuf {
+    projects_root.join(project)
+}
+
+/// Why a project's repository must not be mounted into a session's container (HS-026, spec item 1).
+///
+/// Three refusals the spec names, plus the fourth answer that is not a policy: a repository git cannot
+/// read has not been checked at all, and saying "safe" about it would be a lie.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refusal {
+    /// `<project>/.git` is not a directory: a linked worktree, a submodule checkout, or no checkout.
+    NotADirectory,
+    /// The repository has submodules, whose hooks would live under `.git/modules` inside the mount.
+    SubmodulesPresent,
+    /// `extensions.worktreeConfig` is on, which would let the agent write a per-worktree config.
+    WorktreeConfigEnabled,
+    /// `git` could not read the repository, so nothing about it can be promised.
+    Unreadable(GitError),
+}
+
+/// Whether `repository` may be mounted into a session's container, and why not when it may not
+/// (HS-026).
+///
+/// The checks are spec item 1's, and they run in that order — the cheapest and most fundamental first:
+///
+/// - **`.git` is a directory.** A `.git` *file* means the checkout is a linked worktree or a submodule,
+///   whose repository lives somewhere this mount would not cover.
+/// - **No submodules.** `.gitmodules` is the declaration and `.git/modules` is the initialized copy; the
+///   spec's hole is the hooks under the latter, and an agent holding `.gitmodules` and a writable
+///   `.git/modules` can reach them by initialising a submodule itself. Either one refuses.
+/// - **`extensions.worktreeConfig` is off.** With it on, git reads a per-worktree config file that lives
+///   in the worktree — the directory the agent owns — so the repository's settings stop being
+///   host-only.
+///
+/// One `git` read, not three: the first two are filesystem facts and the third is `git config`. Everything
+/// here is read-only, and this is called **before** the first `worktree add`, so a refused create leaves no
+/// row, no directory and no branch behind.
+pub fn refuse(repository: &Path) -> Result<(), Refusal> {
+    if !repository.join(".git").is_dir() {
+        return Err(Refusal::NotADirectory);
+    }
+    if repository.join(".gitmodules").exists() || repository.join(".git").join("modules").exists() {
+        return Err(Refusal::SubmodulesPresent);
+    }
+    // `--type=bool` so git's own spellings (`true`, `yes`, `on`, `1`) all answer one word. An unset key
+    // exits 1 with no output, which is the common case and not a failure; anything else means the
+    // repository could not be read.
+    let args = [
+        "config",
+        "--type=bool",
+        "--get",
+        "extensions.worktreeConfig",
+    ];
+    let output = git_output(repository, &args).map_err(Refusal::Unreadable)?;
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    match output.status.code() {
+        Some(0) if value == "true" => Err(Refusal::WorktreeConfigEnabled),
+        Some(0) | Some(1) => Ok(()),
+        _ => Err(Refusal::Unreadable(git_error(repository, &args, &output))),
+    }
+}
+
+/// Run one git command in `repository` and answer its trimmed stdout; a non-zero exit is a failure.
+fn git_run(repository: &Path, args: &[&str]) -> Result<String, GitError> {
+    let output = git_output(repository, args)?;
+    if !output.status.success() {
+        return Err(git_error(repository, args, &output));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Spawn git in `repository`. Only an inability to start it is checked here; the exit status is the
+/// caller's question, because "no such branch" is an answer and not a failure.
+fn git_output(repository: &Path, args: &[&str]) -> Result<std::process::Output, GitError> {
+    Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(args)
+        .output()
+        .map_err(|error| GitError {
+            command: git_command(repository, args),
+            detail: format!("git is not runnable ({error}): install git 2.38 or newer"),
+        })
+}
+
+/// What git said about `args`, as the operator reads it: the command, then git's own last words.
+fn git_error(repository: &Path, args: &[&str], output: &std::process::Output) -> GitError {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let detail = stderr.trim();
+    GitError {
+        command: git_command(repository, args),
+        detail: if detail.is_empty() {
+            format!("git exited {} without saying why", output.status)
+        } else {
+            detail.to_string()
+        },
+    }
+}
+
+/// The command as an operator would type it, for a failure's sentence.
+fn git_command(repository: &Path, args: &[&str]) -> String {
+    format!("git -C {} {}", repository.display(), args.join(" "))
 }
 
 /// What one [`Worktree::ensure`] did.

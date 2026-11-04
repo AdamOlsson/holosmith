@@ -37,6 +37,7 @@ use crate::ladder;
 use crate::sessions::activity;
 use crate::sessions::state::{StateError, Trigger};
 use crate::sessions::{NewSession, RepoError, Session, Status};
+use crate::worktree::Refusal;
 
 /// The header a create's idempotency key travels in.
 const KEY_HEADER: &str = "idempotency-key";
@@ -263,7 +264,11 @@ pub async fn create(
         Ok(parts) => parts,
         Err(error) => return error.into_response(),
     };
-    match slot_for(state, &parsed, key).await {
+    // The project's refusals are read here, on the request path, and *answered* only where the create
+    // would write a row (HS-026): a retry of an idempotency key creates nothing and is answered from the
+    // row it already has, and a refused create must not evict an idle session on its way to saying no.
+    let refusal = refuse_project(state, &parsed.project).await;
+    match slot_for(state, &parsed, key, refusal).await {
         Ok((session, inserted)) => {
             // The handoff, and the only place this story spawns anything. The answer is built
             // first, from the `starting` row this call just wrote, and only then does the
@@ -278,6 +283,53 @@ pub async fn create(
             response
         }
         Err(error) => error.into_response(),
+    }
+}
+
+/// The project's refusal rules, read before the create writes anything (HS-026).
+///
+/// The read is two filesystem questions and one `git config`, and it runs on a blocking task: a create's
+/// request path must not park a runtime worker on a subprocess, which is the same rule the worktree's
+/// git reads follow (ADR-0029).
+///
+/// `None` means the project may be mounted — or that this run's backend mounts no repository at all,
+/// which is the stub's answer (`Backends::refuse`). A `Some` is the envelope the create answers **if** it
+/// would otherwise write a row, so a retry of a key that already names a session, and a create that
+/// finds the machine full, are unaffected.
+async fn refuse_project(state: &AppState, project: &str) -> Option<ApiError> {
+    let backend = state.backend.clone();
+    let project = project.to_string();
+    match tokio::task::spawn_blocking(move || backend.refuse(&project)).await {
+        Ok(Ok(())) => None,
+        Ok(Err(refusal)) => Some(refusal_error(refusal)),
+        Err(error) => {
+            tracing::warn!(
+                target: "holosmith::http",
+                %error,
+                "the project's refusal rules did not run"
+            );
+            Some(ApiError::internal())
+        }
+    }
+}
+
+/// The envelope a [`Refusal`] is answered with.
+///
+/// A repository git could not read is not something the operator can fix from the phone: git's own words
+/// go to the log, and the client gets the one sentence every unplanned failure gets (ADR-0008).
+fn refusal_error(refusal: Refusal) -> ApiError {
+    match refusal {
+        Refusal::NotADirectory => ApiError::git_not_directory(),
+        Refusal::SubmodulesPresent => ApiError::submodules_present(),
+        Refusal::WorktreeConfigEnabled => ApiError::worktree_config_enabled(),
+        Refusal::Unreadable(error) => {
+            tracing::warn!(
+                target: "holosmith::http",
+                %error,
+                "the project's repository could not be read"
+            );
+            ApiError::internal()
+        }
     }
 }
 
@@ -308,6 +360,7 @@ async fn slot_for(
     state: &AppState,
     body: &CreateBody,
     key: &str,
+    refusal: Option<ApiError>,
 ) -> Result<(Session, bool), ApiError> {
     // `saturating_add`, not `+ 1`: the bound is a safety net, and an arithmetic panic in a request
     // path for a number nobody can reach is still a panic waiting for a 32-bit build.
@@ -315,7 +368,7 @@ async fn slot_for(
         .unwrap_or(usize::MAX)
         .saturating_add(1);
     for _ in 0..bound {
-        match create_locked(state, body, key)? {
+        match create_locked(state, body, key, refusal.as_ref())? {
             Slot::Inserted(session) => return Ok((session, true)),
             Slot::Existing(session) => return Ok((session, false)),
             Slot::Full => {
@@ -412,13 +465,20 @@ async fn evict_one(state: &AppState) -> bool {
     );
     true
 }
-/// The one lock scope: lookup, cap count and insert, with no `.await` inside so the guard cannot
-/// outlive a synchronous statement. `live_count` and `create` share it, so two creates cannot
-/// both see a free slot (ADR-0012).
+/// The one lock scope: lookup, the project's refusals, cap count and insert, with no `.await` inside so
+/// the guard cannot outlive a synchronous statement. `live_count` and `create` share it, so two creates
+/// cannot both see a free slot (ADR-0012).
 ///
 /// `Slot::Existing` means the idempotency key already named a session; `Slot::Full` means the caller
-/// may evict one and try again.
-fn create_locked(state: &AppState, body: &CreateBody, key: &str) -> Result<Slot, ApiError> {
+/// may evict one and try again. `refusal` is the project's answer, read before the lock (HS-026): it is
+/// raised between the key's lookup and the cap, because a create that cannot run must answer its own
+/// refusal rather than stop somebody else's session to make room for work that will not happen.
+fn create_locked(
+    state: &AppState,
+    body: &CreateBody,
+    key: &str,
+    refusal: Option<&ApiError>,
+) -> Result<Slot, ApiError> {
     let database = state
         .database
         .lock()
@@ -432,6 +492,9 @@ fn create_locked(state: &AppState, body: &CreateBody, key: &str) -> Result<Slot,
         .map_err(|error| internal("by_client_key", error))?
     {
         return Ok(Slot::Existing(existing));
+    }
+    if let Some(refusal) = refusal {
+        return Err(refusal.clone());
     }
     let live = repository
         .live_count()
