@@ -490,7 +490,9 @@ async fn evict_one(state: &AppState) -> bool {
     // as it does to provisioning. The order still holds — the row moved first — and the stop is best
     // effort in a task of its own, like the ladder's second rung, with the same "a container that
     // outlived its row is still deletable" reason.
-    let stopping = state.backend.clone();
+    // The stopper, not the backend: spec item 6's flag is written before the stop, so the exit this
+    // produces reads as one we asked for (HS-030).
+    let stopping = state.stopper();
     let victim = candidate.clone();
     tokio::spawn(async move {
         if let Err(error) = stopping.stop(&victim).await {

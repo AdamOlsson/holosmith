@@ -1,0 +1,17 @@
+-- HS-030: the expected-stop flag (schema 4). One bit on the row, saying "we asked this session's
+-- container to stop".
+--
+-- Spec item 6: "The server records an expected-stop flag before every `docker stop -t 10`. Exit with
+-- the flag set means `stopped`. Exit code 0 without the flag means `stopped` with reason `pi_exit`.
+-- Any other exit means `error`." The flag therefore has to outlive the process that wrote it — a
+-- restart mid-stop is exactly the case where the row is the only witness — which is why it is a
+-- column and not a marker file beside a session's worktree.
+--
+-- It is deliberately **not** part of the session object the API answers: `Session` is pinned to
+-- fifteen keys, and phase 1b may not change the API. Two repository methods read and write it, the
+-- same way `last_seq`, `touch` and `set_worktree` are row facts that no client sees (ADR-0038).
+--
+-- `NOT NULL DEFAULT 0` makes every existing row correct without a backfill, and the ADD COLUMN is the
+-- expand step ADR-0009 asks for. It is the last statement in this file, so nothing after it can be
+-- read as depending on the new column.
+ALTER TABLE sessions ADD COLUMN expected_stop INTEGER NOT NULL DEFAULT 0;

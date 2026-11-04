@@ -93,7 +93,7 @@ async fn an_illegal_move_is_refused_leaves_the_row_alone_and_emits_nothing() {
     let session = starting_session(&state, "illegal");
     let transitioner: Transitioner = state.transitioner();
 
-    // Refused from `starting`, and then from `idle`: the exhaustive 6x14 matrix is proved over
+    // Refused from `starting`, and then from `idle`: the exhaustive 6x15 matrix is proved over
     // `lookup` in the module's own tests, and this proves `apply`'s refusal branch is the same
     // rule for more than one state, with a real row underneath.
     let mut refused = 0;

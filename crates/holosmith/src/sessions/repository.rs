@@ -53,6 +53,20 @@ const ADD_USAGE: &str =
 /// comparison against one value and no reader has to add two columns and remember to.
 const SPEND: &str = "SELECT usage_in + usage_out FROM sessions WHERE id = ?1";
 
+/// The expected-stop flag (HS-030): one bit that says "we asked this session's container to stop".
+/// `?2` is `true`/`false` as SQLite's `1`/`0`.
+const SET_EXPECTED_STOP: &str = "UPDATE sessions SET expected_stop = ?2 WHERE id = ?1";
+
+/// The flag's read *and* clear in one statement (HS-030): the classifier consumes it, so two
+/// observers cannot both be told that the exit they saw was the stop we asked for.
+///
+/// A compare-and-swap rather than `… RETURNING expected_stop`, because SQLite's `RETURNING` on an
+/// `UPDATE` answers the row's values **after** the write (measured: `SET expected_stop = 0` returned `0`
+/// for a flag that was `1`), and PostgreSQL's `OLD` has no SQLite spelling. "Did this statement change
+/// anything" is exactly the question, and it is what `execute` answers.
+const TAKE_EXPECTED_STOP: &str =
+    "UPDATE sessions SET expected_stop = 0 WHERE id = ?1 AND expected_stop = 1";
+
 /// The row's removal: what `deleting` means once the session owns nothing any more (HS-019).
 const REMOVE: &str = "DELETE FROM sessions WHERE id = ?1";
 
@@ -247,6 +261,42 @@ impl<'a> SessionRepository<'a> {
             return Ok(None);
         }
         self.one("set_status", "WHERE id = ?1", &[&id])
+    }
+
+    /// Record whether the stop of this session's container was expected (HS-030, spec item 6).
+    ///
+    /// Not a state change, so this is the repository's and not the transitioner's — the state is where
+    /// the session *is*, and this is one bit about the container. The two production callers are the
+    /// stop routine that sets it before every `docker stop` ([`crate::stop::Stopper`]) and the
+    /// provisioner's container step, which clears it: a fresh container has not been asked to stop, so
+    /// carrying the flag over from the last one would misclassify its exit.
+    ///
+    /// It is deliberately **not** a field of [`Session`](super::Session): the session object is the API's
+    /// body, pinned to fifteen keys, and phase 1b may not change the API (ADR-0038).
+    ///
+    /// A row that has gone is not an error, for [`Self::touch`]'s reason: a stop of a session that was
+    /// deleted under it has nothing left to record.
+    pub fn set_expected_stop(&self, id: &str, expected: bool) -> Result<(), RepoError> {
+        self.connection
+            .execute(SET_EXPECTED_STOP, params![id, expected])
+            .map_err(|error| RepoError::sqlite("set_expected_stop", error))?;
+        Ok(())
+    }
+
+    /// Take the expected-stop flag: `true` when it was set, and it is cleared either way (HS-030).
+    ///
+    /// One statement rather than a read and a write, because the flag answers a question about *one*
+    /// exit: a caller that read `true` and then wrote `false` would leave a window in which a second
+    /// observer reads the same `true` and calls a crash a stop the server asked for.
+    ///
+    /// A session whose row has gone answers `false`, which is the same answer as a flag that was never
+    /// set — the caller's next question does not depend on the difference, and a session deleted while its
+    /// process was dying has nowhere left to record anything.
+    pub fn take_expected_stop(&self, id: &str) -> Result<bool, RepoError> {
+        self.connection
+            .execute(TAKE_EXPECTED_STOP, [id])
+            .map(|changed| changed > 0)
+            .map_err(|error| RepoError::sqlite("take_expected_stop", error))
     }
 
     /// Record that this session was active at `now` (HS-015, HS-020/HS-021's LRU order).

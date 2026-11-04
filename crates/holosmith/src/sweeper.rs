@@ -31,12 +31,12 @@ use std::time::Duration;
 
 use tokio::task::JoinHandle;
 
-use crate::backend::{Backends, SessionBackend};
 use crate::clock;
 use crate::db::Database;
 use crate::events::EventWriter;
 use crate::sessions::Session;
 use crate::sessions::state::{StateError, Transitioner, Trigger};
+use crate::stop::Stopper;
 
 /// The reason an idle session's stop records (spec item 13).
 ///
@@ -54,10 +54,12 @@ pub const TICK: Duration = Duration::from_secs(5);
 /// The idle stop's handles and its two numbers.
 ///
 /// `Clone` for the same reason [`crate::provisioner::Provisioner`] is: `serve` builds one at startup and
-/// hands it to a task, and the fields are a backend value, an `Arc` and a sender.
+/// hands it to a task, and the fields are a [`Stopper`] (itself a backend and an `Arc`), an `Arc` and a
+/// sender. The stop goes through the stopper rather than straight to the backend because spec item 6
+/// makes "we asked for this stop" a fact the row records before the container is asked (HS-030).
 #[derive(Debug, Clone)]
 pub struct Sweeper {
-    backend: Backends,
+    stopper: Stopper,
     database: Arc<Mutex<Database>>,
     events: EventWriter,
     idle_after: Duration,
@@ -65,13 +67,13 @@ pub struct Sweeper {
 
 impl Sweeper {
     pub fn new(
-        backend: Backends,
+        stopper: Stopper,
         database: Arc<Mutex<Database>>,
         events: EventWriter,
         idle_after: Duration,
     ) -> Self {
         Self {
-            backend,
+            stopper,
             database,
             events,
             idle_after,
@@ -161,7 +163,7 @@ impl Sweeper {
         // The row is `stopped`, which is what frees the slot, so the sweep must not wait for the
         // container: spec item 7's rule, and the eviction's precedent (ADR-0024). One wedged backend
         // then delays nothing but its own stop — not the rest of the sweep, and not the next tick.
-        let stopping = self.backend.clone();
+        let stopping = self.stopper.clone();
         let victim = session;
         tokio::spawn(async move {
             if let Err(error) = stopping.stop(&victim).await {

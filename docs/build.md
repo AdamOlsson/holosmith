@@ -165,7 +165,11 @@ key is whole minutes and there is no shorter lever, ADR-0025), and the cap
 row, its replayed transcript and the eviction's own `idle → stopped` event; and
 `case_create_at_cap_refused`, which makes a session and asks for one more while that
 session is still `starting` — live and not evictable — and asserts the `409 cap_reached` envelope and
-the sentence that says nothing was idle), the prompt's turn coalesced (`case_event_coalescing`, which
+the sentence that says nothing was idle), and exit classification (`case_exit_classification`, which
+evicts a session of its own and reads the victim's `expected_stop` out of `app.db` with `python3`'s
+`sqlite3` — no client is sent the flag, ADR-0038 — then resumes that session and asserts the new
+container cleared it; the container's *exit*, which is the other half of the story, has no observer
+until HS-031 attaches pi's stdio), the prompt's turn coalesced (`case_event_coalescing`, which
 makes its own session, prompts it, and asserts the replay holds no more delta rows than the script's
 frames, one message id and the script's first and last sentences in order — the merge itself cannot be
 shown here, because the stub paces eight commit windows apart; see ADR-0031), and compaction

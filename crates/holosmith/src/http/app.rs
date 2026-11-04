@@ -36,6 +36,7 @@ use crate::ladder::Ladder;
 use crate::provisioner::Provisioner;
 use crate::runtime::Runtime;
 use crate::sessions::state::Transitioner;
+use crate::stop::Stopper;
 use crate::sweeper::Sweeper;
 use crate::turn::Turn;
 use crate::web;
@@ -130,6 +131,16 @@ impl AppState {
         )
     }
 
+    /// The one way a session's container is stopped, wired to this state's backend and database
+    /// (HS-030).
+    ///
+    /// Its three users — the sweeper, the create's eviction and the abort ladder — all need the same two
+    /// handles, and spec item 6's flag has to be written before the call in all three (ADR-0038). A
+    /// helper here is what keeps that order in one place.
+    pub fn stopper(&self) -> Stopper {
+        Stopper::new(self.backend.clone(), Arc::clone(&self.database))
+    }
+
     /// The idle stop's sweeper, wired to this state's backend, database and event writer (HS-021).
     ///
     /// `None` when `idle_stop_min` is 0, which is the key's off switch: an operator who wants no idle
@@ -145,7 +156,7 @@ impl AppState {
             return None;
         }
         Some(Sweeper::new(
-            self.backend.clone(),
+            self.stopper(),
             Arc::clone(&self.database),
             self.events.clone(),
             // `clock::minutes`, not `* 60`: the key is a `u64` the config layer accepts without a

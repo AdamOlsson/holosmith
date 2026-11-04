@@ -64,6 +64,10 @@ pub enum Trigger {
     Resume,
     /// The container exited on its own.
     UnexpectedExit,
+    /// The container exited cleanly without having been asked to (spec item 6): code 0 and no
+    /// expected-stop flag. The session ends `stopped` — the agent finished with no turn running — rather
+    /// than `error`, which is what [`Self::UnexpectedExit`] is for.
+    PiExit,
     /// A delete was asked for.
     Delete,
     /// The process restarted and this row was live when it died.
@@ -72,7 +76,7 @@ pub enum Trigger {
 
 impl Trigger {
     /// Every trigger, so a test can prove the table and this enum agree.
-    pub const ALL: [Trigger; 14] = [
+    pub const ALL: [Trigger; 15] = [
         Trigger::CreateAccepted,
         Trigger::PiReady,
         Trigger::ProvisioningFailed,
@@ -85,6 +89,7 @@ impl Trigger {
         Trigger::Drain,
         Trigger::Resume,
         Trigger::UnexpectedExit,
+        Trigger::PiExit,
         Trigger::Delete,
         Trigger::CrashRecovery,
     ];
@@ -104,6 +109,7 @@ impl Trigger {
             Self::Drain => "drain",
             Self::Resume => "resume",
             Self::UnexpectedExit => "unexpected_exit",
+            Self::PiExit => "pi_exit",
             Self::Delete => "delete",
             Self::CrashRecovery => "crash_recovery",
         }
@@ -220,6 +226,16 @@ pub const TABLE: &[Transition] = &[
         from: FromStates::OneOf(&[Status::Starting, Status::Idle, Status::Running]),
         trigger: Trigger::UnexpectedExit,
         to: Status::Error,
+    },
+    // Item 6's clean exit (HS-030): code 0 without the expected-stop flag ends the session *stopped*,
+    // with `pi_exit` as its reason, rather than `error`. Item 8's table has no row for it — its
+    // "container exits unexpectedly" cell is the one this rule replaces for a clean exit — so the row
+    // is this story's amendment, recorded in ADR-0038. It is also the reason word, the way
+    // `idle_stop`'s trigger is its reason's.
+    Transition {
+        from: FromStates::OneOf(&[Status::Starting, Status::Idle, Status::Running]),
+        trigger: Trigger::PiExit,
+        to: Status::Stopped,
     },
     Transition {
         from: FromStates::OneOf(&[Status::Error]),
@@ -456,7 +472,7 @@ mod tests {
 
     #[test]
     fn every_trigger_has_a_word_and_every_word_is_the_tables() {
-        assert_eq!(Trigger::ALL.len(), 14);
+        assert_eq!(Trigger::ALL.len(), 15);
         for trigger in Trigger::ALL {
             assert_eq!(trigger.to_string(), trigger.as_str());
             let rows = TABLE.iter().filter(|row| row.trigger == trigger).count();
@@ -535,6 +551,11 @@ mod tests {
                 FromStates::OneOf(&[Status::Starting, Status::Idle, Status::Running]),
                 Trigger::UnexpectedExit,
                 Status::Error,
+            ),
+            (
+                FromStates::OneOf(&[Status::Starting, Status::Idle, Status::Running]),
+                Trigger::PiExit,
+                Status::Stopped,
             ),
             (
                 FromStates::OneOf(&[Status::Error]),

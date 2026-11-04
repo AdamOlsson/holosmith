@@ -53,6 +53,7 @@ use crate::sessions::RepoError;
 use crate::sessions::Session;
 use crate::sessions::Status;
 use crate::sessions::state::{StateError, Transitioner, Trigger};
+use crate::stop::Stopper;
 
 /// The reason rung 2 records when an abort had to kill the container (spec item 16).
 pub const FORCED_ABORT: &str = "forced_abort";
@@ -251,7 +252,9 @@ impl Ladder {
                 return false;
             }
         }
-        if let Err(error) = self.backend.stop(session).await {
+        // Through the stopper, not the backend: spec item 6's flag is written before the call, so the
+        // exit this stop produces is classified as ours rather than as a crash (HS-030).
+        if let Err(error) = self.stopper().stop(session).await {
             // Best effort, like the provisioner's undo: the row already says `stopped`, and the
             // operator can delete a session whose container outlived it.
             tracing::warn!(
@@ -324,6 +327,14 @@ impl Ladder {
             Arc::clone(&self.database),
             self.events.clone(),
         )
+    }
+
+    /// The one stop routine, wired to this ladder's two handles (HS-030).
+    ///
+    /// The forced rung stops the container the same way the sweeper and the eviction do, so the
+    /// expected-stop flag is written in one place for all three.
+    fn stopper(&self) -> Stopper {
+        Stopper::new(self.backend.clone(), Arc::clone(&self.database))
     }
 
     /// The one state function, wired to this ladder's two handles.

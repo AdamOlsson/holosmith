@@ -14,7 +14,8 @@
 # `abort_completed`, a steer's own frame, a resume's two
 # refusals, a delete from its 202 to the row that is gone, an idle session stopped by the sweeper with
 # its reason, its event and its log line, a create at the cap evicting the idle session before it
-# succeeds, a token budget on a boot of its own ending the turn that spends it, a worktree made in a real
+# succeeds, the expected-stop flag an eviction records and a resume clears, a token budget on a boot of
+# its own ending the turn that spends it, a worktree made in a real
 # repository and taken back when the next step refuses, the three project refusals a create and a resume
 # answer with their own codes, and a Docker preflight that
 # refuses to start with one sentence naming the fix, with no CORS header
@@ -316,6 +317,7 @@ serve_cases=(
   case_idle_stop
   case_delete_unknown_session
   case_create_at_cap_evicts
+  case_exit_classification
   case_create_at_cap_refused
   case_token_budget
   case_compaction
@@ -1794,9 +1796,92 @@ case_create_at_cap_evicts() {
       ;;
   esac
 
-  # Settle the session that took the victim's slot, so the next case knows the state it starts from:
-  # the cap is one, and a refusal needs the live session to be *not* idle.
+  # Settle the session that took the victim's slot: the cap is one, so whatever runs next finds a live
+  # `idle` session it may evict rather than a `starting` one it may not (`case_exit_classification` takes
+  # that slot and gives it back, which is what leaves `case_create_at_cap_refused` free to make its own
+  # `starting` holder).
   wait_for_idle_id "${name}_fresh" "$fresh"
+}
+
+# HS-030's proof from the shipped artifact: the stop the server performs records that it was its own, and
+# a new container starts without the last one's flag.
+#
+# The artifact cannot show the story's other half — a container's *exit* — because this build has no process
+# whose exit anybody observes: the container runs detached on `sleep infinity` until HS-031 attaches pi's
+# stdio, and `--rm` takes it away a moment after it stops (ADR-0038). What it can show is the flag that
+# makes the classification possible, and the two things that set and clear it, read out of `app.db` because
+# no client is sent it.
+#
+# It makes its own victim and its own replacement and removes both, and it runs *before*
+# `case_create_at_cap_refused` on purpose: that case holds the slot with a session the slow stub leaves
+# `starting`, which is live and not evictable, so a create after it answers `409 cap_reached`. Here the
+# slot holds `case_create_at_cap_evicts`' settled session, which a create may evict — and this case leaves
+# the cap free for the refusal's own holder.
+case_exit_classification() {
+  local name=case_exit_classification response body victim fresh flag file found
+  local create_body='{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}'
+  local database="$WORK/data/app.db"
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to read the flag back (tests/exit.rs covers this)\n' "$name"
+    return 0
+  fi
+
+  # Schema 4's column. `ALTER TABLE ... ADD COLUMN` appends the column to the table's own text in
+  # `sqlite_master`, which is how `case_events_table` reads `last_seq`; while serve is running that text may
+  # still be in app.db-wal, so the glob covers the sidecars.
+  found=""
+  for file in "$WORK"/data/app.db*; do
+    [ -f "$file" ] || continue
+    if grep -aq 'expected_stop' "$file"; then
+      found=yes
+      break
+    fi
+  done
+  check "$name/column" "yes" "$found"
+
+  fetch_body "${name}_victim" POST /api/sessions "$create_body" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-exit-1" ||
+    fail "${name}_victim/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "${name}_victim")"
+  expect_status "${name}_victim" "$response" 202
+  body="$(cat "$WORK/responses/${name}_victim.body")"
+  victim="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$victim" ] || fail "${name}_victim/id" "the response names no id: $body"
+  wait_for_idle_id "${name}_victim_idle" "$victim"
+
+  # The stop a request can make happen: with the cap at one and the victim idle, this create evicts it, and
+  # an eviction goes through the same stop routine the sweeper and the ladder's forced rung use.
+  fetch_body "${name}_fresh" POST /api/sessions "$create_body" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-exit-2" ||
+    fail "${name}_fresh/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "${name}_fresh")"
+  expect_status "${name}_fresh" "$response" 202
+  body="$(cat "$WORK/responses/${name}_fresh.body")"
+  fresh="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$fresh" ] || fail "${name}_fresh/id" "the response names no id: $body"
+  [ "$fresh" != "$victim" ] ||
+    fail "${name}_fresh/id" "the create answered the session it had to evict: $body"
+  wait_for_stopped_id "${name}_victim_stopped" "$victim"
+  flag="$(expected_stop_of "$database" "$victim")"
+  check "$name/evicted_flag" "1" "$flag"
+
+  # And a new container does not inherit it: a resume frees no slot, so the session that took the victim's
+  # is removed first, then the victim is resumed through the real endpoint and its provisioning's container
+  # step clears the flag.
+  remove_session "${name}_removed_fresh" "$fresh"
+  fetch_body "${name}_resume" POST "/api/sessions/$victim/resume" '' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_resume/no_answer" "POST /api/sessions/$victim/resume did not answer"
+  expect_status "${name}_resume" "$(answer "${name}_resume")" 202
+  wait_for_idle_id "${name}_resumed_idle" "$victim"
+  flag="$(expected_stop_of "$database" "$victim")"
+  check "$name/resumed_flag" "0" "$flag"
+
+  remove_session "${name}_removed_victim" "$victim"
 }
 
 # HS-023's proof from the artifact: a ceiling under one turn's spend ends the turn that spends it, and
@@ -1856,6 +1941,23 @@ case_token_budget() {
       fail "${name}_row/usage" "the turn's usage was not persisted on the row: $body"
       ;;
   esac
+}
+
+# expected_stop_of <database> <session>: print one row's expected-stop flag, or `none` when the row is
+# gone.
+#
+# The flag is a row fact no client sees (ADR-0038: `Session` is pinned to its fifteen keys and phase 1b may
+# not change the API), so the database is the only place it can be read from — the same `python3` reader
+# `age_session_events` uses, and the same reason the case SKIPs without one.
+expected_stop_of() {
+  python3 - "$1" "$2" <<'PY'
+import sqlite3, sys
+connection = sqlite3.connect(sys.argv[1])
+row = connection.execute(
+    "SELECT expected_stop FROM sessions WHERE id = ?", (sys.argv[2],)).fetchone()
+connection.close()
+print("none" if row is None else row[0])
+PY
 }
 
 # age_session_events <database> <session> <seconds>: push one session's whole log into the past.

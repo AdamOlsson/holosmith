@@ -82,6 +82,7 @@ fn the_table_has_every_column_the_spec_names() {
             "usage_in",
             "usage_out",
             "last_seq",
+            "expected_stop",
         ],
         "the sessions table is not the one the spec names: {columns:?}"
     );
@@ -111,6 +112,7 @@ fn the_table_has_every_column_the_spec_names() {
         "usage_in",
         "usage_out",
         "last_seq",
+        "expected_stop",
     ] {
         assert_eq!(text(name), "INTEGER", "{name} is not INTEGER");
     }
@@ -130,6 +132,7 @@ fn the_table_has_every_column_the_spec_names() {
         "usage_in",
         "usage_out",
         "last_seq",
+        "expected_stop",
     ] {
         assert!(column(name).2, "{name} must be NOT NULL");
     }

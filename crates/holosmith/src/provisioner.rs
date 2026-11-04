@@ -91,6 +91,13 @@ impl Provisioner {
                         completed.push(step);
                     }
                     self.record(&session, provisioned);
+                    // A fresh container has not been asked to stop (spec item 6, HS-030). The flag is
+                    // cleared here rather than by the backend, which may not write a row (ADR-0019), and
+                    // here rather than at the resume: this is the one step that makes a *new* container,
+                    // and a flag left over from the last one would call its first crash an expected stop.
+                    if step == Step::Container {
+                        self.clear_expected_stop(&session);
+                    }
                 }
                 Err(error) => {
                     let reason = error.to_string();
@@ -138,6 +145,23 @@ impl Provisioner {
                 session = %session.id,
                 %error,
                 "the worktree step's record was not written to the row"
+            );
+        }
+    }
+
+    /// Clear the expected-stop flag once the container step has made a new container (HS-030).
+    ///
+    /// A failed write is logged and provisioning carries on, for [`Self::record`]'s reason: the container
+    /// exists either way, and the price of a flag that was not cleared is a misclassified exit rather than
+    /// a broken session.
+    fn clear_expected_stop(&self, session: &Session) {
+        let database = self.database.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Err(error) = database.sessions().set_expected_stop(&session.id, false) {
+            tracing::warn!(
+                target: "holosmith::provisioner",
+                session = %session.id,
+                %error,
+                "the expected-stop flag was not cleared for the new container"
             );
         }
     }

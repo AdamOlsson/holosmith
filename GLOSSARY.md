@@ -153,7 +153,7 @@ One of `starting`, `idle`, `running`, `stopped`, `error`, `deleting`. Its machin
 _Avoid_: Status code, phase
 
 **Trigger**:
-The cause of one state change, one per row of the transition table: `create_accepted`, `pi_ready`, `provisioning_failed`, `prompt`, `agent_settled`, `abort_completed`, `abort_ladder`, `evict`, `idle_stop`, `drain`, `resume`, `unexpected_exit`, `delete`, `crash_recovery`. Its machine name is the `Trigger` type.
+The cause of one state change, one per row of the transition table: `create_accepted`, `pi_ready`, `provisioning_failed`, `prompt`, `agent_settled`, `abort_completed`, `abort_ladder`, `evict`, `idle_stop`, `drain`, `resume`, `unexpected_exit`, `pi_exit`, `delete`, `crash_recovery`. Its machine name is the `Trigger` type.
 _Avoid_: Event, action, cause, command
 
 **Transition**:
@@ -161,8 +161,16 @@ One legal state change: a from, a trigger and a to, held as data in the transiti
 _Avoid_: Move, step, change, migration
 
 **Stopped**:
-A session whose container is gone but whose history, worktree and events are kept, and which can be resumed. Reached from `idle` by `evict`, `idle_stop` and `drain`, and from a killed `running` turn by the abort ladder; never a dead end, because resume always accepts it. A delete can leave one on its way past: a running turn it had to stop (reason `deleted`) and then would not remove, which is a `stopped` session with nothing wrong with it.
+A session whose container is gone but whose history, worktree and events are kept, and which can be resumed. Reached from `idle` by `evict`, `idle_stop` and `drain`, from a killed `running` turn by the abort ladder, and from any live state by a **clean exit** — the container's own exit code `0` with no **expected stop** recorded, which is the agent finishing rather than failing; never a dead end, because resume always accepts it. A delete can leave one on its way past: a running turn it had to stop (reason `deleted`) and then would not remove, which is a `stopped` session with nothing wrong with it.
 _Avoid_: Ended, closed, paused, evicted
+
+**Expected stop**:
+The row's record that a stop of this session's container was the server's own: `sessions.expected_stop`, written by the one stop routine before every `docker stop -t 10` and cleared by a new container's provisioning (and by the exit classification that consumes it). It is what tells an eviction or an idle stop apart from a crash, and it is deliberately **not** part of the session object the API answers. Its machine name is `Stopper`, the one place the flag and the stop live together.
+_Avoid_: Planned stop, graceful stop, stop flag, stopping flag
+
+**Exit classification**:
+The decision spec item 6 makes about a container that stopped: with the **expected stop** recorded it was our stop, so the session stays `stopped`; without it, exit code `0` is the agent finishing (`stopped`, reason `pi_exit`) and anything else is a failure (`error`, reason = the last lines of stderr). It is a pure function (`exit::classify`) plus the one entry point that applies its answer (`Exits::record`), which also appends what the container printed to the **session log**. `unexpected_exit` is the failure arm's trigger, `pi_exit` the clean one's.
+_Avoid_: Exit code, exit status, death, crash detection
 
 **Resume**:
 Bringing a stopped (or failed) session back under the same id: the transition table's `resume` row takes it to `starting`, and provisioning walks it to `idle`. It is the operator's action on a `stopped` or `error` session, and the page performs it under a request that was refused with `session_stopped` or `session_error`.
@@ -254,6 +262,13 @@ _Avoid_: Log line, message, item
 **Seq**:
 The per-session sequence number of an event, assigned by the event writer from the session's `last_seq` counter and never reused — except by a **message snapshot**, which takes the highest seq of the delta rows it removed, so gaps are legal exactly where compaction removed rows.
 _Avoid_: Offset, id, index
+
+**Session log**:
+`<data>/sessions/<id>/session.log`: the append-only file that holds what a session's process printed on
+stderr, verbatim and with no timestamps. It is the complete record, where the row's `status_reason` keeps
+only the last few lines of a failure; spec item 15 says stderr only, so a tool's output goes to its own file
+rather than here. Its machine names are `exit::LOG_FILE` and `exit::session_dir`.
+_Avoid_: Container log, pi log, stderr log, transcript
 
 **Event writer**:
 The one thread that assigns each event's seq, commits a batch of events in one transaction, and only then broadcasts it. Its two handles are `EventWriter` (a producer appends) and `EventStream` (a subscriber reads committed events).
