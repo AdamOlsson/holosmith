@@ -37,7 +37,7 @@ created, prompted, aborted, steered, stopped and resumed, and it is driven from 
 ## 1. Where the work stands
 
 Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is clean, and every
-commit is **pushed** (see the note on pushing below). `HEAD` is `db95a3f`; any commit after it is
+commit is **pushed** (see the note on pushing below). `HEAD` is `f67eb6f`; any commit after it is
 bookkeeping.
 
 **Linear: 20 Done, 60 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-020`
@@ -64,7 +64,7 @@ bookkeeping.
 | HS-017 steer a running turn | PER-49 | `0099ca3`, `8ff1d77` | 0021 |
 | HS-018 stopped state and resume | PER-50 | `dce53c4`, `ff9d907` | 0022 |
 | HS-019 delete flow | PER-51 | `3d5c415`, `7c4ea02`, `cd85572`, `db95a3f` | 0023 |
-| HS-020 cap and eviction | PER-52 | `a3c6825` | 0024 |
+| HS-020 cap and eviction | PER-52 | `a3c6825`, `4f37211`, `f67eb6f` | 0024 |
 
 **Next issue: `PER-53` (HS-021 — idle stop).** Then `PER-54` (HS-022 — turn timeout), and onward in
 `HS-###` order.
@@ -240,15 +240,15 @@ If that fails, **stop and report** — that is a `PROMPT.md` stop condition.
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                     # 217 lib + 25 integration binaries (14 delete.rs, 5 eviction.rs)
-cd web && npm test             # 20 transcript tests (node's own runner)
+cargo test                     # 217 lib + 25 integration binaries (14 delete.rs, 6 eviction.rs)
+cd web && npm test             # 21 transcript tests (node's own runner)
 scripts/verify.sh              # THE one-command gate since HS-006
 ```
 
 `scripts/verify.sh` runs six phases, cheapest first: `fmt`, `clippy`, `test`, `build`
 (`scripts/build.sh`, which itself runs `build-web.sh` — `npm test` then Vite — and `check-static.sh`
 last), `embed` (`scripts/check-embed.sh`), then `serve` — the **shipped musl artifact** booted on
-`--port 0` with a temp data dir, running **36 cases plus a CORS sweep (166 assertions)**, then torn down
+`--port 0` with a temp data dir, running **36 cases plus a CORS sweep (169 assertions)**, then torn down
 with `SIGTERM` and an asserted exit 0. It takes ~3 min (both musl targets). `--no-build` skips `build`
 and `embed`; `--keep` keeps the work dir.
 
@@ -575,7 +575,7 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 - **`docs/build.md` is a story deliverable, not orchestrator-only.** If a story changes prerequisites or
   gates, the doc is in scope, and its prose must be reflowed (~100 columns), not just appended to.
 - **Every story adds at least one `case_*` to `scripts/verify.sh`.** The rule is in bold in
-  `docs/build.md`, and the reviewer enforces it. The current gate is 36 cases / 166 assertions.
+  `docs/build.md`, and the reviewer enforces it. The current gate is 36 cases / 169 assertions.
 - **A create evicts outside its own lock scope.** The create's insert is one scope
   (`create_locked` → `Slot::{Inserted,Existing,Full}`) and an eviction is `Transitioner::apply`'s, which
   takes the same lock; the loop in `slot_for` is what joins them, and it terminates because each
@@ -663,7 +663,7 @@ git status --short                          # must be clean
 . ~/.pi/toolchains/env.sh
 python3 /tmp/lin.py issues | grep -v ' Done ' | head   # next unfinished (recreate /tmp/lin.py, §2)
 python3 /tmp/lin.py issue PER-53            # sanity-check Linear is reachable and scoped
-scripts/verify.sh                           # baseline green (~4 min, 36 cases, 166 assertions)
+scripts/verify.sh                           # baseline green (~4 min, 36 cases, 169 assertions)
 ```
 
 Then start the cycle at **`PER-53` (HS-021 — idle stop)**. Read §1's two facts first: the ladder has
@@ -729,4 +729,4 @@ Last session's ledger, for the shape of it:
 | PER-49 | HS-017 steer | `0099ca3`, `8ff1d77` | Done — 1 P1 fixed (a `last_active_at` assertion the *settle* satisfied, proved by mutation), 11 notes |
 | PER-50 | HS-018 stopped/resume | `dce53c4`, `ff9d907` | Done — 1 P2 fixed (abort retried a dead path, provisioning a session nobody asked for), 16 findings |
 | PER-51 | HS-019 delete flow | `3d5c415`, `7c4ea02`, `cd85572`, `db95a3f` | Done — 1 spec P2 fixed (a refused delete of a running session has already ended the turn; now pinned by a test and by the glossary), 4 doc contradictions, 2 nits; also closed PER-41's recorded batch-collateral nit |
-| PER-52 | HS-020 cap and eviction | `a3c6825` | REVIEW_PLACEHOLDER |
+| PER-52 | HS-020 cap and eviction | `a3c6825`, `4f37211`, `f67eb6f` | Done — 1 P1 fixed (the "nothing was deleted" sentence was written only where a row is built, so the frame path an eviction arrives by showed a dash; now one function both call sites use, proved in Chromium on the live path), 2 P2 test/gate fixes (a random-id claim; a cap case that bet on the host's speed), 1 P2 duplicate column list, 1 mangled doc comment, 3 stale sentences; the eviction's `stop` is spawned, not awaited |
