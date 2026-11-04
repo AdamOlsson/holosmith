@@ -1,4 +1,4 @@
-# RESUME — orchestrator handoff (cold start, after twenty-two stories)
+# RESUME — orchestrator handoff (cold start, after twenty-four stories)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating
 procedure and still governs; this file is the state of the world — what exists, what the environment
@@ -37,11 +37,11 @@ created, prompted, aborted, steered, stopped, resumed and deleted, and it is dri
 ## 1. Where the work stands
 
 Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is clean, and every
-commit is **pushed** (see the note on pushing below). `HEAD` is `e767757`; any commit after it is
+commit is **pushed** (see the note on pushing below). `HEAD` is `0b7d50e`; any commit after it is
 bookkeeping — this file's own refresh.
 
-**Linear: 22 Done, 58 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-022`
-(`PER-33` … `PER-54`).
+**Linear: 24 Done, 56 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-024`
+(`PER-33` … `PER-56`).
 
 | Story | Linear | Commits | ADR |
 | --- | --- | --- | --- |
@@ -67,14 +67,16 @@ bookkeeping — this file's own refresh.
 | HS-020 cap and eviction | PER-52 | `a3c6825`, `4f37211`, `f67eb6f` | 0024 |
 | HS-021 idle stop | PER-53 | `5da2ae2` | 0025 |
 | HS-022 turn timeout | PER-54 | `e767757` | 0026 (amends 0020) |
+| HS-023 token budget | PER-55 | `2e902c2`, `fbc0659` | 0027 |
+| HS-024 Docker preflight | PER-56 | `f241ced`, `0b7d50e` | 0028 |
 
-**Next issue: `PER-55` (HS-023 — token budget).** Then `PER-56` (HS-024 — the Docker backend's first
-story) and onward in `HS-###` order. §8 carries the design for HS-023 worked out but not built.
+**Next issue: `PER-57` (HS-025 — worktree provisioning, the Docker backend's first real work).** Then
+onward in `HS-###` order. §8 carries what HS-025 is about and the facts it inherits.
 
 Ranking, per `PROMPT.md`: Linear priority (all are `No priority`) → `HS-###` order in `docs/stories/` →
 anything already `In Progress` first → skip an issue whose `Blocked by` stories are not `Done`.
 
-### Four facts a cold start must know
+### Six facts a cold start must know
 
 1. **A running turn can now be stopped, in two rungs, with or without the way back.** `src/ladder.rs`
    is the shared routine: `clear_queue` then `abort`, wait up to `abort_grace` (the grace *bounds rung
@@ -83,9 +85,10 @@ anything already `In Progress` first → skip an issue whose `Blocked by` storie
    returns `Ending::{Asked, Forced}` (HS-019's delete, which then removes the session instead of
    resuming it). A turn's end is typed (`TurnEnd::{Settled, Aborted}`) so the runner picks
    `agent_settled` or `abort_completed`; a forced stop has **two owners** and the table decides, which
-   is why exactly one `StateError::Illegal` in `turn.rs` is a `debug` line. What is still open: **the
-   turn timeout and the token budget** (HS-022/HS-023), which climb `end_turn` with their own reason —
-   the reason words so far are `forced_abort`, `deleted` and `evicted`.
+   is why exactly one `StateError::Illegal` in `turn.rs` is a `debug` line. **Two policies now climb it**
+   — HS-022's deadline and HS-023's ceiling — and both sit in the runner's own `select!`, each guarded on
+   one `fired` so the first to fire owns the reason and no second climb is spawned. The six reason words
+   are `forced_abort`, `deleted`, `evicted`, `idle_stop`, `turn_timeout` and `budget_exceeded`.
 2. **A turn that will not end is ended for it, and the reason says which policy asked.** The deadline is
    the turn runner's own (`Turn::run`), not a sweeper's, because the row keeps no per-turn timestamp —
    `last_active_at` is activity, so a steer moves it. It races `start_turn` against a sleep and, when the
@@ -94,7 +97,8 @@ anything already `In Progress` first → skip an issue whose `Blocked by` storie
    task is a bug**: it drops the climb, and a climb dropped between rung 2's `stopped` and its resume
    leaves a session nobody can bring back. Both endings record `turn_timeout` — the runner's
    `running → idle` and the ladder's `running → stopped`. `turn_timeout_min = 0` builds no timer at all.
-   The reason words are now five: `forced_abort`, `deleted`, `evicted`, `idle_stop`, `turn_timeout`.
+   It is the shape HS-023's budget copies: one `fired`, a spawned climb, and a settle that records the
+   reason too when it crossed the line between two polls.
 3. **The web page has now been rendered, including the paths a frame changes.** Playwright's Chromium
    is inside the sandbox (see §2), and HS-016 … HS-018 drove the sessions list, the create form, the
    session screen, the composer's four actions, the transcript's blocks and boundaries, and the abort /
@@ -112,6 +116,24 @@ anything already `In Progress` first → skip an issue whose `Blocked by` storie
    `Trigger::IdleStop` with reason `idle_stop`, logs one `info` line per stop, and spawns the backend's
    `stop`. The tick is a **constant** (5 s), not a config key, so the gate pays a real minute for
    `case_idle_stop`. Only `idle` is a candidate, and the repository's `idle_before` carries that predicate.
+
+5. **A session's spend is a column the event writer adds to, and the runner is what trips the ceiling.**
+   `message.end`'s `usage` is added to `sessions.usage_in`/`usage_out` inside `insert_batch`'s own
+   transaction (the one that assigns the seq), because the *backend* emits the frame and the runner never
+   sees it. `max_session_tokens` (unset = unlimited) is the ceiling; the runner polls the row's
+   `usage_in + usage_out` every 100 ms and climbs the ladder with `budget_exceeded` at **or over** it. A
+   turn that settles over its ceiling records the reason on its own ending instead (there is nothing left
+   to abort), after one extra look a writer tick later. A backend that reports no usage leaves nothing to
+   count, and the session screen says so in one sentence (`budgetNotice` in `transcript.ts`) rather than
+   showing a zero. The tally survives a resume; that is the spec's "per session".
+
+6. **A Docker run does not start on a machine that cannot carry it.** `src/preflight.rs` checks the
+   daemon's `_ping` over `docker_host`, git ≥ 2.38 and `df -Pk <data root>` against `min_free_gb`, and
+   `serve --backend docker` refuses **before the database is opened** with one sentence per failure that
+   names the fix (all failures at once). `role = "hub"` is exempt — a hub runs no sessions (item 10 §6) —
+   and so is `--backend stub`, which the gate and `scripts/check-static.sh` use. `Complaint` is the type
+   HS-045's `doctor` will print. `tests/backend_contract.rs` is the conformance suite both backends must
+   pass; each Docker story adds its case.
 
 Three things HS-014 and HS-015 settled that later stories inherit:
 
@@ -164,7 +186,20 @@ core.sshCommand='ssh -o IdentityAgent=…'` was not enough either — the config
 git@github.com` with those options answering `Hi AdamOlsson!` is the way to check the agent before
 blaming the remote.
 
-Confirmed on `origin/master`: `b49f2cd` … `e767757`. Push after every story, and if a push fails, report
+**The reliable form offers ONE key.** The agent holds three, GitHub rejects the first, and the failure is
+intermittent even with the options above. Pin the key that GitHub accepts (the second one here) with
+`IdentitiesOnly`:
+
+```bash
+ssh-add -L | sed -n '2p' > /tmp/pushkey.pub
+GIT_SSH_COMMAND='ssh -F /dev/null -o IdentitiesOnly=yes -o IdentityFile=/tmp/pushkey.pub \
+  -o IdentityAgent=/run/ssh-agent.sock -o StrictHostKeyChecking=accept-new -o User=git' \
+  git push origin master
+```
+
+(`-i` names a `.pub` that is in the agent: ssh offers exactly that one and signs with the agent's copy.)
+`git ls-remote` with the same options is the cheap way to tell "pushed" from "the agent refused again".
+Confirmed on `origin/master`: `b49f2cd` … `0b7d50e`. Push after every story, and if a push fails, report
 it — do not fake one.
 
 ---
@@ -336,7 +371,7 @@ crates/holosmith/
                             render.rs, duration.rs, editor.rs
   src/backend/              mod.rs (Step, SessionBackend, Backends, BackendError, TurnEnd), stub.rs
                             (the scripted turn; `ignoring_abort`, `failing_at`, `failing_snapshot`),
-                            docker.rs (refuses everything until HS-024)
+                            docker.rs (refuses every operation until HS-025 fills them in)
   src/provisioner.rs        the four-step background task and its five session.status events; stops at
                             a step boundary when the row leaves `starting`
   src/turn.rs               the turn runner (HS-015) and the turn timeout (HS-022): touch → the
@@ -347,7 +382,7 @@ crates/holosmith/
   src/ladder.rs             the abort ladder (HS-016): clear_queue → abort → wait out abort_grace →
                             `running → stopped` with the caller's reason → stop. `climb` adds the
                             resume (the abort); `end_turn` returns `Ending::{Asked,Forced}` and does
-                            not (the delete, and HS-022/HS-023). `FORCED_ABORT`
+                            not (the delete, the timeout and the budget). `FORCED_ABORT`
   src/sweeper.rs            the idle stop's task (HS-021): `Sweeper::sweep` (one pass, public for tests),
                             `run` (the tick loop), `spawn`; `IDLE_STOP`, `TICK` (5 s, a constant)
   src/deleter.rs            the delete flow's task (HS-019): revoke_key (a no-op until HS-039) →
@@ -371,6 +406,9 @@ crates/holosmith/
   src/events/               mod.rs (Event, NewEvent, EventWriter, EventStream), writer.rs, repository.rs
                             (`insert_batch` drops an event whose session has gone; `delete_session_log`),
                             stream.rs (replay→live, lag), registry.rs (open-stream counts)
+  src/preflight.rs          the three startup checks and their sentences (HS-024, ADR-0028):
+                            `check`/`check_with` (the `Tools` seam is the test's shim for git/df),
+                            `Complaint { check, sentence }`, `socket_sentence`
   src/db.rs                 pragmas + read-back, apply_pending, Database::sessions()/events()
   src/sql.rs                the one SQL statement scanner + the shared source walk (cfg(test) guard)
   src/schema.rs             SCHEMA_VERSION (= 3), include_dir! embed, check_embed, contract_violations
@@ -379,7 +417,8 @@ crates/holosmith/
                             pin_single_source, guards, session_repository, sessions_api, events,
                             streams, provisioning, state_machine, session_list, session_screen,
                             turns, abort, steer, resume, delete, eviction, idle_stop, turn_timeout,
-                            support/mod.rs (the shared harness)
+                            token_budget, preflight, backend_contract, support/mod.rs (the shared
+                            harness)
 web/                        Vite 7 + TypeScript, two screens (`/` and `/sessions/<id>`);
                             package-lock COMMITTED; main.ts is the DOM, transcript.ts the renderer's
                             rules (frame parsing, block model, affordances, `stoppedNotice` /
@@ -393,7 +432,7 @@ scripts/check-static.sh     file/readelf, empty-root serve + cmp against web/dis
 scripts/check-embed.sh      the three embed cases (present / absent warns / required fails)
 scripts/verify.sh           the one-command gate (see §3)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0026          read the recent ones before planning anything
+docs/adr/0001…0028          read the recent ones before planning anything
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
 docs/review/PER-33…PER-54   each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
@@ -410,21 +449,23 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   the delete flow, the cap with eviction, the Sessions screen with its create form and the
   "nothing was deleted" notice, the session screen at `/sessions/<id>` with a live transcript and a
   four-action composer.
-- **Not built yet:** the **token budget** (HS-023 — §8 carries the design), the drain (HS-044), tool-output
-  files and `output_ref` (HS-033), usage totals on the screen (HS-034 — the columns `usage_in`/`usage_out`
-  exist and are still always 0, because nothing persists usage yet: HS-023 does), the preview listener
-  (HS-041), the stopped-session expiry (HS-064), Docker (HS-024+), merge, publish, the hub, releases, and
-  any **delete affordance in `web/`** (the API has the endpoint; the page has no button).
-- **Three policies can now stop a session and they must not be confused:** the cap evicts (`evicted`,
-  inside a create), the sweeper stops a quiet one (`idle_stop`, on its own tick), and the turn timeout
-  ends a *turn* (`turn_timeout`, from the runner). All four stop-shaped reasons go through
+- **Not built yet:** anything Docker beyond the preflight (HS-025 … HS-046 — the backend still refuses every
+  operation), the drain (HS-044), tool-output files and `output_ref` (HS-033), the **usage totals on the
+  screen** (HS-034 — the columns are now real, the screen only says "no usage reported" when it must), the
+  preview listener (HS-041), the stopped-session expiry (HS-064), `doctor` (HS-045), merge, publish, the hub,
+  releases, and any **delete affordance in `web/`** (the API has the endpoint; the page has no button).
+- **Four policies can now stop something and they must not be confused:** the cap evicts (`evicted`,
+  inside a create), the sweeper stops a quiet one (`idle_stop`, on its own tick), the turn timeout ends a
+  *turn* (`turn_timeout`, from the runner) and the token budget ends a *turn* (`budget_exceeded`, also from
+  the runner, on one `fired` shared with the timeout so only one climb happens). All of them go through
   `Transitioner::apply`, and the row moves before the container in every one of them.
 - **`runtime::Backend`** has `Stub` and `Docker`; `serve --backend` and the config key `backend` select
-  it. `DockerBackend` **refuses every operation** until HS-024, and the default backend is `docker`
+  it. `DockerBackend` **refuses every operation** until HS-025 fills them in, and the default backend is `docker`
   (ADR-0001: the stub is opt-in), so a default build provisions a session to `error` with a reason
   rather than hanging in `starting`. That refusal is also the demo trick HS-019 used to provoke a real
   failed snapshot from the shipped artifact. `scripts/verify.sh` boots with `backend = "stub"` in its
-  config.
+  config, and so does `scripts/check-static.sh`'s empty-root run — a Docker run now refuses at startup on a
+  machine that fails the preflight (HS-024), and that sandbox has no daemon, no `git` and no `df`.
 - **`AppState`** is `{ config, runtime, database: Arc<std::sync::Mutex<Database>>, events: EventWriter,
   streams: StreamRegistry, backend: Backends }`, with **five** wiring helpers — `provisioner()`,
   `turner()`, `transitioner()`, `ladder()`, `deleter()`. The mutex is an explicit stopgap
@@ -447,7 +488,7 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
 
 ---
 
-## 5. The per-issue cycle (what actually worked, twenty-two times)
+## 5. The per-issue cycle (what actually worked, twenty-four times)
 
 Everything is **sequential: one writer at a time**, never two children editing files.
 
@@ -546,6 +587,10 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   share `sql::guard`; a directory name comes from its own table word or label.
 - **A rule that walks `src/**` must prove it found something.** HS-012's `set_status` guard asserts the
   walk saw both allowed files *before* asserting no offenders — otherwise a broken walk passes green.
+- **A startup refusal changes what every default-backend boot does** (HS-024): seven `tests/serve_cli.rs`
+  tests and `check-static.sh`'s empty-root run failed the moment the Docker preflight landed. The honest
+  fixes are `backend = "stub"` in a shared test config, a fake daemon socket for the two tests that must
+  boot Docker, and `--backend stub` in the empty-root run — never a flag that skips the check.
 - **A test that asserts only a status is how a wrong code ships.** Assert status **and** `code` **and**
   `content-type`, and prove a new guard fires by removing the behaviour and watching the test go red.
 - **The harness's stub is deliberately slow** (`SLOW_STUB_STEP` = 60 s per step) so no test that is not
@@ -721,6 +766,32 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 - **`RESUME.md` is the one place this file's own claims can rot.** It contains counts, SHAs and "next
   issue" statements; anything that changes them is a reason to edit it in the same commit.
 
+### Landmines this session added (HS-023, HS-024)
+
+- **A startup check must run before the thing it protects.** HS-024's first draft put the preflight *after*
+  `Database::open`, so a refused Docker start had already created and migrated `app.db` while the comment and
+  the ADR said "no migration" — a reviewer's P1, and a scripted edit of mine that put the block in the wrong
+  place. The gate case now asserts that no `app.db` appeared. **After any scripted move of a block, read the
+  resulting order, not just the diff.**
+- **A new startup refusal breaks every test and script that boots the default backend.** Seven
+  `tests/serve_cli.rs` tests and `scripts/check-static.sh`'s empty-root run failed the moment the preflight
+  landed, because the default backend is `docker` and this machine has no daemon. The fixes are the honest
+  ones: the shared test config says `backend = "stub"` (with the reason in its doc comment), the two tests
+  that must boot a Docker run bring a **fake daemon socket** (one helper), and `check-static.sh` passes
+  `--backend stub` because that run is about linking.
+- **A check that needs a machine cannot be tested against the machine.** `preflight.rs` takes a `Tools { git,
+  df }` seam so a test points it at shims it wrote. THE ALTERNATIVE IS A TRAP: setting `PATH` in a test is
+  `unsafe` in edition 2024 (and this crate `deny`s `unsafe`), and it is shared state a concurrent test sees.
+- **The writer's 25 ms tick is a race in any test that reads a row right after a turn.** HS-023's own
+  `two_turns_add_up` flaked 2 runs in 5 by reading `usage_in` immediately; `wait_for_usage` waits for the
+  value. This is the same lesson as HS-017's `last_active_at` and it keeps being relearned.
+- **A turn whose last frame is its `message.end` can settle between two polls.** A policy polled at 100 ms
+  cannot catch it, so the runner records the reason on the ending it wrote (HS-022's settle-after-the-deadline
+  shape) and looks once more one writer tick later — because a tally still in the writer's queue is not a
+  tally of nothing.
+- **`awk` is still absent** and a `command -v awk` guard caught me using it in a shell one-liner. Use
+  `git`/`grep`/`sed`/`cut`/`while read`.
+
 ### Reviews
 
 - **Reviews are saved verbatim** and a `## Resolution` section is appended afterwards. Do not edit the
@@ -733,7 +804,10 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 - It reliably finds one real should-fix per story, and since HS-019 usually one **P1-class** one: HS-019's
   was a refusal that had already ended the turn, HS-020's a sentence written on only one of two DOM
   paths. Both were found in the *acceptance bullet's* own words. Take them seriously.
-- **HS-022 came back `BLOCK`, with a P1 on each axis, and both were real.** The spec one was a
+- **Two of the last four reviews came back `BLOCK`, and each time it was the reviewer, not the plan,
+  that was right** — HS-022's was a `select!` the plan itself had argued for, HS-024's a startup check
+  ordered *after* the thing it protects. **HS-022 came back `BLOCK`, with a P1 on each axis, and both were
+  real.** The spec one was a
   concurrency bug the *plan and the ADR had argued for* (a `select!` around the ladder) — a good plan is
   not a defence. The standards one was a **scripted-edit bug of mine**: a Python insertion into
   `docs/stories/README.md` duplicated a bullet onto one line. After any scripted doc edit, `git diff` the
@@ -809,6 +883,8 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 | The create evicts the least recently active `idle` session outside its own lock scope; only `idle` is a candidate; the row moves before the container and the `stop` is **spawned**; a create with nothing idle answers `cap_reached` with its own sentence while the resume keeps ADR-0022's refusal | an eviction is a state change, and a state change takes the lock; an answer must not wait for container work (spec item 7); the two requests have different next steps | ADR-0024 |
 | The idle stop is a sweeper task on a **fixed five-second tick** (a constant, not a config key), its candidates are every `idle` row past `idle_stop_min` from one repository read, each stop is one `apply` plus one spawned best-effort `stop`, and `idle_stop_min = 0` spawns nothing | pacing is not a machine setting (ADR-0015) and the spec's config list is exhaustive (ADR-0006); a policy over rows needs no lock the create holds | ADR-0025 |
 | The turn timeout is the **turn runner's own deadline**, it hands the ladder a task of its own rather than a `select!` branch, and both endings record `turn_timeout` | the row keeps no per-turn timestamp (`last_active_at` moves on a steer, so a watcher would let a steered turn run for ever), and a dropped climb leaves a session stopped with nobody to resume it | ADR-0026, amending ADR-0020 |
+| The **tally is the event writer's** (inside the seq transaction, so the events repository parses exactly one kind's payload) and the **ceiling is the runner's** (a 100 ms poll, `>=`, first policy to fire owns the reason, a settle over the ceiling records the reason instead) | the backend emits `message.end` and the runner never sees the frame; a subscriber would add lag and a second parser; a policy that must record a reason owns the ending | ADR-0027 |
+| The **Docker preflight is a startup refusal** with `Complaint` values reported all at once, `hub` and `stub` exempt, and no new dependency (`df`, `git --version`, a hand-written `_ping`) | the story says "fail at startup instead of mid-turn", item 10 §5 makes the same check `ExecStartPre`, and `unsafe` is denied so `statvfs` was not reachable | ADR-0028 |
 
 ---
 
@@ -819,77 +895,64 @@ cd /home/adamolsson/projects/holosmith
 git status --short                          # must be clean
 . ~/.pi/toolchains/env.sh
 python3 /tmp/lin.py issues | grep -v ' Done ' | head   # next unfinished (recreate /tmp/lin.py, §2)
-python3 /tmp/lin.py issue PER-55            # sanity-check Linear is reachable and scoped
-scripts/verify.sh                           # baseline green (~4 min, 38 cases, 205 assertions)
+python3 /tmp/lin.py issue PER-57            # sanity-check Linear is reachable and scoped
+scripts/verify.sh                           # baseline green (~4 min, 40 cases, 221 assertions)
 ```
 
-Then start the cycle at **`PER-55` (HS-023 — token budget)**. Read §1's four facts first: the turn
-timeout is the runner's own deadline, and the page has been rendered (so a DOM claim needs a Chromium run
-— and a `web/` edit needs a rebuild before that run).
+Then start the cycle at **`PER-57` (HS-025 — worktree provisioning)**. Read §1's six facts first: the
+runner owns both turn policies, the spend is a column the writer adds to, and the page has been rendered
+(so a DOM claim needs a Chromium run — and a `web/` edit needs a rebuild before that run).
 
-### What HS-023 is about, so the first brief is fast
+### What HS-025 is about, so the first brief is fast
 
-Acceptance, verbatim from `docs/stories/phase-1-session-lifecycle-stub.md` (Size S, spec item 13, V3):
+Acceptance, verbatim from `docs/stories/phase-1b-docker-backend.md` (Size M, spec item 1):
 
-- `usage_in` and `usage_out` are updated from `usage` on `message.end` and persisted per session.
-- At `max_session_tokens` the turn is aborted through the shared ladder with reason `budget_exceeded`.
-- Unset means unlimited; the key is optional and absence is not an error.
-- If the backend reports no usage, the budget is disabled and the UI says so — this is the spec's stated
-  contingency, exercised with a stub mode that omits usage.
+- [ ] Provision runs `git worktree add -b agent/<id> <projects>/.worktrees/<id> HEAD` and records the
+      worktree path and `base_commit`.
+- [ ] `ahead` is computed as `git rev-list --count <base_commit>..agent/<id>`.
+- [ ] Teardown runs `git worktree remove --force`, `git branch -D agent/<id>`, `git worktree prune`; a
+      missing worktree is not an error.
+- [ ] Orphaned worktrees from a crashed run are pruned at startup (HS-044).
+- [ ] No fetch step anywhere: the branch and its refs already live in the project repository.
 
-**Already in place:** the config key `max_session_tokens: Option<u64>` (unset by default, validated
-`≥ 1` when set, in `config/mod.rs`), the columns `usage_in`/`usage_out` (migration 0002, always 0, read by
-the row's serializer but written by nobody), the stub's `message.end` frame with
-`usage: {"in": 1200, "out": 340}` at the end of every scripted turn, `Ladder::spawn`, `Turn`'s deadline
-machinery and its `finished(…, reason)` seam, and `Transitioner::apply`.
+**Already in place:** `Step::Worktree` is the first step the provisioner runs, the `worktree` and
+`base_commit` columns exist on the row (migration 0002) and are written by nobody, `DockerBackend` refuses
+`provision` with a sentence while the stub fakes the step, `tests/backend_contract.rs` is where the new
+behaviour's cases belong, and `docs/build.md`'s Docker section is where its prerequisites go.
 
-**The design worked out but not built** (this is the cheapest shape that keeps the reason on the row):
+**What the story has to decide (none of it is settled — plan it before coding):**
 
-1. **Persist usage in the event writer's transaction.** `EventRepository::insert_batch` already borrows the
-   sessions repository *through its own transaction* to bump `last_seq` — the same seam takes a new
-   `SessionRepository::add_usage(id, in, out)` (`UPDATE sessions SET usage_in = usage_in + ?2, usage_out =
-   usage_out + ?3 WHERE id = ?1`) for a `message.end` event. One funnel, durable before the broadcast, no
-   second writer. Cost: the events repository learns one kind's payload (parse `usage.in`/`usage.out` with
-   `serde_json`), which is a contract change worth its own ADR paragraph — the alternative, a broadcast
-   subscriber in the runner, has lag semantics and a second parser.
-2. **Enforce in the turn runner, next to the deadline.** `Turn` gains `budget: Option<u64>` and a third
-   arm in its `select!` (a ~100 ms tick that reads the row's `usage_in + usage_out` and compares). Over the
-   limit → `Ladder::spawn(session, BUDGET_EXCEEDED)` and keep awaiting the turn, exactly as the timeout
-   does — **not** a `select!` branch (see §1 fact 2: a dropped climb can leave a row stopped). The runner
-   then records `budget_exceeded` on the ending it writes, which is the only way the reason reaches
-   `status_reason` when rung 1 works.
-3. **`0`/unset** are different: unset is unlimited (no timer, no reads); `0` is refused by the config
-   validator already, so nothing to decide.
-4. **The stub needs a mode that omits usage** (`StubBackend::omitting_usage()` next to `ignoring_abort`),
-   and bullet 4's "the UI says so" is a `transcript.ts` rule: a settled session whose totals are 0 says
-   "usage not reported" where it would otherwise show tokens. Keep it a pure function with a test in
-   `web/test/transcript.test.ts`, and remember both DOM paths (HS-020's lesson).
-5. **Gate case**, and this one *can* fire cheaply: `max_session_tokens = 1000` in the gate config is under
-   the stub's 1540-per-turn, so a prompt trips it inside a turn. Assert the row's reason, the
-   `session.status` frame's reason, and that the session comes back (`idle`), and remember the turn is
-   nearly over when `message.end` arrives, so the abort may race the settle — assert the *reason* on
-   whichever ending wins, or make the stub emit usage earlier.
+1. **Where the projects root comes from.** There is no `projects_root` config key today; the spec (item 1)
+   and HS-025's path both say `<projects>`. Either a key is added (with the golden config file and the
+   `KNOWN_KEYS` count — §6) or it is derived. Decide with item 1's words and the config validator's rules.
+2. **How a git failure becomes a `BackendError`.** The step's failure reaches the row's `status_reason` and
+   a `session.status` frame, and the sentence must name what to fix (`BackendError::failed(reason)` exists).
+   The refusal shape for a session that is not `starting` any more is ADR-0016's, already handled.
+3. **Where the `ahead` count lives.** The row has no `ahead` column and HS-061/HS-064 do not add one. It is
+   either computed on read (the list endpoint would run `git` per row — expensive and a second data path) or
+   added by a migration. Read HS-061/HS-063 before choosing; a column costs a schema bump (SCHEMA_VERSION,
+   a migration file, the check-static SQL grep).
+4. **Whether the worktree step runs at all under the stub.** The stub currently reports every step as done
+   without touching a repository. Keep that: the stub's job is the lifecycle, and the conformance suite is
+   where the two backends are compared (ADR-0028), so a real worktree under `--backend stub` would make the
+   gate depend on git.
+5. **How a test gets a repository.** `TempDir` + `git init` + one commit is enough; `support/mod.rs` is the
+   shared home. No fetch, no remote, no network.
 
-**Decide canonically and record:** whether the writer or the runner parses `message.end` (and if the
-writer, that the events repository may name one kind's fields); the poll interval for the budget; whether
-a trip on the *last* frame of a turn is worth aborting at all (it is: the next turn would otherwise run
-over budget); and how the UI distinguishes "no turns yet" from "the backend reports no usage" (an
-inference from `usage_in + usage_out == 0` on a settled session is the cheap one, and it must be written
-down).
+### What HS-023 and HS-024 settled that HS-025 inherits
 
-### What HS-021 and HS-022 settled that HS-023 inherits
-
-- **A policy that must record a reason owns the ending.** HS-022's lesson: the ladder's reason only reaches
-  `status_reason` on rung 2, so the *runner* must know why it ended a turn. A check that lives in another
-  task can only ever produce `abort_completed`.
-- **A climb is spawned, never a `select!` branch** (HS-022's review, P1). Dropping a climb between rung 2's
-  `stopped` and its resume leaves a session nobody can bring back.
-- **`apply` per candidate, the row before the container, the container's `stop` best effort** (ADR-0020,
-  ADR-0024, ADR-0025).
-- **A gate case that must wait a real minute should be avoided**: `turn_timeout_min` and `idle_stop_min`
-  are whole minutes, but `max_session_tokens` is a count, so HS-023's case can fire in a second.
-- **The event writer commits every 25 ms**, so a test that reads usage from the row right after a frame
-  races the commit — wait for the value, never sample once.
+- **A machine's state is checked once, at startup, and the sentence is data** (ADR-0028). A git failure
+  mid-provision is the *operation's*, not the machine's: it goes through `BackendError::failed`, not a
+  `Complaint`.
+- **The conformance suite is the definition of "the backend works"**: a new Docker behaviour adds its case
+  to `tests/backend_contract.rs`, and the stub is asked the same question.
+- **A policy that must record a reason owns the ending** (ADR-0026/0027), and **a climb is spawned, never a
+  `select!` branch**.
+- **A test never reads a row right after the operation that wrote it**: the writer commits every 25 ms.
+  `wait_until` on the value (HS-023's `wait_for_usage` is the shape).
+- **Every story adds one `case_*`** to `scripts/verify.sh`, and one that needs a machine state the rest of
+  the run must not carry gets its own boot (`case_token_budget`) or needs no server at all
+  (`case_docker_preflight`) — and then goes last.
 
 ## 9. Reporting
 
@@ -899,7 +962,14 @@ durable record; the review file is the durable review; the commit history is the
 stop before the backlog is empty, say so explicitly, say which issue is next, and leave the tree clean
 and the gates green — a half-finished story is worse than an honest stop.
 
-Last session's ledger, for the shape of it:
+This session's ledger (the twenty-third and twenty-fourth stories):
+
+| Issue | Story | Commits | Outcome |
+| --- | --- | --- | --- |
+| PER-55 | HS-023 token budget | `2e902c2`, `fbc0659` | Done — no P1; 1 spec P2 (the two-turn tally the ADR claimed was never tested, and a `SET` mutant stayed green), 2 spec P3s (the no-usage contingency is "counts what was reported", not "disabled"; a glossary overclaim), 8 standards P3s (a mangled doc comment, a helper spliced into another's heading, a variable with no reader, `WRITER_TICK` restated instead of derived, two parsers disagreeing about what a token count is, a middle-man re-export). The gate also caught a flake in the slice: three tests read the tally right after the turn and went red 2 runs in 5 |
+| PER-56 | HS-024 Docker preflight | `f241ced`, `0b7d50e` | Done — **BLOCK on the spec axis, and it was right**: the preflight ran *after* `Database::open`, so a refused startup had already migrated (my own scripted block move; the gate case now asserts no `app.db`). Plus 5 real P2s (a `hub` was refused, `permission denied` got the `systemctl` advice, `df`'s own words were dropped, HS-046 misattributed as owning ssh in four places, three documents disagreeing about the stub) and 2 standards P2s (a duplicated fake-daemon fixture, two tests that depended on the host's free space). The first gate run also found that `check-static.sh`'s empty-root run needs `--backend stub` |
+
+The session before it, for the shape of a ledger entry:
 
 | Issue | Story | Commits | Outcome |
 | --- | --- | --- | --- |
