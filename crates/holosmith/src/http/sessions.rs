@@ -299,17 +299,12 @@ pub async fn create(
 async fn refuse_project(state: &AppState, project: &str) -> Option<ApiError> {
     let backend = state.backend.clone();
     let project = project.to_string();
-    match tokio::task::spawn_blocking(move || backend.refuse(&project)).await {
+    match tokio::task::spawn_blocking(move || backend.refuse_project(&project)).await {
         Ok(Ok(())) => None,
         Ok(Err(refusal)) => Some(refusal_error(refusal)),
-        Err(error) => {
-            tracing::warn!(
-                target: "holosmith::http",
-                %error,
-                "the project's refusal rules did not run"
-            );
-            Some(ApiError::internal())
-        }
+        // A task that panicked or was cancelled has said nothing about the project, and `internal` is
+        // what logs the operation and the error once (ADR-0012).
+        Err(error) => Some(internal("refuse_project", error)),
     }
 }
 
@@ -322,14 +317,9 @@ fn refusal_error(refusal: Refusal) -> ApiError {
         Refusal::NotADirectory => ApiError::git_not_directory(),
         Refusal::SubmodulesPresent => ApiError::submodules_present(),
         Refusal::WorktreeConfigEnabled => ApiError::worktree_config_enabled(),
-        Refusal::Unreadable(error) => {
-            tracing::warn!(
-                target: "holosmith::http",
-                %error,
-                "the project's repository could not be read"
-            );
-            ApiError::internal()
-        }
+        // A repository git cannot read has not been checked at all, and git's words are the operator's:
+        // `internal` logs the operation and the error, and the client gets ADR-0008's fixed sentence.
+        Refusal::Unreadable(error) => internal("refuse_project", error),
     }
 }
 
@@ -772,7 +762,8 @@ async fn record_steer(state: &AppState, id: &str, guidance: &str) {
 /// Answer `POST /api/sessions/{id}/resume`: 202 and the row, now `starting`, or ADR-0008's envelope.
 ///
 /// The decisions run in this order: the row (`not_found`), the state (the table's two `resume` rows are
-/// `stopped` and `error`; everything else is refused with its own code), the cap, then the transition.
+/// `stopped` and `error`; everything else is refused with its own code), the project's refusals (HS-026 —
+/// the same three codes a create answers), the cap, then the transition.
 ///
 /// **The cap is checked before the transition**, unlike the create's lookup: a resume takes a slot, and
 /// refusing after the row moved would leave a session `starting` with nothing provisioning it. Spec
@@ -792,6 +783,12 @@ pub async fn resume(state: &AppState, id: &str) -> Response {
     };
     if !matches!(current.status, Status::Stopped | Status::Error) {
         return ApiError::not_in_state(current.status, NOT_RESUMABLE).into_response();
+    }
+    // The project's refusals are read for a resume too (HS-026): a session created while its project was
+    // plain would otherwise be brought back into a mount the create would have refused. Before the cap,
+    // for the create's reason — a resume that cannot run must not refuse for a slot it will not take.
+    if let Some(refusal) = refuse_project(state, &current.project).await {
+        return refusal.into_response();
     }
     match live_at_cap(state) {
         Ok(true) => return ApiError::cap_reached().into_response(),

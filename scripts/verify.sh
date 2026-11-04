@@ -315,8 +315,8 @@ serve_cases=(
   case_create_at_cap_refused
   case_token_budget
   case_worktree
-  case_worktree_refusal
   case_docker_preflight
+  case_worktree_refusal
 )
 
 # The health payload: exactly four keys, and the uptime is not predictable, so the assertion is

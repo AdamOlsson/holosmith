@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use super::{BackendError, Provisioned, SessionBackend, Step, TurnEnd};
 use crate::events::EventWriter;
 use crate::sessions::Session;
-use crate::worktree::Worktree;
+use crate::worktree::{Refusal, Worktree, refuse, repository_of};
 
 /// The Docker backend: the machine's projects root, and nothing else.
 ///
@@ -55,11 +55,8 @@ impl DockerBackend {
     /// The create asks this **before** the session row exists, so it cannot go through [`Self::worktree`]:
     /// the repository is named by the projects root and the project alone. It is a host read like every
     /// other in this backend, and [`crate::worktree::refuse`] is where the rules are.
-    pub fn refuse_project(&self, project: &str) -> Result<(), crate::worktree::Refusal> {
-        crate::worktree::refuse(&crate::worktree::repository_of(
-            &self.projects_root,
-            project,
-        ))
+    pub fn refuse_project(&self, project: &str) -> Result<(), Refusal> {
+        refuse(&repository_of(&self.projects_root, project))
     }
 
     /// Every operation's refusal, in one place so the reason always names the operation.

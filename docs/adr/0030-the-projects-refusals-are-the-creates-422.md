@@ -43,12 +43,18 @@ repository" is one place to read.
 - **`.git` is a directory.** A `.git` *file* is a linked worktree's or a submodule checkout's shape, and the
   repository it points at is not the path HS-027 mounts.
 - **No submodules: no `.gitmodules` and no `.git/modules`.** The spec names the hooks that live under
-  `.git/modules`; `.gitmodules` is the declaration an agent inside the mount could use to initialise them
-  itself. Either file refuses — a filesystem read, not `git submodule status`, because the question is
-  "could this repository carry those hooks", and the answer does not depend on whether they exist yet.
-- **`extensions.worktreeConfig` is off**, read through `git config --type=bool --get`: git's own spellings
-  (`true`, `yes`, `on`, `1`) all answer one word, and an unset key exits 1, which is the common case and not
-  a failure. A value git itself cannot parse (exit 128) is not "safe": it is a repository nothing can be
+  `.git/modules`. `.gitmodules` is the declaration, and it is enough on its own: it is checked out into the
+  session's own worktree, so an agent holding `/work` can run `git submodule update --init`, and git then
+  writes the submodule's gitdir — with its `hooks/` — under the **mounted** `<project>/.git/modules`. The
+  mount that protects `hooks` and `config` does not cover that directory, so the repository must not be
+  mounted at all. Either path refuses, as a filesystem read rather than `git submodule status`, because the
+  question is "can this repository carry those hooks", not "does it carry them today".
+- **`extensions.worktreeConfig` is off**, read through `git config --local --type=bool --get`: `--local`
+  because the key is a repository-format fact git honours only from the repository's own config, and a
+  global `extensions.worktreeConfig` in the service user's `~/.gitconfig` would otherwise refuse every
+  project on the machine (measured: without `--local` the read prints `true`, with it it exits 1);
+  `--type=bool` so git's own spellings (`true`, `yes`, `on`, `1`) all answer one word, and an unset key
+  exits 1, which is the common case and not a failure. A value git itself cannot parse (exit 128) is not "safe": it is a repository nothing can be
   promised about, so `Refusal::Unreadable` carries git's words to the log and the client gets
   `500 internal` — ADR-0008's "a reason no client can fix".
 
@@ -76,6 +82,18 @@ has told us nothing about the project.
 
 The code is therefore the project's, not `cap_reached`, when a full machine is asked for an unsafe project —
 and a test pins that, because the ordering is a choice and not an accident of the code's shape.
+
+## A resume asks the same question
+
+`POST /api/sessions/{id}/resume` reads the project's refusals too, in the same place in its own order
+(after the state, before the cap) and with the same three codes. Without it the guard would be a
+create-only illusion: a session created while the project was plain would be brought back into the mount
+this story exists to prevent, which is exactly "I discover the hole after an agent exploits it". The row is
+not moved by a refused resume, so fixing the project and resuming again works.
+
+Spec item 1 names only "refused with 422 at session creation"; the resume is the same *machine* answer about
+the same repository, and a resume that cannot run is not the cap's refusal either, so it answers the
+project's code. A stub run still answers neither (it mounts nothing).
 
 ## One sentence, no code, on the page
 

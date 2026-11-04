@@ -1,6 +1,7 @@
 //! The session worktree: one git worktree and one branch per session, on the host (HS-025).
 //!
-//! Spec item 1 names five host commands, and this module is all five and nothing else:
+//! Spec item 1 names five host commands; this module is those five, the naming rule they share, and
+//! since HS-026 the read that says a repository must not be mounted at all:
 //!
 //! ```text
 //! git worktree add -b agent/<id> <projects>/.worktrees/<id> HEAD
@@ -266,7 +267,7 @@ pub fn repository_of(projects_root: &Path, project: &str) -> PathBuf {
 /// Why a project's repository must not be mounted into a session's container (HS-026, spec item 1).
 ///
 /// Three refusals the spec names, plus the fourth answer that is not a policy: a repository git cannot
-/// read has not been checked at all, and saying "safe" about it would be a lie.
+/// read has not been checked at all, and saying it may be mounted would be a lie.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
     /// `<project>/.git` is not a directory: a linked worktree, a submodule checkout, or no checkout.
@@ -278,6 +279,22 @@ pub enum Refusal {
     /// `git` could not read the repository, so nothing about it can be promised.
     Unreadable(GitError),
 }
+
+/// The one `git` reading the refusal rules make: the repository's own answer about
+/// `extensions.worktreeConfig`.
+///
+/// **`--local` is load-bearing.** `git config --get` without a scope reads system, global and local
+/// merged, so a `extensions.worktreeConfig = true` in the service user's `~/.gitconfig` would refuse every
+/// project on the machine — and `extensions.*` is a repository-format key that git itself honours only from
+/// the repository's own config. `--type=bool` so git's spellings (`true`, `yes`, `on`, `1`) all answer one
+/// word.
+const CONFIG_READ: &[&str] = &[
+    "config",
+    "--local",
+    "--type=bool",
+    "--get",
+    "extensions.worktreeConfig",
+];
 
 /// Whether `repository` may be mounted into a session's container, and why not when it may not
 /// (HS-026).
@@ -306,18 +323,16 @@ pub fn refuse(repository: &Path) -> Result<(), Refusal> {
     // `--type=bool` so git's own spellings (`true`, `yes`, `on`, `1`) all answer one word. An unset key
     // exits 1 with no output, which is the common case and not a failure; anything else means the
     // repository could not be read.
-    let args = [
-        "config",
-        "--type=bool",
-        "--get",
-        "extensions.worktreeConfig",
-    ];
-    let output = git_output(repository, &args).map_err(Refusal::Unreadable)?;
+    let output = git_output(repository, CONFIG_READ).map_err(Refusal::Unreadable)?;
     let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
     match output.status.code() {
         Some(0) if value == "true" => Err(Refusal::WorktreeConfigEnabled),
         Some(0) | Some(1) => Ok(()),
-        _ => Err(Refusal::Unreadable(git_error(repository, &args, &output))),
+        _ => Err(Refusal::Unreadable(git_error(
+            repository,
+            CONFIG_READ,
+            &output,
+        ))),
     }
 }
 
@@ -397,3 +412,26 @@ impl fmt::Display for GitError {
 }
 
 impl std::error::Error for GitError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_worktree_config_read_is_local_and_typed() {
+        // Two facts and both are the rule: without `--local` a global `extensions.worktreeConfig` would
+        // refuse every project on the machine (and git itself honours the key only from the repository's
+        // own config), and without `--type=bool` git's spellings (`on`, `yes`, `1`) would each need an arm.
+        // A behavioural test cannot set this process's global git config: `std::env::set_var` is `unsafe`
+        // in edition 2024 and this crate denies `unsafe`, so the spelling is what is pinned.
+        assert_eq!(
+            CONFIG_READ[1], "--local",
+            "the read is not the repository's"
+        );
+        assert_eq!(CONFIG_READ[2], "--type=bool", "the read is not typed");
+        assert_eq!(
+            CONFIG_READ[CONFIG_READ.len() - 1],
+            "extensions.worktreeConfig"
+        );
+    }
+}

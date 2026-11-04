@@ -255,9 +255,9 @@ impl ApiError {
 
     /// What a create naming a project whose `.git` is not a directory answers (HS-026, spec item 1).
     ///
-    /// Three sentences rather than one per code, because the operator's next step depends on which
-    /// hole was found: a checkout that is not a plain one, submodules whose hooks would live inside the
-    /// mount, or a per-worktree config the agent could write. The page prints the sentence alone
+    /// A sentence each rather than one shared sentence, because the operator's next step depends on
+    /// which hole was found: a checkout that is not a plain one, submodules whose hooks would live
+    /// inside the mount, or a per-worktree config the agent could write. The page prints the sentence alone
     /// (`createFailure` in `web/src/transcript.ts`): the story asks for an explanation, not a code.
     pub fn git_not_directory() -> Self {
         Self::new(

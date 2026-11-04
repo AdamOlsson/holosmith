@@ -676,7 +676,7 @@ fn extensions_worktree_config_is_refused_only_when_git_says_it_is_on() {
 }
 
 #[test]
-fn a_repository_git_cannot_read_is_not_called_safe() {
+fn a_repository_git_cannot_read_is_not_treated_as_mountable() {
     // Not a policy but the absence of an answer: git refuses a boolean key it cannot parse, so nothing
     // about this repository can be promised. The create answers `500 internal` and logs git's words —
     // the assertion here is that the fourth variant carries them rather than claiming the project is fine.
@@ -856,4 +856,91 @@ async fn a_stub_create_has_no_repository_to_refuse() {
 
     let response = post_create(served.addr, "refusal-stub-1").await;
     assert_eq!(response.status, 202, "{}", response.body);
+}
+
+#[tokio::test]
+async fn a_resume_refuses_a_project_the_create_would_have_refused() {
+    // The refusal is the *machine's* answer about the project, not the create's convenience: a session
+    // created while the project was plain is not brought back into a mount the same create would refuse
+    // today ("so that I do not discover the hole after an agent exploits it"). The row is untouched, so
+    // the operator can fix the project and resume again.
+    let dir = TempDir::new("refusal-resume");
+    let root = dir.file("projects");
+    let repo = root.join("holosmith");
+    repository(&repo);
+    let state = docker_state(&dir, &root);
+    let stopped = create_row(&state);
+    let transitioner = state.transitioner();
+    transitioner
+        .apply(&stopped.id, Trigger::PiReady, None)
+        .await
+        .expect("starting -> idle is the table's");
+    transitioner
+        .apply(&stopped.id, Trigger::IdleStop, Some("idle_stop"))
+        .await
+        .expect("idle -> stopped is the table's");
+    std::fs::write(repo.join(".gitmodules"), GITMODULES).expect(".gitmodules is writable");
+
+    let served = Served::start(http::router(state.clone()), GRACE).await;
+    let text = format!(
+        "POST /api/sessions/{}/resume HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: {ORIGIN}\r\n\
+         Content-Type: application/json\r\nX-Holosmith-Client: 1\r\nContent-Length: 0\r\n\
+         Connection: close\r\n\r\n",
+        stopped.id
+    );
+    let response = request(served.addr, &text).await;
+
+    assert_eq!(response.status, 422, "{}", response.body);
+    let body: Value = serde_json::from_str(&response.body).expect("an envelope is JSON");
+    assert_eq!(body["code"], "submodules_present", "{}", response.body);
+    assert_eq!(
+        row(&state, &stopped.id).status,
+        Status::Stopped,
+        "a refused resume moved the row"
+    );
+}
+
+#[tokio::test]
+async fn a_repository_git_cannot_read_answers_500_with_gits_words_in_the_log_only() {
+    // `Refusal::Unreadable` is not a refusal the client can act on, so it is not a 422: git's message names
+    // a config file on the machine, and a phone cannot fix it. ADR-0008's `internal` sentence is the answer,
+    // and the log is where the words go — the assertion is that they are *not* in the body.
+    let dir = TempDir::new("refusal-unreadable-api");
+    let root = dir.file("projects");
+    let repo = root.join("holosmith");
+    repository(&repo);
+    let config = std::fs::read_to_string(repo.join(".git/config")).expect("the config reads");
+    std::fs::write(
+        repo.join(".git/config"),
+        format!("{config}[extensions]\n\tworktreeConfig = maybe\n"),
+    )
+    .expect("the config is writable");
+    let state = docker_state(&dir, &root);
+    let served = Served::start(http::router(state.clone()), GRACE).await;
+
+    let response = post_create(served.addr, "refusal-unreadable").await;
+
+    assert_eq!(response.status, 500, "{}", response.body);
+    assert_eq!(
+        response.header("content-type"),
+        Some("application/json"),
+        "{}",
+        response.body
+    );
+    let body: Value = serde_json::from_str(&response.body).expect("an envelope is JSON");
+    assert_eq!(body["code"], "internal", "{}", response.body);
+    assert!(
+        !response.body.contains("boolean"),
+        "git's own words leaked to the client: {}",
+        response.body
+    );
+    let rows = {
+        let database = state.database.lock().expect("the lock is not poisoned");
+        database
+            .sessions()
+            .list(None)
+            .expect("the list reads")
+            .len()
+    };
+    assert_eq!(rows, 0, "a refused create wrote a row");
 }

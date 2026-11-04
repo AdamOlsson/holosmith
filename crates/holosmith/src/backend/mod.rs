@@ -310,7 +310,7 @@ impl Backends {
     /// all, so it refuses nothing and every stub test and the gate's stub boot need no project on disk
     /// (ADR-0015). It is answered here rather than in the handler for that reason — one place knows which
     /// backend runs, and it is the one that already holds the projects root.
-    pub fn refuse(&self, project: &str) -> Result<(), crate::worktree::Refusal> {
+    pub fn refuse_project(&self, project: &str) -> Result<(), crate::worktree::Refusal> {
         match self {
             Self::Stub(_) => Ok(()),
             Self::Docker(backend) => backend.refuse_project(project),

@@ -373,7 +373,7 @@ async fn the_docker_backend_refuses_a_project_that_is_not_there() {
         "the refusal does not name the hole: {}",
         response.body
     );
-    let live = {
+    let rows = {
         let database = state.database.lock().expect("the lock is not poisoned");
         database
             .sessions()
@@ -381,7 +381,7 @@ async fn the_docker_backend_refuses_a_project_that_is_not_there() {
             .expect("the list reads")
             .len()
     };
-    assert_eq!(live, 0, "a refused create wrote a row");
+    assert_eq!(rows, 0, "a refused create wrote a row");
 
     served.finish().await.expect("a clean shutdown");
 }
