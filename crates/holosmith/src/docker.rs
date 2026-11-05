@@ -127,9 +127,13 @@ impl Docker {
     /// The gateway address a network reports, when it has one.
     ///
     /// Only the network self-test asks (HS-036), and only to learn *which* address the host is reachable on
-    /// from a normal network. `None` for a network that does not exist, has no IPAM config (an internal one, or
-    /// a driver that does not do IPAM) or reports Docker's `<no value>` for a missing field — three ways of
-    /// saying "there is no address here to probe", and none of them is an error.
+    /// from a normal network. `None` for a network that does not exist, has no IPAM config (a driver that does
+    /// not do IPAM) or reports Docker's `<no value>` for a missing field — three ways of saying "there is no
+    /// address here to probe", and none of them is an error.
+    ///
+    /// **An internal network is not one of those cases**: it reports a gateway address like any other and
+    /// simply has no route to it (measured, ADR-0044), which is why nothing here tries to tell internal from
+    /// external by reading fields.
     pub fn gateway(&self, network: &str) -> Option<String> {
         let gateway = self
             .inspect(network, "{{(index .IPAM.Config 0).Gateway}}")
@@ -140,17 +144,57 @@ impl Docker {
         Some(gateway)
     }
 
-    /// Run `docker <arguments>` and answer its exit code with what it printed, for the one caller that reads
-    /// them rather than the text: the network self-test's probe reports by exit code (HS-036).
-    pub fn attempt(&self, arguments: &[String]) -> Result<crate::selftest::Report, DockerError> {
+    /// Run `docker <arguments>` under a bound and answer its exit code with what it printed, for the one caller
+    /// that reads them rather than the text: the network self-test's probe reports by exit code (HS-036).
+    ///
+    /// **Bounded, unlike every other call here**, because this one runs on the startup path: a daemon that
+    /// accepts a `docker run` and then wedges would otherwise hang the boot before the listener binds, which is
+    /// exactly what [`crate::preflight`]'s `PING_TIMEOUT` exists to prevent for its own check. `Ok(None)` is the
+    /// bound expiring and the child being killed — the caller reads it as "the probe did not finish", which is
+    /// not a verdict about the machine.
+    pub fn attempt(
+        &self,
+        arguments: &[String],
+        bound: std::time::Duration,
+    ) -> Result<Option<crate::selftest::Report>, DockerError> {
         let borrowed: Vec<&str> = arguments.iter().map(String::as_str).collect();
-        let output = self.command().args(&borrowed).output().map_err(|error| {
+        let mut child = self
+            .command()
+            .args(&borrowed)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|error| {
+                DockerError::new(
+                    &borrowed,
+                    format!("the docker command could not be run ({error})"),
+                )
+            })?;
+        let deadline = std::time::Instant::now() + bound;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Ok(None);
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+                Err(error) => {
+                    return Err(DockerError::new(
+                        &borrowed,
+                        format!("the docker command could not be waited on ({error})"),
+                    ));
+                }
+            }
+        }
+        let output = child.wait_with_output().map_err(|error| {
             DockerError::new(
                 &borrowed,
-                format!("the docker command could not be run ({error})"),
+                format!("the docker command printed nothing readable ({error})"),
             )
         })?;
-        Ok(crate::selftest::Report {
+        Ok(Some(crate::selftest::Report {
             // A process killed by a signal has no code of its own; -1 is "not success and not a number Docker
             // gave us", which the self-test reads as a probe that did not finish.
             code: output.status.code().unwrap_or(-1),
@@ -164,7 +208,7 @@ impl Docker {
                 .rev()
                 .collect::<Vec<&str>>()
                 .join(" | "),
-        })
+        }))
     }
 
     /// Remove a network, answering `false` when it was not there (which is not a failure: teardown of

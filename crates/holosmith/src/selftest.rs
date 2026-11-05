@@ -1,8 +1,10 @@
 //! The startup self-test: this machine's isolation, measured rather than asserted (HS-036, spec item 2).
 //!
 //! Spec item 2 makes the checkbox advisory and the *network* the enforcement: a session's network is
-//! `--internal`, so there is no gateway and no route out, and the environment proxies only decide which of the
-//! two allowed listeners a container can see. That is a claim about the kernel, and a claim about the kernel
+//! `--internal`, so there is no route out, and the environment proxies only decide which of the two allowed
+//! listeners a container can see. ("No route out" and not "no gateway": an internal network still reports an
+//! IPAM gateway, and that address answers from inside it — measured, ADR-0044. What it cannot do is route
+//! anywhere else, which is what the probe below asks.) That is a claim about the kernel, and a claim about the kernel
 //! that nobody measures is a claim about the daemon's configuration — which is exactly the thing that goes
 //! wrong quietly (`--iptables=false`, a bridge that is not internal, a host with `net.ipv4.ip_forward` and a
 //! default route). So the same probe a test would write runs at startup:
@@ -55,6 +57,15 @@ pub const HOST_PORT: u16 = 2375;
 
 /// The probe's exit code for "something was reachable".
 pub const REACHED: i32 = 9;
+
+/// How long the probe's `docker run` may take before it is killed and the outcome becomes
+/// [`Outcome::Unknown`].
+///
+/// The probe bounds itself (three seconds per target, two targets), so this is a bound on the *container*, not
+/// on the test: a daemon that accepts the run and then wedges must not hang a boot before the listener binds —
+/// the same hazard `crate::preflight`'s `PING_TIMEOUT` names for its own check. Generous rather than tight,
+/// because a slow machine image unpacking for the first time is not a wedged one.
+pub const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The probe itself, run by the image's own node (`node -e <script> <targets…>`).
 pub const PROBE: &str = include_str!("../templates/selftest-probe.js");
@@ -160,7 +171,14 @@ impl Runner for Docker {
             PROBE.to_string(),
         ];
         arguments.extend(targets.iter().cloned());
-        self.attempt(&arguments).map_err(|error| error.to_string())
+        match self.attempt(&arguments, PROBE_TIMEOUT) {
+            Ok(Some(report)) => Ok(report),
+            Ok(None) => Err(format!(
+                "the probe did not finish within {} seconds and was killed",
+                PROBE_TIMEOUT.as_secs()
+            )),
+            Err(error) => Err(error.to_string()),
+        }
     }
 }
 

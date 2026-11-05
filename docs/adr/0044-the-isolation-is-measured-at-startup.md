@@ -19,8 +19,9 @@ Two targets:
 - **The internet** — `1.1.1.1:443`, a public resolver's HTTPS port, so a pass cannot be a coincidence.
 - **The host** — the gateway `docker network inspect bridge` reports, on port `2375` (the conventional
   unauthenticated daemon API). Read from the daemon rather than guessed, and absent on a rootless daemon that
-  has no such gateway, in which case the internet target alone is measured and the sentence says which targets
-  it tried.
+  has no such gateway, in which case the internet target alone is measured and a *failure* says which targets it
+  tried; the passing line therefore claims only "nothing it probed was reachable", not "the host is
+  unreachable".
 
 **And the distinction the whole test rests on:** `connected` and **`refused`** are *reached*;
 `ENETUNREACH`, `EHOSTUNREACH` and a timeout are not. A connection the far side refuses proves the packet
@@ -31,10 +32,20 @@ is about. Measured, both ways, in `tests/selftest.rs`: the internal network pass
 host, so "passed" means something.
 
 **A flag would not have told us.** An `--internal` network still reports an IPAM gateway in `docker network
-inspect` (measured: `172.21.0.1` on this machine's session networks) — the address exists and nothing routes to
-it. So "the network says internal" is not a measurement of reachability, and neither is any other field: the only
-honest check is to try. `tests/container.rs` therefore asserts the flag on a session's network and leaves
-reachability to the probe.
+inspect` (measured: `172.21.0.1` on this machine's session networks). So "the network says internal" is not a
+measurement of reachability, and neither is any other field: the only honest check is to try.
+`tests/container.rs` therefore asserts the flag on a session's network and leaves reachability to the probe.
+
+**And one measured limit, recorded rather than glossed over.** That gateway address *answers* from inside the
+internal network: the probe against a temporary internal network's own gateway gets `refused`, not
+`ENETUNREACH` (measured 2026-11-05, Docker 29.9.2). So "there is no gateway to the host" in item 2 is not
+literally true — what is true, and what the self-test measures, is that there is **no route out**: the internet
+is `ENETUNREACH` and the *default* bridge's gateway is `ENETUNREACH`. A consequence worth knowing before HS-037:
+anything on the host bound to `0.0.0.0` is reachable from a session container at its own network's bridge
+address, the control listener included, and its defence is the guards of item 4 rather than the network. Nothing
+here tries to add that address as a target — a probe that must fail on every Docker installation is not a test,
+it is a lockout — and closing the gap (a firewall on the bridge, or a network driver that does not answer) is a
+decision HS-037 or the phase-1 verification run owns.
 
 ## Three outcomes, and only one refuses
 

@@ -39,6 +39,11 @@ They are a type rather than three `eprintln!`s because three readers need the sa
 `doctor`, and any later check that wants to say "this is the same failure" — and because a test can assert
 the *fix* is present without pinning the prose.
 
+**Amended by ADR-0044:** there is a fourth check, the network **self-test**, and it follows a different rule:
+its "could not run" is one `warn` and the boot continues, because it needs a container rather than a command,
+and a machine whose image is not built yet must still serve the screen that says so. Only a *measured* leak
+refuses. The three checks below are unchanged — for them, a check that cannot run is still a complaint.
+
 **A check that cannot run is never a pass.** `docker_host` on an `ssh://` host is a complaint, and so is a
 `df` or `git` that is missing or refused — with `df`'s own words in the sentence, because "install coreutils"
 is not advice about a program that just answered. No story owns an ssh check yet; when one does, it replaces

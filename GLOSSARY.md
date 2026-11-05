@@ -14,7 +14,9 @@ _Avoid_: Node, box, instance
 The checks a machine must pass before it can run a **session**: the Docker daemon answering `_ping` on
 `docker_host`, git 2.38 or newer, and `min_free_gb` free on the data root. Its failures are sentences that
 name the fix, printed by `serve` at startup (which then refuses) and, from HS-045, by `doctor`. A check that
-cannot run — an `ssh://` daemon, a missing `git` — is a complaint rather than a pass. Its machine names are
+cannot run — an `ssh://` daemon, a missing `git` — is a complaint rather than a pass. **Amended by
+ADR-0044:** the network **self-test** is a fourth check with a different rule — "could not run" is one `warn`
+and the boot continues, because it needs a container rather than a command. Its machine names are
 `preflight::check`, `Complaint` and `Check`.
 _Avoid_: Sanity check, health check, smoke test (a **preflight** is not `doctor`, which is the command that
 prints one)
@@ -487,12 +489,6 @@ _Avoid_: CI flag, risk flag
 
 ### Network and credentials
 
-**Session network**:
-The internal Docker network one session's container is on: `agents_<id>`, created with `--internal`, so it has
-no gateway and no route to the host or the internet. Nothing else joins it. Its machine names are
-`docker::create_internal_network` and `container::network_name`.
-_Avoid_: Sandbox network, bridge, net
-
 **Egress network**:
 The machine's own, **not** internal Docker network — `egress` — that the proxies are attached to, so a
 container's only way out is through something this build controls. It is created once at startup on a Docker
@@ -508,8 +504,6 @@ the boot **refuses**, through a `preflight::Complaint`). A *refused* connection 
 proves the host answered — which is the distinction the test rests on. Its machine names are `selftest::run`,
 `selftest::Outcome` and `templates/selftest-probe.js`.
 _Avoid_: Health check, smoke test, probe
-
-
 
 **Key proxy**:
 The container that holds provider API keys and swaps them for each session's dummy key.
@@ -528,8 +522,13 @@ The set of hostnames the egress proxy will connect to.
 _Avoid_: Whitelist, permitted hosts
 
 **Session network**:
-The private internal Docker network one session's container joins: `agents_<id>`, created `--internal` so nothing on it can reach the host or the internet. Its machine name is `container::network_name`, and the `agents_` prefix is the one string (spec item 2). HS-036 adds the two proxies and the startup self-test that make "only the key proxy answers" a fact rather than a topology.
-_Avoid_: Agent network, container network, sandbox network, bridge
+The private internal Docker network one session's container joins: `agents_<id>`, created `--internal` so that
+nothing on it has a route out — no internet, and no way to another network's gateway. Nothing else joins it.
+Its machine names are `container::network_name` (the `agents_` prefix, spec item 2) and
+`docker::create_internal_network`. **Measured**: an internal network still *reports* an IPAM gateway, and that
+gateway answers from inside it (ADR-0044) — so "no route out" is the property, not "no gateway"; the proxies of
+HS-037/039 are what a container's only way out runs through.
+_Avoid_: Agent network, container network, sandbox network, bridge, net
 
 **Internet access**:
 The per-session choice of whether the egress proxy is connected. Off by default.

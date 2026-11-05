@@ -6,8 +6,10 @@
 //! module is the list and the sentences; HS-045's `doctor` is the command that prints them on demand, and
 //! `serve` is the one that refuses.
 //!
-//! Three checks, and only these three, because they are what this build can answer without Docker and
-//! without the systemd, Tailscale and port questions HS-045 owns:
+//! Three checks are answered here, and only these three, because they are what this build can answer without
+//! Docker and without the systemd, Tailscale and port questions HS-045 owns. A fourth, the network self-test,
+//! needs a container and lives in [`crate::selftest`]; it reports through the same [`Complaint`] and refuses
+//! the same way, so a reader of one has read both (ADR-0044).
 //!
 //! - **Docker** — the daemon answers `GET /_ping` on the socket `docker_host` names. `unix://` (the
 //!   default `/var/run/docker.sock`) and `tcp://host:port` are checked; `ssh://` is reported as *not

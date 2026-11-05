@@ -385,8 +385,10 @@ per transaction, and never touches a session whose state is `starting`, `running
 - Optional: a **Docker daemon and one image** for `scripts/verify.sh`'s `case_container_mounts` and for
   `tests/container.rs`. Both check V1 — the hardened `.git` mounts — against a real container, and both
   print one `SKIP` line and pass without a daemon, because a machine without one is a supported machine
-  (a hub). The image is `$HOLOSMITH_TEST_IMAGE`, default `pi-agent:local`; it needs `sh` and `git`, and
-  its default user must not be root. A development machine can build one, or tag the image it has:
+  (a hub). The image is `$HOLOSMITH_TEST_IMAGE`, default `pi-agent:local`; it needs `sh`, `git` **and
+  `node`** — the network self-test's probe is a node script (HS-036, ADR-0044), and an image without node makes
+  that test `Unknown` rather than failed, so a missing node is a `warn` at every boot instead of a red test. Its
+  default user must not be root. A development machine can build one, or tag the image it has:
   `docker tag pi-agent:local agent-image:<version>`.
 - Optional: **`qemu-aarch64-static`** (or point `HOLOSMITH_QEMU_AARCH64` at one) to run
   the aarch64 artifact on an x86_64 machine. It is a machine-local dev tool installed
@@ -435,10 +437,11 @@ rather than a guessed uid that would hand the agent's files to somebody the host
 on a temporary internal network, asking it to reach `1.1.1.1:443` and the default bridge's gateway. A
 *connection that is refused* counts as reached, because a reset proves the host answered; `ENETUNREACH`, a
 timeout and the like are the pass. Three outcomes, one refusal: `Passed` is a `debug` line, `Unknown` (no image,
-a daemon that cannot create networks) is one `warn` and the boot continues, and `Failed` refuses the boot with a
-sentence naming the target — the same shape and place as the preflight's complaints. `role = "hub"` and
-`--backend stub` run neither, and a machine with no daemon at all is a supported machine: 
-`tests/selftest.rs` and `case_network_selftest` both print one `SKIP` line and pass.
+a daemon that cannot create networks, a probe that did not finish) is one `warn` and the boot continues, and
+`Failed` refuses the boot with a sentence naming what was reached and the targets it tried — the same shape and
+place as the preflight's complaints. `role = "hub"` and `--backend stub` run neither, and a machine with no
+daemon at all is a supported machine: `tests/selftest.rs` and `case_network_selftest` both print one `SKIP`
+line and pass.
 
 **One container per session, limited and on a network of its own** (HS-028, ADR-0036): a
 `docker run -i --rm --init --name s_<id> --network agents_<id> --cap-drop ALL --security-opt

@@ -114,7 +114,8 @@ pub fn run(args: ServeArgs) -> ExitCode {
                     target: "holosmith::serve",
                     network = EGRESS_NETWORK,
                     %error,
-                    "the egress network could not be created: sessions will have no route out through the                      proxies, and any step that needs it will say so"
+                    "the egress network could not be created: a session will have no route out through the proxies, and any \
+                     step that needs it will say so"
                 ),
             }
             // The **self-test**: the isolation is enforced by the kernel, so it is measured rather than
@@ -128,7 +129,7 @@ pub fn run(args: ServeArgs) -> ExitCode {
             match &outcome {
                 crate::selftest::Outcome::Passed => tracing::debug!(
                     target: "holosmith::serve",
-                    "the network self-test passed: an internal network reaches neither the internet nor the host"
+                    "the network self-test passed: nothing it probed was reachable from an internal network"
                 ),
                 crate::selftest::Outcome::Unknown(sentence) => tracing::warn!(
                     target: "holosmith::serve",
