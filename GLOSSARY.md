@@ -253,6 +253,31 @@ _Avoid_: Mock, test mode, dry run
 A stand-in agent process inside a container that replays a recorded session.
 _Avoid_: Mock pi, test agent
 
+**Agent process**:
+The `pi` process a session's container runs, in RPC mode with the container's stdio attached: its stdout
+carries the protocol's records, its stdin takes commands, and its exit code and stderr are what the
+**exit classifier** reads. One process per launch; a resume starts a new one, and the **launch generation**
+is what tells an old process's exit from the current one's. Its machine names are `agent::Agent` and
+`ProcessEnd`.
+_Avoid_: Container (the container is what runs it, and a stopped session has neither), worker, child
+
+**Agent directory**:
+`<data>/sessions/<id>/pi-home`: the directory the agent process reads its configuration from, as
+`PI_CODING_AGENT_DIR` names it. It is a **mount** of the session's container, at its own host path, and it
+is seeded once from a template with the session's model and thinking level and no secrets.
+_Avoid_: Pi home, config dir, profile
+
+**Ready handshake**:
+The `get_state` command a launch sends and the `response` record that repeats its `id`, which is what makes
+a `starting` session `idle`. Not a delay: a process that never answers fails the **step** that asked.
+_Avoid_: Health check, warmup, ping
+
+**Launch line**:
+The one line a launch writes into `session.log` before the process starts: the image, the pi version, the
+session, the **agent directory**, the model and thinking level, and the project-trust decision. Built from
+an allow-list of fields, so it holds nothing that has to be redacted.
+_Avoid_: Startup log, banner
+
 ### Events and history
 
 **Event**:
