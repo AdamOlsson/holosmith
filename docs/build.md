@@ -333,14 +333,22 @@ per transaction, and never touches a session whose state is `starting`, `running
   the socket exists; a machine without a daemon gets no binds and every Docker check skips. A reviewing
   agent inside this sandbox can therefore create containers, which is the point and also the risk.
 - **The mapping's fixtures** are committed, not generated: `crates/holosmith/tests/fixtures/pi-turn-*.jsonl`
-  are two real turns' records from the image the Docker stories run, replayed by `tests/rpc.rs` through the
-  production mapping (ADR-0040). They are refreshed by hand — one prompt against a container with the
-  operator's own provider credentials and network access — and `tests/rpc.rs`'s
-  `a_fixture_whose_records_drifted_fails_this_guard` is what makes a silent refresh visible (it counts the
-  record types per fixture, which a mapping assertion cannot: a frame cannot be missing for a record that is not
-  there). No test that *replays* a fixture needs a provider key, a daemon or the network, because the records
-  are already committed; only the gate's `case_docker_turn` needs the daemon and the image, and it skips
-  without them like every other Docker case.
+  are three real turns' records from the image the Docker stories run — one answer, one that thought first, and
+  one that called a tool — replayed by `tests/rpc.rs` through the production mapping (ADR-0040, ADR-0041). They
+  are refreshed by hand — one prompt against a container with the operator's own provider credentials and
+  network access, in a scratch agent directory under `target/` because a mount source the daemon cannot see is
+  an empty directory, not an error — and `tests/rpc.rs`'s `a_fixture_whose_records_drifted_fails_this_guard` is
+  what makes a silent refresh visible (it counts the record types per fixture, which a mapping assertion
+  cannot: a frame cannot be missing for a record that is not there). The tool fixture's capture needs a prompt
+  that makes the agent call a tool (``Use the bash tool to run exactly: …``), and its last line must end with a
+  newline: the reader splits on LF, so a final record without one waits for EOF — which a fake agent that keeps
+  its stdout open never gives. No test that *replays* a fixture needs a provider key, a daemon or the network,
+  because the records are already committed; only the gate's `case_docker_turn` needs the daemon and the image,
+  and it skips without them like every other Docker case.
+- **A tool's output is a file under the data root** (HS-033, ADR-0041): `<data>/sessions/<id>/tool/<tool_id>.txt`,
+  capped at 5 MiB of output plus one `[truncated: …]` marker line, served by
+  `GET /api/sessions/{id}/tool-output/{tool_id}`. Nothing has to configure it and no test has to clean it up
+  beyond the data root it already uses: the directory is a session's own, beside `session.log` and `pi-home`.
 - Optional: a **Docker daemon and one image** for `scripts/verify.sh`'s `case_container_mounts` and for
   `tests/container.rs`. Both check V1 — the hardened `.git` mounts — against a real container, and both
   print one `SKIP` line and pass without a daemon, because a machine without one is a supported machine
