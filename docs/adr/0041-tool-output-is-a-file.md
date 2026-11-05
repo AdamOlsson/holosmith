@@ -43,16 +43,25 @@ ADR-0019's table pinned `tool.start` as `{"tool_id", "name", "arguments"}` and `
 ```
 
 - **`arguments` is a summary**: the compact JSON of pi's `args`, capped at 2000 characters (`tool::ARGUMENTS_MAX`)
-  with an ellipsis. A `write` of a large file must not put the file in a payload; the whole call is in the
-  message that asked for it and in the stored result's own record.
-- **`status` is `ok` or `error`**, from pi's `isError`. pi reports **no exit code**: a `bash` tool's status code
-  lives inside `result` (`structuredContent.exit_code` in the captured turn), which is tool-specific and which
-  the file holds verbatim. So the frame carries the tool's own verdict — the honest spelling of the story's
-  "exit status" — and anything finer is one `output_ref` away. Absent `isError` is `ok`: pi omits it when the
-  tool did not run, and a frame that said `error` for that would report a failure nobody observed.
+  with an ellipsis. A `write` of a large file must not put the file in a payload, and the story asks for a
+  *summary* by that name. **The rest is retained nowhere** — `message.end`'s `tool_calls` carries the call's
+  name only, and the stored file holds the result, not the arguments — so a `write` whose body exceeds the cap
+  is only in the agent's own message, which this build does not keep. That is recorded here rather than
+  glossed: a reader who needs the whole call has to decide where it should live, and that is a new story.
+- **`status` is `ok` or `error`**, from pi's `isError`. pi reports **no exit code** in the record's own fields:
+  a `bash` tool's status code sits inside `result` (`structuredContent.exit_code` in the captured turn), which
+  is tool-specific, and **the file does not keep it** — the file holds the result's *text* blocks, and
+  `details`/`structuredContent` are dropped. So the frame carries the tool's own verdict, which is this story's
+  reading of the acceptance's "exit status", and the ADR says plainly what is not retained rather than pointing
+  at a file that cannot answer. Absent `isError` is `ok`: pi omits it when the tool did not run, and a frame
+  that said `error` for that would report a failure nobody observed. Keeping the whole `result` (or a `details`
+  blob, or an exit code as a key of its own) is a new decision with its own story: it is a second payload shape
+  for one field, and HS-035 will be the story that touches a result's non-text parts anyway.
 - **`duration_ms`** is pi's `durationMs`, optional because pi measured none when the tool did not run.
 - **`output` is a preview** (`tool::PREVIEW_MAX` = 2000 characters, ellipsis-marked): the transcript's own
-  rendering limit, so a 5 MB output draws as a paragraph and the log's rows stay small.
+  rendering limit, so a 5 MB output draws as a paragraph and the log's rows stay small. This is the one
+  *semantic* change to ADR-0019's table, which is why ADR-0019 now carries an "Amended by ADR-0041" note: the
+  key keeps its name and its position, and its meaning narrows from "the output" to "the beginning of it".
 - **`output_ref` is present only when the file was written.** A store that refused (an id that cannot be a
   filename, a full disk) still leaves a frame, because the tool ran; a frame that claimed a reference to
   nothing would be a dead link the operator could not tell from a slow one.
@@ -72,7 +81,11 @@ the served path and a store-less replay agree.
 - **The path** is `<data>/sessions/<id>/tool/<tool_id>.txt`, beside `session.log` and `pi-home`, because it is
   one session's own file about one of its own turns.
 - **The cap is 5 MiB of output** (`tool::CAP`), a constant and not a config key, for the reason ADR-0032's
-  window and HS-021's tick are: it is a rule of the contract, not a property of a machine. The body is cut on a
+  window and HS-021's tick are: it is a rule of the contract, not a property of a machine. It is *defensive* in
+  practice: pi's own `bash` tool already truncates what it hands back (its description, in the committed
+  fixture, promises the last 2000 lines or 50 KB), so the six-megabyte cases in `tests/rpc.rs` are synthetic and
+  the two-megabyte one in the gate is planted. A tool from a project-local extension need not truncate, which is
+  the case the cap exists for. The body is cut on a
   **character boundary**, so a file is always valid UTF-8, and one marker line follows it:
   `[truncated: stored 5242880 of 6291450 bytes]`. The marker does not count against the cap — the cap is on the
   output, and a marker that ate into it would misreport where the output stopped.
@@ -85,6 +98,13 @@ the served path and a store-less replay agree.
   cleaning up: `.`, `/`, `\` and every control character are simply not characters an id has, so `..` cannot be
   spelled. A refused id is a name no file here can hold, and both the write and the route answer "there is no
   such output" instead of a second reason an operator has to learn.
+- **What the id rule defends against, and what it does not.** The threat is a *name the agent chose*: a tool id
+  arrives from pi's records, so it is agent-controlled text, and joining it unchecked would be a traversal. It
+  is not a defence against something that can already write inside `<data>/sessions/<id>/tool/`: a symlink
+  planted there and named `<tool_id>.txt` is followed by `std::fs::read`. Nothing in this build can create one —
+  the container's mounts are the worktree and the agent's own directory, not a session's data directory — so the
+  gap is recorded rather than papered over, and a story that gives an agent a writable path under `<data>` has
+  to come back to this line.
 
 ## The route
 

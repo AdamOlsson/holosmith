@@ -1375,6 +1375,9 @@ case_tool_output() {
   # Two megabytes, so the served answer is far larger than any payload and the read stays bounded.
   dd if=/dev/zero bs=1024 count=2048 2>/dev/null | tr '\0' 'x' >"$dir/$tool.txt" ||
     fail "$name/write" "could not write $dir/$tool.txt"
+  # The canary one level up, where a join without the id rule lands.
+  printf 'not yours' >"$WORK/data/sessions/leak.txt" ||
+    fail "$name/canary" "could not write the traversal canary"
 
   fetch "$name" GET "/api/sessions/$created_id/tool-output/$tool" "Host: 127.0.0.1" ||
     fail "$name/no_answer" "GET the tool-output route did not answer"
@@ -1388,10 +1391,13 @@ case_tool_output() {
   check "$name/bytes" 2097152 "$(printf '%s' "$size" | tr -d ' ')"
 
   # A name that cannot be a filename is not a path to join: each of these is the envelope's `not_found`, and
-  # none of them reaches a file outside the session's tool directory.
+  # none of them reaches a file outside the session's tool directory. The stored name is `<id>.txt`, so the id
+  # must leave the extension off: `..%2F..%2Fleak` from `sessions/<id>/tool/` is `sessions/leak.txt`, which is
+  # where the canary below is — a canary further away could never be reached and every check would pass with the
+  # id rule deleted (this story's review's point, and axum really does decode a `%2F` inside a segment).
   name=case_tool_output_traversal
   local id
-  for id in '..' '%2e%2e%2f..%2fapp.db' '..%2F..%2Fapp.db' 'a%2Fb' '%2e%2e' 'with%20space'; do
+  for id in '..' '..%2F..%2Fleak' '%2e%2e%2f%2e%2e%2fleak' 'a%2Fb' '%2e%2e' 'with%20space'; do
     fetch "$name" GET "/api/sessions/$created_id/tool-output/$id" "Host: 127.0.0.1" ||
       fail "$name/no_answer" "GET a traversal ($id) did not answer"
     response="$(answer "$name")"
@@ -1399,8 +1405,8 @@ case_tool_output() {
     expect_header "$name" "$response" content-type "application/json"
     expect_code "$name" "$response" not_found
     case "$(cat "$WORK/responses/$name.body")" in
-      *SQLite*)
-        fail "$name/leak" "a traversal reached the database"
+      *"not yours"*)
+        fail "$name/leak" "a traversal reached a file outside the session's tool directory"
         ;;
       *)
         assertions=$((assertions + 1))

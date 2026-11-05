@@ -75,6 +75,9 @@ type MessageBlock = { element: HTMLElement; nodes: BlockNodes };
 type ToolBlock = {
   element: HTMLElement;
   name: HTMLElement;
+  // What the tool was asked for, as the frame's summary (HS-033). Shown because "I want to see what the agent
+  // ran" is the story's own sentence, and a block that named the tool and hid the command would not answer it.
+  arguments_: HTMLElement;
   // The tool's verdict and duration, and the link to its full output (HS-033).
   meta: HTMLElement;
   output: HTMLElement;
@@ -463,6 +466,9 @@ function toolBlock(id: string): ToolBlock {
   const element = make("article", "tool");
   element.dataset.tool = id;
   const name = make("div", "tool-name");
+  // The arguments summary, set by `tool.start` and never replaced: the frame is the whole of what the log
+  // kept, so there is nothing a later frame could add.
+  const arguments_ = kindNode("tool-arguments");
   // What the tool said about itself and how long it took (HS-033). Both start empty and are filled by the
   // `tool.end` frame; a frame written before those keys existed leaves them empty, so a replayed old row
   // draws exactly what it always did.
@@ -472,8 +478,8 @@ function toolBlock(id: string): ToolBlock {
   // the server computed, so it is never text from the agent).
   const full = make("a", "tool-full", "full output");
   full.hidden = true;
-  element.append(name, meta, output, full);
-  return { element, name, meta, output, full };
+  element.append(name, arguments_, meta, output, full);
+  return { element, name, arguments_, meta, output, full };
 }
 
 // Append one piece of output to a kind's node. This is the whole of the 10k-event rule: a text node
@@ -548,6 +554,8 @@ function applyChange(
     }
     if (change.op === "tool-start") {
       block.name.textContent = change.name;
+      block.arguments_.textContent = change.arguments;
+      block.arguments_.hidden = change.arguments === "";
       return;
     }
     // Appended when it arrives and never re-rendered: output can be large, and one assignment is

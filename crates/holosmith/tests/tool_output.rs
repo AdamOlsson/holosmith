@@ -126,8 +126,13 @@ async fn an_id_that_cannot_be_a_filename_is_not_a_file_to_read() {
     store
         .store(&session.id, TOOL, "the real output")
         .expect("the output is stored");
-    // A file *outside* the session's tool directory, which every traversal below is trying to reach.
-    std::fs::write(dir.file("secret.txt"), "not yours").expect("a file to reach for");
+    // The canary sits where a naive join would land. The stored name is `<id>.txt`, so the id `..%2Fsecret`
+    // becomes `<data>/sessions/<id>/tool/../secret.txt`: one level up. (Axum decodes a `%2F` inside a segment —
+    // measured — so the handler really does see `../secret`; a canary at `<data>/secret.txt` would be two levels
+    // away and every assertion below would pass with the id check deleted, which is what this story's review
+    // caught.)
+    let session_dir = dir.path().join("sessions").join(&session.id);
+    std::fs::write(session_dir.join("secret.txt"), "not yours").expect("a file to reach for");
 
     let served = Served::start(http::router(state.clone()), GRACE).await;
     // `..` cannot be spelled with the id rule's characters, so each attempt lands on "no such output" rather
@@ -135,9 +140,9 @@ async fn an_id_that_cannot_be_a_filename_is_not_a_file_to_read() {
     // `%2e%2e%2f` arrives as `../`.
     for id in [
         "..",
-        "%2e%2e%2fsecret",
         "..%2Fsecret",
-        "%2e%2e%2f%2e%2e%2fsecret.txt",
+        "%2e%2e%2fsecret",
+        "..%2F..%2F..%2Fapp",
         "a/b",
         "a%2Fb",
         ".hidden",

@@ -68,6 +68,15 @@ Three payloads are pinned here, because HS-033 and HS-034 will own their full tr
 message's tool-call names, in order) — additive keys, nothing reads them yet, and the arguments and output of a
 call stay `tool.start`/`tool.end`.
 
+**Amended by ADR-0041:** `tool.start` also carries nothing new, but its `arguments` is a **summary**
+(2000 characters, ellipsis-marked) — the whole of a call's arguments is retained nowhere, so a `write` whose
+body exceeds that is only in the agent's own message. `tool.end` gains `status` (`ok`/`error`, pi's `isError`),
+`duration_ms` (pi's measurement, absent when it made none) and `output_ref` (the URL of a **file** holding the
+call's text, written by `crate::tool`); and its `output` **changes meaning** from the whole output to a
+2000-character preview of it, which is why this is an amendment and not only an addition. A tool's structured
+result — a `bash` exit code in `structuredContent`, an image block — is not retained: HS-035 stores images, and
+a `details` blob would need its own decision.
+
 No `output_ref`: the stub writes no file, and item 15's ref belongs to HS-033's output file. The
 screen renders the block and the counts minimally — a `.tool` block with the call's name and its
 output, and one `in N · out N` line inside the message block, each appended when its frame arrives

@@ -23,6 +23,12 @@
 //! construction instead of by sanitising: `.`, `/`, `\` and every control character are simply not in the
 //! set, so `..` cannot be spelled. A refused id is a name no file can hold, and the answer everywhere is
 //! "there is no such output" rather than a second reason an operator has to learn.
+//!
+//! **What the rule defends and what it does not.** The threat is a *name the agent chose*: a tool id arrives
+//! from pi's records, so it is agent-controlled text, and joining it unchecked would be a path traversal. It is
+//! not a defence against something that can already write inside `<data>/sessions/<id>/tool/` — a symlink planted
+//! there and named `<tool_id>.txt` is followed by `std::fs::read`, and nothing in this build can create one: the
+//! container's mounts are the worktree and the agent's own directory, not the data root's session directory.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -85,8 +91,6 @@ pub struct Stored {
     pub preview: String,
     /// The path this endpoint serves it from, for `tool.end`'s `output_ref`.
     pub reference: String,
-    /// Whether the file holds less than the tool printed.
-    pub truncated: bool,
 }
 
 impl Store {
@@ -141,7 +145,6 @@ impl Store {
         Some(Stored {
             preview: preview(output),
             reference: format!("/api/sessions/{session_id}/tool-output/{tool_id}"),
-            truncated: output.len() > CAP,
         })
     }
 
@@ -218,7 +221,7 @@ fn write(path: &Path, output: &str) -> std::io::Result<()> {
         let marker = format!("\n{}\n", truncated_marker(kept.len(), output.len()));
         file.write_all(marker.as_bytes())?;
     }
-    file.sync_all()
+    Ok(())
 }
 
 /// The largest index at or below `max` that is a character boundary of `text`.
@@ -296,7 +299,6 @@ mod tests {
         let store = Store::new(&scratch.0);
         let text = "hello from the tool\n";
         let stored = store.store(SESSION, TOOL, text).expect("stored");
-        assert!(!stored.truncated);
         assert_eq!(stored.preview, text);
         assert_eq!(
             stored.reference,
@@ -317,7 +319,11 @@ mod tests {
         // Two bytes per character, so a byte-count cut would land inside one.
         let text = "é".repeat(CAP); // 2 × CAP bytes
         let stored = store.store(SESSION, TOOL, &text).expect("stored");
-        assert!(stored.truncated);
+        assert_eq!(
+            stored.preview.chars().count(),
+            PREVIEW_MAX + 1,
+            "the preview is the cap's worth of characters, however long the output was"
+        );
         let file = store.path(SESSION, TOOL).expect("a path");
         let written = std::fs::read_to_string(&file).expect("the file is valid UTF-8");
         let (body, marker) = written.split_once('\n').expect("a body and a marker line");

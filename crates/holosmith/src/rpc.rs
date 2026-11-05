@@ -177,6 +177,7 @@ impl ToolEnd {
     }
 }
 
+/// One turn's mapping: which of pi's messages is current, and what it did with the records it could not map.
 ///
 /// One value per turn, because the id it mints is per message and the count is per turn. It holds no clock,
 /// no database and no agent — a record in, a frame out — so a fixture can be replayed through it without a
@@ -188,8 +189,7 @@ pub struct Mapping {
     current: Option<String>,
     /// Records of a type this build knows and has no frame for: pi's `agent_start`/`agent_end`, its queue and
     /// level bookkeeping, the retry and compaction records, the provider's `toolcall_*` blocks and a tool's
-    /// partial results. Declining them is the
-    /// design, so they are not worth a line.
+    /// partial results. Declining them is the design, so they are not worth a line.
     declined: u64,
     /// Records this build does **not** know: a type (or a nested event type) a later pi release invented, or a
     /// shape that is not the one the documentation describes. Counted separately, because that is the one worth
@@ -377,9 +377,10 @@ impl Mapping {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        // The arguments are a *summary*: a `write` of a large file must not put the file in a payload. The
-        // whole of them is in the message that asked for the call (`message.end`'s `tool_calls` names it) and
-        // in the stored output's own record.
+        // The arguments are a *summary*: a `write` of a large file must not put the file in a payload, and the
+        // story asks for a summary by that name. Nothing retains the rest — `message.end`'s `tool_calls` carries
+        // the call's name only, and the stored file holds the result, not the arguments — which ADR-0041
+        // records rather than pretends otherwise.
         let arguments = record
             .get("args")
             .map(|args| tool::truncate(&args.to_string(), tool::ARGUMENTS_MAX))
@@ -587,15 +588,22 @@ fn frame(kind: &'static str, payload: Value) -> Mapped {
 ///
 /// A result is `{"content": [...], "details": {...}}` (`docs/json.md`). The content blocks are what the tool
 /// printed; a block that is not text is named in brackets rather than dropped, so a result carrying an image
-/// leaves a trace in the transcript's text until HS-035 stores and renders it (ADR-0041). A result with no
-/// `content` at all — a tool that printed nothing, or a shape a later pi invented — is the whole value's JSON,
-/// which is at least true.
+/// leaves a trace in the transcript's text until HS-035 stores and renders it (ADR-0041). `details` and pi's
+/// own `structuredContent` are **not** kept — a `bash` tool's exit code lives there, and ADR-0041 says so, so
+/// that `tool.end`'s `status` is read as the tool's verdict rather than as a status code that was thrown away
+/// by accident. A result that is absent or `null` is the empty string: a tool that printed nothing, not the
+/// text `null`.
 fn result_text(result: Option<&Value>) -> String {
     let Some(result) = result else {
         return String::new();
     };
     let Some(blocks) = result.get("content").and_then(Value::as_array) else {
-        return result.to_string();
+        // No `content` at all: the whole value's JSON, which is at least true — but `null` is nothing, not the
+        // word "null".
+        return match result {
+            Value::Null => String::new(),
+            other => other.to_string(),
+        };
     };
     let mut text = String::new();
     for block in blocks {

@@ -132,7 +132,12 @@ asserts the four step words arrived in order), and the state machine's payload
 the fifth is exactly `{"from":"starting","to":"idle","step":null,"reason":null}`), one
 session by id (`case_session_detail`, which asserts the row the create made, that it carries no
 `events` key, and that an unknown id is the `not_found` envelope), the session screen's path
-(`case_session_screen`, which asserts `/sessions/<id>` answers the shell byte-for-byte), and the
+(`case_session_screen`, which asserts `/sessions/<id>` answers the shell byte-for-byte), one tool
+call's full output (`case_tool_output`, which plants a two-megabyte file under the session's own
+`tool/` directory, asserts the route answers it byte for byte as `text/plain` off the artifact's data
+root, and asserts that each spelling of a traversal is the `not_found` envelope — three levels up,
+where the database is, so the check can fail; what the pump *stores* is `tests/rpc.rs`'s and
+`tests/tool_output.rs`'s, because the stub's turn calls no tool), and the
 prompt (`case_prompt_turn`, which asserts the 202 answers the row `running` and then reads that
 session's stream until the turn settles, asserting the turn's six kinds in order and the
 `idle → running → idle` transitions; `case_prompt_bad_body` and `case_prompt_unknown_session`,

@@ -326,6 +326,12 @@ impl Log {
         Store::new(self.dir.path())
     }
 
+    /// The session log a served run's backend holds, over the same data root: what spec item 15 forbids a
+    /// tool's output from reaching.
+    fn sink(&self) -> holosmith::exit::SessionLog {
+        holosmith::exit::SessionLog::new(self.dir.path())
+    }
+
     /// Every committed event of the session, in seq order, once `count` of them are there.
     fn committed(&self, count: usize) -> Vec<Event> {
         let deadline = Instant::now() + PATIENCE;
@@ -431,11 +437,33 @@ fn the_recorded_tool_turn_becomes_a_start_a_delta_run_an_end_and_one_tool_pair()
     assert!(skipped > 0);
 }
 
+/// One tool turn whose `bash` printed `bytes` bytes of `#`: bigger than the preview, small enough to assert.
+fn tool_turn(bytes: usize) -> String {
+    [
+        json!({"type": "agent_start"}).to_string(),
+        json!({"type": "message_start", "message": {"role": "assistant", "content": []}})
+            .to_string(),
+        json!({"type": "tool_execution_start", "toolCallId": TOOL_ID, "toolName": "bash",
+               "args": {"command": "head -c 4096 /dev/zero | tr '\\0' '#'"}})
+        .to_string(),
+        json!({"type": "tool_execution_end", "toolCallId": TOOL_ID, "toolName": "bash",
+               "result": {"content": [{"type": "text", "text": "#".repeat(bytes)}]},
+               "isError": false, "durationMs": 7})
+        .to_string(),
+        json!({"type": "agent_settled", "aborted": false}).to_string(),
+    ]
+    .join("\n")
+        + "\n"
+}
+
+/// The id the synthetic tool turn uses.
+const TOOL_ID: &str = "call_00_9hlt8we6459oa420spsp3mju";
+
 #[tokio::test]
 async fn the_pump_files_a_tool_output_so_the_log_carries_only_a_preview() {
     let dir = TempDir::new("rpc-tool");
     let log = Log::new(dir);
-    let command = fake_agent(&log.dir, TOOL);
+    let command = fake_agent(&log.dir, &tool_turn(4_096));
     let (agent, _exit) = Agent::launch(command, &log.session.id).expect("the fake agent starts");
     let mut records = agent.records();
     let reply = agent
@@ -482,37 +510,53 @@ async fn the_pump_files_a_tool_output_so_the_log_carries_only_a_preview() {
     let reference = tool_end["output_ref"].as_str().expect("the reference");
     assert_eq!(
         reference,
-        format!(
-            "/api/sessions/{}/tool-output/call_00_9hlt8we6459oa420spsp3mju",
-            log.session.id
-        )
+        format!("/api/sessions/{}/tool-output/{TOOL_ID}", log.session.id)
     );
 
-    // The file the reference names holds the whole output, and the frame holds the preview of it.
+    // The file the reference names holds the whole 4096 bytes; the frame holds the preview of it. The output is
+    // deliberately longer than `PREVIEW_MAX`, so this cannot pass with the previewing removed.
     let store = log.store();
     let path = store
-        .path(&log.session.id, "call_00_9hlt8we6459oa420spsp3mju")
+        .path(&log.session.id, TOOL_ID)
         .expect("the file's path");
     assert!(path.starts_with(log.dir.path()), "{}", path.display());
+    let file = std::fs::read_to_string(&path).expect("the file");
+    assert_eq!(file.len(), 4_096);
+    assert_eq!(file, "#".repeat(4_096));
+    let preview = tool_end["output"].as_str().expect("the preview");
     assert_eq!(
-        std::fs::read_to_string(&path).expect("the file"),
-        "hello from the tool\n"
+        preview.chars().count(),
+        holosmith::tool::PREVIEW_MAX + 1,
+        "the frame's output is the preview, ellipsis included"
     );
-    assert_eq!(tool_end["output"], "hello from the tool\n");
+    assert!(preview.ends_with(holosmith::tool::ELLIPSIS));
+    assert!(
+        file.len() > preview.len(),
+        "the file must hold more than the frame does, or this test proves nothing"
+    );
 
-    // And the session's own log is stderr's alone (spec item 15): nothing about the tool went into it.
+    // And the session's own log is stderr's alone (spec item 15). The log is given a line first, so the
+    // assertion below is about a file that exists: an `if let Ok(...)` over a file nobody created would pass on
+    // every run and prove nothing (this story's review caught exactly that).
     let session_log = log
         .dir
         .path()
         .join("sessions")
         .join(&log.session.id)
         .join("session.log");
-    if let Ok(text) = std::fs::read_to_string(&session_log) {
-        assert!(
-            !text.contains("hello from the tool"),
-            "a tool's output reached session.log: {text}"
-        );
-    }
+    log.sink().append(
+        &log.session.id,
+        "the agent's stderr, which is what this file is for",
+    );
+    let text = std::fs::read_to_string(&session_log).expect("the session log exists");
+    assert!(
+        text.contains("the agent's stderr"),
+        "the log is the file this test means to read: {text}"
+    );
+    assert!(
+        !text.contains("hello from the tool"),
+        "a tool's output reached session.log: {text}"
+    );
 }
 
 #[tokio::test]
