@@ -23,7 +23,8 @@
 //! against `--rm`) that HS-031 would delete.
 //!
 //! **`session.log` is the session's stderr and the server's own launch line** — and nothing else.
-//! `<data>/sessions/<id>/session.log` is append-only and carries the lines the container printed, verbatim;
+//! `<data>/sessions/<id>/session.log` is append-only and carries what the container printed on stderr (its
+//! kept tail, at most `crate::agent::STDERR_TAIL` bytes, since HS-031 drains a pipe it also bounds);
 //! the row's `status_reason` carries only the last few, because a phone shows one line. Spec item 15's
 //! "`session.log` holds stderr only" is what keeps a *tool's* output out of it (HS-033 gives each tool call
 //! its own file) and what makes the file worth reading when a session dies; HS-031 adds the launch line
@@ -48,8 +49,9 @@ pub const PI_EXIT: &str = "pi_exit";
 /// How many of stderr's last non-empty lines a failure puts in the row's `status_reason`.
 ///
 /// Five, because the row is read on a phone and the row is also what a list shows: enough to identify a
-/// stack trace's tail or a provider's error, short enough to stay one paragraph. The whole of stderr goes
-/// to [`session.log`](Exits) regardless.
+/// stack trace's tail or a provider's error, short enough to stay one paragraph. `session.log` gets all of
+/// it that was kept — since HS-031 the reader keeps a bounded tail (`agent::STDERR_TAIL`, 64 KiB) of a pipe
+/// it drains to the end, so a build log of megabytes cannot fill the data root.
 pub const STDERR_LINES: usize = 5;
 
 /// Where a session's files live under the data root: `<data>/sessions/<id>` (ADR-0011).
@@ -152,11 +154,6 @@ impl Exits {
         Self::new(database, events, data_root)
     }
 
-    /// The log this classifier writes into, for a caller that wants to append the launch line.
-    pub fn session_log(&self) -> SessionLog {
-        self.log.clone()
-    }
-
     /// Classify how `session`'s container exited, and record what that means.
     ///
     /// The flag is consumed here — read and cleared in one statement — because the answer it gives is
@@ -221,11 +218,6 @@ impl Exits {
     /// nothing more: the row's reason is the durable half of this, and the log is the complete one.
     fn append_log(&self, session_id: &str, stderr: &str) {
         self.log.append(session_id, stderr);
-    }
-
-    /// `<data>/sessions/<id>/session.log`, for a caller that reads what was recorded.
-    pub fn log_path(&self, session_id: &str) -> PathBuf {
-        self.log.path(session_id)
     }
 
     /// One state change through the one function that writes states (ADR-0016), with a failure logged:

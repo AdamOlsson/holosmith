@@ -92,9 +92,9 @@ pub const VERSION_ARGUMENT: &str = "--version";
 
 /// The command a container runs: pi in RPC mode, no session file, project trust approved.
 ///
-/// `--no-session` because a session's own state is Holosmith's event log, not pi's JSONL file (spec item 5);
-/// `--approve` is open question 9's answer, and [`crate::backend::docker`]'s module doc says why the
-/// alternative (`defaultProjectTrust: "always"` in the seed) is not this build's choice.
+/// `--no-session` because a session's own state is Holosmith's event log, not pi's JSONL file (spec item 5).
+/// `--approve` is open question 9's answer: per process, visible in the launch line, and never a setting in
+/// the seed — ADR-0039's "Project trust is `--approve`" says why.
 pub const COMMAND: [&str; 5] = ["pi", "--mode", "rpc", "--no-session", "--approve"];
 
 /// `<data>/sessions/<id>/pi-home`: the directory pi reads its configuration from (spec item 2).
@@ -169,9 +169,12 @@ pub fn launch_line(image: &str, version: &str, session: &Session, home: &Path) -
     )
 }
 
-/// How a launched agent's process ended.
+/// How a launched agent's process ended, as the process itself reported it.
+///
+/// Not to be confused with [`crate::exit::Exit`], which is what an exit *means* for the row: this is the
+/// code and the tail of stderr, and that is the classifier's three answers over them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Exit {
+pub struct Ended {
     /// The container's exit code, as `docker run -i` reports it: the CLI's own code *is* the container's
     /// (`--detach` is what would hide it). A process killed by a signal answers `128 + the signal`.
     pub code: i32,
@@ -255,7 +258,7 @@ impl Agent {
     pub fn launch(
         command: std::process::Command,
         session_id: &str,
-    ) -> io::Result<(Self, oneshot::Receiver<Exit>)> {
+    ) -> io::Result<(Self, oneshot::Receiver<Ended>)> {
         let mut command = tokio::process::Command::from(command);
         command
             .stdin(Stdio::piped())
@@ -303,7 +306,7 @@ impl Agent {
             // The stdout reader ends when the pipe closes; awaiting it here means the exit report is sent
             // after every record has been routed, so a caller cannot see an exit before its last answer.
             let _ = reader.await;
-            if exit.send(Exit { code, stderr }).is_err() {
+            if exit.send(Ended { code, stderr }).is_err() {
                 tracing::debug!(
                     target: "holosmith::agent",
                     session = %session,
@@ -342,15 +345,25 @@ impl Agent {
         }
         let mut line = serde_json::to_vec(&command).unwrap_or_default();
         line.push(b'\n');
-        {
+        // The write is bounded as well as the answer (`docs/rpc.md`: honour stdin backpressure). A process
+        // that stops reading its stdin would otherwise hold this mutex for ever, and the bound would never
+        // start: the handshake's payload is tiny, but HS-032's commands are not, and a session stuck in
+        // `starting` because a `write_all` blocked is exactly the hang the bound exists to prevent.
+        let written = tokio::time::timeout(timeout, async {
             let mut stdin = self.stdin.lock().await;
-            if let Err(error) = stdin.write_all(&line).await {
+            stdin.write_all(&line).await?;
+            stdin.flush().await
+        })
+        .await;
+        match written {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
                 self.forget(id);
                 return Err(AgentError::Write(error));
             }
-            if let Err(error) = stdin.flush().await {
+            Err(_) => {
                 self.forget(id);
-                return Err(AgentError::Write(error));
+                return Err(AgentError::Timeout(timeout));
             }
         }
         match tokio::time::timeout(timeout, receiver).await {
@@ -559,6 +572,19 @@ pub fn version_of(docker: &Docker, image: &str) -> Result<String, String> {
     }
 }
 
+/// Whether the pi an image runs is the one this binary is built for, and the sentence when it is not.
+///
+/// One function so both arms are testable without a second image: `Ok` carries the version (what the launch
+/// line records) and `Err` the sentence the session fails with.
+pub fn version_check(image: &str, found: &str) -> Result<String, String> {
+    let pinned = crate::pins::pi_version();
+    if found == pinned {
+        Ok(found.to_string())
+    } else {
+        Err(version_sentence(image, found, pinned))
+    }
+}
+
 /// The sentence a mismatched agent image fails its session with.
 ///
 /// Three facts and the fix: which image, which pi it runs, which pi this binary is built for. The row's
@@ -705,9 +731,26 @@ mod tests {
     }
 
     #[test]
+    fn the_pinned_version_is_the_one_the_image_must_run() {
+        // Both arms, without a second image and without spelling the pin (which lives in `pins/pi.txt`
+        // only — `tests/pin_single_source.rs`): the match is `Ok`, and anything else is the sentence.
+        let pinned = crate::pins::pi_version();
+        assert_eq!(
+            version_check("agent-image:0.1.0", pinned),
+            Ok(pinned.to_string())
+        );
+        let stale = format!("{pinned}-stale");
+        let error = version_check("agent-image:0.1.0", &stale)
+            .expect_err("a different version is a refusal");
+        assert!(error.contains(&stale), "{error}");
+        assert!(error.contains(pinned), "{error}");
+        assert!(error.contains("agent-image:0.1.0"), "{error}");
+    }
+
+    #[test]
     fn the_version_sentence_names_the_image_both_versions_and_the_fix() {
-        let sentence = version_sentence("agent-image:0.1.0", "1.2.3", "1.4.0");
-        for expected in ["agent-image:0.1.0", "pi 1.2.3", "pi 1.4.0", "rebuild"] {
+        let sentence = version_sentence("agent-image:0.1.0", "1.2.3", "9.9.9");
+        for expected in ["agent-image:0.1.0", "pi 1.2.3", "pi 9.9.9", "rebuild"] {
             assert!(
                 sentence.contains(expected),
                 "{expected} is not in {sentence}"
@@ -730,7 +773,7 @@ mod tests {
     /// It reads one line first, so the handshake's write cannot race the process's exit: a fake that
     /// answered before its stdin was read failed the write with `Broken pipe` and read as a bug in the
     /// plumbing (measured — the first version of these tests did exactly that).
-    fn fake(records: &[&str], code: i32) -> (Agent, oneshot::Receiver<Exit>) {
+    fn fake(records: &[&str], code: i32) -> (Agent, oneshot::Receiver<Ended>) {
         let mut script = String::from("read line\n");
         for record in records {
             script.push_str(&format!("printf '%s\\n' '{record}'\n"));

@@ -256,7 +256,7 @@ Sessions gain `usage_in` and `usage_out`, updated from the `usage` on `message.e
 - Coalescing: inside each 25 ms commit, consecutive deltas of the same kind and message become one row with one seq.
 - Snapshots: for messages completed more than 24 hours ago, a compaction job replaces their delta rows with one `message.snapshot` event (full text, thinking, message id) taking the highest seq of the removed rows. Clients apply it by message id, replacing rather than appending, so it is safe to receive after partial deltas. Seq rule change: seq is strictly increasing and gaps are allowed only where compaction removed rows.
 - New devices: with no `Last-Event-ID` the stream starts at the beginning of the 50th most recent message and sends `history.truncated {before_seq}`. Older history loads with `GET /api/sessions/:id/events/history?before=<seq>&limit=200`.
-- Tool output: the full text goes to `sessions/<id>/tool/<tool_id>.txt` (capped at 5 MB with a truncation marker); `tool.end` carries a truncated `output` plus `output_ref`. Fetch with `GET /api/sessions/:id/tool-output/:tool_id`. The earlier wording about keeping full output in the log is removed; `session.log` holds stderr only.
+- Tool output: the full text goes to `sessions/<id>/tool/<tool_id>.txt` (capped at 5 MB with a truncation marker); `tool.end` carries a truncated `output` plus `output_ref`. Fetch with `GET /api/sessions/:id/tool-output/:tool_id`. The earlier wording about keeping full output in the log is removed; `session.log` holds stderr (the kept tail of it) and the server's own launch line, and never a tool's output.
 - Stopped-session retention (decided in D3): a daily job deletes sessions that have been stopped for more than 7 days (config stopped\_ttl\_days, default 7), using the delete flow from item 9. A snapshot runs first; if it fails, the session is skipped and retried the next day. Sessions in error are never auto-deleted. Add stopped\_at INTEGER to sessions, set when the status becomes stopped and cleared on resume. The Sessions screen shows the days remaining on each stopped session.
 
 ### 16. Abort ladder, hub gaps
@@ -321,7 +321,7 @@ Spec edits that follow from D1:
 - Security table, row Pi login: tokens are never in containers; the agent can use its session's dummy key only through the key proxy.
 - Limits table, row Pi login: one key proxy per machine instead of one shared pi agent directory.
 - Open question 2 is closed and replaced by the vertical-slice check for base-URL override in item 2.
-- Open question 9 is closed: project trust is approved non-interactively inside the container with pi's `--approve`, per process, never from a saved decision or a global default. The launch line in `session.log` records that decision, and a test proves the mechanism by asking the live agent for its command list and finding the project's own resources there.
+- Open question 9 is closed: project trust is approved non-interactively inside the container with pi's `--approve`, per process, never from a saved decision or a global default. The launch line in `session.log` records that decision, and a test that needs a daemon and the agent image proves the mechanism by asking the live agent for its command list and finding the project's own resources there.
 
 ## Single binary and CLI
 

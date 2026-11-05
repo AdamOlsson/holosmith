@@ -2,32 +2,37 @@
 //!
 //! It exists so the trait has the implementation the product actually ships with, and so `--backend
 //! docker` — which is the default (ADR-0001) — answers honestly instead of pretending a session is
-//! provisioned. **Three of the four provisioning steps are real:** the worktree (HS-025), the session's
-//! private network (HS-028) and the container itself (HS-028). The **pi** step still refuses, and so does
-//! every lifecycle operation, with [`BackendError::Unsupported`] or [`BackendError::unsupported_step`],
-//! which the provisioner turns into a `session.status` event and a `status_reason` on the row: an operator
-//! who runs this build without `--backend stub` sees `error` with a reason naming the agent step, not a
-//! session that says `starting` forever.
+//! provisioned. **All four provisioning steps are real:** the worktree (HS-025), the session's private
+//! network (HS-028), the container (HS-028) and the agent inside it (HS-031). The turn's five operations
+//! still refuse — pi's RPC mapping is HS-032 to HS-035 — with [`BackendError::Unsupported`], which the
+//! runner turns into a reason on the row: an operator who prompts a session sees the refusal, not a session
+//! that hangs.
 //!
 //! Whether the machine *can* run Docker sessions at all is not this file's question: [`crate::preflight`]
 //! answers it once, at startup, and `serve` refuses to bring up a Docker run that fails it (HS-024). A
 //! backend that reported its own preflight would be a second opinion about the same machine.
 //!
-//! What is left, and who owns it: the `egress` network and the startup self-test (HS-036), the egress and
-//! key proxies (HS-037, HS-039) and the agent inside the container (HS-031). HS-028 creates the minimum a
-//! container needs — an **internal** network of its own, which is the isolation — and HS-036 owns the rest
-//! of the network's story. HS-031 replaces the detached launch with pi's RPC over the container's stdio.
+//! What is left, and who owns it: the turn's mapping over pi's RPC (HS-032 – HS-035), the `egress` network
+//! and the startup self-test (HS-036), and the egress and key proxies (HS-037, HS-039). HS-028 creates the
+//! minimum a container needs — an **internal** network of its own, which is the isolation — and HS-036 owns
+//! the rest of the network's story.
+//!
+//! **The container is the agent (HS-031).** `docker run` is attached (`-i`), its command is `pi --mode rpc`,
+//! and this module holds the spawned process (`crate::agent::Agent`) in a registry with a per-session
+//! **generation**. Two things follow from that and are worth knowing before reading `delete` and
+//! `supervise`: a launch replaces the registry entry, so an exit from a container a newer launch replaced is
+//! not news; and a delete *forgets* the launch before it removes the container, so the exit its own removal
+//! provokes is not recorded against a row that is going away (ADR-0039).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use super::{BackendError, ExitWatcher, ProcessEnd, Provisioned, SessionBackend, Step, TurnEnd};
-use crate::agent::{self, Agent, Exit};
+use crate::agent::{self, Agent, Ended};
 use crate::container::{ContainerSettings, SessionContainer, network_name};
 use crate::docker::{Docker, DockerError};
 use crate::events::EventWriter;
 use crate::exit::SessionLog;
-use crate::pins;
 use crate::sessions::Session;
 use crate::worktree::{Refusal, Worktree, refuse, repository_of};
 
@@ -82,7 +87,7 @@ pub struct DockerBackend {
 struct Launched {
     generation: u64,
     agent: Arc<Agent>,
-    exit: Option<tokio::sync::oneshot::Receiver<Exit>>,
+    exit: Option<tokio::sync::oneshot::Receiver<Ended>>,
 }
 
 impl DockerBackend {
@@ -113,6 +118,16 @@ impl DockerBackend {
             .map(|launched| Arc::clone(&launched.agent))
     }
 
+    /// Forget this session's launch: the exit of the process that is running is no longer its to report.
+    ///
+    /// Dropping the registry entry is what a delete does before it removes the container, and it is the
+    /// cheapest of the two ways to say "that container is not this session's any more" — the other is
+    /// bumping the generation, which would claim a *new* launch exists.
+    fn forget_agent(&self, session_id: &str) {
+        let mut agents = self.agents.lock().unwrap_or_else(PoisonError::into_inner);
+        agents.remove(session_id);
+    }
+
     /// The pi version the agent image runs, asserted against `pins/pi.txt` once per process.
     ///
     /// The story's fourth acceptance line: "the agent image's pi version equals the binary's pinned pi
@@ -128,12 +143,7 @@ impl DockerBackend {
         let image = self.settings.image.clone();
         let asked = tokio::task::spawn_blocking(move || agent::version_of(&docker, &image)).await;
         let answer = match asked {
-            Ok(Ok(version)) if version == pins::pi_version() => Ok(version),
-            Ok(Ok(version)) => Err(agent::version_sentence(
-                &self.settings.image,
-                &version,
-                pins::pi_version(),
-            )),
+            Ok(Ok(version)) => agent::version_check(&self.settings.image, &version),
             Ok(Err(reason)) => Err(format!(
                 "the agent image {} could not say which pi it runs: {reason}",
                 self.settings.image
@@ -621,6 +631,11 @@ impl SessionBackend for DockerBackend {
         // and a delete of the same session): without it, the delete removes the network between the start's
         // `network create` and its `docker run`.
         let _start = self.start_lock(&session.id).await;
+        // Forgotten **before** the container goes, so the exit this removal provokes answers
+        // `ProcessEnd::NotCurrent` and is never recorded: `Exits::record` appends to `session.log` (and makes
+        // the directory on the way), which would put back the directory the next line removes. A session
+        // being deleted has no exit worth classifying — the row is what is going away (ADR-0039).
+        self.forget_agent(&session.id);
         self.remove_container(session).await;
         self.remove_network(session).await;
         self.remove_worktree(session).await?;
@@ -727,6 +742,121 @@ mod tests {
             .expect_err("there is no agent process for a session nothing launched");
         let sentence = error.to_string();
         assert_eq!(sentence, "the pi step: this session has no agent process");
+    }
+
+    /// A scratch directory, removed by the caller.
+    fn scratch(label: &str) -> std::path::PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("holosmith-docker-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("the scratch directory is creatable");
+        path
+    }
+
+    /// A launched fake agent: `sh` that waits for `trigger` to appear and then exits 7.
+    ///
+    /// A file rather than a sleep because the test has to *decide* when the process ends: with a sleep the
+    /// generation comparison would race the exit, and a test that races proves nothing about which branch ran.
+    fn launched(trigger: &std::path::Path) -> (Arc<Agent>, tokio::sync::oneshot::Receiver<Ended>) {
+        let mut command = std::process::Command::new("sh");
+        command.arg("-c").arg(format!(
+            "while [ ! -f '{}' ]; do sleep 0.01; done; exit 7",
+            trigger.display()
+        ));
+        let (agent, exit) = Agent::launch(command, "0123456789abcdef").expect("it starts");
+        (Arc::new(agent), exit)
+    }
+
+    /// Put a launch in the registry, as `start_container` does.
+    fn remember(
+        backend: &DockerBackend,
+        session_id: &str,
+        generation: u64,
+        agent: Arc<Agent>,
+        exit: tokio::sync::oneshot::Receiver<Ended>,
+    ) {
+        backend
+            .agents
+            .lock()
+            .expect("the registry is not poisoned")
+            .insert(
+                session_id.to_string(),
+                Launched {
+                    generation,
+                    agent,
+                    exit: Some(exit),
+                },
+            );
+    }
+
+    /// An exit belongs to the launch that is current, and to nothing older (HS-031, ADR-0039).
+    ///
+    /// Three cases, and the reason the third exists: a forced stop resumes immediately, so the previous
+    /// container's exit can arrive after a new one has been launched. Classifying it then would turn a stop
+    /// the server asked for into an `error` row (ADR-0038's inherited ordering constraint).
+    #[tokio::test]
+    async fn an_exit_is_news_only_for_the_launch_that_is_current() {
+        let dir = scratch("docker-generation");
+        let backend = backend();
+        let session = session();
+
+        // The current launch: the registry still says generation 1 when the exit arrives.
+        let trigger = dir.join("one");
+        let (agent, exit) = launched(&trigger);
+        remember(&backend, &session.id, 1, agent, exit);
+        let watcher = backend
+            .supervise(&session)
+            .await
+            .expect("a launch to watch");
+        std::fs::write(&trigger, "").expect("writable");
+        assert_eq!(
+            watcher.wait().await,
+            ProcessEnd::Exited {
+                code: 7,
+                stderr: String::new()
+            },
+            "the current launch's exit is news"
+        );
+
+        // A replaced launch: generation 2 is current when generation 1's exit arrives.
+        let first = dir.join("one-again");
+        let (agent, exit) = launched(&first);
+        remember(&backend, &session.id, 1, agent, exit);
+        let stale = backend
+            .supervise(&session)
+            .await
+            .expect("a launch to watch");
+        let second = dir.join("two");
+        let (agent, exit) = launched(&second);
+        remember(&backend, &session.id, 2, agent, exit);
+        std::fs::write(&first, "").expect("writable");
+        assert_eq!(
+            stale.wait().await,
+            ProcessEnd::NotCurrent,
+            "an exit from a container a newer launch replaced is not news"
+        );
+
+        // A forgotten launch: this is what a delete does, so its own removal is never recorded.
+        let third = dir.join("three");
+        let (agent, exit) = launched(&third);
+        remember(&backend, &session.id, 3, agent, exit);
+        let forgotten = backend
+            .supervise(&session)
+            .await
+            .expect("a launch to watch");
+        backend.forget_agent(&session.id);
+        std::fs::write(&third, "").expect("writable");
+        assert_eq!(
+            forgotten.wait().await,
+            ProcessEnd::NotCurrent,
+            "a delete's own removal is not an exit worth classifying"
+        );
+        assert!(
+            backend.agent(&session.id).is_none(),
+            "the forgotten launch is not the session's agent any more"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

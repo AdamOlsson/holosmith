@@ -117,9 +117,12 @@ The alternative ADR-0038 offered — making the ladder await the report between 
 wait into the one path that must not block, and would have needed the watcher in two owners. The generation is
 one number and one comparison.
 
-**The delete marks its own removal expected** (`sessions.expected_stop` before `backend.delete`), because the
-observer would otherwise classify the server's own `docker rm -f` as a crash and move a `deleting` row to
-`error`. `Stopper` still owns the flag for a *stop*; a delete is the same fact by another route.
+**A delete forgets the launch before it removes the container**, and that is what makes its own `docker rm -f`
+quiet. Not the expected-stop flag: the state table has no `unexpected_exit` row out of `deleting`, so a
+recorded exit could at worst log a refused transition — and `Exits::record` appends to `session.log` *before*
+it classifies, which would re-create the session directory the delete removes a line later. Dropping the
+registry entry answers [`ProcessEnd::NotCurrent`] instead, so nothing is appended and nothing is classified.
+`Stopper` keeps owning the flag where it means something: a stop of a session that will still exist.
 
 ## The launch line, and why nothing is redacted
 
@@ -173,8 +176,12 @@ Recorded here rather than papered over, the same way ADR-0029 recorded HS-025's 
   waits for the container to come up, because the step returns before the daemon has created it.
 - `tests/provisioning.rs`'s `a_scripted_agent_exit_reaches_the_row_through_the_server` proves the wiring —
   provisioner → watcher → `Exits::record` → the row — with the stub's scripted exit, no Docker.
-- Mutations worth running: deleting the generation check makes the ladder's forced-stop path record an `error`
-  over a stop the server asked for (reachable only by driving `Ladder::climb`, which `tests/exit.rs` avoids);
-  deleting `--approve` makes `tests/agent.rs`'s `get_commands` assertion fail; deleting `--model`/`--thinking`
-  makes the `debug` line's model `unknown`; clearing the flag at launch instead of at the resume's container
-  step makes `tests/exit.rs`'s provision-clear test fail.
+- `an_exit_is_news_only_for_the_launch_that_is_current` proves the generation rule three ways without Docker:
+  the current launch's exit is news, a replaced launch's is not, and a forgotten one's (a delete's) is not. The
+  fake agent ends when a **file** appears, so the test decides when the exit happens and the comparison is not
+  raced.
+- Mutations worth running: deleting the generation comparison makes that test report `Exited` for a replaced
+  launch; deleting `forget_agent` from `delete` makes the third case report `Exited` over a delete's own
+  removal; deleting `--approve` makes `tests/agent.rs`'s `get_commands` assertion fail; deleting
+  `--model`/`--thinking` makes the ready handshake's log line report `unknown`; making `version_check` ignore
+  its argument makes its unit test pass both arms with one answer.

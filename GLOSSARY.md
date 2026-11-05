@@ -272,12 +272,14 @@ The `get_state` command a launch sends and the `response` record that repeats it
 a `starting` session `idle`. Not a delay: a process that never answers fails the **step** that asked.
 _Avoid_: Health check, warmup, ping
 
-**Launch line**:
-The one line a launch writes into `session.log` before the process starts: the image, the pi version, the
-session, the **agent directory**, the model and thinking level, and the project-trust decision. Built from
-an allow-list of fields, so it holds nothing that has to be redacted.
-_Avoid_: Startup log, banner
+**Launch generation**:
+The number that says which launch of a session's container is current. Every launch bumps it, the backend's
+registry holds it beside the **agent process**, and an exit whose generation is no longer the current one is
+not news: nothing is recorded, because a newer container has replaced the one that ended. Its machine name is
+`Launched::generation`, and what it answers is `ProcessEnd::NotCurrent`.
+_Avoid_: Incarnation, attempt, epoch, version
 
+**Launch line**:
 ### Events and history
 
 **Event**:
@@ -290,7 +292,8 @@ _Avoid_: Offset, id, index
 
 **Session log**:
 `<data>/sessions/<id>/session.log`: the append-only file that holds what a session's process printed on
-stderr, verbatim and with no timestamps, plus the server's own launch line (HS-031). It is the complete
+stderr — the kept tail of it, at most `agent::STDERR_TAIL`, drained from the pipe but not stored whole — with
+no timestamps, plus the server's own **launch line**. It is the complete
 record, where the row's `status_reason` keeps only the last few lines of a failure; spec item 15's "stderr
 only" is what keeps a **tool's** output out of it — that goes to a file of its own. Its machine names are
 `exit::LOG_FILE` and `exit::session_dir`. The badge a row shows is not this file: a multi-line reason is
