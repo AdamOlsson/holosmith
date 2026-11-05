@@ -29,6 +29,15 @@
 //! not a defence against something that can already write inside `<data>/sessions/<id>/tool/` — a symlink planted
 //! there and named `<tool_id>.txt` is followed by `std::fs::read`, and nothing in this build can create one: the
 //! container's mounts are the worktree and the agent's own directory, not the data root's session directory.
+//!
+//! **An image in a result is a second file under the same rule** (HS-035): `<tool_id>-<block index>.<ext>`,
+//! where the extension comes from pi's `mimeType` and a type this build cannot name is kept anyway under
+//! `.bin`. The bytes are base64 in the record and decoded here (`decode_base64`) rather than in the mapping,
+//! the bound is checked from the encoded length *before* anything is allocated, and the frame carries
+//! `images: [{index, mime, output_ref}]` rather than a byte of the picture — for the same reason a tool's output
+//! is a file: the log is replayed to a phone on every reconnect and folded by compaction (ADR-0032). The
+//! extension is the *store's* knowledge, so `GET …/tool-image/{tool_id}/{index}` never takes a type from the
+//! request.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -40,6 +49,34 @@ const TOOL: &str = "tool";
 
 /// The file extension every stored output has.
 const EXTENSION: &str = "txt";
+
+/// The most bytes one stored image holds.
+///
+/// The spec's five megabytes, for the reason [`CAP`] is a constant rather than a config key: it is a rule of
+/// the contract, not a property of a machine. A *decoded* byte count, because that is what a file's size is
+/// and what a browser has to fetch; the base64 a record carries is a third larger and is not the thing being
+/// bounded.
+pub const IMAGE_CAP: usize = 5 * 1024 * 1024;
+
+/// The image types this build can name, extension first and its content type second.
+///
+/// Four, because they are the four a browser draws and this build keeps no image library: naming a type it
+/// cannot recognise would be a guess about bytes it never looked at.
+const IMAGE_TYPES: [(&str, &str); 4] = [
+    ("png", "image/png"),
+    ("jpg", "image/jpeg"),
+    ("gif", "image/gif"),
+    ("webp", "image/webp"),
+];
+
+/// The extension an image of a type this build cannot name is stored under.
+const UNNAMED_EXTENSION: &str = "bin";
+
+/// What a file under [`UNNAMED_EXTENSION`] is served as.
+///
+/// `application/octet-stream` rather than a guessed image type: the bytes are kept, the *frame* carries the
+/// `mime` pi reported, and a machine that cannot name a type must not claim one.
+const UNNAMED_TYPE: &str = "application/octet-stream";
 
 /// The most output bytes a file holds.
 ///
@@ -93,6 +130,39 @@ pub struct Stored {
     pub reference: String,
 }
 
+/// One image block of a tool's result, before anything is stored (HS-035).
+///
+/// pi's block is `{"type": "image", "mimeType": "image/png", "data": "<base64>"}` inside
+/// `tool_execution_end.result.content`. The mapping answers one of these and the pump stores it, for the same
+/// reason [`crate::rpc::Mapped::Tool`] carries the whole output: the mapping does no I/O.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Image {
+    /// The block's index in `result.content`, which is what the reference names.
+    ///
+    /// The block's own position rather than a counter of images, so a frame's entry says where in the result
+    /// it came from and two ends of one call cannot disagree about which is which.
+    pub index: usize,
+    /// pi's `mimeType`: `image/png`, `image/jpeg`, `image/gif` or `image/webp` in practice.
+    pub mime: String,
+    /// pi's `data`: the image, base64.
+    pub data: String,
+}
+
+/// One stored image, as the frame spells it.
+///
+/// No `preview` and no `bytes`: an image is drawn from its reference, and a payload that carried even a
+/// thumbnail would be the log (replayed on every reconnect, folded by compaction) carrying image data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredImage {
+    /// The block's index, echoed from [`Image::index`].
+    pub index: usize,
+    /// pi's `mimeType`, which is the authority for a client: the file's extension says the same thing when
+    /// this build could name it, and nothing when it could not.
+    pub mime: String,
+    /// The path this endpoint serves it from, for `tool.end`'s `images[].output_ref`.
+    pub reference: String,
+}
+
 impl Store {
     /// The store over one machine's data root.
     pub fn new(root: impl Into<PathBuf>) -> Self {
@@ -112,6 +182,17 @@ impl Store {
                 .join(TOOL)
                 .join(format!("{tool_id}.{EXTENSION}")),
         )
+    }
+
+    /// The directory a tool's files are in, or `None` for a session or an id that cannot be a path segment.
+    ///
+    /// The one place a session's tool directory is spelled, so the text file, the images and the read side
+    /// cannot disagree about where a tool's files live.
+    fn directory(&self, session_id: &str, tool_id: &str) -> Option<PathBuf> {
+        if !valid_id(tool_id) || !is_path_segment(session_id) {
+            return None;
+        }
+        Some(session_dir(&self.root, session_id).join(TOOL))
     }
 
     /// Write one tool's output and answer what the frame should say about it.
@@ -148,6 +229,124 @@ impl Store {
         })
     }
 
+    /// Store one tool's images and answer what the frame should say about the ones that were written.
+    ///
+    /// Each image is decoded and written beside the text file, under a name built from the tool id and the
+    /// block's index. A refused image — an invalid base64 body, one over [`IMAGE_CAP`], an id that cannot be a
+    /// filename or a full disk — is a `warn` and no entry, so the frame's `images` names exactly the files that
+    /// exist and a dead reference cannot be produced.
+    ///
+    /// **A second result for one tool id replaces the first**, the rule [`Store::store`] keeps for the text,
+    /// and it includes the *type*: the stale names are removed before the new one is written, so a tool that
+    /// answered a PNG once and a GIF the next time cannot leave a reader looking at the older image under the
+    /// extension the read side tries first.
+    pub fn store_images(
+        &self,
+        session_id: &str,
+        tool_id: &str,
+        images: &[Image],
+    ) -> Vec<StoredImage> {
+        let Some(directory) = self.directory(session_id, tool_id) else {
+            tracing::warn!(
+                target: "holosmith::tool",
+                session = %session_id,
+                tool = %tool_id,
+                "a tool's images were not stored: its id is not a filename"
+            );
+            return Vec::new();
+        };
+        let mut stored = Vec::with_capacity(images.len());
+        for image in images {
+            // The bound is checked from the encoded length, before a byte is allocated for the decoded body:
+            // a record that claims a gigabyte of image must not be a gigabyte of memory first.
+            let Some(bytes) = decode_base64(&image.data) else {
+                tracing::warn!(
+                    target: "holosmith::tool",
+                    session = %session_id,
+                    tool = %tool_id,
+                    index = image.index,
+                    mime = %image.mime,
+                    "an image in a tool result was not stored: its data is not base64 under the cap"
+                );
+                continue;
+            };
+            let extension = extension_of(&image.mime);
+            let path = directory.join(format!("{}.{extension}", stem(tool_id, image.index)));
+            remove_siblings(&directory, tool_id, image.index);
+            if let Err(error) = write_bytes(&path, &bytes) {
+                tracing::warn!(
+                    target: "holosmith::tool",
+                    session = %session_id,
+                    tool = %tool_id,
+                    index = image.index,
+                    path = %path.display(),
+                    %error,
+                    "an image in a tool result could not be written"
+                );
+                continue;
+            }
+            stored.push(StoredImage {
+                index: image.index,
+                mime: image.mime.clone(),
+                reference: image_reference(session_id, tool_id, image.index),
+            });
+        }
+        stored
+    }
+
+    /// The file one stored image is in, with the content type its extension gives it.
+    ///
+    /// `None` for an id that cannot be a filename and for an image that is not there. The extension is not in
+    /// the request: it is the *store's* knowledge, so a client can name an image by the pair the frame gave it
+    /// and the type cannot be talked into something else by the request.
+    pub fn image(
+        &self,
+        session_id: &str,
+        tool_id: &str,
+        index: usize,
+    ) -> Option<(PathBuf, &'static str)> {
+        let directory = self.directory(session_id, tool_id)?;
+        for (extension, mime) in IMAGE_TYPES
+            .iter()
+            .copied()
+            .chain(std::iter::once((UNNAMED_EXTENSION, UNNAMED_TYPE)))
+        {
+            let path = directory.join(format!("{}.{extension}", stem(tool_id, index)));
+            if std::fs::metadata(&path).is_ok() {
+                return Some((path, mime));
+            }
+        }
+        None
+    }
+
+    /// Read one stored image back, with the content type to serve it as.
+    ///
+    /// `None` for an id that cannot be a filename and for a file that is not there — one answer for one
+    /// question, the caller's `404`.
+    pub fn read_image(
+        &self,
+        session_id: &str,
+        tool_id: &str,
+        index: usize,
+    ) -> Option<(Vec<u8>, &'static str)> {
+        let (path, mime) = self.image(session_id, tool_id, index)?;
+        match std::fs::read(&path) {
+            Ok(bytes) => Some((bytes, mime)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                tracing::error!(
+                    target: "holosmith::tool",
+                    session = %session_id,
+                    tool = %tool_id,
+                    path = %path.display(),
+                    %error,
+                    "a stored image could not be read"
+                );
+                None
+            }
+        }
+    }
+
     /// Read one tool's output back, for the route that serves it.
     ///
     /// `None` for an id that cannot be a filename and for a file that is not there, which is one answer for
@@ -172,6 +371,134 @@ impl Store {
             }
         }
     }
+}
+
+/// One stored image's filename stem: the tool's id and the block's index.
+///
+/// A `-` between them and never a `.`, because the extension is the only dot these files have — the read side
+/// tries [`IMAGE_TYPES`]' extensions in order, so a second dot would be a second thing to parse.
+fn stem(tool_id: &str, index: usize) -> String {
+    format!("{tool_id}-{index}")
+}
+
+/// The extension an image's content type is stored under.
+///
+/// A type this build cannot name is stored anyway, under [`UNNAMED_EXTENSION`]: a picture an operator's tool
+/// produced is worth keeping even when this build cannot say what it is, and the frame still carries pi's own
+/// `mime`.
+fn extension_of(mime: &str) -> &'static str {
+    IMAGE_TYPES
+        .iter()
+        .find(|(_, named)| *named == mime)
+        .map(|(extension, _)| *extension)
+        .unwrap_or(UNNAMED_EXTENSION)
+}
+
+/// The reference a frame names one stored image by.
+fn image_reference(session_id: &str, tool_id: &str, index: usize) -> String {
+    format!("/api/sessions/{session_id}/tool-image/{tool_id}/{index}")
+}
+
+/// Remove every name one image could have been stored under, so a second result replaces the first.
+///
+/// A tool id repeated with a different type is the case: without this, the earlier `.png` would still answer a
+/// request for the later `.bin`, and the read side would hand back an image the frame no longer names.
+fn remove_siblings(directory: &Path, tool_id: &str, index: usize) {
+    for (extension, _) in IMAGE_TYPES
+        .iter()
+        .copied()
+        .chain(std::iter::once((UNNAMED_EXTENSION, UNNAMED_TYPE)))
+    {
+        let path = directory.join(format!("{}.{extension}", stem(tool_id, index)));
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::debug!(
+                target: "holosmith::tool",
+                path = %path.display(),
+                %error,
+                "a superseded image could not be removed"
+            ),
+        }
+    }
+}
+
+/// Write bytes: the file, and the directory it lives in when it is not there yet.
+fn write_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, bytes)
+}
+
+/// The bytes of a base64 body, or `None` when it is not base64 or is larger than [`IMAGE_CAP`].
+///
+/// Written out rather than pulled in: the one input is pi's `data` field, the alphabet is the standard one, and
+/// a dependency for forty lines is a dependency this build would then have to keep current. **The cap is
+/// checked from the encoded length first**, before anything is allocated, because the input is
+/// agent-controlled text: a record claiming a gigabyte of image must not be a gigabyte of memory on the way to
+/// being refused. Padding is optional — pi writes it, and a producer that left it off still has a decodable
+/// body — but a `=` anywhere except the end is not base64.
+pub fn decode_base64(text: &str) -> Option<Vec<u8>> {
+    let raw = text.as_bytes();
+    let mut end = raw.len();
+    let mut padding = 0;
+    while end > 0 && raw[end - 1] == b'=' && padding < 2 {
+        end -= 1;
+        padding += 1;
+    }
+    if end == 0 && !raw.is_empty() {
+        return None;
+    }
+    if raw[..end].contains(&b'=') {
+        return None;
+    }
+    if padding > 0 && !raw.len().is_multiple_of(4) {
+        return None;
+    }
+    // A group of one is not a group: `A` alone decodes to nothing and is what a truncated body looks like.
+    if end % 4 == 1 {
+        return None;
+    }
+    if end / 4 * 3 > IMAGE_CAP {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(end / 4 * 3 + 2);
+    let mut group = [0u32; 4];
+    let mut held = 0usize;
+    for byte in &raw[..end] {
+        group[held] = sextet(*byte)?;
+        held += 1;
+        if held == 4 {
+            bytes.push(((group[0] << 2) | (group[1] >> 4)) as u8);
+            bytes.push(((group[1] << 4) | (group[2] >> 2)) as u8);
+            bytes.push(((group[2] << 6) | group[3]) as u8);
+            held = 0;
+        }
+    }
+    match held {
+        0 => {}
+        2 => bytes.push(((group[0] << 2) | (group[1] >> 4)) as u8),
+        3 => {
+            bytes.push(((group[0] << 2) | (group[1] >> 4)) as u8);
+            bytes.push(((group[1] << 4) | (group[2] >> 2)) as u8);
+        }
+        // `end % 4 == 1` was refused above; anything else is a bug in this function.
+        _ => return None,
+    }
+    Some(bytes)
+}
+
+/// One base64 character's six bits.
+fn sextet(byte: u8) -> Option<u32> {
+    Some(match byte {
+        b'A'..=b'Z' => byte - b'A',
+        b'a'..=b'z' => byte - b'a' + 26,
+        b'0'..=b'9' => byte - b'0' + 52,
+        b'+' => 62,
+        b'/' => 63,
+        _ => return None,
+    } as u32)
 }
 
 /// The first [`PREVIEW_MAX`] characters of `text`, with an ellipsis when that is not all of it.
@@ -374,5 +701,177 @@ mod tests {
         store.store(SESSION, TOOL, "first").expect("stored");
         store.store(SESSION, TOOL, "second").expect("stored");
         assert_eq!(store.read(SESSION, TOOL).expect("read"), b"second");
+    }
+
+    /// One image block of a result, with `bytes` base64-encoded the same way pi encodes it.
+    fn image(index: usize, mime: &str, bytes: &[u8]) -> Image {
+        Image {
+            index,
+            mime: mime.to_string(),
+            data: encode_base64(bytes),
+        }
+    }
+
+    /// The encoder the tests need and the build does not: a body has to be written the way pi writes it, and
+    /// the decoder is the half under test. Short enough that a vector could not hide a mistake.
+    fn encode_base64(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for group in bytes.chunks(3) {
+            let mut held = [0u32; 3];
+            for (slot, byte) in group.iter().enumerate() {
+                held[slot] = u32::from(*byte);
+            }
+            let packed = (held[0] << 16) | (held[1] << 8) | held[2];
+            for place in 0..4 {
+                if place <= group.len() {
+                    let sextet = (packed >> (18 - 6 * place)) & 0x3f;
+                    out.push(ALPHABET[sextet as usize] as char);
+                } else {
+                    out.push('=');
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn base64_is_decoded_and_anything_that_is_not_base64_is_refused() {
+        // The vectors every base64 has: the padding rules, the two uncovered trailing shapes, and `+`/`/`.
+        assert_eq!(decode_base64(""), Some(Vec::new()));
+        assert_eq!(decode_base64("aGVsbG8="), Some(b"hello".to_vec()));
+        assert_eq!(decode_base64("aGVsbG8h"), Some(b"hello!".to_vec()));
+        assert_eq!(decode_base64("/w=="), Some(vec![0xff]));
+        assert_eq!(decode_base64("AA=="), Some(vec![0x00]));
+        // Padding left off still decodes: a producer that omits it is not producing something else.
+        assert_eq!(decode_base64("aGVsbG8"), Some(b"hello".to_vec()));
+        assert_eq!(decode_base64("aGVsbA"), Some(b"hell".to_vec()));
+        for bad in [
+            "a",
+            "abcde",
+            "aGVsbG8-",
+            "aGVs bG8=",
+            "a=VsbG8=",
+            "=",
+            "==",
+            "aGVsbG8=a",
+            "aGVsbG8==",
+            "caf\u{e9}",
+        ] {
+            assert!(
+                decode_base64(bad).is_none(),
+                "{bad:?} decoded: {:?}",
+                decode_base64(bad)
+            );
+        }
+        // A hostile body is refused from its length, before a gigabyte is allocated for it.
+        let huge = "A".repeat(IMAGE_CAP / 3 * 4 + 8);
+        assert!(decode_base64(&huge).is_none());
+    }
+
+    #[test]
+    fn an_image_is_stored_beside_the_text_and_served_with_its_own_type() {
+        let scratch = Scratch::new("image");
+        let store = Store::new(&scratch.0);
+        let png = b"\x89PNG\r\n\x1a\nnot really, but the bytes are what matters";
+        let stored = store.store_images(SESSION, TOOL, &[image(1, "image/png", png)]);
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].index, 1);
+        assert_eq!(stored[0].mime, "image/png");
+        assert_eq!(
+            stored[0].reference,
+            format!("/api/sessions/{SESSION}/tool-image/{TOOL}/1")
+        );
+        // The name says what it is, and the bytes are the image rather than the base64 of it.
+        let path = scratch
+            .0
+            .join("sessions")
+            .join(SESSION)
+            .join("tool")
+            .join(format!("{TOOL}-1.png"));
+        assert_eq!(std::fs::read(&path).expect("the file"), png);
+        assert_eq!(
+            store.read_image(SESSION, TOOL, 1),
+            Some((png.to_vec(), "image/png"))
+        );
+        // The text file is a sibling and neither name can be mistaken for the other.
+        let text = store
+            .store(SESSION, TOOL, "Read image file [image/png]")
+            .expect("stored");
+        assert_eq!(text.preview, "Read image file [image/png]");
+        assert!(store.path(SESSION, TOOL).expect("a path").is_file());
+    }
+
+    #[test]
+    fn an_image_type_this_build_cannot_name_is_kept_as_bytes_and_the_frame_still_says_what_it_was()
+    {
+        let scratch = Scratch::new("image-unnamed");
+        let store = Store::new(&scratch.0);
+        let stored = store.store_images(SESSION, TOOL, &[image(0, "image/avif", b"avif bytes")]);
+        assert_eq!(stored.len(), 1, "a picture is worth keeping even unnamed");
+        assert_eq!(
+            stored[0].mime, "image/avif",
+            "the frame keeps pi's own word"
+        );
+        assert_eq!(
+            store.read_image(SESSION, TOOL, 0),
+            Some((b"avif bytes".to_vec(), "application/octet-stream")),
+            "the served type is what the file can honestly claim"
+        );
+    }
+
+    #[test]
+    fn an_image_that_is_not_base64_or_is_over_the_cap_is_not_stored_and_not_referenced() {
+        let scratch = Scratch::new("image-refused");
+        let store = Store::new(&scratch.0);
+        let broken = Image {
+            index: 0,
+            mime: "image/png".to_string(),
+            data: "not base64 at all!".to_string(),
+        };
+        assert!(
+            store.store_images(SESSION, TOOL, &[broken]).is_empty(),
+            "a refused image must not leave a reference behind"
+        );
+        assert!(store.read_image(SESSION, TOOL, 0).is_none());
+        // An id that cannot be a filename writes nothing, and neither does one image among good ones.
+        assert!(
+            store
+                .store_images(SESSION, "../app", &[image(0, "image/png", b"x")])
+                .is_empty()
+        );
+        let mixed = [
+            image(0, "image/png", b"good"),
+            Image {
+                index: 1,
+                mime: "image/png".to_string(),
+                data: "=".to_string(),
+            },
+        ];
+        let stored = store.store_images(SESSION, TOOL, &mixed);
+        assert_eq!(stored.len(), 1, "the good one is still stored: {stored:?}");
+        assert_eq!(stored[0].index, 0);
+    }
+
+    #[test]
+    fn a_second_result_replaces_the_first_images_type_as_well_as_its_bytes() {
+        let scratch = Scratch::new("image-again");
+        let store = Store::new(&scratch.0);
+        store.store_images(SESSION, TOOL, &[image(0, "image/png", b"first")]);
+        store.store_images(SESSION, TOOL, &[image(0, "image/gif", b"second")]);
+        assert_eq!(
+            store.read_image(SESSION, TOOL, 0),
+            Some((b"second".to_vec(), "image/gif")),
+            "the read side tries png first, so the stale png had to go"
+        );
+    }
+
+    #[test]
+    fn an_image_nobody_stored_is_no_bytes_at_all() {
+        let scratch = Scratch::new("image-missing");
+        let store = Store::new(&scratch.0);
+        assert!(store.read_image(SESSION, TOOL, 0).is_none());
+        assert!(store.image("../../etc", TOOL, 0).is_none());
+        assert!(store.image(SESSION, "../app", 0).is_none());
     }
 }

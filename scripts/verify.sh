@@ -313,6 +313,7 @@ serve_cases=(
   case_session_detail
   case_session_screen
   case_tool_output
+  case_tool_image
   case_prompt_turn
   case_turn_timeout
   case_prompt_bad_body
@@ -1422,6 +1423,74 @@ case_tool_output() {
   response="$(answer "$name")"
   expect_status "$name" "$response" 404
   expect_code "$name" "$response" not_found
+}
+
+# HS-035: an image in a tool result is a file beside the output, and the route serves its bytes with the
+# type the file has — not the text route's `text/plain` and not an envelope. The file is planted here for
+# the reason `case_tool_output`'s is: the stub's turn calls no tool, so `tests/rpc.rs` is where a real turn's
+# image is stored by the pump, and `tests/tool_output.rs` where the route's answers are asserted beside it.
+# What only the shipped artifact can add is that the route is in *this* binary's table, off *this* data root,
+# that the answer is the picture rather than a description of it, and that a name which cannot be a filename
+# is refused instead of joined.
+case_tool_image() {
+  local name=case_tool_image response tool index dir image
+  tool=call_00_9hlt8we6459oa420spsp3mju
+  index=1
+  dir="$WORK/data/sessions/$created_id/tool"
+  image="$dir/$tool-$index.png"
+  mkdir -p "$dir" || fail "$name/mkdir" "could not create $dir"
+  # A PNG's eight-byte signature and a few bytes after it: enough that a base64 body served verbatim, or the
+  # wrong content type, cannot pass.
+  printf '\211PNG\r\n\032\n\000\000\000\015IHDRpixels' >"$image" ||
+    fail "$name/write" "could not write $image"
+  # The canary exactly where a join without the id rule lands: the stored name is `<id>-<index>.png`, so the id
+  # `..%2Fleak` becomes `<data>/sessions/<id>/tool/../leak-1.png`.
+  printf 'not yours' >"$WORK/data/sessions/$created_id/leak-1.png" ||
+    fail "$name/canary" "could not write the traversal canary"
+
+  fetch "$name" GET "/api/sessions/$created_id/tool-image/$tool/$index" "Host: 127.0.0.1" ||
+    fail "$name/no_answer" "GET the tool-image route did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 200
+  expect_header "$name" "$response" content-type "image/png"
+  cmp -s "$WORK/responses/$name.body" "$image" ||
+    fail "$name/bytes" "the served answer is not the file's own bytes"
+  assertions=$((assertions + 1))
+
+  # An index nobody stored, on a session that exists: the same code as a missing row, and its own sentence.
+  name=case_tool_image_missing
+  fetch "$name" GET "/api/sessions/$created_id/tool-image/$tool/7" "Host: 127.0.0.1" ||
+    fail "$name/no_answer" "GET an unstored image did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 404
+  expect_code "$name" "$response" not_found
+  # An index that is not a number is not a name this store wrote, so it is the same answer rather than a
+  # second code an operator has to learn.
+  name=case_tool_image_bad_index
+  fetch "$name" GET "/api/sessions/$created_id/tool-image/$tool/one" "Host: 127.0.0.1" ||
+    fail "$name/no_answer" "GET a non-numeric index did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 404
+  expect_code "$name" "$response" not_found
+
+  name=case_tool_image_traversal
+  local id
+  for id in '..' '..%2Fleak' '%2e%2e%2fleak' 'a%2Fb' '%2e%2e' 'with%20space'; do
+    fetch "$name" GET "/api/sessions/$created_id/tool-image/$id/$index" "Host: 127.0.0.1" ||
+      fail "$name/no_answer" "GET a traversal ($id) did not answer"
+    response="$(answer "$name")"
+    expect_status "$name" "$response" 404
+    expect_header "$name" "$response" content-type "application/json"
+    expect_code "$name" "$response" not_found
+    case "$(cat "$WORK/responses/$name.body")" in
+      *"not yours"*)
+        fail "$name/leak" "a traversal reached a file outside the session's tool directory"
+        ;;
+      *)
+        assertions=$((assertions + 1))
+        ;;
+    esac
+  done
 }
 
 # HS-014: the session screen is a path, not a route. `/sessions/<id>` is not a file the app ships,

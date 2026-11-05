@@ -545,6 +545,20 @@ function applyChange(
     container.append(block);
     return;
   }
+  // Something the turn could not do (HS-035): an extension asked a question a session cannot answer, so it was
+  // cancelled and the transcript says which dialog and why. One block per frame like a steer — no id, nothing
+  // a later frame updates — and every node is `createElement` + `textContent`, because the reason is text the
+  // agent's own extension caused.
+  if (change.op === "error") {
+    const block = make("article", "turn-error");
+    block.dataset.method = change.method;
+    block.append(
+      make("div", "turn-error-label", "Cancelled"),
+      make("div", "turn-error-text", change.reason),
+    );
+    container.append(block);
+    return;
+  }
   if (change.op === "tool-start" || change.op === "tool-end") {
     const block = tools.get(change.toolId);
     if (block === undefined) {

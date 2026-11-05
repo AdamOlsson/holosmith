@@ -32,6 +32,7 @@ use crate::http::health::{self, Health};
 use crate::http::history;
 use crate::http::sessions;
 use crate::http::streams;
+use crate::http::tool_image;
 use crate::http::tool_output;
 use crate::ladder::Ladder;
 use crate::provisioner::Provisioner;
@@ -418,6 +419,7 @@ pub fn router(state: AppState) -> Routes {
     let stream_state = Arc::clone(&state);
     let history_state = Arc::clone(&state);
     let tool_output_state = Arc::clone(&state);
+    let tool_image_state = Arc::clone(&state);
     let prompt_state = Arc::clone(&state);
     let abort_state = Arc::clone(&state);
     let steer_state = Arc::clone(&state);
@@ -500,6 +502,18 @@ pub fn router(state: AppState) -> Routes {
                 let state = Arc::clone(&tool_output_state);
                 let (id, tool_id) = captured.map(|Path(pair)| pair).unwrap_or_default();
                 async move { tool_output::respond(&state, &id, &tool_id).await }
+            },
+        )
+        // One image a tool returned, as a file beside that output (HS-035). Read-only on the same terms as the
+        // route above, and the same three `Result`s: the index is a number the handler parses, so a segment that
+        // is not one is `not_found` rather than a second kind of error.
+        .get(
+            "/api/sessions/{id}/tool-image/{tool_id}/{index}",
+            move |captured: Result<Path<(String, String, String)>, PathRejection>| {
+                let state = Arc::clone(&tool_image_state);
+                let (id, tool_id, index) =
+                    captured.map(|Path(captured)| captured).unwrap_or_default();
+                async move { tool_image::respond(&state, &id, &tool_id, &index).await }
             },
         )
         // The prompt: a mutating route, so every guard applies and the manifest records it (HS-015).

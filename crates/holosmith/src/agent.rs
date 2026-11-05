@@ -86,6 +86,15 @@ pub const ENVIRONMENT: [(&str, &str); 4] = [
 /// forever.
 pub const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long one line that is not a command may take to reach the agent's stdin.
+///
+/// The RPC extension UI protocol is the only writer besides [`Agent::request`]: a dialog the client answers
+/// with an `extension_ui_response` (HS-035). It is a small write, so the bound is short, and it lives here
+/// rather than being a caller's argument because a bound somebody has to remember to pass is a bound somebody
+/// will forget — and the thing it protects against is a process that stopped reading its stdin, which would
+/// otherwise pin the agent's stdin mutex for the session's life.
+pub const RESPOND_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// How much of stderr is kept for the row's reason and `session.log`.
 ///
 /// A tail, not a cap on what is read: the pipe is drained to the end either way (a pipe nobody reads stalls
@@ -508,6 +517,29 @@ impl Agent {
     fn forget(&self, id: &str) {
         let mut waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
         waiting.remove(id);
+    }
+
+    /// Write one JSONL line to the agent's stdin, for the sub-protocol that is not a command (HS-035).
+    ///
+    /// An extension's dialog is answered this way: pi is **blocked** until the `extension_ui_response` with the
+    /// request's id arrives (`docs/rpc-extension-ui.md`), so the line is not a request that something answers —
+    /// it is the answer. There is no reply to correlate, so no waiter is registered, and the bound is
+    /// [`RESPOND_TIMEOUT`] because the payload is small and its only failure mode is a process that stopped
+    /// reading.
+    pub async fn respond(&self, line: Value) -> Result<(), AgentError> {
+        let mut bytes = serde_json::to_vec(&line).unwrap_or_default();
+        bytes.push(b'\n');
+        let written = tokio::time::timeout(RESPOND_TIMEOUT, async {
+            let mut stdin = self.stdin.lock().await;
+            stdin.write_all(&bytes).await?;
+            stdin.flush().await
+        })
+        .await;
+        match written {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(AgentError::Write(error)),
+            Err(_) => Err(AgentError::Timeout(RESPOND_TIMEOUT)),
+        }
     }
 
     /// The ready handshake: ask pi for its state and accept only a real answer.

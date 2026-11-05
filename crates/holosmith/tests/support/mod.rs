@@ -225,11 +225,17 @@ impl Served {
     }
 }
 
-/// An answer as a test reads it: the status, every header, and the body as text.
+/// An answer as a test reads it: the status, every header, and the body.
+///
+/// The body is kept **both** ways on purpose: `body` is the text most tests read (an envelope is JSON), and
+/// `bytes` is what actually arrived. An image is not text — the lossy conversion turns `\x89` into a
+/// replacement character — so a test of a binary answer must compare `bytes`, and comparing `body` there would
+/// pass over bytes the server mangled (HS-035's route is the first such answer).
 pub struct Response {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: String,
+    pub bytes: Vec<u8>,
 }
 
 impl Response {
@@ -279,7 +285,8 @@ pub fn parse(raw: &[u8]) -> Response {
         .position(|window| window == b"\r\n\r\n")
         .expect("a response has a header block");
     let head = String::from_utf8_lossy(&raw[..split]).to_string();
-    let body = String::from_utf8_lossy(&raw[split + 4..]).to_string();
+    let payload = raw[split + 4..].to_vec();
+    let body = String::from_utf8_lossy(&payload).to_string();
     let mut lines = head.split("\r\n");
     let status = lines
         .next()
@@ -294,6 +301,7 @@ pub fn parse(raw: &[u8]) -> Response {
         status,
         headers,
         body,
+        bytes: payload,
     }
 }
 

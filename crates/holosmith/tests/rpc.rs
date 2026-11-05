@@ -22,9 +22,9 @@ use serde_json::{Value, json};
 use holosmith::agent::{Agent, Received};
 use holosmith::db::{Database, OpenOptions};
 use holosmith::events::{
-    self, Event, MESSAGE_DELTA, MESSAGE_END, TOOL_END, TOOL_START, WriterOptions,
+    self, Event, MESSAGE_DELTA, MESSAGE_END, TOOL_END, TOOL_START, TURN_ERROR, WriterOptions,
 };
-use holosmith::rpc::{Mapped, Mapping, pump};
+use holosmith::rpc::{Mapped, Mapping, ToolEnd, pump};
 use holosmith::sessions::{NewSession, Session};
 use holosmith::tool::{Store, truncated_marker};
 
@@ -40,6 +40,14 @@ const THINKING: &str = include_str!("fixtures/pi-turn-thinking.jsonl");
 /// The turn that called a tool: pi's `toolcall_*` (the provider's streaming of the call) and
 /// `tool_execution_*` (the call's run and its result), which is what HS-033 maps and files.
 const TOOL: &str = include_str!("fixtures/pi-turn-tool.jsonl");
+
+/// The turn whose tool result carried an **image** (HS-035): `read` on a four-pixel PNG, whose
+/// `tool_execution_end.result.content` holds a text block and an `image` block with the picture in base64.
+const IMAGE: &str = include_str!("fixtures/pi-turn-image.jsonl");
+
+/// The turn a project-local extension asked a question in (HS-035): one `select` dialog, which pi blocks on
+/// until the client answers, and one `notify` afterwards whose text records what the dialog returned.
+const EXTENSION_UI: &str = include_str!("fixtures/pi-turn-extension-ui.jsonl");
 
 /// The instant every row this test writes carries, so a timestamp is asserted rather than raced.
 const NOW: i64 = 1_760_000_000;
@@ -319,6 +327,44 @@ fn a_fixture_whose_records_drifted_fails_this_guard() {
         "the tool fixture is a real turn's records, verbatim: a call's streamed arguments, its run, its result \
          and the answer that repeated what it printed"
     );
+    assert_eq!(
+        multiset(IMAGE),
+        expect(&[
+            ("response", 1),
+            ("agent_start", 1),
+            // Two assistant responses around the call, as in the tool fixture.
+            ("turn_start", 2),
+            ("message_start", 5),
+            ("message_end", 5),
+            ("message_update", 23),
+            ("tool_execution_start", 1),
+            ("tool_execution_end", 1),
+            ("turn_end", 2),
+            ("agent_end", 1),
+            ("agent_settled", 1),
+        ]),
+        "the image fixture is a real turn's records, verbatim: a call whose result held a text block and an \
+         image block, and the answer that described the picture"
+    );
+    assert_eq!(
+        multiset(EXTENSION_UI),
+        expect(&[
+            ("response", 1),
+            ("agent_start", 1),
+            // The two requests are the point of the fixture: one dialog (which blocks) and one notify (which
+            // does not), so a refresh that dropped either would leave one of the two arms unexercised.
+            ("extension_ui_request", 2),
+            ("turn_start", 1),
+            ("message_start", 3),
+            ("message_end", 3),
+            ("message_update", 3),
+            ("turn_end", 1),
+            ("agent_end", 1),
+            ("agent_settled", 1),
+        ]),
+        "the extension fixture is a real turn's records, verbatim: a project-local extension's `select` dialog \
+         before the turn, the `notify` that recorded the cancel, and the answer it did not wait for"
+    );
 }
 
 /// A real event log, its writer, and one session for the frames to hang off.
@@ -424,6 +470,34 @@ fn fake_agent(dir: &TempDir, fixture: &str) -> std::process::Command {
     command
 }
 
+/// A shell script that answers one prompt, prints `fixture` on stdout, and then records everything written to
+/// its stdin afterwards into `$2`.
+///
+/// The second half is what makes "the pump answered the dialog" an assertion rather than a hope: pi's dialog
+/// methods block until a response arrives, so the only proof that the cancel reached the agent is the bytes on
+/// its stdin — and a fake agent that wrote them nowhere would let a pump that answered nothing stay green.
+fn fake_agent_recording_stdin(
+    dir: &TempDir,
+    fixture: &str,
+) -> (std::process::Command, std::path::PathBuf) {
+    let script = dir.write(
+        "fake-pi-recording.sh",
+        "#!/bin/sh\n\
+         IFS= read -r line\n\
+         id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p')\n\
+         printf '{\"type\":\"response\",\"id\":\"%s\",\"command\":\"prompt\",\"success\":true,\
+         \"data\":{\"disposition\":\"started\"}}\\n' \"$id\"\n\
+         cat \"$1\"\n\
+         cat > \"$2\"\n",
+    );
+    let recording = dir.write("turn.jsonl", fixture);
+    let captured = dir.path().join("stdin.txt");
+    let _ = std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755));
+    let mut command = std::process::Command::new("/bin/sh");
+    command.arg(&script).arg(&recording).arg(&captured);
+    (command, captured)
+}
+
 #[test]
 fn the_recorded_tool_turn_becomes_a_start_a_delta_run_an_end_and_one_tool_pair() {
     // The third arm HS-033 adds, and the shape it must have: **one** `tool.start`/`tool.end` pair for one
@@ -521,9 +595,15 @@ async fn the_pump_files_a_tool_output_so_the_log_carries_only_a_preview() {
     assert!(reply.success);
 
     let mut mapping = Mapping::new(&log.session.id);
-    let ended = pump(&mut records, &mut mapping, &log.writer, &log.store())
-        .await
-        .expect("the fixture settles the turn");
+    let ended = pump(
+        &mut records,
+        &mut mapping,
+        &log.writer,
+        &log.store(),
+        &agent,
+    )
+    .await
+    .expect("the fixture settles the turn");
     assert_eq!(ended, holosmith::backend::TurnEnd::Settled);
 
     // Read the tool's frame back out of the committed log: `tool.end` must name the file, and its own
@@ -637,9 +717,15 @@ async fn a_tool_that_prints_megabytes_is_capped_with_a_marker_and_previewed() {
         )
         .await;
     let mut mapping = Mapping::new(&log.session.id);
-    pump(&mut records, &mut mapping, &log.writer, &log.store())
-        .await
-        .expect("the turn settles");
+    pump(
+        &mut records,
+        &mut mapping,
+        &log.writer,
+        &log.store(),
+        &agent,
+    )
+    .await
+    .expect("the turn settles");
 
     let store = log.store();
     let path = store.path(&log.session.id, "call_big").expect("a path");
@@ -688,9 +774,15 @@ async fn the_pump_writes_the_recorded_turn_into_the_log_in_order() {
     assert!(reply.success);
 
     let mut mapping = Mapping::new(&log.session.id);
-    let ended = pump(&mut records, &mut mapping, &log.writer, &log.store())
-        .await
-        .expect("the fixture settles the turn");
+    let ended = pump(
+        &mut records,
+        &mut mapping,
+        &log.writer,
+        &log.store(),
+        &agent,
+    )
+    .await
+    .expect("the fixture settles the turn");
     assert_eq!(ended, holosmith::backend::TurnEnd::Settled);
     // The pump's mapping declines the same documented records a direct replay does, minus the fixture's
     // `response` line — the record that answers the prompt, which the reader routes to its caller and never
@@ -740,9 +832,15 @@ async fn a_coalesced_turn_keeps_its_text_and_its_order() {
         .await
         .expect("the fake agent answers");
     let mut mapping = Mapping::new(&log.session.id);
-    pump(&mut records, &mut mapping, &log.writer, &log.store())
-        .await
-        .expect("the fixture settles the turn");
+    pump(
+        &mut records,
+        &mut mapping,
+        &log.writer,
+        &log.store(),
+        &agent,
+    )
+    .await
+    .expect("the fixture settles the turn");
 
     let events = log.committed(4);
     let deltas: Vec<Value> = events
@@ -802,7 +900,14 @@ async fn an_agent_that_dies_mid_turn_is_a_failed_turn_not_a_hang() {
         )
         .await;
     let mut mapping = Mapping::new(&log.session.id);
-    let ended = pump(&mut records, &mut mapping, &log.writer, &log.store()).await;
+    let ended = pump(
+        &mut records,
+        &mut mapping,
+        &log.writer,
+        &log.store(),
+        &agent,
+    )
+    .await;
     let error = ended.expect_err("an agent that never settles fails its turn");
     assert!(
         error.to_string().contains("settled"),
@@ -841,9 +946,15 @@ async fn a_turn_that_settles_aborted_answers_the_runner_with_aborted() {
         )
         .await;
     let mut mapping = Mapping::new(&log.session.id);
-    let ended = pump(&mut records, &mut mapping, &log.writer, &log.store())
-        .await
-        .expect("the settle answers");
+    let ended = pump(
+        &mut records,
+        &mut mapping,
+        &log.writer,
+        &log.store(),
+        &agent,
+    )
+    .await
+    .expect("the settle answers");
     assert_eq!(ended, holosmith::backend::TurnEnd::Aborted);
     // An aborted turn still ends: the boundary pair is `pump`'s, and the runner's `abort_completed` row is what
     // the transcript draws the turn's end from.
@@ -887,4 +998,298 @@ async fn the_records_end_with_the_process_and_answer_closed_from_then_on() {
     // And it keeps answering: the agent value is still alive in the registry, so a channel that only closed once
     // would leave the next call waiting on nothing.
     assert_eq!(records.recv().await, Received::Closed);
+}
+
+/// Every tool call `fixture` finishes, as the mapping hands them over — the whole record, which is what the
+/// pump stores. The frames a direct replay can build are `mapped`'s; the images are the part that only the
+/// store-less half sees, because a frame with no store names no file (HS-035).
+fn tool_ends(fixture: &str) -> Vec<ToolEnd> {
+    let mut mapping = Mapping::new("0123456789abcdef");
+    records(fixture)
+        .into_iter()
+        .filter_map(|record| match mapping.map(&record) {
+            Mapped::Tool(result) => Some(result),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_recorded_image_turn_names_the_picture_and_the_text_still_says_what_it_was() {
+    // V8's first case, from a real turn: `read` on a four-pixel PNG, whose result is a text block and an
+    // `image` block. The mapping must see the image (the pump is what stores it, below) and the text must keep
+    // a trace of it, so a transcript with no store still says something was there.
+    let ends = tool_ends(IMAGE);
+    assert_eq!(ends.len(), 1, "one call finished in this turn");
+    let end = &ends[0];
+    assert_eq!(end.name, "read");
+    assert_eq!(
+        end.images.len(),
+        1,
+        "the result carried one image block: {:?}",
+        end.images
+    );
+    let picture = &end.images[0];
+    assert_eq!(picture.mime, "image/png");
+    assert_eq!(
+        picture.index, 1,
+        "the block's own index in `result.content`: the text block is 0"
+    );
+    assert!(
+        picture.data.len() > 80,
+        "the base64 body is the picture, not a placeholder: {} characters",
+        picture.data.len()
+    );
+    assert_eq!(
+        end.output, "Read image file [image/png][image]",
+        "the text keeps the tool's own sentence and a bracket for the block it cannot print"
+    );
+
+    // And the replay's frame, which has no store to name a file with: no `images` key rather than a reference to
+    // nothing. The pump's version of this frame is asserted below.
+    let (frames, settled, skipped, unknown) = mapped(IMAGE);
+    assert_eq!(settled, vec![false]);
+    assert_eq!(unknown, 0, "every record in this turn is one pi documents");
+    let end = of_kind(&frames, TOOL_END)[0];
+    assert_eq!(end.payload["name"], "read");
+    assert!(
+        end.payload.get("images").is_none(),
+        "a frame built without a store must not claim a file: {}",
+        end.payload
+    );
+    assert!(
+        skipped > 0,
+        "the turn declined some of pi's bookkeeping, and that is the design"
+    );
+}
+
+#[test]
+fn the_recorded_extension_turn_cancels_the_dialog_and_says_which_one_asked() {
+    // V8's third case, from a real turn: a project-local extension calls `ctx.ui.select`, which in RPC mode
+    // emits an `extension_ui_request` and **blocks the run** until the client answers. The mapping's answer is a
+    // cancel, and the frame it leaves is what makes an extension's odd behaviour explicable.
+    let (frames, settled, skipped, unknown) = mapped(EXTENSION_UI);
+    assert_eq!(settled, vec![false], "the turn settled: nothing hangs");
+    assert_eq!(unknown, 0, "both requests are ones pi documents");
+    let errors = of_kind(&frames, TURN_ERROR);
+    assert_eq!(
+        errors.len(),
+        1,
+        "one dialog, one frame — the notify asks for nothing and answers nothing"
+    );
+    let frame = errors[0];
+    assert_eq!(frame.payload["method"], "select");
+    let reason = frame.payload["reason"].as_str().expect("a reason");
+    assert!(
+        reason.contains("select") && reason.contains("cancelled"),
+        "the sentence names the method and what was done: {reason}"
+    );
+    assert_eq!(
+        frame.payload.as_object().expect("an object").len(),
+        2,
+        "two keys, and no message id: it is not a transcript block of a message"
+    );
+    // Declined: the fixture's `response`, `agent_start`, the notify, pi's own two boundaries, `agent_end`, and
+    // the two ends of the assistant's text block. Nothing of an unknown type — which is the difference between
+    // "documented with no frame" and "a release grew something this build has never seen".
+    assert_eq!(
+        skipped, 8,
+        "the documented records with no frame, counted once each"
+    );
+
+    // The fixture also carries the proof that the cancel *reached* the extension: pi's `notify`, emitted after
+    // the dialog returned, says what the dialog answered. A build that answered nothing would not have this
+    // line at all — it would be sitting in `select`.
+    let notify = records(EXTENSION_UI)
+        .into_iter()
+        .find(|record| record.get("method").and_then(Value::as_str) == Some("notify"))
+        .expect("the fixture's notify");
+    let message = notify["message"].as_str().expect("a message");
+    assert!(
+        message.contains("cancelled"),
+        "the extension's own words about what it got: {message}"
+    );
+}
+
+#[tokio::test]
+async fn the_pump_stores_the_images_of_a_tool_result_and_names_them_in_the_frame() {
+    // The served half of V8's first case: the pump writes the picture beside the tool's text and the frame names
+    // it, so a phone draws an image instead of a paragraph about one.
+    let dir = TempDir::new("rpc-image");
+    let log = Log::new(dir);
+    let command = fake_agent(&log.dir, IMAGE);
+    let (agent, _exit) = Agent::launch(command, &log.session.id).expect("the fake agent starts");
+    let mut records = agent.records();
+    let _ = agent
+        .request(
+            "prompt-1",
+            json!({"id": "prompt-1", "type": "prompt", "message": "hello"}),
+            Duration::from_secs(5),
+        )
+        .await;
+    let mut mapping = Mapping::new(&log.session.id);
+    let ended = pump(
+        &mut records,
+        &mut mapping,
+        &log.writer,
+        &log.store(),
+        &agent,
+    )
+    .await
+    .expect("the fixture settles the turn");
+    assert_eq!(ended, holosmith::backend::TurnEnd::Settled);
+
+    // The writer commits every 25 ms, so "the pump returned" is not "the rows are there": wait for the frame
+    // this test is about, then read the log.
+    let deadline = Instant::now() + PATIENCE;
+    let events = loop {
+        let events = log
+            .database
+            .lock()
+            .expect("the lock")
+            .events()
+            .read_since(&log.session.id, 0, 10_000)
+            .expect("the log reads");
+        if events.iter().any(|event| event.kind == "turn.end") {
+            break events;
+        }
+        assert!(Instant::now() < deadline, "the turn never ended");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let payload_of = |kind: &str| -> Value {
+        let event = events
+            .iter()
+            .find(|event| event.kind == kind)
+            .unwrap_or_else(|| panic!("no {kind} in the log: {events:?}"));
+        serde_json::from_str(&event.payload).expect("a payload is JSON")
+    };
+    let tool_end = payload_of(TOOL_END);
+    let images = tool_end["images"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the frame names its images: {tool_end}"));
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0]["index"], 1);
+    assert_eq!(images[0]["mime"], "image/png");
+    let reference = images[0]["output_ref"].as_str().expect("a reference");
+    assert_eq!(
+        reference,
+        format!(
+            "/api/sessions/{}/tool-image/{}/1",
+            log.session.id, "call_a86a8cbeb3f9441ba986c633"
+        ),
+        "the reference is the route plus the pair the frame gave"
+    );
+    // No byte of the picture is in the payload: that is the whole reason it is a file.
+    let payload = serde_json::to_string(&tool_end).expect("serialised");
+    assert!(
+        !payload.contains("iVBORw0KGgo"),
+        "a PNG's base64 header reached the log: {payload}"
+    );
+
+    // The file is the picture, and the store serves it as one: the four-pixel PNG of the turn's own scratch
+    // directory, byte for byte.
+    let store = log.store();
+    let (bytes, mime) = store
+        .read_image(&log.session.id, "call_a86a8cbeb3f9441ba986c633", 1)
+        .expect("the image is on disk");
+    assert_eq!(mime, "image/png");
+    assert_eq!(
+        &bytes[..8],
+        b"\x89PNG\r\n\x1a\n",
+        "the file is the picture, not the base64 of it"
+    );
+    // The picture is the one the fixture's prompt told pi to read: a 4x4 PNG with a red left half and a blue
+    // right half, 76 bytes, so "the file is the image" is a claim with a number and a header behind it.
+    assert_eq!(bytes.len(), 76, "the stored picture is the one pi read");
+}
+
+#[tokio::test]
+async fn the_pump_answers_a_dialog_with_a_cancel_and_records_that_it_did() {
+    // V8's third case at the served path. The mapping decides (`Mapped::Cancel`), and the **pump** writes the
+    // answer, because pi blocks on it: a frame without the write would be a log claiming a cancel that never
+    // reached the extension, and the turn would hang.
+    let dir = TempDir::new("rpc-dialog");
+    let log = Log::new(dir);
+    let (command, captured) = fake_agent_recording_stdin(&log.dir, EXTENSION_UI);
+    let (agent, _exit) = Agent::launch(command, &log.session.id).expect("the fake agent starts");
+    // Named `stream`, not `records`: `records` is this file's fixture parser, and the two would shadow.
+    let mut stream = agent.records();
+    let _ = agent
+        .request(
+            "prompt-1",
+            json!({"id": "prompt-1", "type": "prompt", "message": "hello"}),
+            Duration::from_secs(5),
+        )
+        .await;
+    let mut mapping = Mapping::new(&log.session.id);
+    let ended = pump(&mut stream, &mut mapping, &log.writer, &log.store(), &agent)
+        .await
+        .expect("the dialog is answered and the turn settles");
+    assert_eq!(
+        ended,
+        holosmith::backend::TurnEnd::Settled,
+        "a session that ignored the dialog would still be waiting on it"
+    );
+
+    // What the agent was handed. The fake agent records only what arrives *after* the prompt, so this file is
+    // the answers and nothing else — and the notify in the fixture is what a second line would be.
+    let deadline = Instant::now() + PATIENCE;
+    let written = loop {
+        let text = std::fs::read_to_string(&captured).unwrap_or_default();
+        if text.contains('\n') {
+            break text;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the pump wrote nothing to the agent's stdin: {text:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let lines: Vec<&str> = written.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "one dialog is one answer, and a fire-and-forget request is answered with nothing: {written}"
+    );
+    let answer: Value = serde_json::from_str(lines[0]).expect("a JSONL line");
+    let asked = records(EXTENSION_UI)
+        .into_iter()
+        .find(|record| record.get("method").and_then(Value::as_str) == Some("select"))
+        .expect("the fixture's dialog");
+    assert_eq!(
+        answer,
+        json!({"type": "extension_ui_response", "id": asked["id"], "cancelled": true}),
+        "the response repeats the request's own id, which is what pi matches it by"
+    );
+
+    // And the frame that says it happened, once, in the turn's own log.
+    let deadline = Instant::now() + PATIENCE;
+    let events = loop {
+        let events = log
+            .database
+            .lock()
+            .expect("the lock")
+            .events()
+            .read_since(&log.session.id, 0, 10_000)
+            .expect("the log reads");
+        if events.iter().any(|event| event.kind == "turn.end") {
+            break events;
+        }
+        assert!(Instant::now() < deadline, "the turn never ended");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let errors: Vec<Value> = events
+        .iter()
+        .filter(|event| event.kind == TURN_ERROR)
+        .map(|event| serde_json::from_str(&event.payload).expect("a payload is JSON"))
+        .collect();
+    assert_eq!(errors.len(), 1, "{events:?}");
+    assert_eq!(errors[0]["method"], "select");
+    assert!(
+        errors[0]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("cancelled")),
+        "{}",
+        errors[0]
+    );
 }

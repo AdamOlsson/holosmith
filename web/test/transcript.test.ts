@@ -462,6 +462,62 @@ test("a steer with no text is dropped, and a non-string text with it", () => {
   assert.equal(parseFrame("turn.steer", "[]"), null);
 });
 
+test("a cancelled extension dialog is one block per frame, drawn once, and it is not a message", () => {
+  // HS-035's frame: `turn.error` with the reason and the method an extension asked for. It has no message id
+  // for a steer's reason — one frame, one block, nothing a later frame would update — so the model keeps no
+  // bookkeeping for it and the block lands where in the turn it happened.
+  const frame = parseFrame(
+    "turn.error",
+    JSON.stringify({
+      reason: "an extension asked for select, and a session cannot answer a dialog, so it was cancelled",
+      method: "select",
+    }),
+  );
+  assert.deepEqual(frame, {
+    type: "error",
+    reason: "an extension asked for select, and a session cannot answer a dialog, so it was cancelled",
+    method: "select",
+  });
+
+  const transcript = new Transcript();
+  assert.deepEqual(transcript.apply(frame as Frame), [
+    {
+      op: "error",
+      reason: "an extension asked for select, and a session cannot answer a dialog, so it was cancelled",
+      method: "select",
+    },
+  ]);
+  // It creates no message block and no tool block: a frame about what the turn could not do is not part of
+  // either, and a turn that read one has no message to fold it into.
+  assert.deepEqual(transcript.order(), []);
+  assert.deepEqual(transcript.toolOrder(), []);
+  // Two dialogs in one turn are two blocks, and the second does not overwrite the first.
+  const second = { type: "error", reason: "an extension asked for confirm, and a session cannot answer a dialog, so it was cancelled", method: "confirm" } as const;
+  assert.deepEqual(transcript.apply(second), [
+    { op: "error", reason: second.reason, method: "confirm" },
+  ]);
+});
+
+test("a turn error with no reason is dropped, and one that is not an object with it", () => {
+  // The reason is the whole point of the frame: a block with a method and no sentence would be a heading with
+  // nothing under it. A missing method is the empty string instead — the sentence carries the meaning.
+  for (const payload of [
+    JSON.stringify({}),
+    JSON.stringify({ reason: "" }),
+    JSON.stringify({ reason: 7 }),
+    JSON.stringify({ reason: null, method: "select" }),
+  ]) {
+    assert.equal(parseFrame("turn.error", payload), null, payload);
+  }
+  assert.equal(parseFrame("turn.error", "not json"), null);
+  assert.equal(parseFrame("turn.error", "[]"), null);
+  assert.deepEqual(parseFrame("turn.error", JSON.stringify({ reason: "why" })), {
+    type: "error",
+    reason: "why",
+    method: "",
+  });
+});
+
 test("10k deltas are 10k appends into one block, never a re-render", () => {
   const transcript = new Transcript();
   const piece = "0123456789";

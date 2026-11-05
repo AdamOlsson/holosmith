@@ -9,6 +9,7 @@ pub mod health;
 mod history;
 mod sessions;
 mod streams;
+mod tool_image;
 mod tool_output;
 
 pub use app::{

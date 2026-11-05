@@ -37,6 +37,16 @@
 //! - **The turn ends on `agent_settled`, not on `agent_end`.** `agent_end` closes one low-level agent run and
 //!   pi can still retry, recover from an overflow, or deliver a queued message after it; `agent_settled` is
 //!   pi saying it has no work left (`docs/json.md`).
+//!
+//! **Two records take more than a frame** (HS-035). A tool result can carry an *image*, which is stored beside
+//! the tool's text and named by `tool.end`'s `images` instead of being carried in a payload; and an extension
+//! can ask the client a *question*, which in RPC mode **blocks the run** until an `extension_ui_response`
+//! arrives. Neither can be a frame alone: the first is I/O, and the second is a write to pi's stdin. So both
+//! answer a variant of [`Mapped`] that [`pump`] finishes — [`Mapped::Tool`] for the output and the images,
+//! [`Mapped::Cancel`] for the dialog — and the mapping itself stays a pure function of one record (ADR-0043).
+//! A dialog nothing answers is a hung session, which is what V8's third case is about; the answer here is
+//! always *cancel*, because nothing in this build can type into a form on a phone, and the cancel is recorded
+//! as a `turn.error` frame so the operator sees why the extension behaved as it did.
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -45,11 +55,12 @@ use std::time::UNIX_EPOCH;
 
 use serde_json::{Value, json};
 
-use crate::agent::{AgentRecords, Received};
+use crate::agent::{Agent, AgentRecords, Received};
 use crate::backend::{BackendError, TurnEnd};
 use crate::clock;
 use crate::events::{
-    EventWriter, MESSAGE_DELTA, MESSAGE_END, NewEvent, TOOL_END, TOOL_START, TURN_END, TURN_START,
+    EventWriter, MESSAGE_DELTA, MESSAGE_END, NewEvent, TOOL_END, TOOL_START, TURN_END, TURN_ERROR,
+    TURN_START,
 };
 use crate::tool::{self, Store};
 
@@ -104,6 +115,11 @@ pub enum Mapped {
     /// root — so it answers the whole record and [`pump`] stores it, then asks [`ToolEnd::frame`] for the
     /// payload once it knows whether the write worked.
     Tool(ToolEnd),
+    /// A dialog an extension asked the client for, which must be answered or the run blocks (HS-035).
+    ///
+    /// Like a tool's output, the mapping cannot write it: the answer is a line on pi's stdin, and the mapping
+    /// has no stdin. [`pump`] writes [`Cancel::response`] and then appends [`Cancel::frame`].
+    Cancel(Cancel),
 }
 
 /// One finished tool call: what the log's frame says, plus the output the file keeps.
@@ -119,6 +135,11 @@ pub struct ToolEnd {
     pub name: String,
     /// Everything the tool printed: the text of its result's content blocks.
     pub output: String,
+    /// The images its result carried, in the order pi listed them (HS-035).
+    ///
+    /// Stored beside the output by the pump, because the mapping does no I/O, and named by
+    /// [`ToolEnd::frame`] as `images` once they are on disk.
+    pub images: Vec<tool::Image>,
     /// `"ok"` or `"error"` — pi's `isError`.
     ///
     /// pi reports no exit code: a `bash` tool's status lives inside `result.details`, which the stored file
@@ -129,17 +150,63 @@ pub struct ToolEnd {
     pub duration_ms: Option<u64>,
 }
 
+/// One dialog an extension asked for, and this build's answer: cancelled (HS-035).
+///
+/// pi's dialog methods (`select`, `confirm`, `input`, `editor`) emit an `extension_ui_request` and **block**
+/// until an `extension_ui_response` with the request's id arrives; their fire-and-forget siblings (`notify`,
+/// `setStatus`, `setWidget`, `setTitle`, `set_editor_text`) never wait for anything and stay declined. A
+/// session has no way to answer a form — the operator is on a phone, and the run is unattended — so the answer
+/// is always `cancelled: true`, which the extension receives as `undefined` (or `false` for a `confirm`), and
+/// the frame says so rather than leaving an extension's odd behaviour unexplained.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cancel {
+    /// The request's own `id`, which the response must repeat.
+    pub id: String,
+    /// pi's `method`, which the frame names so the operator can see what was asked.
+    pub method: String,
+}
+
+impl Cancel {
+    /// The line pi is waiting for: the response that dismisses the dialog.
+    pub fn response(&self) -> Value {
+        json!({"type": "extension_ui_response", "id": self.id, "cancelled": true})
+    }
+
+    /// The one frame the cancel leaves: `turn.error`, with the reason and the method that asked.
+    pub fn frame(&self) -> Mapped {
+        frame(
+            TURN_ERROR,
+            json!({"reason": cancelled_reason(&self.method), "method": self.method}),
+        )
+    }
+}
+
+/// What a `turn.error` says about a dialog nothing could answer.
+///
+/// One sentence, built here and nowhere else, so the frame a test asserts and the frame a phone draws cannot
+/// drift: it names the method, says the thing that could not happen, and says what was done instead.
+fn cancelled_reason(method: &str) -> String {
+    format!(
+        "an extension asked for {method}, and a session cannot answer a dialog, so it was cancelled"
+    )
+}
+
 impl Mapped {
     /// This as one frame, when it is one: a tool's result answers its payload with the **preview** and no
     /// `output_ref` because nothing was stored.
     ///
     /// The served path does not use this — [`pump`] stores first and then builds the frame — it is for a
     /// replay with no data root (a committed fixture, a unit test), where "what frame would this be" is the
-    /// whole question.
+    /// whole question. A cancelled dialog answers **its** frame here, because that frame needs nothing stored:
+    /// it is the record of a write, not of a file.
     pub fn into_frame(self) -> Option<(&'static str, String)> {
         match self {
             Mapped::Frame { kind, payload } => Some((kind, payload)),
-            Mapped::Tool(result) => match result.frame(None) {
+            Mapped::Tool(result) => match result.frame(None, &[]) {
+                Mapped::Frame { kind, payload } => Some((kind, payload)),
+                _ => None,
+            },
+            Mapped::Cancel(cancel) => match cancel.frame() {
                 Mapped::Frame { kind, payload } => Some((kind, payload)),
                 _ => None,
             },
@@ -149,12 +216,14 @@ impl Mapped {
 }
 
 impl ToolEnd {
-    /// The `tool.end` frame, given what the store made of the output (`None` when it could not be written).
+    /// The `tool.end` frame, given what the store made of the output and the images (`None`/empty when
+    /// nothing could be written).
     ///
-    /// The one place the payload's shape is spelled: the store supplies the preview and the reference, and a
+    /// The one place the payload's shape is spelled: the store supplies the preview and the references, and a
     /// failed write still answers a frame — with a preview and no `output_ref` — because the transcript must
-    /// show that something ran.
-    pub fn frame(&self, stored: Option<&tool::Stored>) -> Mapped {
+    /// show that something ran. `images` is present **only when an image was stored**, so a call whose result
+    /// held none answers exactly the payload ADR-0041 pinned, and a row written before this key still draws.
+    pub fn frame(&self, stored: Option<&tool::Stored>, images: &[tool::StoredImage]) -> Mapped {
         let mut payload = serde_json::Map::new();
         payload.insert("tool_id".to_string(), Value::String(self.tool_id.clone()));
         payload.insert("name".to_string(), Value::String(self.name.clone()));
@@ -171,6 +240,23 @@ impl ToolEnd {
             payload.insert(
                 "output_ref".to_string(),
                 Value::String(stored.reference.clone()),
+            );
+        }
+        if !images.is_empty() {
+            payload.insert(
+                "images".to_string(),
+                Value::Array(
+                    images
+                        .iter()
+                        .map(|image| {
+                            json!({
+                                "index": image.index,
+                                "mime": image.mime,
+                                "output_ref": image.reference,
+                            })
+                        })
+                        .collect(),
+                ),
             );
         }
         frame(TOOL_END, Value::Object(payload))
@@ -256,8 +342,13 @@ impl Mapping {
             // A `response` is the reader's to route to the command that asked (HS-031); the mapping meets one only
             // when a fixture is replayed verbatim, and it is a documented record either way.
             Some("response") => self.note_declined(),
+            // An extension asking the client for something (HS-035). The dialog methods block the run until they
+            // are answered and the fire-and-forget ones never wait, so which method it is decides what happens
+            // — see `ui_request`.
+            Some("extension_ui_request") => self.ui_request(record),
             // Bookkeeping pi documents and this contract has no frame for: the queue and level updates, the
-            // compaction and retry records, `extension_ui_request` (HS-035's to answer) and `extension_error`.
+            // compaction and retry records, and an extension that failed to load (`extension_error`, which is
+            // about an extension rather than about the turn).
             Some(
                 "queue_update"
                 | "session_info_changed"
@@ -271,7 +362,6 @@ impl Mapping {
                 | "summarization_retry_attempt_start"
                 | "summarization_retry_finished"
                 | "bash_execution_update"
-                | "extension_ui_request"
                 | "extension_error",
             ) => self.note_declined(),
             // A record type this build has never heard of: a later pi release's, and the one case worth a line.
@@ -410,13 +500,49 @@ impl Mapping {
             // `error` for that would report a failure nobody observed.
             Some(false) | None => "ok",
         };
+        let result = record.get("result");
         Mapped::Tool(ToolEnd {
             tool_id: tool_id.to_string(),
             name,
-            output: result_text(record.get("result")),
+            output: result_text(result),
+            images: result_images(result),
             status,
             duration_ms: record.get("durationMs").and_then(Value::as_u64),
         })
+    }
+
+    /// One `extension_ui_request`: a dialog to cancel, or a record with no frame at all (HS-035).
+    ///
+    /// The two categories are pi's own (`docs/rpc-extension-ui.md`), and they are the whole decision: a dialog
+    /// method **blocks the run** until it is answered, so it is cancelled; a fire-and-forget method never waits
+    /// for anything, so answering one would be an invented exchange. A method this build has never seen is
+    /// *unknown* — the `warn` — because a later pi that grew a blocking method is exactly the thing that must
+    /// not hang a session in silence. A dialog with no id cannot be answered at all, so it is unknown too.
+    fn ui_request(&mut self, record: &Value) -> Mapped {
+        let Some(method) = record.get("method").and_then(Value::as_str) else {
+            return self.note_unknown();
+        };
+        match method {
+            "select" | "confirm" | "input" | "editor" => {
+                let id = record
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty());
+                let Some(id) = id else {
+                    // The response has to repeat the id, so a request without one is a dialog nothing can
+                    // dismiss: worth the `warn`, because the run may well be waiting on it.
+                    return self.note_unknown();
+                };
+                Mapped::Cancel(Cancel {
+                    id: id.to_string(),
+                    method: method.to_string(),
+                })
+            }
+            "notify" | "setStatus" | "setWidget" | "setTitle" | "set_editor_text" => {
+                self.note_declined()
+            }
+            _ => self.note_unknown(),
+        }
     }
 
     /// The id of the message being streamed, minting and keeping one when no start opened it.
@@ -479,12 +605,20 @@ impl Mapping {
 /// **A tool's output is written here too** (HS-033): the mapping answers [`Mapped::Tool`] with everything the
 /// tool printed, and this stores it through [`crate::tool::Store`] before the frame is built. That is the one
 /// piece of I/O in a turn's mapping path, and it is here rather than in the mapping because a mapping that
-/// wrote files could not be replayed from a fixture.
+/// wrote files could not be replayed from a fixture. Its images are stored the same way (HS-035), and the
+/// frame names them rather than carrying them.
+///
+/// **A dialog is answered here** (HS-035): `agent` is the process whose stdin the `extension_ui_response` goes
+/// to, and the write happens **before** the `turn.error` frame is appended, because pi is blocked until the
+/// answer arrives — a frame first would be a log that says the cancel happened while the run is still
+/// waiting for it. A failed write is a `warn` and the turn carries on: the dialog's own `timeout`, when the
+/// extension gave one, is what releases the run then, and the frame still records that something asked.
 pub async fn pump(
     records: &mut AgentRecords,
     mapping: &mut Mapping,
     events: &EventWriter,
     store: &Store,
+    agent: &Agent,
 ) -> Result<TurnEnd, BackendError> {
     append(events, mapping, TURN_START, "{}").await;
     loop {
@@ -502,15 +636,36 @@ pub async fn pump(
                             TurnEnd::Settled
                         });
                     }
-                    // The whole output goes to its file; the frame carries a preview and the reference. A
-                    // store that refused (an id that cannot be a filename, a full disk) still leaves a frame:
-                    // the tool ran, and the transcript says so.
+                    // The whole output goes to its file, its images to theirs; the frame carries a preview and
+                    // the references. A store that refused (an id that cannot be a filename, a full disk) still
+                    // leaves a frame: the tool ran, and the transcript says so.
                     Mapped::Tool(result) => {
                         let stored =
                             store.store(&mapping.session_id, &result.tool_id, &result.output);
-                        match result.frame(stored.as_ref()) {
+                        let images = if result.images.is_empty() {
+                            Vec::new()
+                        } else {
+                            store.store_images(&mapping.session_id, &result.tool_id, &result.images)
+                        };
+                        match result.frame(stored.as_ref(), &images) {
                             Mapped::Frame { kind, payload } => (kind, payload),
                             // `ToolEnd::frame` always answers a frame; nothing else is a frame.
+                            _ => continue,
+                        }
+                    }
+                    // The answer first — pi is blocked on it — and then the frame that says it happened.
+                    Mapped::Cancel(cancel) => {
+                        if let Err(error) = agent.respond(cancel.response()).await {
+                            tracing::warn!(
+                                target: "holosmith::rpc",
+                                session = %mapping.session_id,
+                                method = %cancel.method,
+                                %error,
+                                "an extension's dialog could not be cancelled"
+                            );
+                        }
+                        match cancel.frame() {
+                            Mapped::Frame { kind, payload } => (kind, payload),
                             _ => continue,
                         }
                     }
@@ -588,8 +743,10 @@ fn frame(kind: &'static str, payload: Value) -> Mapped {
 ///
 /// A result is `{"content": [...], "details": {...}}` (`docs/json.md`). The content blocks are what the tool
 /// printed; a block that is not text is named in brackets rather than dropped, so a result carrying an image
-/// leaves a trace in the transcript's text until HS-035 stores and renders it (ADR-0041). `details` and pi's
-/// own `structuredContent` are **not** kept — a `bash` tool's exit code lives there, and ADR-0041 says so, so
+/// leaves a trace in the transcript's text (`[image]`) beside the stored picture HS-035 names in `images`. The
+/// brackets are the *type*, which is why an image reads as `[image]` whether one was stored or not: the text
+/// is a description of the blocks, and the frames are where the detail lives. `details` and pi's own
+/// `structuredContent` are **not** kept — a `bash` tool's exit code lives there, and ADR-0041 says so, so
 /// that `tool.end`'s `status` is read as the tool's verdict rather than as a status code that was thrown away
 /// by accident. A result that is absent or `null` is the empty string: a tool that printed nothing, not the
 /// text `null`.
@@ -619,6 +776,40 @@ fn result_text(result: Option<&Value>) -> String {
 /// A record's `message.role`, when it names one.
 fn role(record: &Value) -> Option<&str> {
     record.get("message")?.get("role")?.as_str()
+}
+
+/// The image blocks of a tool's result, in order, as the store will take them (HS-035).
+///
+/// pi's block is `{"type": "image", "mimeType": "image/png", "data": "<base64>"}`. The block's **index in
+/// `result.content`** is what the reference names, so two images of one result cannot be confused and a frame's
+/// entry says where in the result it came from. A block that is an image but carries no `data`, or no
+/// `mimeType`, is skipped: there is nothing to store, and the text already says `[image]`.
+fn result_images(result: Option<&Value>) -> Vec<tool::Image> {
+    let Some(blocks) = result
+        .and_then(|result| result.get("content"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, block)| {
+            if block.get("type").and_then(Value::as_str) != Some("image") {
+                return None;
+            }
+            let mime = block.get("mimeType").and_then(Value::as_str)?;
+            let data = block.get("data").and_then(Value::as_str)?;
+            if mime.is_empty() || data.is_empty() {
+                return None;
+            }
+            Some(tool::Image {
+                index,
+                mime: mime.to_string(),
+                data: data.to_string(),
+            })
+        })
+        .collect()
 }
 
 /// An assistant message's usage as the contract's two counts, or `None` when the agent reported nothing.
@@ -690,8 +881,12 @@ mod tests {
         (frames, settled)
     }
 
+    /// The session the unit tests' mapping is for. A constant so a test that needs a second one (a cancel's
+    /// response, say) does not have to shadow the `mapping()` helper to build it.
+    const SESSION: &str = "0123456789abcdef";
+
     fn mapping() -> Mapping {
-        Mapping::new("0123456789abcdef")
+        Mapping::new(SESSION)
     }
 
     fn update(event: Value) -> Value {
@@ -971,6 +1166,72 @@ mod tests {
         );
         assert!(frames.is_empty());
         assert_eq!(mapping.skipped(), 0, "an empty delta is mapped to nothing");
+    }
+
+    #[test]
+    fn a_dialog_is_answered_cancelled_and_a_fire_and_forget_request_is_not_answered_at_all() {
+        // pi's own two categories (`docs/rpc-extension-ui.md`). The first blocks the run until a response with
+        // the request's id arrives, so it is cancelled; the second never waits for anything, so an answer would
+        // be an invented exchange between this build and an extension.
+        let mut mapping = mapping();
+        let (frames, settled) = run(
+            &mut mapping,
+            &[
+                json!({"type": "extension_ui_request", "id": "uuid-1", "method": "select",
+                       "title": "Allow?", "options": ["Allow", "Block"]}),
+                json!({"type": "extension_ui_request", "id": "uuid-2", "method": "notify",
+                       "message": "hello", "notifyType": "info"}),
+                json!({"type": "agent_settled", "aborted": false}),
+            ],
+        );
+        assert!(settled == vec![false]);
+        assert_eq!(
+            mapping.skipped(),
+            1,
+            "the notify is the only documented record with no frame"
+        );
+        assert_eq!(mapping.unknown(), 0);
+
+        // The frame the replay can build: `into_frame` answers it, because a cancel needs nothing stored.
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].0, TURN_ERROR);
+        assert_eq!(frames[0].1["method"], "select");
+        assert_eq!(
+            frames[0].1["reason"],
+            json!(
+                "an extension asked for select, and a session cannot answer a dialog, so it was cancelled"
+            )
+        );
+
+        // The line pi is waiting for, which is the pump's to write.
+        let record = json!({"type": "extension_ui_request", "id": "uuid-1", "method": "confirm"});
+        let Mapped::Cancel(cancel) = Mapping::new(SESSION).map(&record) else {
+            panic!("a dialog is a cancel");
+        };
+        assert_eq!(
+            cancel.response(),
+            json!({"type": "extension_ui_response", "id": "uuid-1", "cancelled": true})
+        );
+        assert_eq!(cancel.method, "confirm");
+    }
+
+    #[test]
+    fn a_request_with_no_id_or_an_unknown_method_is_unknown_and_worth_a_warning() {
+        // A dialog with no id cannot be dismissed — the response has to repeat it — and a method this build has
+        // never seen may well be one that blocks. Both are the `warn` count, because a session that hangs on
+        // either would do so with nothing in the log.
+        let mut mapping = mapping();
+        let (frames, _) = run(
+            &mut mapping,
+            &[
+                json!({"type": "extension_ui_request", "method": "select", "title": "no id"}),
+                json!({"type": "extension_ui_request", "id": "", "method": "input"}),
+                json!({"type": "extension_ui_request", "id": "uuid-3", "method": "invented_method"}),
+                json!({"type": "extension_ui_request", "id": "uuid-4"}),
+            ],
+        );
+        assert!(frames.is_empty(), "{frames:?}");
+        assert_eq!((mapping.skipped(), mapping.unknown()), (4, 4));
     }
 
     #[test]

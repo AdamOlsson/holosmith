@@ -54,6 +54,13 @@ pub const TURN_END: &str = "turn.end";
 /// The operator's guidance reaching a running turn: `{"text"}`, and the one kind with no message id
 /// (ADR-0021).
 pub const TURN_STEER: &str = "turn.steer";
+/// Something a turn could not do, said out loud: `{"reason", "method"}` (HS-035, ADR-0043).
+///
+/// Its one producer today is an extension's dialog, which a session cannot answer and therefore cancels; the
+/// frame is why an extension's behaviour is explicable instead of mysterious, and it has no message id for the
+/// reason a steer has none — one frame, one block, nothing continues it. `reason` is the sentence a screen
+/// shows and `method` is pi's own name for what was asked.
+pub const TURN_ERROR: &str = "turn.error";
 
 /// One durable record in a session's stream: the row in `events`, with the seq the writer gave it.
 #[derive(Debug, Clone, PartialEq, Eq)]

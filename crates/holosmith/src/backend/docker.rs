@@ -667,9 +667,10 @@ impl SessionBackend for DockerBackend {
         );
         let mut mapping = Mapping::new(&session.id);
         // A tool's output is a file under the session's own directory, so a two-megabyte `cat` is not
-        // replayed to a phone on every reconnect (HS-033, ADR-0041).
+        // replayed to a phone on every reconnect (HS-033, ADR-0041); its images are files beside it, and the
+        // agent is what an extension's dialog is answered through (HS-035, ADR-0043).
         let store = Store::new(&self.settings.data_root);
-        rpc::pump(&mut records, &mut mapping, events, &store).await
+        rpc::pump(&mut records, &mut mapping, events, &store, &agent).await
     }
 
     /// Queue guidance for the turn that is running (`docs/rpc-commands.md`, `steer`).

@@ -279,6 +279,25 @@ button:disabled {
   white-space: pre-wrap;
 }
 
+/* Something the turn could not do (HS-035): one block per turn.error frame, drawn like a steer's and marked
+   so an operator can see it was the machine that acted, not them. */
+.turn-error {
+  border-left: 2px solid color-mix(in srgb, #c0392b 55%, transparent);
+  padding-left: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.turn-error-label {
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.6;
+}
+
+.turn-error-text {
+  white-space: pre-wrap;
+}
+
 .turn-boundary {
   font-size: 0.75rem;
   letter-spacing: 0.04em;

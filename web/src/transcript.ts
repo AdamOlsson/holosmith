@@ -40,7 +40,11 @@ export type Frame =
       outputRef: string | null;
     }
   | { type: "boundary"; boundary: "start" | "end" }
-  | { type: "steer"; text: string };
+  | { type: "steer"; text: string }
+  // Something a turn could not do (HS-035): an extension asked for a dialog a session cannot answer, so it was
+  // cancelled. Drawn like a steer — one frame, one block, no message id — because it belongs where in the turn
+  // it happened and nothing continues it.
+  | { type: "error"; reason: string; method: string };
 
 // What the page must do for one frame, in this order. `message` and `tool` come first when the
 // block is not on screen yet, so a consumer can create the nodes the next change names.
@@ -60,7 +64,8 @@ export type Change =
       outputRef: string | null;
     }
   | { op: "boundary"; boundary: "start" | "end"; turn: number }
-  | { op: "steer"; text: string };
+  | { op: "steer"; text: string }
+  | { op: "error"; reason: string; method: string };
 
 // The SSE event names. Four are pinned by ADR-0018; `message.end`, `tool.start` and `tool.end` are
 // HS-015's, and the payloads are the plan's D8.
@@ -75,6 +80,10 @@ const TURN_END = "turn.end";
 // a steer has no message id because it has nothing a second frame would update, and a reconnect
 // replays the log and rebuilds the page anyway (ADR-0021).
 const TURN_STEER = "turn.steer";
+// Something a turn could not do, said out loud (HS-035): `{reason, method}`. Its one producer is an
+// extension's dialog, which a session has no way to answer and therefore cancels. Like a steer it has no
+// message id — one frame, one block, nothing that continues it.
+const TURN_ERROR = "turn.error";
 
 // The stream's own frame announcing that the replay it is about to send does not reach the beginning of
 // the log (HS-061). Not a transcript block: it is a cursor, and it is the only frame on this stream that
@@ -97,6 +106,7 @@ export const TRANSCRIPT_EVENTS: readonly string[] = [
   TURN_START,
   TURN_END,
   TURN_STEER,
+  TURN_ERROR,
 ];
 
 // The one id a block is keyed by. A frame that cannot name a message is not a frame: it is
@@ -157,6 +167,7 @@ export function parseFrame(eventType: string, data: string): Frame | null {
   }
   if (
     eventType !== TURN_STEER &&
+    eventType !== TURN_ERROR &&
     eventType !== DELTA &&
     eventType !== SNAPSHOT &&
     eventType !== MESSAGE_END &&
@@ -180,6 +191,15 @@ export function parseFrame(eventType: string, data: string): Frame | null {
     // to draw and is dropped like any other malformed frame.
     const guidance = text(fields["text"]);
     return guidance === null ? null : { type: "steer", text: guidance };
+  }
+  if (eventType === TURN_ERROR) {
+    // A reason is the whole point of the frame, so a payload without one is dropped rather than drawn as a
+    // blank block; the method is the detail, and absent is the empty string.
+    const reason = text(fields["reason"]);
+    if (reason === null || reason === "") {
+      return null;
+    }
+    return { type: "error", reason, method: text(fields["method"]) ?? "" };
   }
   if (eventType === TOOL_START || eventType === TOOL_END) {
     const tool = toolId(fields);
@@ -279,6 +299,11 @@ export class Transcript {
       // No bookkeeping: a steer block is its own frame's, so there is no id to remember and nothing
       // a later frame could change about it (ADR-0021).
       return [{ op: "steer", text: frame.text }];
+    }
+    if (frame.type === "error") {
+      // The same shape, for the same reason (HS-035): one frame, one block, and nothing a later frame
+      // updates — not even the message id a turn's other blocks are keyed by.
+      return [{ op: "error", reason: frame.reason, method: frame.method }];
     }
     if (frame.type === "tool-start" || frame.type === "tool-end") {
       const changes: Change[] = [];
