@@ -491,9 +491,13 @@ async fn a_real_turns_usage_becomes_the_sessions_tally_and_trips_the_ceiling() {
         Some(BUDGET_EXCEEDED),
         "a turn that started over a ceiling the real turn cost did not end"
     );
-    assert!(
-        ended.usage_in >= REAL_IN && ended.usage_out >= REAL_OUT,
-        "the tally lost the real turn's counts: {ended:?}"
+    // Exact, not `>=`: the budgeted turn is aborted at its first poll, before its own `message.end`, so the
+    // only counts in the row are the real turn's — an assertion that allowed more would pass on a tally that
+    // counted one frame twice.
+    assert_eq!(
+        (ended.usage_in, ended.usage_out),
+        (REAL_IN, REAL_OUT),
+        "the tally is not exactly the real turn's counts: {ended:?}"
     );
 }
 

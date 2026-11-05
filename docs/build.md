@@ -141,11 +141,11 @@ where the database is, so the check can fail; what the pump *stores* is `tests/r
 prompt (`case_prompt_turn`, which asserts the 202 answers the row `running` and then reads that
 session's stream until the turn settles, asserting the turn's six kinds in order and the
 `idle → running → idle` transitions; `case_prompt_bad_body` and `case_prompt_unknown_session`,
-which assert the `422 bad_body` and `404 not_found` envelopes), the turn timeout's quiet half
+which assert the `422 bad_body` and `404 not_found` envelopes), the spend across a stop and a resume
 (`case_usage_survives_resume`, which prompts a session on a boot of its own, reads the row's
 `usage_in`/`usage_out` out of `app.db` with `python3` (the API does not carry them — `Session` is pinned to its
 fifteen keys), then evicts that session by creating a second one at a cap of one, resumes it, and asserts the
-two counts are unchanged; without `python3` it prints one `SKIP` line), and the timeout's quiet half
+two counts are unchanged; without `python3` it prints one `SKIP` line), and the turn timeout's quiet half
 (`case_turn_timeout`, which prompts the same session twice with `turn_timeout_min = 1` and asserts each
 row comes back `idle` with no `status_reason` and that the runner wrote no deadline line — the gate
 cannot make the deadline *fire*, because the key is whole minutes and the stub's turn lasts a second, so

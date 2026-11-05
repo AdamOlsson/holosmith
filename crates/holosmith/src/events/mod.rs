@@ -41,7 +41,10 @@ pub const TOOL_START: &str = "tool.start";
 pub const TOOL_END: &str = "tool.end";
 /// A message finishing: `{"message_id", "usage": {"in", "out"}, "stop_reason", "tool_calls"}`. The
 /// `usage` is what the writer adds to the session's tally, and it is optional: a backend that cannot
-/// report it emits the frame without it (HS-023). `stop_reason` and `tool_calls` (the message's
+/// report it — **or that reports a sum of zero**, which is the same thing said twice — emits the frame
+/// without it (HS-023, ADR-0042). Its two numbers are the message's *cost*: `in` is the prompt including
+/// whatever the provider served from its cache, which is why pi's `cacheRead`/`cacheWrite` are folded into
+/// it (ADR-0042). `stop_reason` and `tool_calls` (the message's
 /// tool-call names, in order) are additive keys HS-032 added for pi's answers — ADR-0040, amending
 /// ADR-0019's table, and nothing reads them yet: the arguments and output of a call are
 /// `tool.start`/`tool.end` (HS-033).

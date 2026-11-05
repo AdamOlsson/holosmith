@@ -738,3 +738,21 @@ test("a tool.end carries the verdict, the duration and the output's own address"
     outputRef: "/api/sessions/0123456789abcdef/tool-output/tool-1",
   });
 });
+
+test("a message.end that reports nothing is the same as one that reports no usage", () => {
+  // ADR-0042's rule, on the client's side of the wire: the producer omits `usage` for a zero sum, so this
+  // parse is what keeps a *durable* row written before the rule from hiding "no usage reported".
+  assert.equal(
+    parseFrame("message.end", '{"message_id":"m1","usage":{"in":0,"out":0}}'),
+    null,
+  );
+  // A prompt served entirely from cache is a real cost, and one count of zero is not silence.
+  assert.deepEqual(parseFrame("message.end", '{"message_id":"m1","usage":{"in":512,"out":0}}'), {
+    type: "usage",
+    messageId: "m1",
+    input: 512,
+    output: 0,
+  });
+  // And the sentence the screen draws for it: a turn settled and nothing was reported.
+  assert.equal(budgetNotice({ settled: 1, usage: false }), "no usage reported — the token budget has nothing to count");
+});

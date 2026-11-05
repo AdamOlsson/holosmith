@@ -71,6 +71,12 @@ table pinned `message.end` as `{"message_id", "usage": {"in", "out"}}`, so this 
   deliberately **not** folded in — HS-034 owns "real token counts" and with it any decision about how a cached
   prompt is counted, and inventing the arithmetic here would make that story's numbers disagree with this one's.
 
+  **Amended by ADR-0042:** the two clauses above are answered, and the second no longer holds. `in` is now pi's
+  `input` **plus `cacheRead` and `cacheWrite`** and `out` is `output` (`reasoning` is already inside it), because
+  a prompt's cached part is most of what a real session costs; and a report whose sum is zero emits **no**
+  `usage` key, so "the provider said nothing" has one spelling on the wire instead of two. ADR-0042 has the
+  arithmetic's evidence (every committed fixture's `in + out` equals pi's own `totalTokens`).
+
 Nothing else changed: the coalescer parses only `message.delta`, the repository reads `usage`/`message_id` by
 name, and the page drops a key it does not render. A fourth key on a delta would have been a different matter —
 that payload is pinned exactly (ADR-0031).
@@ -199,7 +205,8 @@ otherwise only unit-tested). Refreshing them is a release step, not a story step
 - The missing-usage warning a session screen shows is HS-034's; this story only stops inventing zeroes.
 - Images in a tool result and extension UI requests are HS-035's, and the record subscription is the seam they
   will use.
-- Fold cache counters into `usage` — HS-034.
+- Fold cache counters into `usage` — HS-034 (**decided by ADR-0042**: they are folded in, and a zero
+  report emits no `usage` key at all).
 - Replay a session's transcript into a resumed agent, so a resume is not an amnesiac turn — unowned, and named
   above.
 - pi's `turn_start`/`turn_end` per assistant response are declined; if a client ever wants the

@@ -2331,7 +2331,7 @@ PY
 # Its own boot, for the reason `case_token_budget` has one: the shared config has a cap of one live session and
 # a case that owns both of its rows can evict one without guessing what came before it.
 case_usage_survives_resume() {
-  local name=case_usage_survives_resume response body first second counted
+  local name=case_usage_survives_resume body first second counts
   local create_body='{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}'
 
   if ! command -v python3 >/dev/null 2>&1; then
@@ -2362,13 +2362,13 @@ case_usage_survives_resume() {
 
   # The row the turn's `message.end` was added to. Polled, because the writer commits on its own tick: a read
   # taken the instant the row says `idle` can be one frame short (HS-023's own lesson).
-  counted=none
+  counts=none
   for _ in $(seq 1 100); do
-    counted="$(usage_of "$WORK/data-usage" "$first")"
-    [ "$counted" = "none" ] || [ "$counted" = "0 0" ] || break
+    counts="$(usage_of "$WORK/data-usage" "$first")"
+    [ "$counts" = "none" ] || [ "$counts" = "0 0" ] || break
     sleep 0.1
   done
-  check "${name}_spent" "1200 340" "$counted"
+  check "${name}_spent" "1200 340" "$counts"
 
   # Evicted by the cap: a second create takes the only slot, and the first session is *stopped* rather than
   # deleted, which is what leaves a row to resume.
@@ -2393,14 +2393,9 @@ case_usage_survives_resume() {
   esac
 
   # The cap is checked before the transition (ADR-0022: a resume refuses rather than evicting), so the second
-  # session has to go before the first can come back. `case_delete_session` is the delete's own case; here it is
-  # the slot's.
-  fetch "${name}_delete" DELETE "/api/sessions/$second" \
-    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
-    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
-    fail "${name}_delete/no_answer" "DELETE /api/sessions/$second did not answer"
-  expect_status "${name}_delete" "$(answer "${name}_delete")" 202
-  wait_for_gone "${name}_gone" "$second"
+  # session has to go before the first can come back. `case_delete_session` is the delete's own case; here the
+  # delete is the slot's, and `remove_session` is the house way to take one.
+  remove_session "${name}_delete" "$second"
 
   fetch_body "${name}_resume" POST "/api/sessions/$first/resume" "" \
     "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
@@ -2409,8 +2404,8 @@ case_usage_survives_resume() {
   expect_status "${name}_resume" "$(answer "${name}_resume")" 202
   wait_for_idle_id "${name}_resumed" "$first"
 
-  second="$(usage_of "$WORK/data-usage" "$first")"
-  check "${name}_resumed" "1200 340" "$second"
+  counts="$(usage_of "$WORK/data-usage" "$first")"
+  check "${name}_resumed" "1200 340" "$counts"
 }
 
 # expected_stop_of <database> <session>: print one row's expected-stop flag, or `none` when the row is

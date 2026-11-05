@@ -156,7 +156,8 @@ fn the_recorded_text_turn_becomes_the_contracts_frames_in_order() {
     assert_eq!(
         end.payload["usage"],
         json!({"in": 1631, "out": 4}),
-        "991 prompt tokens plus 640 the provider served from its cache: what the message cost, which is\n         what the budget counts (HS-034, ADR-0042)"
+        "991 prompt tokens plus 640 the provider served from its cache: what the message cost, which \
+         is what the budget counts (HS-034, ADR-0042)"
     );
     assert_eq!(end.payload["stop_reason"], "stop");
     assert_eq!(

@@ -817,6 +817,20 @@ mod tests {
             }})],
         );
         assert_eq!(frames[0].1["usage"], json!({"in": 512, "out": 0}));
+        // And the third counter, which no committed fixture exercises: without this arm, deleting
+        // `cacheWrite` from the sum would leave the whole suite green.
+        let (frames, _) = run(
+            &mut mapping,
+            &[json!({"type": "message_end", "message": {
+                "role": "assistant", "stopReason": "stop", "content": [],
+                "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 512, "totalTokens": 512},
+            }})],
+        );
+        assert_eq!(
+            frames[0].1["usage"],
+            json!({"in": 512, "out": 0}),
+            "a prompt the provider had to write to its cache still cost something"
+        );
     }
 
     #[test]

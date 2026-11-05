@@ -139,6 +139,12 @@ function usage(payload: Record<string, unknown>): { input: number; output: numbe
   if (!count(input) || !count(output)) {
     return null;
   }
+  // A report of nothing is not a report (ADR-0042): the producer omits the key for a zero sum, and the same
+  // rule here means a *durable* row written before that rule cannot smuggle a zero past the notice either. One
+  // fact in two places, spelled the same way.
+  if (input === 0 && output === 0) {
+    return null;
+  }
   return { input, output };
 }
 
