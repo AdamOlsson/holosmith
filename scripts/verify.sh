@@ -74,6 +74,11 @@ assertions=0
 
 # The only cleanup path: the work dir is removed on success, kept on failure (and with --keep),
 # and a server a failure left running is stopped here rather than outliving the run.
+# The session the running Docker case made, if any: the two cases that start a real container set this, so a
+# `fail` in the middle of one does not leave a live container and network on the machine (HS-031's review —
+# the EXIT trap is the only hook a `fail` leaves, because `fail` exits the script).
+docker_session_id=""
+
 cleanup() {
   local status=$?
   if [ -n "$serve_pid" ] && kill -0 "$serve_pid" 2>/dev/null; then
@@ -83,6 +88,11 @@ cleanup() {
   if [ -n "$socket_pid" ] && kill -0 "$socket_pid" 2>/dev/null; then
     kill "$socket_pid" 2>/dev/null || true
     wait "$socket_pid" 2>/dev/null || true
+  fi
+  if [ -n "$docker_session_id" ]; then
+    docker rm --force "s_$docker_session_id" >/dev/null 2>&1 || true
+    docker network rm "agents_$docker_session_id" >/dev/null 2>&1 || true
+    docker_session_id=""
   fi
   if [ "$status" -ne 0 ] || [ "$keep" -eq 1 ]; then
     printf 'work dir kept: %s\n' "$WORK" >&2
@@ -506,6 +516,7 @@ case_agent_launch() {
   body="$(cat "$WORK/responses/${name}_create.body")"
   id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
   [ -n "$id" ] || fail "${name}_create/id" "the response names no id: $body"
+  docker_session_id="$id"
 
   # The row is the wait: four steps against a real daemon, the last of them a container start plus pi's
   # handshake. `idle` is the story's demo — pi answered, so the session can take a prompt.
@@ -613,6 +624,7 @@ case_agent_launch() {
   assertions=$((assertions + 1))
   check "$name/registrations" "1" \
     "$(git -C "$repo" worktree list --porcelain | grep -c '^worktree ' || true)"
+  docker_session_id=""
 
   # Its server is left running: `phase_serve` stops whatever is up after the last case.
   rm -rf "$root"
@@ -656,6 +668,7 @@ case_docker_resume() {
   body="$(cat "$WORK/responses/${name}_create.body")"
   id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
   [ -n "$id" ] || fail "${name}_create/id" "the response names no id: $body"
+  docker_session_id="$id"
 
   body=""
   for _ in $(seq 1 900); do
@@ -720,6 +733,24 @@ case_docker_resume() {
     "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
     fail "${name}_delete/no_answer" "DELETE did not answer"
   expect_status "${name}_delete" "$(answer "${name}_delete")" 202
+  # The removal is a background task, so it is waited for: removing the case's scratch root underneath it
+  # would let the teardown run against paths that are already gone and prove nothing (HS-031's review).
+  local gone=""
+  for _ in $(seq 1 300); do
+    fetch "${name}_gone" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "${name}_gone/no_answer" "GET /api/sessions/$id did not answer"
+    gone="$(answer "${name}_gone" | sed -n '1s/^HTTP\/1\.[01] \([0-9][0-9][0-9]\).*/\1/p')"
+    [ "$gone" = "404" ] && break
+    sleep 0.1
+  done
+  check "${name}_gone/status" "404" "$gone"
+  # The session's own directory is gone and **stays** gone: this is the case that deletes a *live* session, so
+  # it is where the exit the delete provokes would put `session.log` (and with it the directory) back if the
+  # backend did not forget the launch first (HS-031's review, ADR-0039).
+  [ ! -d "$data/sessions/$id" ] ||
+    fail "${name}/session_dir_left" "the delete left (or re-created) $data/sessions/$id"
+  assertions=$((assertions + 1))
+  docker_session_id=""
   # Its server is left running: `phase_serve` stops whatever is up after the last case.
   rm -rf "$root"
 }
