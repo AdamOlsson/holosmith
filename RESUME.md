@@ -43,14 +43,14 @@ created, prompted, aborted, steered, stopped, resumed and deleted, and it is dri
 
 Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is clean apart from the
 operator's own `log.txt`/`orchestrate.sh`, and every commit is **pushed** (see the note on pushing below).
-`HEAD` is `b7132d1`; any commit after it is bookkeeping — this file's own refresh. Confirmed on
-`origin/master`: `b7132d1`.
+`HEAD` is `5b0dfe5`; any commit after it is bookkeeping — this file's own refresh. Confirmed on
+`origin/master`: `5b0dfe5`.
 
-**Linear: 40 Done, 40 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-036` (`PER-33` …
-`PER-68`), `HS-059` (`PER-91`), `HS-060` (`PER-92`), `HS-061` (`PER-93`) and `HS-065` (`PER-97`).
+**Linear: 41 Done, 39 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-037` (`PER-33` …
+`PER-69`), `HS-059` (`PER-91`), `HS-060` (`PER-92`), `HS-061` (`PER-93`) and `HS-065` (`PER-97`).
 
 **The Docker block is gone.** A real daemon answers on this machine (§2), so `HS-027` … `HS-058` are
-unblocked and the queue is contiguous from `HS-037` on. Six stories have now been built against a real
+unblocked and the queue is contiguous from `HS-038` on. Seven stories have now been built against a real
 `docker run` — the mounts and V1 (`HS-027`), the container with its limits (`HS-028`), the start lock with
 `stop`/`resume` (`HS-029`), the expected-stop flag with the exit classifier (`HS-030`), the **agent**
 (`HS-031`) and the **turn** (`HS-032`) — and each is proven by a test that runs a container, not by a
@@ -59,30 +59,30 @@ and pi's ready handshake, and ends **`idle`**; a prompt reaches pi, every record
 the writer, a tool call's output and any image it returned are written to files, the session's spend is
 counted in tokens that include the prompt's cached part, and an extension's dialog is cancelled instead of
 hanging the turn. The RPC block is **finished**; a Docker boot also measures the machine's isolation with a
-probe container, creates the machine's own `egress` network, and refuses to boot only on a *proven* leak.
+probe container, creates the machine's own `egress` network, starts the machine's **egress proxy** (`hs_egress`,
+HS-037) and refuses to boot only on a *proven* leak. So a container's only route out is now something this build
+controls: an exact allow-list, `CONNECT` to 443 only, and no address that resolves into the machine.
 
-Every story from `HS-001` to `HS-036` is Done, plus `HS-059`–`HS-061` and `HS-065` — 40 of 80. The
+Every story from `HS-001` to `HS-037` is Done, plus `HS-059`–`HS-061` and `HS-065` — 41 of 80. The
 durable record of each is **Linear** (the plan comment, the verbatim demo output, the ship note), the
 review file (`docs/review/PER-<n>.md`, the review verbatim plus its `## Resolution` table) and **`git log`**
-(a commit names its issue; the last one ends `Closes PER-<n>`). Decisions are ADRs `0001` … `0044`, indexed
+(a commit names its issue; the last one ends `Closes PER-<n>`). Decisions are ADRs `0001` … `0045`, indexed
 one line each in `docs/stories/README.md`. Nothing about them belongs in this file.
 
-**Next issue: `PER-68` (HS-036 — per-session network and the startup self-test)** — size **M**, the first
-story of the network half of the Docker chain, and the one that makes the `--internal` claim *measured* rather
-than asserted. §8's own note carries what it needs and what is already there (the per-session network exists
-since `HS-028`; what is missing is the `egress` network, the probe, and the startup refusal). Then the rest of
-the Docker chain in `HS-###` order: `HS-037`–`HS-040` (the two proxies
-and their verification), `HS-041` (preview), `HS-042`–`HS-044` (snapshot, delete keep-rules, reconcile),
-`HS-045` (`doctor`), `HS-046` (the phase-1 verification run — the gate for phase 2), then phase 2. What is
-still behind something is phase 2 (`HS-047` … `HS-058` are `HS-046`'s, the phase-1 verification run, which is
-the story that gates the phase; `HS-066` … `HS-074` sit behind those and behind `HS-049`/`HS-050`), and
-`HS-075` (`PER-107`), which is independent of all of it and **still unstarted** — §8's own note carries its
-four decisions and three landmines.
+**Next issue: `PER-70` (HS-038 — Internet access checkbox wiring, V6)** — size **M**, and the smallest
+remaining story in the Docker chain because the topology already honours the flag (§8's note). Then the rest
+of the chain in `HS-###` order: `HS-039`/`HS-040` (the key proxy and its V3/V4/V5 verification), `HS-041`
+(preview, V7), `HS-042`–`HS-044` (snapshot, delete keep-rules, reconcile), `HS-045` (`doctor`), `HS-046`
+(the phase-1 verification run — the gate for phase 2), then phase 2. What is still behind something is phase
+2 (`HS-047` … `HS-058` are `HS-046`'s, the phase-1 verification run, which is the story that gates the phase;
+`HS-066` … `HS-074` sit behind those and behind `HS-049`/`HS-050`), and `HS-075` (`PER-107`), which is
+independent of all of it and **still unstarted** — §8's own note carries its four decisions and three
+landmines.
 
 Ranking, per `PROMPT.md`: Linear priority (all are `No priority`) → `HS-###` order in `docs/stories/` →
 anything already `In Progress` first → skip an issue whose `Blocked by` stories are not `Done`.
 
-### Twenty-four facts a cold start must know
+### Twenty-five facts a cold start must know
 
 1. **A running turn can now be stopped, in two rungs, with or without the way back.** `src/ladder.rs`
    is the shared routine: `clear_queue` then `abort`, wait up to `abort_grace` (the grace *bounds rung
@@ -391,6 +391,24 @@ about one run in two). **A delete forgets the launch *before* it removes the con
     the host" is really "no route out" — anything host-side bound to `0.0.0.0` is reachable at that bridge
     address, and item 4's guards, not the network, are its defence.
 
+25. **The only route out is a proxy this build starts, and it is a mode of this binary** (HS-037, ADR-0045).
+    `src/egress.rs` is the proxy: pure rules (`Request::parse`, `Rules::target`, `address_problem`) plus a
+    thin tokio layer (`serve`/`handle`/`Record::tunnel`), and `holosmith proxy egress --listen --allow …` is
+    how it runs — the spec's own "internal subcommand" spelling, so one artifact is both server and proxy. Its
+    container is `hs_egress` on `egress`, `--detach --restart unless-stopped --cap-drop ALL
+    --security-opt no-new-privileges`, running **this process's own binary** mounted read-only at its own host
+    path (`EgressProxy::of(&Config)`, `PROXY_START_TIMEOUT` = 90 s because it starts before the listener
+    binds). **`CONNECT` to 443 only** (405 for another method, 403 for another port), an **exact** allow-list
+    (a suffix match is the wildcard `config validate` refuses), and **no address inside the machine** —
+    loopback, 169.254/16, RFC 1918, 100.64/10, IPv6's own spellings and the IPv4 inside 6to4/NAT64/
+    IPv4-compatible ones, with **every** answer a name has checked. Attribution is `Proxy-Authorization`'s
+    username (validated by `tool::valid_id`), which is why a session's container gets
+    `HTTPS_PROXY=http://<id>@egress-proxy:3128` — `egress-proxy` is a **network alias**, the container's name
+    is `hs_egress`. The join is the **network step's** (`provision_network`/`resume`/`remove_network`, under
+    the per-session start lock) and runs only when the row's `network` flag is set; every failure is a `warn`,
+    never a refusal. Both the start and the self-test's probe are **bounded** (`Docker::bounded`), and the
+    request log is the *container's* (`docker logs hs_egress`), not the server's.
+
 Three things HS-014 and HS-015 settled that later stories inherit:
 
 - **The transcript's event contract** (ADR-0018 + ADR-0019), emitted by the backend:
@@ -606,11 +624,12 @@ If that fails, **stop and report** — that is a `PROMPT.md` stop condition.
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                     # 319 lib + 39 test binaries, 688 tests in all (22 in
+cargo test                     # 333 lib + 39 test binaries, 703 tests in all (22 in
                                # tests/worktree.rs, 16 tests/events.rs, 10 tests/turns.rs, 10
                                # tests/compaction.rs, 14 delete.rs, 8 idle_stop.rs, 9 backup.rs,
-                               # 7 history.rs, 10 tests/exit.rs, 5 tests/container.rs, 3 tests/agent.rs,
-                               # 12 tests/rpc.rs, 5 tests/tool_output.rs, 10 tests/token_budget.rs)
+                               # 7 history.rs, 10 tests/exit.rs, 6 tests/container.rs, 3 tests/agent.rs,
+                               # 12 tests/rpc.rs, 5 tests/tool_output.rs, 10 tests/token_budget.rs;
+                               # the proxy's rules are 11 unit tests inside src/egress.rs)
 cd web && npm test             # 41 transcript tests (node's own runner)
 cd web && npx tsc --noEmit     # not a gate phase, but a web edit that does not typecheck is a bug
 scripts/verify.sh              # THE one-command gate since HS-006
@@ -619,15 +638,18 @@ scripts/verify.sh              # THE one-command gate since HS-006
 `scripts/verify.sh` runs six phases, cheapest first: `fmt`, `clippy`, `test`, `build`
 (`scripts/build.sh`, which itself runs `build-web.sh` — `npm test` then Vite — and `check-static.sh`
 last), `embed` (`scripts/check-embed.sh`), then `serve` — the **shipped musl artifact** booted on
-`--port 0` with a temp data dir, running **55 cases plus a CORS sweep (530 assertions)**, then torn down
+`--port 0` with a temp data dir, running **56 cases plus a CORS sweep (537 assertions)**, then torn down
 with `SIGTERM` and an asserted exit 0. Thirteen cases bring their own boot (`case_token_budget`,
 `case_usage_survives_resume`, `case_compaction`, `case_history`, `case_backup`, `case_worktree`,
 `case_worktree_refusal`, `case_agent_launch`, `case_docker_resume`, `case_docker_turn`, plus
 `case_docker_preflight`, which needs no server at all, `case_container_mounts`, which needs no server *and* no
 daemon — it skips, one printed
 line, when there is neither a daemon nor an image — and `case_exit_classification`, which reads a row's
-`expected_stop` out of `app.db` with `python3` and skips when there is no `python3`). It takes ~5 min (both musl targets, the Docker cases
-and `case_idle_stop`'s real minute). `--no-build` skips `build` and `embed`; `--keep` keeps the work dir.
+`expected_stop` out of `app.db` with `python3` and skips when there is no `python3`, and
+`case_egress_proxy`, which needs **no server, no daemon and no internet**: it starts the artifact as
+`proxy egress` on a loopback port and asks it four questions over a socket). It takes ~8 min (both musl
+targets, the Docker cases and `case_idle_stop`'s real minute). `--no-build` skips `build` and `embed`;
+`--keep` keeps the work dir.
 
 A story is not done until all four are green on a clean tree, and then you run the story's own demo
 yourself and paste its output.
@@ -662,17 +684,20 @@ crates/holosmith/
   migrations/0003_events.sql    events + sessions.last_seq (schema 3)
   migrations/0004_expected_stop.sql  sessions.expected_stop (schema 4, HS-030)
   src/main.rs               dispatcher only
-  src/cli.rs                clap: version, config {validate,show,edit}, serve [--port|--data-dir|--backend]
-  src/commands/             version.rs, config.rs, serve.rs
+  src/cli.rs                clap: version, config {validate,show,edit}, serve [--port|--data-dir|--backend],
+                            proxy {egress --listen --allow}
+  src/commands/             version.rs, config.rs, serve.rs, proxy.rs (the egress proxy in the foreground)
   src/config/               mod.rs (typed Config, KeySpec walk, 26 keys), schema.rs, problem.rs,
                             render.rs, duration.rs, editor.rs
   src/backend/              mod.rs (Step, SessionBackend, `ProcessEnd`/`ExitWatcher`/`supervise`,
                             Backends::for_run(backend, ContainerSettings),
                             BackendError, TurnEnd, Provisioned), stub.rs (the scripted turn;
-                            `ignoring_abort`, `failing_at`, `failing_snapshot`), docker.rs (the worktree,
-                            network and container steps are real; `start_container` = `rm -f` then `run`;
-                            the per-session start lock; `stop` = `docker stop --time 10`; `resume` = network
-                            + container; `Pi` and the turn's five operations still refuse, naming HS-031)
+                            `ignoring_abort`, `failing_at`, `failing_snapshot`), docker.rs (all four steps and
+                            a turn are real: `start_container` = `rm -f` then an attached `run`; the
+                            per-session start lock, which the **network** step takes too since HS-037;
+                            `stop` = `docker stop --time 10`; `resume` = network + proxy + container;
+                            `apply_proxy` joins the egress proxy to the session network only when the row's
+                            `network` flag is set, and `remove_network` leaves it before the `rm`)
   src/provisioner.rs        the four-step background task and its five session.status events; stops at
                             a step boundary when the row leaves `starting`; after the pi step it spawns the
                             task that awaits the backend's `ExitWatcher` and calls `Exits::record` (HS-031)
@@ -720,14 +745,20 @@ crates/holosmith/
                             `Mount::argument`/`Mounts::check` (refuses a missing or wrong-kind source
                             *before* `docker run`), `Limits`, `ContainerSettings` (`of(config)`, `at(root)`,
                             `docker()`), `SessionContainer::run_args` (the whole `docker run` vector:
-                            `--detach --rm --init --name s_<id> --network agents_<id>`, the hardening, the
-                            three limits, `-w /work`, `-e HS_SESSION_ID`), `network_name`, `IDLE_COMMAND`
-                            (`sleep infinity` until HS-031), `Unmountable`
+                            `-i --rm --init --name s_<id> --network agents_<id>`, the hardening, the
+                            three limits, `-w /work`, `-e HS_SESSION_ID`, pi's five variables and
+                            `HTTPS_PROXY`), `network_name`, `Unmountable`; and since HS-037 the machine's
+                            proxy: `EgressProxy` (`of(&Config)`, `run_args`), `PROXY_NAME` (`hs_egress`),
+                            `PROXY_ALIAS` (`egress-proxy`), `PROXY_ENV`, `proxy_url(id)`,
+                            `PROXY_START_TIMEOUT` (90 s)
   src/docker.rs             the `docker` CLI as a program (HS-028): `Docker{host}`, `run`/`succeeds`,
-                            `ensure_network`/`gateway`/`attempt` (bounded) and `EGRESS_NETWORK` (HS-036),
-                            `command_line` (the one call whose stdio a caller keeps: the launch),
+                            `ensure_network`/`gateway` and `EGRESS_NETWORK` (HS-036), `command_line` (the one
+                            call whose stdio a caller keeps: the launch),
                             `create_internal_network`/`remove_network`, `remove_container`/`stop_container`
-                            (`STOP_SECONDS` = 10), `run_container`, `inspect`, `DockerError`
+                            (`STOP_SECONDS` = 10), `inspect`, `DockerError`; and since HS-037 the bounded
+                            family for the startup path — `bounded` (the primitive), `attempt` (the probe),
+                            `run_detached(args, bound)`, `remove_container_bounded`, `running`,
+                            `join_network`/`leave_network` (alias, disconnect-first, force)
   src/compactor.rs          compaction's task (HS-060, ADR-0032): `SNAPSHOT_AFTER` (24 h, a constant),
                             `TICK` (60 s), `MESSAGES_PER_PASS` (500), `Compactor::{new, with_window,
                             spawn, run, sweep, fold}`. A pass at startup, then a tick; the per-session
@@ -782,6 +813,12 @@ crates/holosmith/
                             `GitError`; and since HS-026 the refusal reads (ADR-0030): `refuse`,
                             `Refusal`, `repository_of`, `CONFIG_READ` (`--local --type=bool`). Sync and
                             std-only; the backend calls it on `spawn_blocking`
+  src/egress.rs             the egress proxy (HS-037, ADR-0045): `Request::parse`/`username`, `Rules`
+                            (`new`/`allow`/`permits`/`target`), `Target`, `Refusal` (status, word, sentence),
+                            `address_problem`/`embedded_v4` (the ranges, IPv4-mapped, 6to4/NAT64/compatible),
+                            `Record` (`unreadable`/`tunnel`/`log`), `serve`/`handle`/`read_head`/`resolve`/
+                            `connect`/`establish`/`respond`, `pump`/`pump_both` (counted both ways),
+                            `PORT`/`TLS_PORT`/`DEFAULT_LISTEN`/`MAX_HEAD`/`HEAD_TIMEOUT`/`ACCEPT_BACKOFF`
   src/selftest.rs           the network self-test (HS-036, ADR-0044): `Runner` (the seam), `Report`,
                             `Outcome::{Passed, Failed, Unknown}`, `run`/`run_with`/`decide`, `NETWORK`,
                             `PUBLIC`, `HOST_PORT`, `REACHED` (9), `PROBE_TIMEOUT`, `PROBE` (`include_str!` of
@@ -847,7 +884,13 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   with one gap a real container still shows: pi refuses a `prompt` before a stream exists, because a session's
   network is `--internal` and it holds no provider key until the key proxy (HS-039), so `case_docker_turn`
   asserts pi's own refusal sentence and the streaming evidence is the committed fixtures.
-- **What is left of the network half:** the two proxies (HS-037/039), the preview
+- **The egress proxy exists and is the only route out (HS-037).** `holosmith proxy egress` is a mode of the
+  artifact; a Docker boot starts `hs_egress` on `egress` (bounded, `warn` on failure) and the network step
+  joins it to a session's network under the alias `egress-proxy` **only when the row's `network` flag is set**,
+  so `HTTPS_PROXY` is the same string either way and the difference is topology. What that leaves undone is
+  HS-038's: the checkbox in `web/`, the off-case probe and the V6 gate.
+- **What is left of the network half:** the internet-access checkbox and the off-case probe (HS-038), the
+  **key proxy** and its verification (HS-039/040), the preview
   listener (HS-041), the WIP snapshot (HS-042), the delete's keep-rules (HS-043), startup reconcile (HS-044),
   `doctor` (HS-045), the phase-1 verification run (HS-046), merge, publish, the hub, releases, the
   stopped-session expiry (HS-064), and any **delete affordance in `web/`** (the API has the endpoint; the
@@ -870,7 +913,8 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   `Transitioner::apply`, and the row moves before the container in every one of them.
 - **`runtime::Backend`** has `Stub` and `Docker`; `serve --backend` and the config key `backend` select
   it. `DockerBackend::new(ContainerSettings)` provisions all four steps and runs a turn's five operations;
-  what is left of the Docker chain is the network story (HS-036 onwards), and the default backend is `docker`
+  what is left of the Docker chain is the key proxy and everything after it (HS-038 onwards), and the default
+  backend is `docker`
   (ADR-0001: the stub is opt-in), so a default build provisions a session to `error` with a reason
   rather than hanging in `starting`. (Since HS-026 a create for a project that is not a plain checkout is
   refused earlier, with a 422; the demo trick HS-019 used still works for a project that *is* one.) That
@@ -1171,7 +1215,7 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   case that makes its own session must run before the shared one exists or delete it at the end (the
   gate's cap is one live session).
 - **Adding an ADR means updating `docs/stories/README.md`**: the "Decisions taken while slicing" count
-  (now **forty-four**) and the bullet list. A reviewer will check the links resolve — three did not,
+  (now **forty-five**) and the bullet list. A reviewer will check the links resolve — three did not,
   once.
 - **An ADR that a later story changes gets a one-line "Superseded by ADR-00xx" note**, not a rewrite
   (ADR-0012 and ADR-0013 do this; HS-015 added two to ADR-0018).
@@ -1659,6 +1703,51 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   root because the phase's final `stop_serve` is what ends that server; it cleans at the *start* of the next run,
   like `case_docker_turn`.
 
+### Landmines: the egress proxy (HS-037)
+
+- **A `200` to `CONNECT` carries no body at all.** It is the status line and a blank line, and everything after it
+  is the client's TLS handshake — a `Content-Length`, a `Content-Type` or a `Proxy-Agent` there is read as the
+  first TLS record and `curl` says `error:0A00010B:SSL routines::wrong version number`. The story's own demo
+  found it; no test that only probed refusals would have, which is why `Record::tunnel` is now a `pub(crate)`
+  function a test drives against a loopback echo listener (below the policy, which is what makes it possible).
+- **A `copy` that fails reports no count.** `tokio::io::copy_bidirectional` answers `(0, 0)` when either direction
+  errors, so the request an operator reads the line for (one that carried a megabyte and then died) logs
+  `bytes_up=0`. The tunnel is two counted loops over a split socket (`pump`, `pump_both`) that bump an
+  `AtomicU64` as bytes move.
+- **`tracing`'s `field = value` uses `Debug` for a `&str`, and prints it quoted.** `status = self.status` rendered
+  `status="not-listed"`, which a `grep status=not-listed` misses; `status = %self.status` is the fix. Any field a
+  gate greps needs `%`.
+- **The proxy's log is the container's.** `docker logs hs_egress` (or the process's stderr for a host-side run) —
+  **not** `serve`'s stderr, which is where the boot's `debug`/`warn` lines about starting it live. A demo that
+  greps `serve.err` for "answered a request" finds nothing and looks like a broken proxy.
+- **`egress-proxy` is a network alias, not a container name.** `docker network connect --alias egress-proxy`, and
+  Docker's embedded DNS answers an alias only on networks the asker shares with the container. `docker inspect
+  hs_egress --format '{{(index .NetworkSettings.Networks "agents_x").Aliases}}'` is where it is visible; a
+  resolution test from inside a session container (`node -e require('dns').lookup('egress-proxy')`) is the
+  measurement (done in the demo: `172.21.0.2`).
+- **`docker network rm` refuses a network with a live endpoint.** The egress proxy is one for as long as it is
+  joined, so a teardown that forgot the detach would leave the network behind with a `warn` — and ADR-0023 says a
+  delete leaves no `deleting` row. `remove_network` leaves first, and `tests/container.rs` asserts both halves by
+  driving `SessionBackend::undo(Step::Network)`.
+- **`--restart` and `--rm` conflict.** The proxy is detached with a restart policy and no `--rm`, so a stopped
+  proxy keeps its name; the boot's `rm -f` (bounded) is what clears it.
+- **The proxy container runs *this* binary, mounted read-only at its own host path.** So the daemon must be able to
+  see that path — the same fact ADR-0035/0039 record for the projects and data roots. A `serve` whose binary is on
+  a tmpfs the daemon does not share starts no proxy: one `warn`, and `serve` checks `is_file` first, because `-v`
+  of an invisible path creates an empty root-owned *directory*.
+- **Everything on the startup path is bounded.** `Docker::run_detached` and `Docker::remove_container_bounded` take
+  a deadline (`container::PROXY_START_TIMEOUT`, 90 s) for the reason `Docker::attempt` does: a `docker run` can
+  have to pull, and the control listener is the screen an operator needs when it cannot.
+- **A daemon-gated test must not take the production name.** `hs_egress` is the machine's live proxy; the test uses
+  `hs_egress_test` and skips when `docker.running(PROXY_NAME)`, or `cargo test` on a machine with a running server
+  would replace its proxy.
+- **The allow-list is exact, so a registry needs every name.** `crates.io` does not permit `static.crates.io`. That
+  is deliberate (a suffix match is the wildcard `config validate` refuses); a story that "fixes" it into a suffix
+  match re-opens the decision ADR-0045 records.
+- **Two things the proxy cannot do, and what owns them.** It cannot inspect a tunnel's content (item 2's accepted
+  risk), and it cannot stop a container from reaching the host's own bridge-bound services at its network's
+  gateway (ADR-0044's measurement) — item 4's guards are that path's defence and **HS-046** owns the decision.
+
 ## 7. Decisions taken on the operator's behalf (do not silently undo)
 
 Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0044`, one line each in
@@ -1691,43 +1780,40 @@ docker image inspect pi-agent:local         # the image the Docker stories run; 
 scripts/verify.sh                           # baseline green (~8-11 min, 55 cases, 530 assertions)
 ```
 
-Then start the cycle at **`PER-69` (HS-037 — egress proxy)** — size **L**, and the first story that needs a
-container *the product ships* rather than one it drives. What is already there, and the questions the plan must
-settle before any code:
+Then start the cycle at **`PER-70` (HS-038 — Internet access checkbox wiring, V6)** — size **M**, and the
+smallest story left in the chain because HS-037 already did the hard half. What is already there, and what is
+genuinely missing:
 
-- **The binary is described as "the single static binary that is the Holosmith hub, server, proxies and CLI"**,
-  so the proxy is most plausibly a second mode of this binary (`holosmith egress-proxy`, a `clap` subcommand)
-  rather than a second program: the image then needs no new build, and HS-048's embedded Dockerfiles can run it.
-  Decide that first — it decides the rest, including how the container is named (`hs_egress`), what command it
-  runs, and how a test drives it without Docker (a unit test over the proxy's decision function, the way
-  `exit::classify` and `selftest::decide` are tested).
-- **The acceptance is a list of refusals, and each is a pure function worth testing on its own**: `CONNECT` to
-  port 443 only; only allow-listed domains; any destination resolving to loopback, link-local, RFC 1918 or
-  `100.64.0.0/10` refused *regardless of the allow-list* (so resolution happens before the check, and a name with
-  two answers must fail if **any** answer is private); host and bytes logged per request with the session id as
-  the proxy username; and provider hosts are **not** on the allow-list because the key proxy (HS-039) handles
-  those.
-- **`egress` exists but holds nothing yet** (HS-036 created it; `internal=false`). The proxy container attaches to
-  `egress` **and** to each session network with `docker network connect` — the second half of "a container's only
-  route out" — which means the server now *manages* that connection per session (create, resume, and teardown on
-  delete by HS-043). Say in the plan where that lives: a provisioner step is the natural place, but "one
-  container, many networks" is a new shape and needs its own ADR.
-- **`network_default` and the allow-list key already exist** (`[egress] allow = []` in `config show`), so the list
-  itself needs no new config key. Check before adding one.
-- **The gate cannot require a daemon.** A `case_*` that needs the proxy container skips on a machine without one,
-  and the unit tests must carry the refusals.
-- **Do not let the egress allow-list drift into the provider hosts.** The key proxy is what makes a model call
-  work; mixing the two would put the credential path in the wrong container.
-- **Item 2's residual risk applies here**: every allow-listed host is an exfiltration channel (HTTPS is opaque to
-  the proxy), and anything host-side bound to `0.0.0.0` is reachable from a session container at its own network's
-  gateway address (measured in HS-036, ADR-0044).
+- **The topology already honours the flag.** `sessions.network` is a real column, `POST /api/sessions` parses
+  `network`, and `DockerBackend::apply_proxy` joins the egress proxy to the session's network **only when the row
+  says so** (and leaves it when it does not), on the create and on `resume`. So the acceptance's first three
+  bullets may already be true; verify them before writing anything, and if they are, the story is the UI, the
+  off case's *measurement*, and the V6 gate.
+- **The UI is where the work is.** `web/src/main.ts` has the create form and `web/src/transcript.ts` the rules;
+  `GET /api/sessions` already carries `network_default`, so the checkbox is `network_default` as its initial
+  state and `network: <bool>` in the body. A "row's text is written in two places" rule applies (ADR-0017's
+  lesson): if the session screen must show whether a session may reach the internet, one pure function in
+  `transcript.ts` and a test in `web/test/transcript.test.mjs`-style, not two strings.
+- **The off case's probe is new.** HS-036's self-test measures the *on* machine (nothing reachable from an
+  internal network). Item 2's second paragraph asks for the off case too: a probe on a session network with no
+  egress proxy attached must reach nothing but the key proxy — and the key proxy is HS-039's, so what can be
+  measured today is "nothing but nothing". Say so in the plan rather than inventing a key proxy here.
+- **V6 is the story's gate**: `curl --noproxy '*'` from a container fails; a non-listed host through the proxy is
+  403; the off case passes. The first and second are measurable today (`case_egress_proxy` already proves the
+  403 without a container); the third needs a real session network, so it is a daemon-gated case that skips.
+- **No new config key.** `network_default` exists (ships `false`) and `[egress] allow` exists. Check
+  `config show` before adding one, and update `tests/golden/config-default.toml` only if a key really appears.
+- **Then `HS-039`/`HS-040`** (the key proxy: `hs_key`, `<data>/secrets/keys.toml` 0600, a dummy key per session,
+  `models.json` with `baseUrl` and the dummy key, `NO_PROXY=key-proxy`, revocation on delete — the HS-019 hook is
+  still a no-op and is `delete`'s `revoke_key`), which is what makes a real turn possible at all and is the
+  blocker for `case_docker_turn`'s "pi refuses the prompt" being replaced with a real one.
 
-Read §1's twenty-four facts first: eight of them are the Docker half (mounts and V1, the container and its
+Read §1's twenty-five facts first: eight of them are the Docker half (mounts and V1, the container and its
 limits, the start lock and `resume`, the expected-stop flag with its classifier, the agent launch and its stdio,
 the exit seam with its generations, the agent directory with the data root it forces, and the mapping with its
 record seam), one is a tool's output as a file, and the rest are the writer's coalescing, the runner's two turn
-policies, the worktree step, the create's project refusals, compaction, truncated replay, the daily bundle and
-the rendered page.
+policies, the worktree step, the create's project refusals, compaction, truncated replay, the daily bundle, the
+rendered page and the egress proxy.
 
 **One thing this build does not do, recorded rather than discovered:** a resumed session's pi has **no memory**
 of the earlier turns (`--no-session`; the transcript is Holosmith's log). Replaying the log into a new pi is a
@@ -1779,16 +1865,17 @@ re-read.
 If you stop before the backlog is empty, say so explicitly, say which issue is next, and leave the tree
 clean and the gates green — **a half-finished story is worse than an honest stop**.
 
-This session (`b2fecf5` → `b7132d1`) shipped two stories:
+This session (`b7132d1` → `5b0dfe5`) shipped one story:
 
 | Issue | Story | Commits | Outcome |
 | --- | --- | --- | --- |
-| PER-67 | HS-035 images and extension dialogs (V8) | `70f337e`, `c0b72af`, `f9d64aa`, `6fa4a89`, `60eaac3` | Done — an image in a tool result is a file beside the tool's text (`<tool_id>-<block index>.<ext>`, base64 decoded by the store, the cap counted on decoded bytes including the trailing group and refused from the encoded length), named by `tool.end`'s `images` additively, served by `GET …/tool-image/{tool_id}/{index}` with the type the *file* has, and drawn by the page as one link per picture; an extension's dialog is cancelled with the response written **before** the frame (pi blocks on it), the fire-and-forget methods stay declined, and the contract gained `turn.error`. Two real fixtures. ADR-0043. Review **OK with notes** both axes: one P1 (served but never linked, while the ADR claimed it was) and one P2 (a second result replaced only the indices it carried), both fixed in code, six P3s fixed, one dismissed (`docs/review/PER-67.md`) |
-| PER-68 | HS-036 the isolation, measured | `9b85d85`, `c61667a`, `b7132d1` | Done — a Docker boot creates the machine's `egress` network and runs one probe container from `agent_image` on a temporary internal network, asking it to reach the internet and the default bridge's gateway; **a `refused` connection counts as reached**, measured both ways (`tests/selftest.rs` runs the bridge as its control). Three outcomes and one refusal: `Passed` (debug), `Unknown` (one `warn`: no image, a daemon that cannot create networks, a probe past its 60 s bound), `Failed` (a `preflight` complaint, printed and refused). ADR-0044, and it records a measured limit: an internal network's **own** gateway answers, so item 2's "no gateway" is really "no route out". Review **OK with notes** both axes: two P1s (ADR-0028 unamended; a duplicated glossary entry) and four P2s (a mangled log sentence, an unbounded startup `docker run`, a pass line claiming more than it measured, `build.md`'s missing `node`), all fixed; two P3s dismissed (`docs/review/PER-68.md`) |
+| PER-69 | HS-037 the egress proxy | `fe52c0f`, `39952fc`, `df2ec3b`, `5b0dfe5` | Done — the only route out of a session container is now a proxy this build starts, as a **mode of this binary** (`holosmith proxy egress`) whose container (`hs_egress`, on `egress`, `--restart unless-stopped`) runs *this* artifact mounted read-only at its own host path. `CONNECT` to 443 only; an **exact** allow-list; **no address inside the machine** (loopback, link-local, RFC 1918, 100.64/10, IPv6's own spellings and the v4 inside 6to4/NAT64/IPv4-compatible ones, every answer checked, so `localhost` is refused even when listed); host and bytes logged once per request with the session id as the proxy username, which is why a container gets `HTTPS_PROXY=http://<id>@egress-proxy:3128` and `egress-proxy` is a **network alias**. The join is the network step's, under the per-session start lock, and only when the row's `network` flag is set. ADR-0045. Review **OK with notes** both axes: one P1 (an unbounded `docker run` on the pre-bind startup path — ADR-0044's own hazard, reintroduced) and two spec P2s (byte counts lost when a tunnel failed, and ADR-0044's hand-over left unanswered), all fixed; the P3s included a real one (the allow path had no test that would have caught the `Content-Length`-on-a-200 bug the demo found). Demo: `curl -x http://<id>@…` → 200 with bytes both ways, three refusals with their sentences, and in Docker: `egress-proxy -> 172.21.0.2` resolved and used **from inside a session container**, and a `network: false` session whose network has no proxy on it |
 
-Ledger for the next session: **HS-037 (`PER-69`, the egress proxy, size L)** is next and is the biggest
-remaining piece of the Docker chain; §8's own note lists the design questions to settle first (a second mode of
-this binary, the refusal functions, and where a per-session `docker network connect` lives). Then `HS-038`–`HS-046`
-in order. The session that wrote this stopped after two complete stories rather than start an L story it could
-not finish — a half-finished story is worse than an honest stop (§9).
+Ledger for the next session: **HS-038 (`PER-70`, the internet-access checkbox, size M)** is next — and a large
+part of the acceptance may already be true, because HS-037 honours the flag in the topology; §8's own note says
+what to verify before writing anything (the checkbox in `web/`, the off-case probe, and V6's three checks). Then
+`HS-039`/`HS-040` (the key proxy and its verification), `HS-041`, `HS-042`–`HS-046`. The session that wrote this
+stopped after one complete L story rather than start a second it could not finish — a half-finished story is
+worse than an honest stop (§9). Everything is pushed; the final `scripts/verify.sh` on the committed tree was
+**56 cases, 537 assertions, ok**.
 
