@@ -1048,6 +1048,7 @@ fn the_recorded_image_turn_names_the_picture_and_the_text_still_says_what_it_was
     // And the replay's frame, which has no store to name a file with: no `images` key rather than a reference to
     // nothing. The pump's version of this frame is asserted below.
     let (frames, settled, skipped, unknown) = mapped(IMAGE);
+    print_frames("image", &frames);
     assert_eq!(settled, vec![false]);
     assert_eq!(unknown, 0, "every record in this turn is one pi documents");
     let end = of_kind(&frames, TOOL_END)[0];
@@ -1069,6 +1070,7 @@ fn the_recorded_extension_turn_cancels_the_dialog_and_says_which_one_asked() {
     // emits an `extension_ui_request` and **blocks the run** until the client answers. The mapping's answer is a
     // cancel, and the frame it leaves is what makes an extension's odd behaviour explicable.
     let (frames, settled, skipped, unknown) = mapped(EXTENSION_UI);
+    print_frames("extension ui", &frames);
     assert_eq!(settled, vec![false], "the turn settled: nothing hangs");
     assert_eq!(unknown, 0, "both requests are ones pi documents");
     let errors = of_kind(&frames, TURN_ERROR);
@@ -1170,6 +1172,7 @@ async fn the_pump_stores_the_images_of_a_tool_result_and_names_them_in_the_frame
     assert_eq!(images.len(), 1);
     assert_eq!(images[0]["index"], 1);
     assert_eq!(images[0]["mime"], "image/png");
+    eprintln!("tool.end in the log: {tool_end}");
     let reference = images[0]["output_ref"].as_str().expect("a reference");
     assert_eq!(
         reference,
@@ -1251,6 +1254,7 @@ async fn the_pump_answers_a_dialog_with_a_cancel_and_records_that_it_did() {
         1,
         "one dialog is one answer, and a fire-and-forget request is answered with nothing: {written}"
     );
+    eprintln!("stdin the pump wrote: {}", lines[0]);
     let answer: Value = serde_json::from_str(lines[0]).expect("a JSONL line");
     let asked = records(EXTENSION_UI)
         .into_iter()
@@ -1283,6 +1287,7 @@ async fn the_pump_answers_a_dialog_with_a_cancel_and_records_that_it_did() {
         .filter(|event| event.kind == TURN_ERROR)
         .map(|event| serde_json::from_str(&event.payload).expect("a payload is JSON"))
         .collect();
+    eprintln!("the frame it left: {}", errors[0]);
     assert_eq!(errors.len(), 1, "{events:?}");
     assert_eq!(errors[0]["method"], "select");
     assert!(
