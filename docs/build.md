@@ -430,6 +430,16 @@ fallback is not in use. The image is the config key `agent_image` (default `agen
 `--user` is deliberately not passed: the image's own user must be non-root, which the V1 checks assert
 rather than a guessed uid that would hand the agent's files to somebody the host does not own.
 
+**The isolation is measured at every boot** (HS-036, ADR-0044). A Docker run creates the machine's own
+`egress` network (not internal — the proxies attach to it) and then runs one probe container from `agent_image`
+on a temporary internal network, asking it to reach `1.1.1.1:443` and the default bridge's gateway. A
+*connection that is refused* counts as reached, because a reset proves the host answered; `ENETUNREACH`, a
+timeout and the like are the pass. Three outcomes, one refusal: `Passed` is a `debug` line, `Unknown` (no image,
+a daemon that cannot create networks) is one `warn` and the boot continues, and `Failed` refuses the boot with a
+sentence naming the target — the same shape and place as the preflight's complaints. `role = "hub"` and
+`--backend stub` run neither, and a machine with no daemon at all is a supported machine: 
+`tests/selftest.rs` and `case_network_selftest` both print one `SKIP` line and pass.
+
 **One container per session, limited and on a network of its own** (HS-028, ADR-0036): a
 `docker run -i --rm --init --name s_<id> --network agents_<id> --cap-drop ALL --security-opt
 no-new-privileges --workdir /work --cpus … --memory …m --pids-limit …` with the five mounts and

@@ -16,6 +16,7 @@ use crate::backend::Backends;
 use crate::clock;
 use crate::config::{Config, LoadError, LoadedConfig, Overrides, Role};
 use crate::db::{self, Database, OpenOptions};
+use crate::docker::{Docker, EGRESS_NETWORK};
 use crate::events::{self, StreamRegistry, WriterOptions};
 use crate::http::{self, App, AppState, Guards};
 use crate::logging;
@@ -86,19 +87,64 @@ pub fn run(args: ServeArgs) -> ExitCode {
     // It comes after the data root is created because one check is about that filesystem, and before the
     // database is opened because a machine that cannot run sessions should not migrate one.
     if backend == Backend::Docker && loaded.config.role != Role::Hub {
-        let complaints = crate::preflight::check(&loaded.config);
+        let mut complaints = crate::preflight::check(&loaded.config);
+        if complaints.is_empty() {
+            tracing::debug!(
+                target: "holosmith::serve",
+                docker_host = loaded.config.docker_host.as_deref().unwrap_or(crate::preflight::DEFAULT_DOCKER_HOST),
+                min_free_gb = loaded.config.min_free_gb,
+                "the docker preflight passed"
+            );
+            // Two things that need a daemon which answered the preflight, and neither of which a stub run or a
+            // hub does at all (HS-036, spec item 2).
+            //
+            // The **egress network** is the machine's own, not a session's: the proxies attached to it are what
+            // a container's only route out runs through, so it is created here, once, rather than by each of
+            // them. A failure is one `warn` and the boot continues: a session's own network step already fails
+            // with a message about itself, and refusing the boot over it would take the control UI down with it
+            // — which is the one thing an operator needs to see what happened.
+            let docker = Docker::new(loaded.config.docker_host.clone());
+            match docker.ensure_network(EGRESS_NETWORK, false) {
+                Ok(()) => tracing::debug!(
+                    target: "holosmith::serve",
+                    network = EGRESS_NETWORK,
+                    "the egress network is there"
+                ),
+                Err(error) => tracing::warn!(
+                    target: "holosmith::serve",
+                    network = EGRESS_NETWORK,
+                    %error,
+                    "the egress network could not be created: sessions will have no route out through the                      proxies, and any step that needs it will say so"
+                ),
+            }
+            // The **self-test**: the isolation is enforced by the kernel, so it is measured rather than
+            // asserted. Only a *proven* leak refuses the boot; a probe that could not run is a `warn`, because
+            // a machine that cannot verify is not the same fact as a machine that was measured to leak (and a
+            // machine whose image is not built yet must still serve) — ADR-0044.
+            let outcome = crate::selftest::run(&docker, &loaded.config.agent_image);
+            if let Some(complaint) = outcome.complaint() {
+                complaints.push(complaint);
+            }
+            match &outcome {
+                crate::selftest::Outcome::Passed => tracing::debug!(
+                    target: "holosmith::serve",
+                    "the network self-test passed: an internal network reaches neither the internet nor the host"
+                ),
+                crate::selftest::Outcome::Unknown(sentence) => tracing::warn!(
+                    target: "holosmith::serve",
+                    sentence = %sentence,
+                    "the network self-test could not run, so this machine's isolation is unverified"
+                ),
+                // Already in `complaints`, which prints the sentence and refuses.
+                crate::selftest::Outcome::Failed(_) => {}
+            }
+        }
         if !complaints.is_empty() {
             for complaint in &complaints {
                 eprintln!("holosmith: serve: {complaint}");
             }
             return ExitCode::FAILURE;
         }
-        tracing::debug!(
-            target: "holosmith::serve",
-            docker_host = loaded.config.docker_host.as_deref().unwrap_or(crate::preflight::DEFAULT_DOCKER_HOST),
-            min_free_gb = loaded.config.min_free_gb,
-            "the docker preflight passed"
-        );
     }
     // Held for the process lifetime. ADR-0012's lock is kept (ADR-0013): the event writer is the
     // single writer for events and takes the lock only for its own transaction, so a handler's

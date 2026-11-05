@@ -23,6 +23,7 @@ pub mod provisioner;
 pub mod rpc;
 pub mod runtime;
 pub mod schema;
+pub mod selftest;
 pub mod serve;
 pub mod sessions;
 mod sql;

@@ -54,6 +54,12 @@ pub enum Check {
     Docker,
     Git,
     Disk,
+    /// The machine's network isolation, measured by [`crate::selftest`] rather than by a command here.
+    ///
+    /// It is in this enum because it is reported the same way and refuses the same way, and because HS-045's
+    /// `doctor` has to print it beside the other three. [`check`] never answers it: it needs a container, so it
+    /// lives in its own module and `serve` adds its complaint to this list.
+    Network,
 }
 
 impl Check {
@@ -63,6 +69,7 @@ impl Check {
             Self::Docker => "docker",
             Self::Git => "git",
             Self::Disk => "disk",
+            Self::Network => "network",
         }
     }
 }

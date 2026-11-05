@@ -20,6 +20,14 @@ use std::process::Command;
 /// How long a stopped container has before it is killed: spec item 6's `docker stop -t 10`.
 pub const STOP_SECONDS: &str = "10";
 
+/// The machine's own network for the proxies that are allowed to reach out (spec item 2).
+///
+/// Not internal, and not per session: the egress proxy is attached here *and* to each session network, so that
+/// a container's only route out is through something this build controls. It is created at startup on a Docker
+/// run (HS-036) so the proxies that arrive next have one place to attach to, and its absence is a `warn` rather
+/// than a refusal — a session's own network step already fails with a message about itself.
+pub const EGRESS_NETWORK: &str = "egress";
+
 /// The `docker` command, pointed at the daemon `docker_host` names.
 ///
 /// `None` leaves the choice to the CLI's own default (the rootful socket), which is what `docker_host`
@@ -93,14 +101,70 @@ impl Docker {
     /// Spec item 2: `docker network create --internal agents_<id>`. `--internal` is the whole point — a
     /// network without it has a gateway to the host and a route out — so it is not a flag a caller passes.
     pub fn create_internal_network(&self, name: &str) -> Result<(), DockerError> {
-        // A network that already exists is this session's from an earlier run (the teardown failed, or the
-        // process died). `--internal` on an existing network is not a change, so reuse is right; asking
-        // first keeps the error for the case that matters (a daemon that cannot create networks).
+        self.ensure_network(name, true)
+    }
+
+    /// Create a network, reusing one that is already there.
+    ///
+    /// **An existing network is reused, not recreated**, whatever its flags: it is this session's from an
+    /// earlier run (the teardown failed, or the process died) or, for [`EGRESS_NETWORK`], the machine's own. A
+    /// network that exists with the wrong flags is a machine problem no `create` can fix, and `network create`
+    /// would answer "already exists" — so asking first keeps the error for the case that matters, a daemon
+    /// that cannot create networks at all. `internal` is the whole difference between a session network and
+    /// the egress one, which is why it is a parameter and not two functions.
+    pub fn ensure_network(&self, name: &str, internal: bool) -> Result<(), DockerError> {
         if self.succeeds(&["network", "inspect", name]) {
             return Ok(());
         }
-        self.run(&["network", "create", "--internal", name])
-            .map(|_| ())
+        let mut arguments = vec!["network", "create"];
+        if internal {
+            arguments.push("--internal");
+        }
+        arguments.push(name);
+        self.run(&arguments).map(|_| ())
+    }
+
+    /// The gateway address a network reports, when it has one.
+    ///
+    /// Only the network self-test asks (HS-036), and only to learn *which* address the host is reachable on
+    /// from a normal network. `None` for a network that does not exist, has no IPAM config (an internal one, or
+    /// a driver that does not do IPAM) or reports Docker's `<no value>` for a missing field — three ways of
+    /// saying "there is no address here to probe", and none of them is an error.
+    pub fn gateway(&self, network: &str) -> Option<String> {
+        let gateway = self
+            .inspect(network, "{{(index .IPAM.Config 0).Gateway}}")
+            .ok()?;
+        if gateway.is_empty() || gateway == "<no value>" {
+            return None;
+        }
+        Some(gateway)
+    }
+
+    /// Run `docker <arguments>` and answer its exit code with what it printed, for the one caller that reads
+    /// them rather than the text: the network self-test's probe reports by exit code (HS-036).
+    pub fn attempt(&self, arguments: &[String]) -> Result<crate::selftest::Report, DockerError> {
+        let borrowed: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        let output = self.command().args(&borrowed).output().map_err(|error| {
+            DockerError::new(
+                &borrowed,
+                format!("the docker command could not be run ({error})"),
+            )
+        })?;
+        Ok(crate::selftest::Report {
+            // A process killed by a signal has no code of its own; -1 is "not success and not a number Docker
+            // gave us", which the self-test reads as a probe that did not finish.
+            code: output.status.code().unwrap_or(-1),
+            reached: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+            complaint: String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .rev()
+                .take(3)
+                .collect::<Vec<&str>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<&str>>()
+                .join(" | "),
+        })
     }
 
     /// Remove a network, answering `false` when it was not there (which is not a failure: teardown of

@@ -487,6 +487,30 @@ _Avoid_: CI flag, risk flag
 
 ### Network and credentials
 
+**Session network**:
+The internal Docker network one session's container is on: `agents_<id>`, created with `--internal`, so it has
+no gateway and no route to the host or the internet. Nothing else joins it. Its machine names are
+`docker::create_internal_network` and `container::network_name`.
+_Avoid_: Sandbox network, bridge, net
+
+**Egress network**:
+The machine's own, **not** internal Docker network — `egress` — that the proxies are attached to, so a
+container's only way out is through something this build controls. It is created once at startup on a Docker
+run, and its absence is a `warn` rather than a refusal because a session's own network step already fails with
+a message about itself. Its machine name is `docker::EGRESS_NETWORK`.
+_Avoid_: Proxy network, outbound network, dmz
+
+**Self-test**:
+The startup measurement of a machine's isolation: one probe container on a temporary internal network tries to
+reach the internet and the host, and the verdict is the probe's exit code. `Passed` (nothing reached, a `debug`
+line), `Unknown` (the probe could not run: one `warn`, the boot continues) and `Failed` (something was reached:
+the boot **refuses**, through a `preflight::Complaint`). A *refused* connection counts as reached — a reset
+proves the host answered — which is the distinction the test rests on. Its machine names are `selftest::run`,
+`selftest::Outcome` and `templates/selftest-probe.js`.
+_Avoid_: Health check, smoke test, probe
+
+
+
 **Key proxy**:
 The container that holds provider API keys and swaps them for each session's dummy key.
 _Avoid_: Auth proxy, gateway, sidecar

@@ -343,6 +343,7 @@ serve_cases=(
   case_agent_launch
   case_docker_resume
   case_docker_turn
+  case_network_selftest
 )
 
 # V1 (HS-027): the hardened `.git` mounts, measured on a real daemon. Three writes must fail, three git
@@ -1491,6 +1492,57 @@ case_tool_image() {
         ;;
     esac
   done
+}
+
+# HS-036: this machine's isolation, measured. The probe is `tests/selftest.rs`'s subject too, with a bridge
+# control; what only the *shipped artifact* can add is that a real boot runs it, that the answer is in the log,
+# that the machine's own `egress` network is created (not internal — the proxies attach to it) and that the
+# temporary probe network does not outlive the boot. `HOLOSMITH_LOG=debug` for this boot alone: the pass is a
+# `debug` line, because a startup that says nothing is the shape `tests/serve_cli.rs` pins at eight lines.
+case_network_selftest() {
+  local name=case_network_selftest image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
+  local root="$repo_root/target/verify-selftest-$$"
+  # `docker::EGRESS_NETWORK`, spelled a second time here because a shell cannot read a Rust constant: the name
+  # is the spec's (`egress`), and the case fails loudly if the binary ever picks another.
+  local egress=egress
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    printf 'SKIP %s: no Docker daemon answers (tests/selftest.rs is the same check)\n' "$name"
+    return 0
+  fi
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    printf 'SKIP %s: no image %s (HOLOSMITH_TEST_IMAGE names another)\n' "$name" "$image"
+    return 0
+  fi
+  stop_serve
+  rm -rf "$root"
+  mkdir -p "$root/projects" || fail "$name/mkdir" "could not create $root"
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\nagent_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
+    "$owner" "$root/projects" "$image" >"$WORK/config-selftest.toml"
+  HOLOSMITH_LOG=debug
+  export HOLOSMITH_LOG
+  start_serve "$WORK/config-selftest.toml" "$root/data"
+  unset HOLOSMITH_LOG
+
+  grep -q 'network self-test passed' "$serve_err" ||
+    fail "$name/passed" "the boot did not report a passing self-test: $(cat "$serve_err")"
+  assertions=$((assertions + 1))
+  if grep -q 'self-test could not run' "$serve_err"; then
+    fail "$name/ran" "the self-test did not run: $(cat "$serve_err")"
+  fi
+  assertions=$((assertions + 1))
+
+  # The egress network is the machine's, is not internal, and exists after the boot.
+  docker network inspect "$egress" >/dev/null 2>&1 ||
+    fail "$name/egress" "the boot created no egress network"
+  local internal
+  internal="$(docker network inspect "$egress" --format '{{.Internal}}' 2>/dev/null | tr -d '\r')"
+  check "$name/egress-not-internal" "false" "$internal"
+
+  # The temporary probe network does not outlive the boot, whatever the outcome.
+  if docker network inspect holosmith-selftest >/dev/null 2>&1; then
+    fail "$name/left-behind" "the probe network outlived the boot"
+  fi
+  assertions=$((assertions + 1))
 }
 
 # HS-014: the session screen is a path, not a route. `/sessions/<id>` is not a file the app ships,
