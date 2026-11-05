@@ -155,7 +155,7 @@ The deliberate choice covers "a second image with a different pi cannot be built
             Ok(Ok(version)) => Err(agent::version_sentence(…)),
 ```
 — plus its caching (`*cache = Some(answer.clone())`) is untested. A mutation flipping `==` to `!=`, or deleting the cache write, leaves `cargo test` green, so "the agent image's pi version equals the binary's pinned version; a mismatch fails the session" is argued rather than proved.
-**Smallest fix (no image needed):** extract `fn assert_pinned(image: &str, found: &str) -> Result<String, String>` from that match and unit-test both arms with `"1.4.0"`/`"1.5.0"` against `pins::pi_version()`.
+**Smallest fix (no image needed):** extract `fn assert_pinned(image: &str, found: &str) -> Result<String, String>` from that match and unit-test both arms with two version strings against `pins::pi_version()`.
 
 ### P-4 · P3 · `scripts/verify.sh` `case_agent_launch` — the trust assertion is weaker than line 324 claims
 `HolosmithSpec.md:324` says "a test proves the mechanism by asking the live agent for its command list and finding the project's own resources there". Only `tests/agent.rs` does that, and it skips without a daemon *and* an image (which the brief accepts). The gate asserts the string `project trust approved` from the launch line, which proves what was *written*, not what pi *did*. Consequence: on a hub or a machine without the image the gate prints `ok`, and the strongest trust claim is unverified. Report-only, since the brief lists the skip as deliberate.
@@ -163,7 +163,7 @@ The deliberate choice covers "a second image with a different pi cannot be built
 ---
 
 ## What I could not verify (supervisor to run)
-- `cargo test` — I cannot compile; `tests/agent.rs` and `tests/container.rs` need a daemon and `pi-agent:local` (whose pi equals `pins/pi.txt` = `1.4.0`, per `RESUME.md:378-380`).
+- `cargo test` — I cannot compile; `tests/agent.rs` and `tests/container.rs` need a daemon and `pi-agent:local` (whose pi equals `pins/pi.txt`, per `RESUME.md`'s environment section).
 - `cargo fmt --check` (S-9) and `cargo clippy --all-targets -- -D warnings`.
 - `scripts/verify.sh` — specifically that `case_agent_launch` reaches `idle` inside its 90 s poll on a cold image, and the P-1 repro above as a new `tests/exit.rs` case.
 - Whether `docker rm -f` on an attached `docker run` writes to stderr on this daemon (it decides how often P-1's leftover actually appears — the ordering bug is unconditional, the visible file is not).
@@ -171,6 +171,12 @@ The deliberate choice covers "a second image with a different pi cannot be built
 ## Merge verdict
 **OK with notes** — no P0; one P1 (P-1) that is a small, contained ordering change in `DockerBackend::delete` and should be fixed before this story is called done, because it contradicts the delete contract the same diff states three times; the rest are documentation-accuracy and untested-mechanism items (P2) plus report-only notes (P3).
 ## Resolution
+
+**One redaction in the body above, and nothing else was changed:** the review spelled the pinned pi version
+once, in its "what I could not verify" and "smallest fix" lines. `tests/pin_single_source.rs` forbids a second
+copy of that literal anywhere in the tree — docs and reviews included — so those two places now say
+"`pins/pi.txt`" and "two version strings" instead. The requirement outranks quoting a version number verbatim;
+no finding, quote or verdict was touched.
 
 Thirteen of the fourteen findings were fixed in the same session; one was dismissed with the gate's own
 output. The one that mattered is **P-1**: the review was right that a delete of a *live* session re-created
