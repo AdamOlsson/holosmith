@@ -288,6 +288,20 @@ fn v1_holds_the_hardened_git_mounts_answer_the_way_spec_item_one_says() {
     docker
         .create_internal_network(&container.network)
         .expect("the session network is creatable");
+    // Spec item 2's first bullet, measured rather than assumed: the network a session joins is `internal`.
+    // The self-test proves the *machine* honours it; this proves the flag is on the session's own network.
+    //
+    // Only the flag, because the gateway field lies about reachability: an `--internal` network still reports
+    // an IPAM gateway (measured here — `172.21.0.1`), it simply has no route to it. That is *why* HS-036 probes
+    // instead of reading flags, and an assertion on the gateway would be an assertion on a number Docker makes
+    // up either way.
+    assert_eq!(
+        docker
+            .inspect(&container.network, "{{.Internal}}")
+            .expect("the session network is inspectable"),
+        "true",
+        "a session network must be internal, or it has a route to the host"
+    );
     rm_container(&container.name);
     // The production vector is detached (the container step does not hold a process open until HS-031);
     // V1 needs the container's stdout, so the same vector runs attached.

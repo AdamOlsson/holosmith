@@ -30,6 +30,12 @@ only `connected` would pass a machine whose containers can reach the host, which
 is about. Measured, both ways, in `tests/selftest.rs`: the internal network passes and the bridge finds the
 host, so "passed" means something.
 
+**A flag would not have told us.** An `--internal` network still reports an IPAM gateway in `docker network
+inspect` (measured: `172.21.0.1` on this machine's session networks) — the address exists and nothing routes to
+it. So "the network says internal" is not a measurement of reachability, and neither is any other field: the only
+honest check is to try. `tests/container.rs` therefore asserts the flag on a session's network and leaves
+reachability to the probe.
+
 ## Three outcomes, and only one refuses
 
 | Outcome | When | What the boot does |
