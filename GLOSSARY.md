@@ -498,11 +498,14 @@ _Avoid_: Proxy network, outbound network, dmz
 
 **Self-test**:
 The startup measurement of a machine's isolation: one probe container on a temporary internal network tries to
-reach the internet and the host, and the verdict is the probe's exit code. `Passed` (nothing reached, a `debug`
-line), `Unknown` (the probe could not run: one `warn`, the boot continues) and `Failed` (something was reached:
-the boot **refuses**, through a `preflight::Complaint`). A *refused* connection counts as reached — a reset
-proves the host answered — which is the distinction the test rests on. Its machine names are `selftest::run`,
-`selftest::Outcome` and `templates/selftest-probe.js`.
+reach the internet, the host, and the egress proxy, and the verdict is the probe's exit code. `Passed` (nothing
+reached, a `debug` line), `Unknown` (the probe could not run: one `warn`, the boot continues) and `Failed`
+(something was reached: the boot **refuses**, through a `preflight::Complaint`). A *refused* connection counts as
+reached — a reset proves the host answered — which is the distinction the test rests on. The proxy target is
+what makes **the off case** measured rather than assumed: `egress-proxy` is the proxy's network **alias**, so on a
+network nothing is joined to it does not resolve, and a proxy that answers there is a finding of its own (it means
+a session that asked for no internet access would reach one anyway). Its machine names are `selftest::run`,
+`selftest::Outcome`, `selftest::PROXY_TARGET` and `templates/selftest-probe.js`.
 _Avoid_: Health check, smoke test, probe
 
 **Key proxy**:
@@ -546,7 +549,13 @@ HS-037/039 are what a container's only way out runs through.
 _Avoid_: Agent network, container network, sandbox network, bridge, net
 
 **Internet access**:
-The per-session choice of whether the egress proxy is connected. Off by default.
+The per-session choice of whether the machine's egress proxy is joined to the session's own network
+(`sessions.network`; `network_default` is only the create form's starting state, never a body's default). **Off by
+default.** It is **topology, not configuration**: a session's container carries the same `HTTPS_PROXY` either way,
+and what changes is whether anything answers on that address — so "off" means nothing outside the machine is
+reachable, and the boot measures it rather than trusting the row's value (the self-test's third target). Its
+machine names are `sessions::NewSession::network`, `DockerBackend::apply_proxy` and `selftest::PROXY_TARGET`; the
+two sentences an operator reads are `transcript.ts`'s `networkText` and `networkDetail`.
 _Avoid_: Network flag, online mode
 
 **Control listener**:

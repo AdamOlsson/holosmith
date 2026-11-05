@@ -17,7 +17,9 @@
 # succeeds, the expected-stop flag an eviction records and a resume clears, a token budget on a boot of
 # its own ending the turn that spends it, a worktree made in a real
 # repository and taken back when the next step refuses, the three project refusals a create and a resume
-# answer with their own codes, and a Docker preflight that
+# answer with their own codes, the Internet-access checkbox measured on two real session networks (nothing
+# reachable directly, the proxy's alias resolvable in exactly one of them, and the flag as a network's endpoint
+# count after a resume), and a Docker preflight that
 # refuses to start with one sentence naming the fix, with no CORS header
 # on any answer, and stopping on SIGTERM with exit 0.
 # --no-build skips the two artifact phases; --keep keeps the work dir of a successful run. On
@@ -345,6 +347,7 @@ serve_cases=(
   case_docker_turn
   case_network_selftest
   case_egress_proxy
+  case_internet_toggle
 )
 
 # V1 (HS-027): the hardened `.git` mounts, measured on a real daemon. Three writes must fail, three git
@@ -1635,6 +1638,247 @@ PY
   wait "$proxy_pid" 2>/dev/null || true
 }
 
+# HS-038 (V6): the Internet-access checkbox is **topology**, not configuration. Two real sessions, one per
+# setting, both taken through the production path (a create's network step is what `apply_proxy` joins the
+# machine's egress proxy from), and three measurements on each session's own network.
+#
+# The image has no `curl` (measured), so V6's `curl --noproxy '*'` and "a non-listed host through the proxy" are
+# asked by node — the same `net.connect` the self-test's probe is built on, for the same reason ADR-0044 gives.
+# What the case asserts, per network:
+#
+#   direct  the internet, asked directly. **Unreachable in both cases**: the checkbox opens a proxy, it does not
+#           give the session a route, and a case that only checked the `on` half would pass a build that had
+#           stopped being internal at all.
+#   proxy   the egress proxy's alias. It must not resolve in the `off` case (`EAI_AGAIN` when nothing is
+#           attached — measured) and must answer `403` for a host that is not on the allow-list in the `on` one.
+#
+# Then the two halves that no container can show: `docker inspect`'s environment (identical modulo the session
+# id, which is the acceptance's "the difference is topology, not configuration") and a `kill` + `resume` pair,
+# after which the network's endpoint count is 1 for the off session and 2 for the on one — the assertion a
+# wrong flag cannot survive, and the only proof that a resume keeps the choice.
+case_internet_toggle() {
+  local name=case_internet_toggle image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
+  local root="$repo_root/target/verify-toggle-$$"
+  # Two statements, not one `local`: `local` is a command, so `projects="$root/projects"` on the same line would
+  # expand `$root` before it is set, and `set -u` makes that an error rather than an empty path (case_backup's
+  # lesson).
+  local projects="$root/projects"
+  local data="$root/data"
+  local off_id on_id body label id verdicts env_off env_on count
+  # The probe's verdict words, spelled the way the `case` patterns below need them: a shell `$CONNECTING` would be
+  # an unbound variable, because the node constants live inside the heredoc where the shell cannot see them.
+  local not_listed="HTTP/1.1 403 Forbidden"
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    printf 'SKIP %s: no Docker daemon answers (tests/selftest.rs and tests/container.rs are the same check)\n' "$name"
+    return 0
+  fi
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    printf 'SKIP %s: no image %s (HOLOSMITH_TEST_IMAGE names another)\n' "$name" "$image"
+    return 0
+  fi
+  stop_serve
+  rm -rf "$root"
+  mkdir -p "$projects/holosmith" || fail "$name/mkdir" "could not create $projects/holosmith"
+  git -C "$projects/holosmith" init --quiet . ||
+    fail "$name/git" "git init did not work in $projects/holosmith"
+  git -C "$projects/holosmith" -c user.name=verify -c user.email=verify@example commit --quiet \
+    --allow-empty -m "the first commit" || fail "$name/git" "git commit did not work"
+  # `allow = ["crates.io"]` on purpose: a 403 is only evidence of an allow-list if the list is not empty.
+  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "docker"\nprojects_root = "%s"\nagent_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n\n[egress]\nallow = ["crates.io"]\n' \
+    "$owner" "$projects" "$image" >"$WORK/config-toggle.toml"
+  start_serve "$WORK/config-toggle.toml" "$data"
+
+  # 90 seconds and not `wait_for_idle_id`'s ten: a Docker create runs four steps and ends with pi's ready
+  # handshake, which is what `case_docker_turn` also allows 90 s for. A slow *first* create on a machine that has
+  # to unpack the image is not a failure of this story.
+  wait_idle() {
+    local label="$1" session="$2" body="" _
+    for _ in $(seq 1 900); do
+      fetch "$label" GET "/api/sessions/$session" "Host: 127.0.0.1" ||
+        fail "$label/no_answer" "GET /api/sessions/$session did not answer"
+      body="$(cat "$WORK/responses/$label.body")"
+      case "$body" in
+        *'"status":"starting"'*) sleep 0.1 ;;
+        *) break ;;
+      esac
+    done
+    printf '%s\n' "$body" | grep -qF '"status":"idle"' ||
+      fail "$label/status" "the session did not reach idle: $body"
+    assertions=$((assertions + 1))
+  }
+
+  # The two creates. The only difference between them is the body's `network`, which is the point.
+  for label in off on; do
+    if [ "$label" = off ]; then
+      body='{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high","network":false}'
+    else
+      body='{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high","network":true}'
+    fi
+    fetch_body "${name}_${label}_create" POST /api/sessions "$body" \
+      "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+      "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-toggle-$label" ||
+      fail "${name}_${label}_create/no_answer" "POST /api/sessions did not answer"
+    expect_status "${name}_${label}_create" "$(answer "${name}_${label}_create")" 202
+    body="$(cat "$WORK/responses/${name}_${label}_create.body")"
+    id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+    [ -n "$id" ] || fail "${name}_${label}_create/id" "the response names no id: $body"
+    # The row carries the choice, and that is what the topology is derived from (acceptance bullet 4).
+    printf '%s\n' "$body" | grep -qF "\"network\":$([ "$label" = on ] && echo true || echo false)" ||
+      fail "${name}_${label}_create/network" "the row does not carry the choice it was given: $body"
+    assertions=$((assertions + 1))
+    if [ "$label" = off ]; then off_id="$id"; else on_id="$id"; fi
+    docker_session_id="$id"
+    wait_idle "${name}_${label}_idle" "$id"
+    docker network inspect "agents_$id" >/dev/null 2>&1 ||
+      fail "${name}_${label}_network" "the create left no agents_$id network"
+    assertions=$((assertions + 1))
+  done
+
+  # The probe, one line per question. `node -e` because this image has node and no curl.
+  cat >"$WORK/toggle-probe.js" <<'PROBE'
+const net = require("net");
+const CONNECTING = "connected";
+const REFUSED = "refused";
+const NOT_LISTED = "HTTP/1.1 403 Forbidden";
+// The same two verdicts the self-test counts as *reached* (ADR-0044): a connection, or a reset from something
+// that answered. `ECONNREFUSED` here would be the host's own stack, which is a route.
+const direct = () =>
+  new Promise((resolve) => {
+    const socket = net.connect({ host: "1.1.1.1", port: 443 });
+    socket.setTimeout(3000);
+    socket.on("connect", () => {
+      socket.destroy();
+      resolve(CONNECTING);
+    });
+    socket.on("timeout", () => {
+      socket.destroy();
+      resolve("timed out");
+    });
+    socket.on("error", (error) => resolve(String(error.code || error.message)));
+  });
+const ask = (head) =>
+  new Promise((resolve) => {
+    const socket = net.connect({ host: "egress-proxy", port: 3128 });
+    let answer = "";
+    socket.setTimeout(5000);
+    socket.on("connect", () => socket.write(head));
+    socket.on("data", (chunk) => {
+      answer += chunk;
+    });
+    socket.on("close", () => resolve(answer.split("\r\n")[0] || "closed"));
+    socket.on("timeout", () => {
+      socket.destroy();
+      resolve("timed out");
+    });
+    // No auth header: the username is attribution, not a check (ADR-0045), and a probe that had to invent one
+    // would be testing the wrong thing.
+    socket.on("error", (error) => resolve(String(error.code || error.message)));
+  });
+(async () => {
+  console.log(`direct ${await direct()}`);
+  console.log(`proxy ${await ask("CONNECT example.com:443 HTTP/1.1\r\nHost: example.com\r\n\r\n")}`);
+})();
+PROBE
+
+  for label in off on; do
+    if [ "$label" = off ]; then id="$off_id"; else id="$on_id"; fi
+    verdicts="$(docker run --rm --network "agents_$id" "$image" node -e "$(cat "$WORK/toggle-probe.js")" \
+      2>"$WORK/responses/${name}_${label}_probe.err")" ||
+      fail "${name}_${label}_probe" "the probe container failed: $(cat "$WORK/responses/${name}_${label}_probe.err")"
+    # The pass is a *code*, spelled out rather than "anything that is not one of those two": an unrecognised word
+    # from a changed probe would otherwise pass this check silently, which is the vacuous-assertion trap the gate
+    # has been bitten by twice (HS-020, HS-061).
+    case "$verdicts" in
+      *"direct connected"* | *"direct refused"*)
+        fail "${name}_${label}_direct" "the session reached 1.1.1.1 directly, so its network is not internal: $verdicts"
+        ;;
+      *"direct ENETUNREACH"* | *"direct EHOSTUNREACH"* | *"direct ENETDOWN"* | *"direct timed out"*)
+        assertions=$((assertions + 1))
+        ;;
+      *)
+        fail "${name}_${label}_direct" "the probe printed no direct verdict this case can read: $verdicts"
+        ;;
+    esac
+    if [ "$label" = off ]; then
+      case "$verdicts" in
+        *"proxy EAI_AGAIN"* | *"proxy ENOTFOUND"*)
+          assertions=$((assertions + 1))
+          ;;
+        *)
+          fail "${name}_off_proxy" "a session that asked for no internet resolved or reached the egress proxy: $verdicts"
+          ;;
+      esac
+    else
+      case "$verdicts" in
+        *"proxy $not_listed"*)
+          assertions=$((assertions + 1))
+          ;;
+        *"proxy EAI_AGAIN"* | *"proxy ENOTFOUND"*)
+          printf 'SKIP %s/on: the egress proxy is not on the session network (the boot said why: %s)\n' \
+            "$name" "$(grep -i 'egress' "$serve_err" | tr '\n' ' ')"
+          ;;
+        *)
+          fail "${name}_on_proxy" "a non-listed host through the proxy did not get a 403: $verdicts"
+          ;;
+      esac
+    fi
+  done
+
+  # The environment: the same `HTTPS_PROXY` modulo the session id, in both cases. That is the acceptance's "the
+  # difference is topology, not configuration", read off the containers the daemon is really running.
+  env_off="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "s_$off_id" 2>/dev/null |
+    sed -n 's/^HTTPS_PROXY=//p')"
+  env_on="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "s_$on_id" 2>/dev/null |
+    sed -n 's/^HTTPS_PROXY=//p')"
+  check "${name}_off_env" "http://$off_id@egress-proxy:3128" "$env_off"
+  check "${name}_on_env" "http://$on_id@egress-proxy:3128" "$env_on"
+
+  # A resume keeps the choice: the container is killed (its exit is `unexpected_exit`, which lands the row in
+  # `error` — a resumable state), resumed, and the network's endpoint count is then the flag itself: the session
+  # alone when nothing may be reached, and the session plus the machine's proxy when something may.
+  for label in off on; do
+    if [ "$label" = off ]; then id="$off_id"; want=1; else id="$on_id"; want=2; fi
+    docker kill "s_$id" >/dev/null 2>&1 || fail "${name}_${label}_kill" "could not kill s_$id"
+    body=""
+    for _ in $(seq 1 200); do
+      fetch "${name}_${label}_error" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+        fail "${name}_${label}_error/no_answer" "GET /api/sessions/$id did not answer"
+      body="$(cat "$WORK/responses/${name}_${label}_error.body")"
+      case "$body" in
+        *'"status":"error"'*) break ;;
+      esac
+      sleep 0.1
+    done
+    printf '%s\n' "$body" | grep -q '"status":"error"' ||
+      fail "${name}_${label}_error" "the killed container's exit did not move the row to error: $body"
+    assertions=$((assertions + 1))
+    fetch_body "${name}_${label}_resume" POST "/api/sessions/$id/resume" '' \
+      "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+      "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+      fail "${name}_${label}_resume/no_answer" "POST /api/sessions/$id/resume did not answer"
+    expect_status "${name}_${label}_resume" "$(answer "${name}_${label}_resume")" 202
+    wait_idle "${name}_${label}_resumed" "$id"
+    count=""
+    for _ in $(seq 1 100); do
+      count="$(docker network inspect "agents_$id" --format '{{len .Containers}}' 2>/dev/null | tr -d '\r')"
+      [ "$count" = "$want" ] && break
+      sleep 0.1
+    done
+    check "${name}_${label}_resumed_endpoints" "$want" "$count"
+  done
+
+  # The case leaves the machine as it found it: both sessions gone (their containers, networks and worktrees with
+  # them), and the trap's single-session backstop disarmed because the API did the work.
+  docker_session_id=""
+  remove_session "${name}_off_delete" "$off_id" force
+  remove_session "${name}_on_delete" "$on_id" force
+  if docker network inspect "agents_$off_id" >/dev/null 2>&1 ||
+    docker network inspect "agents_$on_id" >/dev/null 2>&1; then
+    fail "${name}_left_behind" "a deleted session left its network behind"
+  fi
+  assertions=$((assertions + 1))
+}
+
 # HS-014: the session screen is a path, not a route. `/sessions/<id>` is not a file the app ships,
 # so the fallback answers the app shell (ADR-0007) — byte-for-byte the page `case_app_shell` reads,
 # which is what makes a reload of one session's screen work with no router installed.
@@ -2104,14 +2348,21 @@ wait_for_stopped_id() {
   fail "$label/status" "the session never reached stopped: $body"
 }
 
-# remove_session <label> <id>: delete a session and wait for its row to be gone, so a case that made
-# one of its own leaves the machine as it found it.
+# remove_session <label> <id> [force]: delete a session and wait for its row to be gone, so a case
+# that made one of its own leaves the machine as it found it.
+#
+# `force` is HS-019's `?force=true`, and a Docker run needs it: the WIP snapshot the delete asks the backend
+# for before it removes anything is HS-042's, so a Docker session with a worktree answers `409 unsaved_work`
+# until then — the spelling `case_docker_turn` uses, and the reason the stub is where the snapshot's own
+# refusal is exercised.
 remove_session() {
-  local label="$1" id="$2" response
-  fetch "$label" DELETE "/api/sessions/$id" \
+  local label="$1" id="$2" force="${3:-}" response path
+  path="/api/sessions/$id"
+  [ -z "$force" ] || path="$path?force=true"
+  fetch "$label" DELETE "$path" \
     "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
     "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
-    fail "$label/no_answer" "DELETE /api/sessions/$id did not answer"
+    fail "$label/no_answer" "DELETE $path did not answer"
   response="$(answer "$label")"
   expect_status "$label" "$response" 202
   wait_for_gone "${label}_gone" "$id"
