@@ -155,13 +155,6 @@ button:disabled {
   color: #b3261e;
 }
 
-/* What the create form's Internet-access choice does (HS-038): a line under the checkbox, styled like the
-   rest of the form's secondary text so it reads as an explanation rather than a warning. */
-.hint {
-  margin: 0;
-  font-size: 0.875rem;
-  opacity: 0.7;
-}
 
 /* The session screen (HS-014): one transcript, one composer. */
 .session-link {

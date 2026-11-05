@@ -76,10 +76,13 @@ assertions=0
 
 # The only cleanup path: the work dir is removed on success, kept on failure (and with --keep),
 # and a server a failure left running is stopped here rather than outliving the run.
-# The session the running Docker case made, if any: the two cases that start a real container set this, so a
-# `fail` in the middle of one does not leave a live container and network on the machine (HS-031's review —
-# the EXIT trap is the only hook a `fail` leaves, because `fail` exits the script).
+# The session the running Docker case made, if any: the cases that start a real container set this, so a `fail`
+# in the middle of one does not leave a live container and network on the machine (HS-031's review — the EXIT
+# trap is the only hook a `fail` leaves, because `fail` exits the script). A case that makes **two** sessions
+# (HS-038's) sets the second one too: one id cannot describe a pair, and a half-cleaned failure leaves exactly
+# the orphan the trap exists to prevent.
 docker_session_id=""
+docker_second_session_id=""
 
 cleanup() {
   local status=$?
@@ -91,11 +94,18 @@ cleanup() {
     kill "$socket_pid" 2>/dev/null || true
     wait "$socket_pid" 2>/dev/null || true
   fi
-  if [ -n "$docker_session_id" ]; then
-    docker rm --force "s_$docker_session_id" >/dev/null 2>&1 || true
-    docker network rm "agents_$docker_session_id" >/dev/null 2>&1 || true
-    docker_session_id=""
-  fi
+  local id
+  for id in ${docker_session_id:-} ${docker_second_session_id:-}; do
+    docker rm --force "s_$id" >/dev/null 2>&1 || true
+    # The egress proxy is an endpoint on a session network that allowed internet access, and `docker network rm`
+    # refuses a network with one — so a teardown that forgot the detach would leave the network behind with a
+    # `warn`, which is the orphan HS-044 owns. `docker.rs`'s `remove_network` leaves first for the same reason.
+    docker network disconnect --force "agents_$id" hs_egress >/dev/null 2>&1 || true
+    docker network rm "agents_$id" >/dev/null 2>&1 || true
+  done
+  docker_session_id=""
+  docker_second_session_id=""
+  # shellcheck disable=SC2086 # deliberate word splitting: each id is one word, and an empty list is no words.
   if [ "$status" -ne 0 ] || [ "$keep" -eq 1 ]; then
     printf 'work dir kept: %s\n' "$WORK" >&2
     return 0
@@ -1535,6 +1545,14 @@ case_network_selftest() {
   fi
   assertions=$((assertions + 1))
 
+  # HS-038's pair, in the boot's own words: the probe sees the proxy once it is joined — which is what makes the off
+  # case's silence evidence — or the machine had no proxy to join, which the boot also says. A run that says
+  # neither is a pair that was measured by nobody, and a `debug` line is why this case boots with `HOLOSMITH_LOG=debug`.
+  grep -q 'the probe sees the egress proxy once it is joined' "$serve_err" ||
+    grep -q 'the egress proxy is not running on this machine' "$serve_err" ||
+    fail "$name/pair" "the boot neither saw the joined proxy nor said it had none: $(grep -i 'egress' "$serve_err" | tr '\n' ' ')"
+  assertions=$((assertions + 1))
+
   # The egress network is the machine's, is not internal, and exists after the boot.
   docker network inspect "$egress" >/dev/null 2>&1 ||
     fail "$name/egress" "the boot created no egress network"
@@ -1664,7 +1682,7 @@ case_internet_toggle() {
   # lesson).
   local projects="$root/projects"
   local data="$root/data"
-  local off_id on_id body label id verdicts env_off env_on count
+  local off_id on_id body label id verdicts env_off env_on got count want running why pair
   # The probe's verdict words, spelled the way the `case` patterns below need them: a shell `$CONNECTING` would be
   # an unbound variable, because the node constants live inside the heredoc where the shell cannot see them.
   local not_listed="HTTP/1.1 403 Forbidden"
@@ -1688,25 +1706,7 @@ case_internet_toggle() {
     "$owner" "$projects" "$image" >"$WORK/config-toggle.toml"
   start_serve "$WORK/config-toggle.toml" "$data"
 
-  # 90 seconds and not `wait_for_idle_id`'s ten: a Docker create runs four steps and ends with pi's ready
-  # handshake, which is what `case_docker_turn` also allows 90 s for. A slow *first* create on a machine that has
-  # to unpack the image is not a failure of this story.
-  wait_idle() {
-    local label="$1" session="$2" body="" _
-    for _ in $(seq 1 900); do
-      fetch "$label" GET "/api/sessions/$session" "Host: 127.0.0.1" ||
-        fail "$label/no_answer" "GET /api/sessions/$session did not answer"
-      body="$(cat "$WORK/responses/$label.body")"
-      case "$body" in
-        *'"status":"starting"'*) sleep 0.1 ;;
-        *) break ;;
-      esac
-    done
-    printf '%s\n' "$body" | grep -qF '"status":"idle"' ||
-      fail "$label/status" "the session did not reach idle: $body"
-    assertions=$((assertions + 1))
-  }
-
+  # `wait_for_idle_docker`, not `wait_for_idle_id`: a Docker create ends with pi's ready handshake.
   # The two creates. The only difference between them is the body's `network`, which is the point.
   for label in off on; do
     if [ "$label" = off ]; then
@@ -1727,8 +1727,10 @@ case_internet_toggle() {
       fail "${name}_${label}_create/network" "the row does not carry the choice it was given: $body"
     assertions=$((assertions + 1))
     if [ "$label" = off ]; then off_id="$id"; else on_id="$id"; fi
-    docker_session_id="$id"
-    wait_idle "${name}_${label}_idle" "$id"
+    # Both ids, so a `fail` between the creates and the deletes leaves neither container nor network behind.
+    docker_session_id="$off_id"
+    docker_second_session_id="$on_id"
+    wait_for_idle_docker "${name}_${label}_idle" "$id"
     docker network inspect "agents_$id" >/dev/null 2>&1 ||
       fail "${name}_${label}_network" "the create left no agents_$id network"
     assertions=$((assertions + 1))
@@ -1737,11 +1739,9 @@ case_internet_toggle() {
   # The probe, one line per question. `node -e` because this image has node and no curl.
   cat >"$WORK/toggle-probe.js" <<'PROBE'
 const net = require("net");
-const CONNECTING = "connected";
-const REFUSED = "refused";
-const NOT_LISTED = "HTTP/1.1 403 Forbidden";
-// The same two verdicts the self-test counts as *reached* (ADR-0044): a connection, or a reset from something
-// that answered. `ECONNREFUSED` here would be the host's own stack, which is a route.
+// One line per question, and the verdicts are the shell patterns' contract: `connect` resolves `connected` or a
+// code (`ENETUNREACH` on an internal network), and `ask` resolves a status line or a code. The words live here
+// and nowhere else in the probe — a constant the shell cannot read is a comment that looks like a source of truth.
 const direct = () =>
   new Promise((resolve) => {
     const socket = net.connect({ host: "1.1.1.1", port: 443 });
@@ -1813,31 +1813,64 @@ PROBE
         *"proxy $not_listed"*)
           assertions=$((assertions + 1))
           ;;
-        *"proxy EAI_AGAIN"* | *"proxy ENOTFOUND"*)
-          printf 'SKIP %s/on: the egress proxy is not on the session network (the boot said why: %s)\n' \
-            "$name" "$(grep -i 'egress' "$serve_err" | tr '\n' ' ')"
-          ;;
         *)
-          fail "${name}_on_proxy" "a non-listed host through the proxy did not get a 403: $verdicts"
+          # The two causes of "the alias does not answer" are different facts and only one of them is this
+          # story's: a machine whose proxy container is **not running** (HS-037's `warn`, a supported machine)
+          # and a proxy that runs but was never joined to this session's network — which is the checkbox not
+          # working. `EAI_AGAIN` cannot tell them apart; one `docker inspect` can. A SKIP therefore has to name
+          # evidence the boot actually printed, or it would be a green run over the bug the case exists for.
+          running="$(docker inspect hs_egress --format '{{.State.Running}}' 2>/dev/null | tr -d '\r')"
+          if [ "$running" != "true" ]; then
+            why="$(grep -i 'egress proxy' "$serve_err" | tr '\n' ' ')"
+            [ -n "$why" ] ||
+              fail "${name}_on_proxy" "the egress proxy is not running and the boot said nothing about it: $verdicts"
+            printf 'SKIP %s/on: the egress proxy is not running, so the on half cannot be measured (the boot said: %s)\n' \
+              "$name" "$why"
+          else
+            fail "${name}_on_proxy" \
+              "the egress proxy is running and was not on the on session's network, so the checkbox did not change \
+               reachability: $verdicts"
+          fi
           ;;
       esac
     fi
   done
 
-  # The environment: the same `HTTPS_PROXY` modulo the session id, in both cases. That is the acceptance's "the
-  # difference is topology, not configuration", read off the containers the daemon is really running.
+  # The environment: identical in both cases once each session's own id is normalised — the acceptance's "the
+  # difference is topology, not configuration", read off the containers the daemon is really running and over
+  # **every** variable rather than the one the story names, because the next story that adds an env var should not
+  # have to remember this case.
   env_off="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "s_$off_id" 2>/dev/null |
-    sed -n 's/^HTTPS_PROXY=//p')"
+    sed "s/$off_id/SESSION/g" | sort)"
   env_on="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "s_$on_id" 2>/dev/null |
-    sed -n 's/^HTTPS_PROXY=//p')"
-  check "${name}_off_env" "http://$off_id@egress-proxy:3128" "$env_off"
-  check "${name}_on_env" "http://$on_id@egress-proxy:3128" "$env_on"
+    sed "s/$on_id/SESSION/g" | sort)"
+  [ -n "$env_off" ] || fail "${name}_off_env" "the off session's container has no environment to read"
+  if [ "$env_off" != "$env_on" ]; then
+    fail "${name}_env_parity" "the two containers' environments differ, so the difference is configuration rather \
+      than topology: off=[$(printf '%s' "$env_off" | tr '\n' ' ')] on=[$(printf '%s' "$env_on" | tr '\n' ' ')]"
+  fi
+  assertions=$((assertions + 1))
+  # And the one variable the acceptance names, spelled out: a second spelling of the URL in shell on purpose, the
+  # way `case_container_mounts` spells the mount vector again (V1 is measured independently of the binary).
+  for pair in "off:$off_id" "on:$on_id"; do
+    label="${pair%%:*}"
+    id="${pair##*:}"
+    got="$(printf '%s\n' "$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "s_$id" 2>/dev/null)" |
+      sed -n 's/^HTTPS_PROXY=//p')"
+    check "${name}_${label}_proxy_env" "http://$id@egress-proxy:3128" "$got"
+  done
 
   # A resume keeps the choice: the container is killed (its exit is `unexpected_exit`, which lands the row in
-  # `error` — a resumable state), resumed, and the network's endpoint count is then the flag itself: the session
+  # `error` — a resumable state), resumed, and the network's endpoint count is then the choice itself: the session
   # alone when nothing may be reached, and the session plus the machine's proxy when something may.
+  #
+  # The proxy is **detached first**, and that is what makes the count evidence rather than an inheritance: `resume`
+  # re-creates the network idempotently, so a network that survived the stop keeps whatever the create attached to
+  # it — an `on` session would report 2 even with `apply_proxy` deleted from `resume`. Detached and then 2 is a
+  # rejoin; detached and then 1 is a missing one.
   for label in off on; do
     if [ "$label" = off ]; then id="$off_id"; want=1; else id="$on_id"; want=2; fi
+    docker network disconnect --force "agents_$id" hs_egress >/dev/null 2>&1 || true
     docker kill "s_$id" >/dev/null 2>&1 || fail "${name}_${label}_kill" "could not kill s_$id"
     body=""
     for _ in $(seq 1 200); do
@@ -1857,7 +1890,7 @@ PROBE
       "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
       fail "${name}_${label}_resume/no_answer" "POST /api/sessions/$id/resume did not answer"
     expect_status "${name}_${label}_resume" "$(answer "${name}_${label}_resume")" 202
-    wait_idle "${name}_${label}_resumed" "$id"
+    wait_for_idle_docker "${name}_${label}_resumed" "$id"
     count=""
     for _ in $(seq 1 100); do
       count="$(docker network inspect "agents_$id" --format '{{len .Containers}}' 2>/dev/null | tr -d '\r')"
@@ -1868,15 +1901,20 @@ PROBE
   done
 
   # The case leaves the machine as it found it: both sessions gone (their containers, networks and worktrees with
-  # them), and the trap's single-session backstop disarmed because the API did the work.
-  docker_session_id=""
+  # them), and only then is the trap's backstop disarmed — disarming it before the deletes would leave a failed
+  # delete with nothing to clean it up.
   remove_session "${name}_off_delete" "$off_id" force
   remove_session "${name}_on_delete" "$on_id" force
+  docker_session_id=""
+  docker_second_session_id=""
   if docker network inspect "agents_$off_id" >/dev/null 2>&1 ||
     docker network inspect "agents_$on_id" >/dev/null 2>&1; then
     fail "${name}_left_behind" "a deleted session left its network behind"
   fi
   assertions=$((assertions + 1))
+  # Its server is left running: `phase_serve` stops whatever is up after the last case, and that server's data root
+  # is this case's — so the scratch tree goes now, like `case_docker_turn`'s.
+  rm -rf "$root"
 }
 
 # HS-014: the session screen is a path, not a route. `/sessions/<id>` is not a file the app ships,
@@ -2235,6 +2273,28 @@ case_steer_on_an_idle_session() {
 # wait_for_idle <label>: poll `created_id`'s row until it says idle, bounded and counted once.
 wait_for_idle() {
   wait_for_idle_id "$1" "$created_id"
+}
+
+# wait_for_idle_docker <label> <id>: the same question with a Docker create's patience.
+#
+# Ninety seconds and not `wait_for_idle_id`'s ten: a Docker create runs four steps and ends with pi's ready
+# handshake, which is what `case_docker_turn` also allows 90 s for. A slow *first* create on a machine that has to
+# unpack the image is not a failure of the story that asked. Top-level rather than nested inside its one caller,
+# so the name exists on a machine where that case SKIPs at its guard.
+wait_for_idle_docker() {
+  local label="$1" id="$2" body="" _
+  for _ in $(seq 1 900); do
+    fetch "$label" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "$label/no_answer" "GET /api/sessions/$id did not answer"
+    body="$(cat "$WORK/responses/$label.body")"
+    case "$body" in
+      *'"status":"starting"'*) sleep 0.1 ;;
+      *) break ;;
+    esac
+  done
+  printf '%s\n' "$body" | grep -qF '"status":"idle"' ||
+    fail "$label/status" "the session did not reach idle: $body"
+  assertions=$((assertions + 1))
 }
 
 # wait_for_idle_id <label> <id>: the same for any session, which HS-020's eviction case needs because

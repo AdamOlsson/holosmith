@@ -11,8 +11,12 @@
 //!
 //! 1. create a **temporary internal network** ([`NETWORK`], reused if a previous run left it),
 //! 2. run **one container from the image sessions run** on it, with [`PROBE`] as its command,
-//! 3. ask that container to reach the internet and the host, and read its **exit code**,
-//! 4. remove the network whatever happened.
+//! 3. ask that container to reach the internet, the host **and the egress proxy's alias**, and read its **exit
+//!    code** — nothing may answer, which is spec item 2's off case (HS-038),
+//! 4. join the machine's egress proxy to that same network and ask again, about the alias only: it must answer
+//!    now, or the first measurement would have been silence for the wrong reason (an alias that never resolves
+//!    passes a check for a proxy that is not there at all),
+//! 5. remove the network whatever happened.
 //!
 //! **Three outcomes, and only one of them refuses.** [`Outcome::Passed`] is nothing reachable;
 //! [`Outcome::Failed`] is something reachable, and the boot refuses with a sentence naming the target and the
@@ -75,8 +79,9 @@ pub const REACHED: i32 = 9;
 /// How long the probe's `docker run` may take before it is killed and the outcome becomes
 /// [`Outcome::Unknown`].
 ///
-/// The probe bounds itself (three seconds per target, two targets), so this is a bound on the *container*, not
-/// on the test: a daemon that accepts the run and then wedges must not hang a boot before the listener binds —
+/// The probe bounds itself (three seconds per target, and a run asks about at most three or one), so this is a
+/// bound on each *container*, not on the test: a daemon that accepts a run and then wedges must not hang a boot
+/// before the listener binds —
 /// the same hazard `crate::preflight`'s `PING_TIMEOUT` names for its own check. Generous rather than tight,
 /// because a slow machine image unpacking for the first time is not a wedged one.
 pub const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -146,10 +151,19 @@ pub trait Runner {
     fn create_network(&self, name: &str) -> Result<(), String>;
     /// Remove it, whatever happened. Not being there is not a failure.
     fn remove_network(&self, name: &str);
-    /// The addresses a session network must not reach: the internet, and the host when it has one.
+    /// The addresses a session network must not reach: the internet, the egress proxy's alias, and the host
+    /// when the daemon has one.
     fn targets(&self) -> Vec<String>;
     /// Run the probe on `network` and answer what it reported.
     fn probe(&self, network: &str, image: &str, targets: &[String]) -> Result<Report, String>;
+    /// The egress proxy's container name, when this machine has one running. `None` is a machine that runs
+    /// sessions without a proxy (HS-037 warns about it rather than refusing), and it is why the pair below is not
+    /// measured — not a verdict about isolation.
+    fn proxy(&self) -> Option<String>;
+    /// Attach the proxy to `network` under the alias a session's container resolves it by.
+    fn join_proxy(&self, network: &str) -> Result<(), String>;
+    /// Detach it again. Not being attached is not a failure.
+    fn leave_proxy(&self, network: &str);
 }
 
 impl Runner for Docker {
@@ -196,6 +210,24 @@ impl Runner for Docker {
             Err(error) => Err(error.to_string()),
         }
     }
+
+    fn proxy(&self) -> Option<String> {
+        self.running(crate::container::PROXY_NAME)
+            .then(|| crate::container::PROXY_NAME.to_string())
+    }
+
+    fn join_proxy(&self, network: &str) -> Result<(), String> {
+        self.join_network(
+            network,
+            crate::container::PROXY_NAME,
+            crate::container::PROXY_ALIAS,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    fn leave_proxy(&self, network: &str) {
+        self.leave_network(network, crate::container::PROXY_NAME);
+    }
 }
 
 /// Run the self-test with the machine's own Docker and image.
@@ -217,7 +249,13 @@ pub fn run_with(runner: &dyn Runner, image: &str) -> Outcome {
         ));
     }
     let targets = runner.targets();
+    // Spec item 2's **off case**, measured first: on a network nothing is attached to, none of the targets may
+    // answer — the internet, the host, or the egress proxy's own alias.
     let report = runner.probe(NETWORK, image, &targets);
+    // …and then the same network with the proxy on it, before the network goes. This is what makes the silence
+    // above mean something: an alias that never resolves would pass the off case for a proxy that is not there
+    // at all, which is the bug the off case exists to catch (HS-038).
+    pair(runner, image);
     runner.remove_network(NETWORK);
     match report {
         Ok(report) => decide(&report, &targets),
@@ -225,6 +263,57 @@ pub fn run_with(runner: &dyn Runner, image: &str) -> Outcome {
             "the probe container could not be run, so this machine's isolation was not measured ({error}); \
              check that the image `{image}` exists on this machine and that `docker run` works without a tty"
         )),
+    }
+}
+
+/// The other half of the off case: join the machine's egress proxy to the probe's network, ask the probe about
+/// **nothing but the alias**, and leave again.
+///
+/// Not a verdict, and deliberately so. A proxy that will not join, or that is not built on this machine, is
+/// HS-037's `warn` and not a statement about isolation — refusing the boot over it would take the control UI down
+/// for a machine whose sessions otherwise work. What it buys is the *discrimination*: the off case's silence is
+/// only evidence if the same network reports the proxy the moment it is attached, and no other check in the build
+/// puts the two facts side by side at startup.
+///
+/// The join is `join_network`'s (disconnect, then connect with the alias), so a proxy left attached by a previous
+/// run is replaced rather than doubled; the leave is unconditional, and the network is removed right after.
+fn pair(runner: &dyn Runner, image: &str) {
+    let Some(proxy) = runner.proxy() else {
+        tracing::debug!(
+            target: "holosmith::selftest",
+            proxy = crate::container::PROXY_NAME,
+            "the egress proxy is not running on this machine, so the off case's pair — the proxy answering once \
+             it is joined — was not measured"
+        );
+        return;
+    };
+    let one = [PROXY_TARGET.to_string()];
+    let joined = runner
+        .join_proxy(NETWORK)
+        .map_err(|error| format!("the proxy could not be joined to the probe's network ({error})"))
+        .and_then(|()| runner.probe(NETWORK, image, &one));
+    runner.leave_proxy(NETWORK);
+    match joined {
+        Ok(report) if report.code == REACHED => tracing::debug!(
+            target: "holosmith::selftest",
+            proxy = %proxy,
+            "the probe sees the egress proxy once it is joined, which is what makes the off case's silence mean \
+             something"
+        ),
+        Ok(report) => tracing::warn!(
+            target: "holosmith::selftest",
+            proxy = %proxy,
+            reached = %report.reached.trim(),
+            complaint = %report.complaint.trim(),
+            "the egress proxy was joined to the probe's network and nothing answered on the alias, so a session \
+             that asked for internet access would have a word and no route"
+        ),
+        Err(error) => tracing::warn!(
+            target: "holosmith::selftest",
+            %error,
+            "the egress proxy's half of the self-test could not be measured: a session's internet access may be a \
+             word rather than a route"
+        ),
     }
 }
 
@@ -296,29 +385,60 @@ fn leaked(report: &Report) -> bool {
 mod tests {
     use super::*;
 
-    /// A runner that answers from a script: what creating the network does, what the probe reports, and
-    /// whether it was removed.
+    /// A runner that answers from a script: what creating the network does, **what each probe run reports** (a
+    /// queue, because the off case runs one probe and its pair runs a second), whether the proxy was joined, and
+    /// whether the network was removed.
     struct Fake {
         create: Result<(), String>,
-        probe: Result<Report, String>,
+        probes: std::cell::RefCell<std::collections::VecDeque<Result<Report, String>>>,
+        proxy: Option<String>,
+        join: Result<(), String>,
         targets: Vec<String>,
         created: std::cell::RefCell<Vec<String>>,
         removed: std::cell::RefCell<Vec<String>>,
+        joined: std::cell::RefCell<Vec<String>>,
+        left: std::cell::RefCell<Vec<String>>,
+        asked: std::cell::RefCell<Vec<Vec<String>>>,
     }
 
     impl Fake {
         fn passing() -> Self {
             Self {
                 create: Ok(()),
-                probe: Ok(Report {
-                    code: 0,
-                    reached: String::new(),
-                    complaint: String::new(),
-                }),
-                targets: vec![PUBLIC.to_string(), format!("172.17.0.1:{HOST_PORT}")],
+                probes: std::cell::RefCell::new(
+                    [Ok(Report {
+                        code: 0,
+                        reached: String::new(),
+                        complaint: String::new(),
+                    })]
+                    .into_iter()
+                    .collect(),
+                ),
+                proxy: None,
+                join: Ok(()),
+                // The production list, to the letter: the fake is asked the same questions the machine is, or
+                // the assertions about which targets are probed would be about a list nobody builds.
+                targets: vec![
+                    PUBLIC.to_string(),
+                    PROXY_TARGET.to_string(),
+                    format!("172.17.0.1:{HOST_PORT}"),
+                ],
                 created: std::cell::RefCell::new(Vec::new()),
                 removed: std::cell::RefCell::new(Vec::new()),
+                joined: std::cell::RefCell::new(Vec::new()),
+                left: std::cell::RefCell::new(Vec::new()),
+                asked: std::cell::RefCell::new(Vec::new()),
             }
+        }
+
+        /// The same runner, with the machine's proxy running and a second scripted probe answer.
+        fn paired(second: Report) -> Self {
+            let fake = Self {
+                proxy: Some(crate::container::PROXY_NAME.to_string()),
+                ..Self::passing()
+            };
+            fake.probes.borrow_mut().push_back(Ok(second));
+            fake
         }
     }
 
@@ -340,9 +460,27 @@ mod tests {
             &self,
             _network: &str,
             _image: &str,
-            _targets: &[String],
+            targets: &[String],
         ) -> Result<Report, String> {
-            self.probe.clone()
+            self.asked.borrow_mut().push(targets.to_vec());
+            match self.probes.borrow_mut().pop_front() {
+                Some(answer) => answer,
+                // A run that asks more than it scripted is a bug in this test, not a machine fact.
+                None => panic!("the fake was asked for more probe runs than it was given"),
+            }
+        }
+
+        fn proxy(&self) -> Option<String> {
+            self.proxy.clone()
+        }
+
+        fn join_proxy(&self, network: &str) -> Result<(), String> {
+            self.joined.borrow_mut().push(network.to_string());
+            self.join.clone()
+        }
+
+        fn leave_proxy(&self, network: &str) {
+            self.left.borrow_mut().push(network.to_string());
         }
     }
 
@@ -363,14 +501,16 @@ mod tests {
 
     #[test]
     fn something_reachable_refuses_the_boot_with_a_sentence_that_names_it() {
-        let fake = Fake {
-            probe: Ok(Report {
-                code: REACHED,
-                reached: format!("{PUBLIC} connected"),
-                complaint: String::new(),
-            }),
-            ..Fake::passing()
-        };
+        let fake = Fake::passing();
+        *fake
+            .probes
+            .borrow_mut()
+            .front_mut()
+            .expect("the fake was given one scripted probe") = Ok(Report {
+            code: REACHED,
+            reached: format!("{PUBLIC} connected"),
+            complaint: String::new(),
+        });
         let outcome = run_with(&fake, "pi-agent:local");
         let Outcome::Failed(sentence) = &outcome else {
             panic!("a reached target must fail the boot: {outcome:?}");
@@ -413,10 +553,12 @@ mod tests {
                 complaint: String::new(),
             }),
         ] {
-            let fake = Fake {
-                probe: report.clone(),
-                ..Fake::passing()
-            };
+            let fake = Fake::passing();
+            *fake
+                .probes
+                .borrow_mut()
+                .front_mut()
+                .expect("the fake was given one scripted probe") = report.clone();
             let outcome = run_with(&fake, "missing:image");
             let Outcome::Unknown(sentence) = &outcome else {
                 panic!("{report:?} must be unknown, not a verdict: {outcome:?}");
@@ -540,6 +682,75 @@ mod tests {
             ),
             Outcome::Passed
         );
+    }
+
+    /// The pair is what makes the off case evidence rather than a tautology: the *same* network reports the proxy
+    /// once it is joined, so a silence on a network nothing is attached to cannot be the silence of an alias that
+    /// never resolves.
+    #[test]
+    fn the_proxy_is_asked_about_again_on_the_same_network_once_it_is_joined() {
+        let fake = Fake::paired(Report {
+            code: REACHED,
+            reached: format!("{PROXY_TARGET} connected"),
+            complaint: String::new(),
+        });
+        let outcome = run_with(&fake, "pi-agent:local");
+        assert_eq!(outcome, Outcome::Passed);
+        assert_eq!(
+            fake.asked.borrow().len(),
+            2,
+            "the off case and its pair: {:?}",
+            fake.asked.borrow()
+        );
+        assert!(
+            fake.asked.borrow()[0].contains(&PROXY_TARGET.to_string()),
+            "the first run asks about the proxy along with everything else: {:?}",
+            fake.asked.borrow()[0]
+        );
+        assert_eq!(
+            fake.asked.borrow()[1].as_slice(),
+            [PROXY_TARGET.to_string()],
+            "the second asks about the alias alone, so its answer cannot be another target's"
+        );
+        assert_eq!(fake.joined.borrow().as_slice(), [NETWORK]);
+        assert_eq!(
+            fake.left.borrow().as_slice(),
+            [NETWORK],
+            "the proxy must not stay on the probe's network"
+        );
+        assert_eq!(
+            fake.removed.borrow().as_slice(),
+            [NETWORK],
+            "and the network must not outlive the run either"
+        );
+    }
+
+    #[test]
+    fn a_proxy_that_does_not_answer_the_pair_is_not_a_verdict_about_isolation() {
+        // Joined and silent: the machine's proxy is broken, which HS-037 makes a `warn` — it fails a download,
+        // not a session — so the isolation is still `Passed` and nothing is refused. The join and the leave still
+        // happened, or a machine whose proxy is fine would drift into this arm unscathed.
+        let fake = Fake::paired(Report {
+            code: 0,
+            reached: String::new(),
+            complaint: String::new(),
+        });
+        let outcome = run_with(&fake, "pi-agent:local");
+        assert_eq!(outcome, Outcome::Passed);
+        assert!(outcome.complaint().is_none(), "{outcome:?}");
+        assert_eq!(fake.joined.borrow().as_slice(), [NETWORK]);
+        assert_eq!(fake.left.borrow().as_slice(), [NETWORK]);
+    }
+
+    #[test]
+    fn without_a_proxy_the_pair_is_not_measured_and_nothing_is_joined() {
+        // `Fake::passing()` has no proxy running: the second run would be a second silence, which is not evidence,
+        // so it is not made — and a join of a container that is not there would be a `warn` at every boot.
+        let fake = Fake::passing();
+        assert_eq!(run_with(&fake, "pi-agent:local"), Outcome::Passed);
+        assert_eq!(fake.asked.borrow().len(), 1);
+        assert!(fake.joined.borrow().is_empty());
+        assert!(fake.left.borrow().is_empty());
     }
 
     #[test]

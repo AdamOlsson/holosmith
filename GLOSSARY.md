@@ -504,8 +504,11 @@ reached, a `debug` line), `Unknown` (the probe could not run: one `warn`, the bo
 reached — a reset proves the host answered — which is the distinction the test rests on. The proxy target is
 what makes **the off case** measured rather than assumed: `egress-proxy` is the proxy's network **alias**, so on a
 network nothing is joined to it does not resolve, and a proxy that answers there is a finding of its own (it means
-a session that asked for no internet access would reach one anyway). Its machine names are `selftest::run`,
-`selftest::Outcome`, `selftest::PROXY_TARGET` and `templates/selftest-probe.js`.
+a session that asked for no internet access would reach one anyway). The probe runs **twice on that network** —
+once bare, once with the proxy joined — because a silence is only evidence if the alias answers the moment
+something is attached; the second run is a `debug`/`warn` line and never a verdict, since a proxy that will not
+join fails a download rather than a session. Its machine names are `selftest::run`, `selftest::Outcome`,
+`selftest::PROXY_TARGET`, `selftest::pair` and `templates/selftest-probe.js`.
 _Avoid_: Health check, smoke test, probe
 
 **Key proxy**:
@@ -553,9 +556,11 @@ The per-session choice of whether the machine's egress proxy is joined to the se
 (`sessions.network`; `network_default` is only the create form's starting state, never a body's default). **Off by
 default.** It is **topology, not configuration**: a session's container carries the same `HTTPS_PROXY` either way,
 and what changes is whether anything answers on that address — so "off" means nothing outside the machine is
-reachable, and the boot measures it rather than trusting the row's value (the self-test's third target). Its
-machine names are `sessions::NewSession::network`, `DockerBackend::apply_proxy` and `selftest::PROXY_TARGET`; the
-two sentences an operator reads are `transcript.ts`'s `networkText` and `networkDetail`.
+reachable. The **boot** measures the proxy's half of that (a network nothing is joined to reaches nothing, and
+joining the proxy is what changes it) and `case_internet_toggle` measures a **session's** (the row's choice, the two
+networks it produces, and the same choice after a resume). Its machine names are `sessions::NewSession::network`,
+`DockerBackend::apply_proxy` and `selftest::PROXY_TARGET`; the phrase an operator reads is `transcript.ts`'s
+`networkText`.
 _Avoid_: Network flag, online mode
 
 **Control listener**:

@@ -232,17 +232,22 @@ plain socket — `GET` gets `405`, `CONNECT` to port 80 gets `403`, an unlisted 
 one line per answer carries the session id from the proxy username, the host and the byte counts. The allow
 path needs a real allow-listed host, so it is a unit test over a local echo server (`src/egress.rs`) and
 the story's demo; a case that claimed to prove it would be proving nothing, or would need the internet
-(ADR-0045), and the Internet-access checkbox (`case_internet_toggle`, which needs the daemon **and** the image,
-boots the artifact with `--backend docker`, and creates two real sessions that differ only in the body's
-`network`. It then asks each session's own network three questions from a probe container: the internet
-directly, which must be unreachable in **both** cases (the checkbox opens a proxy, not the route), the
-`egress-proxy` alias, which must not resolve in the off case and must answer `403` for a host that is not on
-the allow-list in the on one, and the container's `HTTPS_PROXY`, identical modulo the session id. The image has
-no `curl`, so the questions are node's `net.connect` — the same script shape the self-test's probe uses. The
-last assertion is the one no container shows: the container is killed, the row's `unexpected_exit` lands it in
-`error`, `POST /resume` brings it back, and the network's **endpoint count** is 1 for the off session and 2 for
-the on one, which is a wrong flag's signature; see ADR-0046). A case that must assert one code keeps every
-higher guard check correct, or it asserts another guard's code under its own name.
+(ADR-0045); and the Internet-access checkbox (`case_internet_toggle`, which needs the daemon **and** the image and
+starts the artifact on a `backend = "docker"` **config file** — the backend comes from the file rather than from a
+`--backend` flag, as above — then creates two real sessions that differ only in the body's `network`. Two questions
+are asked from a probe container on each session's own network — the internet directly, which must be unreachable
+in **both** cases (the checkbox opens a proxy, not the route), and the `egress-proxy` alias, which must not resolve
+in the off case and must answer `403` for a host that is not on the allow-list in the on one — and a third is read
+from the two containers with `docker inspect`: every environment variable is identical once each session's own id
+is normalised, which is the acceptance's "topology, not configuration". The image has no `curl`, so the questions
+are node's `net.connect`, the same script shape the self-test's probe uses. The last assertion is the one no
+container shows: the proxy is detached, the container is killed (the row's `unexpected_exit` lands it in `error`),
+`POST /resume` brings it back, and the network's **endpoint count** is 1 for the off session and 2 for the on one —
+detaching first is what makes that a rejoin rather than an inheritance, and a wrong flag cannot survive it; see
+ADR-0046).
+
+One rule for every case above and below: a case that must assert one code keeps every higher guard check correct,
+or it asserts another guard's code under its own name.
 
 The CORS sweep is deliberately **not** in that array: it runs once after every case and checks
 that no answer the run saved carries an `access-control-*` header or `vary: origin`. Being

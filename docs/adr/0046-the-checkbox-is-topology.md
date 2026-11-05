@@ -31,30 +31,54 @@ and the isolation sentence (which names `--iptables=false` and the default bridg
 wrong machine setting. A direct leak still wins when both are reached, because it is the worse finding. `decide`
 gained one branch and `leaked` the predicate behind it.
 
+**And the probe runs twice, on the same network.** A silence on a network nothing is attached to is only evidence
+if the alias answers the moment something is: otherwise a build whose `join_network` never adds the alias — the
+exact bug the off case exists to catch — passes it, because a name that never resolves is indistinguishable from a
+proxy that is not there. So after the off probe the self-test joins the machine's `hs_egress` to the same network
+under the alias and asks again, about the alias alone, and leaves. That half is **not a verdict**: a proxy that
+will not join or is not running is HS-037's `warn` (it fails a download, not a session — refusing the boot over it
+would take the control UI down for a machine whose sessions otherwise work), and it is logged as one `debug` line
+when it works and one `warn` when it does not. What it buys is the discrimination, at boot, that no other check
+makes.
+
+**What it still does not do**, stated rather than implied: the probe runs on the self-test's own temporary network,
+not on a session's, and it reads no row. Item 2's sentence is "a probe **on a session network** without the egress
+proxy must reach nothing except the key proxy", and the session-shaped half of that is
+`case_internet_toggle`'s — two real sessions, their own networks, the row's choice behind each. The boot owns "a
+network nothing is joined to reaches nothing, and joining the proxy is what changes that"; the gate owns "a
+session's row produces that topology".
+
 **Why a name, and not a port that is closed.** A closed port answers `refused`, which ADR-0044 counts as
 *reached* — so an unanswered port is not evidence of an absent proxy, it is evidence of nothing at all. A name
 that does not resolve cannot be answered by anything, whatever is listening behind it, and it is the only fact
 that separates "this session asked for no internet" from "the proxy is missing by accident".
 
-**What is deliberately not in the list yet: the key proxy.** The off case's promise in spec item 2 is that *only
-the key proxy answers*. That container does not exist until HS-039, and a target nothing answers would make the
-sentence about it a claim rather than a measurement. HS-039 adds it to `targets()`, and the off case then reads
-"nothing but the key proxy" instead of "nothing at all".
+**What is deliberately not in the list yet: the key proxy.** Both acceptance bullets that mention it — bullet 1's
+"only the key proxy is reachable" and bullet 5's "nothing but the key proxy answers" — need a container that does
+not exist until HS-039. Today the off case measures *nothing* answering, which is the same measurement with the
+one legitimate answer removed; a target nothing answers would make the sentence about it a claim rather than a
+measurement. HS-039's job is therefore not to add a name to `targets()` (a target must not answer) but a **second
+question**: the alias that is *expected* to answer on a session network. `decide` gets that shape when there is
+something to point it at.
 
 ## The words are the operator's, so they are a rule
 
 The checkbox is not a setting with a direct route behind it — the container carries the same `HTTPS_PROXY` in
-both cases, and only the topology differs (ADR-0045). So `transcript.ts` holds two functions, `networkText`
-(the screen's `internet on` / `internet off`) and `networkDetail` (the line under the checkbox: allow-listed
-hosts through this machine's proxy, or nothing outside reachable), both used by `main.ts` and both tested
-against the alternative. That is the repository's existing rule that a sentence an operator reads gets a test
-(`createFailure`, `budgetNotice`, `stoppedNotice`), and it is the whole of this story's UI work: the promise is
-that the two sentences cannot drift into one, and that neither names an environment variable the operator could
-go and change — because in both cases there is nothing in the environment to change.
+both cases, and only the topology differs (ADR-0045). So the phrase the session screen shows is a function in
+`transcript.ts` (`networkText`, `internet on` / `internet off`) with a test rather than a ternary in `main.ts`, on
+the rule that a sentence an operator reads is a rule here (`createFailure`, `budgetNotice`, `stoppedNotice`).
+
+**The rendered output is byte-identical to what HS-013 shipped**, and that is deliberate: phase 1b says nothing in
+it "may require a UI or API change", and this story's acceptance bullet 4 ("visible in the UI") was already
+satisfied by HS-013's checkbox and HS-013's meta span. The story therefore adds **no element, no listener and no
+style** — only the tested spelling of an existing string. An explanation *under* the checkbox was drafted and cut
+for exactly this reason: it is a new visible element, and it belongs to the story that owns the form, not to a
+phase that forbids UI work. (Nothing was lost by cutting it: the operator already has the screen's own phrase, and
+the sentence about *why* a download fails belongs with the error they will see.)
 
 ## V6 is a container on each network, and the flag is the endpoint count
 
-`case_internet_toggle` boots the artifact with `--backend docker`, creates **two real sessions that differ only
+`case_internet_toggle` boots the artifact on a `backend = "docker"` config, creates **two real sessions that differ only
 in the body's `network`**, and asks each session's own network three questions from a probe container: the
 internet directly (unreachable in **both** cases — a case that checked only the on half would pass a build whose
 networks had stopped being internal), the proxy's alias (must not resolve in the off case, must answer `403` for
@@ -62,10 +86,12 @@ a non-listed host in the on one), and the container's `HTTPS_PROXY` (the same st
 which is the acceptance's "the difference is topology, not configuration", read off the containers the daemon is
 really running).
 
-Then the half no container can show: **a resume keeps the choice**. The container is killed (its exit lands the
-row in `error`, a resumable state), resumed, and the network's endpoint count is the flag itself — **1** for the
-off session, **2** for the on one. That is the assertion a wrong flag cannot survive, and it is the only
-end-to-end proof that `apply_proxy` runs on the resume path rather than only on the create's.
+Then the half no container can show: **a resume keeps the choice**. The proxy is detached from each session's
+network, the container is killed (its exit lands the row in `error`, a resumable state), the session is resumed,
+and the endpoint count is **1** for the off session and **2** for the on one. The detach is what makes the count
+evidence rather than an inheritance: `resume` re-creates the network idempotently, so a network that survived the
+stop keeps whatever the create attached to it and an `on` session would report 2 with `apply_proxy` deleted from
+`resume`. Detached and then 2 is a rejoin; detached and then 1 is a missing one.
 
 The image has no `curl` (measured), so V6's `curl --noproxy '*'` is asked by node — the same `net.connect` the
 self-test's probe is built on, for the reason ADR-0044 gives: one image, and the one sessions already run.

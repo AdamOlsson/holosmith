@@ -557,23 +557,12 @@ export function createFailure(code: string, message: string): string {
 //
 // Spec item 2's checkbox is **topology, not configuration** (ADR-0045, ADR-0046): the container carries the same
 // `HTTPS_PROXY` either way, and what changes is whether this machine's egress proxy is joined to the session's own
-// network. So the phrase is about the choice, not about a setting an operator could go and find — and it is one
-// function because it is written twice (the create form's label and the session screen's meta) and two spellings
-// of one fact is how a screen ends up disagreeing with itself (HS-020's lesson).
+// network. So the phrase is about the choice and not about a setting an operator could go and find — and it is a
+// function with a test rather than a ternary in `main.ts` because that is where this file keeps every sentence a
+// screen shows (`stateText`, `stoppedNotice`, `createFailure`), and because the two spellings of "on" and "off"
+// are exactly the pair a later edit drifts apart.
 export function networkText(network: boolean): string {
   return network ? "internet on" : "internet off";
-}
-
-// The line under the create form's checkbox: what the choice does, in the terms the operator can check afterwards.
-//
-// Two sentences rather than one with a "not", because the meaning is not symmetrical: with the box on, some hosts
-// are reachable *through this machine's proxy* and everything else still is not; with it off, nothing outside is
-// reachable at all. A single "internet access" label would be a promise about the direct route, which neither case
-// gives (HS-037: the proxy is the only route out).
-export function networkDetail(network: boolean): string {
-  return network
-    ? "allow-listed hosts are reachable through this machine's proxy"
-    : "nothing outside this machine is reachable";
 }
 
 // Where the stream is. One spelling, so the list and the screen cannot ask for different paths,

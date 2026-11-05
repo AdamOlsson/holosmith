@@ -168,16 +168,33 @@ fn a_listener_on_the_proxy_alias_is_what_the_off_case_looks_for() {
             .expect("the probe finishes")
     };
 
-    // Nothing is attached: the alias does not resolve, and that is the pass `selftest::run` reports today.
+    // Nothing is attached: the alias does not resolve, and that is the pass `selftest::run` reports today. The
+    // *word* matters as much as the verdict — the gate's case accepts `EAI_AGAIN` or `ENOTFOUND`, so this is where
+    // the pass is pinned to what the probe really prints rather than to "not reached".
     let bare = probe(&docker);
     eprintln!(
-        "off case on {network}: exit {} reached {:?}",
-        bare.code, bare.reached
+        "off case on {network}: exit {} reached {:?} said {:?}",
+        bare.code,
+        bare.reached,
+        bare.complaint.trim()
     );
     assert_eq!(
         bare.code, 0,
         "nothing should answer on a network with no proxy attached, and the probe said {}",
         bare.reached
+    );
+    assert!(
+        !bare.reached.contains(PROXY_TARGET),
+        "a network nothing is attached to must not report the alias: {}",
+        bare.reached
+    );
+    assert!(
+        bare.complaint
+            .lines()
+            .any(|line| line.starts_with(PROXY_TARGET)
+                && (line.ends_with("EAI_AGAIN") || line.ends_with("ENOTFOUND"))),
+        "the probe's own verdict for the alias is a name that does not resolve: {:?}",
+        bare.complaint
     );
 
     // The same network with a listener on the alias: now the probe must find it, or the check cannot fire and the
