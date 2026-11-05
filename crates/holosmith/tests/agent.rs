@@ -26,6 +26,9 @@ use serde_json::json;
 /// id would fight over both (HS-027 measured that).
 const ID: &str = "0a1b2c3d4e5f6a7b";
 const ID_VERSION: &str = "0a1b2c3d4e5f6a7c";
+/// A third id, because a container is `s_<id>` and a network is `agents_<id>`: two tests that shared one id
+/// would fight over both (HS-027's lesson), and these two run in parallel.
+const ID_COMMANDS: &str = "0a1b2c3d4e5f6a7d";
 
 /// A scratch repository, data root and worktree under the workspace's `target/`.
 struct Scratch {
@@ -370,4 +373,97 @@ fn an_image_whose_pi_cannot_answer_fails_the_session_at_the_container_step() {
         );
         backend.delete(&session).await.expect("the teardown works");
     });
+}
+
+/// The turn's four commands, against real pi: each one reaches the agent and gets an answer back (HS-032).
+///
+/// This container has no provider key (HS-039 builds the key proxy) and its network is internal (HS-028), so
+/// `prompt` is *refused* by pi before a stream exists — which is the arm asserted here. What the test is
+/// about is reachability rather than the answer: a command that never got written would fail with a write
+/// error or a timeout, and a refusal is pi's own sentence arriving on the pipe. The streaming arm is
+/// `tests/rpc.rs`'s, over records captured from a real turn.
+#[test]
+fn the_turns_commands_reach_pi_and_a_refusal_is_pis_sentence() {
+    let image = image();
+    if !ready(&image) {
+        println!(
+            "SKIP the_turns_commands_reach_pi_and_a_refusal_is_pis_sentence: no image {image}"
+        );
+        return;
+    }
+    let scratch = Scratch::new("commands");
+    scratch.project(ID_COMMANDS);
+    let settings = scratch.settings(&image);
+    let backend = DockerBackend::new(settings.clone());
+    let session = session(ID_COMMANDS);
+    let container = SessionContainer::of(&settings, &session);
+    remove(&container.name);
+    let runtime = runtime();
+
+    runtime.block_on(async {
+        provision(&backend, &session).await;
+        // One event writer for the prompt, on the scratch root's own database: nothing is asserted about the
+        // log here, only about the answer, and a turn that is refused appends nothing anyway.
+        let database = std::sync::Arc::new(std::sync::Mutex::new(
+            holosmith::db::Database::open(
+                &scratch.path.join("commands.db"),
+                holosmith::db::OpenOptions::default(),
+                1_760_000_000,
+            )
+            .expect("a database opens"),
+        ));
+        let (events, _stream) =
+            holosmith::events::spawn(database, holosmith::events::WriterOptions::default());
+
+        let prompt = backend
+            .start_turn(&session, "say hello", &events)
+            .await
+            .expect_err("a session with no provider key cannot start a turn");
+        let BackendError::Failed { reason } = prompt else {
+            panic!("the prompt failed with something other than a reason: {prompt:?}");
+        };
+        assert!(
+            reason.contains("the prompt was refused"),
+            "the reason does not say the prompt was refused: {reason}"
+        );
+        assert!(
+            reason.contains("API key") || reason.contains("provider"),
+            "the reason does not carry pi's own words: {reason}"
+        );
+
+        // The three ladder commands: an idle agent answers them, and an answer either way is the point — a
+        // command that never reached the pipe would be a write error or a timeout, and both are failures here.
+        answer(backend.clear_queue(&session).await, "clear_queue");
+        answer(backend.abort(&session).await, "abort");
+        answer(backend.steer(&session, "go left").await, "steer");
+
+        // The agent is still the same process and still answering: a refused prompt is not a dead agent.
+        let running = backend
+            .agent(ID_COMMANDS)
+            .expect("the session still has an agent");
+        let reply = running
+            .request(
+                "state-after-1",
+                json!({"id": "state-after-1", "type": "get_state"}),
+                Duration::from_secs(20),
+            )
+            .await
+            .expect("pi answers `get_state` after a refused prompt");
+        assert!(reply.success, "{reply:?}");
+
+        backend.delete(&session).await.expect("the teardown works");
+    });
+}
+
+/// Accept pi's two answers to a command — accepted, or refused in pi's words — and fail on anything that says
+/// the command never reached it.
+fn answer(result: Result<(), BackendError>, operation: &str) {
+    match result {
+        Ok(()) => {}
+        Err(BackendError::Failed { reason }) => assert!(
+            reason.contains("was refused"),
+            "the {operation} failed with something other than pi's refusal: {reason}"
+        ),
+        Err(other) => panic!("the {operation} did not reach pi: {other}"),
+    }
 }

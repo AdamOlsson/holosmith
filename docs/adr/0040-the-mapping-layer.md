@@ -13,8 +13,8 @@ finished message says how it finished, and nothing unknown is ever fatal.
 and at most one frame out, plus the two facts a message needs (which id is being streamed, how many records
 this turn declined). It reads no clock, no database and no agent.
 
-That is what makes the story's last acceptance line worth anything. The fixture is a **real turn** — pi 1.4.0,
-the version `pins/pi.txt` pins, inside `pi-agent:local`, with one prompt — committed verbatim under
+That is what makes the story's last acceptance line worth anything. The fixture is a **real turn** — the pi
+release `pins/pi.txt` pins, inside `pi-agent:local`, with one prompt — committed verbatim under
 `crates/holosmith/tests/fixtures/`. The replay tests hand its records to the same `Mapping` a container drives,
 so they assert what the product does with records nobody wrote by hand, including the ones it must *decline*
 (pi's system prompt, the operator's own user message, `agent_start`/`agent_end`, the compaction and retry

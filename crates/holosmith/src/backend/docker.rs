@@ -1070,6 +1070,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn every_command_gets_an_id_of_its_own() {
+        // pi answers with the record that repeats a command's id, and the waiter is registered by id: two live
+        // commands sharing one would hand each other's replies to the wrong caller. A steer, a `clear_queue` and
+        // an abort can be in flight together, so the id cannot be a constant the way the handshake's is.
+        let backend = backend();
+        let ids: Vec<String> = (0..4).map(|_| backend.command_id("steer")).collect();
+        let unique: std::collections::HashSet<&String> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "{ids:?}");
+        assert!(ids[0].starts_with("steer-"), "{ids:?}");
+        // Across operations too, which is the case that matters: a steer and an abort racing.
+        assert_ne!(backend.command_id("abort"), backend.command_id("abort"));
+    }
+
     #[tokio::test]
     async fn undoing_a_step_that_never_ran_is_not_a_failure() {
         // The provisioner undoes what completed, so with the docker backend only the worktree ever
