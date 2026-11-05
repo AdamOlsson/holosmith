@@ -1378,7 +1378,10 @@ case_tool_output() {
 
   fetch "$name" GET "/api/sessions/$created_id/tool-output/$tool" "Host: 127.0.0.1" ||
     fail "$name/no_answer" "GET the tool-output route did not answer"
-  response="$(answer "$name")"
+  # The header block alone, read out of the saved answer: `expect_header` pipes its argument through `sed
+  # '/^\r$/q'`, which quits at the blank line, so a two-megabyte body in a shell variable would leave the
+  # writer with SIGPIPE — and `set -o pipefail` turns that into the whole run exiting 141 (measured here).
+  response="$(sed '/^\r$/q' "$WORK/responses/$name.http")"
   expect_status "$name" "$response" 200
   expect_header "$name" "$response" content-type "text/plain; charset=utf-8"
   size="$(wc -c <"$WORK/responses/$name.body")"
@@ -2880,7 +2883,11 @@ case_no_cors_header() {
   local file label
   for file in "$WORK"/responses/*.http; do
     label="$(basename "$file" .http)"
-    expect_no_cors "$label" "$(cat "$file")"
+    # The header block alone, read from the file rather than the whole answer: `expect_no_cors` pipes its
+    # argument through `sed '/^\r$/q'`, which quits at the blank line, so a body of any size in a shell
+    # variable leaves the writer with SIGPIPE — and `set -o pipefail` makes that exit the run at 141 instead
+    # of failing an assertion (measured, with HS-033's two-megabyte tool output).
+    expect_no_cors "$label" "$(sed '/^\r$/q' "$file")"
   done
 }
 
