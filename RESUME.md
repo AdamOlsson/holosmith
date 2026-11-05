@@ -5,6 +5,11 @@ procedure and still governs; this file is the state of the world — what exists
 already has, which decisions are settled, and the landmines that cost real time. Read all of it before
 touching anything.
 
+It is a **snapshot, not an archive**: it deliberately carries no per-story history. What each finished
+story changed is in Linear (plan, demo, ship note), `docs/review/PER-<n>.md` (the review and its
+`## Resolution`) and `git log`; what was decided is in `docs/adr/`. Anything here that a session would not
+act on has been cut.
+
 The run is **fully automatic**. The operator is not present. Never ask them a question: decide
 canonically, record the decision in the Linear issue and the commit message, and continue.
 
@@ -52,42 +57,11 @@ proven by a test that runs a container, not by a document. **`HS-031` is the sto
 an agent**: it replaces the detached `sleep infinity` with pi's stdio, and everything after it is RPC
 mapping.
 
-| Story | Linear | Commits | ADR |
-| --- | --- | --- | --- |
-| HS-001 static binary, `version` | PER-33 | `e481ea7`, `d302635` | 0004, 0005 |
-| HS-002 one typed config | PER-34 | `bbb1f0f`, `a45edac` | 0006 |
-| HS-003 `serve`, embedded app, `/api/health` | PER-35 | `50c20ee`, `e71da58`, `cc9aadb` | 0007, 0008 |
-| HS-004 SQLite + forward-only migrations | PER-36 | `a4774b9`, `bd3b73e`, `ae92a7d` | 0009 |
-| HS-005 browser-facing guards | PER-37 | `6c4f02c`, `6994c0f` | 0010 |
-| HS-006 `scripts/verify.sh` | PER-38 | `2af15d4`, `108a6ee` | — (0003 governs) |
-| HS-007 session row + repository, schema 2 | PER-39 | `ad3ffc0`, `fad974d` | 0011 |
-| HS-008 `POST /api/sessions` | PER-40 | `c5891e4`, `858d295` | 0012 |
-| HS-009 event log + single writer, schema 3 | PER-41 | `5cae107`, `dae1fd9` | 0013 |
-| HS-010 SSE stream, `Last-Event-ID` | PER-42 | `3b03c5c`, `07f318d` | 0014 |
-| HS-011 stub backend + provisioner steps | PER-43 | `9071390`, `b5022fc` | 0015 |
-| HS-012 one enforced state machine | PER-44 | `9424677` | 0016 |
-| HS-013 sessions list + new-session form | PER-45 | `47471c4` | 0017 |
-| HS-014 session screen, live transcript | PER-46 | `82c8c35` | 0018 |
-| HS-015 prompt and the turn lifecycle | PER-47 | `d4077df` | 0019 |
-| HS-016 abort with the full ladder | PER-48 | `d034237`, `3d2ecba` | 0020 |
-| HS-017 steer a running turn | PER-49 | `0099ca3`, `8ff1d77` | 0021 |
-| HS-018 stopped state and resume | PER-50 | `dce53c4`, `ff9d907` | 0022 |
-| HS-019 delete flow | PER-51 | `3d5c415`, `7c4ea02`, `cd85572`, `db95a3f` | 0023 |
-| HS-020 cap and eviction | PER-52 | `a3c6825`, `4f37211`, `f67eb6f` | 0024 |
-| HS-021 idle stop | PER-53 | `5da2ae2` | 0025 |
-| HS-022 turn timeout | PER-54 | `e767757` | 0026 (amends 0020) |
-| HS-023 token budget | PER-55 | `2e902c2`, `fbc0659` | 0027 |
-| HS-024 Docker preflight | PER-56 | `f241ced`, `0b7d50e` | 0028 |
-| HS-025 worktree provisioning | PER-57 | `7e36bde`, `1fe7f6e`, `ce4dc82` | 0029 |
-| HS-026 worktree refusal rules | PER-58 | `18e4695`, `c233ab7` | 0030 |
-| HS-059 event coalescing | PER-91 | `06f506b`, `65f7107`, `5207a97` | 0031 |
-| HS-060 message snapshots and compaction | PER-92 | `5c0f960`, `e2a24b6`, `f0ecf8c`, `901b4ef`, `d1cb620` | 0032 |
-| HS-061 history truncation and pagination | PER-93 | `f8c3126`, `315b963`, `0a15876` | 0033 |
-| HS-065 daily project backup | PER-97 | `ea313e4`, `b4d7338` | 0034 |
-| HS-027 hardened `.git` mounts and V1 | PER-59 | `3025360`, `b009320` | 0035 |
-| HS-028 container run with limits | PER-60 | `5aae311`, `b009320` | 0036 |
-| HS-029 name conflicts, `stop`, `resume`, start lock | PER-61 | `e826539` | 0037 |
-| HS-030 exit classification | PER-62 | `9b79f75`, `a360fcd`, `b3ce038` | 0038 |
+Every story from `HS-001` to `HS-030` is Done, plus `HS-059`–`HS-061` and `HS-065` — 34 of 80. The
+durable record of each is **Linear** (the plan comment, the verbatim demo output, the ship note), the
+review file (`docs/review/PER-<n>.md`, the review verbatim plus its `## Resolution` table) and **`git log`**
+(a commit names its issue; the last one ends `Closes PER-<n>`). Decisions are ADRs `0001` … `0038`, indexed
+one line each in `docs/stories/README.md`. Nothing about them belongs in this file.
 
 **Next issue: `PER-63` (HS-031 — real pi launch, ready handshake and project trust)** — size **L**, and
 the story that turns the container into an agent: attached stdio instead of the detached `sleep infinity`,
@@ -128,18 +102,12 @@ anything already `In Progress` first → skip an issue whose `Blocked by` storie
    `running → idle` and the ladder's `running → stopped`. `turn_timeout_min = 0` builds no timer at all.
    It is the shape HS-023's budget copies: one `fired`, a spawned climb, and a settle that records the
    reason too when it crossed the line between two polls.
-3. **The web page has now been rendered, including the paths a frame changes.** Playwright's Chromium
-   is inside the sandbox (see §2), and HS-016 … HS-018 drove the sessions list, the create form, the
-   session screen, the composer's four actions, the transcript's blocks and boundaries, and the abort /
-   steer / resume round trips; HS-019 drove the delete's 202 → 404 and the closed stream; HS-020 drove
-   the cap's eviction **both ways** — the row as drawn from the list, and a row turning `stopped` under
-   the operator from a `session.status` frame with no reload (which is where that story's one blocker
-   lived); HS-021 drove the sweeper's frame path the same way (a row drawn `idle`, then turned
-   `stopped · idle_stop` under the operator with no reload). This is still **not** a substitute for a
-   gate — nothing in `scripts/` may require a browser —
-   but "unverified from source" is no longer the honest answer for a screen that has been looked at.
-   HS-060 drove the session screen again after compaction (one block, the whole text, the whole thinking,
-   no duplication — the snapshot's `replaceChildren` path). What has *not* been looked at: the hub
+3. **The web page has been rendered, including the paths a frame changes.** Playwright's Chromium is
+   inside the sandbox (§2): the sessions list and create form, the session screen, the composer's four
+   actions, the transcript's blocks and boundaries, and the round trips for abort, steer, resume, delete,
+   eviction, idle stop, compaction and history paging have all been driven. This is **not** a substitute
+   for a gate — nothing in `scripts/` may require a browser — but "unverified from source" is not the
+   honest answer for a screen that has been looked at. What has **not** been looked at: the hub
    (HS-057+), the changes sheet, and anything phase 2 adds beyond the transcript.
 
 4. **A quiet session stops costing money, on a timer nobody asks for.** `sweeper.rs` reads every `idle`
@@ -168,12 +136,13 @@ anything already `In Progress` first → skip an issue whose `Blocked by` storie
    row. **A step that only adopted is not undone** when a later step fails (`Provisioned::undoable`):
    those commits are the agent's, and deleting them would be data loss dressed as cleanliness.
 
-7. **The step after the worktree is still the one that refuses**, so a Docker-backed create ends `error`
-   with `the network step: … (HS-027)` and the provisioner takes the worktree back. That is why
-   `case_worktree` asserts the worktree is *gone*, and why the story's "commit in it, see `ahead`
-   increment" half is only shown by `tests/worktree.rs` (ADR-0029 records this). The `Session` value a
-   later step is handed is the **create's**, so `session.worktree` is still `''` even after the row has
-   the path — HS-027's mounts must derive it (`DockerBackend::worktree`) rather than read it.
+7. **The step after the container is the one that refuses** (the `pi` step, fact 16), so a Docker-backed
+   create ends `error` there and the provisioner takes the container, the network and the worktree back —
+   which is why `case_worktree` asserts the worktree is *gone* and why ADR-0029 records the story's
+   "commit in it, see `ahead` increment" half as shown only by `tests/worktree.rs`. **The `Session` value a
+   later step is handed is the create's**, so `session.worktree` is still `''` even after the row has the
+   path: the mounts derive it (`DockerBackend::worktree`) rather than read it, and HS-031's agent step must
+   do the same.
 
 8. **A project the machine must not mount is refused by the create, with its own 422.**
    `src/worktree.rs` holds `refuse(repository) -> Result<(), Refusal>` (and `Refusal`, `repository_of`,
@@ -756,7 +725,7 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
 
 ---
 
-## 5. The per-issue cycle (what actually worked, twenty-eight times)
+## 5. The per-issue cycle (what actually worked)
 
 Everything is **sequential: one writer at a time**, never two children editing files.
 
@@ -803,7 +772,7 @@ Everything is **sequential: one writer at a time**, never two children editing f
    It is a cold-start snapshot. The operator asked for it once at the end of a session; refreshing it
    after each story is cheap insurance if the session dies.
 
-Commit messages are prose about *why*, not a restatement of the diff. Look at the last twenty-two for tone.
+Commit messages are prose about *why*, not a restatement of the diff. Look at the last few for tone.
 
 Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/review/` + `git log`):
 
@@ -1039,7 +1008,7 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 - **`RESUME.md` is the one place this file's own claims can rot.** It contains counts, SHAs and "next
   issue" statements; anything that changes them is a reason to edit it in the same commit.
 
-### Landmines this session added (HS-023, HS-024)
+### Landmines: startup checks, refusals and the writer's tick (HS-023, HS-024)
 
 - **A startup check must run before the thing it protects.** HS-024's first draft put the preflight *after*
   `Database::open`, so a refused Docker start had already created and migrated `app.db` while the comment and
@@ -1062,10 +1031,10 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   cannot catch it, so the runner records the reason on the ending it wrote (HS-022's settle-after-the-deadline
   shape) and looks once more one writer tick later — because a tally still in the writer's queue is not a
   tally of nothing.
-- **`awk` is still absent** and a `command -v awk` guard caught me using it in a shell one-liner. Use
-  `git`/`grep`/`sed`/`cut`/`while read`.
+- **`awk` is absent** (§2) — use `git`/`grep`/`sed`/`cut`/`while read`, and check with `command -v` before
+  writing a one-liner from muscle memory.
 
-### Landmines HS-025 added
+### Landmines: worktrees (HS-025)
 
 - **`git worktree add` resolves a *relative* path against the repository**, not the caller's directory
   (measured, git 2.43): `git -C repo worktree add ../x` lands inside the repository. Every path in
@@ -1094,7 +1063,7 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   writes shims and nothing else in it forks (8 consecutive runs clean). If another test binary grows the
   same pattern, copy that lock rather than the shim dance.
 
-### Landmines HS-027, HS-028 and HS-029 added (Docker is real now)
+### Landmines: Docker — mounts, containers, starts (HS-027 – HS-029)
 
 - **A path the daemon cannot see is not a mount, and `-v` does not say so.** Docker resolves a bind mount's
   source in the **host's** mount namespace. This sandbox's `/` and `/tmp` are tmpfs, so `docker run -v
@@ -1187,7 +1156,7 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 
 ---
 
-### Landmines HS-026 and HS-059 added
+### Landmines: project refusals and coalescing (HS-026, HS-059)
 
 - **The gate's cap is one live session, so a case that creates one can evict the run's shared session.**
   `case_event_coalescing` was first placed after `case_prompt_turn`; its create evicted `created_id`
@@ -1224,7 +1193,7 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   `docs/review/PER-91.md`, its Linear comment and PER-93's own. Read the issue's title before writing
   `Closes <IDENT>`.
 
-### Landmines HS-060 added
+### Landmines: compaction (HS-060)
 
 - **Coalescing makes a row count a race, so a test must wait for the row it means.** A message of three
   text deltas and one thinking delta becomes *two* rows when the writer sees one batch and four when it
@@ -1258,7 +1227,7 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   sessions, never inside a transaction. An `await` inside the fold would let a shutdown roll a pass back
   halfway through its deletes and snapshot.
 
-### Landmines HS-061 and HS-065 added
+### Landmines: history windows and backup (HS-061, HS-065)
 
 - **A window makes the "turn" label a lie unless the frame says what it skipped.** The page numbers a
   turn from the `turn.start` frames it has seen, so a replay starting at the 50th message would call its
@@ -1285,11 +1254,10 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   cut — it could not fail for either bug it named. The strays had to sit *between* the window's messages.
   This is the review's finding and the story's best lesson: **mutate the behaviour and watch the test go
   red** before believing a green one.
-- **A scripted append to `docs/stories/README.md` went wrong for the second session running.** HS-022's
-  duplicated a bullet onto one line; this session's put the ADR-0033 bullet at the *end of the file*,
-  after the "Importing into Linear" section, so the index showed 32 bullets under a count of
-  thirty-three. The lesson: after any scripted doc edit, `grep -c '^- \[ADR-'` the file and read the
-  changed lines — `cargo`/`npm` will never catch it.
+- **A scripted doc edit has now gone wrong three times** (a bullet duplicated onto one line; an ADR bullet
+  appended after the "Importing into Linear" section; the same page's count drifting from its bullet list).
+  After any scripted edit of a Markdown file, `grep -c '^- \[ADR-'` it and read the changed lines — `cargo`
+  and `npm` never will.
 - **A `local a=… b="$a"` is unbound under `set -u`.** `local` is a command: `$a` is expanded before it
   runs. `case_backup` failed the gate with `projects: unbound variable` for exactly that. Two statements.
 - **A prune that only runs where a bundle is written stops working for ever after one failure.** HS-065's
@@ -1306,7 +1274,7 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   recovery point is the one thing that must not lie. The same shape is worth copying wherever a file must
   never be half-present.
 
-### Landmines HS-030 added
+### Landmines: the expected-stop flag and the exit classifier (HS-030)
 
 - **SQLite's `RETURNING` on an `UPDATE` answers the row *after* the write.** `UPDATE … SET expected_stop = 0
   … RETURNING expected_stop` therefore reports `0` for a flag that was `1`, so "take the flag" cannot be
@@ -1337,62 +1305,22 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 
 ## 7. Decisions taken on the operator's behalf (do not silently undo)
 
-| Decision | Why | Where recorded |
-| --- | --- | --- |
-| Default branch stays `master` | the repo's own default; renaming would be an invented change | commit history, every run note |
-| Ship locally, never fake a push | no credentials exist (`Permission denied (publickey)`, re-tested); reporting the blocker is the honest path | every issue's run note |
-| Rust + root Cargo workspace, one binary crate | stories assume Rust | ADR-0004 |
-| Static non-PIE musl on both arches, proven with bwrap + qemu, container runs deferred to HS-046 | no Docker daemon; ADR-0003 says a check belongs to the story where changing the design is still cheap | ADR-0005 |
-| Config: one typed value, `KeySpec` single table, three-pass validation, `# <key> unset` | "reports every problem at once" is impossible with a single `toml` parse | ADR-0006 |
-| axum + the `Routes`/`App` seam, placeholder+marker for the web app, shutdown deadline with streams cut | measured: `axum::serve` rejects a tower-wrapped service; an endless stream blocked shutdown 29 s | ADR-0007 |
-| One JSON error envelope | the spec names codes, never bodies | ADR-0008 |
-| SQLite: pragmas read back before any transaction, one transaction per start, SQLite's own write lock, `_contract_` naming, older-binary warns | measured: WAL inside a transaction is silently refused; only prepare-time errors carry SQL text | ADR-0009 |
-| Guards are one layer inside `App::new`; CORS stripped, not just avoided; `GET` mutability prevented by the route vocabulary | "no CORS header, ever" cannot be a review checklist | ADR-0010 |
-| Session id is 16 lowercase hex from `randomblob(8)`, generated by the repository before the insert | the id is pasted into a branch, a container name and two paths; hex is safe in all four and needs no crate | ADR-0011 |
-| `status` has no `CHECK`; the six values are a Rust enum | a corrupt row should be a read-time error, and HS-012 adds transitions without rewriting a constraint SQLite cannot drop | ADR-0011 |
-| `Arc<std::sync::Mutex<Database>>` in `AppState` as an explicit stopgap | `rusqlite::Connection` is `Send` but not `Sync`; ADR-0009 deferred the sharing decision | ADR-0012 |
-| Validation is **shape, not vocabulary** (no model/thinking list) | the spec enumerates neither; inventing a list is a third vocabulary, and HS-031 confirms pi's real values | ADR-0012 |
-| The cap refuses with 409 rather than evicting | nothing is evictable until HS-019 can stop and HS-020 can evict | ADR-0012 |
-| The mutex stays and the writer task is added on top | ADR-0012's "HS-009 replaces it" conflated a lock with a task | ADR-0013 |
-| The SSE heartbeat is axum's `KeepAlive`; `futures-core` is a direct dependency | writing our own comment line would double the heartbeat | ADR-0014 |
-| One backend trait with **one method per provisioning step** plus `undo`; an enum `Backends`, not `dyn` | the story's progress reporting *is* step granularity; `async fn` traits are not object-safe | ADR-0015 |
-| The stub's per-step delay and the turn's pace are one constructor argument (200 ms under `serve`) | a stub's pacing is not a machine setting | ADR-0015 |
-| `backend` **is** a config key (default `docker`), with `--backend` overriding it | the story names both, and ADR-0006 says an override applies to the loaded value | ADR-0015 |
-| The transition table is data keyed by `(from, trigger)`; a caller never names a target | a story cannot invent an illegal state, and the write and its event cannot diverge | ADR-0016 |
-| "Impossible outside it" is a source walk over `src/**`, not a `pub(crate)` write | the repository's tests live outside the crate and are HS-007's coverage of the write | ADR-0016 |
-| The recovery row admits the three **live** states, not `any` | the spec's cell is "server crash", not a state | ADR-0016 |
-| `GET /api/sessions` answers `{"sessions":[…],"network_default":…}`; one `EventSource` per visible live session; the page holds only the DOM | one round trip for the form's default; the cap bounds open streams | ADR-0017 |
-| The transcript's five event kinds are pinned before their producer; a block is keyed by message id; a delta is one appended text node and a snapshot the only replacement | HS-015 (and HS-032) must emit one shape, not choose their own; re-reading accumulated text per delta is O(n²) per turn | ADR-0018 |
-| The renderer's rules live in `web/src/transcript.ts`, tested with node's own runner inside `build-web.sh` | no browser here and no producer at the time; node strips types natively, so it costs no dependency | ADR-0018 |
-| The backend emits a turn's frames; the server owns every state change; the prompt's transition is the handler's | the 202 must promise `running`, and a backend must not be able to move a row | ADR-0019 |
-| Refusals are `409 session_<state>`, the state's own word — not an umbrella code | the spec names two, HS-017 names a third, and a derived family has no second vocabulary | ADR-0019 |
-| `message.end`, `tool.start`, `tool.end` payloads are pinned now; `output_ref` and usage persistence wait | HS-033/HS-034 own their full treatment, and the screen renders them minimally meanwhile | ADR-0019 |
-| Story docs in `docs/stories/` are not edited — they are the source the Linear issues were imported from | editing them drifts from Linear; the ADR carries the contract instead | PER-34 plan comment |
-| S/M stories are implemented in-session; M/L with new surface goes to a worker child with a written brief | the orchestrator already holds the plan for small ones; a fresh context is better for a large slice | §5, and every Linear note since HS-011 |
-| A turn's end is typed (`TurnEnd`), and cancellation is the backend's — no server token, no `select!` (the `select!` half is amended by ADR-0026: one exists, but it cancels nothing and the ladder is spawned) | the agent process is what must stop, and a token would let the server believe it had stopped a turn still running | ADR-0020 |
-| Abort climbs two rungs, the row moves before the container is killed, and the ladder's reason is a parameter | the other order leaves a row saying `idle` over a dead container; HS-022 passes `turn_timeout` and HS-023 `budget_exceeded` | ADR-0020 |
-| A steer is `turn.steer` with `{"text"}` and **no** message id; the agent is asked before the record is written | a steer is one frame that nothing continues, so an id would have no second use; the record must claim only what was delivered | ADR-0021 |
-| No stop endpoint; resume is the only way back, the cap is checked before its transition, and `SessionBackend::resume` stays uncalled | the spec has no stop endpoint, and the policies that stop a session are HS-020/021/044 | ADR-0022 |
-| The delete's snapshot is the request's and the removal a task's; the turn is ended by `end_turn` (no resume); the event log goes with the row, so the writer drops an event whose session has gone; idempotency is keyed to the row's state; `force` is the literal `force=true` | only a synchronous snapshot can answer 409 and leave the row intact, and a log nothing can read is dead weight | ADR-0023 |
-| The create evicts the least recently active `idle` session outside its own lock scope; only `idle` is a candidate; the row moves before the container and the `stop` is **spawned**; a create with nothing idle answers `cap_reached` with its own sentence while the resume keeps ADR-0022's refusal | an eviction is a state change, and a state change takes the lock; an answer must not wait for container work (spec item 7); the two requests have different next steps | ADR-0024 |
-| The idle stop is a sweeper task on a **fixed five-second tick** (a constant, not a config key), its candidates are every `idle` row past `idle_stop_min` from one repository read, each stop is one `apply` plus one spawned best-effort `stop`, and `idle_stop_min = 0` spawns nothing | pacing is not a machine setting (ADR-0015) and the spec's config list is exhaustive (ADR-0006); a policy over rows needs no lock the create holds | ADR-0025 |
-| The turn timeout is the **turn runner's own deadline**, it hands the ladder a task of its own rather than a `select!` branch, and both endings record `turn_timeout` | the row keeps no per-turn timestamp (`last_active_at` moves on a steer, so a watcher would let a steered turn run for ever), and a dropped climb leaves a session stopped with nobody to resume it | ADR-0026, amending ADR-0020 |
-| The **tally is the event writer's** (inside the seq transaction, so the events repository parses exactly one kind's payload — three since ADR-0032) and the **ceiling is the runner's** (a 100 ms poll, `>=`, first policy to fire owns the reason, a settle over the ceiling records the reason instead) | the backend emits `message.end` and the runner never sees the frame; a subscriber would add lag and a second parser; a policy that must record a reason owns the ending | ADR-0027 |
-| The **Docker preflight is a startup refusal** with `Complaint` values reported all at once, `hub` and `stub` exempt, and no new dependency (`df`, `git --version`, a hand-written `_ping`) | the story says "fail at startup instead of mid-turn", item 10 §5 makes the same check `ExecStartPre`, and `unsafe` is denied so `statvfs` was not reachable | ADR-0028 |
-| The **worktree's five host commands live in one `src/worktree.rs` value**, the backend runs them on `spawn_blocking`, and the **provisioner** writes the two columns the step reports | item 1 names them as host commands that four later stories read, and ADR-0019 forbids a backend writing a row | ADR-0029 |
-| A worktree step that **adopted** a worktree is **not undone** when a later step fails; a delete still removes it | those commits are the agent's work, and deleting them to tidy up after a step that made nothing is data loss; a delete's session is going away and was snapshotted | ADR-0029 |
-| The **project's refusals are the create's and the resume's 422** (`git_not_directory`, `submodules_present`, `worktree_config_enabled`), read by `worktree::refuse` through `Backends::refuse_project` on `spawn_blocking`, raised after the key and before the cap, with the stub answering "no repository" | spec item 1 says "refused with 422 at session creation"; the provisioner has no request to answer; a retry must still answer its row and a refused create must not evict | ADR-0030 |
-| **Coalescing is the writer's**, a pure `coalesce(batch)` between `collect` and `commit`, merging only consecutive deltas of one session, message id and delta kind, serialising once per run | spec item 15 names the 25 ms commit; ADR-0013 makes the writer the one place a seq is assigned; a per-delta re-serialise is ADR-0018's quadratic mistake | ADR-0031 |
-| **`ahead` is a function, not a column and not an endpoint**, and the story's demo is recorded as half-showable | no column exists, HS-061 owns `GET /changes`, a per-row git call in the list endpoint is a second data path; the step after the worktree refuses, so a live worktree cannot be shown from the artifact | ADR-0029 |
-| **History truncation is the stream's read step and the window is a key**: with no `Last-Event-ID` a replay starts at the **lowest** seq of the `history_window`-th most recent message (a backwards scan over the message-bearing kinds), announced by a `history.truncated` frame carrying `{before_seq, turns_before}` and **no SSE `id`**; a page is `seq < before ORDER BY seq DESC LIMIT n`, `before` is required with `422 bad_query`, and the page shows a button, not infinite scroll | a block must be whole, so the cut is the message's first row; a reconnecting client already has everything below its own seq; `turns_before` is the one number a client cannot compute, because the frames that would say it are the ones it was not sent; seq is strictly increasing, so a page is stable by construction | ADR-0033 |
-| **The project backup is one verified bundle per project per day, taken by the create**: `<data>/backups/<project>-<YYYY-MM-DD>.bundle` (UTC, `--all`), written aside → `git bundle verify` → renamed, the last `KEEP = 7` kept, awaited after the row is inserted and before the provisioner runs, and **every failure is one `warn` that does not block the session**; the repository is `<projects_root>/<project>` whatever backend runs | the name is the state and the prune's sort key; a file under the final name must always be one git could read; the story says "before the first session of each day", so ordering is the requirement, and a broken safety net must not become an outage; the thing an agent can damage is the host checkout | ADR-0034 |
-| **The hardened mounts are one value, kept at their host paths, and V1 passes as specified** (so the spec's narrower fallback is not applied), with `--user` deliberately not passed and the image as the key `agent_image` | the worktree's `.git` *file* holds an absolute `gitdir:`, so any other container path points git at nothing mounted; naming a uid would guess a mapping the deploy step owns, and a wrong guess is "permission denied" mid-turn | ADR-0035 |
-| **HS-028 fills the network step too**, `--internal` because that is the isolation, with the container **detached** on `sleep infinity` until HS-031 and three integer limit keys that refuse `0` | a container cannot join a network that does not exist, and spec item 6's run line names it; an attached process nobody reads is a container that fills its stdout pipe | ADR-0036 |
-| **A start is `rm -f` then `run`, serialised per session by a `tokio` mutex in the backend**; `stop` is `docker stop --time 10` and `resume` re-creates the network and container but no worktree | `--rm` removes an exited container a moment after `docker stop` answers (measured), a container the process lost track of must be replaceable, and interleaved starts fail with a name conflict one caller cannot explain; the worktree step's `ensure` is create-or-adopt | ADR-0037 |
-| **The expected-stop flag is a `sessions` column that no client is sent, written by one `Stopper` before every stop, and taken with a compare-and-swap**; a clean exit is its own table row (`pi_exit` → `stopped`), the failure arm keeps `unexpected_exit`, and the classifier is a pure function whose applier has **no production caller until HS-031** | `Session` is the API's body and phase 1b may not change the API, so the flag is a row fact like `last_seq`/`touch`; three copies of "write then stop" is two a test cannot see; SQLite's `RETURNING` answers the post-write row, so a read-then-clear would race; item 8 has no row for a clean exit and item 6 replaces its error cell for code 0; the container runs detached and `--rm` removes it, so nothing can observe an exit before HS-031's attached stdio | ADR-0038 |
-| **Compaction is a background pass inside the database mutex**, one transaction per session, bounded by `MESSAGES_PER_PASS` after the already-folded filter and by the newest candidate's `message.end` on the delta scan; the 24-hour window is the spec's constant and not a key; the snapshot takes the highest removed seq and `sessions.last_seq` never moves; nothing is broadcast | `Transitioner::apply` takes the same mutex, so the skip of a running turn needs no second lock; the spec names 24 hours and its config list is exhaustive; a client already connected has the deltas and a reconnecting one reads the snapshot from its replay | ADR-0032 |
+Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0038`, one line each in
+`docs/stories/README.md`); read the recent ones before planning, and **amend rather than rewrite** — an ADR
+a later story changes gets a "Superseded by ADR-00xx" note (0012/0013, and 0020 was amended by 0026).
 
----
+The handful that are **not** in an ADR, and that a fresh session is most likely to undo by accident:
+
+- the default branch stays **`master`** — this repo has no `main`, and renaming it would be an invented
+  change;
+- **never fake a push**: report a failure instead (§2's ssh incantation is how a push actually works);
+- **`docs/stories/**` is not edited** — it is the source the Linear issues were imported from; a contract
+  that needs changing goes in an ADR;
+- the default backend is **`docker`** with the stub opt-in (ADR-0001), so every test and script that boots
+  `serve` says which backend it means;
+- **S/M stories are implemented in-session; M/L ones go to a worker child with a written brief** (§5);
+- the **Linear issue number is not derivable from the story number** — read the title before writing
+  `Closes <IDENT>`.
 
 ## 8. Resume checklist
 
@@ -1449,107 +1377,43 @@ machine itself.
 
 ### What HS-075 is about, so the first brief is fast
 
-Acceptance, verbatim from `docs/stories/phase-4-self-development.md` (Size M, spec item 10):
+`PER-107`, expand/contract migration discipline, size **M**, spec item 10, independent of the Docker chain
+and **never started**. Acceptance: a release may add but never drop or rename anything the previous
+release uses; a test asserts the previous release's schema is still a subset of the current one; `doctor`
+reports the schema version and refuses to start when the database is newer than the binary; the rule is
+documented where a migration author will read it, with an example of a deferred cleanup.
 
-- [ ] A release may add but never drop or rename anything the previous release uses; cleanup ships one
-      release later.
-- [ ] A test asserts the previous release's schema is still a subset of the current one.
-- [ ] `doctor` reports schema version and refuses to start when the database is newer than the binary.
-- [ ] The rule is documented where a migration author will read it, with an example of the deferred
-      cleanup.
+Four things to settle first:
 
-**Demo:** a CI check rejects a migration that drops or renames a column the previous release still reads.
+1. **What "the previous release's schema" is, mechanically.** There is no released artifact and no tag to
+   check out, so prefer (a) a checked-in snapshot (`docs/schema/previous.sql`, *not* under `migrations/`)
+   compared by a test, over (b) a drop/rename scanner — (a) is a fact, (b) is a lint, and the acceptance
+   asks for both. Say in the ADR how the snapshot is refreshed (a release step, not a story step).
+2. **Where the check lives**: there is no CI, so a `scripts/check-migrations.sh` run from `verify.sh` as a
+   **phase** (it needs no server) plus a `cargo test`.
+3. **`doctor` is HS-045's and is blocked.** Implement the *refusal* (the database newer than the binary) and
+   the *reporting* (the banner already prints `database … schema n`), record that `doctor` is HS-045's and
+   name the sentence it will print. Do not invent a `doctor` command here.
+4. **"Where a migration author will read it"** is `docs/build.md`'s migrations section plus the ADR, and the
+   deferred-cleanup example should be a real pair of migration files or a quoted diff.
 
-**Already in place, so nothing here is rebuilt:** `src/schema.rs` (`SCHEMA_VERSION` = 4, `include_dir!`,
-`check_embed`, `contract_violations`); `src/db.rs`'s `apply_pending` and the `_contract_` naming rule
-(ADR-0009); `migrations/000{1,2,3,4}_*.sql`; `tests/db_migrations.rs`; `scripts/check-static.sh`'s byte
-grep for the schema SQL; ADR-0009's "older-binary warns" rule.
-
-**The four things to settle before writing code:**
-
-1. **What "the previous release's schema" *is*, mechanically.** There is no released artifact to read here,
-   and no git tag to check out. The honest options are (a) a checked-in snapshot of the previous release's
-   schema (`docs/schema/previous.sql` or a `migrations/` copy) that the test compares against, or (b) a
-   per-migration "drop/rename" scanner over the SQL — a table of forbidden statements — plus a
-   subset test against the *current* embedded migrations. (a) is a fact and (b) is a lint; the acceptance
-   asks for both ("a test asserts the previous release's schema is still a subset"). Prefer (a) with a
-   generated snapshot, and say in the ADR how it is refreshed (a release step, not a story step).
-2. **Where the check lives.** "A CI check" — there is no CI here, so it is a `scripts/` check (the gate's
-   own `check-migrations.sh`, run from `scripts/verify.sh` as a **phase**, not a `case_*`: it needs no
-   server) and a `cargo test`. `scripts/verify.sh`'s phase list is six; adding a seventh is the honest
-   shape and `docs/build.md` documents the phases.
-3. **`doctor` is HS-045's and is blocked.** The acceptance's third line names it. Two of its three clauses
-   are doable now — *report* the schema version (the startup banner already prints `database … schema n`)
-   and *refuse to start* when the database is newer than the binary (`apply_pending` must already answer
-   something for that; check `db.rs` first, ADR-0009 says "older-binary warns"). Implement the refusal and
-   the reporting, and record in the ADR and the Linear comment that `doctor` itself is HS-045's, naming
-   the sentence it will print. **Do not invent a `doctor` command here** — HS-045 owns its shape and its
-   other checks.
-4. **The documentation site.** "Where a migration author will read it" is `docs/build.md`'s migrations
-   section (it already exists) plus the ADR; the example of the deferred cleanup should be a real pair of
-   migration files or a quoted diff, not prose alone.
-
-**Two traps.** `scripts/check-static.sh` byte-greps the artifact for the schema SQL, so a new migration
-changes what that grep sees; and `SCHEMA_VERSION` is a literal that `check_embed` cross-checks against the
-embedded files, so a snapshot file added under `migrations/` would be embedded as a migration and break the
-build — put the previous-release snapshot somewhere else (`docs/schema/`), not in `migrations/`.
+Two traps: `scripts/check-static.sh` byte-greps the artifact for the schema SQL, and `SCHEMA_VERSION` is a
+literal `check_embed` cross-checks against the embedded files — so a snapshot under `migrations/` would be
+embedded as a migration and break the build.
 
 ## 9. Reporting
 
-Keep a running ledger in the conversation (issue → plan → implement → review → fix → ship, with SHAs) so
-a restart can see what was done from Linear, `docs/review/` and `git log`. The Linear issue is the
-durable record; the review file is the durable review; the commit history is the durable change. If you
-stop before the backlog is empty, say so explicitly, say which issue is next, and leave the tree clean
-and the gates green — a half-finished story is worse than an honest stop.
+The durable record is **Linear** (plan, demo output and ship note per issue), **`docs/review/PER-<n>.md`**
+(the review verbatim and its `## Resolution` table) and **`git log`**. Keep a short ledger in the
+conversation while a session runs (issue → plan → implement → review → fix → ship) so a restart can see it
+from those three; do not carry old sessions' ledgers in this file — that was 200 lines of history nobody
+re-read.
 
-This session's ledger (one story shipped — the Docker chain now starts at HS-031):
+If you stop before the backlog is empty, say so explicitly, say which issue is next, and leave the tree
+clean and the gates green — **a half-finished story is worse than an honest stop**.
 
-| Issue | Story | Commits | Outcome |
-| --- | --- | --- | --- |
-| PER-62 | HS-030 exit classification | `9b79f75`, `a360fcd`, `b3ce038` | Done — schema 4 adds `sessions.expected_stop`, one `stop::Stopper` writes it before every `docker stop` (the sweeper, the eviction and the forced rung all use it, so the ordering has one home), `take_expected_stop` is a compare-and-swap because **SQLite's `RETURNING` on an `UPDATE` answers the row after the write** (measured), `src/exit.rs`'s pure `classify` implements item 6's three answers, the table gains `Trigger::PiExit` (`→ stopped`, reason `pi_exit`), and `Exits::record` applies a verdict and keeps stderr in `<data>/sessions/<id>/session.log`. **`Exits::record` has no production caller**: nothing observes a container's exit until HS-031 attaches pi's stdio, and `--rm` leaves nothing to inspect — recorded in ADR-0038 rather than hidden, which makes the demo half artifact (the flag, read out of `app.db`) and half test (the three outcomes). Review: Standards **PASS with findings** (2 P2, 4 P3), Spec **PASS with findings** (3 P2, 3 P3), 10 fixed and 2 recorded (`docs/review/PER-62.md`): a test named for `record` that never called it, the session log's own doc contradicting itself about HS-031's launch line, three test names claiming an ordering nothing can observe, the ADR's mutation census (four, re-measured), two stale "the flag is HS-030's" sentences, an unguarded id-to-path join (now `is_path_segment` + a unit test), an expected-exit test that could not fail (from `stopped` both arms are no-ops — now split, and the discriminating one starts from a live row), an unclipped multi-line `status_reason` (now `transcript.ts`'s `stateText`: last line, clipped, 2 node tests — the plan's "no UI change" was wrong), the gate reading the flag before the spawned stop wrote it, and `pi_exit` missing from the "no sentence invented" test. The **one thing only documentation can fix**: a forced rung resumes immediately, so the resume's container step can clear the flag before the stopped container's exit is recorded — HS-031 must record that exit first, or key the flag to the container's incarnation. Gate: **50 cases / 390 assertions**; `cargo test` 602; `npm test` 36. |
-
-The session before it, for the shape of a ledger entry:
+This session shipped one story:
 
 | Issue | Story | Commits | Outcome |
 | --- | --- | --- | --- |
-| PER-59 | HS-027 hardened `.git` mounts and V1 | `3025360`, `b009320` | Done — **V1 measured and passed as specified**, so the spec's narrower fallback is not applied. New `src/container.rs` (the four mounts as one value, the hardening, the `docker run` vector, `Mounts::check`), `agent_image` key, `tests/container.rs` (a real container), `case_container_mounts`. Review: Standards **PASS with findings**, Spec **PASS with findings**, no P1, seven findings all fixed (`docs/review/PER-59-60.md`): dead `docker::absolute` deleted; the teardown's dropped error now a `warn`; the four new keys added to the setter-coverage test; the `0`-refusal tested; two V1 clauses that could pass on a missing `mount`/`id` hardened; a stale doc summary; the sandbox's socket grant documented. Mutation proof: removing the read-only hooks mount makes `hooks_write` succeed. **The one environmental discovery that shaped everything after it:** a path the daemon cannot see is not a mount — `/tmp` is tmpfs here, and `-v` silently creates an empty root-owned directory instead |
-| PER-60 | HS-028 container run with limits | `5aae311`, `b009320` | Done — the **network and container steps are real**: `docker network create --internal agents_<id>` and `docker run --detach --rm --init --name s_<id> --network agents_<id> --cap-drop ALL --security-opt no-new-privileges -w /work -e HS_SESSION_ID --cpus/--memory/--pids-limit` + the four mounts. New `src/docker.rs` (the CLI as a program, `-H` not `DOCKER_HOST`), three limit keys that refuse `0`, `tests/container.rs`'s `docker inspect` case, `case_docker_container`, ADR-0036. Detached with `sleep infinity` until HS-031 — recorded, not papered over. The demo is half artifact (a create ends `error` at the **pi** step, so the two earlier steps reached a real daemon, and nothing is left behind) and half test (`docker inspect`: caps, limits, init, auto-remove, network, workdir, four binds, no socket) |
-| PER-61 | HS-029 name conflicts, `stop`, `resume`, start lock | `e826539` | Done — `--rm` is **not** enough: the daemon removes an exited container a moment *after* `docker stop` answers (measured; a test failed one run in three until it waited), so a start is `rm -f` then `run`, serialised per session by a `tokio` mutex in the backend. `SessionBackend::resume` finally has a body (network + container, no worktree), `stop` is `docker stop --time 10`, and three new container tests + `case_docker_resume` prove it. **Mutation-proved lock:** delete it and seven of eight concurrent starts fail with "the name is already in use" |
-
-The session before it, for the shape of a ledger entry:
-
-| Issue | Story | Commits | Outcome |
-| --- | --- | --- | --- |
-| PER-93 | HS-061 history truncation and pagination | `f8c3126`, `315b963`, `0a15876` | Done — Standards **PASS with findings** (2 P2, 2 P3), Spec **PASS with findings** (1 P2, 2 P3); no P1 and no behaviour defect. All five findings real and all fixed: the ADR-0033 bullet had been scripted to the **end** of `docs/stories/README.md` (after the "Importing into Linear" section), `GLOSSARY.md`'s **Last-Event-ID** still promised a replay "from the beginning" 80 lines above the new **Truncated history** entry, five comments/ADRs claimed the same thing (including `budgetNotice`'s, where a settled-turn count from zero would say "no turn has run yet" about a session that has run forty — which is *why* the frame carries `turns_before`), and the spec P2 was the best of the session: `a_delta_that_names_no_message_neither_opens_a_message_nor_ends_the_scan` **could not fail for either bug it named**, because its strays sat above the window where both mutations still gave the right cut; they now sit between the window's messages and **both mutations go red** (`left: 4, right: 3`, and a panic on the `expect`). Two spec P3s dismissed with the reason recorded (the affordance is proved by reading only — no script may require a browser; and "a block is always whole" rests on a producer property now written into ADR-0033). New: `events/repository.rs`'s `truncation_point`/`turns_before`/`read_before`, `Item::Truncated` + `HISTORY_TRUNCATED`, `http/history.rs`, `bad_query`, `history_window` (27th key), `web/src/transcript.ts`'s `parseTruncated`/`setTurnBase`/`historyPath`, the "Load earlier" button, ADR-0033, 7 `tests/history.rs` + 3 repository + 4 node tests, `case_history`. **The gate caught the turn arithmetic twice** (the unit test and the case both said 1 where 2 is right) |
-| PER-97 | HS-065 daily project backup | `ea313e4`, `b4d7338`, `d2559bc` | Done — Standards **PASS with findings** (3 P3), Spec **PASS with findings** (2 P2, 2 P3). The two P2s were the valuable ones: the temporary bundle name was a function of project and day while `back_up` runs **outside** the create's lock scope, so two creates on one project could have the second `git bundle create` truncate the file the first was about to rename — and if the second then failed, the name that verified held a file rewritten after the check (now per attempt, `<name>.bundle.<pid>.<n>.tmp`); and "a corrupt bundle is deleted rather than kept" had **no test that could fail**, because git always writes a bundle it can verify, so the delete branch was unreachable (now `Backups::keep` with a junk-file unit test, **mutation-proved**). Also fixed: "is logged" was asserted nowhere (`case_backup` now creates a session for a project with no repository and greps the boot's stderr), `prune` returned a count nobody read, `BackupError` did not implement `Error`, and `Backups::new`'s doc restated its signature instead of the absolute-path invariant. Self-review before the gate had already found two things: the prune only ran where a bundle was written (one transient `remove_file` error and a machine keeps every bundle for ever), and `case_backup` failed on `local projects=… repo="$projects/…"`, **unbound under `set -u`** because `local` is a command. New: `src/backup.rs`, the create's `back_up` on `spawn_blocking`, ADR-0034, 9 `tests/backup.rs` + 1 unit case, `case_backup`, `GLOSSARY.md`'s **Project backup** |
-| PER-107 | HS-075 expand/contract migration discipline | — | **Not started.** It is the last unblocked story; §8 carries the four decisions to settle first, the three landmines, and the one acceptance line (`doctor`) that belongs to the blocked HS-045 |
-
-The session before it, for the shape of a ledger entry:
-
-| Issue | Story | Commits | Outcome |
-| --- | --- | --- | --- |
-| — | (a flake, not a story) | `1fb7454` | **Fixed**: `tests/preflight.rs` failed ~3 runs in 40 with `Text file busy (os error 26)`. `exec` of a file any process holds open for writing fails, and `std::process::Command` forks on another thread's behalf, inheriting the write descriptor of a shim written a moment earlier. A `one_at_a_time()` mutex around each whole test body is the fix, and it works because every test in that binary writes shims and nothing else in it forks. 8 consecutive runs clean; the first baseline gate run of the session had died on it |
-| PER-92 | HS-060 message snapshots and compaction | `5c0f960`, `e2a24b6`, `f0ecf8c`, `901b4ef`, `d1cb620` | Done — Standards **PASS with findings** (no P1; 3 P2, 5 P3), Spec **PASS**. The three P2s were all real: ADR-0027/0031 both claimed "the repository parses exactly one kind's payload" and compaction makes it three (amended in both, plus the README parenthetical); `sweep` discarded `Compaction::unreadable`, so a session with a payload the contract does not describe would stall for ever with no log line (one `warn` arm); and the fold read **every** delta row the session had ever held while holding the database mutex (now bounded by the newest candidate's `message.end` — which also *narrows* the strictness rule to the deltas that could belong to a message being folded, and the test moved its bad row accordingly). Also fixed: a self-contradicting `GLOSSARY` **Seq** entry, a `pub(super)` that meant the crate root, and two doc comments. New: `src/compactor.rs`, `EventRepository::compact`, `events::Compaction`, the shared `parse_delta`, ADR-0032, 10 `tests/compaction.rs` cases, `case_compaction`. **Four mutation proofs** (state re-read, `first()` for `last()`, the already-folded filter, the unreadable guard) — and one of them taught the story something: the seq test's message had one delta row because of coalescing, so `first()` and `last()` agreed until the test used two delta kinds |
-| PER-58 | HS-026 worktree refusal rules | `18e4695`, `c233ab7` | Done — Standards **PASS with findings** (1 P2, 5 P3), Spec **PASS with findings** (1 P2, 3 P3). The spec P2 was real: **a resume bypassed the guard**, so a project that became unsafe could be re-mounted — `resume` now answers the same three codes. The standards P2 was the repo's one log-and-answer pattern (`internal(op, error)`) re-implemented by hand. Also fixed: `git config` needed **`--local`** (a global `extensions.worktreeConfig` would have refused every project on the machine — measured before the fix), an HTTP case for `Unreadable` → `500`, and the `.gitmodules` rule now argues itself in ADR-0030 (the declaration is checked out into `/work`, so `submodule update --init` writes hooks under the mounted `.git/modules`). New: `worktree::refuse`/`Refusal`, three codes + constructors, `Backends::refuse_project`, `createFailure` on the page, ADR-0030, 12 tests, `case_worktree_refusal`. Also **first: the story rewrote HS-025's behaviour** (a project the machine does not hold is now a 422, not an `error` row), recorded rather than papered over |
-| PER-91 | HS-059 event coalescing | `06f506b`, `65f7107`, `5207a97` | Done — Standards **BLOCK** (1 P1, 3 P2, 7 P3), Spec OK with notes. The P1 was real and is the lesson of the session: the live-path test asserted row adjacency **ADR-0031 itself declares false**, and passed only because a zero-paced stub fit one 25 ms window — fixed by giving the test a two-second commit window, not by deleting the assertion. P2s: `coalesce` re-serialised the whole run per delta (quadratic — ADR-0018's own argument), `pub` on an internal helper, and a shape check that would silently drop a fourth key. The **gate case also had to move**: at `max_live_sessions = 1` its create evicted the run's shared session and `case_turn_timeout` failed with `409` where it expected `202`. Measured: 5,000 deltas → 3 rows; the stub's seven → three. New: `events::coalesce`, ADR-0031, 3 `tests/events.rs` cases, a live-path case, 2 node tests, `case_event_coalescing`. **The issue number was wrong** — the commits say `Closes PER-93` (HS-061); `docs/review/PER-91.md` and both Linear issues carry the correction |
-| PER-59 | HS-027 hardened `.git` mounts and V1 | — | **Not done: blocked.** No Docker daemon here (`docker` CLI 29.9.2, no `/var/run/docker.sock`), and every acceptance line is a fact about a **container** (six mounts, `--cap-drop ALL`, `no-new-privileges`, the V1 gate). Not implemented against a fake daemon; PER-59 carries the argument and the exact question, and `HS-028 … HS-058` are blocked transitively (their roots — `PER-74`, `PER-79`, `PER-84`, `PER-94`, `PER-100` — carry a pointer) |
-
-The session before it, for the shape of a ledger entry:
-
-| Issue | Story | Commits | Outcome |
-| --- | --- | --- | --- |
-| PER-55 | HS-023 token budget | `2e902c2`, `fbc0659` | Done — no P1; 1 spec P2 (the two-turn tally the ADR claimed was never tested, and a `SET` mutant stayed green), 2 spec P3s (the no-usage contingency is "counts what was reported", not "disabled"; a glossary overclaim), 8 standards P3s (a mangled doc comment, a helper spliced into another's heading, a variable with no reader, `WRITER_TICK` restated instead of derived, two parsers disagreeing about what a token count is, a middle-man re-export). The gate also caught a flake in the slice: three tests read the tally right after the turn and went red 2 runs in 5 |
-| PER-57 | HS-025 worktree provisioning | `7e36bde`, `1fe7f6e`, `ce4dc82` | Done — Standards **PASS with findings** (1 P1, 4 P2/P3), Spec **PASS with findings** (1 P2). The P1 was real: `case_worktree`'s python3 guard sat after its `stop_serve`, so a machine without python3 failed the gate at `FAIL serve/sigterm` while three sentences promised it passed. The valuable one was **the plan's gap, not the code's**: the provisioner undoes every completed step, and the worktree step's undo deletes the worktree *and* `branch -D`s the branch — so a resumed session's adopted worktree (with the agent's commits on it) would be destroyed when the next step refused. Fixed with `Ensured::created` → `Provisioned::undoable`, proved by mutation. Also fixed: the unreachable `not_yet` arm, four doc sentences, and a host-dependent Docker test. New: `src/worktree.rs`, `tests/worktree.rs` (10 cases), `case_worktree`, ADR-0029 |
-| PER-56 | HS-024 Docker preflight | `f241ced`, `0b7d50e` | Done — **BLOCK on the spec axis, and it was right**: the preflight ran *after* `Database::open`, so a refused startup had already migrated (my own scripted block move; the gate case now asserts no `app.db`). Plus 5 real P2s (a `hub` was refused, `permission denied` got the `systemctl` advice, `df`'s own words were dropped, HS-046 misattributed as owning ssh in four places, three documents disagreeing about the stub) and 2 standards P2s (a duplicated fake-daemon fixture, two tests that depended on the host's free space). The first gate run also found that `check-static.sh`'s empty-root run needs `--backend stub` |
-
-The session before it, for the shape of a ledger entry:
-
-| Issue | Story | Commits | Outcome |
-| --- | --- | --- | --- |
-| PER-48 | HS-016 abort ladder | `d034237`, `3d2ecba` | Done — 2 P2s fixed (the grace did not bound rung 1; `Unreported` read as failure), 6 nits |
-| PER-49 | HS-017 steer | `0099ca3`, `8ff1d77` | Done — 1 P1 fixed (a `last_active_at` assertion the *settle* satisfied, proved by mutation), 11 notes |
-| PER-50 | HS-018 stopped/resume | `dce53c4`, `ff9d907` | Done — 1 P2 fixed (abort retried a dead path, provisioning a session nobody asked for), 16 findings |
-| PER-51 | HS-019 delete flow | `3d5c415`, `7c4ea02`, `cd85572`, `db95a3f` | Done — 1 spec P2 fixed (a refused delete of a running session has already ended the turn; now pinned by a test and by the glossary), 4 doc contradictions, 2 nits; also closed PER-41's recorded batch-collateral nit |
-| PER-52 | HS-020 cap and eviction | `a3c6825`, `4f37211`, `f67eb6f` | Done — 1 P1 fixed (the "nothing was deleted" sentence was written only where a row is built, so the frame path an eviction arrives by showed a dash; now one function both call sites use, proved in Chromium on the live path), 2 P2 test/gate fixes (a random-id claim; a cap case that bet on the host's speed), 1 P2 duplicate column list, 1 mangled doc comment, 3 stale sentences; the eviction's `stop` is spawned, not awaited |
-| PER-53 | HS-021 idle stop | `5da2ae2` | Done — no P1; 5 P2s and 3 nits, all fixed. The two test-claim findings were settled by mutation (the bound now brackets `(90s, 130s]`, and the candidate query's `status = 'idle'` has a test that reads the query); two review claims about the *plan* and the *ADR* were fixed as documentation, and the gate's process-wide `idle_stop_min = 1` is now a written rule for later cases |
-| PER-54 | HS-022 turn timeout | `e767757` | Done — **BLOCK on both axes, both real**: 1 spec P1 (the nested `select!` could cancel the climb between rung 2 and the resume, leaving a session stopped forever — now `Ladder::spawn` plus a resume assertion), 1 standards P1 (`docs/stories/README.md` carried the ADR-0025 bullet twice, this session's scripted-edit bug), plus ADR-0020's amendment note, 3 stale-doc fixes, and a "per turn" test that could not fail (now a second fast turn under the same deadline) |
+| PER-62 | HS-030 exit classification | `9b79f75`, `a360fcd`, `b3ce038` | Done — schema 4's `sessions.expected_stop`, one `Stopper` writes it before every stop, a compare-and-swap take, `src/exit.rs`'s pure classifier + the new `pi_exit` table row, and `session.log`. **`Exits::record` has no production caller until HS-031** (ADR-0038). Review: PASS with findings on both axes, 10 fixed, 2 recorded (`docs/review/PER-62.md`) |
