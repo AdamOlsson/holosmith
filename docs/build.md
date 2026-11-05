@@ -342,22 +342,45 @@ per transaction, and never touches a session whose state is `starting`, `running
   the socket exists; a machine without a daemon gets no binds and every Docker check skips. A reviewing
   agent inside this sandbox can therefore create containers, which is the point and also the risk.
 - **The mapping's fixtures** are committed, not generated: `crates/holosmith/tests/fixtures/pi-turn-*.jsonl`
-  are three real turns' records from the image the Docker stories run — one answer, one that thought first, and
-  one that called a tool — replayed by `tests/rpc.rs` through the production mapping (ADR-0040, ADR-0041). They
-  are refreshed by hand — one prompt against a container with the operator's own provider credentials and
-  network access, in a scratch agent directory under `target/` because a mount source the daemon cannot see is
-  an empty directory, not an error — and `tests/rpc.rs`'s `a_fixture_whose_records_drifted_fails_this_guard` is
-  what makes a silent refresh visible (it counts the record types per fixture, which a mapping assertion
-  cannot: a frame cannot be missing for a record that is not there). The tool fixture's capture needs a prompt
-  that makes the agent call a tool (``Use the bash tool to run exactly: …``), and its last line must end with a
-  newline: the reader splits on LF, so a final record without one waits for EOF — which a fake agent that keeps
-  its stdout open never gives. No test that *replays* a fixture needs a provider key, a daemon or the network,
-  because the records are already committed; only the gate's `case_docker_turn` needs the daemon and the image,
-  and it skips without them like every other Docker case.
+  are five real turns' records from the image the Docker stories run — one answer, one that thought first, one
+  that called a tool, one whose tool result carried an image, and one in which a project-local extension asked
+  the client a question — replayed by `tests/rpc.rs` through the production mapping (ADR-0040, ADR-0041,
+  ADR-0043). They are refreshed by hand — one prompt against a container with the operator's own provider
+  credentials and network access, in a scratch agent directory under `target/` because a mount source the
+  daemon cannot see is an empty directory, not an error — and `tests/rpc.rs`'s
+  `a_fixture_whose_records_drifted_fails_this_guard` is what makes a silent refresh visible (it counts the
+  record types per fixture, which a mapping assertion cannot: a frame cannot be missing for a record that is
+  not there).
+  - The tool fixture's capture needs a prompt that makes the agent call a tool (``Use the bash tool to run
+    exactly: …``).
+  - The **image** fixture needs a tool result that carries an `image` block, which `read` on a PNG produces; the
+    picture lives in the container's working directory, so the prompt names a path under it
+    (``Use the read tool on /work/pixel.png and then say…``).
+  - The **extension UI** fixture needs a project-local extension — `.pi/extensions/<name>.ts` in the working
+    directory, calling `ctx.ui.select(...)` from a `turn_start` handler — and the run must be launched with
+    `--approve`, which is what makes a project's extensions load. Its `notify` after the dialog is the record
+    that proves the cancel arrived: its text is what the dialog answered.
+  - **Every fixture's last line must end with a newline**: the reader splits on LF, so a final record without
+    one waits for EOF — which a fake agent that keeps its stdout open never gives.
+  - **The capture must keep pi's stdin open until `agent_settled`.** Closing it is pi's orderly shutdown
+    (`docs/rpc.md`), so a capture driven by `docker run -i < prompt.txt` records the system prompt and stops:
+    a small driver that writes the prompt, reads stdout line by line, and answers a dialog with
+    `{"type": "extension_ui_response", "id": …, "cancelled": true}` is what produces a complete turn. Answering
+    the dialog is also what the build does, so the fixture is the same exchange production code has.
+  - No test that *replays* a fixture needs a provider key, a daemon or the network, because the records are
+    already committed; only the gate's `case_docker_turn` needs the daemon and the image, and it skips without
+    them like every other Docker case.
 - **A tool's output is a file under the data root** (HS-033, ADR-0041): `<data>/sessions/<id>/tool/<tool_id>.txt`,
   capped at 5 MiB of output plus one `[truncated: …]` marker line, served by
   `GET /api/sessions/{id}/tool-output/{tool_id}`. Nothing has to configure it and no test has to clean it up
   beyond the data root it already uses: the directory is a session's own, beside `session.log` and `pi-home`.
+- **An image in a tool result is a second file in the same directory** (HS-035, ADR-0043):
+  `<data>/sessions/<id>/tool/<tool_id>-<block index>.<ext>`, where the extension comes from pi's `mimeType`
+  (`png`, `jpg`, `gif`, `webp`) and a type this build cannot name is kept as `.bin` and served as
+  `application/octet-stream`. It is served by `GET /api/sessions/{id}/tool-image/{tool_id}/{index}`, the index
+  being the block's position in `result.content`; `tool.end`'s `images` names the pair, so nothing about the
+  type comes from the request. The cap is 5 MiB **decoded** per image, and it is refused before anything is
+  allocated.
 - Optional: a **Docker daemon and one image** for `scripts/verify.sh`'s `case_container_mounts` and for
   `tests/container.rs`. Both check V1 — the hardened `.git` mounts — against a real container, and both
   print one `SKIP` line and pass without a daemon, because a machine without one is a supported machine

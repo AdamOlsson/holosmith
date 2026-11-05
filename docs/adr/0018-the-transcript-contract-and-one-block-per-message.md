@@ -19,6 +19,11 @@ one JSON object:
 | `turn.start` | `{}` | a turn began |
 | `turn.end` | `{}` | a turn ended |
 
+**Amended by ADR-0043:** there is a fifth kind, `turn.error`, carrying `{"reason", "method"}` and **no message
+id** — one frame, one block, nothing continues it, which is the shape ADR-0021 gave a steer. Its one producer is
+an extension's dialog, which a session cannot answer and therefore cancels; the sentence it carries is why an
+extension's behaviour is explicable rather than mysterious.
+
 `session.status` keeps its ADR-0016 payload and drives the screen's badge; these four drive the
 transcript. Two of the four names are the spec's, quoted from item 15: `message.snapshot` "holding
 full text, thinking, message id", and the coalescing rule "consecutive deltas of the same kind and

@@ -324,6 +324,14 @@ _Avoid_: Heartbeat, ping, keepalive event
 An incremental piece of model output that is appended to a message.
 _Avoid_: Chunk, token, fragment
 
+**Turn error**:
+One event saying something a turn could not do: `{"reason", "method"}`, and the transcript's fifth kind.
+It has **no message id** — one frame, one block, nothing continues it, exactly a **turn steer** frame's
+shape — and its one producer today is an extension's dialog, which a session cannot answer and therefore
+cancels: the `reason` is the sentence the screen shows and the `method` is pi's own name for what was
+asked. Its machine name is `turn.error` (`TURN_ERROR`) and `rpc::Cancel::frame`.
+_Avoid_: Error event, failure, warning, exception
+
 **Coalescing**:
 Merging the consecutive deltas of one message and kind inside one event-writer commit into a single row with one seq, so a streaming turn does not make the log grow one row per token: `events::coalesce`, applied to the writer's batch before it becomes rows. The merged row keeps the first event's `created_at`, and the transcript cannot tell it from the deltas it replaced.
 _Avoid_: Batching, debounce, dedupe, aggregation
@@ -450,6 +458,16 @@ _Avoid_: Snapshot (that is the message snapshot and the WIP snapshot), archive, 
 **DB backup**:
 A copy of the database file taken before a promotion.
 _Avoid_: Snapshot
+
+**Tool image**:
+One image a tool's result carried, stored as its own file beside the call's text:
+`<data>/sessions/<id>/tool/<tool_id>-<block index>.<ext>`. It is named by `tool.end`'s `images` entries
+(`index`, `mime`, `output_ref`) and read through `GET /api/sessions/{id}/tool-image/{tool_id}/{index}`,
+which serves the bytes with the type the *file* has. The bytes are never in an event payload, for the
+reason a **tool call**'s output is a file, and the `index` is the block's position in pi's
+`result.content`. The text of the same result keeps `[image]`, so a result with no store still says one
+was there.
+_Avoid_: Attachment, picture, screenshot, image blob
 
 **Changes view**:
 A read-only diff of a session's branch against its target. Not a file browser.

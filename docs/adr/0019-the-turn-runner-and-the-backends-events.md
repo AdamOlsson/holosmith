@@ -77,6 +77,13 @@ call's text, written by `crate::tool`); and its `output` **changes meaning** fro
 result — a `bash` exit code in `structuredContent`, an image block — is not retained: HS-035 stores images, and
 a `details` blob would need its own decision.
 
+**Amended by ADR-0043:** there is a fifth kind, `turn.error`, with `{"reason", "method"}` and **no message
+id** — one frame, one block, nothing continues it, exactly a steer's shape (ADR-0021). Its one producer is an
+extension's dialog, which a session cannot answer and therefore cancels; the cancel itself is a line on the
+agent's stdin and the frame is the record of it. `tool.end` also gains `images: [{index, mime, output_ref}]`
+additively, and only when an image was stored, so a call whose result held none answers exactly the payload
+ADR-0041 pinned.
+
 No `output_ref`: the stub writes no file, and item 15's ref belongs to HS-033's output file. The
 screen renders the block and the counts minimally — a `.tool` block with the call's name and its
 output, and one `in N · out N` line inside the message block, each appended when its frame arrives
