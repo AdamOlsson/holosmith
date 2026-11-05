@@ -18,6 +18,8 @@ import {
   budgetNotice,
   createFailure,
   historyPath,
+  networkDetail,
+  networkText,
   parseFrame,
   parseTruncated,
   sessionIdFromPath,
@@ -351,6 +353,14 @@ function createSection(networkDefault: boolean): HTMLElement {
   network.checked = networkDefault;
   const internet = make("label", "checkbox");
   internet.append(network, make("span", "", "Internet access"));
+  // What the choice does, in the operator's terms, and it is the same function the screen's own phrase
+  // comes from: the box is topology (ADR-0046), so "off" has to say what an off session cannot do.
+  const detail = make("p", "hint");
+  const showDetail = (): void => {
+    detail.textContent = networkDetail(network.checked);
+  };
+  showDetail();
+  network.addEventListener("change", showDetail);
   const button = make("button", "", "Start session");
   button.type = "submit";
   const error = make("p", "error");
@@ -427,6 +437,7 @@ function createSection(networkDefault: boolean): HTMLElement {
     field("model", model),
     field("thinking", thinking),
     internet,
+    detail,
     button,
   );
   section.append(make("h2", "", "New session"), form, error);
@@ -1036,7 +1047,7 @@ function sessionScreen(health: Health, session: SessionDetail): void {
     make("span", "id", session.id),
     make("span", "model", session.model),
     make("span", "level", `thinking ${session.thinking}`),
-    make("span", "network", session.network ? "internet on" : "internet off"),
+    make("span", "network", networkText(session.network)),
     make("span", "activity", `active ${relativeTime(session.last_active_at, secondsNow())}`),
     budget,
   );

@@ -21,6 +21,8 @@ import {
   PROJECT_REFUSALS,
   createFailure,
   historyPath,
+  networkDetail,
+  networkText,
   parseFrame,
   parseTruncated,
   sessionIdFromPath,
@@ -876,5 +878,31 @@ test("a tool.end names the pictures its result carried, and one it cannot link i
   for (const wrong of [JSON.stringify({ tool_id: "call_1", images: {} }), JSON.stringify({ tool_id: "call_1", images: 7 })]) {
     const parsed = parseFrame("tool.end", wrong);
     assert.deepEqual((parsed as { images: unknown }).images, [], wrong);
+  }
+});
+
+test("the Internet-access choice is two phrases and two sentences, and neither says 'internet access'", () => {
+  // HS-038: spec item 2's checkbox is **topology**, so the page must not describe it as a setting with a
+  // direct route behind it. The assertions are about what each case *promises*, because a screen that said
+  // the same thing either way would make the checkbox look inert — which is the bug the story is about.
+  assert.equal(networkText(true), "internet on");
+  assert.equal(networkText(false), "internet off");
+  // The two phrases are different, and neither is the bare feature name: a badge reading "internet access"
+  // would not say which way it is set.
+  assert.notEqual(networkText(true), networkText(false));
+
+  const on = networkDetail(true);
+  const off = networkDetail(false);
+  assert.notEqual(on, off, "the two cases must not read the same");
+  // On: the proxy, and allow-listed hosts — not "the internet".
+  assert.match(on, /allow-listed/);
+  assert.match(on, /proxy/);
+  // Off: nothing outside. It must not claim the session reaches a proxy, and must not promise a route.
+  assert.match(off, /nothing outside/);
+  assert.doesNotMatch(off, /allow-listed/);
+  // Neither sentence may name a *configuration* the operator could go and change: the environment is
+  // identical in both cases (ADR-0045), so "HTTPS_PROXY" in this copy would be a lie about the difference.
+  for (const sentence of [on, off]) {
+    assert.doesNotMatch(sentence, /HTTPS_PROXY|http_proxy|environment variable/i, sentence);
   }
 });
