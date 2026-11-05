@@ -5,8 +5,9 @@
 //! provisioned. **All four provisioning steps are real:** the worktree (HS-025), the session's private
 //! network (HS-028), the container (HS-028) and the agent inside it (HS-031), and since HS-032 so are the
 //! turn's operations: a prompt reaches pi over its RPC mode and every record pi prints becomes a frame on the
-//! writer ([`crate::rpc`]). What is still refused is the WIP snapshot, which is HS-042's — a refusal the
-//! delete flow reads (ADR-0023).
+//! writer ([`crate::rpc`]). The WIP snapshot is real since HS-042 (ADR-0049): the delete flow's
+//! `SessionBackend::snapshot` call is its `409 unsaved_work` guard, and the turn runner and `Stopper` take one
+//! before the work can be lost.
 //!
 //! Whether the machine *can* run Docker sessions at all is not this file's question: [`crate::preflight`]
 //! answers it once, at startup, and `serve` refuses to bring up a Docker run that fails it (HS-024). A
@@ -1241,8 +1242,8 @@ mod tests {
     #[tokio::test]
     async fn a_turn_with_no_agent_names_the_fix_and_a_snapshot_with_no_worktree_says_so() {
         // `stop` and `resume` left this list in HS-029, and the turn's four operations left it in HS-032: a
-        // prompt, a steer, a `clear_queue` and an abort are pi's RPC commands now. What is left is the WIP
-        // snapshot, which is HS-042's.
+        // prompt, a steer, a `clear_queue` and an abort are pi's RPC commands now. HS-042 made the snapshot a
+        // real host git operation, so what is left here is only the no-agent sentences.
         let backend = backend();
         let session = session();
         // A session this backend has launched nothing for: the turn's operations cannot ask an agent that is

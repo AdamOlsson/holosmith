@@ -1,4 +1,4 @@
-# RESUME — orchestrator handoff (cold start, after forty-three stories, with a real Docker daemon)
+# RESUME — orchestrator handoff (cold start, after forty-five stories, with a real Docker daemon)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating
 procedure and still governs; this file is the state of the world — what exists, what the environment
@@ -43,19 +43,22 @@ created, prompted, aborted, steered, stopped, resumed and deleted, and it is dri
 
 Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is clean apart from the
 operator's own `log.txt`/`orchestrate.sh`, and every commit is **pushed** (see the note on pushing below).
-`HEAD` is `f99035a`; any commit after it is bookkeeping — this file's own refresh. Confirmed on
-`origin/master`: `f99035a`.
+`HEAD` is `5a5bcd8`; any commit after it is bookkeeping — this file's own refresh. Confirmed on
+`origin/master`: `5a5bcd8`.
 
-**Linear: 43 Done, 37 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-038` (`PER-33` …
-`PER-70`), `HS-059` (`PER-91`), `HS-060` (`PER-92`), `HS-061` (`PER-93`), `HS-065` (`PER-97`) and `HS-075`
-(`PER-107`).
+**Linear: 45 Done, 35 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-039` (`PER-33` …
+`PER-71`), `HS-042` (`PER-74`), `HS-059` (`PER-91`), `HS-060` (`PER-92`), `HS-061` (`PER-93`), `HS-065`
+(`PER-97`) and `HS-075` (`PER-107`). **Not done: `HS-040` (`PER-72`) and `HS-041` (`PER-73`)** — they sit
+before HS-042 in story order and were skipped: HS-040 is a real-key verification run and HS-041 is the
+preview listener.
 
 **The Docker block is gone.** A real daemon answers on this machine (§2), so `HS-027` … `HS-058` are unblocked
-and the queue runs contiguously from `HS-039` on (37 of the 80 are still Backlog). Nine stories have now been
-built against a real `docker run` — the mounts and V1 (`HS-027`), the container with its limits (`HS-028`), the
-start lock with `stop`/`resume` (`HS-029`), the expected-stop flag with the exit classifier (`HS-030`), the
-**agent** (`HS-031`), the **turn** (`HS-032`), the machine's **egress proxy** (`HS-037`) and the **checkbox's
-topology** (`HS-038`) — and each is proven by a test that runs a container, not by a document. A Docker create
+and the queue has 35 Backlog issues. Ten stories have now been built against a real `docker run` — the mounts
+and V1 (`HS-027`), the container with its limits (`HS-028`), the start lock with `stop`/`resume` (`HS-029`),
+the expected-stop flag with the exit classifier (`HS-030`), the **agent** (`HS-031`), the **turn** (`HS-032`),
+the machine's **egress proxy** (`HS-037`), the **checkbox's topology** (`HS-038`) and the **key proxy**
+(`HS-039`) — and each is proven by a test that runs a container, not by a document. `HS-042` is the WIP
+snapshot (host git, no container) and is proven by `tests/snapshot.rs` and the gate. A Docker create
 provisions the worktree, the network, the attached container running pi in RPC mode
 and pi's ready handshake, and ends **`idle`**; a prompt reaches pi, every record it prints becomes a frame on
 the writer, a tool call's output and any image it returned are written to files, the session's spend is
@@ -65,25 +68,26 @@ probe container, creates the machine's own `egress` network, starts the machine'
 HS-037) and refuses to boot only on a *proven* leak. So a container's only route out is now something this build
 controls: an exact allow-list, `CONNECT` to 443 only, and no address that resolves into the machine.
 
-Every story from `HS-001` to `HS-038` is Done, plus `HS-059`–`HS-061`, `HS-065` and `HS-075` — 43 of 80. The
+Every story from `HS-001` to `HS-039` is Done, plus `HS-042`, `HS-059`–`HS-061`, `HS-065` and `HS-075` — 45 of 80. The
 durable record of each is **Linear** (the plan comment, the verbatim demo output, the ship note), the
 review file (`docs/review/PER-<n>.md`, the review verbatim plus its `## Resolution` table) and **`git log`**
-(a commit names its issue; the last one ends `Closes PER-<n>`). Decisions are ADRs `0001` … `0047`, indexed
+(a commit names its issue; the last one ends `Closes PER-<n>`). Decisions are ADRs `0001` … `0049`, indexed
 one line each in `docs/stories/README.md`. Nothing about them belongs in this file.
 
-**Next issue: `PER-71` (HS-039 — Key proxy)** — size **L**, and the one story that makes a real turn possible at
-all: until it exists, a session's container holds no provider key, so `case_docker_turn` asserts pi's *own*
-refusal sentence rather than a stream. `HS-040` (V3/V4/V5), `HS-041` (preview, V7), `HS-042`–`HS-044`
-(snapshot, delete keep-rules, reconcile), `HS-045` (`doctor`, which prints `schema::Verdict`'s sentences and
-refuses a newer database), `HS-046` (the phase-1 verification run — the gate for phase 2) follow in order,
-then phase 2. What is still behind something is phase 2 (`HS-047` … `HS-058` are `HS-046`'s; `HS-066` …
-`HS-074` sit behind those and behind `HS-049`/`HS-050`). `HS-075` is **done** (ADR-0047), so the last
-independent story is spent and the queue is now a chain from `HS-039` on.
+**Next in story order: `PER-72` (HS-040 — Key proxy verification, V3/V4/V5).** It is a **verification** story:
+a real turn, `get_available_models` with only a dummy key and `PI_OFFLINE=1`, and a precedence test, all through
+HS-039's proxy, with the results written into the spec's table. This run did **not** find a key for the provider
+the default session model uses (`anthropic`); the machine does have an `opencode`/`opencode-go` credential in
+`~/.pi/agent/auth.json` (and `OPENCODE_API_KEY` in the environment), so a future session can either add that
+provider row and use a model it serves, or use an operator-supplied Anthropic key. Do not fake V3. `PER-73`
+(HS-041 — Preview listener, V7) is the next implementable story if the key is still unavailable; `PER-75`
+(HS-043 — delete hardening) follows HS-042, and `PER-76`/`PER-77` (HS-044/045) follow it. `HS-046` (`PER-78`)
+is the phase-1 verification run and the gate for phase 2; phase 2's deploy/hub stories are behind it.
 
 Ranking, per `PROMPT.md`: Linear priority (all are `No priority`) → `HS-###` order in `docs/stories/` →
 anything already `In Progress` first → skip an issue whose `Blocked by` stories are not `Done`.
 
-### Twenty-seven facts a cold start must know
+### Twenty-nine facts a cold start must know
 
 1. **A running turn can now be stopped, in two rungs, with or without the way back.** `src/ladder.rs`
    is the shared routine: `clear_queue` then `abort`, wait up to `abort_grace` (the grace *bounds rung
@@ -245,9 +249,10 @@ anything already `In Progress` first → skip an issue whose `Blocked by` storie
     `case_agent_launch` asserts the seeded agent directory, the launch line, `docker inspect`'s command and
     environment, and the exit classifier's third row; `case_docker_resume` asserts a resume reaches `idle`
     again over the same worktree. `case_docker_turn` prompts a real container and asserts pi's *own* refusal
-    sentence on the row — a session's network is `--internal` and it holds no provider key until HS-039, so
-    pi rejects the `prompt` command before a stream exists. That is a different observable from a hang, and it
-    is the most a real container can show until the key proxy exists.
+    sentence on the row — a session's network is `--internal`, its pi-home has a dummy key, and the gate's
+    machine stores no provider key, so `models.json` has an empty provider object and pi rejects the `prompt`
+    command before a stream exists. That is a different observable from a hang, and the streaming evidence is
+    the committed fixtures (HS-040 owns the real-key turn).
 
 17. **Whether a container stopped because we asked is now a row's bit, and it is decided by a pure
     function.** `sessions.expected_stop INTEGER NOT NULL DEFAULT 0` (schema 4) records "the server asked
@@ -418,8 +423,9 @@ about one run in two). **A delete forgets the launch *before* it removes the con
     attached to is only evidence if it is not the silence of an alias that was never created; `decide`/`leaked`
     give a proxy that answers its **own** sentence instead of the bridge advice, and a direct leak still outranks
     it. The second run is a `debug` line when it works and a `warn` when it does not, **never a verdict** — a proxy
-    that will not join fails a download, not a session (ADR-0045). The **key proxy is deliberately absent** from
-    that list until HS-039: it needs a *second question* (an alias that must answer), not another target. The
+    that will not join fails a download, not a session (ADR-0045). **HS-039 added the key proxy's inverse pair**
+    (`KEY_PROXY_TARGET = "key-proxy:8080"`, joined to the same network and required to answer) rather than a
+    target nothing may reach. The
     session-shaped claim is the gate's: `case_internet_toggle` creates two real sessions differing only in the
     body's `network`, and asserts per network the internet unreachable directly, the alias resolving in exactly
     one, every env var identical once each id is normalised, and — after the proxy is **detached** and the
@@ -442,6 +448,24 @@ about one run in two). **A delete forgets the launch *before* it removes the con
     `apply_pending` returns early on `Same` and warns-and-continues on `Newer` (**item 10 needs that**: a rollback
     must not need a restore) and `doctor` is where `Newer` refuses. The gate has a `migrations` **phase** and
     `case_schema_newer`, which boots the artifact over a schema-99 database.
+
+28. **The key proxy keeps the real key out of every session, and it is a second mode of this binary** (HS-039,
+    ADR-0048). `<data>/secrets/keys.toml` (0600) holds `[providers]` (real keys) and `[sessions]` (each session's
+    dummy); `holosmith key set|list|remove` edits it, `set` reading stdin only. `hs_key` mounts that file
+    read-only at its own path on the `egress` network, is joined to **every** session network under the alias
+    `key-proxy`, and `holosmith proxy key` validates the dummy, swaps in the real key in the provider's own
+    header, and forwards over TLS with `openssl s_client` (the artifact is static). The provider is a fixed
+    table (`key::PROVIDERS`, host + base path + auth header), never a request-controlled host. `models.json` in
+    the pi-home is rewritten on every start with the proxy URL and the dummy; `settings.json` keeps the
+    seed-only-if-absent rule. The delete flow's `revoke_key` removes the session's row. A corrupt store fails
+    the container step with the file named; a missing proxy is a `warn`.
+29. **The WIP snapshot is a temporary index and a ref, and it is taken before the work can be lost** (HS-042,
+    ADR-0049). `src/snapshot.rs` implements spec item 9: `GIT_INDEX_FILE` for `read-tree HEAD`, `add -A` and
+    `write-tree`, then `commit-tree` with `holosmith <holosmith@localhost>` and `update-ref` to
+    `refs/holosmith/wip/<id>`; a tree equal to `HEAD` removes the ref. It runs on every `agent_settled`
+    (`Turn::finished`), before every stop (`Stopper::stop`) and before delete (the existing 409 path). The host
+    runs it; `holosmith container snapshot` is the `/work`/`HS_SESSION_ID` equivalent. A failure is logged on a
+    settle/stop and is a refusal at delete.
 
 Three things HS-014 and HS-015 settled that later stories inherit:
 
@@ -675,7 +699,7 @@ scripts/verify.sh              # THE one-command gate since HS-006
 (`cargo test --test schema_previous` — the expand/contract rule, HS-075), `build`
 (`scripts/build.sh`, which itself runs `build-web.sh` — `npm test` then Vite — and `check-static.sh`
 last), `embed` (`scripts/check-embed.sh`), then `serve` — the **shipped musl artifact** booted on
-`--port 0` with a temp data dir, running **58 cases plus a CORS sweep (588 assertions)**, then torn down
+`--port 0` with a temp data dir, running **60 cases plus a CORS sweep (609 assertions)**, then torn down
 with `SIGTERM` and an asserted exit 0. Thirteen cases bring their own boot (`case_token_budget`,
 `case_usage_survives_resume`, `case_compaction`, `case_history`, `case_backup`, `case_worktree`,
 `case_worktree_refusal`, `case_agent_launch`, `case_docker_resume`, `case_docker_turn`, plus
@@ -767,7 +791,7 @@ crates/holosmith/
                             stderr)` which takes the flag, applies `PiExit` or `UnexpectedExit`, and appends
                             the stderr to `<data>/sessions/<id>/session.log`. **No production caller yet**:
                             HS-031's attached stdio is the observer
-  src/deleter.rs            the delete flow's task (HS-019): revoke_key (a no-op until HS-039) →
+  src/deleter.rs            the delete flow's task (HS-019): revoke_key (HS-039's dummy) →
                             `backend.delete` → remove the row *and its event log* in one
                             transaction → close the session's streams. `DELETED` is the rung-2 word
   src/agent.rs              the agent process (HS-031, ADR-0039) and its record seam (HS-032): `Agent::launch`
@@ -789,7 +813,24 @@ crates/holosmith/
                             `HTTPS_PROXY`), `network_name`, `Unmountable`; and since HS-037 the machine's
                             proxy: `EgressProxy` (`of(&Config)`, `run_args`), `PROXY_NAME` (`hs_egress`),
                             `PROXY_ALIAS` (`egress-proxy`), `PROXY_ENV`, `proxy_url(id)`,
-                            `PROXY_START_TIMEOUT` (90 s)
+                            `PROXY_START_TIMEOUT` (90 s); and since HS-039 the key proxy:
+                            `KeyProxy` (`of(&Config)`, `run_args`), which mounts the key file read-only
+                            and runs `proxy key` on `hs_key`
+  src/key.rs                the provider/store half of HS-039 (ADR-0048): `Provider`, `PROVIDERS`,
+                            `provider`, `Store` (`from_data_root`, `ensure_file`, `load`, `save`,
+                            `set_provider`, `remove_provider`, `providers`, `dummy_for`, `revoke`,
+                            `session_of`), `Secrets`, `models`, `KEY_PROXY_ALIAS`, `KEY_PROXY_PORT`,
+                            `KEY_PROXY_NAME`, `contains_real_key`
+  src/keyproxy.rs           the key proxy itself (HS-039, ADR-0048): `Route::parse`, `Head`/`parse`,
+                            `upstream` (header swap), `serve`/`handle`, `forward` (openssl s_client,
+                            counted streaming), `Record`, `MAX_BODY`, `MAX_CONNECTIONS`, `CA_FILE`
+  src/snapshot.rs           the WIP snapshot (HS-042, ADR-0049): `take` (temporary index, read-tree,
+                            add -A, write-tree, commit-tree, update-ref), `Taken::{Written, Removed}`,
+                            `SnapshotError`, `REF_PREFIX`, `MESSAGE`, `IDENTITY`, `reference`
+  src/commands/key.rs       `holosmith key set|list|remove` (HS-039): stdin-only set, providers only in
+                            list, remove
+  src/commands/container.rs `holosmith container snapshot` (HS-042): `/work` + `HS_SESSION_ID` + a
+                            temporary index
   src/docker.rs             the `docker` CLI as a program (HS-028): `Docker{host}`, `run`/`succeeds`,
                             `ensure_network`/`gateway` and `EGRESS_NETWORK` (HS-036), `command_line` (the one
                             call whose stdio a caller keeps: the launch),
@@ -858,10 +899,12 @@ crates/holosmith/
                             `Record` (`unreadable`/`tunnel`/`log`), `serve`/`handle`/`read_head`/`resolve`/
                             `connect`/`establish`/`respond`, `pump`/`pump_both` (counted both ways),
                             `PORT`/`TLS_PORT`/`DEFAULT_LISTEN`/`MAX_HEAD`/`HEAD_TIMEOUT`/`ACCEPT_BACKOFF`
-  src/selftest.rs           the network self-test (HS-036, ADR-0044; HS-038's pair, ADR-0046): `Runner` (the
-                            seam, now with `proxy`/`join_proxy`/`leave_proxy`), `Report`,
+  src/selftest.rs           the network self-test (HS-036, ADR-0044; HS-038's pair, ADR-0046; HS-039's
+                            inverse pair, ADR-0048): `Runner` (the seam, now with `proxy`/`join_proxy`/
+                            `leave_proxy`/`key_proxy`/`join_key_proxy`/`leave_key_proxy`), `Report`,
                             `Outcome::{Passed, Failed, Unknown}`, `run`/`run_with`/`decide`/`leaked`, `pair`,
-                            `NETWORK`, `PUBLIC`, `PROXY_TARGET` (`egress-proxy:3128`), `HOST_PORT`,
+                            `key_pair`, `NETWORK`, `PUBLIC`, `PROXY_TARGET` (`egress-proxy:3128`),
+                            `KEY_PROXY_TARGET` (`key-proxy:8080`), `HOST_PORT`,
                             `REACHED` (9), `PROBE_TIMEOUT`, `PROBE` (`include_str!` of
                             `templates/selftest-probe.js`)
   src/preflight.rs          the three startup checks and their sentences (HS-024, ADR-0028):
@@ -880,8 +923,9 @@ crates/holosmith/
   src/{serve,web,logging,clock,version,pins}.rs
   tests/                    version_cli, config_cli, http_contract, serve_cli, db_migrations, exit, agent,
                             rpc (the fixture replays and the pump), tool_output (the endpoint and the store's
-                            rules at the wire), fixtures/pi-turn-{text,thinking,tool,image,extension-ui}.jsonl,
-                            pin_single_source, guards, session_repository, sessions_api, events,
+                            rules at the wire), key_cli, key_proxy, snapshot, fixtures/pi-turn-{text,thinking,
+                            tool,image,extension-ui}.jsonl, pin_single_source, guards, session_repository,
+                            sessions_api, events,
                             streams, provisioning, state_machine, session_list, session_screen,
                             turns, abort, steer, resume, delete, eviction, idle_stop, turn_timeout,
                             token_budget, preflight, backend_contract, worktree, compaction,
@@ -906,7 +950,7 @@ scripts/check-static.sh     file/readelf, empty-root serve + cmp against web/dis
 scripts/check-embed.sh      the three embed cases (present / absent warns / required fails)
 scripts/verify.sh           the one-command gate (see §3)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0047          read the recent ones before planning anything
+docs/adr/0001…0049          read the recent ones before planning anything
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
 docs/review/PER-33…PER-70, PER-91…PER-93, PER-97, PER-107  each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
@@ -931,8 +975,9 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   classified, and a resume replaces the container and reaches `idle` again. A **prompt** reaches pi, its
   records become the transcript's frames, a tool call's output is filed, and the session's spend is counted —
   with one gap a real container still shows: pi refuses a `prompt` before a stream exists, because a session's
-  network is `--internal` and it holds no provider key until the key proxy (HS-039), so `case_docker_turn`
-  asserts pi's own refusal sentence and the streaming evidence is the committed fixtures.
+  network is `--internal`, its pi-home has only a dummy key, and the gate's machine stores no provider key, so
+  `case_docker_turn` asserts pi's own refusal sentence and the streaming evidence is the committed fixtures.
+  HS-039's key proxy is real but HS-040's real-key turn is not done.
 - **The egress proxy exists and is the only route out (HS-037).** `holosmith proxy egress` is a mode of the
   artifact; a Docker boot starts `hs_egress` on `egress` (bounded, `warn` on failure) and the network step
   joins it to a session's network under the alias `egress-proxy` **only when the row's `network` flag is set**,
@@ -945,11 +990,11 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   that snapshot is a **release step** (`scripts/schema-snapshot.sh`), not a story's, and a contract migration
   changes it in the same commit. `schema::verdict` is the sentence `serve` warns with on a newer database and
   `doctor` will refuse with (ADR-0047).
-- **What is left of the network half:** the **key proxy** and its verification (HS-039/040), the preview
-  listener (HS-041), the WIP snapshot (HS-042), the delete's keep-rules (HS-043), startup reconcile (HS-044),
-  `doctor` (HS-045), the phase-1 verification run (HS-046), merge, publish, the hub, releases, the
-  stopped-session expiry (HS-064), and any **delete affordance in `web/`** (the API has the endpoint; the
-  page has no button).
+- **What is left of the network half:** the key proxy's **verification** (HS-040), the preview listener
+  (HS-041), the delete's keep-rules (HS-043), startup reconcile (HS-044), `doctor` (HS-045), the phase-1
+  verification run (HS-046), merge, publish, the hub, releases, the stopped-session expiry (HS-064), and any
+  **delete affordance in `web/`** (the API has the endpoint; the page has no button). The key proxy itself
+  (HS-039) and the WIP snapshot (HS-042) are done.
 - **The log is now read in two shapes and written by two producers of two kinds.** The stream replays a
   *window* (`history_window`, default 50) and says so with `history.truncated`; `GET …/events/history`
   answers the frames below that cursor. `events/stream.rs`'s `REPLAY_LIMIT` is still `u32::MAX` — it is
@@ -967,8 +1012,9 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   the runner, on one `fired` shared with the timeout so only one climb happens). All of them go through
   `Transitioner::apply`, and the row moves before the container in every one of them.
 - **`runtime::Backend`** has `Stub` and `Docker`; `serve --backend` and the config key `backend` select
-  it. `DockerBackend::new(ContainerSettings)` provisions all four steps and runs a turn's five operations;
-  what is left of the Docker chain is the key proxy and everything after it (HS-039 onwards), and the default
+  it. `DockerBackend::new(ContainerSettings)` provisions all four steps, runs a turn's five operations and
+  implements the WIP snapshot; what is left of the Docker chain is HS-040's real-key verification and the
+  stories after it (HS-041 onwards), and the default
   backend is `docker`
   (ADR-0001: the stub is opt-in), so a default build provisions a session to `error` with a reason
   rather than hanging in `starting`. (Since HS-026 a create for a project that is not a plain checkout is
@@ -1266,11 +1312,11 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 - **`docs/build.md` is a story deliverable, not orchestrator-only.** If a story changes prerequisites or
   gates, the doc is in scope, and its prose must be reflowed (~100 columns), not just appended to.
 - **Every story adds at least one `case_*` to `scripts/verify.sh`.** The rule is in bold in
-  `docs/build.md`, and the reviewer enforces it. The current gate is 58 cases / 588 assertions, and a
+  `docs/build.md`, and the reviewer enforces it. The current gate is 60 cases / 609 assertions, and a
   case that makes its own session must run before the shared one exists or delete it at the end (the
   gate's cap is one live session).
 - **Adding an ADR means updating `docs/stories/README.md`**: the "Decisions taken while slicing" count
-  (now **forty-five**) and the bullet list. A reviewer will check the links resolve — three did not,
+  (now **forty-nine**) and the bullet list. A reviewer will check the links resolve — three did not,
   once.
 - **An ADR that a later story changes gets a one-line "Superseded by ADR-00xx" note**, not a rewrite
   (ADR-0012 and ADR-0013 do this; HS-015 added two to ADR-0018).
@@ -1838,7 +1884,7 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 
 ## 7. Decisions taken on the operator's behalf (do not silently undo)
 
-Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0047`, one line each in
+Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0049`, one line each in
 `docs/stories/README.md`); read the recent ones before planning, and **amend rather than rewrite** — an ADR
 a later story changes gets a "Superseded by ADR-00xx" note (0012/0013, and 0020 was amended by 0026).
 
@@ -1862,40 +1908,27 @@ cd /home/adamolsson/projects/holosmith
 git status --short                          # must be clean
 . ~/.pi/toolchains/env.sh
 python3 /tmp/lin.py issues | grep -v ' Done ' | head   # next unfinished (recreate /tmp/lin.py, §2)
-python3 /tmp/lin.py issue PER-67            # sanity-check Linear is reachable and scoped
+python3 /tmp/lin.py issue PER-72            # sanity-check Linear is reachable and scoped
 docker version                              # the daemon must answer, or every Docker story is a lie
 docker image inspect pi-agent:local         # the image the Docker stories run; its pi == pins/pi.txt
-scripts/verify.sh                           # baseline green (~9-12 min, 58 cases, 588 assertions)
+scripts/verify.sh                           # baseline green (~9-12 min, 60 cases, 609 assertions)
 ```
 
-Then start the cycle at **`PER-71` (HS-039 — Key proxy)** — size **L**, and the story that makes a real turn
-possible at all: until it exists a session's container holds no provider key, so `case_docker_turn` asserts pi's
-*own* refusal sentence instead of a stream (fact 16). What is already there, and what it needs:
+Then start the cycle at **`PER-72` (HS-040 — Key proxy verification, V3/V4/V5)**. It is a **verification**
+story, not a code story: a real turn through HS-039's proxy with a dummy key, `get_available_models` with only
+that dummy and `PI_OFFLINE=1`, and the precedence check, with the results written into the spec's table. The key
+proxy and its refusal path are done (ADR-0048), but this run did not have a key for `anthropic`, the provider
+the default session model uses. The machine has an `opencode`/`opencode-go` credential in
+`~/.pi/agent/auth.json` and `OPENCODE_API_KEY` in the environment; a future session may add that provider row
+and use a model it serves, or use an operator-supplied Anthropic key. Do not fake V3. If no real key is
+available, take **`PER-73` (HS-041 — Preview listener, V7)** as the next implementable story, then `PER-75`
+(HS-043) after HS-042. `HS-046` (`PER-78`) is the phase-1 verification run and the gate for phase 2.
 
-- **The container side is ready and waiting for it.** `agent::ENVIRONMENT` already carries
-  `NO_PROXY=key-proxy`, the pi home is `<data>/sessions/<id>/pi-home` seeded from an embedded template (fact 20),
-  and `deleter.rs`'s `revoke_key` is a no-op with HS-039's name on it. `HS-037`'s proxy is the shape to copy: a
-  **mode of this binary** (`holosmith proxy egress`) started at boot, bounded, joined to a session's network by
-  `apply_proxy` with a network alias, container `hs_key` on the `egress` network.
-- **The CLI is new surface**: `key set <provider>` reads the key from **stdin only**, `key list` prints providers
-  and never values, `key remove` exists; the store is `<data>/secrets/keys.toml` at **0600**, mounted read-only
-  into `hs_key` only. `cli.rs`'s `Cmd` has `Serve | Version | Config | Proxy` today; `key` is a fifth and the
-  golden-output tests for `config` say how a CLI surface is pinned.
-- **The hard part is streaming.** The proxy must forward provider requests over HTTPS and pass an SSE body through
-  **unbuffered**, while swapping a dummy key for the real one and logging bytes per session — that is more than
-  `egress.rs` does (it tunnels bytes it never parses). Plan it as its own module, unit-testable on a loopback
-  listener the way `src/egress.rs`'s `Record::tunnel` is, and do not put the streaming path in the gate: a gate
-  that needs a real provider is not a gate (`HS-040` owns V3–V5, which is where the operator's own key is used).
-- **The off case gains its second question.** ADR-0046/0047: the self-test's `PROXY_TARGET` list is things that
-  must **not** answer, so the key proxy is not another target but an alias that must **answer** on a session
-  network — `decide`/`pair` need that direction, and bullet 1 of HS-038's acceptance ("only the key proxy is
-  reachable") is what it closes.
-- **The dummy key is per session and is revoked on delete** — the HS-019 hook, plus a row for it (ADR-0019: a
-  backend may not write a row, so this is the server's or a mount's).
-- **Then `HS-040`** (V3/V4/V5 with a real key), `HS-041` (preview, V7), `HS-042`–`HS-044`, `HS-045` (which prints
-  `schema::Verdict`'s sentences), `HS-046` (the phase-1 verification run and the gate for phase 2).
+What is already there for HS-040: `holosmith key set <provider>` and `hs_key` (ADR-0048), the committed turn
+fixtures (`docs/build.md`), `tests/rpc.rs` and `tests/key_proxy.rs`, and the gate's key case. What is missing is
+the real key and the checklist, not the mechanism.
 
-Read §1's twenty-seven facts first: eight of them are the Docker half (mounts and V1, the container and its
+Read §1's twenty-nine facts first: eight of them are the Docker half (mounts and V1, the container and its
 limits, the start lock and `resume`, the expected-stop flag with its classifier, the agent launch and its stdio,
 the exit seam with its generations, the agent directory with the data root it forces, and the mapping with its
 record seam), one is a tool's output as a file, one is the checkbox's boot-time **pair** (26) and one is
@@ -1923,19 +1956,12 @@ re-read.
 If you stop before the backlog is empty, say so explicitly, say which issue is next, and leave the tree
 clean and the gates green — **a half-finished story is worse than an honest stop**.
 
-This session (`5b0dfe5` → `f99035a`) shipped two stories:
+This session (`f8ca638` → `5a5bcd8`) shipped two stories:
 
 | Issue | Story | Commits | Outcome |
 | --- | --- | --- | --- |
-| PER-70 | HS-038 Internet access checkbox wiring (V6) | `3f9493b`, `40af696`, `ae216d6`, `92f6f12`, `748559a`, `d8703db`, `db3a207` | Done — the wiring was already true (HS-037 honours the row's `network` on the create **and** the resume, and the container's environment is identical either way), so the story shipped the three things a wiring with no measurement cannot claim. The self-test's probe gains `egress-proxy:3128` (the **alias**, never the container name) and runs **twice on one network** — bare, then with `hs_egress` joined — so the off case's silence is evidence; a proxy answering where nothing should leave is a wiring finding with its **own** sentence, and a direct leak still outranks it. `case_internet_toggle` creates two real sessions differing only in the body's `network` and asserts, per network, the internet unreachable directly, the alias resolving in exactly one, every env var identical once the ids are normalised, and — after the proxy is **detached** and the container killed and resumed — the endpoint count **1** / **2**, which is a rejoin rather than an inheritance. ADR-0046. Review **BLOCK** on one P1 (the `on` half's SKIP took exactly the bug it exists to catch; a running-but-unjoined proxy now fails) plus a spec P2 (bullet 5's "only the key proxy" is deferred to HS-039, now said out loud), all 17 findings fixed; the two mutations the review asked for were run and watched go red. Demo: `npm install` failing with `EAI_AGAIN` off and installing through the proxy on, an `/api/health`-style probe of both networks, and the Chromium look at the checkbox |
-| PER-107 | HS-075 expand/contract migration discipline | `c047233`, `f99035a` | Done — the rule had **two halves and the repo had one**: `schema::contract_violations` already refuses an unmarked `DROP`/`RENAME` and `cargo test` already runs it, so nothing was rebuilt; what was missing is the release-over-release fact. `docs/schema/previous.sql` (a real dump, kept **out of** `migrations/` because that directory is embedded) is compared with this build's as a **subset** by `tests/schema_previous.rs`, through SQLite rather than a second SQL grammar, refreshed by `scripts/schema-snapshot.sh` at **release** time; `schema::verdict` is the `Same`/`Older`/`Newer` sentence `serve` warns with and `doctor` (HS-045) will refuse with, and `serve` continues on a newer database because item 10's rollback must not need a restore. A new `migrations` **phase** and `case_schema_newer`. ADR-0047. Review **BLOCK** on one P1 that landed on both axes — the guard against a vacuous pass compared table *sets* for equality, forbidding the added table the rule permits — fixed and mutation-proven both ways; 17 findings fixed or dismissed. Demo: the snapshot's 3 tables/25 columns, a regenerated snapshot byte-identical to the tree's, both rule halves green, and a boot over schema 99 printing `database … schema 99` with `/api/health` 200 |
+| PER-71 | HS-039 Key proxy | `efe1fad`, `134d0e8` | Done — the real key lives only in `<data>/secrets/keys.toml` (0600); each session gets a dummy and a `models.json` pointing at `http://key-proxy:8080/<provider>`; `hs_key` validates the dummy, swaps in the real key and forwards over TLS (`openssl s_client`, because the artifact is static), joined to every session network under `key-proxy`. `key set` reads stdin only; `key list` never prints values; delete revokes the dummy. The provider is a fixed table, so a request cannot name a host. The self-test asks the key-proxy alias to answer (the inverse of HS-038's egress pair), and `case_internet_toggle` stores a sentinel real key and greps the session directory, environment and mounts for it. ADR-0048. Review **BLOCK** on a body-loss P1 (head+body in one segment) and the missing bullet-7 assertion; both fixed, plus the P2s. Demo: a real `api.anthropic.com` request returned the provider's 401 through the proxy, the session's `models.json` held only the dummy, and the delete removed the `[sessions]` row. |
+| PER-74 | HS-042 WIP snapshot | `fcd37dc`, `5a5bcd8` | Done — `src/snapshot.rs` is spec item 9's temporary-index script; the ref is `refs/holosmith/wip/<id>`, the identity is `holosmith <holosmith@localhost>`, and a tree equal to `HEAD` removes the ref. It runs on every `agent_settled`, before every stop and before delete; the host runs it, `holosmith container snapshot` is the `/work`/`HS_SESSION_ID` equivalent. ADR-0049. Review **OK with notes**, two P1 test gaps (the settle site and the deletion case) fixed and the P2s cleaned. Demo: a real worktree kept its modified and new files in the ref while HEAD, the index and the working tree stayed put; a clean tree removed the ref. |
 
-Two mutations worth carrying forward: deleting `join_network` from `apply_proxy` makes
-`case_internet_toggle_on_proxy` red, and making the network step skip its join when the network already exists
-makes `case_internet_toggle_on_resumed_endpoints` red (`expected '2', got '1'`). Both were reverted; the tree is
-clean and the final `scripts/verify.sh` on the committed tree was **58 cases, 588 assertions, ok** — and pushed.
-
-Ledger for the next session: **HS-039 (`PER-71`, the key proxy, size L)** is next and is a chain from there on
-(§8's note above says what already waits for it). It is the story that makes a real turn possible; the risky part
-is streaming a provider's SSE body through the proxy unbuffered. Expect it to need more than one gate cycle, and
-prefer an honest stop over a half-built proxy.
+The final `scripts/verify.sh` on the committed tree was **60 cases, 609 assertions, ok**; both stories are pushed
+to `origin/master` at `5a5bcd8`.
