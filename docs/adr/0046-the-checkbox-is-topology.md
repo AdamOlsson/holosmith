@@ -89,9 +89,14 @@ really running).
 Then the half no container can show: **a resume keeps the choice**. The proxy is detached from each session's
 network, the container is killed (its exit lands the row in `error`, a resumable state), the session is resumed,
 and the endpoint count is **1** for the off session and **2** for the on one. The detach is what makes the count
-evidence rather than an inheritance: `resume` re-creates the network idempotently, so a network that survived the
-stop keeps whatever the create attached to it and an `on` session would report 2 with `apply_proxy` deleted from
-`resume`. Detached and then 2 is a rejoin; detached and then 1 is a missing one.
+evidence rather than an inheritance: the resume re-creates the network idempotently, so a network that survived the
+stop keeps whatever the create attached to it and an `on` session reports 2 whether or not the re-join happened.
+Detached and then 2 is a rejoin; detached and then 1 is a missing one — **measured** by mutating the network step
+to skip the join when its network already exists, which is precisely that bug: the case goes red with
+`expected '2', got '1'`.
+
+(The join lives in the **network step**, which a resume runs again through the provisioner; `SessionBackend::resume`
+is the ladder's path and joins too, but it is not what `POST /resume` takes.)
 
 The image has no `curl` (measured), so V6's `curl --noproxy '*'` is asked by node — the same `net.connect` the
 self-test's probe is built on, for the reason ADR-0044 gives: one image, and the one sessions already run.

@@ -135,11 +135,15 @@ else in the review was edited.
 ### The reviewer's "could not verify without running" list, run
 
 - `scripts/verify.sh` on the committed tree: **57 cases, 579 assertions, ok**.
-- S1's mutation, before the fix, was exactly as the reviewer predicted: with `apply_proxy`'s join deleted the `on`
-  half printed one SKIP line and the run stayed green. After the fix the same deletion fails
-  `case_internet_toggle_on_proxy` (`the egress proxy is running and was not on the on session's network`), and
-  SP2's mutation — `self.apply_proxy(session)` removed from `resume` — now fails
-  `case_internet_toggle_on_resumed_endpoints` (`expected 2, got 1`). Both were watched going red and then reverted.
+- S1's mutation: with `join_network` deleted from `apply_proxy`, the fixed case fails with
+  `case_internet_toggle_on_proxy — the egress proxy is running and was not on the on session's network` (before the
+  fix the same deletion took the SKIP arm and the run stayed green, which is the reviewer's prediction confirmed).
+- SP2's mutation: the network step made to skip its join when the network already exists — the "the resume
+  inherited whatever the create attached" bug — fails `case_internet_toggle_on_resumed_endpoints — expected '2', got
+  '1'`. (The API's resume runs the network step through the provisioner; `SessionBackend::resume` is the ladder's
+  path, which is why the first attempt at this mutation — deleting `apply_proxy` from `resume` — stayed green and
+  the mutation was moved to the step the path really takes.)
+- Both were watched going red and then reverted, and the tree was re-run green afterwards.
 - The `EAI_AGAIN` word: pinned in `tests/selftest.rs` (`the probe's own verdict for the alias is a name that does
   not resolve`), which asserts the probe's stderr line for `egress-proxy:3128` ends in `EAI_AGAIN` or `ENOTFOUND`.
 - `docker kill` → `error`: the case asserts it, and the run above took that path twice.
