@@ -221,6 +221,21 @@ button:disabled {
   opacity: 0.8;
 }
 
+.tool-meta {
+  font-size: 0.75rem;
+  opacity: 0.6;
+}
+
+.tool-meta:empty {
+  display: none;
+}
+
+.tool-full {
+  font-size: 0.75rem;
+  display: inline-block;
+  margin-top: 0.25rem;
+}
+
 .tool-output {
   font-family: ui-monospace, monospace;
   font-size: 0.8125rem;

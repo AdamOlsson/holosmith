@@ -9,6 +9,7 @@ pub mod health;
 mod history;
 mod sessions;
 mod streams;
+mod tool_output;
 
 pub use app::{
     App, AppState, ManifestEntry, RequestCounter, RouteKind, Routes, is_guard_exempt, router,

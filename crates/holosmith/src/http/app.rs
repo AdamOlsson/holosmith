@@ -32,6 +32,7 @@ use crate::http::health::{self, Health};
 use crate::http::history;
 use crate::http::sessions;
 use crate::http::streams;
+use crate::http::tool_output;
 use crate::ladder::Ladder;
 use crate::provisioner::Provisioner;
 use crate::runtime::Runtime;
@@ -416,6 +417,7 @@ pub fn router(state: AppState) -> Routes {
     let create_state = Arc::clone(&state);
     let stream_state = Arc::clone(&state);
     let history_state = Arc::clone(&state);
+    let tool_output_state = Arc::clone(&state);
     let prompt_state = Arc::clone(&state);
     let abort_state = Arc::clone(&state);
     let steer_state = Arc::clone(&state);
@@ -485,6 +487,19 @@ pub fn router(state: AppState) -> Routes {
                 let state = Arc::clone(&history_state);
                 let id = id.map(|Path(id)| id).unwrap_or_default();
                 async move { history::respond(&state, &id, query).await }
+            },
+        )
+        // One tool call's full output, as a file (HS-033). Read-only like its neighbours, so the manifest
+        // records `ReadOnly` and every guard applies with nothing new. Both path segments are taken as
+        // `Result`s: a `%FF` segment is not UTF-8, and an id that is not a name is a file that cannot exist —
+        // the handler answers `not_found` for each, which is one answer to one question (a traversal is
+        // impossible because the id is checked against an allow-list before anything is joined).
+        .get(
+            "/api/sessions/{id}/tool-output/{tool_id}",
+            move |captured: Result<Path<(String, String)>, PathRejection>| {
+                let state = Arc::clone(&tool_output_state);
+                let (id, tool_id) = captured.map(|Path(pair)| pair).unwrap_or_default();
+                async move { tool_output::respond(&state, &id, &tool_id).await }
             },
         )
         // The prompt: a mutating route, so every guard applies and the manifest records it (HS-015).

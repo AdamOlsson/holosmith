@@ -21,9 +21,12 @@ use serde_json::{Value, json};
 
 use holosmith::agent::{Agent, Received};
 use holosmith::db::{Database, OpenOptions};
-use holosmith::events::{self, Event, MESSAGE_DELTA, MESSAGE_END, WriterOptions};
+use holosmith::events::{
+    self, Event, MESSAGE_DELTA, MESSAGE_END, TOOL_END, TOOL_START, WriterOptions,
+};
 use holosmith::rpc::{Mapped, Mapping, pump};
 use holosmith::sessions::{NewSession, Session};
+use holosmith::tool::{Store, truncated_marker};
 
 mod support;
 use support::TempDir;
@@ -33,6 +36,10 @@ const TEXT: &str = include_str!("fixtures/pi-turn-text.jsonl");
 
 /// The turn that thought before it answered.
 const THINKING: &str = include_str!("fixtures/pi-turn-thinking.jsonl");
+
+/// The turn that called a tool: pi's `toolcall_*` (the provider's streaming of the call) and
+/// `tool_execution_*` (the call's run and its result), which is what HS-033 maps and files.
+const TOOL: &str = include_str!("fixtures/pi-turn-tool.jsonl");
 
 /// The instant every row this test writes carries, so a timestamp is asserted rather than raced.
 const NOW: i64 = 1_760_000_000;
@@ -68,7 +75,16 @@ fn mapped(fixture: &str) -> (Vec<Frame>, Vec<bool>, u64, u64) {
                 payload: serde_json::from_str(&payload).expect("a frame's payload is JSON"),
             }),
             Mapped::Settled { aborted } => settled.push(aborted),
-            Mapped::Nothing => {}
+            // A tool's result is a frame whose whole output belongs in a file. With no data root there is
+            // none, so the frame is the previewed shape — the served path stores first (see the pump tests).
+            mapped => {
+                if let Some((kind, payload)) = mapped.into_frame() {
+                    frames.push(Frame {
+                        kind: kind.to_string(),
+                        payload: serde_json::from_str(&payload).expect("a frame's payload is JSON"),
+                    });
+                }
+            }
         }
     }
     (frames, settled, mapping.skipped(), mapping.unknown())
@@ -237,6 +253,28 @@ fn a_fixture_whose_records_drifted_fails_this_guard() {
         "the thinking fixture is the same turn shape with a thinking block, and it is the only fixture that \
          exercises that arm"
     );
+    assert_eq!(
+        multiset(TOOL),
+        expect(&[
+            ("response", 1),
+            ("agent_start", 1),
+            // Two assistant responses around one tool call: pi's own boundaries are per response, and this is
+            // the fixture that proves the contract's turn is not theirs.
+            ("turn_start", 2),
+            ("message_start", 5),
+            ("message_end", 5),
+            ("message_update", 47),
+            ("tool_execution_start", 1),
+            ("tool_execution_update", 2),
+            ("tool_execution_end", 1),
+            // The second response's boundary ends after its text, which is why it appears here.
+            ("turn_end", 2),
+            ("agent_end", 1),
+            ("agent_settled", 1),
+        ]),
+        "the tool fixture is a real turn's records, verbatim: a call's streamed arguments, its run, its result \
+         and the answer that repeated what it printed"
+    );
 }
 
 /// A real event log, its writer, and one session for the frames to hang off.
@@ -281,6 +319,11 @@ impl Log {
             session,
             dir,
         }
+    }
+
+    /// The tool-output store the pump writes to: the same data root, so a test reads back what a turn stored.
+    fn store(&self) -> Store {
+        Store::new(self.dir.path())
     }
 
     /// Every committed event of the session, in seq order, once `count` of them are there.
@@ -331,6 +374,212 @@ fn fake_agent(dir: &TempDir, fixture: &str) -> std::process::Command {
     command
 }
 
+#[test]
+fn the_recorded_tool_turn_becomes_a_start_a_delta_run_an_end_and_one_tool_pair() {
+    // The third arm HS-033 adds, and the shape it must have: **one** `tool.start`/`tool.end` pair for one
+    // call, even though pi printed both the provider's `toolcall_*` stream and the execution's records. The
+    // call's id is the same in both, so mapping both would open two blocks for one call (ADR-0041).
+    let (frames, settled, skipped, unknown) = mapped(TOOL);
+    print_frames("tool", &frames);
+    assert_eq!(settled, vec![false]);
+    assert_eq!(unknown, 0, "every record in this turn is one pi documents");
+
+    let kinds: Vec<&str> = frames.iter().map(|frame| frame.kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        [
+            MESSAGE_END,
+            TOOL_START,
+            TOOL_END,
+            MESSAGE_DELTA,
+            MESSAGE_DELTA,
+            MESSAGE_DELTA,
+            MESSAGE_DELTA,
+            MESSAGE_END
+        ],
+        "the first answer asked for a tool, the call ran, then the answer repeated what it printed: {kinds:?}"
+    );
+
+    // The call itself: the name and a summary of the arguments, from the execution's own record.
+    let start = of_kind(&frames, TOOL_START)[0];
+    assert_eq!(start.payload["tool_id"], "call_00_9hlt8we6459oa420spsp3mju");
+    assert_eq!(start.payload["name"], "bash");
+    let arguments = start.payload["arguments"].as_str().expect("arguments");
+    assert!(
+        arguments.contains("hello from the tool"),
+        "the arguments summary carries the command: {arguments}"
+    );
+
+    // Its result: the output, the tool's own verdict and pi's duration.
+    let end = of_kind(&frames, TOOL_END)[0];
+    assert_eq!(end.payload["tool_id"], start.payload["tool_id"]);
+    assert_eq!(end.payload["name"], "bash");
+    assert_eq!(end.payload["output"], "hello from the tool\n");
+    assert_eq!(end.payload["status"], "ok");
+    assert!(
+        end.payload["duration_ms"].as_u64().is_some(),
+        "pi measured the tool: {}",
+        end.payload["duration_ms"]
+    );
+    assert!(
+        end.payload.get("output_ref").is_none(),
+        "a replay with no data root stores nothing, so it names no reference: {}",
+        end.payload
+    );
+    // A turn with a tool call declines more records than a plain one — pi's streamed call arguments and the
+    // tool's partial results — and the count is the drift guard's business, not this test's.
+    assert!(skipped > 0);
+}
+
+#[tokio::test]
+async fn the_pump_files_a_tool_output_so_the_log_carries_only_a_preview() {
+    let dir = TempDir::new("rpc-tool");
+    let log = Log::new(dir);
+    let command = fake_agent(&log.dir, TOOL);
+    let (agent, _exit) = Agent::launch(command, &log.session.id).expect("the fake agent starts");
+    let mut records = agent.records();
+    let reply = agent
+        .request(
+            "prompt-1",
+            json!({"id": "prompt-1", "type": "prompt", "message": "hello"}),
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("the fake agent answers");
+    assert!(reply.success);
+
+    let mut mapping = Mapping::new(&log.session.id);
+    let ended = pump(&mut records, &mut mapping, &log.writer, &log.store())
+        .await
+        .expect("the fixture settles the turn");
+    assert_eq!(ended, holosmith::backend::TurnEnd::Settled);
+
+    // Read the tool's frame back out of the committed log: `tool.end` must name the file, and its own
+    // `output` must be the transcript's preview rather than the whole thing.
+    let deadline = Instant::now() + PATIENCE;
+    let events = loop {
+        let events = log
+            .database
+            .lock()
+            .expect("the lock")
+            .events()
+            .read_since(&log.session.id, 0, 10_000)
+            .expect("the log reads");
+        if events.iter().any(|event| event.kind == "turn.end") {
+            break events;
+        }
+        assert!(Instant::now() < deadline, "the turn never ended");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let payload_of = |kind: &str| -> Value {
+        let event = events
+            .iter()
+            .find(|event| event.kind == kind)
+            .unwrap_or_else(|| panic!("no {kind} in the log"));
+        serde_json::from_str(&event.payload).expect("a payload is JSON")
+    };
+    let tool_end = payload_of("tool.end");
+    let reference = tool_end["output_ref"].as_str().expect("the reference");
+    assert_eq!(
+        reference,
+        format!(
+            "/api/sessions/{}/tool-output/call_00_9hlt8we6459oa420spsp3mju",
+            log.session.id
+        )
+    );
+
+    // The file the reference names holds the whole output, and the frame holds the preview of it.
+    let store = log.store();
+    let path = store
+        .path(&log.session.id, "call_00_9hlt8we6459oa420spsp3mju")
+        .expect("the file's path");
+    assert!(path.starts_with(log.dir.path()), "{}", path.display());
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("the file"),
+        "hello from the tool\n"
+    );
+    assert_eq!(tool_end["output"], "hello from the tool\n");
+
+    // And the session's own log is stderr's alone (spec item 15): nothing about the tool went into it.
+    let session_log = log
+        .dir
+        .path()
+        .join("sessions")
+        .join(&log.session.id)
+        .join("session.log");
+    if let Ok(text) = std::fs::read_to_string(&session_log) {
+        assert!(
+            !text.contains("hello from the tool"),
+            "a tool's output reached session.log: {text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_tool_that_prints_megabytes_is_capped_with_a_marker_and_previewed() {
+    // The story's own case, at the served path rather than in the store's unit tests: the file is capped and
+    // says where it stopped, and the frame is small however large the tool's output was.
+    const HUGE: usize = 6 * 1024 * 1024;
+    let dir = TempDir::new("rpc-huge");
+    let log = Log::new(dir);
+    let printed = "abcdefghij".repeat(HUGE / 10);
+    let fixture = [
+        json!({"type": "agent_start"}).to_string(),
+        json!({"type": "message_start", "message": {"role": "assistant", "content": []}})
+            .to_string(),
+        json!({"type": "tool_execution_start", "toolCallId": "call_big", "toolName": "bash",
+               "args": {"command": "cat big.txt"}})
+        .to_string(),
+        json!({"type": "tool_execution_end", "toolCallId": "call_big", "toolName": "bash",
+               "result": {"content": [{"type": "text", "text": printed}]},
+               "isError": false, "durationMs": 12})
+        .to_string(),
+        json!({"type": "agent_settled", "aborted": false}).to_string(),
+    ]
+    .join("\n")
+        + "\n";
+    let command = fake_agent(&log.dir, &fixture);
+    let (agent, _exit) = Agent::launch(command, &log.session.id).expect("the fake agent starts");
+    let mut records = agent.records();
+    let _ = agent
+        .request(
+            "prompt-1",
+            json!({"id": "prompt-1", "type": "prompt", "message": "hello"}),
+            Duration::from_secs(5),
+        )
+        .await;
+    let mut mapping = Mapping::new(&log.session.id);
+    pump(&mut records, &mut mapping, &log.writer, &log.store())
+        .await
+        .expect("the turn settles");
+
+    let store = log.store();
+    let path = store.path(&log.session.id, "call_big").expect("a path");
+    let written = std::fs::read_to_string(&path).expect("the file is valid UTF-8");
+    let (body, marker) = written.split_once('\n').unwrap_or_else(|| {
+        panic!(
+            "a capped file ends with a marker line: {} bytes",
+            written.len()
+        )
+    });
+    assert_eq!(body.len(), holosmith::tool::CAP, "the body is the cap");
+    assert_eq!(
+        marker.trim_end(),
+        truncated_marker(holosmith::tool::CAP, printed.len()),
+        "the marker names what was kept and what there was"
+    );
+
+    // The frame is a preview, whatever the tool printed.
+    let (frames, _, _, _) = mapped(&fixture);
+    let end = of_kind(&frames, TOOL_END)[0];
+    let preview = end.payload["output"].as_str().expect("the preview");
+    assert!(
+        preview.chars().count() <= holosmith::tool::PREVIEW_MAX + 1,
+        "the preview is {} characters",
+        preview.chars().count()
+    );
+}
+
 #[tokio::test]
 async fn the_pump_writes_the_recorded_turn_into_the_log_in_order() {
     let dir = TempDir::new("rpc-pump");
@@ -351,7 +600,7 @@ async fn the_pump_writes_the_recorded_turn_into_the_log_in_order() {
     assert!(reply.success);
 
     let mut mapping = Mapping::new(&log.session.id);
-    let ended = pump(&mut records, &mut mapping, &log.writer)
+    let ended = pump(&mut records, &mut mapping, &log.writer, &log.store())
         .await
         .expect("the fixture settles the turn");
     assert_eq!(ended, holosmith::backend::TurnEnd::Settled);
@@ -403,7 +652,7 @@ async fn a_coalesced_turn_keeps_its_text_and_its_order() {
         .await
         .expect("the fake agent answers");
     let mut mapping = Mapping::new(&log.session.id);
-    pump(&mut records, &mut mapping, &log.writer)
+    pump(&mut records, &mut mapping, &log.writer, &log.store())
         .await
         .expect("the fixture settles the turn");
 
@@ -465,7 +714,7 @@ async fn an_agent_that_dies_mid_turn_is_a_failed_turn_not_a_hang() {
         )
         .await;
     let mut mapping = Mapping::new(&log.session.id);
-    let ended = pump(&mut records, &mut mapping, &log.writer).await;
+    let ended = pump(&mut records, &mut mapping, &log.writer, &log.store()).await;
     let error = ended.expect_err("an agent that never settles fails its turn");
     assert!(
         error.to_string().contains("settled"),
@@ -504,7 +753,7 @@ async fn a_turn_that_settles_aborted_answers_the_runner_with_aborted() {
         )
         .await;
     let mut mapping = Mapping::new(&log.session.id);
-    let ended = pump(&mut records, &mut mapping, &log.writer)
+    let ended = pump(&mut records, &mut mapping, &log.writer, &log.store())
         .await
         .expect("the settle answers");
     assert_eq!(ended, holosmith::backend::TurnEnd::Aborted);

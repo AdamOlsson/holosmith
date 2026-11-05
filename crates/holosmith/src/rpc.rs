@@ -31,7 +31,7 @@
 //!   and a process-wide counter (`msg-<nanos>-<n>`), the same shape the stub's ids have (HS-011's reason: a
 //!   restart that started over at `msg-1` would fold a new turn into a previous turn's block).
 //! - **Unknown is counted, never fatal.** A record type or nested event type this build does not map — a
-//!   queue update, an extension error, and every `toolcall_*` until HS-033 — answers
+//!   queue update, an extension error, and the provider's `toolcall_*` — answers
 //!   [`Mapped::Nothing`] and moves a counter, and [`pump`] logs that counter once per turn. A mapping layer
 //!   that died on a frame it did not recognise would take the session with it.
 //! - **The turn ends on `agent_settled`, not on `agent_end`.** `agent_end` closes one low-level agent run and
@@ -48,7 +48,10 @@ use serde_json::{Value, json};
 use crate::agent::{AgentRecords, Received};
 use crate::backend::{BackendError, TurnEnd};
 use crate::clock;
-use crate::events::{EventWriter, MESSAGE_DELTA, MESSAGE_END, NewEvent, TURN_END, TURN_START};
+use crate::events::{
+    EventWriter, MESSAGE_DELTA, MESSAGE_END, NewEvent, TOOL_END, TOOL_START, TURN_END, TURN_START,
+};
+use crate::tool::{self, Store};
 
 /// The prefix of a minted message id. It is the stub's, so a log cannot tell which backend wrote a block.
 const MESSAGE_PREFIX: &str = "msg";
@@ -95,9 +98,85 @@ pub enum Mapped {
         /// `agent_settled.aborted`: the run ended because something aborted it.
         aborted: bool,
     },
+    /// A tool call that finished, with the output that belongs in a file rather than in the log (HS-033).
+    ///
+    /// The mapping cannot write it — it does no I/O, which is what lets a fixture replay without a data
+    /// root — so it answers the whole record and [`pump`] stores it, then asks [`ToolEnd::frame`] for the
+    /// payload once it knows whether the write worked.
+    Tool(ToolEnd),
 }
 
-/// One turn's mapping: which of pi's messages is current, and what it did with the records it could not map.
+/// One finished tool call: what the log's frame says, plus the output the file keeps.
+///
+/// The two are deliberately separate. `output` is the whole of what the tool printed and never becomes a
+/// payload — a `cat` of a large file in the log would be replayed on every reconnect and folded by
+/// compaction — while `preview` (built when the frame is) is what the transcript draws.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolEnd {
+    /// pi's `toolCallId`, which is the id its `tool_execution_start` carried and the name the file has.
+    pub tool_id: String,
+    /// pi's `toolName`.
+    pub name: String,
+    /// Everything the tool printed: the text of its result's content blocks.
+    pub output: String,
+    /// `"ok"` or `"error"` — pi's `isError`.
+    ///
+    /// pi reports no exit code: a `bash` tool's status lives inside `result.details`, which the stored file
+    /// holds verbatim. So the frame carries the tool's own verdict, which is the honest spelling of the
+    /// story's "exit status" (ADR-0041).
+    pub status: &'static str,
+    /// pi's `durationMs`, absent when it measured none (a tool that did not run).
+    pub duration_ms: Option<u64>,
+}
+
+impl Mapped {
+    /// This as one frame, when it is one: a tool's result answers its payload with the **preview** and no
+    /// `output_ref` because nothing was stored.
+    ///
+    /// The served path does not use this — [`pump`] stores first and then builds the frame — it is for a
+    /// replay with no data root (a committed fixture, a unit test), where "what frame would this be" is the
+    /// whole question.
+    pub fn into_frame(self) -> Option<(&'static str, String)> {
+        match self {
+            Mapped::Frame { kind, payload } => Some((kind, payload)),
+            Mapped::Tool(result) => match result.frame(None) {
+                Mapped::Frame { kind, payload } => Some((kind, payload)),
+                _ => None,
+            },
+            Mapped::Nothing | Mapped::Settled { .. } => None,
+        }
+    }
+}
+
+impl ToolEnd {
+    /// The `tool.end` frame, given what the store made of the output (`None` when it could not be written).
+    ///
+    /// The one place the payload's shape is spelled: the store supplies the preview and the reference, and a
+    /// failed write still answers a frame — with a preview and no `output_ref` — because the transcript must
+    /// show that something ran.
+    pub fn frame(&self, stored: Option<&tool::Stored>) -> Mapped {
+        let mut payload = serde_json::Map::new();
+        payload.insert("tool_id".to_string(), Value::String(self.tool_id.clone()));
+        payload.insert("name".to_string(), Value::String(self.name.clone()));
+        let output = match stored {
+            Some(stored) => stored.preview.clone(),
+            None => tool::preview(&self.output),
+        };
+        payload.insert("output".to_string(), Value::String(output));
+        payload.insert("status".to_string(), Value::String(self.status.to_string()));
+        if let Some(duration) = self.duration_ms {
+            payload.insert("duration_ms".to_string(), Value::from(duration));
+        }
+        if let Some(stored) = stored {
+            payload.insert(
+                "output_ref".to_string(),
+                Value::String(stored.reference.clone()),
+            );
+        }
+        frame(TOOL_END, Value::Object(payload))
+    }
+}
+
 ///
 /// One value per turn, because the id it mints is per message and the count is per turn. It holds no clock,
 /// no database and no agent — a record in, a frame out — so a fixture can be replayed through it without a
@@ -108,7 +187,8 @@ pub struct Mapping {
     /// The assistant message pi is currently streaming, if any.
     current: Option<String>,
     /// Records of a type this build knows and has no frame for: pi's `agent_start`/`agent_end`, its queue and
-    /// level bookkeeping, the retry and compaction records, a toolcall's blocks (HS-033's). Declining them is the
+    /// level bookkeeping, the retry and compaction records, the provider's `toolcall_*` blocks and a tool's
+    /// partial results. Declining them is the
     /// design, so they are not worth a line.
     declined: u64,
     /// Records this build does **not** know: a type (or a nested event type) a later pi release invented, or a
@@ -165,6 +245,14 @@ impl Mapping {
             }
             Some("message_update") => self.update(record),
             Some("message_end") => self.end(record),
+            // The tool's own execution: HS-033's pair. The *provider's* `toolcall_*` above are declined and
+            // these two are mapped, because they carry the complete `args` and the result, and pi gives them
+            // the same id — mapping both would open two blocks for one call (ADR-0041).
+            Some("tool_execution_start") => self.tool_start(record),
+            // A partial result. It is not in the contract and the page has no rule for a replacing tool
+            // frame, so it is a documented record with no frame rather than an unknown one.
+            Some("tool_execution_update") => self.note_declined(),
+            Some("tool_execution_end") => self.tool_end(record),
             // A `response` is the reader's to route to the command that asked (HS-031); the mapping meets one only
             // when a fixture is replayed verbatim, and it is a documented record either way.
             Some("response") => self.note_declined(),
@@ -227,7 +315,9 @@ impl Mapping {
                 );
                 return self.note_declined();
             }
-            // `toolcall_start`/`_delta`/`_end` are HS-033's.
+            // `toolcall_start`/`_delta`/`_end` are the provider's streaming of the call's arguments. They are
+            // declined because `tool_execution_start` carries the same call's complete `args` and
+            // `tool_execution_end` its result, so mapping both would open two blocks for one call (ADR-0041).
             "toolcall_start" | "toolcall_delta" | "toolcall_end" => return self.note_declined(),
             _ => return self.note_unknown(),
         };
@@ -254,8 +344,8 @@ impl Mapping {
             return self.note_unknown();
         };
         if message.get("role").and_then(Value::as_str) != Some("assistant") {
-            // The user's own prompt, pi's system message, and (until HS-033) a tool result. None of them is
-            // a transcript block.
+            // The user's own prompt, pi's system message, and a tool result (whose text is `tool.end`'s, from
+            // the execution record, and whose images are HS-035's). None of them is a transcript block.
             return Mapped::Nothing;
         }
         let message_id = self.ended_id("a message ended with no message started");
@@ -269,6 +359,63 @@ impl Mapping {
         }
         payload.insert("tool_calls".to_string(), Value::Array(tool_calls(message)));
         frame(MESSAGE_END, Value::Object(payload))
+    }
+
+    /// One `tool_execution_start`: the call's name and a summary of its arguments.
+    ///
+    /// The block the page draws is keyed by the tool id, so an id pi did not give is a call that cannot be
+    /// drawn: it is declined rather than rendered under a blank heading, the same rule a message follows.
+    fn tool_start(&mut self, record: &Value) -> Mapped {
+        let Some(tool_id) = record.get("toolCallId").and_then(Value::as_str) else {
+            return self.note_unknown();
+        };
+        if tool_id.is_empty() {
+            return self.note_declined();
+        }
+        let name = record
+            .get("toolName")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        // The arguments are a *summary*: a `write` of a large file must not put the file in a payload. The
+        // whole of them is in the message that asked for the call (`message.end`'s `tool_calls` names it) and
+        // in the stored output's own record.
+        let arguments = record
+            .get("args")
+            .map(|args| tool::truncate(&args.to_string(), tool::ARGUMENTS_MAX))
+            .unwrap_or_default();
+        frame(
+            TOOL_START,
+            json!({"tool_id": tool_id, "name": name, "arguments": arguments}),
+        )
+    }
+
+    /// One `tool_execution_end`: the result, which the pump stores and the frame previews.
+    fn tool_end(&mut self, record: &Value) -> Mapped {
+        let Some(tool_id) = record.get("toolCallId").and_then(Value::as_str) else {
+            return self.note_unknown();
+        };
+        if tool_id.is_empty() {
+            return self.note_declined();
+        }
+        let name = record
+            .get("toolName")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let status = match record.get("isError").and_then(Value::as_bool) {
+            Some(true) => "error",
+            // Absent is not an error: pi omits the field when a tool did not run, and a frame that said
+            // `error` for that would report a failure nobody observed.
+            Some(false) | None => "ok",
+        };
+        Mapped::Tool(ToolEnd {
+            tool_id: tool_id.to_string(),
+            name,
+            output: result_text(record.get("result")),
+            status,
+            duration_ms: record.get("durationMs").and_then(Value::as_u64),
+        })
     }
 
     /// The id of the message being streamed, minting and keeping one when no start opened it.
@@ -327,10 +474,16 @@ impl Mapping {
 /// turn is the operator's prompt (see the module doc), so `turn.start` goes out before the first frame and
 /// `turn.end` when pi says it settled. A turn the agent never settles — its process died mid-run — writes no
 /// `turn.end`, because the turn did not end: `crate::exit` records what became of the row.
+///
+/// **A tool's output is written here too** (HS-033): the mapping answers [`Mapped::Tool`] with everything the
+/// tool printed, and this stores it through [`crate::tool::Store`] before the frame is built. That is the one
+/// piece of I/O in a turn's mapping path, and it is here rather than in the mapping because a mapping that
+/// wrote files could not be replayed from a fixture.
 pub async fn pump(
     records: &mut AgentRecords,
     mapping: &mut Mapping,
     events: &EventWriter,
+    store: &Store,
 ) -> Result<TurnEnd, BackendError> {
     append(events, mapping, TURN_START, "{}").await;
     loop {
@@ -347,6 +500,18 @@ pub async fn pump(
                         } else {
                             TurnEnd::Settled
                         });
+                    }
+                    // The whole output goes to its file; the frame carries a preview and the reference. A
+                    // store that refused (an id that cannot be a filename, a full disk) still leaves a frame:
+                    // the tool ran, and the transcript says so.
+                    Mapped::Tool(result) => {
+                        let stored =
+                            store.store(&mapping.session_id, &result.tool_id, &result.output);
+                        match result.frame(stored.as_ref()) {
+                            Mapped::Frame { kind, payload } => (kind, payload),
+                            // `ToolEnd::frame` always answers a frame; nothing else is a frame.
+                            _ => continue,
+                        }
                     }
                     Mapped::Frame { kind, payload } => (kind, payload),
                     Mapped::Nothing => continue,
@@ -418,6 +583,31 @@ fn frame(kind: &'static str, payload: Value) -> Mapped {
     }
 }
 
+/// A tool's result as text: the `text` blocks of `result.content`, in order.
+///
+/// A result is `{"content": [...], "details": {...}}` (`docs/json.md`). The content blocks are what the tool
+/// printed; a block that is not text is named in brackets rather than dropped, so a result carrying an image
+/// leaves a trace in the transcript's text until HS-035 stores and renders it (ADR-0041). A result with no
+/// `content` at all — a tool that printed nothing, or a shape a later pi invented — is the whole value's JSON,
+/// which is at least true.
+fn result_text(result: Option<&Value>) -> String {
+    let Some(result) = result else {
+        return String::new();
+    };
+    let Some(blocks) = result.get("content").and_then(Value::as_array) else {
+        return result.to_string();
+    };
+    let mut text = String::new();
+    for block in blocks {
+        let kind = block.get("type").and_then(Value::as_str).unwrap_or("");
+        match kind {
+            "text" => text.push_str(block.get("text").and_then(Value::as_str).unwrap_or("")),
+            other => text.push_str(&format!("[{other}]")),
+        }
+    }
+    text
+}
+
 /// A record's `message.role`, when it names one.
 fn role(record: &Value) -> Option<&str> {
     record.get("message")?.get("role")?.as_str()
@@ -466,12 +656,15 @@ mod tests {
         let mut settled = Vec::new();
         for record in records {
             match mapping.map(record) {
-                Mapped::Frame { kind, payload } => frames.push((
-                    kind.to_string(),
-                    serde_json::from_str(&payload).expect("a frame's payload is JSON"),
-                )),
                 Mapped::Settled { aborted } => settled.push(aborted),
-                Mapped::Nothing => {}
+                mapped => {
+                    if let Some((kind, payload)) = mapped.into_frame() {
+                        frames.push((
+                            kind.to_string(),
+                            serde_json::from_str(&payload).expect("a frame's payload is JSON"),
+                        ));
+                    }
+                }
             }
         }
         (frames, settled)
@@ -643,8 +836,8 @@ mod tests {
         assert!(frames.is_empty(), "{frames:?}");
         assert_eq!(settled, vec![false]);
         // Declined, because pi documents them and this contract has no frame for them: the queue update,
-        // `agent_start`, `agent_end`, the session-info change, the toolcall delta (HS-033's) and the extension
-        // error. Unknown, and therefore worth a `warn`: the invented nested event type. `assistant_start` is
+        // `agent_start`, `agent_end`, the session-info change, the toolcall delta (the provider's, declined so
+        // that one call is one block) and the extension error. Unknown, and therefore worth a `warn`: the invented nested event type. `assistant_start` is
         // mapped, not declined.
         assert_eq!((mapping.skipped(), mapping.unknown()), (7, 1));
     }

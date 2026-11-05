@@ -28,6 +28,7 @@ pub mod sessions;
 mod sql;
 pub mod stop;
 pub mod sweeper;
+pub mod tool;
 pub mod turn;
 pub mod version;
 pub mod web;

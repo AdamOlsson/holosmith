@@ -310,8 +310,8 @@ pub fn session_dir(data_root: &Path, session_id: &str) -> PathBuf {
 
 /// Whether `text` can be one path component: no separators, no `.`/`..`, nothing that a filesystem reads as
 /// more than a name. A guard against writing outside a session's directory, not a second spelling of what
-/// an id is.
-fn is_path_segment(text: &str) -> bool {
+/// an id is. `crate::tool` asks the same question of a tool id and reuses this rather than restating it.
+pub(crate) fn is_path_segment(text: &str) -> bool {
     !text.is_empty()
         && text.chars().all(|character| {
             character.is_ascii_alphanumeric() || character == '-' || character == '_'

@@ -40,6 +40,7 @@ use crate::events::EventWriter;
 use crate::exit::SessionLog;
 use crate::rpc::{self, Mapping};
 use crate::sessions::Session;
+use crate::tool::Store;
 use crate::worktree::{Refusal, Worktree, refuse, repository_of};
 
 /// How long pi may take to answer a command that only accepts or queues it.
@@ -665,7 +666,10 @@ impl SessionBackend for DockerBackend {
             "the agent accepted the prompt"
         );
         let mut mapping = Mapping::new(&session.id);
-        rpc::pump(&mut records, &mut mapping, events).await
+        // A tool's output is a file under the session's own directory, so a two-megabyte `cat` is not
+        // replayed to a phone on every reconnect (HS-033, ADR-0041).
+        let store = Store::new(&self.settings.data_root);
+        rpc::pump(&mut records, &mut mapping, events, &store).await
     }
 
     /// Queue guidance for the turn that is running (`docs/rpc-commands.md`, `steer`).

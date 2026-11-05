@@ -72,7 +72,14 @@ type BlockNodes = Record<DeltaKind, HTMLElement>;
 type MessageBlock = { element: HTMLElement; nodes: BlockNodes };
 
 // One tool call's block: its name and, once it ends, its output.
-type ToolBlock = { element: HTMLElement; name: HTMLElement; output: HTMLElement };
+type ToolBlock = {
+  element: HTMLElement;
+  name: HTMLElement;
+  // The tool's verdict and duration, and the link to its full output (HS-033).
+  meta: HTMLElement;
+  output: HTMLElement;
+  full: HTMLAnchorElement;
+};
 
 // The key the create carries. `crypto.randomUUID` is the platform's own UUID, but it exists only in
 // a secure context, and the control listener is plain HTTP unless it sits behind `tailscale serve`.
@@ -456,9 +463,17 @@ function toolBlock(id: string): ToolBlock {
   const element = make("article", "tool");
   element.dataset.tool = id;
   const name = make("div", "tool-name");
+  // What the tool said about itself and how long it took (HS-033). Both start empty and are filled by the
+  // `tool.end` frame; a frame written before those keys existed leaves them empty, so a replayed old row
+  // draws exactly what it always did.
+  const meta = make("div", "tool-meta");
   const output = kindNode("tool-output");
-  element.append(name, output);
-  return { element, name, output };
+  // The full output is a file, not a payload: this is the one link that fetches it (`output_ref`, a path
+  // the server computed, so it is never text from the agent).
+  const full = make("a", "tool-full", "full output");
+  full.hidden = true;
+  element.append(name, meta, output, full);
+  return { element, name, meta, output, full };
 }
 
 // Append one piece of output to a kind's node. This is the whole of the 10k-event rule: a text node
@@ -539,6 +554,19 @@ function applyChange(
     // the whole of the cost.
     block.output.textContent = change.output;
     block.output.hidden = change.output === "";
+    // `ok · 0.4s`, or just the part the frame carried: an older row has neither.
+    const parts: string[] = [];
+    if (change.status !== null) {
+      parts.push(change.status);
+    }
+    if (change.durationMs !== null) {
+      parts.push(`${(change.durationMs / 1000).toFixed(1)}s`);
+    }
+    block.meta.textContent = parts.join(" · ");
+    if (change.outputRef !== null) {
+      block.full.setAttribute("href", change.outputRef);
+      block.full.hidden = false;
+    }
     return;
   }
   const block = blocks.get(change.messageId);

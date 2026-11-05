@@ -26,7 +26,19 @@ export type Frame =
   | { type: "snapshot"; messageId: string; text: string; thinking: string }
   | { type: "usage"; messageId: string; input: number; output: number }
   | { type: "tool-start"; toolId: string; name: string; arguments: string }
-  | { type: "tool-end"; toolId: string; output: string }
+  | {
+      type: "tool-end";
+      toolId: string;
+      // The whole output's first `PREVIEW_MAX` characters: the rest is at the session's tool-output
+      // endpoint (HS-033).
+      output: string;
+      // `"ok"`/`"error"` — pi's own verdict for the tool. `null` for a row written before HS-033 added
+      // the key: the log is durable, so such a row is replayed for ever and must still draw.
+      status: string | null;
+      durationMs: number | null;
+      // The path the full output can be fetched from, or `null` when nothing was stored.
+      outputRef: string | null;
+    }
   | { type: "boundary"; boundary: "start" | "end" }
   | { type: "steer"; text: string };
 
@@ -39,7 +51,14 @@ export type Change =
   | { op: "usage"; messageId: string; input: number; output: number }
   | { op: "tool"; toolId: string }
   | { op: "tool-start"; toolId: string; name: string; arguments: string }
-  | { op: "tool-end"; toolId: string; output: string }
+  | {
+      op: "tool-end";
+      toolId: string;
+      output: string;
+      status: string | null;
+      durationMs: number | null;
+      outputRef: string | null;
+    }
   | { op: "boundary"; boundary: "start" | "end"; turn: number }
   | { op: "steer"; text: string };
 
@@ -171,7 +190,17 @@ export function parseFrame(eventType: string, data: string): Frame | null {
         arguments: text(fields["arguments"]) ?? "",
       };
     }
-    return { type: "tool-end", toolId: tool, output: text(fields["output"]) ?? "" };
+    // Three optional keys HS-033 added to the payload: a frame written before them (a durable log) or by a
+    // producer that stored nothing has none of them, and `null` is how the model says "the log did not say".
+    const duration = fields["duration_ms"];
+    return {
+      type: "tool-end",
+      toolId: tool,
+      output: text(fields["output"]) ?? "",
+      status: text(fields["status"]),
+      durationMs: count(duration) ? duration : null,
+      outputRef: text(fields["output_ref"]),
+    };
   }
   const id = messageId(fields);
   if (id === null) {
@@ -260,7 +289,14 @@ export class Transcript {
           arguments: frame.arguments,
         });
       } else {
-        changes.push({ op: "tool-end", toolId: frame.toolId, output: frame.output });
+        changes.push({
+          op: "tool-end",
+          toolId: frame.toolId,
+          output: frame.output,
+          status: frame.status,
+          durationMs: frame.durationMs,
+          outputRef: frame.outputRef,
+        });
       }
       return changes;
     }

@@ -157,7 +157,15 @@ test("a tool call is its own block, in its own order, never a message", () => {
   );
   assert.deepEqual(
     parseFrame("tool.end", '{"tool_id":"tool-1","name":"read_file","output":"1  // The app"}'),
-    { type: "tool-end", toolId: "tool-1", output: "1  // The app" },
+    {
+      type: "tool-end",
+      toolId: "tool-1",
+      output: "1  // The app",
+      // HS-033's three keys: a frame written without them (a durable log) parses with all three `null`.
+      status: null,
+      durationMs: null,
+      outputRef: null,
+    },
   );
 
   const transcript = new Transcript();
@@ -181,18 +189,48 @@ test("a tool call is its own block, in its own order, never a message", () => {
   });
   assert.deepEqual(second.map((change) => change.op), ["tool", "tool-start"]);
   transcript.apply(delta("m1", "text", "read both"));
-  const end = transcript.apply({ type: "tool-end", toolId: "tool-1", output: "done" });
-  assert.deepEqual(end, [{ op: "tool-end", toolId: "tool-1", output: "done" }]);
+  const end = transcript.apply({
+    type: "tool-end",
+    toolId: "tool-1",
+    output: "done",
+    status: "ok",
+    durationMs: 400,
+    outputRef: "/api/sessions/0123456789abcdef/tool-output/tool-1",
+  });
+  assert.deepEqual(end, [
+    {
+      op: "tool-end",
+      toolId: "tool-1",
+      output: "done",
+      status: "ok",
+      durationMs: 400,
+      outputRef: "/api/sessions/0123456789abcdef/tool-output/tool-1",
+    },
+  ]);
   assert.deepEqual(transcript.toolOrder(), ["tool-1", "tool-2"]);
   assert.deepEqual(transcript.order(), ["m1"], "a tool call is never a message block");
 });
 
 test("a tool.end without its tool.start creates the block first", () => {
   const transcript = new Transcript();
-  const changes = transcript.apply({ type: "tool-end", toolId: "tool-9", output: "the output" });
+  const changes = transcript.apply({
+    type: "tool-end",
+    toolId: "tool-9",
+    output: "the output",
+    status: null,
+    durationMs: null,
+    outputRef: null,
+  });
   assert.deepEqual(changes, [
     { op: "tool", toolId: "tool-9" },
-    { op: "tool-end", toolId: "tool-9", output: "the output" },
+    {
+      op: "tool-end",
+      toolId: "tool-9",
+      output: "the output",
+      status: null,
+      durationMs: null,
+      outputRef: null,
+    },
   ]);
   assert.deepEqual(transcript.toolOrder(), ["tool-9"]);
   assert.deepEqual(transcript.order(), []);
@@ -641,4 +679,62 @@ test("a page folded at its own turn base continues the live transcript's numberi
   page.setTurnBase(3);
   const pageTurns = [1, 2].map(() => turnOf(page.apply(boundary("start"))));
   assert.deepEqual(pageTurns, [4, 5], "the page did not end where the live transcript began");
+});
+
+test("a tool.end carries the verdict, the duration and the output's own address", () => {
+  // HS-033's three keys, and the two ways a frame can arrive without them: a row written before they
+  // existed (a durable log) and a producer whose store refused the file.
+  assert.deepEqual(
+    parseFrame(
+      "tool.end",
+      '{"tool_id":"tool-1","name":"bash","output":"hello\\n","status":"error",' +
+        '"duration_ms":1234,"output_ref":"/api/sessions/0123456789abcdef/tool-output/tool-1"}',
+    ),
+    {
+      type: "tool-end",
+      toolId: "tool-1",
+      output: "hello\n",
+      status: "error",
+      durationMs: 1234,
+      outputRef: "/api/sessions/0123456789abcdef/tool-output/tool-1",
+    },
+  );
+  // A duration that is not a whole number of milliseconds is not a duration: both refusals are the same
+  // rule the usage counts follow (`count`), so a `1.5` renders as "the log did not say" rather than "1.5s".
+  const fractional = parseFrame(
+    "tool.end",
+    '{"tool_id":"tool-1","output":"x","status":"ok","duration_ms":1.5}',
+  );
+  assert.deepEqual(fractional, {
+    type: "tool-end",
+    toolId: "tool-1",
+    output: "x",
+    status: "ok",
+    durationMs: null,
+    outputRef: null,
+  });
+  // The change the DOM half applies, in one object: no second frame can update a tool block.
+  const transcript = new Transcript();
+  transcript.apply({
+    type: "tool-start",
+    toolId: "tool-1",
+    name: "bash",
+    arguments: "ls",
+  });
+  const [change] = transcript.apply({
+    type: "tool-end",
+    toolId: "tool-1",
+    output: "preview",
+    status: "ok",
+    durationMs: 20,
+    outputRef: "/api/sessions/0123456789abcdef/tool-output/tool-1",
+  });
+  assert.deepEqual(change, {
+    op: "tool-end",
+    toolId: "tool-1",
+    output: "preview",
+    status: "ok",
+    durationMs: 20,
+    outputRef: "/api/sessions/0123456789abcdef/tool-output/tool-1",
+  });
 });
