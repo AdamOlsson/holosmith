@@ -130,6 +130,7 @@ impl AppState {
             self.backend.clone(),
             Arc::clone(&self.database),
             self.streams.clone(),
+            self.config.secrets_path(),
         )
     }
 

@@ -598,6 +598,79 @@ impl EgressProxy {
     }
 }
 
+/// The machine's key proxy container (HS-039, spec item 2): one `hs_key`, on `egress`, joined to every
+/// session network under the alias `key-proxy`.
+///
+/// It is the same shape as [`EgressProxy`] with two differences that are the story:
+///
+/// * **It mounts the key file**, read-only, at its own host path. A session's container mounts neither the file
+///   nor the directory: its `models.json` has a dummy key and no real one.
+/// * **It accepts a plaintext request from pi and speaks TLS to the provider.** The TLS client is `openssl`
+///   from the agent image; the artifact is static and has no TLS stack of its own. That is recorded in
+///   ADR-0048 rather than hidden in a dependency.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyProxy {
+    /// The image the container runs, from `agent_image` until a proxy image is built.
+    pub image: String,
+    /// This build's binary: both what is mounted and what is run.
+    pub binary: PathBuf,
+    /// `<data>/secrets/keys.toml`, mounted read-only. The only container that ever sees a real key.
+    pub keys: PathBuf,
+}
+
+impl KeyProxy {
+    /// The machine's key proxy, or the sentence explaining why this build cannot start one.
+    pub fn of(config: &Config) -> Result<Self, String> {
+        let Some(binary) = std::env::current_exe().ok() else {
+            return Err(
+                "the key proxy runs this binary, and this process could not name its own executable, so no                  proxy container was started"
+                    .to_string(),
+            );
+        };
+        Ok(Self {
+            image: config.agent_image.clone(),
+            binary,
+            keys: config.secrets_path(),
+        })
+    }
+
+    /// The `docker run` arguments, from `run` to the last `--keys`.
+    pub fn run_args(&self) -> Vec<String> {
+        let binary = self.binary.display().to_string();
+        let keys = self.keys.display().to_string();
+        vec![
+            "run".to_string(),
+            "--detach".to_string(),
+            "--name".to_string(),
+            crate::key::KEY_PROXY_NAME.to_string(),
+            "--network".to_string(),
+            crate::docker::EGRESS_NETWORK.to_string(),
+            "--network-alias".to_string(),
+            crate::key::KEY_PROXY_ALIAS.to_string(),
+            "--restart".to_string(),
+            "unless-stopped".to_string(),
+            "--cap-drop".to_string(),
+            "ALL".to_string(),
+            "--security-opt".to_string(),
+            "no-new-privileges".to_string(),
+            "-v".to_string(),
+            format!("{binary}:{binary}:ro"),
+            // The only mount of the key file anywhere in this build. A session's container never names it.
+            "-v".to_string(),
+            format!("{keys}:{keys}:ro"),
+            "--entrypoint".to_string(),
+            binary,
+            self.image.clone(),
+            "proxy".to_string(),
+            "key".to_string(),
+            "--listen".to_string(),
+            format!("0.0.0.0:{}", crate::key::KEY_PROXY_PORT),
+            "--keys".to_string(),
+            keys,
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

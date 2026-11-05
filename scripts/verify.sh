@@ -358,6 +358,7 @@ serve_cases=(
   case_docker_resume
   case_docker_turn
   case_network_selftest
+  case_key_proxy
   case_egress_proxy
   case_internet_toggle
   case_schema_newer
@@ -1556,6 +1557,14 @@ case_network_selftest() {
     fail "$name/pair" "the boot neither saw the joined proxy nor said it had none: $(grep -i 'egress' "$serve_err" | tr '\n' ' ')"
   assertions=$((assertions + 1))
 
+  # HS-039's inverse pair: the key proxy must answer on the probe's network. A boot that did not start it says
+  # so, and that is a `warn` rather than a verdict — but a boot that started it and did not see the alias is a
+  # key-proxy join bug, which is what this line makes visible.
+  grep -q 'the key proxy answers on the probe' "$serve_err" ||
+    grep -q 'the key proxy is not running' "$serve_err" ||
+    fail "$name/key-pair" "the boot neither saw the key proxy's alias nor said it had none: $(grep -i 'key proxy' "$serve_err" | tr '\n' ' ')"
+  assertions=$((assertions + 1))
+
   # The egress network is the machine's, is not internal, and exists after the boot.
   docker network inspect "$egress" >/dev/null 2>&1 ||
     fail "$name/egress" "the boot created no egress network"
@@ -1568,6 +1577,97 @@ case_network_selftest() {
     fail "$name/left-behind" "the probe network outlived the boot"
   fi
   assertions=$((assertions + 1))
+}
+
+# HS-039: the key store and the key proxy's refusal path, with no daemon and no internet. The forwarding half
+# to a provider is HS-040's (a gate that needs a real key is not a gate); what this case can prove is the part
+# that must never be wrong: the file is 0600, `key list` never prints a value, the CLI reads stdin, and a
+# request with no dummy (or an unknown provider) is answered without a provider being contacted.
+case_key_proxy() {
+  local name=case_key_proxy root="$WORK/key-proxy-$$" config="$WORK/config-key-proxy.toml"
+  local key='sk-ant-verify-secret' port statuses keyproxy_pid="" mode
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to speak HTTP to the key proxy (tests/key_proxy.rs covers the wire)\n' "$name"
+    return 0
+  fi
+  rm -rf "$root"
+  mkdir -p "$root/data" "$root/projects" || fail "$name/mkdir" "could not create $root"
+  printf 'data_root = "%s/data"\nprojects_root = "%s/projects"\nbackend = "stub"\n' "$root" "$root" >"$config"
+
+  printf '%s\n' "$key" | "$artifact" --config "$config" key set anthropic >"$WORK/responses/$name-set.out" 2>"$WORK/responses/$name-set.err" ||
+    fail "$name/set" "key set failed: $(cat "$WORK/responses/$name-set.err")"
+  grep -qx 'stored anthropic' "$WORK/responses/$name-set.out" ||
+    fail "$name/set-output" "key set printed $(cat "$WORK/responses/$name-set.out")"
+  mode="$(stat -c '%a' "$root/data/secrets/keys.toml" 2>/dev/null || true)"
+  check "$name/mode" "600" "$mode"
+
+  "$artifact" --config "$config" key list >"$WORK/responses/$name-list.out" 2>"$WORK/responses/$name-list.err" ||
+    fail "$name/list" "key list failed: $(cat "$WORK/responses/$name-list.err")"
+  grep -qx 'anthropic' "$WORK/responses/$name-list.out" ||
+    fail "$name/list-provider" "key list did not name the provider: $(cat "$WORK/responses/$name-list.out")"
+  if grep -q "$key" "$WORK/responses/$name-list.out" "$WORK/responses/$name-list.err"; then
+    fail "$name/list-secret" "key list printed the key"
+  fi
+  assertions=$((assertions + 2))
+
+  port="$(python3 - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+)"
+  "$artifact" proxy key --listen "127.0.0.1:$port" --keys "$root/data/secrets/keys.toml" \
+    >"$WORK/responses/$name-proxy.log" 2>&1 &
+  keyproxy_pid=$!
+  for _ in $(seq 1 100); do
+    grep -q 'the key proxy is listening' "$WORK/responses/$name-proxy.log" 2>/dev/null && break
+    kill -0 "$keyproxy_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  grep -q "listen=127.0.0.1:$port" "$WORK/responses/$name-proxy.log" ||
+    fail "$name/listen" "the key proxy did not report its bound address: $(cat "$WORK/responses/$name-proxy.log")"
+
+  statuses="$(python3 - "$port" <<'PY'
+import socket, sys
+
+port = int(sys.argv[1])
+
+def ask(head):
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+        sock.sendall(head.encode())
+        answer = b""
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            answer += chunk
+    return answer.decode("utf-8", "replace")
+
+questions = [
+    ("no-key", "POST /anthropic/v1/messages HTTP/1.1\r\nHost: key-proxy:8080\r\nContent-Length: 2\r\n\r\n{}"),
+    ("unknown", "POST /not-a-provider/v1/messages HTTP/1.1\r\nHost: key-proxy:8080\r\n\r\n"),
+]
+for label, head in questions:
+    answer = ask(head)
+    print(label, answer.split("\r\n", 1)[0])
+PY
+)" || fail "$name/driver" "the python3 driver failed"
+  check "$name/no-key" "no-key HTTP/1.1 401 Unauthorized" "$(grep '^no-key ' <<<"$statuses")"
+  check "$name/unknown" "unknown HTTP/1.1 403 Forbidden" "$(grep '^unknown ' <<<"$statuses")"
+  grep -q 'status=no-key' "$WORK/responses/$name-proxy.log" ||
+    fail "$name/log" "the key proxy did not log the refusal: $(cat "$WORK/responses/$name-proxy.log")"
+  assertions=$((assertions + 1))
+
+  kill -TERM "$keyproxy_pid" 2>/dev/null || true
+  wait "$keyproxy_pid" 2>/dev/null || true
+  "$artifact" --config "$config" key remove anthropic >/dev/null 2>&1 ||
+    fail "$name/remove" "key remove failed"
+  [ -z "$("$artifact" --config "$config" key list)" ] ||
+    fail "$name/removed" "key list is not empty after remove"
+  assertions=$((assertions + 1))
+  rm -rf "$root"
 }
 
 # HS-037: the egress proxy, on the wire and with no daemon and no internet. What it proves is the four
@@ -1755,7 +1855,21 @@ const direct = () =>
     socket.setTimeout(3000);
     socket.on("connect", () => {
       socket.destroy();
-      resolve(CONNECTING);
+      resolve("connected");
+    });
+    socket.on("timeout", () => {
+      socket.destroy();
+      resolve("timed out");
+    });
+    socket.on("error", (error) => resolve(String(error.code || error.message)));
+  });
+const key = () =>
+  new Promise((resolve) => {
+    const socket = net.connect({ host: "key-proxy", port: 8080 });
+    socket.setTimeout(3000);
+    socket.on("connect", () => {
+      socket.destroy();
+      resolve("connected");
     });
     socket.on("timeout", () => {
       socket.destroy();
@@ -1783,6 +1897,7 @@ const ask = (head) =>
   });
 (async () => {
   console.log(`direct ${await direct()}`);
+  console.log(`key ${await key()}`);
   console.log(`proxy ${await ask("CONNECT example.com:443 HTTP/1.1\r\nHost: example.com\r\n\r\n")}`);
 })();
 PROBE
@@ -1804,6 +1919,18 @@ PROBE
         ;;
       *)
         fail "${name}_${label}_direct" "the probe printed no direct verdict this case can read: $verdicts"
+        ;;
+    esac
+    # The key proxy is the one address a session may reach in **both** cases (spec item 2): a model call
+    # must work with the Internet-access checkbox off, so a missing alias is a key-proxy join bug rather than
+    # a checkbox bug. The probe only proves the TCP alias resolves and accepts; the dummy-key check is
+    # `case_key_proxy`'s and the provider path is HS-040's.
+    case "$verdicts" in
+      *"key connected"*)
+        assertions=$((assertions + 1))
+        ;;
+      *)
+        fail "${name}_${label}_key" "the key proxy's alias did not answer on the session network: $verdicts"
         ;;
     esac
     if [ "$label" = off ]; then
@@ -1876,7 +2003,10 @@ PROBE
   # it — an `on` session would report 2 even with `apply_proxy` deleted from `resume`. Detached and then 2 is a
   # rejoin; detached and then 1 is a missing one.
   for label in off on; do
-    if [ "$label" = off ]; then id="$off_id"; want=1; else id="$on_id"; want=2; fi
+    # The key proxy is on every session network, so the stable count is session + key proxy (2) for the
+    # off case and session + key proxy + egress proxy (3) for the on one. The egress checkbox is still the
+    # only difference, which is what makes the assertion about it.
+    if [ "$label" = off ]; then id="$off_id"; want=2; else id="$on_id"; want=3; fi
     docker network disconnect --force "agents_$id" hs_egress >/dev/null 2>&1 || true
     docker kill "s_$id" >/dev/null 2>&1 || fail "${name}_${label}_kill" "could not kill s_$id"
     body=""

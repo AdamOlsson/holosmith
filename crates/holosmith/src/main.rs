@@ -31,6 +31,14 @@ fn main() -> ExitCode {
                     config: cli.config,
                 })
             }
+            ProxyAction::Key { listen, keys } => {
+                commands::proxy::run_key(commands::proxy::KeyProxyArgs {
+                    listen,
+                    keys,
+                    config: cli.config,
+                })
+            }
         },
+        Cmd::Key { action } => commands::key::run(action, cli.config),
     }
 }

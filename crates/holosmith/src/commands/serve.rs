@@ -125,6 +125,12 @@ pub fn run(args: ServeArgs) -> ExitCode {
             // `warn`: a machine without a proxy still serves sessions, and those sessions reach nothing
             // outside their own network — the off case the spec already supports.
             start_egress_proxy(&loaded.config);
+            // The **key proxy** on the same network: the only thing that holds a real provider key, joined to
+            // every session network by the network step (HS-039). Like the egress proxy it is the machine's,
+            // started once and replaced on every boot, and every failure is a `warn`: a machine without it
+            // still serves its control UI, and its sessions fail a model call with a sentence rather than
+            // refusing to exist.
+            start_key_proxy(&loaded.config);
             // The **self-test**: the isolation is enforced by the kernel, so it is measured rather than
             // asserted. Only a *proven* leak refuses the boot; a probe that could not run is a `warn`, because
             // a machine that cannot verify is not the same fact as a machine that was measured to leak (and a
@@ -348,6 +354,71 @@ fn start_egress_proxy(config: &Config) {
             %error,
             "the egress proxy could not be started: a session that allows internet access will find nothing \
              at its proxy address, so its downloads fail at once rather than leaving"
+        ),
+    }
+}
+
+/// Start the machine's key proxy container, replacing one an earlier run left behind (HS-039).
+///
+/// The key file is created first, mode 0600, because it is a mount source: `-v` of a missing path creates an
+/// empty root-owned *directory* and the proxy would then read a directory as TOML (ADR-0035's measurement,
+/// applied to the second proxy). The temporary file + rename in [`crate::key::Store`] means a running proxy
+/// sees one complete file or the previous one, never a half-written key.
+fn start_key_proxy(config: &Config) {
+    let store = crate::key::Store::from_data_root(&config.data_root);
+    if let Err(error) = store.ensure_file() {
+        tracing::warn!(
+            target: "holosmith::serve",
+            path = %store.path().display(),
+            %error,
+            "no key proxy was started: the key file could not be prepared, and a mount of a missing source is              an empty directory"
+        );
+        return;
+    }
+    let proxy = match crate::container::KeyProxy::of(config) {
+        Ok(proxy) => proxy,
+        Err(sentence) => {
+            tracing::warn!(target: "holosmith::serve", sentence = %sentence, "no key proxy was started");
+            return;
+        }
+    };
+    if !proxy.binary.is_file() {
+        tracing::warn!(
+            target: "holosmith::serve",
+            binary = %proxy.binary.display(),
+            "no key proxy was started: this process's own binary is not a file at its own path, so a container              mounted from it would start from an empty directory"
+        );
+        return;
+    }
+    if !proxy.keys.is_file() {
+        tracing::warn!(
+            target: "holosmith::serve",
+            keys = %proxy.keys.display(),
+            "no key proxy was started: the key file is not a file, and mounting it would give the proxy a              directory"
+        );
+        return;
+    }
+    let docker = Docker::new(config.docker_host.clone());
+    let bound = crate::container::PROXY_START_TIMEOUT;
+    docker.remove_container_bounded(crate::key::KEY_PROXY_NAME, bound);
+    match docker.run_detached(&proxy.run_args(), bound) {
+        Ok(Some(_)) => tracing::debug!(
+            target: "holosmith::serve",
+            container = crate::key::KEY_PROXY_NAME,
+            keys = %proxy.keys.display(),
+            "the key proxy is running"
+        ),
+        Ok(None) => tracing::warn!(
+            target: "holosmith::serve",
+            container = crate::key::KEY_PROXY_NAME,
+            seconds = bound.as_secs(),
+            "the key proxy did not start within its bound and was abandoned: a session's model calls will find              nothing at its proxy address"
+        ),
+        Err(error) => tracing::warn!(
+            target: "holosmith::serve",
+            container = crate::key::KEY_PROXY_NAME,
+            %error,
+            "the key proxy could not be started: a session's model calls will find nothing at its proxy address"
         ),
     }
 }

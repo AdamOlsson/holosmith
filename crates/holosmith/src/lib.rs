@@ -16,6 +16,8 @@ pub mod egress;
 pub mod events;
 pub mod exit;
 pub mod http;
+pub mod key;
+pub mod keyproxy;
 pub mod ladder;
 pub mod logging;
 pub mod pins;

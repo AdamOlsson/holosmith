@@ -38,6 +38,7 @@ use crate::container::{ContainerSettings, SessionContainer, network_name};
 use crate::docker::{Docker, DockerError};
 use crate::events::EventWriter;
 use crate::exit::SessionLog;
+use crate::key::{self, Store as KeyStore};
 use crate::rpc::{self, Mapping};
 use crate::sessions::Session;
 use crate::tool::Store;
@@ -338,6 +339,7 @@ impl DockerBackend {
             "the session's network is up"
         );
         self.apply_proxy(session).await;
+        self.apply_key_proxy(session).await;
         Ok(Provisioned::Nothing)
     }
 
@@ -391,6 +393,48 @@ impl DockerBackend {
         }
     }
 
+    /// Join the machine's key proxy to this session's network, unconditionally (HS-039, spec item 2).
+    ///
+    /// The model provider is reachable with the Internet-access checkbox either way, so this is not the
+    /// egress proxy's conditional join: every session network gets `hs_key` under the alias the container's
+    /// `models.json` names. A failure is a `warn`, never a refusal: a missing proxy fails a model call, not a
+    /// session, and a machine whose proxy image is not built yet must still serve its control UI.
+    async fn apply_key_proxy(&self, session: &Session) {
+        let network = self.network(session);
+        let joined = Self::docker(Step::Network, self.settings.docker(), move |docker| {
+            if !docker.running(crate::key::KEY_PROXY_NAME) {
+                return Ok(false);
+            }
+            docker.join_network(
+                &network,
+                crate::key::KEY_PROXY_NAME,
+                crate::key::KEY_PROXY_ALIAS,
+            )?;
+            Ok(true)
+        })
+        .await;
+        match joined {
+            Ok(true) => tracing::debug!(
+                target: "holosmith::backend",
+                session = %session.id,
+                proxy = crate::key::KEY_PROXY_NAME,
+                "the key proxy is on the session's network"
+            ),
+            Ok(false) => tracing::warn!(
+                target: "holosmith::backend",
+                session = %session.id,
+                proxy = crate::key::KEY_PROXY_NAME,
+                "the key proxy is not running, so this session's model calls will fail at its proxy address"
+            ),
+            Err(error) => tracing::warn!(
+                target: "holosmith::backend",
+                session = %session.id,
+                %error,
+                "the key proxy could not be joined to this session's network: its model calls will fail"
+            ),
+        }
+    }
+
     /// The container itself, running pi (spec item 6, HS-031).
     ///
     /// Four things happen here, in this order, and each one is a refusal that must come before the next:
@@ -427,6 +471,29 @@ impl DockerBackend {
             BackendError::failed(format!(
                 "the container step: the agent directory {} could not be made ({error})",
                 home.display()
+            ))
+        })?;
+        // The key proxy's half of the agent directory (HS-039): a dummy key for this session, and the
+        // `models.json` that sends the provider call to the proxy. Both are written **before**
+        // `Mounts::check`, because the pi-home is a mount source and Docker would otherwise create a missing
+        // file as a directory. The real key is never written here; `Store::dummy_for` is the only value this
+        // file is allowed to carry.
+        let store = KeyStore::from_data_root(&self.settings.data_root);
+        let dummy = store.dummy_for(&session.id).map_err(|error| {
+            BackendError::failed(format!(
+                "the container step: this session's dummy key could not be stored ({error})"
+            ))
+        })?;
+        let secrets = store.load().map_err(|error| {
+            BackendError::failed(format!(
+                "the container step: the key store could not be read ({error})"
+            ))
+        })?;
+        let models = home.join("models.json");
+        std::fs::write(&models, key::models(&secrets, &dummy)).map_err(|error| {
+            BackendError::failed(format!(
+                "the container step: the agent's models file {} could not be written ({error})",
+                models.display()
             ))
         })?;
         container
@@ -626,6 +693,27 @@ impl DockerBackend {
         // proxy is one for as long as the session allowed internet access (HS-037). A detach that fails — the
         // proxy is already gone, the network never had it — is the ordinary answer, not a reason to skip the
         // removal, so its result is not read.
+        // The key proxy is on every session network (HS-039), so it must leave before the network can be
+        // removed too. Not being attached is the ordinary answer for a network that never finished its step.
+        let key_leaving = Self::docker(Step::Network, self.settings.docker(), {
+            let name = name.clone();
+            move |docker| Ok(docker.leave_network(&name, crate::key::KEY_PROXY_NAME))
+        })
+        .await;
+        match key_leaving {
+            Ok(true) => {}
+            Ok(false) => tracing::debug!(
+                target: "holosmith::backend",
+                session = %session.id,
+                "the key proxy was not on the session's network, so there was nothing to detach"
+            ),
+            Err(error) => tracing::warn!(
+                target: "holosmith::backend",
+                session = %session.id,
+                %error,
+                "the key proxy could not be detached from the session's network"
+            ),
+        }
         let leaving = Self::docker(Step::Network, self.settings.docker(), {
             let name = name.clone();
             move |docker| Ok(docker.leave_network(&name, crate::container::PROXY_NAME))

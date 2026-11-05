@@ -61,8 +61,9 @@ pub const SETTINGS: &str = "settings.json";
 ///
 /// Embedded rather than read from disk, because the binary is the product (item 10 §1): a deployment has
 /// no `templates/` next to the executable. The two fields are patched per session from the row
-/// ([`seed`]); everything else a later story needs (the key proxy's `models.json`, HS-039) is added there
-/// rather than guessed here.
+/// ([`seed`]); the key proxy's `models.json` is a second file written beside this one by the Docker
+/// backend (HS-039), because it carries the session's dummy key and is therefore not part of this
+/// secret-free template.
 pub const TEMPLATE: &str = include_str!("../templates/pi-home/settings.json");
 
 /// The launch environment's four fixed variables, and why each is one.
@@ -121,7 +122,9 @@ pub fn home(data_root: &Path, session_id: &str) -> PathBuf {
 ///
 /// **Seed only what is not there.** A resume finds the directory the previous container left — with the
 /// files pi itself wrote into it (`auth.json`, `models-store.json`) — and overwriting them would be this
-/// module deciding that the agent's own state is disposable. The row cannot change a session's model or
+/// module deciding that the agent's own state is disposable. `models.json` is the exception, and it is
+/// written by the backend rather than here: it carries the session's dummy key, which must follow the key
+/// store on a resume (HS-039). The row cannot change a session's model or
 /// thinking after the create (no endpoint does), so a settings file that is already there is still the
 /// right one, and one that is not is written from [`TEMPLATE`] with the row's two preferences.
 ///

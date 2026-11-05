@@ -26,6 +26,7 @@
 //! This is not a state machine: the row is `deleting` before this task exists, and the table has no
 //! way out of `deleting` — the only exit is the removal, which is step 3.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::task::JoinHandle;
@@ -51,14 +52,23 @@ pub struct Deleter {
     backend: Backends,
     database: Arc<Mutex<Database>>,
     streams: StreamRegistry,
+    /// `<data>/secrets/keys.toml`: the session's dummy key is removed here before the backend tears anything
+    /// down (HS-039). A key that spends money must stop working the moment the operator asked.
+    secrets: PathBuf,
 }
 
 impl Deleter {
-    pub fn new(backend: Backends, database: Arc<Mutex<Database>>, streams: StreamRegistry) -> Self {
+    pub fn new(
+        backend: Backends,
+        database: Arc<Mutex<Database>>,
+        streams: StreamRegistry,
+        secrets: PathBuf,
+    ) -> Self {
         Self {
             backend,
             database,
             streams,
+            secrets,
         }
     }
 
@@ -76,7 +86,7 @@ impl Deleter {
     /// more. A failure leaves the row as it is, with the message in the log and the operator's next
     /// `DELETE` as the retry.
     pub async fn remove(&self, session: &Session) {
-        revoke_key(session);
+        revoke_key(session, &self.secrets);
         // No expected-stop flag here, deliberately: the *backend* is what makes a delete's exit quiet, by
         // forgetting the launch before it removes the container (HS-031, ADR-0039). The flag would say
         // "the server asked for this stop", which the row is about to stop existing for.
@@ -150,11 +160,24 @@ impl Deleter {
 /// wires the revocation here. The call site is the story's, because "revoked on delete" is a promise
 /// that has to have somewhere to land — a later story that found no hook would have to invent the
 /// ordering as well as the mechanism.
-fn revoke_key(session: &Session) {
-    tracing::debug!(
-        target: "holosmith::deleter",
-        session = %session.id,
-        network = session.network,
-        "no dummy key to revoke until HS-039"
-    );
+fn revoke_key(session: &Session, secrets: &std::path::Path) {
+    let store = crate::key::Store::new(secrets);
+    match store.revoke(&session.id) {
+        Ok(true) => tracing::info!(
+            target: "holosmith::deleter",
+            session = %session.id,
+            "the session's dummy key was revoked"
+        ),
+        Ok(false) => tracing::debug!(
+            target: "holosmith::deleter",
+            session = %session.id,
+            "the session had no dummy key to revoke"
+        ),
+        Err(error) => tracing::warn!(
+            target: "holosmith::deleter",
+            session = %session.id,
+            %error,
+            "the session's dummy key could not be revoked; the key file is the operator's to repair"
+        ),
+    }
 }

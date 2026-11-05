@@ -23,6 +23,7 @@ use tokio::net::TcpListener;
 
 use crate::config::{Config, LoadError};
 use crate::egress::{self, Rules};
+use crate::key::Store;
 use crate::logging;
 
 /// What the command line asked for.
@@ -34,6 +35,94 @@ pub struct ProxyArgs {
     pub allow: Vec<String>,
     /// The config file, for the allow-list fallback.
     pub config: Option<PathBuf>,
+}
+
+/// `holosmith proxy key`: the key proxy, as a mode of this binary (HS-039).
+#[derive(Debug, Clone)]
+pub struct KeyProxyArgs {
+    pub listen: Option<String>,
+    pub keys: Option<PathBuf>,
+    pub config: Option<PathBuf>,
+}
+
+pub fn run_key(args: KeyProxyArgs) -> ExitCode {
+    logging::init();
+    let listen = args
+        .listen
+        .clone()
+        .unwrap_or_else(|| crate::keyproxy::DEFAULT_LISTEN.to_string());
+    let address: SocketAddr = match listen.parse() {
+        Ok(address) => address,
+        Err(error) => {
+            eprintln!("holosmith: proxy key: {listen} is not an address to listen on: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let path = match args.keys {
+        Some(path) => path,
+        None => match Config::load(args.config.clone()) {
+            Ok(loaded) => loaded.config.secrets_path(),
+            Err(LoadError::Invalid(problems)) => {
+                eprint!("{problems}");
+                return ExitCode::FAILURE;
+            }
+            Err(error) => {
+                eprintln!(
+                    "holosmith: proxy key: no --keys was given and the config could not be read: {error}"
+                );
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+    let store = std::sync::Arc::new(Store::new(path));
+    // A container gets the file as a read-only mount, so its parent is not a directory it may chmod. Only a
+    // host-side run (no file yet, or the proxy's own first start) creates and seals it.
+    if !store.path().is_file()
+        && let Err(error) = store.ensure_file()
+    {
+        eprintln!("holosmith: proxy key: the key store could not be prepared: {error}");
+        return ExitCode::FAILURE;
+    }
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("holosmith: proxy key: cannot start a runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(async move {
+        let listener = match TcpListener::bind(address).await {
+            Ok(listener) => listener,
+            Err(error) => {
+                eprintln!("holosmith: proxy key: cannot listen on {address}: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let bound = listener.local_addr().unwrap_or(address);
+        tracing::info!(
+            target: "holosmith::keyproxy",
+            listen = %bound,
+            keys = %store.path().display(),
+            "the key proxy is listening"
+        );
+        let stop = match crate::serve::StopSignal::install() {
+            Ok(stop) => stop,
+            Err(error) => {
+                eprintln!("holosmith: proxy key: cannot install the signal handler: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
+        tokio::select! {
+            _ = crate::keyproxy::serve(listener, store) => {}
+            _ = stop.recv() => {
+                tracing::info!(target: "holosmith::keyproxy", "the key proxy was asked to stop");
+            }
+        }
+        ExitCode::SUCCESS
+    })
 }
 
 pub fn run(args: ProxyArgs) -> ExitCode {

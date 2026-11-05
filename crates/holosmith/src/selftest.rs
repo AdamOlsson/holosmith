@@ -66,6 +66,14 @@ pub const PUBLIC: &str = "1.1.1.1:443";
 /// and not two with a comment.
 pub const PROXY_TARGET: &str = "egress-proxy:3128";
 
+/// The key proxy's alias, which **must answer** on a session network (HS-039, spec item 2).
+///
+/// It is deliberately not in [`Runner::targets`]: that list is things nothing may reach. This is the one
+/// legitimate answer on a session network whose Internet access is off, so it is the second half of the pair:
+/// join `hs_key`, ask for this alias alone, and require a connection. A build whose network step forgot the
+/// join is a model call that fails at once, and this is where the boot says so.
+pub const KEY_PROXY_TARGET: &str = "key-proxy:8080";
+
 /// The port the host is probed on.
 ///
 /// The convention for a daemon's unauthenticated TCP API, which is what makes it a *good* canary either way:
@@ -164,6 +172,19 @@ pub trait Runner {
     fn join_proxy(&self, network: &str) -> Result<(), String>;
     /// Detach it again. Not being attached is not a failure.
     fn leave_proxy(&self, network: &str);
+
+    /// The key proxy's container name, when this machine has one running.
+    fn key_proxy(&self) -> Option<String> {
+        None
+    }
+
+    /// Attach the key proxy to `network` under its alias.
+    fn join_key_proxy(&self, _network: &str) -> Result<(), String> {
+        Err("this runner has no key proxy".to_string())
+    }
+
+    /// Detach it again.
+    fn leave_key_proxy(&self, _network: &str) {}
 }
 
 impl Runner for Docker {
@@ -228,6 +249,24 @@ impl Runner for Docker {
     fn leave_proxy(&self, network: &str) {
         self.leave_network(network, crate::container::PROXY_NAME);
     }
+
+    fn key_proxy(&self) -> Option<String> {
+        self.running(crate::key::KEY_PROXY_NAME)
+            .then(|| crate::key::KEY_PROXY_NAME.to_string())
+    }
+
+    fn join_key_proxy(&self, network: &str) -> Result<(), String> {
+        self.join_network(
+            network,
+            crate::key::KEY_PROXY_NAME,
+            crate::key::KEY_PROXY_ALIAS,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    fn leave_key_proxy(&self, network: &str) {
+        self.leave_network(network, crate::key::KEY_PROXY_NAME);
+    }
 }
 
 /// Run the self-test with the machine's own Docker and image.
@@ -256,6 +295,7 @@ pub fn run_with(runner: &dyn Runner, image: &str) -> Outcome {
     // above mean something: an alias that never resolves would pass the off case for a proxy that is not there
     // at all, which is the bug the off case exists to catch (HS-038).
     pair(runner, image);
+    key_pair(runner, image);
     runner.remove_network(NETWORK);
     match report {
         Ok(report) => decide(&report, &targets),
@@ -313,6 +353,50 @@ fn pair(runner: &dyn Runner, image: &str) {
             %error,
             "the egress proxy's half of the self-test could not be measured: a session's internet access may be a \
              word rather than a route"
+        ),
+    }
+}
+
+/// The key proxy's half of the off case: join it to the probe's network, ask for its alias alone, and require
+/// **an answer**.
+///
+/// This is the inverse of [`pair`] and it is not a verdict either. A key proxy that is missing is HS-039's
+/// `warn`, not a machine that leaks; what the line buys is the discrimination "the alias resolves on a session
+/// network" that no unit test can make at boot.
+fn key_pair(runner: &dyn Runner, image: &str) {
+    let Some(proxy) = runner.key_proxy() else {
+        tracing::debug!(
+            target: "holosmith::selftest",
+            proxy = crate::key::KEY_PROXY_NAME,
+            "the key proxy is not running, so the off case's legitimate answer — the key proxy's alias — was              not measured"
+        );
+        return;
+    };
+    let one = [KEY_PROXY_TARGET.to_string()];
+    let joined = runner
+        .join_key_proxy(NETWORK)
+        .map_err(|error| {
+            format!("the key proxy could not be joined to the probe's network ({error})")
+        })
+        .and_then(|()| runner.probe(NETWORK, image, &one));
+    runner.leave_key_proxy(NETWORK);
+    match joined {
+        Ok(report) if report.code == REACHED => tracing::debug!(
+            target: "holosmith::selftest",
+            proxy = %proxy,
+            "the key proxy answers on the probe's network, which is the one address a session without internet              access may reach"
+        ),
+        Ok(report) => tracing::warn!(
+            target: "holosmith::selftest",
+            proxy = %proxy,
+            reached = %report.reached.trim(),
+            complaint = %report.complaint.trim(),
+            "the key proxy was joined to the probe's network and its alias did not answer, so a session's model              calls will fail"
+        ),
+        Err(error) => tracing::warn!(
+            target: "holosmith::selftest",
+            %error,
+            "the key proxy's half of the self-test could not be measured: a session's model path may be a word              rather than a route"
         ),
     }
 }

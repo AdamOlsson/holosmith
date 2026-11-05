@@ -223,12 +223,17 @@ see ADR-0039), and the resume over a live agent (`case_docker_resume`, which cre
 again with a running container over the same worktree, then deletes its own session so the run's cap is
 left as it found it; see ADR-0037/ADR-0039), and the turn (`case_docker_turn`, which prompts a session whose
 container is pi in RPC mode and asserts the prompt is **accepted** by the handler and then ended by pi's own
-answer — a session's network is `--internal` and it holds no provider key until HS-039, so pi refuses the
-`prompt` command before a stream exists, and what the row carries is pi's sentence, not this build's; the
+answer — a session's network is `--internal`, its pi-home holds only a dummy key, and the gate's machine has no
+stored provider key, so pi refuses the `prompt` command before a stream exists; what the row carries is pi's
+sentence, not this build's; the
 container must still be running afterwards, and a resume-then-prompt must work a second time, which is what
 proves the RPC path is repeatable rather than a one-off and what found the removal-supersedes-the-launch bug
-ADR-0040 records; see ADR-0040), and the egress
-proxy's refusals (`case_egress_proxy`, which needs no server, no daemon and no internet: it starts the shipped
+ADR-0040 records; see ADR-0040), and the key store and key proxy's refusal path (`case_key_proxy`, which needs no server, no daemon
+and no internet: it writes a key with `key set` through stdin, asserts `keys.toml` is 0600 and `key list` prints
+the provider and never the value, starts the shipped artifact as `proxy key` on a loopback port, and asserts a
+request with no dummy key is `401` and an unknown provider is `403` before any provider is contacted; the
+forwarding half is HS-040's because a gate that needs a real provider key is not a gate; see ADR-0048), and the
+egress proxy's refusals (`case_egress_proxy`, which needs no server, no daemon and no internet: it starts the shipped
 artifact as `proxy egress` on a loopback port with two allow-listed names and asks it four questions over a
 plain socket — `GET` gets `405`, `CONNECT` to port 80 gets `403`, an unlisted host gets `403`, and
 `localhost`, **on** the list, gets `403` because its address is inside the machine — then asserts the log's
@@ -416,6 +421,10 @@ start, rather than a service that refuses to come back up.
   needs native type stripping: **node 22.18 or later** (22.6 through 22.17 need
   `--experimental-strip-types`, and 23.6+ is fine). Without node and npm `scripts/build.sh`
   stops before cargo with a message naming this file. A bare `cargo build` never runs npm.
+- **`openssl`** in the agent image for a Docker run whose key proxy is used: `holosmith proxy key` runs
+  `openssl s_client` to terminate the session's plaintext request and speak TLS to the provider (the artifact is
+  static and has no TLS stack, ADR-0048). The image this repository tests with carries it; a missing binary is a
+  502 from the proxy, not a silent fallback.
 - **git** for `scripts/build.sh`, and for a Docker run at runtime: the worktree step runs
   `git worktree`, `git rev-list` and `git branch` against the project repository on the host
   (HS-025). Not required by `cargo build` itself, and not required by `--backend stub`.

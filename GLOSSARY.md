@@ -512,11 +512,22 @@ join fails a download rather than a session. Its machine names are `selftest::ru
 _Avoid_: Health check, smoke test, probe
 
 **Key proxy**:
-The container that holds provider API keys and swaps them for each session's dummy key.
+A **mode of this binary** (`holosmith proxy key`), run as the `hs_key` container on the `egress` network and
+joined to every session network under the alias `key-proxy`. Pi is configured with
+`http://key-proxy:8080/<provider>` and a per-session **dummy key**; the proxy validates that dummy against
+`<data>/secrets/keys.toml`, swaps in the provider's real key in the header that provider uses, and forwards the
+request over TLS. The provider is selected by the first path segment from a fixed table (`key::PROVIDERS`), so
+a request cannot name its own host or port. It logs one line per request with the session, the provider, the
+host and the bytes. Its machine names are `keyproxy::Route`, `container::KeyProxy`,
+`key::KEY_PROXY_NAME`, `key::KEY_PROXY_ALIAS` and `key::KEY_PROXY_PORT`.
 _Avoid_: Auth proxy, gateway, sidecar
 
 **Dummy key**:
-The per-session throwaway credential the agent holds instead of a real key.
+The per-session throwaway credential the agent holds instead of a real key. It is minted by
+`key::Store::dummy_for`, stored in `<data>/secrets/keys.toml`'s `[sessions]` table, written into the session's
+`pi-home/models.json` as a literal `apiKey`, and revoked when the session is deleted. It has no spending power
+outside the key proxy, which is the point: the real key never enters a session mount, an environment variable or
+the agent's directory.
 _Avoid_: Session key, placeholder, fake token
 
 **Egress proxy**:

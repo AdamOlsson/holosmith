@@ -47,6 +47,11 @@ pub enum Cmd {
         #[command(subcommand)]
         which: ProxyAction,
     },
+    /// Store, list or remove the provider keys the key proxy uses.
+    Key {
+        #[command(subcommand)]
+        action: KeyAction,
+    },
 }
 
 /// The proxies a container runs (spec item 2's "internal subcommands").
@@ -60,6 +65,32 @@ pub enum ProxyAction {
         /// A domain a tunnel may target. Repeatable; absent means the config's `[egress] allow`.
         #[arg(long, value_name = "DOMAIN")]
         allow: Vec<String>,
+    },
+    /// The key proxy: validates a session's dummy key and swaps in the real provider key.
+    Key {
+        /// Address to listen on.
+        #[arg(long, value_name = "ADDR")]
+        listen: Option<String>,
+        /// The key file. Absent means the config's `<data>/secrets/keys.toml`.
+        #[arg(long, value_name = "PATH")]
+        keys: Option<PathBuf>,
+    },
+}
+
+/// The three key subcommands (spec CLI phase 1).
+#[derive(Debug, Subcommand)]
+pub enum KeyAction {
+    /// Read one provider's key from stdin and store it, mode 0600.
+    Set {
+        /// The provider id (`anthropic`, `openai`, …).
+        provider: String,
+    },
+    /// Print the providers that have a key. Never the values.
+    List,
+    /// Remove one provider's key.
+    Remove {
+        /// The provider id.
+        provider: String,
     },
 }
 
