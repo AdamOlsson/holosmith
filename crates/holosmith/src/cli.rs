@@ -42,6 +42,25 @@ pub enum Cmd {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Run one of the proxies, in the foreground. Used inside containers.
+    Proxy {
+        #[command(subcommand)]
+        which: ProxyAction,
+    },
+}
+
+/// The proxies a container runs (spec item 2's "internal subcommands").
+#[derive(Debug, Subcommand)]
+pub enum ProxyAction {
+    /// The egress proxy: the only route out of a session container.
+    Egress {
+        /// Address to listen on.
+        #[arg(long, value_name = "ADDR")]
+        listen: Option<String>,
+        /// A domain a tunnel may target. Repeatable; absent means the config's `[egress] allow`.
+        #[arg(long, value_name = "DOMAIN")]
+        allow: Vec<String>,
+    },
 }
 
 /// The three config subcommands.

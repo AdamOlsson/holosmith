@@ -2,7 +2,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use holosmith::cli::{Cli, Cmd};
+use holosmith::cli::{Cli, Cmd, ProxyAction};
 use holosmith::commands;
 use holosmith::config::Overrides;
 
@@ -23,5 +23,14 @@ fn main() -> ExitCode {
         }),
         Cmd::Version { json } => commands::version::run(json),
         Cmd::Config { action } => commands::config::run(action, cli.config),
+        Cmd::Proxy { which } => match which {
+            ProxyAction::Egress { listen, allow } => {
+                commands::proxy::run(commands::proxy::ProxyArgs {
+                    listen,
+                    allow,
+                    config: cli.config,
+                })
+            }
+        },
     }
 }
