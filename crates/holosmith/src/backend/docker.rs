@@ -151,7 +151,8 @@ impl DockerBackend {
     /// [`Self::forget_agent`] cannot be used here, because the generation is derived from the registry entry
     /// (`get().map(generation).unwrap_or(0) + 1`) and a removed entry restarts the count at 1 — a watcher from
     /// the *previous* launch would then compare equal to the new one and record an exit it must not.
-    /// Superseding keeps the count monotone and drops the receiver nobody is going to take.
+    /// Superseding keeps the count monotone. Dropping the receiver is belt and braces: `supervise` takes it in the
+    /// same provisioner run, so on every path that matters the field is already empty.
     fn supersede_agent(&self, session_id: &str) {
         let mut agents = self.agents.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(launched) = agents.get_mut(session_id) {
@@ -260,10 +261,13 @@ impl DockerBackend {
     }
 
     /// This session's live agent, or the failure a turn's operation reports without one.
-    fn live(&self, session: &Session, operation: &str) -> Result<Arc<Agent>, BackendError> {
+    ///
+    /// `subject` is the operation as a sentence reads it ("the turn", "clearing the queue"), not its machine
+    /// name: the text lands in the row's `status_reason`, which is prose for the operator.
+    fn live(&self, session: &Session, subject: &str) -> Result<Arc<Agent>, BackendError> {
         self.agent(&session.id).ok_or_else(|| {
             BackendError::failed(format!(
-                "the {operation}: this session has no agent process — resume it"
+                "{subject}: this session has no agent process — resume it"
             ))
         })
     }
@@ -377,12 +381,12 @@ impl DockerBackend {
         let version = self.image_version().await?;
         let arguments = container.run_args();
         let name = container.name.clone();
-        let leftover = name.clone();
-        Self::docker(Step::Container, self.settings.docker(), move |docker| {
-            docker.remove_container(&leftover);
-            Ok(())
-        })
-        .await?;
+        // The previous container goes through the backend's own removal rather than through `Docker` directly, so
+        // that the one place which supersedes the launch before removing anything (spec item 6's `rm -f`, and see
+        // `remove_container`) is the only place it can be forgotten. That is this step's own hazard: `rm -f` ends
+        // the attached `docker run` of the session's previous agent, and its exit arrives *before* the new launch
+        // registers a generation.
+        self.remove_container(session).await;
         // The launch line first, so a launch that never starts has one too, and so the log says which
         // command was attempted before anything else in it.
         self.log.append(
@@ -625,7 +629,7 @@ impl SessionBackend for DockerBackend {
         prompt: &str,
         events: &EventWriter,
     ) -> Result<TurnEnd, BackendError> {
-        let agent = self.live(session, "turn")?;
+        let agent = self.live(session, "the turn")?;
         // Subscribed **before** the prompt is written: pi starts printing as soon as it accepts the message,
         // and a turn whose first records arrived before anybody was listening would lose the beginning of its
         // text — permanently, because they are not in the log either.
@@ -670,7 +674,7 @@ impl SessionBackend for DockerBackend {
     /// been told (ADR-0021, `http::sessions::record_steer`). A backend that also wrote it would put two blocks
     /// in the transcript for one instruction.
     async fn steer(&self, session: &Session, text: &str) -> Result<(), BackendError> {
-        let agent = self.live(session, "steer")?;
+        let agent = self.live(session, "the steer")?;
         let id = self.command_id("steer");
         let reply = agent
             .request(
@@ -685,7 +689,7 @@ impl SessionBackend for DockerBackend {
 
     /// Drop the prompts the agent has queued but not started (`clear_queue`).
     async fn clear_queue(&self, session: &Session) -> Result<(), BackendError> {
-        let agent = self.live(session, "clear_queue")?;
+        let agent = self.live(session, "clearing the queue")?;
         let id = self.command_id("clear_queue");
         let reply = agent
             .request(
@@ -704,7 +708,7 @@ impl SessionBackend for DockerBackend {
     /// `start_turn` is what answers [`TurnEnd::Aborted`] (when `agent_settled` says the run was aborted), and
     /// the ladder is what waits for the row to move (ADR-0020).
     async fn abort(&self, session: &Session) -> Result<(), BackendError> {
-        let agent = self.live(session, "abort")?;
+        let agent = self.live(session, "the abort")?;
         let id = self.command_id("abort");
         let reply = agent
             .request(&id, json!({"id": id, "type": "abort"}), ABORT_TIMEOUT)
@@ -1048,16 +1052,16 @@ mod tests {
             .start_turn(&session, "a prompt", &events)
             .await
             .map(|_| ());
-        for (operation, error) in [
-            ("turn", start_turn),
-            ("steer", backend.steer(&session, "more").await),
-            ("clear_queue", backend.clear_queue(&session).await),
-            ("abort", backend.abort(&session).await),
+        for (subject, error) in [
+            ("the turn", start_turn),
+            ("the steer", backend.steer(&session, "more").await),
+            ("clearing the queue", backend.clear_queue(&session).await),
+            ("the abort", backend.abort(&session).await),
         ] {
             let error = error.expect_err("an operation with no agent fails");
             assert_eq!(
                 error.to_string(),
-                format!("the {operation}: this session has no agent process — resume it")
+                format!("{subject}: this session has no agent process — resume it")
             );
         }
         let snapshot = backend
@@ -1081,7 +1085,7 @@ mod tests {
         assert_eq!(unique.len(), ids.len(), "{ids:?}");
         assert!(ids[0].starts_with("steer-"), "{ids:?}");
         // Across operations too, which is the case that matters: a steer and an abort racing.
-        assert_ne!(backend.command_id("abort"), backend.command_id("abort"));
+        assert_ne!(backend.command_id("steer"), backend.command_id("abort"));
     }
 
     #[tokio::test]

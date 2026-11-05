@@ -14,6 +14,16 @@
 //! only producer (ADR-0032). A provider whose end content disagreed with its deltas therefore shows the
 //! deltas, which is exactly what was on screen live.
 //!
+//! **The transcript's turn is the operator's prompt, not pi's assistant response.** pi emits `turn_start`/
+//! `turn_end` around *one assistant response* (its `docs/json.md`: "A turn is one assistant response plus any
+//! tool calls and tool results produced by that response"), and a run can hold several of them once retries,
+//! steering or tool calls are involved. The contract's turn is the prompt: the stub emits one `turn.start`/`turn
+//! .end` pair per prompt, `turns_before` numbers the log by those rows, and the page counts a turn from
+//! `turn.start` and a settled turn from `turn.end`. So [`pump`] writes the pair itself — `turn.start` before the
+//! first frame and `turn.end` when pi settles — and pi's own boundaries are records it declines. Mapping them
+//! would have made "turn 3" mean "third assistant response" and told the page a turn had settled while the row
+//! was still `running`.
+//!
 //! **Three rules the mapping keeps:**
 //!
 //! - **pi's messages have no id, so one is minted.** A transcript block is keyed by the message id, and the
@@ -46,10 +56,11 @@ const MESSAGE_PREFIX: &str = "msg";
 /// A process-wide counter for minted ids, because a session runs several turns in one process.
 static MINTED: AtomicU64 = AtomicU64::new(1);
 
-/// The instant this process started, which keeps two runs of the binary from minting the same ids.
+/// The instant this process first minted an id, which keeps two runs of the binary from minting the same ones.
 ///
-/// The counter alone cannot be the id: a restarted process would start over at 1 and fold a new turn's
-/// deltas into a previous turn's block against a durable log.
+/// The counter alone cannot be the id: a restarted process would start over at 1 and fold a new turn's deltas
+/// into a previous turn's block against a durable log. The value is taken on the first mint, not at startup —
+/// uniqueness does not care which, and only the wording of this policy does.
 fn minted_instant() -> u128 {
     static INSTANT: OnceLock<u128> = OnceLock::new();
     *INSTANT.get_or_init(|| {
@@ -86,7 +97,7 @@ pub enum Mapped {
     },
 }
 
-/// One turn's mapping: which of pi's messages is current, and how many records it declined.
+/// One turn's mapping: which of pi's messages is current, and what it did with the records it could not map.
 ///
 /// One value per turn, because the id it mints is per message and the count is per turn. It holds no clock,
 /// no database and no agent — a record in, a frame out — so a fixture can be replayed through it without a
@@ -96,8 +107,14 @@ pub struct Mapping {
     session_id: String,
     /// The assistant message pi is currently streaming, if any.
     current: Option<String>,
-    /// How many records this turn produced no frame for.
-    skipped: u64,
+    /// Records of a type this build knows and has no frame for: pi's `agent_start`/`agent_end`, its queue and
+    /// level bookkeeping, the retry and compaction records, a toolcall's blocks (HS-033's). Declining them is the
+    /// design, so they are not worth a line.
+    declined: u64,
+    /// Records this build does **not** know: a type (or a nested event type) a later pi release invented, or a
+    /// shape that is not the one the documentation describes. Counted separately, because that is the one worth
+    /// a `warn`: it is how a mapping layer learns that pi has grown a frame it should map.
+    unknown: u64,
 }
 
 impl Mapping {
@@ -106,13 +123,19 @@ impl Mapping {
         Self {
             session_id: session_id.into(),
             current: None,
-            skipped: 0,
+            declined: 0,
+            unknown: 0,
         }
     }
 
-    /// How many records this turn produced no frame for: the number [`pump`] logs once at the end.
+    /// How many records this turn produced no frame for at all, of either kind.
     pub fn skipped(&self) -> u64 {
-        self.skipped
+        self.declined + self.unknown
+    }
+
+    /// How many of those are records this build does not know — the number worth a `warn`.
+    pub fn unknown(&self) -> u64 {
+        self.unknown
     }
 
     /// Map one record pi printed.
@@ -121,8 +144,10 @@ impl Mapping {
     /// everything that reaches here is an object of some kind and the question is only what it means.
     pub fn map(&mut self, record: &Value) -> Mapped {
         match record.get("type").and_then(Value::as_str) {
-            Some("turn_start") => frame(TURN_START, json!({})),
-            Some("turn_end") => frame(TURN_END, json!({})),
+            // pi's own response boundaries: the transcript's turn is the prompt, so [`pump`] writes that pair and
+            // these are declined (see the module doc). `agent_start`/`agent_end` are one low-level run's edges,
+            // and a run can retry, recover and continue after them.
+            Some("agent_start" | "agent_end" | "turn_start" | "turn_end") => self.note_declined(),
             Some("agent_settled") => Mapped::Settled {
                 aborted: record
                     .get("aborted")
@@ -140,32 +165,74 @@ impl Mapping {
             }
             Some("message_update") => self.update(record),
             Some("message_end") => self.end(record),
-            // Everything else pi emits — `agent_start`, `agent_end`, `queue_update`,
-            // `thinking_level_changed`, `extension_ui_request` (HS-035), `extension_error`, the compaction
-            // and retry records — has no frame in this contract yet.
-            _ => self.skip(),
+            // A `response` is the reader's to route to the command that asked (HS-031); the mapping meets one only
+            // when a fixture is replayed verbatim, and it is a documented record either way.
+            Some("response") => self.note_declined(),
+            // Bookkeeping pi documents and this contract has no frame for: the queue and level updates, the
+            // compaction and retry records, `extension_ui_request` (HS-035's to answer) and `extension_error`.
+            Some(
+                "queue_update"
+                | "session_info_changed"
+                | "thinking_level_changed"
+                | "entry_appended"
+                | "compaction_start"
+                | "compaction_end"
+                | "auto_retry_start"
+                | "auto_retry_end"
+                | "summarization_retry_scheduled"
+                | "summarization_retry_attempt_start"
+                | "summarization_retry_finished"
+                | "bash_execution_update"
+                | "extension_ui_request"
+                | "extension_error",
+            ) => self.note_declined(),
+            // A record type this build has never heard of: a later pi release's, and the one case worth a line.
+            _ => self.note_unknown(),
         }
     }
 
     /// One `message_update`: its nested event decides whether it is a delta.
     fn update(&mut self, record: &Value) -> Mapped {
-        let Some(event) = record.get("assistantMessageEvent") else {
-            return self.skip();
+        let Some(event) = record
+            .get("assistantMessageEvent")
+            .filter(|event| event.is_object())
+        else {
+            return self.note_unknown();
         };
         let Some(kind) = event.get("type").and_then(Value::as_str) else {
-            return self.skip();
+            return self.note_unknown();
         };
         let kind = match kind {
             "text_delta" => "text",
             "thinking_delta" => "thinking",
-            // The ends of a block, the start of the provider stream and its `done`/`error`: the content is
-            // already on screen as deltas (ADR-0040's D3), and `toolcall_*` is HS-033's.
-            "text_start" | "text_end" | "thinking_start" | "thinking_end" | "start" | "done"
-            | "error" => return Mapped::Nothing,
-            _ => return self.skip(),
+            // The ends of a block, the start of the provider stream and its `done`: the content is already on
+            // screen as deltas (ADR-0040).
+            "text_start" | "text_end" | "thinking_start" | "thinking_end" | "start" | "done" => {
+                return self.note_declined();
+            }
+            // A provider stream that failed is worth a line, and it is the only diagnostic anywhere: the
+            // assistant message's `stopReason` says `error`, and pi's reason is the sentence an operator needs.
+            "error" => {
+                let reason = event
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("none");
+                let detail = event.get("error").and_then(Value::as_str).unwrap_or("none");
+                tracing::warn!(
+                    target: "holosmith::rpc",
+                    session = %self.session_id,
+                    reason,
+                    detail,
+                    "pi's provider stream ended with an error"
+                );
+                return self.note_declined();
+            }
+            // `toolcall_start`/`_delta`/`_end` are HS-033's.
+            "toolcall_start" | "toolcall_delta" | "toolcall_end" => return self.note_declined(),
+            _ => return self.note_unknown(),
         };
         let Some(text) = event.get("delta").and_then(Value::as_str) else {
-            return self.skip();
+            return self.note_unknown();
         };
         if text.is_empty() {
             // Nothing to append. A frame with no text would add a row and a text node that say nothing.
@@ -184,7 +251,7 @@ impl Mapping {
     /// One `message_end`: the assistant message's whole result, which is where usage comes from.
     fn end(&mut self, record: &Value) -> Mapped {
         let Some(message) = record.get("message").filter(|message| message.is_object()) else {
-            return self.skip();
+            return self.note_unknown();
         };
         if message.get("role").and_then(Value::as_str) != Some("assistant") {
             // The user's own prompt, pi's system message, and (until HS-033) a tool result. None of them is
@@ -234,29 +301,38 @@ impl Mapping {
         id
     }
 
-    /// Count a record this build has no frame for, and answer that there is none.
-    fn skip(&mut self) -> Mapped {
-        self.skipped += 1;
+    /// Count a record of a kind this build knows and has no frame for, and say there is none.
+    fn note_declined(&mut self) -> Mapped {
+        self.declined += 1;
+        Mapped::Nothing
+    }
+
+    /// Count a record this build does not know, and say there is none.
+    fn note_unknown(&mut self) -> Mapped {
+        self.unknown += 1;
         Mapped::Nothing
     }
 }
 
 /// Drive one turn: map pi's records onto `events` until the agent settles.
 ///
-/// Called by [`crate::backend::DockerBackend::start_turn`] after it has written the prompt, with a
-/// subscription taken *before* that write so no record can be lost between the two. The caller's
-/// subscription is the only ordering the transcript relies on: records arrive in the order pi printed them,
-/// and each frame is appended in that order, so the writer's seqs are that order too.
+/// Called by [`crate::backend::DockerBackend::start_turn`] after it has written the prompt, with a subscription
+/// taken *before* that write so no record can be lost between the two. The caller's subscription is the only
+/// ordering the transcript relies on: records arrive in the order pi printed them, each frame is appended in
+/// that order, and the writer's seqs are that order too. The channel has a bound and the reader *waits* when it
+/// fills, so a slow commit slows pi rather than dropping text — "every delta reaches the writer" is a property
+/// of that, not a hope (ADR-0040).
 ///
-/// **Nothing here is fatal except the agent going quiet.** A lagged subscriber (the buffer filled) loses
-/// whole records — text the operator will not see — and says so once; a record this build does not map is
-/// counted. Only a closed stream ends the turn without an answer, because a turn with no `agent_settled` is a
-/// process that died mid-turn, and the row's own exit classification (`crate::exit`) is what records that.
+/// **The turn's boundary pair is written here**, not mapped from pi's `turn_start`/`turn_end`: the contract's
+/// turn is the operator's prompt (see the module doc), so `turn.start` goes out before the first frame and
+/// `turn.end` when pi says it settled. A turn the agent never settles — its process died mid-run — writes no
+/// `turn.end`, because the turn did not end: `crate::exit` records what became of the row.
 pub async fn pump(
     records: &mut AgentRecords,
     mapping: &mut Mapping,
     events: &EventWriter,
 ) -> Result<TurnEnd, BackendError> {
+    append(events, mapping, TURN_START, "{}").await;
     loop {
         match records.recv().await {
             Received::Record(record) => {
@@ -264,7 +340,8 @@ pub async fn pump(
                 let mapped = mapping.map(&record);
                 let (kind, payload) = match mapped {
                     Mapped::Settled { aborted } => {
-                        log_skipped(mapping);
+                        log_declined(mapping);
+                        append(events, mapping, TURN_END, "{}").await;
                         return Ok(if aborted {
                             TurnEnd::Aborted
                         } else {
@@ -274,35 +351,10 @@ pub async fn pump(
                     Mapped::Frame { kind, payload } => (kind, payload),
                     Mapped::Nothing => continue,
                 };
-                let event = NewEvent {
-                    session_id: mapping.session_id.clone(),
-                    kind: kind.to_string(),
-                    payload,
-                    created_at: clock::unix_now(),
-                };
-                // A failed append means the writer has stopped, which in a served process means the process
-                // is going down. The loss is logged and the turn carries on, exactly as the stub's own turn
-                // does: the turn *ran*, so failing it here would write a session that did its work into
-                // `error` because the process was leaving.
-                if let Err(error) = events.append(event).await {
-                    tracing::error!(
-                        target: "holosmith::rpc",
-                        session = %mapping.session_id,
-                        %error,
-                        "a turn frame was not queued"
-                    );
-                }
-            }
-            Received::Lagged(missed) => {
-                tracing::warn!(
-                    target: "holosmith::rpc",
-                    session = %mapping.session_id,
-                    missed,
-                    "the agent's records fell behind; those frames are lost, and the turn continues"
-                );
+                append(events, mapping, kind, &payload).await;
             }
             Received::Closed => {
-                log_skipped(mapping);
+                log_declined(mapping);
                 return Err(BackendError::failed(
                     "the turn: the agent's output ended before it settled".to_string(),
                 ));
@@ -311,17 +363,51 @@ pub async fn pump(
     }
 }
 
-/// One line per turn when the mapping declined something, so a new record type is findable.
-fn log_skipped(mapping: &Mapping) {
-    if mapping.skipped == 0 {
-        return;
+/// Queue one frame for the turn's session.
+///
+/// A failed append means the writer has stopped, which in a served process means the process is going down. The
+/// loss is logged and the turn carries on, exactly as the stub's own turn does: the turn *ran*, so failing it
+/// here would write a session that did its work into `error` because the process was leaving.
+async fn append(events: &EventWriter, mapping: &Mapping, kind: &str, payload: &str) {
+    let event = NewEvent {
+        session_id: mapping.session_id.clone(),
+        kind: kind.to_string(),
+        payload: payload.to_string(),
+        created_at: clock::unix_now(),
+    };
+    if let Err(error) = events.append(event).await {
+        tracing::error!(
+            target: "holosmith::rpc",
+            session = %mapping.session_id,
+            kind,
+            %error,
+            "a turn frame was not queued"
+        );
     }
-    tracing::debug!(
-        target: "holosmith::rpc",
-        session = %mapping.session_id,
-        skipped = mapping.skipped,
-        "records this build has no frame for were dropped"
-    );
+}
+
+/// One line per turn about what the mapping did with the records it had no frame for.
+///
+/// Two levels, because the two facts are different: declining a documented record is the design and is a `debug`
+/// note, while a record type this build does not know is the one thing an operator should be able to find in the
+/// log — it is how a pi release that grew a frame gets noticed. At most one line per turn either way.
+fn log_declined(mapping: &Mapping) {
+    if mapping.declined > 0 {
+        tracing::debug!(
+            target: "holosmith::rpc",
+            session = %mapping.session_id,
+            declined = mapping.declined,
+            "records with no frame in this contract were declined"
+        );
+    }
+    if mapping.unknown > 0 {
+        tracing::warn!(
+            target: "holosmith::rpc",
+            session = %mapping.session_id,
+            unknown = mapping.unknown,
+            "records of a type this build does not map were dropped; pi may have grown a frame"
+        );
+    }
 }
 
 /// One frame, serialised once.
@@ -520,7 +606,9 @@ mod tests {
     }
 
     #[test]
-    fn the_turn_boundaries_are_empty_frames_and_the_settle_ends_the_turn() {
+    fn pis_own_turn_boundaries_are_declined_and_the_settle_ends_the_turn() {
+        // pi's `turn_start`/`turn_end` bracket one *assistant response*, and a run can hold several of them. The
+        // contract's turn is the prompt, whose pair `pump` writes, so these two must produce nothing here.
         let mut mapping = mapping();
         let (frames, settled) = run(
             &mut mapping,
@@ -530,15 +618,13 @@ mod tests {
                 json!({"type": "agent_settled", "aborted": true}),
             ],
         );
-        assert_eq!(frames[0].0, TURN_START);
-        assert_eq!(frames[0].1, json!({}));
-        assert_eq!(frames[1].0, TURN_END);
-        assert_eq!(frames[1].1, json!({}));
+        assert!(frames.is_empty(), "{frames:?}");
         assert_eq!(settled, vec![true]);
+        assert_eq!((mapping.skipped(), mapping.unknown()), (2, 0));
     }
 
     #[test]
-    fn an_unknown_record_and_an_unknown_nested_event_are_counted_and_harmless() {
+    fn a_record_this_build_knows_is_declined_and_one_it_does_not_is_unknown() {
         let mut mapping = mapping();
         let (frames, settled) = run(
             &mut mapping,
@@ -556,10 +642,11 @@ mod tests {
         );
         assert!(frames.is_empty(), "{frames:?}");
         assert_eq!(settled, vec![false]);
-        // `queue_update`, `agent_start`, `agent_end`, `session_info_changed`, the toolcall delta (HS-033's),
-        // the invented event and the extension error: seven records with no frame. `assistant_start` is
-        // mapped, not skipped.
-        assert_eq!(mapping.skipped(), 7);
+        // Declined, because pi documents them and this contract has no frame for them: the queue update,
+        // `agent_start`, `agent_end`, the session-info change, the toolcall delta (HS-033's) and the extension
+        // error. Unknown, and therefore worth a `warn`: the invented nested event type. `assistant_start` is
+        // mapped, not declined.
+        assert_eq!((mapping.skipped(), mapping.unknown()), (7, 1));
     }
 
     #[test]
@@ -584,7 +671,11 @@ mod tests {
             ],
         );
         assert!(frames.is_empty(), "{frames:?}");
-        assert_eq!(mapping.skipped(), 7);
+        assert_eq!(
+            (mapping.skipped(), mapping.unknown()),
+            (7, 7),
+            "a shape the documentation does not describe is a type this build does not know"
+        );
     }
 
     #[test]

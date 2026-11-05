@@ -39,9 +39,12 @@ pub const MESSAGE_SNAPSHOT: &str = "message.snapshot";
 pub const TOOL_START: &str = "tool.start";
 /// A tool call finishing: `{"tool_id", "name", "output"}`.
 pub const TOOL_END: &str = "tool.end";
-/// A message finishing: `{"message_id", "usage": {"in", "out"}}`. The `usage` is what the writer
-/// adds to the session's tally, and it is optional: a backend that cannot report it emits the frame
-/// without it (HS-023).
+/// A message finishing: `{"message_id", "usage": {"in", "out"}, "stop_reason", "tool_calls"}`. The
+/// `usage` is what the writer adds to the session's tally, and it is optional: a backend that cannot
+/// report it emits the frame without it (HS-023). `stop_reason` and `tool_calls` (the message's
+/// tool-call names, in order) are additive keys HS-032 added for pi's answers — ADR-0040, amending
+/// ADR-0019's table, and nothing reads them yet: the arguments and output of a call are
+/// `tool.start`/`tool.end` (HS-033).
 pub const MESSAGE_END: &str = "message.end";
 /// A turn ending: `{}`.
 pub const TURN_END: &str = "turn.end";

@@ -336,8 +336,11 @@ per transaction, and never touches a session whose state is `starting`, `running
   are two real turns' records from the image the Docker stories run, replayed by `tests/rpc.rs` through the
   production mapping (ADR-0040). They are refreshed by hand — one prompt against a container with the
   operator's own provider credentials and network access — and `tests/rpc.rs`'s
-  `a_fixture_whose_frames_drifted_fails_this_guard` is what makes a silent refresh visible. Neither the gate
-  nor any test needs a provider key, a daemon or the network, because the records are already committed.
+  `a_fixture_whose_records_drifted_fails_this_guard` is what makes a silent refresh visible (it counts the
+  record types per fixture, which a mapping assertion cannot: a frame cannot be missing for a record that is not
+  there). No test that *replays* a fixture needs a provider key, a daemon or the network, because the records
+  are already committed; only the gate's `case_docker_turn` needs the daemon and the image, and it skips
+  without them like every other Docker case.
 - Optional: a **Docker daemon and one image** for `scripts/verify.sh`'s `case_container_mounts` and for
   `tests/container.rs`. Both check V1 — the hardened `.git` mounts — against a real container, and both
   print one `SKIP` line and pass without a daemon, because a machine without one is a supported machine

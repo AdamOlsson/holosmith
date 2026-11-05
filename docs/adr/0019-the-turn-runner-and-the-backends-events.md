@@ -64,6 +64,10 @@ Three payloads are pinned here, because HS-033 and HS-034 will own their full tr
 | `tool.start` | `{"tool_id": "…", "name": "read_file", "arguments": "src/main.ts"}` | a tool call began |
 | `tool.end` | `{"tool_id": "…", "name": "read_file", "output": "…"}` | the call returned, with its output |
 
+**Amended by ADR-0040:** `message.end` also carries `stop_reason` (pi's own word) and `tool_calls` (the
+message's tool-call names, in order) — additive keys, nothing reads them yet, and the arguments and output of a
+call stay `tool.start`/`tool.end`.
+
 No `output_ref`: the stub writes no file, and item 15's ref belongs to HS-033's output file. The
 screen renders the block and the counts minimally — a `.tool` block with the call's name and its
 output, and one `in N · out N` line inside the message block, each appended when its frame arrives

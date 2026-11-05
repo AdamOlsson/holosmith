@@ -53,8 +53,9 @@ have made the transcript right at the end and wrong while it mattered.
 
 ## `message.end` gains two keys, additively
 
-The acceptance asks a completed message to carry "usage, tool-call summary and stop reason". ADR-0018 pinned
-`message.end` as `{"message_id", "usage": {"in", "out"}}`, so this story **amends** it by addition:
+The acceptance asks a completed message to carry "usage, tool-call summary and stop reason". ADR-0019's payload
+table pinned `message.end` as `{"message_id", "usage": {"in", "out"}}`, so this story **amends** it by addition
+(the ADR carries a note pointing here):
 
 ```json
 {"message_id":"msg-…","usage":{"in":991,"out":4},"stop_reason":"stop","tool_calls":["bash","read"]}
@@ -74,6 +75,23 @@ Nothing else changed: the coalescer parses only `message.delta`, the repository 
 name, and the page drops a key it does not render. A fourth key on a delta would have been a different matter —
 that payload is pinned exactly (ADR-0031).
 
+## The transcript's turn is the operator's prompt, not pi's assistant response
+
+pi's `turn_start`/`turn_end` bracket **one assistant response** — its `docs/json.md` says "a turn is one assistant
+response plus any tool calls and tool results produced by that response" — and a run can hold several of them once
+retries, steering or tool calls are involved. The contract's turn is the prompt: the stub emits one
+`turn.start`/`turn.end` pair per prompt, `turns_before` numbers the log by those rows (HS-061), and the page counts
+a turn from `turn.start` and a settled turn from `turn.end`.
+
+So `rpc::pump` writes the pair itself — `turn.start` before the first frame, `turn.end` when pi settles — and pi's
+own boundaries are records the mapping **declines**. Mapping them would have made "turn 3" mean "third assistant
+response", told the page a turn had settled while the row was still `running`, and over-counted the budget notice's
+settled turns — none of which a fixture with one assistant message can show. This is a decision the first draft
+made in code and argued nowhere; the review asked for it and it is here.
+
+A turn whose agent never settles writes no `turn.end`: the turn did not end, and `crate::exit` records what became
+of the row instead.
+
 ## The turn ends on `agent_settled`, and never on a record this build does not know
 
 `agent_settled{aborted}` is pi saying it has no further work; `agent_end` is not, because pi can still retry,
@@ -81,14 +99,36 @@ recover from an overflow, or deliver a queued message after it. So `agent_settle
 a turn, `aborted: true` answers `TurnEnd::Aborted` (which the runner writes as `abort_completed`), and
 everything else answers `TurnEnd::Settled`.
 
-Unknown record types, unknown nested `assistantMessageEvent` types, and malformed shapes are counted and
-dropped — one `debug` line per turn with the count. `toolcall_*` is counted this way on purpose: HS-033 owns it,
-and a mapping that guessed would have to be rewritten there. A record that is not JSON at all never reaches the
-mapping: the reader (`agent.rs`) has always rejected it.
+The mapping keeps **two** counters, because two different things are happening:
 
-Records cross from the reader to a turn on a **bounded broadcast**, subscribed *before* the prompt is written so
-no record can be lost between the write and the subscription. A subscriber that falls behind is told how many
-it missed and carries on: the alternative — failing the turn — would kill a session because the log was busy.
+- **Declined**: a record pi documents and this contract has no frame for — `agent_start`/`agent_end`, pi's
+  `turn_start`/`turn_end`, the queue and level updates, the compaction and retry records, `toolcall_*` (HS-033's),
+  `extension_ui_request` (HS-035's), and `response` (the reader's to route; the mapping meets one only when a
+  fixture is replayed verbatim). Declining these is the design, so they are one `debug` line per turn at most.
+- **Unknown**: a record type, a nested event type, or a shape the documentation does not describe. That is the
+  one worth an operator's attention — a pi release that grew a frame this build should map — so it is a `warn`,
+  once per turn, with the count. The acceptance's "logged and skipped" is satisfied at the level the default
+  filter actually shows (`info`), which a `debug` would not be.
+
+A provider stream that ends with pi's nested `error` event is its own `warn`, carrying pi's `reason` and `error`:
+the assistant message's `stopReason` records that it failed, and this is the only place the sentence exists. A
+record that is not JSON at all never reaches the mapping: the reader (`agent.rs`) has always rejected it.
+
+## Records cross on a bounded channel that the reader *waits* on
+
+Records reach a turn over a bounded `mpsc` (`agent::Slots`), subscribed *before* the prompt is written so nothing
+printed between the write and the subscription can be lost. One subscriber is the design — a session runs one turn
+at a time — so a new subscription replaces the previous sender rather than fanning out.
+
+When the buffer fills, the reader **waits**, which stops it draining pi's stdout, which blocks pi on its pipe:
+backpressure all the way to the agent, which is what makes the story's "every delta reaches the writer" true by
+construction. The first draft used a `broadcast`, which cannot wait — a slow batch of commits silently dropped a
+turn's text and the pump could only log how much it had lost. That is a loss the acceptance line forbids, and the
+review found it: a ring that drops the oldest record is a transcript with a hole in it.
+
+"The process is gone" is the reader's own last word, not the channel closing: the `Agent` value keeps the slot
+alive for as long as the backend's registry holds it, so a turn that waited for the channel to close would wait
+for its session to be deleted. The reader takes the sender out of the slot as it ends (`Slots::close`).
 
 ## The other four turn operations, because nothing else owns them
 
@@ -109,11 +149,26 @@ next step boundary before the new container is up. Measured on this story's own 
 prompt — which lost that race about one run in two, while the gate case won it, which is what flakiness looks
 like.
 
-The fix is ADR-0039's rule applied to every removal the server performs: `remove_container` **supersedes** the
-session's launch before it removes anything (a bumped generation and the receiver dropped), so the exit answers
-`ProcessEnd::NotCurrent`. `supersede_agent` rather than `forget_agent`, because the generation is derived from
-the registry entry: a forgotten entry restarts the count at 1, and a watcher from the previous launch would
-compare equal to the new one. The delete keeps `forget_agent`, which is right — nothing follows it.
+The fix is ADR-0039's rule applied to every removal the server performs: **one** removal, `DockerBackend::
+remove_container`, **supersedes** the session's launch before it removes anything (a bumped generation, and the
+receiver dropped), so the exit answers `ProcessEnd::NotCurrent`. `supersede_agent` rather than `forget_agent`,
+because the generation is derived from the registry entry: a forgotten entry restarts the count at 1, and a watcher
+from the previous launch would compare equal to the new one. The delete keeps `forget_agent` before its own
+removal, which is right — nothing follows it.
+
+The first draft of this fix put the supersede inside `remove_container` but left `start_container` calling
+`Docker::remove_container` (the CLI helper) inline — so the step that provokes the resume race was the one call site
+the rule did not cover, while three documents said it was fixed. `start_container` now goes through the backend's
+own `remove_container`, and there is one place a removal can happen rather than two.
+
+## A resumed session's agent has no memory, and that is not this story's to fix
+
+`--no-session` (ADR-0039) means pi keeps no session file and the transcript lives in Holosmith's event log. It
+follows that a resumed session — a new container, a new pi process — starts with **no context**: the operator sees
+the whole transcript and the agent does not. HS-031's ADR handed this revisit to this story; the honest answer is
+that a mapping cannot invent it. Replaying the log into a new pi (as a prompt preamble, or as pi's own session
+file) is a product decision with a cost — a token bill for every resume — and it needs a story of its own. It is
+recorded here, in the ADR and in the ship note, rather than discovered later as a bug.
 
 ## The fixture is captured by hand, and refreshed by a release step
 
@@ -145,3 +200,7 @@ otherwise only unit-tested). Refreshing them is a release step, not a story step
 - Images in a tool result and extension UI requests are HS-035's, and the record subscription is the seam they
   will use.
 - Fold cache counters into `usage` — HS-034.
+- Replay a session's transcript into a resumed agent, so a resume is not an amnesiac turn — unowned, and named
+  above.
+- pi's `turn_start`/`turn_end` per assistant response are declined; if a client ever wants the
+  response-within-a-turn boundary, that is a new frame kind and a second spelling, so it would need its own story.

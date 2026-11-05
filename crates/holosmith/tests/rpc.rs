@@ -17,7 +17,6 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use rusqlite::Connection;
 use serde_json::{Value, json};
 
 use holosmith::agent::{Agent, Received};
@@ -58,7 +57,7 @@ fn records(fixture: &str) -> Vec<Value> {
 }
 
 /// Every frame `fixture` maps to, and what the mapping declined.
-fn mapped(fixture: &str) -> (Vec<Frame>, Vec<bool>, u64) {
+fn mapped(fixture: &str) -> (Vec<Frame>, Vec<bool>, u64, u64) {
     let mut mapping = Mapping::new("0123456789abcdef");
     let mut frames = Vec::new();
     let mut settled = Vec::new();
@@ -72,7 +71,7 @@ fn mapped(fixture: &str) -> (Vec<Frame>, Vec<bool>, u64) {
             Mapped::Nothing => {}
         }
     }
-    (frames, settled, mapping.skipped())
+    (frames, settled, mapping.skipped(), mapping.unknown())
 }
 
 /// Print the frames a fixture maps to, one line each.
@@ -113,19 +112,21 @@ fn text_of(frames: &[Frame], kind: &str) -> String {
 
 #[test]
 fn the_recorded_text_turn_becomes_the_contracts_frames_in_order() {
-    let (frames, settled, skipped) = mapped(TEXT);
+    let (frames, settled, skipped, unknown) = mapped(TEXT);
     print_frames("text", &frames);
     let kinds: Vec<&str> = frames.iter().map(|frame| frame.kind.as_str()).collect();
     assert_eq!(
         kinds,
-        ["turn.start", MESSAGE_DELTA, MESSAGE_END, "turn.end",],
-        "one text block, its end, and the turn's boundaries: {kinds:?}"
+        [MESSAGE_DELTA, MESSAGE_END],
+        "one text block and its end: the turn's boundary pair is `pump`'s, because the contract's turn is the \
+         prompt and pi's `turn_start`/`turn_end` are per assistant response: {kinds:?}"
     );
     assert_eq!(settled, vec![false], "the agent settled, and did not abort");
-    assert!(
-        skipped > 0,
-        "the fixture carries pi's system prompt, its user message and its own bookkeeping, and none of \
-         them is a frame"
+    assert_eq!(
+        (skipped, unknown),
+        (7, 0),
+        "pi's system prompt, its user message, its boundaries, its prompt's `response` and its bookkeeping: \
+         seven documented records this contract has no frame for, and no record type this build has never seen"
     );
 
     assert_eq!(text_of(&frames, "text"), "hello world");
@@ -133,7 +134,7 @@ fn the_recorded_text_turn_becomes_the_contracts_frames_in_order() {
 
     let end = of_kind(&frames, MESSAGE_END)[0];
     assert_eq!(
-        end.payload["message_id"], frames[1].payload["message_id"],
+        end.payload["message_id"], frames[0].payload["message_id"],
         "the message's deltas and its end share the id the mapping minted"
     );
     assert_eq!(end.payload["usage"], json!({"in": 991, "out": 4}));
@@ -147,9 +148,10 @@ fn the_recorded_text_turn_becomes_the_contracts_frames_in_order() {
 
 #[test]
 fn the_recorded_thinking_turn_streams_thinking_before_text() {
-    let (frames, settled, _) = mapped(THINKING);
+    let (frames, settled, _, unknown) = mapped(THINKING);
     print_frames("thinking", &frames);
     assert_eq!(settled, vec![false]);
+    assert_eq!(unknown, 0, "pi's thinking records are documented ones");
 
     let delta_kinds: Vec<&str> = of_kind(&frames, MESSAGE_DELTA)
         .into_iter()
@@ -179,21 +181,62 @@ fn the_recorded_thinking_turn_streams_thinking_before_text() {
 }
 
 #[test]
-fn a_fixture_whose_frames_drifted_fails_this_guard() {
-    // The guard that makes the two replays above meaningful: the fixtures are committed verbatim, and this
-    // test fails if either stops carrying the records the mapping's arms are proven against. It is cheap and
-    // it is the reason a fixture refresh is a deliberate act rather than an accident.
-    for (name, fixture) in [("text", TEXT), ("thinking", THINKING)] {
-        let (frames, settled, _) = mapped(fixture);
-        assert_eq!(settled.len(), 1, "{name}: one `agent_settled`");
-        assert_eq!(
-            of_kind(&frames, MESSAGE_END).len(),
-            1,
-            "{name}: one assistant message"
-        );
-        assert_eq!(of_kind(&frames, "turn.start").len(), 1, "{name}");
-        assert!(!text_of(&frames, "text").is_empty(), "{name}: text");
-    }
+fn a_fixture_whose_records_drifted_fails_this_guard() {
+    // The guard that makes the two replays above meaningful, and the one thing they cannot assert: *which*
+    // records the fixtures hold. A refresh that dropped pi's system prompt — or that stopped recording the
+    // thinking blocks — would leave every mapping assertion above green, because a frame cannot be missing for a
+    // record that is not there. So the record types are counted per fixture.
+    let multiset = |fixture: &str| {
+        let mut counts: Vec<(String, usize)> = Vec::new();
+        for record in records(fixture) {
+            let kind = record
+                .get("type")
+                .and_then(Value::as_str)
+                .expect("every fixture record names its type");
+            match counts.iter_mut().find(|(seen, _)| seen == kind) {
+                Some((_, count)) => *count += 1,
+                None => counts.push((kind.to_string(), 1)),
+            }
+        }
+        counts
+    };
+    let expect = |pairs: &[(&str, usize)]| -> Vec<(String, usize)> {
+        pairs
+            .iter()
+            .map(|(kind, count)| (kind.to_string(), *count))
+            .collect()
+    };
+    assert_eq!(
+        multiset(TEXT),
+        expect(&[
+            ("response", 1),
+            ("agent_start", 1),
+            ("turn_start", 1),
+            ("message_start", 3),
+            ("message_end", 3),
+            ("message_update", 3),
+            ("turn_end", 1),
+            ("agent_end", 1),
+            ("agent_settled", 1),
+        ]),
+        "the text fixture is a real turn's records, verbatim"
+    );
+    assert_eq!(
+        multiset(THINKING),
+        expect(&[
+            ("response", 1),
+            ("agent_start", 1),
+            ("turn_start", 1),
+            ("message_start", 3),
+            ("message_end", 3),
+            ("message_update", 7),
+            ("turn_end", 1),
+            ("agent_end", 1),
+            ("agent_settled", 1),
+        ]),
+        "the thinking fixture is the same turn shape with a thinking block, and it is the only fixture that \
+         exercises that arm"
+    );
 }
 
 /// A real event log, its writer, and one session for the frames to hang off.
@@ -312,15 +355,15 @@ async fn the_pump_writes_the_recorded_turn_into_the_log_in_order() {
         .await
         .expect("the fixture settles the turn");
     assert_eq!(ended, holosmith::backend::TurnEnd::Settled);
-    // Two records with no frame: `agent_start` and `agent_end`. A direct replay of the fixture counts three,
-    // because it also maps the fixture's `response` line — the record that answers the prompt, which the
-    // reader routes to its caller and never publishes to a turn.
-    assert_eq!(mapping.skipped(), 2, "agent_start and agent_end");
+    // The pump's mapping declines the same documented records a direct replay does, minus the fixture's
+    // `response` line — the record that answers the prompt, which the reader routes to its caller and never
+    // publishes to a turn. Nothing is of an unknown type either way.
     assert_eq!(
-        mapped(TEXT).2,
-        3,
-        "the replay also maps the prompt's `response`"
+        mapping.skipped(),
+        mapped(TEXT).2 - 1,
+        "the prompt's `response` is routed, not published"
     );
+    assert_eq!(mapping.unknown(), 0);
 
     let events = log.committed(4);
     let kinds: Vec<&str> = events.iter().map(|event| event.kind.as_str()).collect();
@@ -396,44 +439,24 @@ async fn an_agent_that_dies_mid_turn_is_a_failed_turn_not_a_hang() {
     // A process that prints one delta and exits: no `agent_settled` ever arrives, so the pump must answer a
     // failure the runner can turn into `unexpected_exit` rather than waiting for ever.
     let dir = TempDir::new("rpc-dies");
-    let script = dir.write(
+    let log = Log::new(dir);
+    let script = log.dir.write(
         "dies.sh",
         "#!/bin/sh\n\
          IFS= read -r line\n\
-         printf '{\"type\":\"turn_start\"}\\n'\n\
-         printf '{\"type\":\"message_start\",\"message\":{\"role\":\"assistant\",\"content\":[]}}\\n'\n\
+         printf '{\"type\":\"turn_start\"}\n'\n\
+         printf '{\"type\":\"message_start\",\"message\":{\"role\":\"assistant\",\"content\":[]}}\n'\n\
          printf '{\"type\":\"message_update\",\"assistantMessageEvent\":\
-         {\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"half\"}}\\n'\n",
+         {\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"half\"}}\n'\n",
     );
     let _ = std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755));
     let mut command = std::process::Command::new("/bin/sh");
     command.arg(&script);
 
-    let database = Arc::new(Mutex::new(
-        Database::open(&dir.database(), OpenOptions::default(), NOW).expect("a database opens"),
-    ));
-    let (writer, _stream) = events::spawn(Arc::clone(&database), WriterOptions::default());
-    let session = database
-        .lock()
-        .expect("the lock")
-        .sessions()
-        .create(
-            &NewSession {
-                project: "holosmith".to_string(),
-                model: "claude-sonnet-4.5".to_string(),
-                thinking: "high".to_string(),
-                network: false,
-                client_key: Some("rpc-dies".to_string()),
-                base_commit: None,
-            },
-            NOW,
-        )
-        .expect("a session is created");
-
-    let (agent, _exit) = Agent::launch(command, &session.id).expect("the fake agent starts");
+    let (agent, _exit) = Agent::launch(command, &log.session.id).expect("the fake agent starts");
     let mut records = agent.records();
-    // The `prompt` write races the process's exit, and either arm is the same answer for this test: the run
-    // is over before it settled.
+    // The `prompt` write races the process's exit, and either arm is the same answer for this test: the run is
+    // over before it settled.
     let _ = agent
         .request(
             "prompt-1",
@@ -441,69 +464,37 @@ async fn an_agent_that_dies_mid_turn_is_a_failed_turn_not_a_hang() {
             Duration::from_secs(5),
         )
         .await;
-    let mut mapping = Mapping::new(&session.id);
-    let ended = pump(&mut records, &mut mapping, &writer).await;
+    let mut mapping = Mapping::new(&log.session.id);
+    let ended = pump(&mut records, &mut mapping, &log.writer).await;
     let error = ended.expect_err("an agent that never settles fails its turn");
     assert!(
         error.to_string().contains("settled"),
         "the reason names the missing settle: {error}"
     );
 
-    // The delta it did print is still in the log: a failed turn is not a silent one.
-    let deadline = Instant::now() + PATIENCE;
-    loop {
-        let count: i64 = Connection::open(dir.database())
-            .expect("a second connection opens")
-            .query_row(
-                "SELECT count(*) FROM events WHERE session_id = ?1 AND type = ?2",
-                [&session.id, MESSAGE_DELTA],
-                |row| row.get(0),
-            )
-            .expect("the count answers");
-        if count == 1 {
-            break;
-        }
-        assert!(Instant::now() < deadline, "the delta reached the log");
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    // The delta it did print is still in the log: a failed turn is not a silent one. Two rows are there — the
+    // turn's opening boundary and that delta — and no `turn.end`, because the turn did not end.
+    let events = log.committed(2);
+    let kinds: Vec<&str> = events.iter().map(|event| event.kind.as_str()).collect();
+    assert_eq!(kinds, ["turn.start", MESSAGE_DELTA], "{kinds:?}");
 }
 
 #[tokio::test]
 async fn a_turn_that_settles_aborted_answers_the_runner_with_aborted() {
     let dir = TempDir::new("rpc-aborted");
-    let script = dir.write(
+    let log = Log::new(dir);
+    let script = log.dir.write(
         "aborted.sh",
         "#!/bin/sh\n\
          IFS= read -r line\n\
-         printf '{\"type\":\"agent_start\"}\\n'\n\
-         printf '{\"type\":\"agent_settled\",\"aborted\":true}\\n'\n\
+         printf '{\"type\":\"agent_start\"}\n'\n\
+         printf '{\"type\":\"agent_settled\",\"aborted\":true}\n'\n\
          cat > /dev/null\n",
     );
     let _ = std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755));
-    let database = Arc::new(Mutex::new(
-        Database::open(&dir.database(), OpenOptions::default(), NOW).expect("a database opens"),
-    ));
-    let (writer, _stream) = events::spawn(Arc::clone(&database), WriterOptions::default());
-    let session = database
-        .lock()
-        .expect("the lock")
-        .sessions()
-        .create(
-            &NewSession {
-                project: "holosmith".to_string(),
-                model: "claude-sonnet-4.5".to_string(),
-                thinking: "high".to_string(),
-                network: false,
-                client_key: Some("rpc-aborted".to_string()),
-                base_commit: None,
-            },
-            NOW,
-        )
-        .expect("a session is created");
-
     let mut command = std::process::Command::new("/bin/sh");
     command.arg(&script);
-    let (agent, _exit) = Agent::launch(command, &session.id).expect("the fake agent starts");
+    let (agent, _exit) = Agent::launch(command, &log.session.id).expect("the fake agent starts");
     let mut records = agent.records();
     let _ = agent
         .request(
@@ -512,26 +503,51 @@ async fn a_turn_that_settles_aborted_answers_the_runner_with_aborted() {
             Duration::from_secs(5),
         )
         .await;
-    let mut mapping = Mapping::new(&session.id);
-    let ended = pump(&mut records, &mut mapping, &writer)
+    let mut mapping = Mapping::new(&log.session.id);
+    let ended = pump(&mut records, &mut mapping, &log.writer)
         .await
         .expect("the settle answers");
     assert_eq!(ended, holosmith::backend::TurnEnd::Aborted);
+    // An aborted turn still ends: the boundary pair is `pump`'s, and the runner's `abort_completed` row is what
+    // the transcript draws the turn's end from.
+    let events = log.committed(2);
+    let kinds: Vec<&str> = events.iter().map(|event| event.kind.as_str()).collect();
+    assert_eq!(kinds, ["turn.start", "turn.end"], "{kinds:?}");
 }
 
-/// The unreachable arm, kept honest: a subscription whose sender has gone reports `Closed`.
+/// The three things a turn can be handed: a record, the end of the process, and the same end again.
+///
+/// The last arm is the one the design needs and the old broadcast could not give: the agent's registry entry keeps
+/// the publication slot alive for as long as the session exists, so "the process is gone" has to be the reader's
+/// own last word rather than the channel closing. A pump that asked again after a `Closed` must not wait for a
+/// write that will never come.
 #[tokio::test]
-async fn a_closed_agent_reports_a_closed_stream() {
-    // Nothing is launched: `Agent::launch` drops the sender with the process, so a subscription with no writer
-    // left answers `Closed` rather than blocking. `Received` is the mapping's only input, so its three arms are
-    // worth one assertion each.
+async fn the_records_end_with_the_process_and_answer_closed_from_then_on() {
     let dir = TempDir::new("rpc-closed");
-    let script = dir.write("quiet.sh", "#!/bin/sh\ncat > /dev/null\n");
+    let script = dir.write(
+        "one.sh",
+        "#!/bin/sh\nIFS= read -r line\nprintf '{\"type\":\"agent_start\"}\n'\n",
+    );
     let _ = std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755));
     let mut command = std::process::Command::new("/bin/sh");
     command.arg(&script);
     let (agent, _exit) = Agent::launch(command, "0123456789abcdef").expect("the agent starts");
     let mut records = agent.records();
-    drop(agent);
+    // The record is published on the same pipe, so the prompt is what starts the script's body.
+    let _ = agent
+        .request(
+            "prompt-1",
+            json!({"id": "prompt-1", "type": "prompt", "message": "hello"}),
+            Duration::from_secs(5),
+        )
+        .await;
+
+    match records.recv().await {
+        Received::Record(record) => assert_eq!(record["type"], "agent_start"),
+        other => panic!("the script printed one record: {other:?}"),
+    }
+    assert_eq!(records.recv().await, Received::Closed);
+    // And it keeps answering: the agent value is still alive in the registry, so a channel that only closed once
+    // would leave the next call waiting on nothing.
     assert_eq!(records.recv().await, Received::Closed);
 }

@@ -159,8 +159,12 @@ Recorded here rather than papered over, the same way ADR-0029 recorded HS-025's 
 
 - **A resume is a new agent process.** `--no-session` means pi keeps no session file, so item 16's "the same
   session id reopens the pi session" is not what this build does; Holosmith's event log is the transcript, and
-  HS-032 owns the revisit when a turn exists.
+  HS-032 owns the revisit when a turn exists. **ADR-0040 records the answer HS-032 gave**: the transcript is
+  Holosmith's, pi is not told any of it, so a resumed agent starts with no memory of the earlier turns and
+  replaying the log into a new pi is a story of its own — not something a mapping can invent.
 - **Nothing maps a turn yet.** stdout's non-`response` records are counted and dropped (HS-032/033/035).
+  **Superseded by ADR-0040:** they are published to the session's turn on a bounded channel (backpressure, not
+  loss) and `crate::rpc` maps them; HS-033 and HS-035 extend the mapping rather than the reader.
 - **A crashed server leaves its container** (the CLI's death does not stop it), which is HS-044's reconcile;
   the next start's `rm -f` is what makes it boring in the meantime.
 - **The container appears seconds after the step returns** — measured at several seconds on this machine. So
