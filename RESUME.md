@@ -43,38 +43,39 @@ created, prompted, aborted, steered, stopped, resumed and deleted, and it is dri
 
 Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is clean apart from the
 operator's own `log.txt`/`orchestrate.sh`, and every commit is **pushed** (see the note on pushing below).
-`HEAD` is `ba1dd83`; any commit after it is bookkeeping — this file's own refresh. Confirmed on
-`origin/master`: `dba7faf..ba1dd83`.
+`HEAD` is `a602c6f`; any commit after it is bookkeeping — this file's own refresh. Confirmed on
+`origin/master`: `a602c6f`.
 
-**Linear: 35 Done, 45 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-031` (`PER-33` …
-`PER-63`), `HS-059` (`PER-91`), `HS-060` (`PER-92`), `HS-061` (`PER-93`) and `HS-065` (`PER-97`).
+**Linear: 36 Done, 44 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-032` (`PER-33` …
+`PER-64`), `HS-059` (`PER-91`), `HS-060` (`PER-92`), `HS-061` (`PER-93`) and `HS-065` (`PER-97`).
 
 **The Docker block is gone.** A real daemon answers on this machine (§2), so `HS-027` … `HS-058` are
-unblocked and the queue is contiguous from `HS-032` on. Five stories have now been built against a real
+unblocked and the queue is contiguous from `HS-033` on. Six stories have now been built against a real
 `docker run` — the mounts and V1 (`HS-027`), the container with its limits (`HS-028`), the start lock with
-`stop`/`resume` (`HS-029`), the expected-stop flag with the exit classifier (`HS-030`) and the **agent**
-(`HS-031`) — and each is proven by a test that runs a container, not by a document. A Docker create now
-provisions the worktree, the network, the attached container running pi in RPC mode, pi's ready handshake,
-and ends **`idle`**, and the exit the attached stdio observes is classified. Everything after it is RPC
-mapping: `HS-032` – `HS-035`.
+`stop`/`resume` (`HS-029`), the expected-stop flag with the exit classifier (`HS-030`), the **agent**
+(`HS-031`) and the **turn** (`HS-032`) — and each is proven by a test that runs a container, not by a
+document. A Docker create provisions the worktree, the network, the attached container running pi in RPC mode
+and pi's ready handshake, and ends **`idle`**; a prompt now reaches pi and every record it prints becomes a
+frame on the writer. What is left of the RPC block is `HS-033` – `HS-035`.
 
-Every story from `HS-001` to `HS-031` is Done, plus `HS-059`–`HS-061` and `HS-065` — 35 of 80. The
+Every story from `HS-001` to `HS-032` is Done, plus `HS-059`–`HS-061` and `HS-065` — 36 of 80. The
 durable record of each is **Linear** (the plan comment, the verbatim demo output, the ship note), the
 review file (`docs/review/PER-<n>.md`, the review verbatim plus its `## Resolution` table) and **`git log`**
-(a commit names its issue; the last one ends `Closes PER-<n>`). Decisions are ADRs `0001` … `0039`, indexed
+(a commit names its issue; the last one ends `Closes PER-<n>`). Decisions are ADRs `0001` … `0040`, indexed
 one line each in `docs/stories/README.md`. Nothing about them belongs in this file.
 
-**Next issue: `PER-64` (HS-032 — RPC mapping: message deltas)** — size **M**, and the story that makes a
-turn real: pi's `message_update`/`message_end` records become `message.delta`/`message.end` frames on the
-writer, in order, with usage, and a **recorded fixture** of a real turn replays in the tests. It is the first
-story that has to *write* to the agent: `DockerBackend::agent(id)` hands out the live `Arc<agent::Agent>`
-(`request(id, json, timeout)`), and `EventWriter` is what a frame goes through. §1's facts 18–20 are what it
-needs. Then `HS-033` (`PER-65`, tool calls and output files), `HS-034` (`PER-66`, usage), `HS-035` (V8), and
-then the rest of the Docker chain in `HS-###` order. What is still behind something
-is phase 2 (`HS-047` … `HS-058` are `HS-046`'s, the phase-1 verification run, which is the story that gates
-the phase; `HS-066` … `HS-074` sit behind those and behind `HS-049`/`HS-050`), and `HS-075` (`PER-107`),
-which is independent of all of it and **still unstarted** — §8's own note carries its four decisions and
-three landmines.
+**Next issue: `PER-65` (HS-033 — RPC mapping: tool calls and output files)** — size **M**. pi's
+`tool_execution_start/update/end` records become `tool.start`/`tool.end` frames (the payloads are already in
+ADR-0019's table and the page already renders them), the full output goes to
+`<data>/sessions/<id>/tool/<tool_id>.txt` capped at 5 MB with a truncation marker, `tool.end` carries a
+truncated `output` plus `output_ref`, `GET /api/sessions/{id}/tool-output/{tool_id}` serves the file with no
+path traversal, and `session.log` stays stderr-only. §1's fact 21 is the seam it extends — the records already
+arrive; only the mapping's `toolcall_*`/`tool_execution_*` arms are missing. Then `HS-034` (`PER-66`, usage),
+`HS-035` (`PER-67`, images and V8), and the rest of the Docker chain in `HS-###` order. What is still behind
+something is phase 2 (`HS-047` … `HS-058` are `HS-046`'s, the phase-1 verification run, which is the story
+that gates the phase; `HS-066` … `HS-074` sit behind those and behind `HS-049`/`HS-050`), and `HS-075`
+(`PER-107`), which is independent of all of it and **still unstarted** — §8's own note carries its four
+decisions and three landmines.
 
 Ranking, per `PROMPT.md`: Linear priority (all are `No priority`) → `HS-###` order in `docs/stories/` →
 anything already `In Progress` first → skip an issue whose `Blocked by` stories are not `Done`.
@@ -234,13 +235,14 @@ anything already `In Progress` first → skip an issue whose `Blocked by` storie
     use". `stop` is `docker stop --time 10`; `resume` re-creates the network and the container and touches
     no worktree (`ensure` is create-or-adopt, ADR-0029). `SessionBackend::resume` had been uncalled since
     ADR-0022 and now has a body.
-16. **The `pi` step still refuses, so a Docker create still ends `error` — one step later than before.**
-    The reason is `the pi step: the docker backend does not start the agent yet (HS-031)`. That is the
-    observable the gate asserts (`case_docker_container`, `case_docker_resume`): the row reached the
-    **agent** step, so the network and container steps both went to a real daemon, and the teardown left no
-    container, no network and no worktree. The container runs **detached** with `sleep infinity`
-    (`container::IDLE_COMMAND`) until HS-031 attaches pi's stdio, and that placeholder is what lets
-    `docker inspect` show the flags before there is an agent to run.
+16. **A Docker create ends `idle`, and a prompt reaches pi (HS-031, HS-032).** The four steps are all real:
+    the worktree, the internal network, the attached container and pi's ready handshake. The gate's
+    `case_agent_launch` asserts the seeded agent directory, the launch line, `docker inspect`'s command and
+    environment, and the exit classifier's third row; `case_docker_resume` asserts a resume reaches `idle`
+    again over the same worktree. `case_docker_turn` prompts a real container and asserts pi's *own* refusal
+    sentence on the row — a session's network is `--internal` and it holds no provider key until HS-039, so
+    pi rejects the `prompt` command before a stream exists. That is a different observable from a hang, and it
+    is the most a real container can show until the key proxy exists.
 
 17. **Whether a container stopped because we asked is now a row's bit, and it is decided by a pure
     function.** `sessions.expected_stop INTEGER NOT NULL DEFAULT 0` (schema 4) records "the server asked
@@ -283,7 +285,12 @@ anything already `In Progress` first → skip an issue whose `Blocked by` storie
     **generation**, the entry is *replaced* by every launch and never removed, and the comparison happens when
     the exit arrives. So the ladder's immediate resume after rung 2 is safe without waiting: an exit that
     arrives before the resume has the flag set (`Expected`), and one that arrives after it is `NotCurrent`.
-    **A delete forgets the launch *before* it removes the container** — not with the expected-stop flag, which
+    **Every removal the server provokes supersedes the launch first** — `remove_container` is the one place that
+does it (a bumped generation, not a forgotten entry: the counter is derived from the entry, so forgetting would
+restart it at 1 and let an old watcher compare equal), and the container step now goes **through** it, because
+`start_container`'s `rm -f` ends the previous agent and that exit arrives before the new launch registers a
+generation (HS-032 found this the hard way: a resume classified its own removal as "the container exited 137",
+about one run in two). **A delete forgets the launch *before* it removes the container** — not with the expected-stop flag, which
     the delete deliberately does not write: `Exits::record` appends to `session.log` *before* it classifies and
     `SessionLog::append` makes the directory, so a live session's exit would re-create
     `<data>/sessions/<id>` after the delete removed it (HS-031's review, P1). The four other stop policies are
@@ -301,6 +308,31 @@ anything already `In Progress` first → skip an issue whose `Blocked by` storie
     handshake with no error anywhere. The launch line (`agent::launch_line`, built from an allow-list of seven
     fields, so nothing is scrubbed) is appended by the backend's own `exit::SessionLog`; stderr reaches the log
     once, from `Exits::record`.
+
+21. **A turn is pi's records mapped to frames by one pure module, and the record seam is where HS-033/035
+    extend it.** `src/rpc.rs`'s `Mapping::map(&Value) -> Mapped` is one record in, at most one frame out, and
+    `rpc::pump(records, mapping, events)` drives a turn: subscribe **before** the prompt is written, write it,
+    append every frame, and end on `agent_settled` (`aborted` → `TurnEnd::Aborted`). The reader
+    (`agent::read_records`) routes a `response` to its caller and **publishes** every other record to the
+    session's turn through `agent::Slots`, a bounded `mpsc` it *waits* on (backpressure, not loss);
+    `Received::{Record, Closed}`, where `Closed` is the reader's own `Slots::close` because the `Agent` value
+    in the registry would otherwise keep the channel open for the session's life. Decisions that are easy to
+    undo by accident: (a) **the transcript's turn is the operator's prompt**, so `pump` writes `turn.start`
+    before the first frame and `turn.end` on the settle, and pi's per-assistant-response
+    `turn_start`/`turn_end` are **declined** — mapping them would make "turn 3" mean "third assistant
+    response" and tell the page a turn settled while the row was `running`; (b) message ids are minted
+    `msg-<first-mint instant>-<counter>`, because pi's messages carry none and the log is durable; (c)
+    `text_end`/`thinking_end` content is **not** re-emitted (the deltas already said it, and
+    `message.snapshot` has exactly one producer, compaction); (d) `message.end` carries `usage` (optional),
+    `stop_reason` and `tool_calls` (the message's tool-call names) — additive keys, ADR-0040 amending
+    ADR-0019's table; (e) two counters: **declined** (a documented record with no frame — one `debug` per turn)
+    and **unknown** (a type or shape this build has never seen — one `warn` per turn, and that is how a pi
+    release that grew a frame gets noticed). `toolcall_*` and `tool_execution_*` are declined on purpose:
+    HS-033 owns them. The fixtures are two **real turns** under `crates/holosmith/tests/fixtures/`, captured
+    with the operator's own provider credentials on the default bridge (the image's pi == `pins/pi.txt`), and
+    replayed by `tests/rpc.rs` through the same mapping a container drives; `docs/build.md` carries the capture
+    and refresh procedure, and `a_fixture_whose_records_drifted_fails_this_guard` counts record types because a
+    mapping assertion cannot see a record that is not there.
 
 Three things HS-014 and HS-015 settled that later stories inherit:
 
@@ -516,10 +548,11 @@ If that fails, **stop and report** — that is a `PROMPT.md` stop condition.
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                     # 279 lib + 37 integration binaries, 634 tests in all (22 in
+cargo test                     # 293 lib + 39 integration binaries, 645 tests in all (22 in
                                # tests/worktree.rs, 16 tests/events.rs, 10 tests/turns.rs, 10
                                # tests/compaction.rs, 14 delete.rs, 8 idle_stop.rs, 9 backup.rs,
-                               # 7 history.rs, 10 tests/exit.rs, 5 tests/container.rs, 2 tests/agent.rs)
+                               # 7 history.rs, 10 tests/exit.rs, 5 tests/container.rs, 3 tests/agent.rs,
+                               # 8 tests/rpc.rs)
 cd web && npm test             # 36 transcript tests (node's own runner)
 cd web && npx tsc --noEmit     # not a gate phase, but a web edit that does not typecheck is a bug
 scripts/verify.sh              # THE one-command gate since HS-006
@@ -528,10 +561,10 @@ scripts/verify.sh              # THE one-command gate since HS-006
 `scripts/verify.sh` runs six phases, cheapest first: `fmt`, `clippy`, `test`, `build`
 (`scripts/build.sh`, which itself runs `build-web.sh` — `npm test` then Vite — and `check-static.sh`
 last), `embed` (`scripts/check-embed.sh`), then `serve` — the **shipped musl artifact** booted on
-`--port 0` with a temp data dir, running **50 cases plus a CORS sweep (409 assertions)**, then torn down
-with `SIGTERM` and an asserted exit 0. Ten cases bring their own boot (`case_token_budget`,
+`--port 0` with a temp data dir, running **51 cases plus a CORS sweep (434 assertions)**, then torn down
+with `SIGTERM` and an asserted exit 0. Eleven cases bring their own boot (`case_token_budget`,
 `case_compaction`, `case_history`, `case_backup`, `case_worktree`, `case_worktree_refusal`,
-`case_agent_launch`, `case_docker_resume`, plus `case_docker_preflight`, which needs no
+`case_agent_launch`, `case_docker_resume`, `case_docker_turn`, plus `case_docker_preflight`, which needs no
 server at all, `case_container_mounts`, which needs no server *and* no daemon — it skips, one printed
 line, when there is neither a daemon nor an image — and `case_exit_classification`, which reads a row's
 `expected_stop` out of `app.db` with `python3` and skips when there is no `python3`). It takes ~5 min (both musl targets, the Docker cases
@@ -609,11 +642,13 @@ crates/holosmith/
   src/deleter.rs            the delete flow's task (HS-019): revoke_key (a no-op until HS-039) →
                             `backend.delete` → remove the row *and its event log* in one
                             transaction → close the session's streams. `DELETED` is the rung-2 word
-  src/agent.rs              the agent process (HS-031, ADR-0039): `Agent::launch` (piped stdio, LF-only JSONL
-                            reader routing `response` records by command id, stderr into a 64 KiB tail, the
-                            exit sent after the last record), `request`, `ready` (the `get_state` handshake,
-                            `READY_TIMEOUT`), `Ended`, `AgentError`, `HOME`/`SETTINGS`/`TEMPLATE`/`ENVIRONMENT`
-                            /`COMMAND`, `home`/`ensure_home`/`seed`/`launch_line`, `version_of`/`version_check`
+  src/agent.rs              the agent process (HS-031, ADR-0039) and its record seam (HS-032): `Agent::launch`
+                            (piped stdio, an LF-only JSONL reader that routes `response` records by command id
+                            and **publishes** the rest, stderr into a 64 KiB tail, the exit sent after the last
+                            record), `records()`/`Slots`/`Received`/`AgentRecords`/`RECORDS_BUFFER` (a bounded
+                            channel the reader *waits* on), `request`, `ready`, `Ended`, `AgentError`,
+                            `HOME`/`SETTINGS`/`TEMPLATE`/`ENVIRONMENT`/`COMMAND`,
+                            `home`/`ensure_home`/`seed`/`launch_line`, `version_of`/`version_check`
                             /`version_sentence`
   templates/pi-home/settings.json  the seed's template, embedded with `include_str!` (no secrets)
   src/container.rs          the session's container (HS-027/028/029, ADR-0035/0036/0037): `Mounts`
@@ -636,6 +671,10 @@ crates/holosmith/
                             `BackupError`, `KEEP` (7), `BACKUPS` ("backups"), and the private `day`/
                             `civil_from_days` (UTC, integer-only, no dependency). Sync and std-only, and
                             it logs nothing — the create logs its error
+  src/rpc.rs                the mapping (HS-032, ADR-0040): `Mapping::{new, map, skipped, unknown}` (one
+                            pi record → at most one frame, `Mapped::{Nothing, Frame, Settled}`), `pump`
+                            (turn.start → frames → turn.end, ending on `agent_settled`), the minted message
+                            id, `declined`/`unknown` counters, and the two additive keys on `message.end`
   src/runtime.rs            runtime::Backend {Stub,Docker} — which backend this run uses
   src/http/                 mod.rs, app.rs (Routes/App seam, AppState + provisioner()/turner()/
                             transitioner()/ladder()/deleter()/sweeper()/compactor(), edge layer,
@@ -678,6 +717,7 @@ crates/holosmith/
   src/schema.rs             SCHEMA_VERSION (= 4), include_dir! embed, check_embed, contract_violations
   src/{serve,web,logging,clock,version,pins}.rs
   tests/                    version_cli, config_cli, http_contract, serve_cli, db_migrations, exit, agent,
+                            rpc (the fixture replays and the pump), fixtures/pi-turn-{text,thinking}.jsonl,
                             pin_single_source, guards, session_repository, sessions_api, events,
                             streams, provisioning, state_machine, session_list, session_screen,
                             turns, abort, steer, resume, delete, eviction, idle_stop, turn_timeout,
@@ -702,9 +742,9 @@ scripts/check-static.sh     file/readelf, empty-root serve + cmp against web/dis
 scripts/check-embed.sh      the three embed cases (present / absent warns / required fails)
 scripts/verify.sh           the one-command gate (see §3)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0039          read the recent ones before planning anything
+docs/adr/0001…0040          read the recent ones before planning anything
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-63, PER-91, PER-92, PER-93, PER-97  each a verbatim review + a `## Resolution` table
+docs/review/PER-33…PER-64, PER-91, PER-92, PER-93, PER-97  each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -1048,7 +1088,7 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 - **`docs/build.md` is a story deliverable, not orchestrator-only.** If a story changes prerequisites or
   gates, the doc is in scope, and its prose must be reflowed (~100 columns), not just appended to.
 - **Every story adds at least one `case_*` to `scripts/verify.sh`.** The rule is in bold in
-  `docs/build.md`, and the reviewer enforces it. The current gate is 44 cases / 284 assertions, and a
+  `docs/build.md`, and the reviewer enforces it. The current gate is 51 cases / 434 assertions, and a
   case that makes its own session must run before the shared one exists or delete it at the end (the
   gate's cap is one live session).
 - **Adding an ADR means updating `docs/stories/README.md`**: the "Decisions taken while slicing" count
@@ -1402,9 +1442,60 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   re-creates `<data>/sessions/<id>` after the delete removed it (HS-031's review, P1). Do not "fix" that by
   skipping the log on `Expected` — `tests/exit.rs` asserts the lines are kept for an expected exit.
 
+### Landmines: the mapping and the record seam (HS-032)
+
+- **The transcript's turn is the prompt, and pi's `turn_start`/`turn_end` are per assistant response.** `pump`
+  writes the boundary pair; the mapping *declines* pi's. Mapping them makes "turn N" mean "Nth assistant
+  response" (the page counts `turn.start`, `turns_before` numbers by it), tells the page a turn settled while
+  the row is still `running`, and over-counts the budget notice once a tool round trip exists. The stub emits
+  one pair per prompt, and that is the contract.
+- **One record must be mapped once.** `pump` maps `record` into a value and matches on it; calling
+  `mapping.map(&record)` twice — once to test for `Settled`, once for a frame — mints two message ids for one
+  message. The first draft did exactly that.
+- **`agent_settled` ends a turn, `agent_end` does not.** pi retries, recovers from an overflow and delivers
+  queued messages after `agent_end`; only `agent_settled` means "no work left".
+- **A turn's boundary pair is not written when the agent dies mid-turn.** `Received::Closed` answers
+  `BackendError::Failed`, the runner writes `unexpected_exit`, and no `turn.end` exists — the turn did not end.
+- **The record channel is bounded and the reader *waits* on it.** A `broadcast` ring drops the oldest record,
+  which is a transcript with a hole in it and the reason the acceptance's "every delta reaches the writer" was
+  not true in the first draft. When the buffer fills, the reader stops draining pi's stdout, which blocks pi on
+  its pipe — backpressure, not loss. Do not "fix" a slow pump by loosening that into a lossy ring.
+- **`Closed` is the reader's own last word (`Slots::close`), not the channel closing.** The `Agent` value lives
+  in the backend's registry for the session's life, so the channel outlives the process; a pump that waited for
+  the channel would wait for the session to be deleted.
+- **Subscribe before the prompt is written.** pi starts printing as soon as it accepts, and a record printed
+  between the write and the subscription is lost from the log too.
+- **pi's messages carry no id, so the mapping mints one** (`msg-<first-mint instant>-<counter>`, the stub's
+  shape). The process instant is taken on the *first mint*, not at startup — uniqueness does not care, three
+  documents once said otherwise. A delta with no `message_start` **opens** the message instead of minting per
+  delta.
+- **`text_end`/`thinking_end` content is deliberately not emitted.** The deltas already produced the text; the
+  only replacing frame is `message.snapshot` and compaction is its only producer (ADR-0032). Emitting the end
+  content as a snapshot mid-message would wipe that message's thinking.
+- **Two counters, two levels.** A documented record with no frame (`agent_start`, pi's `turn_start`,
+  `toolcall_*` until HS-033, `extension_ui_request` until HS-035, a fixture's `response`) is *declined* —
+  one `debug` per turn. A type or shape this build has never seen is *unknown* and is a **`warn`**: `debug`
+  is invisible at the default `info` filter, and that warn is how a pi release that grew a frame gets noticed.
+- **A removal the server performs is never news, and there is one function that removes.** `remove_container`
+  supersedes the launch (bumped generation, receiver dropped) *before* it removes anything, and
+  `start_container` now calls it — the first draft called the `Docker` CLI helper inline, so the resume path
+  was the one place the rule did not reach, and a resume then classified its own `rm -f` as "the container
+  exited 137" about one run in two. `supersede_agent`, not `forget_agent`: the generation is derived from the
+  registry entry, so forgetting restarts the count at 1 and an old watcher compares equal.
+- **The fixtures are captured by hand, and the gate cannot make one.** A session's container has no provider
+  key (HS-039) and an `--internal` network (HS-028), so pi refuses `prompt` before a stream exists — that is
+  what `case_docker_turn` asserts (pi's own sentence on the row, the container still alive, a second round trip
+  after a resume). The streaming evidence is the two committed `.jsonl` fixtures, captured with the operator's
+  own credentials on the default bridge from the image the Docker stories run; `docs/build.md` has the
+  procedure, and a refresh must not contain the pinned pi version literal (the pin guard scans tracked files).
+- **A data root under `/tmp` is invisible to the daemon.** The demo lost a cycle to it: `pi-home` is a mount
+  source, so a `/tmp` data root mounts an empty root-owned directory and pi fails with `EACCES` on
+  `auth.json` — silently, with no error anywhere but that sentence. Every Docker test, gate case and demo
+  builds its data root under `target/`.
+
 ## 7. Decisions taken on the operator's behalf (do not silently undo)
 
-Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0038`, one line each in
+Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0040`, one line each in
 `docs/stories/README.md`); read the recent ones before planning, and **amend rather than rewrite** — an ADR
 a later story changes gets a "Superseded by ADR-00xx" note (0012/0013, and 0020 was amended by 0026).
 
@@ -1428,53 +1519,54 @@ cd /home/adamolsson/projects/holosmith
 git status --short                          # must be clean
 . ~/.pi/toolchains/env.sh
 python3 /tmp/lin.py issues | grep -v ' Done ' | head   # next unfinished (recreate /tmp/lin.py, §2)
-python3 /tmp/lin.py issue PER-63            # sanity-check Linear is reachable and scoped
+python3 /tmp/lin.py issue PER-65            # sanity-check Linear is reachable and scoped
 docker version                              # the daemon must answer, or every Docker story is a lie
 docker image inspect pi-agent:local         # the image the Docker stories run; its pi == pins/pi.txt
-scripts/verify.sh                           # baseline green (~5-8 min, 50 cases, 390 assertions)
+scripts/verify.sh                           # baseline green (~6-8 min, 51 cases, 434 assertions)
 ```
 
-Then start the cycle at **`PER-64` (HS-032 — RPC mapping: message deltas)** — size **M**. It is the story
-that makes a turn real, and what it needs is already in place:
+Then start the cycle at **`PER-65` (HS-033 — RPC mapping: tool calls and output files)** — size **M**. The
+records already arrive; HS-033 adds the two arms the mapping declines today and the output-file half:
 
-- **The agent is reachable.** `DockerBackend::agent(&session_id) -> Option<Arc<agent::Agent>>` is public;
-  `Agent::request(id, json, timeout) -> Result<Reply, AgentError>` writes one JSONL command and awaits the
-  `response` that repeats its id, bounding both the write and the reply. `Reply { success, error, data }`.
-- **The frames to map** are pi's `message_update` (`assistantMessageEvent.type` = `text_start`/`text_delta`/
-  `text_end`/`thinking_*`/`toolcall_*`) and `message_end`, plus `turn_start`/`turn_end`/`agent_settled`
-  (`~/.pi/.../docs/json.md` is the canonical table). The transcript's contract is `docs/adr/0018`/`0019`'s
-  table (`message.delta {message_id, kind, text}`, `message.end {message_id, usage:{in,out}}`, …) and the
-  writer coalesces a batch's deltas already (ADR-0031), so a delta per record is the right granularity.
-- **`start_turn` is where it goes**: it takes `&EventWriter`, it must answer `TurnEnd::{Settled, Aborted}`
-  (`agent_settled.aborted`), and the runner owns the row (`turn.rs`). `steer`/`clear_queue`/`abort` are the
-  other three (`prompt`/`steer`/`clear_queue`/`abort` commands in `docs/rpc-commands.md`).
-- **A turn needs a provider**, and there is no key proxy until HS-039: with `PI_OFFLINE=1` and no key a real
-  prompt fails at the provider. The acceptance's "recorded fixture from a real turn" may therefore have to be
-  captured with this machine's own environment (the sandbox's pi has credentials) and committed as JSONL,
-  with the tests replaying it through the same reader — decide and record how, canonically.
-- **Unknown records must be counted and dropped**, never fatal (`agent::read_records` already does that; the
-  mapping layer needs a hook where `read_records` currently increments `skipped`).
+- **The seam is `src/rpc.rs`.** `Mapping::map` currently declines `toolcall_start`/`toolcall_delta`/
+  `toolcall_end` (and `tool_execution_start`/`_update`/`_end`, which are not in its vocabulary at all —
+  the latter is the pair that carries a tool's *result*: `{toolCallId, toolName, result, isError, durationMs}`,
+  see `docs/json.md`). `tool.start`/`tool.end`'s payloads are pinned in **ADR-0019's table** and the page
+  already renders both, so the frames are a mapping change plus two additive keys
+  (`status`/`duration`), not a contract invention. `tests/rpc.rs`'s fixtures are where a tool-using turn
+  belongs: capture a third one (`docs/build.md` has the procedure) so the replay exercises the arm.
+- **The output file is the server's, not the mapping's.** `tool.end`'s full output goes to
+  `<data>/sessions/<id>/tool/<tool_id>.txt`, capped at 5 MB with a truncation marker, and the frame carries a
+  truncated `output` plus `output_ref`; `GET /api/sessions/{id}/tool-output/{tool_id}` serves the file and a
+  `{tool_id}` that is not 32 hex characters (or that escapes the directory) must be refused, not joined —
+  `Path<String>` gives you the string and the guards give you the rest. `session.log` stays stderr-only
+  (item 15), so a tool's output must never be written into it.
+- **The mapping is pure, so the file write cannot live in it.** Decide where it goes (`pump` owns the
+  `EventWriter` and the session id, so it is the natural place) and record it in the ADR — an ADR-0041 that
+  amends ADR-0019's `tool.start`/`tool.end` rows by the same "additive keys" pattern ADR-0040 used for
+  `message.end`.
+- **A tool result can carry an image**, which is HS-035's; do not half-build it here — but do not drop the
+  record silently either, or V8's fixture has nothing to replay.
 
-Then `HS-033` (`PER-65`), `HS-034` (`PER-66`), `HS-035` (`PER-67`), and the rest of the Docker chain in
+Then `HS-034` (`PER-66`, usage), `HS-035` (`PER-67`, images and V8), and the rest of the Docker chain in
 `HS-###` order: `HS-036` (the `egress` network and the startup self-test), `HS-037`–`HS-040` (the two proxies
 and their verification), `HS-041` (preview), `HS-042`–`HS-044` (snapshot, delete keep-rules, reconcile),
 `HS-045` (`doctor`), `HS-046` (the phase-1 verification run — the gate for phase 2), then phase 2.
 
-After it the rest of the Docker chain in `HS-###` order: `HS-032`–`HS-035` (pi's RPC mapping),
-`HS-036` (the `egress` network and the startup self-test), `HS-037`–`HS-040` (the two proxies and their
-verification), `HS-041` (preview), `HS-042`–`HS-044` (snapshot, delete keep-rules, reconcile),
-`HS-045` (`doctor`), `HS-046` (the phase-1 verification run — the gate for phase 2), then phase 2.
+Read §1's twenty-one facts first: eight of them are the Docker half (mounts and V1, the container and its
+limits, the start lock and `resume`, the expected-stop flag with its classifier, the agent launch and its stdio,
+the exit seam with its generations, the agent directory with the data root it forces, and the mapping with its
+record seam), and the rest are the writer's coalescing, the runner's two turn policies, the worktree step, the
+create's project refusals, compaction, truncated replay, the daily bundle and the rendered page.
 
-Read §1's twenty facts first: seven of them are the Docker half (mounts and V1, the container and its limits,
-the start lock and `resume`, the expected-stop flag with its classifier, the agent launch and its stdio, the
-exit seam with its generations, and the agent directory with the data root it forces), and the rest are the
-writer's coalescing, the runner's two turn policies, the worktree step, the create's project refusals,
-compaction, truncated replay, the daily bundle and the rendered page.
+**One thing this build does not do, recorded rather than discovered:** a resumed session's pi has **no memory**
+of the earlier turns (`--no-session`; the transcript is Holosmith's log). Replaying the log into a new pi is a
+product decision with a token cost and needs its own story — ADR-0040 and ADR-0039 both say so, and nothing in
+the backlog owns it yet.
 
 **`HS-075` (`PER-107`, expand/contract migration discipline) is independent of all of that** and can be
 taken at any point — it is the one story whose only blocker is `HS-004`, and §8's own note below carries the
-four decisions and three landmines it needs. It is **not shipped**; it was the "next" story before the
-daemon appeared and was never started.
+four decisions and three landmines it needs. It is **not shipped**.
 
 **The remaining true blocker is `HS-066` onwards** (phase 2's deploy/hub stories), which wait on
 `HS-047`/`HS-056`/`HS-057` and the phase-1 verification run. Nothing in the queue is now blocked on the
@@ -1517,8 +1609,8 @@ re-read.
 If you stop before the backlog is empty, say so explicitly, say which issue is next, and leave the tree
 clean and the gates green — **a half-finished story is worse than an honest stop**.
 
-This session shipped one story:
+This session (`9b493ac` → `a602c6f`) shipped one story:
 
 | Issue | Story | Commits | Outcome |
 | --- | --- | --- | --- |
-| PER-63 | HS-031 the container is the agent | `c4039df`, `968420d`, `22b51d6`, `bbd5695`, `e6adebb`, `379d7ce`, `ba1dd83` | Done — an attached `docker run -i` whose stdio is pi's RPC (`src/agent.rs`: LF-only JSONL, responses routed by id, both pipes drained, the exit sent last), the pi step as a real `get_state` handshake under a 30 s bound, `<data>/sessions/<id>/pi-home` as a **fifth mount** seeded from an embedded template, the image's `pi --version` asserted against `pins/pi.txt` once per process, `--approve` (open question 9 closed), the launch line in `session.log`, and the exit recorded by the server through a new `supervise` seam — with ADR-0038's ordering constraint closed by keying the flag to the **launch generation**. Review: "OK with notes", one **P1** (a delete of a live session re-created its own session directory, fixed by forgetting the launch first) plus 12 more fixed and 1 dismissed (`docs/review/PER-63.md`) |
+| PER-64 | HS-032 RPC mapping: message deltas | `d430fae`, `82a7738`, `a190f7e`, `a6c8a60`, `a602c6f` | Done — pi's records become the transcript's frames in one pure module (`src/rpc.rs`: `Mapping::map`, `rpc::pump`), the reader publishes every non-`response` record to the turn over a bounded `mpsc` it *waits* on, the turn's four other operations (`steer`/`clear_queue`/`abort`) are real with unique command ids, two real turns are committed as fixtures and replayed through production code, and the demo found + the review caught a resume that classified its own `rm -f` as an unexpected death (fixed in `remove_container`, which `start_container` now calls). ADR-0040. Review: **BLOCK**, one **P1** (the removal fix was on a call site the resume path never reached) plus a P2 on the turn-boundary semantics (pi's `turn_start` is per assistant response; `pump` writes the pair now) and one on the lossy `broadcast` (now backpressure) — 16 findings, 15 fixed, 1 acknowledged (`docs/review/PER-64.md`) |
