@@ -358,6 +358,7 @@ serve_cases=(
   case_network_selftest
   case_egress_proxy
   case_internet_toggle
+  case_schema_newer
 )
 
 # V1 (HS-027): the hardened `.git` mounts, measured on a real daemon. Three writes must fail, three git
@@ -1919,6 +1920,56 @@ PROBE
   # Its server is left running: `phase_serve` stops whatever is up after the last case, and that server's data root
   # is this case's — so the scratch tree goes now, like `case_docker_turn`'s.
   rm -rf "$root"
+}
+
+# HS-075: a database from a **newer** release. `serve` continues — item 10's rollback must not need a restore, and
+# expand/contract is what makes continuing safe — and it says so in two places an operator reads: the banner's
+# `schema <n>` is the *recorded* number rather than the binary's, and one `warn` names both versions and the command
+# that refuses (`doctor`, HS-045). This is the observable half of the acceptance's third bullet; the pure verdict
+# and its sentence are `tests/schema_previous.rs`'s.
+case_schema_newer() {
+  local name=case_schema_newer root="$repo_root/target/verify-schema-newer-$$"
+  local line
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to write a newer schema_version (tests/schema_previous.rs covers the verdict)\n' "$name"
+    return 0
+  fi
+  stop_serve
+  rm -rf "$root"
+  mkdir -p "$root"
+  printf 'owner = "%s"\nbackend = "stub"\n' "$owner" >"$WORK/config-schema-newer.toml"
+  # One boot to create and migrate the database, then the row is rewritten to a version from the future.
+  start_serve "$WORK/config-schema-newer.toml" "$root/data" >/dev/null
+  stop_serve
+  python3 - "$root/data/app.db" <<'SQL' || fail "$name/seed" "could not write a newer schema_version"
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.execute("INSERT INTO schema_version (version, name, applied_at) VALUES (99, 'from-the-future', 0)")
+db.commit()
+SQL
+  HOLOSMITH_LOG=info
+  export HOLOSMITH_LOG
+  start_serve "$WORK/config-schema-newer.toml" "$root/data" >/dev/null
+  unset HOLOSMITH_LOG
+  grep -q '^database .* schema 99$' "$serve_err" ||
+    fail "$name/banner" "the banner does not print the recorded schema: $(grep '^database ' "$serve_err" || true)"
+  assertions=$((assertions + 1))
+  # One line, naming what an operator has to act on: both numbers, and the command that refuses.
+  line="$(grep -i 'newer release wrote this database' "$serve_err" || true)"
+  [ -n "$line" ] || fail "$name/warn" "the boot said nothing about the newer schema: $(cat "$serve_err")"
+  case "$line" in
+    *99*4*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/versions" "the warning does not name both schema versions: $line" ;;
+  esac
+  printf '%s\n' "$line" | grep -q 'doctor' ||
+    fail "$name/doctor" "the warning does not name the command that refuses: $line"
+  assertions=$((assertions + 1))
+  # And it is really serving: a refused boot would have exited, so a 200 here is the "continues" half of the claim.
+  fetch "$name" GET /api/health "Host: 127.0.0.1" ||
+    fail "$name/no_answer" "GET /api/health did not answer over a newer database"
+  expect_status "$name" "$(answer "$name")" 200
+  # Its server is left running for the phase's final `stop_serve`, so the scratch root — which holds its data root —
+  # goes with it rather than being removed here.
 }
 
 # HS-014: the session screen is a path, not a route. `/sessions/<id>` is not a file the app ships,
@@ -3621,6 +3672,11 @@ command -v cargo >/dev/null 2>&1 ||
 run_phase fmt cargo fmt --check
 run_phase clippy cargo clippy --all-targets -- -D warnings
 run_phase test cargo test
+# HS-075: the expand/contract rule in one named command. The destructive side is refused where a migration is
+# written (`schema::contract_violations`, which `cargo test` already runs); this is the other half — the previous
+# release's schema checked against this build's — given a phase of its own so a migration author sees the rule
+# named in the output instead of buried in a test list (ADR-0047).
+run_phase migrations cargo test --test schema_previous
 if [ "$build" -eq 1 ]; then
   # scripts/build.sh runs scripts/build-web.sh first and scripts/check-static.sh last, so this
   # calls it once rather than running npm twice.

@@ -300,14 +300,18 @@ pub fn apply_pending(
     now: i64,
 ) -> Result<u32, DbError> {
     let recorded = recorded_version(conn, path)?;
-    if recorded > schema::SCHEMA_VERSION {
+    // One decision, in `schema::verdict`, because the banner, the `warn` below and `doctor` (HS-045) all report the
+    // same fact and a second comparison is a second chance to disagree (HS-075).
+    let verdict = schema::verdict(recorded, schema::SCHEMA_VERSION);
+    if verdict == schema::Verdict::Newer {
         // Item 10: rolling `current` back to an older binary must not need a restore, and
-        // expand/contract is what makes continuing safe.
+        // expand/contract is what makes continuing safe. `doctor` is where this refuses.
         tracing::warn!(
             database = %path.display(),
             recorded,
             binary = schema::SCHEMA_VERSION,
-            "the database was migrated by a newer release; continuing without migrating it"
+            verdict = %verdict.sentence(recorded, schema::SCHEMA_VERSION),
+            "a newer release wrote this database; continuing without migrating it"
         );
         return Ok(recorded);
     }

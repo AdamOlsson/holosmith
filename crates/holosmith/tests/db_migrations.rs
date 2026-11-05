@@ -424,10 +424,19 @@ fn an_older_binary_on_a_newer_database_warns_and_continues() {
         .status();
     let _ = child.wait();
 
+    // The message and the sentence beside it: HS-075 made one function own the words, so the boot names both
+    // numbers and the command that *would* refuse — `doctor`, which is the half that fails a start rather than a
+    // rollback.
     assert!(
-        said.contains("was migrated by a newer release; continuing without migrating it"),
+        said.contains("a newer release wrote this database; continuing without migrating it"),
         "the start did not warn: {said}"
     );
+    for needle in ["doctor", "expand/contract"] {
+        assert!(
+            said.contains(needle),
+            "the warning does not name `{needle}`, so an operator cannot act on it: {said}"
+        );
+    }
     assert!(
         said.contains(&format!(
             "database {} schema {}",

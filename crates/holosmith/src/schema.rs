@@ -139,6 +139,54 @@ pub fn check_embed(migrations: &[Migration]) -> Result<u32, EmbedError> {
     Ok(previous)
 }
 
+/// What a database's recorded schema version means to this binary (HS-075, spec item 10).
+///
+/// One function rather than three comparisons, because three callers read the same fact and must not disagree:
+/// the startup banner prints the recorded number, [`crate::db::apply_pending`] decides whether to migrate, and
+/// `doctor` (HS-045) will decide whether to refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// The database is already the schema this binary embeds.
+    Same,
+    /// The database is behind: this binary migrates it on the next open.
+    Older,
+    /// A **newer** release wrote this database. Item 10's rollback is the reason it is not fatal to `serve`:
+    /// switching `current` back to an older binary must not need a restore, and expand/contract is what makes
+    /// continuing safe. `doctor` is where it refuses, because that is the guard that runs before a start.
+    Newer,
+}
+
+/// What `recorded` means to a binary that understands `binary`.
+pub const fn verdict(recorded: u32, binary: u32) -> Verdict {
+    if recorded == binary {
+        Verdict::Same
+    } else if recorded < binary {
+        Verdict::Older
+    } else {
+        Verdict::Newer
+    }
+}
+
+impl Verdict {
+    /// The sentence an operator reads, which is the same one in the banner's words, in the startup `warn`, and in
+    /// `doctor`'s refusal — one spelling of one fact (HS-020's lesson, one level up).
+    pub fn sentence(self, recorded: u32, binary: u32) -> String {
+        match self {
+            Self::Same => format!("the database is at this release's schema ({binary})"),
+            Self::Older => format!(
+                "the database is at schema {recorded} and this release migrates it to {binary}; the migrations it \
+                 runs are forward-only and additive, so the previous release could still read the result"
+            ),
+            Self::Newer => format!(
+                "the database is at schema {recorded}, which a newer release wrote, and this binary understands \
+                 {binary}: `holosmith doctor --quick` refuses to start on it, and `serve` continues only because \
+                 rolling `current` back must not need a database restore — that is what expand/contract buys \
+                 (spec item 10, ADR-0047)"
+            ),
+        }
+    }
+}
+
 /// Migrations that drop or rename something without being named as contract migrations.
 ///
 /// ADR-0009's expand/contract rule: a destructive statement ships only in

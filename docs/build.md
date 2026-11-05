@@ -326,6 +326,60 @@ test names a data root inside its own temporary directory, because `serve` now c
 migrates whatever root the config resolves to, and an omitted key resolves to the built-in
 default.
 
+### The expand/contract rule, and the one file to refresh
+
+A migration may **add**. It may not drop or rename anything the previous release still uses — that is what makes
+`holosmith rollback` a symlink switch rather than a database restore (spec item 10, ADR-0047). Two things enforce
+it, and they catch different mistakes:
+
+- **A destructive statement in a file that is not named as a contract migration is a test failure, immediately.**
+  `schema::contract_violations` refuses `DROP TABLE`, `ALTER TABLE … DROP COLUMN` and `RENAME` in any migration
+  whose slug is not `contract` or `contract_*`, matched on words rather than substrings. So the cleanup that follows
+  an expand ships as `0005_contract_drop_old_column.sql`, one release later, and a release that only expands cannot
+  contain one by accident.
+- **A snapshot of the previous release's schema is compared with this build's**, as a subset: every table and every
+  column in `docs/schema/previous.sql` must still exist. Drop or rename one and the subset test fails with the two
+  ways forward in its message. It is not under `crates/holosmith/migrations` on purpose — that directory is embedded
+  and byte-grepped into the artifact by `scripts/check-static.sh` — and the comparison is done by SQLite
+  (`sqlite_master`, `pragma_table_info`), not by a second SQL parser.
+
+`scripts/verify.sh` runs the subset test as the `migrations` phase, so a broken rule is named in the output rather
+than buried in a test list.
+
+**Refreshing the snapshot is a release step.** Take the release you are leaving — the simplest is to start its
+binary once with an empty `--data-dir`, which migrates it — and run:
+
+```bash
+scripts/schema-snapshot.sh <data root>/app.db    # writes docs/schema/previous.sql
+```
+
+Commit the result *with* the change that needed it. A contract migration changes this file in the same commit, so
+the diff is the record of what that release gave up; that is the only mechanical form the "one release later" clause
+can take, because nothing in a repository knows which binary was promoted.
+
+A worked pair, as a migration author would write it:
+
+```sql
+-- 0004_expectation.sql — release N: expand. Add the new shape, keep the old one working.
+ALTER TABLE sessions ADD COLUMN expected_stop INTEGER NOT NULL DEFAULT 0;
+```
+
+```sql
+-- 0007_contract_drop_retry_count.sql — release N+3: contract. The code stopped reading `retry_count` in N, and the
+-- snapshot (docs/schema/previous.sql) is refreshed here, in this commit, so a reviewer sees both halves.
+ALTER TABLE sessions DROP COLUMN retry_count;
+```
+
+If you are tempted to write the second one in the same release as the first, the subset test is what will stop you:
+`retry_count` is still in the snapshot, and the message says either to keep it or to refresh the snapshot and say
+why rolling back past this release is acceptable.
+
+**A newer database is not a refusal to start.** If `schema_version` is *higher* than the binary's
+`schema::SCHEMA_VERSION`, `serve` warns and continues: an older binary over a newer database is exactly the rollback
+expand/contract exists to make safe. `schema::verdict` holds that decision and the sentence, the banner prints the
+**recorded** number (`database <path> schema <n>`), and `doctor` (HS-045) is where the sentence becomes a refusal —
+a check that runs before a start, rather than a service that refuses to come back up.
+
 **The event log is not append-only for ever.** Compaction (HS-060, ADR-0032) replaces the delta
 rows of messages completed more than 24 hours ago with one `message.snapshot` each, so an `events`
 row can disappear while `sessions.last_seq` stays where it was. Two consequences for anyone

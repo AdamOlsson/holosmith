@@ -615,7 +615,18 @@ _Avoid_: Cleanup script, destructive migration, breaking migration
 
 **Schema version**:
 The number of the newest database migration the binary embeds, which `version` reports and the database records.
+The two can disagree, and `schema::verdict` is the one function that says what that means: a **recorded** number
+below the binary's is migrated on open, and one above it is a database a newer release wrote — `serve` continues
+(a rollback must not need a restore) and `doctor` refuses, and `Verdict::sentence` is the words both use.
 _Avoid_: DB version, migration count, schema revision
+
+**Previous schema**:
+The schema the **previous release** shipped, kept as a real SQL dump in `docs/schema/previous.sql` and compared
+with this build's as a subset by `tests/schema_previous.rs`: every table and column it names must still exist, so a
+drop or a rename fails and an addition does not. It is not a migration and does not live under `migrations/`, and
+refreshing it (`scripts/schema-snapshot.sh`) is a **release step**, so its diff is the record of what a release gave
+up.
+_Avoid_: Old schema, baseline schema, schema history
 
 **Release**:
 One built version of the binary, in its own directory, with the `current` symlink pointing at the live one.
