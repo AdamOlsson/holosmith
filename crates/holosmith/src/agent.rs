@@ -222,6 +222,66 @@ impl fmt::Display for AgentError {
 
 impl std::error::Error for AgentError {}
 
+/// How many records a subscriber for one turn may fall behind before it is told.
+///
+/// A streaming turn prints a record per token, so the buffer is the slack between pi's pace and the
+/// writer's: the pump appends each frame through a bounded queue (ADR-0013), so a burst can outrun it. A
+/// subscriber that does fall behind loses whole records (text that never reaches the transcript) and is told
+/// how many, which is [`Received::Lagged`] — never a killed turn (ADR-0040).
+pub const RECORDS_BUFFER: usize = 1024;
+
+/// One thing a subscriber for a turn can learn from the agent's stdout.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Received {
+    /// One record pi printed that was not a `response`: a session event, an extension UI request, or pi's own
+    /// bookkeeping. [`crate::rpc::Mapping`] decides what it means.
+    Record(Value),
+    /// The subscriber fell this many records behind, and they are gone.
+    Lagged(u64),
+    /// The process is gone: stdout is closed and nothing more will arrive.
+    Closed,
+}
+
+/// A turn's subscription to the records the agent's stdout reader publishes.
+///
+/// Taken **before** the prompt is written, because a record printed between the write and the subscription
+/// would otherwise be lost — and the first records of a turn arrive immediately.
+pub struct AgentRecords {
+    receiver: tokio::sync::broadcast::Receiver<Option<Value>>,
+    /// Set once the reader has said the process is gone, so every later call answers the same thing instead of
+    /// waiting on a channel nothing will write to again.
+    done: bool,
+}
+
+impl std::fmt::Debug for AgentRecords {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AgentRecords")
+    }
+}
+
+impl AgentRecords {
+    /// The next record, the fact that some were lost, or that the process is gone.
+    ///
+    /// "The process is gone" is **the reader's own last word** (`None`), not the channel closing: the agent's
+    /// sender is held by the [`Agent`] value the backend keeps in its registry, so the channel outlives the
+    /// process. A turn that waited for the channel to close would wait for its session to be deleted.
+    pub async fn recv(&mut self) -> Received {
+        if self.done {
+            return Received::Closed;
+        }
+        match self.receiver.recv().await {
+            Ok(Some(record)) => Received::Record(record),
+            Ok(None) | Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                self.done = true;
+                Received::Closed
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                Received::Lagged(missed)
+            }
+        }
+    }
+}
+
 /// A launched agent: its stdin and the answers awaiting it.
 ///
 /// The process itself belongs to the task [`Agent::launch`] spawns, because a `Child` has to be waited on
@@ -233,6 +293,9 @@ pub struct Agent {
     /// Command id → the caller waiting for its answer. A `std` mutex, never held across an `await`: it is
     /// touched for one insert and one removal.
     waiting: Arc<Mutex<HashMap<String, oneshot::Sender<Reply>>>>,
+    /// Every record the stdout reader parses and does not route as a `response` (HS-032), and the reader's
+    /// final `None` when the process is gone.
+    records: tokio::sync::broadcast::Sender<Option<Value>>,
     session_id: String,
 }
 
@@ -281,12 +344,19 @@ impl Agent {
 
         let waiting: Arc<Mutex<HashMap<String, oneshot::Sender<Reply>>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let (records, _) = tokio::sync::broadcast::channel(RECORDS_BUFFER);
         let (exit, exit_rx) = oneshot::channel();
         let session = session_id.to_string();
         let reader_waiting = Arc::clone(&waiting);
+        let reader_records = records.clone();
         let reader_session = session.clone();
         tokio::spawn(async move {
-            let reader = tokio::spawn(read_records(stdout, reader_waiting, reader_session));
+            let reader = tokio::spawn(read_records(
+                stdout,
+                reader_waiting,
+                reader_records,
+                reader_session,
+            ));
             let errors = tokio::spawn(read_stderr(stderr));
             let code = match child.wait().await {
                 Ok(status) => exit_code(&status),
@@ -320,10 +390,22 @@ impl Agent {
             Self {
                 stdin: AsyncMutex::new(stdin),
                 waiting,
+                records,
                 session_id: session_id.to_string(),
             },
             exit_rx,
         ))
+    }
+
+    /// Subscribe to the records this agent prints from now on (HS-032).
+    ///
+    /// Taken before a command is written, so the records that command causes cannot arrive before there is
+    /// somebody to receive them. Every call is an independent subscription: a turn's own.
+    pub fn records(&self) -> AgentRecords {
+        AgentRecords {
+            receiver: self.records.subscribe(),
+            done: false,
+        }
     }
 
     /// Send one command and await the response that repeats its `id`.
@@ -429,6 +511,7 @@ fn exit_code(status: &std::process::ExitStatus) -> i32 {
 async fn read_records(
     stdout: tokio::process::ChildStdout,
     waiting: Arc<Mutex<HashMap<String, oneshot::Sender<Reply>>>>,
+    records: tokio::sync::broadcast::Sender<Option<Value>>,
     session_id: String,
 ) {
     let mut reader = BufReader::new(stdout);
@@ -473,9 +556,11 @@ async fn read_records(
             }
         };
         if record.get("type").and_then(Value::as_str) != Some("response") {
-            // Session events, extension UI records and pi's own bookkeeping: HS-032 maps the first, HS-035
-            // the second, and this build acknowledges neither, so they are counted and dropped.
-            skipped += 1;
+            // Session events, extension UI records and pi's own bookkeeping: published for the turn's mapping
+            // (HS-032) and for the extension UI requests (HS-035). `send` fails when no turn is listening,
+            // which is not an error — a steer's records and a settle after the pump has returned both land
+            // there.
+            let _ = records.send(Some(record));
             continue;
         }
         let Some(id) = record.get("id").and_then(Value::as_str) else {
@@ -518,9 +603,13 @@ async fn read_records(
             target: "holosmith::agent",
             session = %session_id,
             skipped,
-            "records this build does not map were dropped"
+            "records on the agent's output could not be read"
         );
     }
+    // The last word: a turn subscribed to this agent learns that nothing more will arrive. Announced here
+    // rather than left to the channel closing, because the `Agent` value keeps a sender alive for as long as
+    // the backend's registry holds it (see `AgentRecords::recv`).
+    let _ = records.send(None);
     // The map's senders are dropped with this task, so every waiter learns the process is gone.
 }
 

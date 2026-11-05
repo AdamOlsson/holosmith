@@ -20,6 +20,7 @@ pub mod logging;
 pub mod pins;
 pub mod preflight;
 pub mod provisioner;
+pub mod rpc;
 pub mod runtime;
 pub mod schema;
 pub mod serve;

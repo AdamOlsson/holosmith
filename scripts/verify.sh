@@ -339,6 +339,7 @@ serve_cases=(
   case_container_mounts
   case_agent_launch
   case_docker_resume
+  case_docker_turn
 )
 
 # V1 (HS-027): the hardened `.git` mounts, measured on a real daemon. Three writes must fail, three git
@@ -754,6 +755,171 @@ case_docker_resume() {
   # Its server is left running: `phase_serve` stops whatever is up after the last case.
   rm -rf "$root"
 }
+
+# HS-032's proof from the artifact: a prompt on a Docker session reaches **pi's RPC loop** and what pi answers
+# comes back as the row's own reason. The mapping itself (a record in, a frame out) is `cargo test --test rpc`'s,
+# against records captured from a real turn; this case is the half only a real container can show.
+#
+# The assertion is a refusal and not a streamed answer, and that is a fact about this phase rather than a
+# shortcut: a session's container is on an `--internal` network (HS-028) and holds no provider key (HS-039), so
+# pi's `prompt` command is rejected before a stream exists — "No API key found for openrouter", in pi's own
+# words, which is what the row then carries. A refused prompt that reached pi is a *different* observable from
+# a session that hangs: the row leaves `running` for `error` with that sentence, and the container is still
+# alive afterwards, so the resume below is a second real round trip rather than a repeat of a dead process.
+#
+# Its projects root and data root live under `target/` for `case_agent_launch`'s reason.
+case_docker_turn() {
+  local name=case_docker_turn body id image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
+  local root="$repo_root/target/verify-turn-$$" projects="$repo_root/target/verify-turn-$$/projects"
+  local repo="$repo_root/target/verify-turn-$$/projects/holosmith"
+  local data="$repo_root/target/verify-turn-$$/data"
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    printf 'SKIP %s: no Docker daemon answers (tests/agent.rs is the same check)\n' "$name"
+    return 0
+  fi
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    printf 'SKIP %s: no image %s (HOLOSMITH_TEST_IMAGE names another)\n' "$name" "$image"
+    return 0
+  fi
+  stop_serve
+  rm -rf "$root"
+  mkdir -p "$repo" || fail "$name/mkdir" "could not create $repo"
+  git -C "$repo" init --quiet . || fail "$name/git" "git init did not work in $repo"
+  git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet \
+    --allow-empty -m "the first commit" || fail "$name/git" "git commit did not work in $repo"
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\nagent_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
+    "$owner" "$projects" "$image" >"$WORK/config-turn-agent.toml"
+  start_serve "$WORK/config-turn-agent.toml" "$data"
+
+  fetch_body "${name}_create" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-turn-agent-1" ||
+    fail "${name}_create/no_answer" "POST /api/sessions did not answer"
+  expect_status "${name}_create" "$(answer "${name}_create")" 202
+  body="$(cat "$WORK/responses/${name}_create.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id" ] || fail "${name}_create/id" "the response names no id: $body"
+  docker_session_id="$id"
+
+  body=""
+  for _ in $(seq 1 900); do
+    fetch "${name}_row" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "${name}_row/no_answer" "GET /api/sessions/$id did not answer"
+    body="$(cat "$WORK/responses/${name}_row.body")"
+    case "$body" in
+      *'"status":"starting"'*) sleep 0.1 ;;
+      *) break ;;
+    esac
+  done
+  printf '%s\n' "$body" | grep -qF '"status":"idle"' ||
+    fail "${name}_row/status" "the session did not become idle: $body"
+  assertions=$((assertions + 1))
+
+  # The prompt: accepted by the handler (202, `running`), then ended by pi's own answer.
+  fetch_body "${name}_prompt" POST "/api/sessions/$id/prompt" '{"prompt":"say hello"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_prompt/no_answer" "POST /api/sessions/$id/prompt did not answer"
+  expect_status "${name}_prompt" "$(answer "${name}_prompt")" 202
+  body="$(cat "$WORK/responses/${name}_prompt.body")"
+  printf '%s\n' "$body" | grep -qF '"status":"running"' ||
+    fail "${name}_prompt/status" "the answer is not a running session: $body"
+  assertions=$((assertions + 1))
+
+  # The row leaves `running` — that is the mapping's floor: a turn that never settled would sit here for ever
+  # (the deadline is minutes away) — and it leaves with pi's sentence on it.
+  body=""
+  for _ in $(seq 1 600); do
+    fetch "${name}_ended" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "${name}_ended/no_answer" "GET /api/sessions/$id did not answer"
+    body="$(cat "$WORK/responses/${name}_ended.body")"
+    case "$body" in
+      *'"status":"running"'*) sleep 0.1 ;;
+      *) break ;;
+    esac
+  done
+  case "$body" in
+    *'"status":"error"'*'"status_reason":"the prompt was refused'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "${name}_ended/reason" "the turn did not end with pi's own refusal: $body"
+      ;;
+  esac
+  # The refusal names the provider, which is what proves the sentence came from pi and not from this build.
+  printf '%s\n' "$body" | grep -qF 'API key' ||
+    fail "${name}_ended/sentence" "the reason does not carry pi's words: $body"
+  assertions=$((assertions + 1))
+
+  # pi is still there: the refusal was a command's answer, not the process dying.
+  docker inspect --format '{{.State.Running}}' "s_$id" 2>/dev/null | grep -qx true ||
+    fail "${name}/container" "the refused prompt left no running container"
+  assertions=$((assertions + 1))
+
+  # A second round trip on the same session, so the case proves the RPC path is repeatable rather than a
+  # one-off: resume, reach `idle` again, prompt again, and the same refusal comes back.
+  fetch_body "${name}_resume" POST "/api/sessions/$id/resume" '' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_resume/no_answer" "POST /api/sessions/$id/resume did not answer"
+  expect_status "${name}_resume" "$(answer "${name}_resume")" 202
+  body=""
+  for _ in $(seq 1 900); do
+    fetch "${name}_row2" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "${name}_row2/no_answer" "GET /api/sessions/$id did not answer"
+    body="$(cat "$WORK/responses/${name}_row2.body")"
+    case "$body" in
+      *'"status":"starting"'*) sleep 0.1 ;;
+      *) break ;;
+    esac
+  done
+  printf '%s\n' "$body" | grep -qF '"status":"idle"' ||
+    fail "${name}_row2/status" "the resumed session did not reach idle: $body"
+  assertions=$((assertions + 1))
+  fetch_body "${name}_prompt2" POST "/api/sessions/$id/prompt" '{"prompt":"say hello again"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_prompt2/no_answer" "POST /api/sessions/$id/prompt did not answer"
+  expect_status "${name}_prompt2" "$(answer "${name}_prompt2")" 202
+  body=""
+  for _ in $(seq 1 600); do
+    fetch "${name}_ended2" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "${name}_ended2/no_answer" "GET /api/sessions/$id did not answer"
+    body="$(cat "$WORK/responses/${name}_ended2.body")"
+    case "$body" in
+      *'"status":"running"'*) sleep 0.1 ;;
+      *) break ;;
+    esac
+  done
+  case "$body" in
+    *'"status":"error"'*'the prompt was refused'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "${name}_ended2/reason" "the second turn did not end with pi's refusal: $body"
+      ;;
+  esac
+
+  fetch "${name}_delete" DELETE "/api/sessions/$id?force=true" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_delete/no_answer" "DELETE did not answer"
+  expect_status "${name}_delete" "$(answer "${name}_delete")" 202
+  local gone=""
+  for _ in $(seq 1 300); do
+    fetch "${name}_gone" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "${name}_gone/no_answer" "GET /api/sessions/$id did not answer"
+    gone="$(answer "${name}_gone" | sed -n '1s/^HTTP\/1\.[01] \([0-9][0-9][0-9]\).*/\1/p')"
+    [ "$gone" = "404" ] && break
+    sleep 0.1
+  done
+  check "${name}_gone/status" "404" "$gone"
+  docker_session_id=""
+  # Its server is left running: `phase_serve` stops whatever is up after the last case.
+  rm -rf "$root"
+}
+
 # The health payload: exactly four keys, and the uptime is not predictable, so the assertion is
 # the prefix and the closing brace (the shape tests/http_contract.rs uses).
 case_health() {

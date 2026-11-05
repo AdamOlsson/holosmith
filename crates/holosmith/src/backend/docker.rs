@@ -3,19 +3,20 @@
 //! It exists so the trait has the implementation the product actually ships with, and so `--backend
 //! docker` — which is the default (ADR-0001) — answers honestly instead of pretending a session is
 //! provisioned. **All four provisioning steps are real:** the worktree (HS-025), the session's private
-//! network (HS-028), the container (HS-028) and the agent inside it (HS-031). The turn's five operations
-//! still refuse — pi's RPC mapping is HS-032 to HS-035 — with [`BackendError::Unsupported`], which the
-//! runner turns into a reason on the row: an operator who prompts a session sees the refusal, not a session
-//! that hangs.
+//! network (HS-028), the container (HS-028) and the agent inside it (HS-031), and since HS-032 so are the
+//! turn's operations: a prompt reaches pi over its RPC mode and every record pi prints becomes a frame on the
+//! writer ([`crate::rpc`]). What is still refused is the WIP snapshot, which is HS-042's — a refusal the
+//! delete flow reads (ADR-0023).
 //!
 //! Whether the machine *can* run Docker sessions at all is not this file's question: [`crate::preflight`]
 //! answers it once, at startup, and `serve` refuses to bring up a Docker run that fails it (HS-024). A
 //! backend that reported its own preflight would be a second opinion about the same machine.
 //!
-//! What is left, and who owns it: the turn's mapping over pi's RPC (HS-032 – HS-035), the `egress` network
-//! and the startup self-test (HS-036), and the egress and key proxies (HS-037, HS-039). HS-028 creates the
-//! minimum a container needs — an **internal** network of its own, which is the isolation — and HS-036 owns
-//! the rest of the network's story.
+//! What is left, and who owns it: the rest of pi's RPC mapping — tool calls and output files (HS-033), the
+//! usage question (HS-034) and images with extension UI requests (HS-035) — the `egress` network and the
+//! startup self-test (HS-036), and the egress and key proxies (HS-037, HS-039). HS-028 creates the minimum a
+//! container needs — an **internal** network of its own, which is the isolation — and HS-036 owns the rest of
+//! the network's story.
 //!
 //! **The container is the agent (HS-031).** `docker run` is attached (`-i`), its command is `pi --mode rpc`,
 //! and this module holds the spawned process (`crate::agent::Agent`) in a registry with a per-session
@@ -25,16 +26,36 @@
 //! provokes is not recorded against a row that is going away (ADR-0039).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
+
+use serde_json::json;
 
 use super::{BackendError, ExitWatcher, ProcessEnd, Provisioned, SessionBackend, Step, TurnEnd};
-use crate::agent::{self, Agent, Ended};
+use crate::agent::{self, Agent, AgentError, Ended};
 use crate::container::{ContainerSettings, SessionContainer, network_name};
 use crate::docker::{Docker, DockerError};
 use crate::events::EventWriter;
 use crate::exit::SessionLog;
+use crate::rpc::{self, Mapping};
 use crate::sessions::Session;
 use crate::worktree::{Refusal, Worktree, refuse, repository_of};
+
+/// How long pi may take to answer a command that only accepts or queues it.
+///
+/// These are the cheap ones — `prompt` answers once the message is accepted, `steer` once it is queued,
+/// `clear_queue` once the queue is returned — so a bound of ten seconds is generous for a process that is
+/// already running and short enough that a wedged agent is a failed call rather than a hung request.
+pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long `abort` may take to answer.
+///
+/// Longer than the other commands because pi's `abort` waits for the session to become idle before it
+/// answers (`docs/rpc-commands.md`), and an agent in the middle of a tool call can take a while to stop. The
+/// abort ladder bounds this further with whatever is left of `abort_grace` (ADR-0020), which is why this can
+/// be a comfortable number rather than a tight one.
+pub const ABORT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The Docker backend: one machine's container settings.
 ///
@@ -80,6 +101,12 @@ pub struct DockerBackend {
     version: Arc<tokio::sync::Mutex<Option<Result<String, String>>>>,
     /// `<data>/sessions/<id>/session.log`: the session's stderr and the launch line (spec item 15, HS-030).
     log: SessionLog,
+    /// How many RPC commands this process has written, which is what makes a command's id unique.
+    ///
+    /// The ready handshake is one constant id because it is one per agent (HS-031); a turn's commands are not:
+    /// a steer, a `clear_queue` and an abort can be in flight together, and pi correlates an answer by id, so
+    /// two live commands sharing one would hand each other's replies to the wrong caller.
+    commands: Arc<AtomicU64>,
 }
 
 /// One launched agent process: the generation that names it, the agent, and the exit nobody has taken yet.
@@ -103,6 +130,7 @@ impl DockerBackend {
             starts: Arc::new(Mutex::new(HashMap::new())),
             agents: Arc::new(Mutex::new(HashMap::new())),
             version: Arc::new(tokio::sync::Mutex::new(None)),
+            commands: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -116,6 +144,20 @@ impl DockerBackend {
         agents
             .get(session_id)
             .map(|launched| Arc::clone(&launched.agent))
+    }
+
+    /// Make this session's launch stale without forgetting it: a newer generation, and no exit left to take.
+    ///
+    /// [`Self::forget_agent`] cannot be used here, because the generation is derived from the registry entry
+    /// (`get().map(generation).unwrap_or(0) + 1`) and a removed entry restarts the count at 1 — a watcher from
+    /// the *previous* launch would then compare equal to the new one and record an exit it must not.
+    /// Superseding keeps the count monotone and drops the receiver nobody is going to take.
+    fn supersede_agent(&self, session_id: &str) {
+        let mut agents = self.agents.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(launched) = agents.get_mut(session_id) {
+            launched.generation += 1;
+            launched.exit = None;
+        }
     }
 
     /// Forget this session's launch: the exit of the process that is running is no longer its to report.
@@ -205,6 +247,25 @@ impl DockerBackend {
     /// Every operation's refusal, in one place so the reason always names the operation.
     fn refuse(operation: &str) -> BackendError {
         BackendError::unsupported("docker", operation)
+    }
+
+    /// The id of one command this backend writes, unique for the process's lifetime.
+    ///
+    /// pi answers a command with a record that repeats its id, and the waiter is registered by id, so two
+    /// live commands with one id would each receive the other's reply. The word in front is for a log line and
+    /// a panic message, not for pi.
+    fn command_id(&self, operation: &str) -> String {
+        let counted = self.commands.fetch_add(1, Ordering::Relaxed);
+        format!("{operation}-{counted}")
+    }
+
+    /// This session's live agent, or the failure a turn's operation reports without one.
+    fn live(&self, session: &Session, operation: &str) -> Result<Arc<Agent>, BackendError> {
+        self.agent(&session.id).ok_or_else(|| {
+            BackendError::failed(format!(
+                "the {operation}: this session has no agent process — resume it"
+            ))
+        })
     }
 
     /// Run `git` for one step off the runtime's worker, since a subprocess is not a future.
@@ -440,6 +501,17 @@ impl DockerBackend {
     /// *failure* to remove is logged and not propagated: the delete flow's job is to remove the row, and a
     /// container the daemon cannot remove is a machine problem the log names.
     async fn remove_container(&self, session: &Session) {
+        // The launch is made stale **before** the removal, because the exit `rm -f` provokes is the server's
+        // own doing and is never news (ADR-0039's rule, and ADR-0040 explains why it is here for every
+        // removal and not only the delete's).
+        //
+        // This is not a detail: `rm -f` ends the attached `docker run` that is this session's previous
+        // sentence, and without this the exit arrives while that process is *still* the current launch — the
+        // new one registers a generation a moment later — so it is classified as an unexpected death. A resume
+        // then dies with "the container exited 137", and the row stops the provisioner at the next step
+        // boundary before the new container is up. Measured on HS-032's resume-after-a-refused-prompt, which
+        // lost that race about one run in two.
+        self.supersede_agent(&session.id);
         let name = self.container(session).name;
         let removed = Self::docker(Step::Container, self.settings.docker(), move |docker| {
             Ok(docker.remove_container(&name))
@@ -549,23 +621,96 @@ impl SessionBackend for DockerBackend {
 
     async fn start_turn(
         &self,
-        _session: &Session,
-        _prompt: &str,
-        _events: &EventWriter,
+        session: &Session,
+        prompt: &str,
+        events: &EventWriter,
     ) -> Result<TurnEnd, BackendError> {
-        Err(Self::refuse("start_turn"))
+        let agent = self.live(session, "turn")?;
+        // Subscribed **before** the prompt is written: pi starts printing as soon as it accepts the message,
+        // and a turn whose first records arrived before anybody was listening would lose the beginning of its
+        // text — permanently, because they are not in the log either.
+        let mut records = agent.records();
+        let id = self.command_id("prompt");
+        let reply = agent
+            .request(
+                &id,
+                json!({"id": id, "type": "prompt", "message": prompt}),
+                COMMAND_TIMEOUT,
+            )
+            .await
+            .map_err(|error| turn_failure("the prompt", error))?;
+        if !reply.success {
+            return Err(BackendError::failed(format!(
+                "the prompt was refused: {}",
+                reply
+                    .error
+                    .unwrap_or_else(|| "pi gave no reason".to_string())
+            )));
+        }
+        // `disposition` says whether the message started a run, was queued behind one, or an extension
+        // consumed it (`docs/rpc-commands.md`). It is diagnostics only: the frames decide what happened, and
+        // the turn ends when pi says it settled.
+        tracing::debug!(
+            target: "holosmith::backend",
+            session = %session.id,
+            disposition = reply.data
+                .as_ref()
+                .and_then(|data| data.get("disposition"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("none"),
+            "the agent accepted the prompt"
+        );
+        let mut mapping = Mapping::new(&session.id);
+        rpc::pump(&mut records, &mut mapping, events).await
     }
 
-    async fn steer(&self, _session: &Session, _text: &str) -> Result<(), BackendError> {
-        Err(Self::refuse("steer"))
+    /// Queue guidance for the turn that is running (`docs/rpc-commands.md`, `steer`).
+    ///
+    /// The `turn.steer` frame is **not** written here: it is the prompt route's, recorded once the agent has
+    /// been told (ADR-0021, `http::sessions::record_steer`). A backend that also wrote it would put two blocks
+    /// in the transcript for one instruction.
+    async fn steer(&self, session: &Session, text: &str) -> Result<(), BackendError> {
+        let agent = self.live(session, "steer")?;
+        let id = self.command_id("steer");
+        let reply = agent
+            .request(
+                &id,
+                json!({"id": id, "type": "steer", "message": text}),
+                COMMAND_TIMEOUT,
+            )
+            .await
+            .map_err(|error| turn_failure("the steer", error))?;
+        accept("the steer", &reply)
     }
 
-    async fn clear_queue(&self, _session: &Session) -> Result<(), BackendError> {
-        Err(Self::refuse("clear_queue"))
+    /// Drop the prompts the agent has queued but not started (`clear_queue`).
+    async fn clear_queue(&self, session: &Session) -> Result<(), BackendError> {
+        let agent = self.live(session, "clear_queue")?;
+        let id = self.command_id("clear_queue");
+        let reply = agent
+            .request(
+                &id,
+                json!({"id": id, "type": "clear_queue"}),
+                COMMAND_TIMEOUT,
+            )
+            .await
+            .map_err(|error| turn_failure("the clear_queue", error))?;
+        accept("the clear_queue", &reply)
     }
 
-    async fn abort(&self, _session: &Session) -> Result<(), BackendError> {
-        Err(Self::refuse("abort"))
+    /// Ask the agent to end the running turn (the ladder's rung one).
+    ///
+    /// Returns once pi has answered `abort`, not once the turn's frames have been mapped: the turn's own
+    /// `start_turn` is what answers [`TurnEnd::Aborted`] (when `agent_settled` says the run was aborted), and
+    /// the ladder is what waits for the row to move (ADR-0020).
+    async fn abort(&self, session: &Session) -> Result<(), BackendError> {
+        let agent = self.live(session, "abort")?;
+        let id = self.command_id("abort");
+        let reply = agent
+            .request(&id, json!({"id": id, "type": "abort"}), ABORT_TIMEOUT)
+            .await
+            .map_err(|error| turn_failure("the abort", error))?;
+        accept("the abort", &reply)
     }
 
     /// Stop the container, keeping the worktree, the history and the events (spec item 6).
@@ -695,6 +840,29 @@ impl SessionBackend for DockerBackend {
     async fn snapshot(&self, _session: &Session) -> Result<(), BackendError> {
         Err(Self::refuse("snapshot"))
     }
+}
+
+/// A command that did not get an answer, as the operation's own failure.
+///
+/// The three [`AgentError`] arms — a closed stdin, a timeout, a process that closed its output — are all "the
+/// agent is not answering", and the row's reason has to say which operation was asking. The message is the
+/// turn runner's `status_reason`, so it is one sentence an operator can act on (resume the session).
+fn turn_failure(operation: &str, error: AgentError) -> BackendError {
+    BackendError::failed(format!("{operation}: {error}"))
+}
+
+/// Whether pi accepted a command that has nothing else to say, or the reason it did not.
+fn accept(operation: &str, reply: &crate::agent::Reply) -> Result<(), BackendError> {
+    if reply.success {
+        return Ok(());
+    }
+    Err(BackendError::failed(format!(
+        "{operation} was refused: {}",
+        reply
+            .error
+            .clone()
+            .unwrap_or_else(|| "pi gave no reason".to_string())
+    )))
 }
 
 #[cfg(test)]
@@ -867,32 +1035,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_operations_this_build_does_not_implement_refuse_and_say_which_one_it_was() {
-        // `stop` and `resume` left this list in HS-029: both are real now (a `docker stop`, and a network
-        // plus a container). What is left is the turn's own machinery — pi's RPC is HS-031/HS-032, the
-        // ladder's three rungs are HS-016's on top of them, and the WIP snapshot is HS-042's.
+    async fn only_the_snapshot_still_refuses_and_a_turn_with_no_agent_names_the_fix() {
+        // `stop` and `resume` left this list in HS-029, and the turn's four operations left it in HS-032: a
+        // prompt, a steer, a `clear_queue` and an abort are pi's RPC commands now. What is left is the WIP
+        // snapshot, which is HS-042's.
         let backend = backend();
         let session = session();
-        // `start_turn` answers how the turn ended; it refuses before it would append anything, so
-        // the outcome is discarded and only the refusal is asserted.
+        // A session this backend has launched nothing for: the turn's operations cannot ask an agent that is
+        // not there, and the sentence says what the operator should do about it rather than naming a story.
         let (_scratch, events) = crate::events::scratch_writer();
         let start_turn = backend
             .start_turn(&session, "a prompt", &events)
             .await
             .map(|_| ());
         for (operation, error) in [
-            ("start_turn", start_turn),
+            ("turn", start_turn),
             ("steer", backend.steer(&session, "more").await),
             ("clear_queue", backend.clear_queue(&session).await),
             ("abort", backend.abort(&session).await),
-            ("snapshot", backend.snapshot(&session).await),
         ] {
-            let error = error.expect_err("every operation refuses");
+            let error = error.expect_err("an operation with no agent fails");
             assert_eq!(
                 error.to_string(),
-                format!("the docker backend does not implement {operation} yet")
+                format!("the {operation}: this session has no agent process — resume it")
             );
         }
+        let snapshot = backend
+            .snapshot(&session)
+            .await
+            .expect_err("the WIP snapshot is HS-042's");
+        assert_eq!(
+            snapshot.to_string(),
+            "the docker backend does not implement snapshot yet"
+        );
     }
 
     #[tokio::test]
