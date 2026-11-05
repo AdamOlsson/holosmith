@@ -262,6 +262,7 @@ fn a_real_container_runs_pi_and_answers_the_ready_handshake() {
     // is in the session's log.
     let seeded = std::fs::read_to_string(container.home.join(agent::SETTINGS))
         .expect("the agent directory holds a seed");
+    assert!(seeded.contains("defaultModel"), "{seeded}");
     assert!(seeded.contains("claude-sonnet-4.5"), "{seeded}");
     assert!(seeded.contains("high"), "{seeded}");
     let log = std::fs::read_to_string(

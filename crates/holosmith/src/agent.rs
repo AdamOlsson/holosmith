@@ -47,6 +47,12 @@ pub const SETTINGS: &str = "settings.json";
 
 /// The seed: a template with model preferences and **no secrets** (the story's first acceptance line).
 ///
+/// Its two keys are pi's own (`docs/settings.md`): `defaultModel` and `defaultThinkingLevel`, which are what
+/// a process started *without* `--model`/`--thinking` would use. The launch passes those two flags as well
+/// (see `container::SessionContainer::run_args`), so the file is the session's durable configuration and the
+/// flags are how this build makes pi honour it with `PI_OFFLINE=1` — measured: the file alone leaves
+/// `get_state` at `model.id: "unknown"`.
+///
 /// Embedded rather than read from disk, because the binary is the product (item 10 §1): a deployment has
 /// no `templates/` next to the executable. The two fields are patched per session from the row
 /// ([`seed`]); everything else a later story needs (the key proxy's `models.json`, HS-039) is added there
@@ -134,8 +140,11 @@ pub enum Created {
 pub fn seed(session: &Session) -> String {
     let mut document: Value = serde_json::from_str(TEMPLATE).unwrap_or_else(|_| json!({}));
     if let Some(object) = document.as_object_mut() {
-        object.insert("model".to_string(), json!(session.model));
-        object.insert("thinkingLevel".to_string(), json!(session.thinking));
+        object.insert("defaultModel".to_string(), json!(session.model));
+        object.insert(
+            "defaultThinkingLevel".to_string(),
+            json!(session.thinking),
+        );
     }
     let mut text = serde_json::to_string_pretty(&document).unwrap_or_default();
     text.push('\n');
@@ -612,7 +621,7 @@ mod tests {
         // which item 2 forbids in three places.
         let document: Value = serde_json::from_str(TEMPLATE).expect("the template is JSON");
         let object = document.as_object().expect("the template is an object");
-        for key in ["model", "thinkingLevel"] {
+        for key in ["defaultModel", "defaultThinkingLevel"] {
             assert!(object.contains_key(key), "the template has no {key}");
         }
         for forbidden in ["apiKey", "api_key", "key", "token", "secret", "password"] {
@@ -626,8 +635,8 @@ mod tests {
     #[test]
     fn the_seed_is_the_template_with_the_rows_two_preferences() {
         let document: Value = serde_json::from_str(&seed(&session())).expect("the seed is JSON");
-        assert_eq!(document["model"], "claude-sonnet-4.5");
-        assert_eq!(document["thinkingLevel"], "high");
+        assert_eq!(document["defaultModel"], "claude-sonnet-4.5");
+        assert_eq!(document["defaultThinkingLevel"], "high");
         let template: Value = serde_json::from_str(TEMPLATE).expect("the template is JSON");
         assert_eq!(
             document.as_object().map(|object| object.len()),
