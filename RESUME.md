@@ -1,4 +1,4 @@
-# RESUME — orchestrator handoff (cold start, after thirty-six stories, with a real Docker daemon)
+# RESUME — orchestrator handoff (cold start, after thirty-seven stories, with a real Docker daemon)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating
 procedure and still governs; this file is the state of the world — what exists, what the environment
@@ -43,14 +43,14 @@ created, prompted, aborted, steered, stopped, resumed and deleted, and it is dri
 
 Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is clean apart from the
 operator's own `log.txt`/`orchestrate.sh`, and every commit is **pushed** (see the note on pushing below).
-`HEAD` is `60eaac3`; any commit after it is bookkeeping — this file's own refresh. Confirmed on
-`origin/master`: `60eaac3`.
+`HEAD` is `b7132d1`; any commit after it is bookkeeping — this file's own refresh. Confirmed on
+`origin/master`: `b7132d1`.
 
-**Linear: 39 Done, 41 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-035` (`PER-33` …
-`PER-67`), `HS-059` (`PER-91`), `HS-060` (`PER-92`), `HS-061` (`PER-93`) and `HS-065` (`PER-97`).
+**Linear: 40 Done, 40 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-036` (`PER-33` …
+`PER-68`), `HS-059` (`PER-91`), `HS-060` (`PER-92`), `HS-061` (`PER-93`) and `HS-065` (`PER-97`).
 
 **The Docker block is gone.** A real daemon answers on this machine (§2), so `HS-027` … `HS-058` are
-unblocked and the queue is contiguous from `HS-036` on. Six stories have now been built against a real
+unblocked and the queue is contiguous from `HS-037` on. Six stories have now been built against a real
 `docker run` — the mounts and V1 (`HS-027`), the container with its limits (`HS-028`), the start lock with
 `stop`/`resume` (`HS-029`), the expected-stop flag with the exit classifier (`HS-030`), the **agent**
 (`HS-031`) and the **turn** (`HS-032`) — and each is proven by a test that runs a container, not by a
@@ -58,12 +58,13 @@ document. A Docker create provisions the worktree, the network, the attached con
 and pi's ready handshake, and ends **`idle`**; a prompt reaches pi, every record it prints becomes a frame on
 the writer, a tool call's output and any image it returned are written to files, the session's spend is
 counted in tokens that include the prompt's cached part, and an extension's dialog is cancelled instead of
-hanging the turn. The RPC block is **finished**.
+hanging the turn. The RPC block is **finished**; a Docker boot also measures the machine's isolation with a
+probe container, creates the machine's own `egress` network, and refuses to boot only on a *proven* leak.
 
-Every story from `HS-001` to `HS-035` is Done, plus `HS-059`–`HS-061` and `HS-065` — 39 of 80. The
+Every story from `HS-001` to `HS-036` is Done, plus `HS-059`–`HS-061` and `HS-065` — 40 of 80. The
 durable record of each is **Linear** (the plan comment, the verbatim demo output, the ship note), the
 review file (`docs/review/PER-<n>.md`, the review verbatim plus its `## Resolution` table) and **`git log`**
-(a commit names its issue; the last one ends `Closes PER-<n>`). Decisions are ADRs `0001` … `0043`, indexed
+(a commit names its issue; the last one ends `Closes PER-<n>`). Decisions are ADRs `0001` … `0044`, indexed
 one line each in `docs/stories/README.md`. Nothing about them belongs in this file.
 
 **Next issue: `PER-68` (HS-036 — per-session network and the startup self-test)** — size **M**, the first
@@ -81,7 +82,7 @@ four decisions and three landmines.
 Ranking, per `PROMPT.md`: Linear priority (all are `No priority`) → `HS-###` order in `docs/stories/` →
 anything already `In Progress` first → skip an issue whose `Blocked by` stories are not `Done`.
 
-### Twenty-three facts a cold start must know
+### Twenty-four facts a cold start must know
 
 1. **A running turn can now be stopped, in two rungs, with or without the way back.** `src/ladder.rs`
    is the shared routine: `clear_queue` then `abort`, wait up to `abort_grace` (the grace *bounds rung
@@ -374,6 +375,22 @@ about one run in two). **A delete forgets the launch *before* it removes the con
     fire-and-forget methods stay declined and an unknown method is the `warn`. The frame is the contract's fifth
     kind, `turn.error` with `{reason, method}` and **no message id** (a steer's shape).
 
+24. **A Docker boot measures the machine's isolation, and only a measured leak refuses it** (HS-036, ADR-0044).
+    `src/selftest.rs` creates `holosmith-selftest` (`--internal`, reused then always removed), runs **one probe
+    container from `agent_image`** on it with `templates/selftest-probe.js` as `node -e`, and asks it to reach
+    `1.1.1.1:443` and the default bridge's gateway on `2375`. **A `refused` connection counts as reached** — a
+    reset proves the host answered — while `ENETUNREACH`/a timeout are the pass; measured both ways, so
+    `tests/selftest.rs` runs the probe on the bridge too as its control. Three outcomes and one refusal:
+    `Passed` (a `debug` line), `Unknown` (no image, a daemon that cannot create networks, or the probe exceeding
+    `PROBE_TIMEOUT` = 60 s, which exists because `docker run` on the startup path must not hang a boot) → one
+    `warn` and the boot continues, and `Failed` → a `preflight::Complaint` with `Check::Network`, printed and
+    refused exactly like the other three. The **`egress`** network (`docker::EGRESS_NETWORK`, not internal, for
+    the proxies of HS-037/039) is created at the same point, with a `warn` rather than a refusal. `role = "hub"`
+    and `--backend stub` do neither. **Measured limit, recorded in ADR-0044 and not to be "fixed" by adding a
+    target**: an internal network's *own* gateway answers (`refused`) from inside it, so item 2's "no gateway to
+    the host" is really "no route out" — anything host-side bound to `0.0.0.0` is reachable at that bridge
+    address, and item 4's guards, not the network, are its defence.
+
 Three things HS-014 and HS-015 settled that later stories inherit:
 
 - **The transcript's event contract** (ADR-0018 + ADR-0019), emitted by the backend:
@@ -589,7 +606,7 @@ If that fails, **stop and report** — that is a `PROMPT.md` stop condition.
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                     # 310 lib + 38 test binaries, 681 tests in all (22 in
+cargo test                     # 319 lib + 39 test binaries, 688 tests in all (22 in
                                # tests/worktree.rs, 16 tests/events.rs, 10 tests/turns.rs, 10
                                # tests/compaction.rs, 14 delete.rs, 8 idle_stop.rs, 9 backup.rs,
                                # 7 history.rs, 10 tests/exit.rs, 5 tests/container.rs, 3 tests/agent.rs,
@@ -602,7 +619,7 @@ scripts/verify.sh              # THE one-command gate since HS-006
 `scripts/verify.sh` runs six phases, cheapest first: `fmt`, `clippy`, `test`, `build`
 (`scripts/build.sh`, which itself runs `build-web.sh` — `npm test` then Vite — and `check-static.sh`
 last), `embed` (`scripts/check-embed.sh`), then `serve` — the **shipped musl artifact** booted on
-`--port 0` with a temp data dir, running **54 cases plus a CORS sweep (525 assertions)**, then torn down
+`--port 0` with a temp data dir, running **55 cases plus a CORS sweep (530 assertions)**, then torn down
 with `SIGTERM` and an asserted exit 0. Thirteen cases bring their own boot (`case_token_budget`,
 `case_usage_survives_resume`, `case_compaction`, `case_history`, `case_backup`, `case_worktree`,
 `case_worktree_refusal`, `case_agent_launch`, `case_docker_resume`, `case_docker_turn`, plus
@@ -707,6 +724,7 @@ crates/holosmith/
                             three limits, `-w /work`, `-e HS_SESSION_ID`), `network_name`, `IDLE_COMMAND`
                             (`sleep infinity` until HS-031), `Unmountable`
   src/docker.rs             the `docker` CLI as a program (HS-028): `Docker{host}`, `run`/`succeeds`,
+                            `ensure_network`/`gateway`/`attempt` (bounded) and `EGRESS_NETWORK` (HS-036),
                             `command_line` (the one call whose stdio a caller keeps: the launch),
                             `create_internal_network`/`remove_network`, `remove_container`/`stop_container`
                             (`STOP_SECONDS` = 10), `run_container`, `inspect`, `DockerError`
@@ -764,6 +782,10 @@ crates/holosmith/
                             `GitError`; and since HS-026 the refusal reads (ADR-0030): `refuse`,
                             `Refusal`, `repository_of`, `CONFIG_READ` (`--local --type=bool`). Sync and
                             std-only; the backend calls it on `spawn_blocking`
+  src/selftest.rs           the network self-test (HS-036, ADR-0044): `Runner` (the seam), `Report`,
+                            `Outcome::{Passed, Failed, Unknown}`, `run`/`run_with`/`decide`, `NETWORK`,
+                            `PUBLIC`, `HOST_PORT`, `REACHED` (9), `PROBE_TIMEOUT`, `PROBE` (`include_str!` of
+                            `templates/selftest-probe.js`)
   src/preflight.rs          the three startup checks and their sentences (HS-024, ADR-0028):
                             `check`/`check_with` (the `Tools` seam is the test's shim for git/df),
                             `Complaint { check, sentence }`, `socket_sentence`
@@ -800,7 +822,7 @@ scripts/verify.sh           the one-command gate (see §3)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
 docs/adr/0001…0042          read the recent ones before planning anything
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-67, PER-91, PER-92, PER-93, PER-97  each a verbatim review + a `## Resolution` table
+docs/review/PER-33…PER-68, PER-91, PER-92, PER-93, PER-97  each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -825,8 +847,7 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   with one gap a real container still shows: pi refuses a `prompt` before a stream exists, because a session's
   network is `--internal` and it holds no provider key until the key proxy (HS-039), so `case_docker_turn`
   asserts pi's own refusal sentence and the streaming evidence is the committed fixtures.
-- **Not built yet:** the `egress` network and its startup
-  self-test (HS-036), the two proxies (HS-037/039), the preview
+- **What is left of the network half:** the two proxies (HS-037/039), the preview
   listener (HS-041), the WIP snapshot (HS-042), the delete's keep-rules (HS-043), startup reconcile (HS-044),
   `doctor` (HS-045), the phase-1 verification run (HS-046), merge, publish, the hub, releases, the
   stopped-session expiry (HS-064), and any **delete affordance in `web/`** (the API has the endpoint; the
@@ -1146,11 +1167,11 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 - **`docs/build.md` is a story deliverable, not orchestrator-only.** If a story changes prerequisites or
   gates, the doc is in scope, and its prose must be reflowed (~100 columns), not just appended to.
 - **Every story adds at least one `case_*` to `scripts/verify.sh`.** The rule is in bold in
-  `docs/build.md`, and the reviewer enforces it. The current gate is 54 cases / 525 assertions, and a
+  `docs/build.md`, and the reviewer enforces it. The current gate is 55 cases / 530 assertions, and a
   case that makes its own session must run before the shared one exists or delete it at the end (the
   gate's cap is one live session).
 - **Adding an ADR means updating `docs/stories/README.md`**: the "Decisions taken while slicing" count
-  (now **forty-three**) and the bullet list. A reviewer will check the links resolve — three did not,
+  (now **forty-four**) and the bullet list. A reviewer will check the links resolve — three did not,
   once.
 - **An ADR that a later story changes gets a one-line "Superseded by ADR-00xx" note**, not a rewrite
   (ADR-0012 and ADR-0013 do this; HS-015 added two to ADR-0018).
@@ -1611,9 +1632,36 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   the page did not, while the ADR claimed it did — read the *demo sentence* of a story against the client, not
   just against the server.
 
+### Landmines: the network self-test (HS-036)
+
+- **A gateway field is not a measurement.** An `--internal` network reports an IPAM gateway and that address
+  *answers* from inside it (`refused`, measured). So do not "improve" the check into an assertion on a field, and
+  do not add the internal gateway as a probe target — it fails on every Docker installation, which is a lockout
+  rather than a test. The ADR records the limit and who owns closing it.
+- **`connected` and `refused` are both "reached".** A probe that counted only `connected` would pass a machine
+  whose containers reach the host, which is the leak the story is about.
+- **A startup `docker run` needs a deadline.** The probe bounds itself per target, but a daemon that accepts a run
+  and then wedges hangs the boot before the listener binds — `Docker::attempt` polls `try_wait` under
+  `PROBE_TIMEOUT` and a bound that expires is `Unknown`, never a verdict.
+- **"Could not measure" is not "measured a leak".** Only `Failed` refuses the boot; `Unknown` is one `warn`. That
+  is also what keeps every gate case that boots Docker against a `_ping`-only socket working — check that
+  property before changing the level.
+- **A `warn!` at startup is visible and an `info!` breaks a test.** `tests/serve_cli.rs` pins a *stub* boot's
+  banner at exactly eight lines; a Docker boot's banner is not pinned, so the self-test's lines are `debug`/`warn`
+  and the case that wants to see the pass boots with `HOLOSMITH_LOG=debug`.
+- **The probe is a node script and the image must have node.** A missing node is exit 127, which is `Unknown` (a
+  `warn` at every boot), not a test failure — so `docs/build.md`'s image prerequisites name it.
+- **The `egress` network is the machine's, and its failure is a `warn`.** Refusing the boot over it would take the
+  control UI down, which is the one screen an operator needs to see what happened.
+- **Orphaned `agents_*` networks accumulate.** Two from earlier gate runs were on this machine when HS-036
+  finished; HS-044 owns the sweep.
+- **A started server's data root cannot be removed while it runs.** `case_network_selftest` leaves its scratch
+  root because the phase's final `stop_serve` is what ends that server; it cleans at the *start* of the next run,
+  like `case_docker_turn`.
+
 ## 7. Decisions taken on the operator's behalf (do not silently undo)
 
-Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0043`, one line each in
+Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0044`, one line each in
 `docs/stories/README.md`); read the recent ones before planning, and **amend rather than rewrite** — an ADR
 a later story changes gets a "Superseded by ADR-00xx" note (0012/0013, and 0020 was amended by 0026).
 
@@ -1640,37 +1688,41 @@ python3 /tmp/lin.py issues | grep -v ' Done ' | head   # next unfinished (recrea
 python3 /tmp/lin.py issue PER-67            # sanity-check Linear is reachable and scoped
 docker version                              # the daemon must answer, or every Docker story is a lie
 docker image inspect pi-agent:local         # the image the Docker stories run; its pi == pins/pi.txt
-scripts/verify.sh                           # baseline green (~7-9 min, 54 cases, 525 assertions)
+scripts/verify.sh                           # baseline green (~8-11 min, 55 cases, 530 assertions)
 ```
 
-Then start the cycle at **`PER-68` (HS-036 — per-session network and the startup self-test)** — size **M**.
-What is already there and what is genuinely new, so the plan is fast:
+Then start the cycle at **`PER-69` (HS-037 — egress proxy)** — size **L**, and the first story that needs a
+container *the product ships* rather than one it drives. What is already there, and the questions the plan must
+settle before any code:
 
-- **The first acceptance bullet is done and proven.** `docker::create_internal_network` is
-  `docker network create --internal agents_<id>` (reuse on an existing network, because a teardown may have
-  failed), the container step joins only that network, and `case_docker_container`/`tests/container.rs` see the
-  flags. Do not re-do it; **assert** it where the story's demo wants it.
-- **The second bullet is new surface**: the `egress` network (a normal, non-internal network the proxies attach
-  to) has to exist. It is *not* per session, so decide where it is created — a `Docker` call in `serve` before
-  the listener, or the same place the preflight runs — and record it in an ADR, because "one network for the
-  machine" is a shape a later story (`HS-037`'s proxy container, `HS-044`'s reconcile) will depend on.
-- **The third bullet is the story's real work**: a *startup self-test* that creates a temporary internal
-  network, runs a probe container on it, tries a direct connection to the internet **and to the host**, and
-  refuses to start sessions if either succeeds. The refusal belongs with `src/preflight.rs`'s `Complaint`
-  (HS-024 already refuses a boot with one sentence per failure, and `role = "hub"` and `--backend stub` are
-  exempt) — but it costs a container at startup, so it must be skippable and must not run twice in the gate.
-  `tests/preflight.rs`'s `Tools` seam is how a check that needs a machine is tested without the machine.
-- **The fourth bullet is HS-044's** ("Orphaned `agents_*` networks are removed at startup (HS-044)") — the
-  acceptance names the story that owns it, so implement the self-test and record that the sweep is HS-044's,
-  exactly as ADR-0038 recorded `Exits::record` having no caller until HS-031.
-- **The fifth bullet is already true and needs a test**: a network step that fails rolls the row to `error` and
-  leaves no network (`tests/backend_contract.rs`'s provision step, `case_docker_resume`'s fake socket).
-- **The gate cannot assume a daemon.** Every Docker case prints one `SKIP` line and passes without one, and
-  `case_docker_preflight` needs no server at all. A self-test that runs at boot will meet
-  `scripts/verify.sh`'s own boot, which is `backend = "stub"` — say in the plan how the case exercises the new
-  refusal without breaking the run.
+- **The binary is described as "the single static binary that is the Holosmith hub, server, proxies and CLI"**,
+  so the proxy is most plausibly a second mode of this binary (`holosmith egress-proxy`, a `clap` subcommand)
+  rather than a second program: the image then needs no new build, and HS-048's embedded Dockerfiles can run it.
+  Decide that first — it decides the rest, including how the container is named (`hs_egress`), what command it
+  runs, and how a test drives it without Docker (a unit test over the proxy's decision function, the way
+  `exit::classify` and `selftest::decide` are tested).
+- **The acceptance is a list of refusals, and each is a pure function worth testing on its own**: `CONNECT` to
+  port 443 only; only allow-listed domains; any destination resolving to loopback, link-local, RFC 1918 or
+  `100.64.0.0/10` refused *regardless of the allow-list* (so resolution happens before the check, and a name with
+  two answers must fail if **any** answer is private); host and bytes logged per request with the session id as
+  the proxy username; and provider hosts are **not** on the allow-list because the key proxy (HS-039) handles
+  those.
+- **`egress` exists but holds nothing yet** (HS-036 created it; `internal=false`). The proxy container attaches to
+  `egress` **and** to each session network with `docker network connect` — the second half of "a container's only
+  route out" — which means the server now *manages* that connection per session (create, resume, and teardown on
+  delete by HS-043). Say in the plan where that lives: a provisioner step is the natural place, but "one
+  container, many networks" is a new shape and needs its own ADR.
+- **`network_default` and the allow-list key already exist** (`[egress] allow = []` in `config show`), so the list
+  itself needs no new config key. Check before adding one.
+- **The gate cannot require a daemon.** A `case_*` that needs the proxy container skips on a machine without one,
+  and the unit tests must carry the refusals.
+- **Do not let the egress allow-list drift into the provider hosts.** The key proxy is what makes a model call
+  work; mixing the two would put the credential path in the wrong container.
+- **Item 2's residual risk applies here**: every allow-listed host is an exfiltration channel (HTTPS is opaque to
+  the proxy), and anything host-side bound to `0.0.0.0` is reachable from a session container at its own network's
+  gateway address (measured in HS-036, ADR-0044).
 
-Read §1's twenty-two facts first: eight of them are the Docker half (mounts and V1, the container and its
+Read §1's twenty-four facts first: eight of them are the Docker half (mounts and V1, the container and its
 limits, the start lock and `resume`, the expected-stop flag with its classifier, the agent launch and its stdio,
 the exit seam with its generations, the agent directory with the data root it forces, and the mapping with its
 record seam), one is a tool's output as a file, and the rest are the writer's coalescing, the runner's two turn
@@ -1727,13 +1779,16 @@ re-read.
 If you stop before the backlog is empty, say so explicitly, say which issue is next, and leave the tree
 clean and the gates green — **a half-finished story is worse than an honest stop**.
 
-This session (`b2fecf5` → `60eaac3`) shipped one story:
+This session (`b2fecf5` → `b7132d1`) shipped two stories:
 
 | Issue | Story | Commits | Outcome |
 | --- | --- | --- | --- |
-| PER-67 | HS-035 images and extension dialogs (V8) | `70f337e`, `c0b72af`, `f9d64aa`, `6fa4a89`, `60eaac3` | Done — an image in a tool result is a file beside the tool's text (`<tool_id>-<block index>.<ext>`, the base64 decoded by the store, the cap counted on decoded bytes including the trailing group and refused from the encoded length), named by `tool.end`'s `images` additively, served by `GET …/tool-image/{tool_id}/{index}` with the type the *file* has, and drawn by the page as one link per picture; an extension's dialog is cancelled with the response written **before** the frame, because pi blocks on it, and the fire-and-forget methods stay declined; the contract gained `turn.error` (`{reason, method}`, no message id). Two real fixtures captured (an image in a tool result, a `select` dialog whose `notify` records the cancel). ADR-0043. Review: **OK with notes** on both axes, one P1 (the picture was served and never linked while the ADR claimed it was) and one P2 (a second result replaced only the indices it carried) — both fixed in code with the test that makes the wrong design fail, six P3s fixed and one dismissed (`docs/review/PER-67.md`) |
+| PER-67 | HS-035 images and extension dialogs (V8) | `70f337e`, `c0b72af`, `f9d64aa`, `6fa4a89`, `60eaac3` | Done — an image in a tool result is a file beside the tool's text (`<tool_id>-<block index>.<ext>`, base64 decoded by the store, the cap counted on decoded bytes including the trailing group and refused from the encoded length), named by `tool.end`'s `images` additively, served by `GET …/tool-image/{tool_id}/{index}` with the type the *file* has, and drawn by the page as one link per picture; an extension's dialog is cancelled with the response written **before** the frame (pi blocks on it), the fire-and-forget methods stay declined, and the contract gained `turn.error`. Two real fixtures. ADR-0043. Review **OK with notes** both axes: one P1 (served but never linked, while the ADR claimed it was) and one P2 (a second result replaced only the indices it carried), both fixed in code, six P3s fixed, one dismissed (`docs/review/PER-67.md`) |
+| PER-68 | HS-036 the isolation, measured | `9b85d85`, `c61667a`, `b7132d1` | Done — a Docker boot creates the machine's `egress` network and runs one probe container from `agent_image` on a temporary internal network, asking it to reach the internet and the default bridge's gateway; **a `refused` connection counts as reached**, measured both ways (`tests/selftest.rs` runs the bridge as its control). Three outcomes and one refusal: `Passed` (debug), `Unknown` (one `warn`: no image, a daemon that cannot create networks, a probe past its 60 s bound), `Failed` (a `preflight` complaint, printed and refused). ADR-0044, and it records a measured limit: an internal network's **own** gateway answers, so item 2's "no gateway" is really "no route out". Review **OK with notes** both axes: two P1s (ADR-0028 unamended; a duplicated glossary entry) and four P2s (a mangled log sentence, an unbounded startup `docker run`, a pass line claiming more than it measured, `build.md`'s missing `node`), all fixed; two P3s dismissed (`docs/review/PER-68.md`) |
 
-Ledger for the next session: HS-036 (`PER-68`) is the next issue and the first of the network half; §8's own
-note says which of its five bullets is already true, which is HS-044's, and where the startup self-test has to
-live without breaking the gate's stub boot. Then `HS-037` on, in `HS-###` order.
+Ledger for the next session: **HS-037 (`PER-69`, the egress proxy, size L)** is next and is the biggest
+remaining piece of the Docker chain; §8's own note lists the design questions to settle first (a second mode of
+this binary, the refusal functions, and where a per-session `docker network connect` lives). Then `HS-038`–`HS-046`
+in order. The session that wrote this stopped after two complete stories rather than start an L story it could
+not finish — a half-finished story is worse than an honest stop (§9).
 
