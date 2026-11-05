@@ -2377,7 +2377,30 @@ case_usage_survives_resume() {
     "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-usage-second" ||
     fail "${name}_second/no_answer" "the second POST /api/sessions did not answer"
   expect_status "${name}_second" "$(answer "${name}_second")" 202
-  wait_for_reason_id "${name}_evicted" "$first" evicted
+  body="$(cat "$WORK/responses/${name}_second.body")"
+  second="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$second" ] || fail "${name}_second/id" "the response names no id: $body"
+  # `wait_for_reason_id` is the *turn* policies' shape (back to `idle` with a reason); an eviction leaves the
+  # row `stopped`, which is what makes it resumable.
+  wait_for_stopped_id "${name}_evicted" "$first"
+  case "$(cat "$WORK/responses/${name}_evicted.body")" in
+    *'"status_reason":"evicted"'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "${name}_evicted/reason" "the evicted session's row names no reason: $(cat "$WORK/responses/${name}_evicted.body")"
+      ;;
+  esac
+
+  # The cap is checked before the transition (ADR-0022: a resume refuses rather than evicting), so the second
+  # session has to go before the first can come back. `case_delete_session` is the delete's own case; here it is
+  # the slot's.
+  fetch "${name}_delete" DELETE "/api/sessions/$second" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_delete/no_answer" "DELETE /api/sessions/$second did not answer"
+  expect_status "${name}_delete" "$(answer "${name}_delete")" 202
+  wait_for_gone "${name}_gone" "$second"
 
   fetch_body "${name}_resume" POST "/api/sessions/$first/resume" "" \
     "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
