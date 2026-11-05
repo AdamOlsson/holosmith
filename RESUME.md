@@ -1,4 +1,4 @@
-# RESUME — orchestrator handoff (cold start, after thirty-seven stories, with a real Docker daemon)
+# RESUME — orchestrator handoff (cold start, after forty-three stories, with a real Docker daemon)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating
 procedure and still governs; this file is the state of the world — what exists, what the environment
@@ -43,18 +43,20 @@ created, prompted, aborted, steered, stopped, resumed and deleted, and it is dri
 
 Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is clean apart from the
 operator's own `log.txt`/`orchestrate.sh`, and every commit is **pushed** (see the note on pushing below).
-`HEAD` is `5b0dfe5`; any commit after it is bookkeeping — this file's own refresh. Confirmed on
-`origin/master`: `5b0dfe5`.
+`HEAD` is `f99035a`; any commit after it is bookkeeping — this file's own refresh. Confirmed on
+`origin/master`: `f99035a`.
 
-**Linear: 41 Done, 39 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-037` (`PER-33` …
-`PER-69`), `HS-059` (`PER-91`), `HS-060` (`PER-92`), `HS-061` (`PER-93`) and `HS-065` (`PER-97`).
+**Linear: 43 Done, 37 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-038` (`PER-33` …
+`PER-70`), `HS-059` (`PER-91`), `HS-060` (`PER-92`), `HS-061` (`PER-93`), `HS-065` (`PER-97`) and `HS-075`
+(`PER-107`).
 
-**The Docker block is gone.** A real daemon answers on this machine (§2), so `HS-027` … `HS-058` are
-unblocked and the queue is contiguous from `HS-038` on. Seven stories have now been built against a real
-`docker run` — the mounts and V1 (`HS-027`), the container with its limits (`HS-028`), the start lock with
-`stop`/`resume` (`HS-029`), the expected-stop flag with the exit classifier (`HS-030`), the **agent**
-(`HS-031`) and the **turn** (`HS-032`) — and each is proven by a test that runs a container, not by a
-document. A Docker create provisions the worktree, the network, the attached container running pi in RPC mode
+**The Docker block is gone.** A real daemon answers on this machine (§2), so `HS-027` … `HS-058` are unblocked
+and the queue runs contiguously from `HS-039` on (37 of the 80 are still Backlog). Nine stories have now been
+built against a real `docker run` — the mounts and V1 (`HS-027`), the container with its limits (`HS-028`), the
+start lock with `stop`/`resume` (`HS-029`), the expected-stop flag with the exit classifier (`HS-030`), the
+**agent** (`HS-031`), the **turn** (`HS-032`), the machine's **egress proxy** (`HS-037`) and the **checkbox's
+topology** (`HS-038`) — and each is proven by a test that runs a container, not by a document. A Docker create
+provisions the worktree, the network, the attached container running pi in RPC mode
 and pi's ready handshake, and ends **`idle`**; a prompt reaches pi, every record it prints becomes a frame on
 the writer, a tool call's output and any image it returned are written to files, the session's spend is
 counted in tokens that include the prompt's cached part, and an extension's dialog is cancelled instead of
@@ -63,26 +65,25 @@ probe container, creates the machine's own `egress` network, starts the machine'
 HS-037) and refuses to boot only on a *proven* leak. So a container's only route out is now something this build
 controls: an exact allow-list, `CONNECT` to 443 only, and no address that resolves into the machine.
 
-Every story from `HS-001` to `HS-037` is Done, plus `HS-059`–`HS-061` and `HS-065` — 41 of 80. The
+Every story from `HS-001` to `HS-038` is Done, plus `HS-059`–`HS-061`, `HS-065` and `HS-075` — 43 of 80. The
 durable record of each is **Linear** (the plan comment, the verbatim demo output, the ship note), the
 review file (`docs/review/PER-<n>.md`, the review verbatim plus its `## Resolution` table) and **`git log`**
-(a commit names its issue; the last one ends `Closes PER-<n>`). Decisions are ADRs `0001` … `0045`, indexed
+(a commit names its issue; the last one ends `Closes PER-<n>`). Decisions are ADRs `0001` … `0047`, indexed
 one line each in `docs/stories/README.md`. Nothing about them belongs in this file.
 
-**Next issue: `PER-70` (HS-038 — Internet access checkbox wiring, V6)** — size **M**, and the smallest
-remaining story in the Docker chain because the topology already honours the flag (§8's note). Then the rest
-of the chain in `HS-###` order: `HS-039`/`HS-040` (the key proxy and its V3/V4/V5 verification), `HS-041`
-(preview, V7), `HS-042`–`HS-044` (snapshot, delete keep-rules, reconcile), `HS-045` (`doctor`), `HS-046`
-(the phase-1 verification run — the gate for phase 2), then phase 2. What is still behind something is phase
-2 (`HS-047` … `HS-058` are `HS-046`'s, the phase-1 verification run, which is the story that gates the phase;
-`HS-066` … `HS-074` sit behind those and behind `HS-049`/`HS-050`), and `HS-075` (`PER-107`), which is
-independent of all of it and **still unstarted** — §8's own note carries its four decisions and three
-landmines.
+**Next issue: `PER-71` (HS-039 — Key proxy)** — size **L**, and the one story that makes a real turn possible at
+all: until it exists, a session's container holds no provider key, so `case_docker_turn` asserts pi's *own*
+refusal sentence rather than a stream. `HS-040` (V3/V4/V5), `HS-041` (preview, V7), `HS-042`–`HS-044`
+(snapshot, delete keep-rules, reconcile), `HS-045` (`doctor`, which prints `schema::Verdict`'s sentences and
+refuses a newer database), `HS-046` (the phase-1 verification run — the gate for phase 2) follow in order,
+then phase 2. What is still behind something is phase 2 (`HS-047` … `HS-058` are `HS-046`'s; `HS-066` …
+`HS-074` sit behind those and behind `HS-049`/`HS-050`). `HS-075` is **done** (ADR-0047), so the last
+independent story is spent and the queue is now a chain from `HS-039` on.
 
 Ranking, per `PROMPT.md`: Linear priority (all are `No priority`) → `HS-###` order in `docs/stories/` →
 anything already `In Progress` first → skip an issue whose `Blocked by` stories are not `Done`.
 
-### Twenty-five facts a cold start must know
+### Twenty-seven facts a cold start must know
 
 1. **A running turn can now be stopped, in two rungs, with or without the way back.** `src/ladder.rs`
    is the shared routine: `clear_queue` then `abort`, wait up to `abort_grace` (the grace *bounds rung
@@ -409,6 +410,39 @@ about one run in two). **A delete forgets the launch *before* it removes the con
     never a refusal. Both the start and the self-test's probe are **bounded** (`Docker::bounded`), and the
     request log is the *container's* (`docker logs hs_egress`), not the server's.
 
+26. **"Off" is measured at boot as a *pair*, and the pair is what makes it evidence** (HS-038, ADR-0046).
+    `selftest::PROXY_TARGET = "egress-proxy:3128"` — the **alias**, never `hs_egress`, because the container name
+    resolves on the `egress` network only and a probe asking for it would pass on every machine — joins the probe's
+    target list, and the probe runs **twice on the same network**: bare (nothing may answer, the alias included)
+    and then with the machine's proxy joined (the alias alone must answer). A silence on a network nothing is
+    attached to is only evidence if it is not the silence of an alias that was never created; `decide`/`leaked`
+    give a proxy that answers its **own** sentence instead of the bridge advice, and a direct leak still outranks
+    it. The second run is a `debug` line when it works and a `warn` when it does not, **never a verdict** — a proxy
+    that will not join fails a download, not a session (ADR-0045). The **key proxy is deliberately absent** from
+    that list until HS-039: it needs a *second question* (an alias that must answer), not another target. The
+    session-shaped claim is the gate's: `case_internet_toggle` creates two real sessions differing only in the
+    body's `network`, and asserts per network the internet unreachable directly, the alias resolving in exactly
+    one, every env var identical once each id is normalised, and — after the proxy is **detached** and the
+    container killed and resumed — the network's endpoint count **1** off / **2** on. Detaching first is
+    load-bearing: `resume` re-creates the network idempotently, so an `on` session would report 2 with the re-join
+    deleted. The copy under the create form was **cut** (a new element is a UI change in a phase that forbids one);
+    the phrase an operator reads is `transcript.ts`'s `networkText`, tested.
+27. **Expand/contract has two halves, and only one of them is about one file** (HS-075, ADR-0047).
+    `schema::contract_violations` (HS-004) already refuses `DROP TABLE`, `DROP COLUMN` and `RENAME` in a migration
+    whose **slug** is not `contract`/`contract_*`, matched on words, and `cargo test` runs it over the embedded
+    set. The other half is a fact about *two* releases: `docs/schema/previous.sql` is a real dump of the previous
+    release's schema, kept **out of `migrations/`** (that directory is embedded and `check-static.sh` byte-greps the
+    artifact), and `tests/schema_previous.rs` compares it with this build's as a **subset** through SQLite
+    (`sqlite_master`, `pragma_table_info`) — a drop or a rename fails, an addition does not. **A first draft
+    compared table sets for equality and forbade an added table**; the review's P1, and the reason the comparison
+    is one direction with two truncation guards that are not the rule's opposite. `scripts/schema-snapshot.sh`
+    refreshes the file **at release time** (read-only connection, `uname -m` triple, `.tmp` moved into place), and
+    a contract migration changes it in the same commit — the machine can enforce *deliberate*, never *one release
+    later*. `schema::verdict` is the other half's vocabulary: `Same`/`Older`/`Newer` with one sentence each,
+    `apply_pending` returns early on `Same` and warns-and-continues on `Newer` (**item 10 needs that**: a rollback
+    must not need a restore) and `doctor` is where `Newer` refuses. The gate has a `migrations` **phase** and
+    `case_schema_newer`, which boots the artifact over a schema-99 database.
+
 Three things HS-014 and HS-015 settled that later stories inherit:
 
 - **The transcript's event contract** (ADR-0018 + ADR-0019), emitted by the backend:
@@ -624,21 +658,24 @@ If that fails, **stop and report** — that is a `PROMPT.md` stop condition.
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                     # 333 lib + 39 test binaries, 703 tests in all (22 in
+cargo test                     # 338 lib + 40 test binaries, ~720 tests in all (22 in
                                # tests/worktree.rs, 16 tests/events.rs, 10 tests/turns.rs, 10
                                # tests/compaction.rs, 14 delete.rs, 8 idle_stop.rs, 9 backup.rs,
                                # 7 history.rs, 10 tests/exit.rs, 6 tests/container.rs, 3 tests/agent.rs,
-                               # 12 tests/rpc.rs, 5 tests/tool_output.rs, 10 tests/token_budget.rs;
-                               # the proxy's rules are 11 unit tests inside src/egress.rs)
-cd web && npm test             # 41 transcript tests (node's own runner)
+                               # 12 tests/rpc.rs, 5 tests/tool_output.rs, 10 tests/token_budget.rs,
+                               # 3 tests/schema_previous.rs; the proxy's rules are 11 unit tests
+                               # inside src/egress.rs and the migration guards 12 inside src/schema.rs)
+cargo test --test schema_previous   # the `migrations` phase, run on its own
+cd web && npm test             # 42 transcript tests (node's own runner)
 cd web && npx tsc --noEmit     # not a gate phase, but a web edit that does not typecheck is a bug
 scripts/verify.sh              # THE one-command gate since HS-006
 ```
 
-`scripts/verify.sh` runs six phases, cheapest first: `fmt`, `clippy`, `test`, `build`
+`scripts/verify.sh` runs seven phases, cheapest first: `fmt`, `clippy`, `test`, **`migrations`**
+(`cargo test --test schema_previous` — the expand/contract rule, HS-075), `build`
 (`scripts/build.sh`, which itself runs `build-web.sh` — `npm test` then Vite — and `check-static.sh`
 last), `embed` (`scripts/check-embed.sh`), then `serve` — the **shipped musl artifact** booted on
-`--port 0` with a temp data dir, running **56 cases plus a CORS sweep (537 assertions)**, then torn down
+`--port 0` with a temp data dir, running **58 cases plus a CORS sweep (588 assertions)**, then torn down
 with `SIGTERM` and an asserted exit 0. Thirteen cases bring their own boot (`case_token_budget`,
 `case_usage_survives_resume`, `case_compaction`, `case_history`, `case_backup`, `case_worktree`,
 `case_worktree_refusal`, `case_agent_launch`, `case_docker_resume`, `case_docker_turn`, plus
@@ -647,7 +684,9 @@ daemon — it skips, one printed
 line, when there is neither a daemon nor an image — and `case_exit_classification`, which reads a row's
 `expected_stop` out of `app.db` with `python3` and skips when there is no `python3`, and
 `case_egress_proxy`, which needs **no server, no daemon and no internet**: it starts the artifact as
-`proxy egress` on a loopback port and asks it four questions over a socket). It takes ~8 min (both musl
+`proxy egress` on a loopback port and asks it four questions over a socket, `case_internet_toggle`, which needs
+the daemon and the image and creates two real sessions, and `case_schema_newer`, which needs no daemon and boots
+the artifact over a database from schema 99). It takes ~9 min (both musl
 targets, the Docker cases and `case_idle_stop`'s real minute). `--no-build` skips `build` and `embed`;
 `--keep` keeps the work dir.
 
@@ -819,16 +858,25 @@ crates/holosmith/
                             `Record` (`unreadable`/`tunnel`/`log`), `serve`/`handle`/`read_head`/`resolve`/
                             `connect`/`establish`/`respond`, `pump`/`pump_both` (counted both ways),
                             `PORT`/`TLS_PORT`/`DEFAULT_LISTEN`/`MAX_HEAD`/`HEAD_TIMEOUT`/`ACCEPT_BACKOFF`
-  src/selftest.rs           the network self-test (HS-036, ADR-0044): `Runner` (the seam), `Report`,
-                            `Outcome::{Passed, Failed, Unknown}`, `run`/`run_with`/`decide`, `NETWORK`,
-                            `PUBLIC`, `HOST_PORT`, `REACHED` (9), `PROBE_TIMEOUT`, `PROBE` (`include_str!` of
+  src/selftest.rs           the network self-test (HS-036, ADR-0044; HS-038's pair, ADR-0046): `Runner` (the
+                            seam, now with `proxy`/`join_proxy`/`leave_proxy`), `Report`,
+                            `Outcome::{Passed, Failed, Unknown}`, `run`/`run_with`/`decide`/`leaked`, `pair`,
+                            `NETWORK`, `PUBLIC`, `PROXY_TARGET` (`egress-proxy:3128`), `HOST_PORT`,
+                            `REACHED` (9), `PROBE_TIMEOUT`, `PROBE` (`include_str!` of
                             `templates/selftest-probe.js`)
   src/preflight.rs          the three startup checks and their sentences (HS-024, ADR-0028):
                             `check`/`check_with` (the `Tools` seam is the test's shim for git/df),
                             `Complaint { check, sentence }`, `socket_sentence`
-  src/db.rs                 pragmas + read-back, apply_pending, Database::sessions()/events()
+  src/db.rs                 pragmas + read-back, apply_pending (which switches on `schema::verdict`),
+                            Database::sessions()/events()
   src/sql.rs                the one SQL statement scanner + the shared source walk (cfg(test) guard)
-  src/schema.rs             SCHEMA_VERSION (= 4), include_dir! embed, check_embed, contract_violations
+  src/schema.rs             SCHEMA_VERSION (= 4), include_dir! embed, check_embed, contract_violations,
+                            and since HS-075 `Verdict {Same, Older, Newer}`, `verdict` and `Verdict::sentence`
+                            (the sentence the boot warns with and `doctor` will refuse with, ADR-0047)
+  docs/schema/previous.sql   the previous release's schema as a dump (HS-075, ADR-0047): compared with this
+                            build's by `tests/schema_previous.rs` as a subset; NOT a migration, and it must
+                            never move under `migrations/`
+  scripts/schema-snapshot.sh  the release step that regenerates it (`<data root>/app.db`, read-only open)
   src/{serve,web,logging,clock,version,pins}.rs
   tests/                    version_cli, config_cli, http_contract, serve_cli, db_migrations, exit, agent,
                             rpc (the fixture replays and the pump), tool_output (the endpoint and the store's
@@ -837,7 +885,8 @@ crates/holosmith/
                             streams, provisioning, state_machine, session_list, session_screen,
                             turns, abort, steer, resume, delete, eviction, idle_stop, turn_timeout,
                             token_budget, preflight, backend_contract, worktree, compaction,
-                            history, backup, container (V1 + the container's flags + stop/remove/resume +
+                            history, backup, schema_previous (the subset test + the comparison function +
+                            the verdict's sentences), container (V1 + the container's flags + stop/remove/resume +
                             eight concurrent starts; **needs a daemon and `$HOLOSMITH_TEST_IMAGE`,
                             default `pi-agent:local`, and skips otherwise**), support/mod.rs
                             (the shared harness, which also has `repository`/`git`/`head`/
@@ -857,9 +906,9 @@ scripts/check-static.sh     file/readelf, empty-root serve + cmp against web/dis
 scripts/check-embed.sh      the three embed cases (present / absent warns / required fails)
 scripts/verify.sh           the one-command gate (see §3)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0042          read the recent ones before planning anything
+docs/adr/0001…0047          read the recent ones before planning anything
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-68, PER-91, PER-92, PER-93, PER-97  each a verbatim review + a `## Resolution` table
+docs/review/PER-33…PER-70, PER-91…PER-93, PER-97, PER-107  each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -887,10 +936,16 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
 - **The egress proxy exists and is the only route out (HS-037).** `holosmith proxy egress` is a mode of the
   artifact; a Docker boot starts `hs_egress` on `egress` (bounded, `warn` on failure) and the network step
   joins it to a session's network under the alias `egress-proxy` **only when the row's `network` flag is set**,
-  so `HTTPS_PROXY` is the same string either way and the difference is topology. What that leaves undone is
-  HS-038's: the checkbox in `web/`, the off-case probe and the V6 gate.
-- **What is left of the network half:** the internet-access checkbox and the off-case probe (HS-038), the
-  **key proxy** and its verification (HS-039/040), the preview
+  so `HTTPS_PROXY` is the same string either way and the difference is topology. HS-038 measured that (the boot's
+  bare/joined pair and `case_internet_toggle`) and left the **copy** under the checkbox to whoever next owns the
+  create form, because a new element is a UI change in a phase that forbids one (ADR-0046).
+- **The migration rule has two halves and both are enforced (HS-075).** `schema::contract_violations` refuses an
+  unmarked destructive statement in a migration (`cargo test`), and `tests/schema_previous.rs` refuses a drop or a
+  rename against `docs/schema/previous.sql` — the gate calls the second the `migrations` **phase**. Refreshing
+  that snapshot is a **release step** (`scripts/schema-snapshot.sh`), not a story's, and a contract migration
+  changes it in the same commit. `schema::verdict` is the sentence `serve` warns with on a newer database and
+  `doctor` will refuse with (ADR-0047).
+- **What is left of the network half:** the **key proxy** and its verification (HS-039/040), the preview
   listener (HS-041), the WIP snapshot (HS-042), the delete's keep-rules (HS-043), startup reconcile (HS-044),
   `doctor` (HS-045), the phase-1 verification run (HS-046), merge, publish, the hub, releases, the
   stopped-session expiry (HS-064), and any **delete affordance in `web/`** (the API has the endpoint; the
@@ -913,7 +968,7 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   `Transitioner::apply`, and the row moves before the container in every one of them.
 - **`runtime::Backend`** has `Stub` and `Docker`; `serve --backend` and the config key `backend` select
   it. `DockerBackend::new(ContainerSettings)` provisions all four steps and runs a turn's five operations;
-  what is left of the Docker chain is the key proxy and everything after it (HS-038 onwards), and the default
+  what is left of the Docker chain is the key proxy and everything after it (HS-039 onwards), and the default
   backend is `docker`
   (ADR-0001: the stub is opt-in), so a default build provisions a session to `error` with a reason
   rather than hanging in `starting`. (Since HS-026 a create for a project that is not a plain checkout is
@@ -1211,7 +1266,7 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 - **`docs/build.md` is a story deliverable, not orchestrator-only.** If a story changes prerequisites or
   gates, the doc is in scope, and its prose must be reflowed (~100 columns), not just appended to.
 - **Every story adds at least one `case_*` to `scripts/verify.sh`.** The rule is in bold in
-  `docs/build.md`, and the reviewer enforces it. The current gate is 55 cases / 530 assertions, and a
+  `docs/build.md`, and the reviewer enforces it. The current gate is 58 cases / 588 assertions, and a
   case that makes its own session must run before the shared one exists or delete it at the end (the
   gate's cap is one live session).
 - **Adding an ADR means updating `docs/stories/README.md`**: the "Decisions taken while slicing" count
@@ -1748,9 +1803,42 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   risk), and it cannot stop a container from reaching the host's own bridge-bound services at its network's
   gateway (ADR-0044's measurement) — item 4's guards are that path's defence and **HS-046** owns the decision.
 
+### Landmines: the checkbox's pair, and expand/contract (HS-038, HS-075)
+
+- **A gate case that SKIPs on the bug it exists to catch is the P1 of this project.** HS-038's `on` half skipped when
+  the proxy's alias did not answer — which is exactly what a deleted `join_network` produces. "The alias does not
+  answer" has two causes and `EAI_AGAIN` cannot tell them apart; one `docker inspect hs_egress` can, and a SKIP now
+  has to be backed by a line the boot actually printed. Before you write `SKIP` inside a case's assertion, ask what
+  a missing feature would print there.
+- **A measurement that cannot distinguish "absent" from "never created" is not a measurement.** HS-036's probe
+  reported silence on a network nothing was attached to, and so would a build whose alias was never added — so
+  HS-038 made it a **pair**: bare, then with the proxy joined, on the same network. The same review found the
+  endpoint count inherited its "2" from the create, which is why the case detaches the proxy before the kill.
+  **Mutate the wrong thing and watch the test stay green** — that is how both were found.
+- **A non-vacuity guard must not be the rule's opposite.** HS-075's first subset test added a guard that compared
+  table *sets* for equality, which forbade the one thing expand/contract permits (adding a table) and pointed its
+  repair at refreshing the snapshot — the move that voids the check for a release. The reviewer's P1. A guard is
+  allowed to demand that the fixture is non-empty; it is not allowed to contradict the rule.
+- **`support::TempDir` is keyed by label *and* pid**, so two tests in one binary that share a label delete each
+  other's directory mid-run. SQLite's answer is `disk I/O error`, which reads like a filesystem bug. One label per
+  test.
+- **A SQL rule has one implementation.** `schema::contract_violations` already existed and was already run by
+  `cargo test`, so HS-075 built **no second scanner** and no shell script — `scripts/verify.sh`'s `migrations`
+  phase runs the Rust test. A `sed`/`grep` twin of a SQL rule is the second spelling this repo refuses.
+- **Anything embedded is off limits for fixtures.** `migrations/` is `include_dir!`-ed and `check-static.sh`
+  byte-greps the artifact for its SQL, so a schema snapshot lives in `docs/schema/` and is loaded with
+  `include_str!` by a test only.
+- **`git describe` is baked into the artifact, so a gate run on a dirty tree produces a `-dirty` banner** — and
+  `tests/pin_single_source.rs` scans *saved reviews too*: a review that spells the pinned version literal makes
+  `cargo test` red. Redact it in the review body and say so in the `## Resolution` (HS-075 had to).
+- **A `local a=… b="$a"` is unbound under `set -u`** — hit again in HS-038 (`local root=… projects="$root/…"`), and
+  the fix is two `local`s. Where a shell `case` reads verdicts an embedded node script produces, the words have to
+  be shell variables; `$CONNECTING` from a heredoc is an unbound variable, and an *accepted-anything* pattern
+  (`"direct "*)`) is how a case passes over a probe that changed its words.
+
 ## 7. Decisions taken on the operator's behalf (do not silently undo)
 
-Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0044`, one line each in
+Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0047`, one line each in
 `docs/stories/README.md`); read the recent ones before planning, and **amend rather than rewrite** — an ADR
 a later story changes gets a "Superseded by ADR-00xx" note (0012/0013, and 0020 was amended by 0026).
 
@@ -1777,82 +1865,52 @@ python3 /tmp/lin.py issues | grep -v ' Done ' | head   # next unfinished (recrea
 python3 /tmp/lin.py issue PER-67            # sanity-check Linear is reachable and scoped
 docker version                              # the daemon must answer, or every Docker story is a lie
 docker image inspect pi-agent:local         # the image the Docker stories run; its pi == pins/pi.txt
-scripts/verify.sh                           # baseline green (~8-11 min, 55 cases, 530 assertions)
+scripts/verify.sh                           # baseline green (~9-12 min, 58 cases, 588 assertions)
 ```
 
-Then start the cycle at **`PER-70` (HS-038 — Internet access checkbox wiring, V6)** — size **M**, and the
-smallest story left in the chain because HS-037 already did the hard half. What is already there, and what is
-genuinely missing:
+Then start the cycle at **`PER-71` (HS-039 — Key proxy)** — size **L**, and the story that makes a real turn
+possible at all: until it exists a session's container holds no provider key, so `case_docker_turn` asserts pi's
+*own* refusal sentence instead of a stream (fact 16). What is already there, and what it needs:
 
-- **The topology already honours the flag.** `sessions.network` is a real column, `POST /api/sessions` parses
-  `network`, and `DockerBackend::apply_proxy` joins the egress proxy to the session's network **only when the row
-  says so** (and leaves it when it does not), on the create and on `resume`. So the acceptance's first three
-  bullets may already be true; verify them before writing anything, and if they are, the story is the UI, the
-  off case's *measurement*, and the V6 gate.
-- **The UI is where the work is.** `web/src/main.ts` has the create form and `web/src/transcript.ts` the rules;
-  `GET /api/sessions` already carries `network_default`, so the checkbox is `network_default` as its initial
-  state and `network: <bool>` in the body. A "row's text is written in two places" rule applies (ADR-0017's
-  lesson): if the session screen must show whether a session may reach the internet, one pure function in
-  `transcript.ts` and a test in `web/test/transcript.test.mjs`-style, not two strings.
-- **The off case's probe is new.** HS-036's self-test measures the *on* machine (nothing reachable from an
-  internal network). Item 2's second paragraph asks for the off case too: a probe on a session network with no
-  egress proxy attached must reach nothing but the key proxy — and the key proxy is HS-039's, so what can be
-  measured today is "nothing but nothing". Say so in the plan rather than inventing a key proxy here.
-- **V6 is the story's gate**: `curl --noproxy '*'` from a container fails; a non-listed host through the proxy is
-  403; the off case passes. The first and second are measurable today (`case_egress_proxy` already proves the
-  403 without a container); the third needs a real session network, so it is a daemon-gated case that skips.
-- **No new config key.** `network_default` exists (ships `false`) and `[egress] allow` exists. Check
-  `config show` before adding one, and update `tests/golden/config-default.toml` only if a key really appears.
-- **Then `HS-039`/`HS-040`** (the key proxy: `hs_key`, `<data>/secrets/keys.toml` 0600, a dummy key per session,
-  `models.json` with `baseUrl` and the dummy key, `NO_PROXY=key-proxy`, revocation on delete — the HS-019 hook is
-  still a no-op and is `delete`'s `revoke_key`), which is what makes a real turn possible at all and is the
-  blocker for `case_docker_turn`'s "pi refuses the prompt" being replaced with a real one.
+- **The container side is ready and waiting for it.** `agent::ENVIRONMENT` already carries
+  `NO_PROXY=key-proxy`, the pi home is `<data>/sessions/<id>/pi-home` seeded from an embedded template (fact 20),
+  and `deleter.rs`'s `revoke_key` is a no-op with HS-039's name on it. `HS-037`'s proxy is the shape to copy: a
+  **mode of this binary** (`holosmith proxy egress`) started at boot, bounded, joined to a session's network by
+  `apply_proxy` with a network alias, container `hs_key` on the `egress` network.
+- **The CLI is new surface**: `key set <provider>` reads the key from **stdin only**, `key list` prints providers
+  and never values, `key remove` exists; the store is `<data>/secrets/keys.toml` at **0600**, mounted read-only
+  into `hs_key` only. `cli.rs`'s `Cmd` has `Serve | Version | Config | Proxy` today; `key` is a fifth and the
+  golden-output tests for `config` say how a CLI surface is pinned.
+- **The hard part is streaming.** The proxy must forward provider requests over HTTPS and pass an SSE body through
+  **unbuffered**, while swapping a dummy key for the real one and logging bytes per session — that is more than
+  `egress.rs` does (it tunnels bytes it never parses). Plan it as its own module, unit-testable on a loopback
+  listener the way `src/egress.rs`'s `Record::tunnel` is, and do not put the streaming path in the gate: a gate
+  that needs a real provider is not a gate (`HS-040` owns V3–V5, which is where the operator's own key is used).
+- **The off case gains its second question.** ADR-0046/0047: the self-test's `PROXY_TARGET` list is things that
+  must **not** answer, so the key proxy is not another target but an alias that must **answer** on a session
+  network — `decide`/`pair` need that direction, and bullet 1 of HS-038's acceptance ("only the key proxy is
+  reachable") is what it closes.
+- **The dummy key is per session and is revoked on delete** — the HS-019 hook, plus a row for it (ADR-0019: a
+  backend may not write a row, so this is the server's or a mount's).
+- **Then `HS-040`** (V3/V4/V5 with a real key), `HS-041` (preview, V7), `HS-042`–`HS-044`, `HS-045` (which prints
+  `schema::Verdict`'s sentences), `HS-046` (the phase-1 verification run and the gate for phase 2).
 
-Read §1's twenty-five facts first: eight of them are the Docker half (mounts and V1, the container and its
+Read §1's twenty-seven facts first: eight of them are the Docker half (mounts and V1, the container and its
 limits, the start lock and `resume`, the expected-stop flag with its classifier, the agent launch and its stdio,
 the exit seam with its generations, the agent directory with the data root it forces, and the mapping with its
-record seam), one is a tool's output as a file, and the rest are the writer's coalescing, the runner's two turn
-policies, the worktree step, the create's project refusals, compaction, truncated replay, the daily bundle, the
-rendered page and the egress proxy.
+record seam), one is a tool's output as a file, one is the checkbox's boot-time **pair** (26) and one is
+expand/contract's two halves (27), and the rest are the writer's coalescing, the runner's two turn policies, the
+worktree step, the create's project refusals, compaction, truncated replay, the daily bundle, the rendered page
+and the egress proxy.
 
 **One thing this build does not do, recorded rather than discovered:** a resumed session's pi has **no memory**
 of the earlier turns (`--no-session`; the transcript is Holosmith's log). Replaying the log into a new pi is a
 product decision with a token cost and needs its own story — ADR-0040 and ADR-0039 both say so, and nothing in
 the backlog owns it yet.
 
-**`HS-075` (`PER-107`, expand/contract migration discipline) is independent of all of that** and can be
-taken at any point — it is the one story whose only blocker is `HS-004`, and §8's own note below carries the
-four decisions and three landmines it needs. It is **not shipped**.
-
 **The remaining true blocker is `HS-066` onwards** (phase 2's deploy/hub stories), which wait on
 `HS-047`/`HS-056`/`HS-057` and the phase-1 verification run. Nothing in the queue is now blocked on the
 machine itself.
-
-### What HS-075 is about, so the first brief is fast
-
-`PER-107`, expand/contract migration discipline, size **M**, spec item 10, independent of the Docker chain
-and **never started**. Acceptance: a release may add but never drop or rename anything the previous
-release uses; a test asserts the previous release's schema is still a subset of the current one; `doctor`
-reports the schema version and refuses to start when the database is newer than the binary; the rule is
-documented where a migration author will read it, with an example of a deferred cleanup.
-
-Four things to settle first:
-
-1. **What "the previous release's schema" is, mechanically.** There is no released artifact and no tag to
-   check out, so prefer (a) a checked-in snapshot (`docs/schema/previous.sql`, *not* under `migrations/`)
-   compared by a test, over (b) a drop/rename scanner — (a) is a fact, (b) is a lint, and the acceptance
-   asks for both. Say in the ADR how the snapshot is refreshed (a release step, not a story step).
-2. **Where the check lives**: there is no CI, so a `scripts/check-migrations.sh` run from `verify.sh` as a
-   **phase** (it needs no server) plus a `cargo test`.
-3. **`doctor` is HS-045's and is blocked.** Implement the *refusal* (the database newer than the binary) and
-   the *reporting* (the banner already prints `database … schema n`), record that `doctor` is HS-045's and
-   name the sentence it will print. Do not invent a `doctor` command here.
-4. **"Where a migration author will read it"** is `docs/build.md`'s migrations section plus the ADR, and the
-   deferred-cleanup example should be a real pair of migration files or a quoted diff.
-
-Two traps: `scripts/check-static.sh` byte-greps the artifact for the schema SQL, and `SCHEMA_VERSION` is a
-literal `check_embed` cross-checks against the embedded files — so a snapshot under `migrations/` would be
-embedded as a migration and break the build.
 
 ## 9. Reporting
 
@@ -1865,17 +1923,19 @@ re-read.
 If you stop before the backlog is empty, say so explicitly, say which issue is next, and leave the tree
 clean and the gates green — **a half-finished story is worse than an honest stop**.
 
-This session (`b7132d1` → `5b0dfe5`) shipped one story:
+This session (`5b0dfe5` → `f99035a`) shipped two stories:
 
 | Issue | Story | Commits | Outcome |
 | --- | --- | --- | --- |
-| PER-69 | HS-037 the egress proxy | `fe52c0f`, `39952fc`, `df2ec3b`, `5b0dfe5` | Done — the only route out of a session container is now a proxy this build starts, as a **mode of this binary** (`holosmith proxy egress`) whose container (`hs_egress`, on `egress`, `--restart unless-stopped`) runs *this* artifact mounted read-only at its own host path. `CONNECT` to 443 only; an **exact** allow-list; **no address inside the machine** (loopback, link-local, RFC 1918, 100.64/10, IPv6's own spellings and the v4 inside 6to4/NAT64/IPv4-compatible ones, every answer checked, so `localhost` is refused even when listed); host and bytes logged once per request with the session id as the proxy username, which is why a container gets `HTTPS_PROXY=http://<id>@egress-proxy:3128` and `egress-proxy` is a **network alias**. The join is the network step's, under the per-session start lock, and only when the row's `network` flag is set. ADR-0045. Review **OK with notes** both axes: one P1 (an unbounded `docker run` on the pre-bind startup path — ADR-0044's own hazard, reintroduced) and two spec P2s (byte counts lost when a tunnel failed, and ADR-0044's hand-over left unanswered), all fixed; the P3s included a real one (the allow path had no test that would have caught the `Content-Length`-on-a-200 bug the demo found). Demo: `curl -x http://<id>@…` → 200 with bytes both ways, three refusals with their sentences, and in Docker: `egress-proxy -> 172.21.0.2` resolved and used **from inside a session container**, and a `network: false` session whose network has no proxy on it |
+| PER-70 | HS-038 Internet access checkbox wiring (V6) | `3f9493b`, `40af696`, `ae216d6`, `92f6f12`, `748559a`, `d8703db`, `db3a207` | Done — the wiring was already true (HS-037 honours the row's `network` on the create **and** the resume, and the container's environment is identical either way), so the story shipped the three things a wiring with no measurement cannot claim. The self-test's probe gains `egress-proxy:3128` (the **alias**, never the container name) and runs **twice on one network** — bare, then with `hs_egress` joined — so the off case's silence is evidence; a proxy answering where nothing should leave is a wiring finding with its **own** sentence, and a direct leak still outranks it. `case_internet_toggle` creates two real sessions differing only in the body's `network` and asserts, per network, the internet unreachable directly, the alias resolving in exactly one, every env var identical once the ids are normalised, and — after the proxy is **detached** and the container killed and resumed — the endpoint count **1** / **2**, which is a rejoin rather than an inheritance. ADR-0046. Review **BLOCK** on one P1 (the `on` half's SKIP took exactly the bug it exists to catch; a running-but-unjoined proxy now fails) plus a spec P2 (bullet 5's "only the key proxy" is deferred to HS-039, now said out loud), all 17 findings fixed; the two mutations the review asked for were run and watched go red. Demo: `npm install` failing with `EAI_AGAIN` off and installing through the proxy on, an `/api/health`-style probe of both networks, and the Chromium look at the checkbox |
+| PER-107 | HS-075 expand/contract migration discipline | `c047233`, `f99035a` | Done — the rule had **two halves and the repo had one**: `schema::contract_violations` already refuses an unmarked `DROP`/`RENAME` and `cargo test` already runs it, so nothing was rebuilt; what was missing is the release-over-release fact. `docs/schema/previous.sql` (a real dump, kept **out of** `migrations/` because that directory is embedded) is compared with this build's as a **subset** by `tests/schema_previous.rs`, through SQLite rather than a second SQL grammar, refreshed by `scripts/schema-snapshot.sh` at **release** time; `schema::verdict` is the `Same`/`Older`/`Newer` sentence `serve` warns with and `doctor` (HS-045) will refuse with, and `serve` continues on a newer database because item 10's rollback must not need a restore. A new `migrations` **phase** and `case_schema_newer`. ADR-0047. Review **BLOCK** on one P1 that landed on both axes — the guard against a vacuous pass compared table *sets* for equality, forbidding the added table the rule permits — fixed and mutation-proven both ways; 17 findings fixed or dismissed. Demo: the snapshot's 3 tables/25 columns, a regenerated snapshot byte-identical to the tree's, both rule halves green, and a boot over schema 99 printing `database … schema 99` with `/api/health` 200 |
 
-Ledger for the next session: **HS-038 (`PER-70`, the internet-access checkbox, size M)** is next — and a large
-part of the acceptance may already be true, because HS-037 honours the flag in the topology; §8's own note says
-what to verify before writing anything (the checkbox in `web/`, the off-case probe, and V6's three checks). Then
-`HS-039`/`HS-040` (the key proxy and its verification), `HS-041`, `HS-042`–`HS-046`. The session that wrote this
-stopped after one complete L story rather than start a second it could not finish — a half-finished story is
-worse than an honest stop (§9). Everything is pushed; the final `scripts/verify.sh` on the committed tree was
-**56 cases, 537 assertions, ok**.
+Two mutations worth carrying forward: deleting `join_network` from `apply_proxy` makes
+`case_internet_toggle_on_proxy` red, and making the network step skip its join when the network already exists
+makes `case_internet_toggle_on_resumed_endpoints` red (`expected '2', got '1'`). Both were reverted; the tree is
+clean and the final `scripts/verify.sh` on the committed tree was **58 cases, 588 assertions, ok** — and pushed.
 
+Ledger for the next session: **HS-039 (`PER-71`, the key proxy, size L)** is next and is a chain from there on
+(§8's note above says what already waits for it). It is the story that makes a real turn possible; the risky part
+is streaming a provider's SSE body through the proxy unbuffered. Expect it to need more than one gate cycle, and
+prefer an honest stop over a half-built proxy.
