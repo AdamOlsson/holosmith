@@ -1025,7 +1025,10 @@ impl SessionBackend for DockerBackend {
             .data_root
             .join("sessions")
             .join(&session.id)
-            .join("wip.index");
+            .join(format!(
+                "wip-{}.index",
+                self.commands.fetch_add(1, Ordering::Relaxed)
+            ));
         let id = session.id.clone();
         let taken = tokio::task::spawn_blocking(move || snapshot::take(&worktree, &index, &id))
             .await

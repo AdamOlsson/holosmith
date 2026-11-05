@@ -14,6 +14,12 @@ CLI) and removed whatever happened. `read-tree HEAD` is load-bearing rather than
 tracked file the agent **deleted** a staged deletion, which a bare `git add -A` on an empty index would
 represent as nothing at all.
 
+**The host runs it, not the container.** Spec item 9 describes `docker exec s_<id> hs-snapshot`; this build
+calls the same module in-process from the Docker backend, because a snapshot must work when the container is
+already gone or when the session is `stopped`, and the worktree is a host directory either way. The spec's
+container spelling remains available as `holosmith container snapshot` with `/work` and `HS_SESSION_ID`, which
+is the manual equivalent and the gate's subject.
+
 The snapshot commit's identity is `-c user.name=holosmith -c user.email=holosmith@localhost` on the
 command, never a write to a repository or global config. The `commit-tree` has `HEAD` as its parent, so
 the ref is a child of the branch's tip and `git diff <branch> refs/holosmith/wip/<id>` is the

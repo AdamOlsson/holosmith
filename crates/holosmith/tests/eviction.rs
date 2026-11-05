@@ -140,8 +140,8 @@ async fn drive(state: &AppState, id: &str, trigger: Trigger, reason: Option<&str
 }
 
 /// The eviction and the removal are different things, so every assertion about "nothing was deleted"
-/// reads the backend's calls: a `Stop` is the cap making room, a `Delete` or a `Snapshot` would be
-/// data loss.
+/// reads the backend's calls: a `Stop` is the cap making room, a `Delete` would be data loss, and the
+/// `Snapshot` before the `Stop` is HS-042 keeping the victim's uncommitted work.
 fn lifecycle(stub: &holosmith::backend::StubBackend, id: &str) -> Vec<Call> {
     stub.recorded()
         .into_iter()

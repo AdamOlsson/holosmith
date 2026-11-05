@@ -63,6 +63,8 @@ impl Taken {
 pub enum SnapshotError {
     /// The worktree directory is not there.
     NotAWorktree(PathBuf),
+    /// The temporary index could not be made, which is a filesystem fact rather than a git one.
+    Index { path: PathBuf, detail: String },
     /// A git command could not start, or answered non-zero. The text is git's own last words.
     Git { command: String, detail: String },
 }
@@ -82,6 +84,11 @@ impl fmt::Display for SnapshotError {
             Self::NotAWorktree(path) => {
                 write!(f, "there is no worktree at {} to snapshot", path.display())
             }
+            Self::Index { path, detail } => write!(
+                f,
+                "the temporary snapshot index {} could not be made: {detail}",
+                path.display()
+            ),
             Self::Git { command, detail } => write!(f, "{command}: {detail}"),
         }
     }
@@ -99,8 +106,10 @@ pub fn take(worktree: &Path, index: &Path, id: &str) -> Result<Taken, SnapshotEr
         return Err(SnapshotError::NotAWorktree(worktree.to_path_buf()));
     }
     if let Some(parent) = index.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| SnapshotError::git(worktree, &["index"], error.to_string()))?;
+        std::fs::create_dir_all(parent).map_err(|error| SnapshotError::Index {
+            path: index.to_path_buf(),
+            detail: error.to_string(),
+        })?;
     }
     let _ = std::fs::remove_file(index);
     let result = take_inner(worktree, index, id);
@@ -114,7 +123,7 @@ fn take_inner(worktree: &Path, index: &Path, id: &str) -> Result<Taken, Snapshot
     run(worktree, &["add", "-A"], &env)?;
     let tree = run(worktree, &["write-tree"], &env)?;
     let head_tree = run(worktree, &["rev-parse", "HEAD^{tree}"], &[])?;
-    let reference = format!("{REF_PREFIX}{id}");
+    let reference = reference(id);
     if tree == head_tree {
         if run(
             worktree,
@@ -127,20 +136,24 @@ fn take_inner(worktree: &Path, index: &Path, id: &str) -> Result<Taken, Snapshot
         }
         return Ok(Taken::Removed);
     }
-    let mut commit_args = vec![
-        "-c",
-        "user.name=holosmith",
-        "-c",
-        "user.email=holosmith@localhost",
-        "commit-tree",
-        &tree,
-        "-p",
-        "HEAD",
-        "-m",
-        MESSAGE,
-    ];
-    let commit = run(worktree, &commit_args, &[])?;
-    commit_args.clear();
+    let name = format!("{}={}", IDENTITY[0].0, IDENTITY[0].1);
+    let email = format!("{}={}", IDENTITY[1].0, IDENTITY[1].1);
+    let commit = run(
+        worktree,
+        &[
+            "-c",
+            &name,
+            "-c",
+            &email,
+            "commit-tree",
+            &tree,
+            "-p",
+            "HEAD",
+            "-m",
+            MESSAGE,
+        ],
+        &[],
+    )?;
     run(worktree, &["update-ref", &reference, &commit], &[])?;
     Ok(Taken::Written { commit, tree })
 }

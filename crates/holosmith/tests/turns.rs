@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::Method;
-use holosmith::backend::StubBackend;
+use holosmith::backend::{Call, StubBackend};
 use holosmith::config::Config;
 use holosmith::events::WriterOptions;
 use holosmith::http::error::{
@@ -172,7 +172,8 @@ async fn a_prompt_answers_the_running_row_and_a_second_prompt_is_refused() {
 #[tokio::test]
 async fn the_turn_settles_the_session_and_moves_last_active_at() {
     let dir = TempDir::new("turns-activity");
-    let state = with_stub(state_in(&dir, Config::default()), paced(100));
+    let stub = paced(100);
+    let state = with_stub(state_in(&dir, Config::default()), stub.clone());
     let served = Served::start(http::router(state.clone()), GRACE).await;
     let id = created_id(&post_create(served.addr, "turns-activity").await);
     wait_idle(&state, &id).await;
@@ -191,6 +192,37 @@ async fn the_turn_settles_the_session_and_moves_last_active_at() {
         after.last_active_at > before,
         "last_active_at did not move: {before} -> {}",
         after.last_active_at
+    );
+    // HS-042: every `agent_settled` takes a WIP snapshot before the row moves. This is the only test
+    // that names the site; deleting the call in `Turn::finished` must make it red.
+    assert!(
+        stub.calls().contains(&Call::Snapshot),
+        "the settle did not snapshot: {:?}",
+        stub.calls()
+    );
+    served.finish().await.expect("a clean shutdown");
+}
+
+#[tokio::test]
+async fn a_snapshot_that_fails_does_not_turn_a_finished_turn_into_an_error() {
+    // HS-042's other half: a git failure is reported in the log and does not change the turn's ending. The
+    // session finished its work; losing that fact because a ref could not be written would be worse than a
+    // missing ref (the delete's `409 unsaved_work` is where a failure is a refusal).
+    let dir = TempDir::new("turns-snapshot-fails");
+    let stub = fast_stub().failing_snapshot();
+    let state = with_stub(state_in(&dir, Config::default()), stub.clone());
+    let served = Served::start(http::router(state.clone()), GRACE).await;
+    let id = created_id(&post_create(served.addr, "turns-snapshot-fails").await);
+    wait_idle(&state, &id).await;
+    let accepted = post_prompt(served.addr, &id, PROMPT).await;
+    assert_eq!(accepted.status, 202, "{}", accepted.body);
+    wait_idle(&state, &id).await;
+    let after = row(&state, &id);
+    assert_eq!(after.status, Status::Idle, "the turn's own ending won");
+    assert_eq!(after.status_reason, None);
+    assert!(
+        stub.calls().contains(&Call::Snapshot),
+        "the settle did not try the snapshot"
     );
     served.finish().await.expect("a clean shutdown");
 }

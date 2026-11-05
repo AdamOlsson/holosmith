@@ -232,8 +232,11 @@ ADR-0040 records; see ADR-0040), and the key store and key proxy's refusal path 
 and no internet: it writes a key with `key set` through stdin, asserts `keys.toml` is 0600 and `key list` prints
 the provider and never the value, starts the shipped artifact as `proxy key` on a loopback port, and asserts a
 request with no dummy key is `401` and an unknown provider is `403` before any provider is contacted; the
-forwarding half is HS-040's because a gate that needs a real provider key is not a gate; see ADR-0048), and the
-egress proxy's refusals (`case_egress_proxy`, which needs no server, no daemon and no internet: it starts the shipped
+forwarding half is HS-040's because a gate that needs a real provider key is not a gate; see ADR-0048), the
+WIP snapshot (`case_snapshot`, which needs no daemon: it builds a real repository and linked worktree under
+`target/`, runs the artifact's `container snapshot` with `HS_SESSION_ID`, and asserts the ref has the changed
+and new files while HEAD, the index and the working tree are untouched, then that a tree equal to HEAD removes
+the ref; see ADR-0049), and the egress proxy's refusals (`case_egress_proxy`, which needs no server, no daemon and no internet: it starts the shipped
 artifact as `proxy egress` on a loopback port with two allow-listed names and asks it four questions over a
 plain socket — `GET` gets `405`, `CONNECT` to port 80 gets `403`, an unlisted host gets `403`, and
 `localhost`, **on** the list, gets `403` because its address is inside the machine — then asserts the log's
@@ -266,8 +269,7 @@ remember to place the new case before it.
 is what makes this a growing gate rather than a snapshot: a story that adds a route or a
 behaviour has one obvious place to prove the shipped binary does it. A case that needs a setting the
 rest of the run must not carry gets a boot of its own (see `case_token_budget`, `case_usage_survives_resume`,
-`case_compaction`, `case_history`, `case_backup`, `case_worktree`, `case_worktree_refusal` and
-`case_snapshot`), the
+`case_compaction`, `case_history`, `case_backup`, `case_worktree` and `case_worktree_refusal`), the
 Internet-access checkbox (`case_internet_toggle`, described above), and a database from a newer release
 (`case_schema_newer`, which needs no daemon: it boots the artifact twice over one data root, rewrites the
 recorded `schema_version` to 99 in between with `python3`'s `sqlite3`, and asserts that the second boot's

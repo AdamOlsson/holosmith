@@ -113,6 +113,34 @@ fn a_snapshot_keeps_uncommitted_work_without_moving_the_branch_or_the_index() {
 }
 
 #[test]
+fn a_deleted_tracked_file_is_a_deletion_in_the_snapshot() {
+    // `read-tree HEAD` is load-bearing rather than decoration: without it a bare `git add -A` on an empty
+    // index would represent a deletion as nothing at all, and the ref would silently restore the file.
+    let directory = TempDir::new("deleted");
+    let id = "0011223344556677";
+    let (project, path) = worktree(&directory, id);
+    std::fs::remove_file(path.join("tracked.txt")).expect("remove the tracked file");
+    snapshot::take(&path, &directory.path.join("wip.index"), id).expect("snapshot");
+    let reference = snapshot::reference(id);
+    let answer = Command::new("git")
+        .arg("-C")
+        .arg(&project)
+        .args(["cat-file", "-e", &format!("{reference}:tracked.txt")])
+        .output()
+        .expect("git runs");
+    assert!(
+        !answer.status.success(),
+        "the deleted file was put back in the snapshot"
+    );
+    // The commit exists and its message is the spec's, which proves the tree was written even though it
+    // differs from HEAD by a deletion alone.
+    assert_eq!(
+        git(&project, &["log", "-1", "--format=%s", &reference]),
+        "holosmith snapshot"
+    );
+}
+
+#[test]
 fn a_tree_equal_to_head_removes_the_ref_instead_of_writing_another_commit() {
     let directory = TempDir::new("clean");
     let id = "fedcba9876543210";

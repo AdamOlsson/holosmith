@@ -15,6 +15,11 @@
 //! records it and hands the backend a stop that has already been announced — which is also the order
 //! every caller already uses for the *state*: the row moves before the container does (ADR-0020).
 //!
+//! Since HS-042 the snapshot runs **before** the flag and the container stop, because spec item 9 says so.
+//! It is not that the worktree would disappear with the container — it lives on the host — but that the
+//! spec's order is "snapshot, then stop", and a stop that returned before the ref existed would be a stop
+//! whose promise depended on a later task.
+//!
 //! A flag write that fails is logged and does not stop the stop. The policy asked for a container to be
 //! stopped, and a row write that failed is not a reason to keep a runaway session alive; the price is a
 //! misclassified exit, and the log line is what an operator has to go on.
