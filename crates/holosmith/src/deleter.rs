@@ -77,6 +77,12 @@ impl Deleter {
     /// `DELETE` as the retry.
     pub async fn remove(&self, session: &Session) {
         revoke_key(session);
+        // The container is about to be removed by the server, so its exit is not news. `Stopper` owns the
+        // flag for a *stop* (HS-030); a delete is the same fact by another route, and since HS-031 there is
+        // an observer that would otherwise classify the removal as a crash and move a `deleting` row to
+        // `error`. Written before the backend is asked, for `Stopper`'s reason: the order cannot be
+        // observed from outside these two lines (ADR-0038).
+        self.mark_expected(session);
         match self.backend.delete(session).await {
             Ok(()) => {}
             // A backend that cannot delete has never built anything for this session: it refuses
@@ -120,6 +126,22 @@ impl Deleter {
             ),
         }
         self.close(&session.id);
+    }
+
+    /// Record that this session's container is being removed because the server said so (HS-031).
+    ///
+    /// A failure is a `warn` and the removal carries on: the flag only decides how an exit reads, and a
+    /// delete that refused because a column could not be written would be a delete that never happens.
+    fn mark_expected(&self, session: &Session) {
+        let database = self.database.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Err(error) = database.sessions().set_expected_stop(&session.id, true) {
+            tracing::warn!(
+                target: "holosmith::deleter",
+                session = %session.id,
+                %error,
+                "the delete's expected-stop flag was not written"
+            );
+        }
     }
 
     /// The one transaction: the log and then the row, through the repository that owns each.

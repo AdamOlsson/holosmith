@@ -178,6 +178,36 @@ async fn a_create_provisions_the_four_steps_in_order_and_ends_idle() {
 }
 
 #[tokio::test]
+async fn a_scripted_agent_exit_reaches_the_row_through_the_server() {
+    // HS-031: after a successful pi step the provisioner hands the backend's exit watcher to a task of its
+    // own, and that task records what the exit means (`Exits::record`). The stub's scripted exit is the only
+    // way to prove that wiring without Docker — and the row's ending is the classifier's, not this test's:
+    // a process that dies without the expected-stop flag is `error` with the tail of what it printed
+    // (spec item 6).
+    let dir = TempDir::new("provisioning-exit");
+    let state = with_stub(
+        state_in(&dir, Config::default()),
+        paced(1).exiting(137, "the agent fell over"),
+    );
+    let served = Served::start(http::router(state.clone()), GRACE).await;
+    let id = created_id(&post_create(served.addr, "exit").await);
+
+    wait_until("the agent's exit is recorded", || {
+        row(&state, &id).status == Status::Error
+    })
+    .await;
+    let crashed = row(&state, &id);
+    assert_eq!(crashed.status, Status::Error);
+    assert_eq!(
+        crashed.status_reason.as_deref(),
+        Some("the agent fell over"),
+        "the row's reason is not what the process printed"
+    );
+
+    served.finish().await.expect("a clean shutdown");
+}
+
+#[tokio::test]
 async fn the_steps_reach_a_browser_over_the_event_stream() {
     // The same five events, watched the way the phone watches them: the SSE `id` is the seq, the
     // `data` is the payload, and the last frame says the session is idle.
@@ -360,7 +390,7 @@ async fn the_docker_backend_refuses_a_project_that_is_not_there() {
     let mut state = state_in(&dir, config);
     state.backend = Backends::for_run(
         holosmith::runtime::Backend::Docker,
-        holosmith::container::ContainerSettings::at(projects),
+        holosmith::container::ContainerSettings::at(projects, dir.path()),
     );
     assert_eq!(
         state.backend.as_str(),

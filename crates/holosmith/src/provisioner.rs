@@ -25,30 +25,39 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::task::JoinHandle;
 
-use crate::backend::{Backends, Provisioned, SessionBackend, Step};
+use crate::backend::{Backends, ProcessEnd, Provisioned, SessionBackend, Step};
 use crate::clock;
 use crate::db::Database;
 use crate::events::{EventWriter, NewEvent};
+use crate::exit::Exits;
 use crate::sessions::state::{SESSION_STATUS, SessionStatus, Transitioner, Trigger};
 use crate::sessions::{Session, Status};
 
 /// The provisioner's handles: where to run steps, where the row is, and where events go.
 ///
 /// `Clone` because the create handler builds one per accepted session and hands it to a task; the
-/// three fields are a backend value, one `Arc` and a sender, so cloning copies no state.
+/// four fields are a backend value, one `Arc`, a sender and a cheap handle, so cloning copies no state.
 #[derive(Debug, Clone)]
 pub struct Provisioner {
     backend: Backends,
     database: Arc<Mutex<Database>>,
     events: EventWriter,
+    /// What a finished agent process's exit means, once the pi step has left one running (HS-031).
+    ///
+    /// Built here from the row database rather than passed in: the data root is the directory the database
+    /// lives in ([`Exits::for_database`]), so the two handles this runner already has are all an exit's
+    /// consequences need.
+    exits: Exits,
 }
 
 impl Provisioner {
     pub fn new(backend: Backends, database: Arc<Mutex<Database>>, events: EventWriter) -> Self {
+        let exits = Exits::for_database(Arc::clone(&database), events.clone());
         Self {
             backend,
             database,
             events,
+            exits,
         }
     }
 
@@ -98,6 +107,13 @@ impl Provisioner {
                     if step == Step::Container {
                         self.clear_expected_stop(&session);
                     }
+                    // The last step left a process running, and its exit is the server's to record: the
+                    // backend hands it over and a task of this one's watching calls `Exits::record` when
+                    // it arrives (HS-031, ADR-0038). Done *after* the step reported success, so a stack that
+                    // never became ready has no watcher.
+                    if step == Step::Pi {
+                        self.supervise(&session).await;
+                    }
                 }
                 Err(error) => {
                     let reason = error.to_string();
@@ -115,6 +131,32 @@ impl Provisioner {
             }
         }
         self.settle(&session).await;
+    }
+
+    /// Watch the agent process the pi step left running, and record how it ends (HS-031).
+    ///
+    /// A task of its own rather than a branch here: this run is over once the session is `idle`, and an
+    /// agent process outlives it by hours. The backend answers `None` when it has no process to supervise
+    /// (the stub, and a Docker session whose launch never happened), which is not a failure.
+    ///
+    /// The exit's *meaning* is [`crate::exit`]'s three questions and the backend's fourth ("is this exit
+    /// still about the current container?"): this task only routes the answer.
+    async fn supervise(&self, session: &Session) {
+        let Some(watcher) = self.backend.supervise(session).await else {
+            return;
+        };
+        let exits = self.exits.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            match watcher.wait().await {
+                ProcessEnd::Exited { code, stderr } => exits.record(&session, code, &stderr).await,
+                ProcessEnd::NotCurrent => tracing::debug!(
+                    target: "holosmith::provisioner",
+                    session = %session.id,
+                    "the agent process that ended is not the session's current one"
+                ),
+            }
+        });
     }
 
     /// Write what a step made into the row, before the next step runs.

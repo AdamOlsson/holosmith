@@ -21,10 +21,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use super::{BackendError, Provisioned, SessionBackend, Step, TurnEnd};
+use super::{BackendError, ExitWatcher, ProcessEnd, Provisioned, SessionBackend, Step, TurnEnd};
+use crate::agent::{self, Agent, Exit};
 use crate::container::{ContainerSettings, SessionContainer, network_name};
 use crate::docker::{Docker, DockerError};
 use crate::events::EventWriter;
+use crate::exit::SessionLog;
+use crate::pins;
 use crate::sessions::Session;
 use crate::worktree::{Refusal, Worktree, refuse, repository_of};
 
@@ -55,6 +58,31 @@ pub struct DockerBackend {
     /// `tokio::sync::Mutex` plus a 16-byte id is not worth a racy registry, and a process is restarted long
     /// before this matters.
     starts: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// The agent process each session's container is running, and which launch of it is current.
+    ///
+    /// One entry per session id, **replaced** by every launch and never removed: the generation is what
+    /// says whether an exit still belongs to the session's container (see [`ProcessEnd`]), and a map that
+    /// forgot an entry would let a re-created id restart the count and call an old exit current. The memory
+    /// is a handle and an `Arc` per session this process served, which is the trade [`Self::starts`] already
+    /// makes for the same reason.
+    agents: Arc<Mutex<HashMap<String, Launched>>>,
+    /// The pi version the image runs, asked once per process (`Some(Err(..))` is a remembered failure).
+    ///
+    /// One question, one answer: `docker run --entrypoint pi <image> --version` costs a container start, and
+    /// the answer cannot change while this process lives (an image is replaced by an upgrade, which restarts
+    /// the server). A `tokio` mutex because the answer arrives through `spawn_blocking` and the wait is an
+    /// `await`.
+    version: Arc<tokio::sync::Mutex<Option<Result<String, String>>>>,
+    /// `<data>/sessions/<id>/session.log`: the session's stderr and the launch line (spec item 15, HS-030).
+    log: SessionLog,
+}
+
+/// One launched agent process: the generation that names it, the agent, and the exit nobody has taken yet.
+#[derive(Debug)]
+struct Launched {
+    generation: u64,
+    agent: Arc<Agent>,
+    exit: Option<tokio::sync::oneshot::Receiver<Exit>>,
 }
 
 impl DockerBackend {
@@ -65,9 +93,58 @@ impl DockerBackend {
     /// would have to guess, and a guess about an image is a container that does not start.
     pub fn new(settings: ContainerSettings) -> Self {
         Self {
+            log: SessionLog::new(settings.data_root.clone()),
             settings,
             starts: Arc::new(Mutex::new(HashMap::new())),
+            agents: Arc::new(Mutex::new(HashMap::new())),
+            version: Arc::new(tokio::sync::Mutex::new(None)),
         }
+    }
+
+    /// This session's current agent, if one is running.
+    ///
+    /// Public because a test that wants to ask the process something — the ready handshake is the pi step's,
+    /// but "did the project's own resources load" is a question only the live agent can answer — has no
+    /// other way in. HS-032's turn methods will use it from inside this module.
+    pub fn agent(&self, session_id: &str) -> Option<Arc<Agent>> {
+        let agents = self.agents.lock().unwrap_or_else(PoisonError::into_inner);
+        agents
+            .get(session_id)
+            .map(|launched| Arc::clone(&launched.agent))
+    }
+
+    /// The pi version the agent image runs, asserted against `pins/pi.txt` once per process.
+    ///
+    /// The story's fourth acceptance line: "the agent image's pi version equals the binary's pinned pi
+    /// version; a mismatch fails the session with a clear error". A cached failure is re-answered rather
+    /// than re-asked, because a machine whose image is wrong is wrong for every session and the operator
+    /// needs the sentence once per row, not one container start per session.
+    async fn image_version(&self) -> Result<String, BackendError> {
+        let mut cache = self.version.lock().await;
+        if let Some(known) = cache.as_ref() {
+            return known.clone().map_err(BackendError::failed);
+        }
+        let docker = self.settings.docker();
+        let image = self.settings.image.clone();
+        let asked = tokio::task::spawn_blocking(move || agent::version_of(&docker, &image)).await;
+        let answer = match asked {
+            Ok(Ok(version)) if version == pins::pi_version() => Ok(version),
+            Ok(Ok(version)) => Err(agent::version_sentence(
+                &self.settings.image,
+                &version,
+                pins::pi_version(),
+            )),
+            Ok(Err(reason)) => Err(format!(
+                "the agent image {} could not say which pi it runs: {reason}",
+                self.settings.image
+            )),
+            Err(error) => Err(format!(
+                "the agent image {} was not asked in time ({error})",
+                self.settings.image
+            )),
+        };
+        *cache = Some(answer.clone());
+        answer.map_err(BackendError::failed)
     }
 
     /// The session's start lock, taken for the whole of `start`/`resume`.
@@ -182,15 +259,19 @@ impl DockerBackend {
         Ok(Provisioned::Nothing)
     }
 
-    /// The container itself (spec item 6).
+    /// The container itself, running pi (spec item 6, HS-031).
     ///
-    /// The mounts are checked *before* the daemon is asked, because `docker run -v` creates a missing
-    /// source as an empty root-owned directory: a broken projects root would otherwise give the agent an
-    /// empty `/work` and a `.git` that is not the repository, with no error anywhere (ADR-0035).
+    /// Four things happen here, in this order, and each one is a refusal that must come before the next:
     ///
-    /// HS-031 replaces this launch with an attached one and pipes pi's RPC through the container's stdio;
-    /// until then the container is detached and runs the image's own command, which is what makes
-    /// "the flags are right" inspectable before there is an agent to run.
+    /// 1. **The agent directory is made and seeded** (spec item 2). It is a mount's source, and
+    ///    `docker run -v` creates a missing source as an empty root-owned directory (ADR-0035).
+    /// 2. **The mounts are checked** for the same reason, over all five now.
+    /// 3. **The image's pi is asserted** against `pins/pi.txt`, once per process — before a process is
+    ///    started rather than after, so a mismatch costs no container and the row's reason is the version
+    ///    sentence rather than a mysterious readiness timeout.
+    /// 4. **Any leftover container is removed and one attached `docker run` is spawned** (spec item 6).
+    ///    Attached is what makes the container the agent: its stdin and stdout are pi's RPC channel and its
+    ///    exit code is what [`crate::exit`] classifies.
     async fn provision_container(&self, session: &Session) -> Result<Provisioned, BackendError> {
         // Serialised with a resume of the same session: both are "remove any leftover container, then start
         // one", and interleaving them is a name conflict neither caller could explain (HS-029).
@@ -209,26 +290,94 @@ impl DockerBackend {
     /// while its container lived (HS-044 reconciles that at startup; this makes the next start boring).
     async fn start_container(&self, session: &Session) -> Result<(), BackendError> {
         let container = self.container(session);
+        let home = container.home.clone();
+        agent::ensure_home(&home, session).map_err(|error| {
+            BackendError::failed(format!(
+                "the container step: the agent directory {} could not be made ({error})",
+                home.display()
+            ))
+        })?;
         container
             .mounts
             .check()
             .map_err(|missing| BackendError::failed(format!("the container step: {missing}")))?;
+        // Asked before the launch, and cached for the process: a stale image is a machine problem, not a
+        // session's, and the sentence says which image and which two versions.
+        let version = self.image_version().await?;
         let arguments = container.run_args();
         let name = container.name.clone();
         let leftover = name.clone();
-        let id = Self::docker(Step::Container, self.settings.docker(), move |docker| {
+        Self::docker(Step::Container, self.settings.docker(), move |docker| {
             docker.remove_container(&leftover);
-            docker.run_container(&arguments)
+            Ok(())
         })
         .await?;
+        // The launch line first, so a launch that never starts has one too, and so the log says which
+        // command was attempted before anything else in it.
+        self.log.append(
+            &session.id,
+            &agent::launch_line(&container.image, &version, session, &container.home),
+        );
+        let command = self.settings.docker().command_line(&arguments);
+        let (agent, exit) = Agent::launch(command, &session.id).map_err(|error| {
+            BackendError::failed(format!(
+                "the container step: the agent process could not be started ({error})"
+            ))
+        })?;
+        let generation = {
+            let mut agents = self.agents.lock().unwrap_or_else(PoisonError::into_inner);
+            let generation = agents
+                .get(&session.id)
+                .map(|launched| launched.generation)
+                .unwrap_or(0)
+                + 1;
+            agents.insert(
+                session.id.clone(),
+                Launched {
+                    generation,
+                    agent: Arc::new(agent),
+                    exit: Some(exit),
+                },
+            );
+            generation
+        };
         tracing::debug!(
             target: "holosmith::backend",
             session = %session.id,
             container = %name,
-            container_id = %id,
-            "the container is running"
+            pi = %version,
+            generation,
+            "the agent is launched"
         );
         Ok(())
+    }
+
+    /// The agent step: pi answered its own state question, so it is ready for a turn (spec item 7's
+    /// `starting → idle` is the provisioner's, after this).
+    ///
+    /// A launch that produced no handshake is a failure rather than a pass: a session that is `idle` with no
+    /// agent would accept a prompt nobody can answer (HS-032).
+    async fn provision_agent(&self, session: &Session) -> Result<Provisioned, BackendError> {
+        let some = self.agent(&session.id).ok_or_else(|| {
+            BackendError::failed("the pi step: this session has no agent process".to_string())
+        })?;
+        let reply = some
+            .ready()
+            .await
+            .map_err(|error| BackendError::failed(format!("the pi step: {error}")))?;
+        // A `get_state` answer carries the model and the thinking level pi actually resolved, which is the
+        // one thing the row's choices cannot prove on their own (measured: without `--model`/`--thinking`
+        // it answers `unknown`/`off`). `debug` rather than `info`: the startup banner is pinned to eight
+        // lines and this is diagnostics (the sweeper's and the compactor's precedent).
+        let data = reply.data.unwrap_or_default();
+        tracing::debug!(
+            target: "holosmith::backend",
+            session = %session.id,
+            model = data.get("model").and_then(|model| model.get("id")).and_then(|id| id.as_str()).unwrap_or("unknown"),
+            thinking = data.get("thinkingLevel").and_then(|level| level.as_str()).unwrap_or("unknown"),
+            "pi reports ready"
+        );
+        Ok(Provisioned::Nothing)
     }
 
     /// `git worktree add` (or the adoption of one that is already there), and the record it makes.
@@ -304,6 +453,26 @@ impl DockerBackend {
         }
     }
 
+    /// Remove the session's own directory: `<data>/sessions/<id>`, with the agent's `pi-home` and its log.
+    ///
+    /// Best effort, like the container and the network: a delete's job is to remove the row, and a
+    /// directory that could not be removed is a `warn` rather than a `deleting` row that never ends
+    /// (ADR-0023). A directory that is not there is nothing to do.
+    fn remove_session_dir(&self, session: &Session) {
+        let directory = crate::exit::session_dir(&self.settings.data_root, &session.id);
+        match std::fs::remove_dir_all(&directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(
+                target: "holosmith::backend",
+                session = %session.id,
+                path = %directory.display(),
+                %error,
+                "the session's directory could not be removed"
+            ),
+        }
+    }
+
     /// Remove the session's network, ignoring "no such network".
     ///
     /// The same three-way answer as the container's: "removed", "was not there" (a debug line) and "the
@@ -332,22 +501,17 @@ impl DockerBackend {
 }
 
 impl SessionBackend for DockerBackend {
-    /// Run one provisioning step: the worktree, the network and the container are real (HS-025, HS-028), and
-    /// the agent step refuses in one sentence naming HS-031.
+    /// Run one provisioning step: the worktree, the network, the container and the agent are all real.
     ///
-    /// The row's `status_reason` is where an operator reads this, so "the pi step: the docker backend does
-    /// not start the agent yet (HS-031)" says what is wrong, whose work it is, and that the session is not
-    /// broken — it is a build that cannot run it. Written out per arm rather than through a helper: a
-    /// helper would need an arm for the steps that *are* filled, and those arms could never run.
+    /// The row's `status_reason` is where an operator reads a failure, so each step's refusal names the
+    /// step and what was wrong with it. The four arms are written out rather than routed through a helper:
+    /// a helper would need an arm for the steps that cannot fail this way, and those arms could never run.
     async fn provision(&self, session: &Session, step: Step) -> Result<Provisioned, BackendError> {
         match step {
             Step::Worktree => self.provision_worktree(session).await,
             Step::Network => self.provision_network(session).await,
             Step::Container => self.provision_container(session).await,
-            Step::Pi => Err(BackendError::unsupported_step(
-                step,
-                "the docker backend does not start the agent yet (HS-031)",
-            )),
+            Step::Pi => self.provision_agent(session).await,
         }
     }
 
@@ -438,11 +602,15 @@ impl SessionBackend for DockerBackend {
         self.start_container(session).await
     }
 
-    /// Remove everything the session owns: the container, its network, the worktree and its branch.
+    /// Remove everything the session owns: the container, its network, the worktree and its branch, and the
+    /// session's own directory.
     ///
-    /// The session *directory* (`<data>/sessions/<id>`) joins this call in HS-031, which is what makes one.
-    /// Answering `Ok` for a session nothing was provisioned for is deliberate: teardown of a session that
-    /// never got that far must not leave a `deleting` row behind (ADR-0023).
+    /// The session directory (`<data>/sessions/<id>`) joined this call in HS-031, which is what made it a
+    /// directory: it holds the agent's `pi-home` and the `session.log`. A delete takes both, because a session
+    /// that is gone cannot be resumed and its log is a record of a row that no longer exists.
+    ///
+    /// Answering `Ok` for a session nothing was provisioned for is deliberate: teardown of a session that never
+    /// got that far must not leave a `deleting` row behind (ADR-0023).
     async fn delete(&self, session: &Session) -> Result<(), BackendError> {
         // The container, then its network, then the worktree and the branch. Each is best-effort except
         // the worktree: a container or a network the daemon has already forgotten is a fact, and a
@@ -455,7 +623,58 @@ impl SessionBackend for DockerBackend {
         let _start = self.start_lock(&session.id).await;
         self.remove_container(session).await;
         self.remove_network(session).await;
-        self.remove_worktree(session).await
+        self.remove_worktree(session).await?;
+        self.remove_session_dir(session);
+        Ok(())
+    }
+
+    /// Hand the server the exit of the agent this session's container is running (HS-031).
+    ///
+    /// The exit is reported once, by the task [`Agent::launch`] spawned; this takes the receiver and wraps it
+    /// with the one question the server cannot answer — **is that exit still about this session's
+    /// container?** A forced stop resumes immediately, so the previous container's exit can arrive after a
+    /// new one has been launched, and [`ProcessEnd::NotCurrent`] is how that exit says "not news" instead of
+    /// turning a stop the server asked for into an `error` row (ADR-0038's inherited ordering constraint).
+    ///
+    /// The decision is made when the exit arrives, not when it is taken: a generation is compared against
+    /// the registry at that moment.
+    async fn supervise(&self, session: &Session) -> Option<ExitWatcher> {
+        let (receiver, generation) = {
+            let mut agents = self.agents.lock().unwrap_or_else(PoisonError::into_inner);
+            let launched = agents.get_mut(&session.id)?;
+            (launched.exit.take()?, launched.generation)
+        };
+        let registry = Arc::clone(&self.agents);
+        let session_id = session.id.clone();
+        let (sender, watcher) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let end = match receiver.await {
+                Ok(exit) => {
+                    let current = {
+                        let agents = registry.lock().unwrap_or_else(PoisonError::into_inner);
+                        agents.get(&session_id).map(|launched| launched.generation)
+                    };
+                    if current == Some(generation) {
+                        ProcessEnd::Exited {
+                            code: exit.code,
+                            stderr: exit.stderr,
+                        }
+                    } else {
+                        tracing::debug!(
+                            target: "holosmith::backend",
+                            session = %session_id,
+                            generation,
+                            current,
+                            "an older container's exit is not news"
+                        );
+                        ProcessEnd::NotCurrent
+                    }
+                }
+                Err(_) => ProcessEnd::NotCurrent,
+            };
+            let _ = sender.send(end);
+        });
+        Some(ExitWatcher::new(watcher))
     }
 
     async fn snapshot(&self, _session: &Session) -> Result<(), BackendError> {
@@ -491,26 +710,30 @@ mod tests {
     }
 
     fn backend() -> DockerBackend {
-        DockerBackend::new(ContainerSettings::at("/nonexistent/projects"))
+        DockerBackend::new(ContainerSettings::at(
+            "/nonexistent/projects",
+            "/nonexistent/data",
+        ))
     }
 
     #[tokio::test]
-    async fn the_step_this_build_does_not_provision_refuses_and_names_its_story() {
-        for (step, story) in [(Step::Pi, "HS-031")] {
-            let error = backend()
-                .provision(&session(), step)
-                .await
-                .expect_err("a step with no implementation refuses");
-            let sentence = error.to_string();
-            assert!(
-                sentence.starts_with(&format!("the {step} step: ")),
-                "the sentence does not name the step: {sentence}"
-            );
-            assert!(
-                sentence.contains(story),
-                "the sentence does not name the story that fills it: {sentence}"
-            );
-        }
+    async fn a_pi_step_with_no_launch_behind_it_fails_the_session_instead_of_claiming_ready() {
+        // HS-031's fourth hole to close: the pi step used to refuse for every session. It is now the ready
+        // handshake, and a handshake with no process would be the worst answer of all — a session marked
+        // `idle` that accepts a prompt nobody can answer. So the step fails, and it says which step.
+        let error = backend()
+            .provision(&session(), Step::Pi)
+            .await
+            .expect_err("there is no agent process for a session nothing launched");
+        let sentence = error.to_string();
+        assert_eq!(sentence, "the pi step: this session has no agent process");
+    }
+
+    #[tokio::test]
+    async fn a_session_nothing_launched_has_no_process_to_supervise() {
+        // The provisioner asks after a successful pi step; a backend that has launched nothing answers
+        // `None` rather than a watcher that would wait for a report nobody sends.
+        assert!(backend().supervise(&session()).await.is_none());
     }
 
     #[tokio::test]

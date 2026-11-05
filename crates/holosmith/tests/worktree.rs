@@ -76,7 +76,7 @@ const NO_DAEMON: &str = "unix:///nonexistent/holosmith-test.sock";
 fn settings(root: &Path) -> ContainerSettings {
     ContainerSettings {
         docker_host: Some(NO_DAEMON.to_string()),
-        ..ContainerSettings::at(root)
+        ..ContainerSettings::at(root, root.join("data"))
     }
 }
 

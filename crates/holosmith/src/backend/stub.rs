@@ -114,6 +114,10 @@ struct StubState {
     /// Whether a turn's `message.end` carries no usage, which is how a test produces the backend
     /// spec item 13 says the token budget cannot count (HS-023).
     omits_usage: bool,
+    /// A scripted process end for [`SessionBackend::supervise`], if a test asked for one (HS-031).
+    exits: Mutex<Option<super::ProcessEnd>>,
+    /// Sessions this stub has already handed a watcher for: one process, one exit.
+    supervised: Mutex<HashSet<String>>,
     recorded: Mutex<Vec<Recorded>>,
 }
 
@@ -134,6 +138,8 @@ impl StubBackend {
                 ignores_abort: false,
                 fails_snapshot: false,
                 omits_usage: false,
+                exits: Mutex::new(None),
+                supervised: Mutex::new(HashSet::new()),
                 recorded: Mutex::new(Vec::new()),
             }),
         }
@@ -192,6 +198,22 @@ impl StubBackend {
         Arc::get_mut(&mut self.state)
             .expect("a stub that has not been cloned yet is mutable")
             .omits_usage = true;
+        self
+    }
+
+    /// The same stub, with a scripted process end: [`super::SessionBackend::supervise`] answers a watcher
+    /// that reports this exit, once per session (HS-031).
+    ///
+    /// Like [`Self::failing_at`] this is a constructor argument and not a config key: it is how the server's
+    /// supervision path is proved without Docker, and nothing an operator runs should be able to make a
+    /// session report an exit that never happened.
+    pub fn exiting(mut self, code: i32, stderr: &str) -> Self {
+        Arc::get_mut(&mut self.state)
+            .expect("a stub that has not been cloned yet is mutable")
+            .exits = Mutex::new(Some(super::ProcessEnd::Exited {
+            code,
+            stderr: stderr.to_string(),
+        }));
         self
     }
 
@@ -434,6 +456,38 @@ impl SessionBackend for StubBackend {
 
     async fn snapshot(&self, session: &Session) -> Result<(), BackendError> {
         self.note(Call::Snapshot, session, "")
+    }
+
+    /// A scripted process end, once per session, or `None` when this stub was not told to script one.
+    ///
+    /// The stub has no process, so without this the server's half of HS-031 — the provisioner spawning
+    /// the task that calls [`crate::exit::Exits::record`] — would only be provable by driving a real
+    /// container. The exit is delivered immediately: the row is then moved from whichever state it is in
+    /// (`starting` before the settle, `idle` after), which is exactly the table's `unexpected_exit` row and
+    /// the same race a real agent that dies a millisecond after its handshake produces.
+    async fn supervise(&self, session: &Session) -> Option<super::ExitWatcher> {
+        let scripted = {
+            let state = self
+                .state
+                .exits
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state.clone()?
+        };
+        {
+            let mut given = self
+                .state
+                .supervised
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if !given.insert(session.id.clone()) {
+                // One process, one exit: a second watcher would wait for a report nobody sends.
+                return None;
+            }
+        }
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let _ = sender.send(scripted);
+        Some(super::ExitWatcher::new(receiver))
     }
 }
 

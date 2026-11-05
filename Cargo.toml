@@ -16,7 +16,7 @@ toml_edit = { version = "0.25", default-features = false, features = ["parse", "
 shlex = "2"
 axum = "0.8"
 futures-core = "0.3"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "time", "macros", "sync", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "time", "macros", "sync", "io-util", "process"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 include_dir = "0.7"

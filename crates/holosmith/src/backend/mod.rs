@@ -204,6 +204,63 @@ impl Provisioned {
     }
 }
 
+/// What the end of a supervised agent process means for its session (HS-031).
+///
+/// The server's exit policy ([`crate::exit`]) classifies an exit with three questions — was this stop
+/// asked for, did it exit 0, what did it print — and this is the fourth: **is this exit still about the
+/// session's container?** A forced stop resumes immediately (the ladder's rung two), so the previous
+/// container's exit can arrive after a new one has been launched, and classifying it then would turn a
+/// stop the server asked for into an `error` row (ADR-0038's inherited ordering constraint). The backend
+/// is the only thing that knows which container is current, so it answers here rather than the server
+/// asking later.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProcessEnd {
+    /// The process that ended is the session's current container: its exit is news.
+    Exited {
+        /// The container's exit code, as `docker run -i` reports it.
+        code: i32,
+        /// The tail of what it printed on stderr.
+        stderr: String,
+    },
+    /// A newer container for this session had already been launched, or the process was never the
+    /// session's to report. Nothing to record: the row's own caller already said what happened.
+    NotCurrent,
+}
+
+/// One session's agent process, supervised from the server's side of the pipe.
+///
+/// A backend hands one of these out once, after a launch it owns; the server awaits it and records the
+/// exit ([`crate::exit::Exits::record`]) — because a backend emits frames and never writes a row
+/// (ADR-0019). Dropping the watcher is allowed and means "nobody is recording this one": the process is
+/// still the backend's to reap and to classify as stale.
+pub struct ExitWatcher {
+    receiver: tokio::sync::oneshot::Receiver<ProcessEnd>,
+}
+
+impl std::fmt::Debug for ExitWatcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ExitWatcher")
+    }
+}
+
+impl ExitWatcher {
+    /// Wrap the receiver a backend's supervisor sends the answer on.
+    pub fn new(receiver: tokio::sync::oneshot::Receiver<ProcessEnd>) -> Self {
+        Self { receiver }
+    }
+
+    /// Wait for the process to end and answer what that means.
+    ///
+    /// A sender that is gone (the backend dropped the task) answers [`ProcessEnd::NotCurrent`]: there is no
+    /// report, and an `error` row invented from a missing report would be worse than the silence.
+    pub async fn wait(self) -> ProcessEnd {
+        match self.receiver.await {
+            Ok(end) => end,
+            Err(_) => ProcessEnd::NotCurrent,
+        }
+    }
+}
+
 /// The eight operations the story names, plus the per-step undo a failed provisioning needs.
 ///
 /// `async fn` in a trait, which is not object-safe: the crate never holds a `dyn SessionBackend`
@@ -270,6 +327,15 @@ pub trait SessionBackend {
 
     /// Record uncommitted work without touching the branch or the working tree.
     async fn snapshot(&self, session: &Session) -> Result<(), BackendError>;
+
+    /// Hand over the supervision of the agent process a successful pi step left running (HS-031).
+    ///
+    /// Called once, after [`Step::Pi`], by the provisioner — the one place that has both the database and
+    /// the events an exit's consequences need (ADR-0019). `None` means "this backend has no process to
+    /// supervise": the stub never starts one, and a Docker session whose launch never happened has nothing
+    /// to report. Answering `None` a second time for the same session is correct rather than a bug — an exit
+    /// happens once, and a second watcher would wait for a report that never comes.
+    async fn supervise(&self, session: &Session) -> Option<ExitWatcher>;
 }
 
 /// The backend this run uses.
@@ -394,6 +460,13 @@ impl SessionBackend for Backends {
             Self::Docker(backend) => backend.snapshot(session).await,
         }
     }
+
+    async fn supervise(&self, session: &Session) -> Option<ExitWatcher> {
+        match self {
+            Self::Stub(backend) => backend.supervise(session).await,
+            Self::Docker(backend) => backend.supervise(session).await,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -424,14 +497,16 @@ mod tests {
     #[test]
     fn a_for_run_backend_carries_the_word_it_was_chosen_by() {
         for (choice, word) in [(Backend::Stub, "stub"), (Backend::Docker, "docker")] {
-            let backend =
-                Backends::for_run(choice, ContainerSettings::at("/srv/holosmith/projects"));
+            let backend = Backends::for_run(
+                choice,
+                ContainerSettings::at("/srv/holosmith/projects", "/srv/holosmith/data"),
+            );
             assert_eq!(backend.as_str(), word);
         }
         assert_eq!(
             Backends::for_run(
                 Backend::default(),
-                ContainerSettings::at("/srv/holosmith/projects"),
+                ContainerSettings::at("/srv/holosmith/projects", "/srv/holosmith/data"),
             )
             .as_str(),
             "docker",

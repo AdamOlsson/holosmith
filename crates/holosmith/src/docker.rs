@@ -43,6 +43,18 @@ impl Docker {
         command
     }
 
+    /// One `docker` invocation as a value another module can spawn, with `-H` and the arguments set.
+    ///
+    /// For the one call in this build that is not "run it and read the answer": the agent's launch is
+    /// attached, so its stdio belongs to the caller for as long as the container lives (HS-031). Everything
+    /// else here stays synchronous and hands back a string; this hands back the program — which is why there
+    /// is no `run_container` beside `stop_container` any more.
+    pub fn command_line(&self, arguments: &[String]) -> Command {
+        let mut command = self.command();
+        command.args(arguments);
+        command
+    }
+
     /// Run `docker <arguments>` and answer its stdout, or an error carrying the first line it printed.
     ///
     /// The first line rather than all of it: Docker puts the actionable sentence first and then repeats
@@ -121,15 +133,6 @@ impl Docker {
         }
         self.run(&["stop", "--time", STOP_SECONDS, name])
             .map(|_| true)
-    }
-
-    /// Start a container from `arguments` (a [`crate::container::SessionContainer`]'s run vector).
-    ///
-    /// Answers the container's id, which is what `docker run` prints and what a log line wants; the name
-    /// is what everything else uses, because it is derived and therefore stable.
-    pub fn run_container(&self, arguments: &[String]) -> Result<String, DockerError> {
-        let borrowed: Vec<&str> = arguments.iter().map(String::as_str).collect();
-        self.run(&borrowed).map(|id| id.trim().to_string())
     }
 
     /// One `docker inspect` field, as Go's template syntax spells it — the seam the tests read flags

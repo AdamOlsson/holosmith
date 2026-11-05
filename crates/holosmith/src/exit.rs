@@ -117,7 +117,7 @@ fn tail(code: i32, stderr: &str) -> String {
 pub struct Exits {
     database: Arc<Mutex<Database>>,
     events: EventWriter,
-    data_root: PathBuf,
+    log: SessionLog,
 }
 
 impl Exits {
@@ -130,8 +130,31 @@ impl Exits {
         Self {
             database,
             events,
-            data_root: data_root.into(),
+            log: SessionLog::new(data_root),
         }
+    }
+
+    /// The classifier for the machine whose row database is `database`.
+    ///
+    /// The data root is the directory the database lives in: `serve` opens `<data>/app.db` and the config
+    /// refuses a `data_root` that is not absolute, so the parent *is* the machine's data root (ADR-0011).
+    /// That lets the provisioner build this from the two handles it already has instead of every wiring site
+    /// learning a third argument — and there is exactly one rule for where a session's files are.
+    pub fn for_database(database: Arc<Mutex<Database>>, events: EventWriter) -> Self {
+        let data_root = {
+            let database = database.lock().unwrap_or_else(PoisonError::into_inner);
+            database
+                .path()
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."))
+        };
+        Self::new(database, events, data_root)
+    }
+
+    /// The log this classifier writes into, for a caller that wants to append the launch line.
+    pub fn session_log(&self) -> SessionLog {
+        self.log.clone()
     }
 
     /// Classify how `session`'s container exited, and record what that means.
@@ -197,7 +220,53 @@ impl Exits {
     /// (HS-031 seeds the agent directory when it starts a container). A failure to write is a `warn` and
     /// nothing more: the row's reason is the durable half of this, and the log is the complete one.
     fn append_log(&self, session_id: &str, stderr: &str) {
-        if stderr.is_empty() {
+        self.log.append(session_id, stderr);
+    }
+
+    /// `<data>/sessions/<id>/session.log`, for a caller that reads what was recorded.
+    pub fn log_path(&self, session_id: &str) -> PathBuf {
+        self.log.path(session_id)
+    }
+
+    /// One state change through the one function that writes states (ADR-0016), with a failure logged:
+    /// the row is what happened, and the event is the report of it.
+    async fn transition(&self, session_id: &str, trigger: Trigger, reason: Option<&str>) {
+        Transitioner::new(Arc::clone(&self.database), self.events.clone())
+            .apply_logged(session_id, trigger, reason)
+            .await;
+    }
+}
+
+/// The session's log file as one value: `<data>/sessions/<id>/session.log`, append-only (HS-031).
+///
+/// Lifted out of [`Exits`] when HS-031 needed to write into it from somewhere that must not write a row:
+/// a backend may not touch the database (ADR-0019), but the *file* is the agent process's own stderr and
+/// the launch line the backend is the only thing that could describe. Two callers, one writer, and the
+/// path guard in one place.
+#[derive(Debug, Clone)]
+pub struct SessionLog {
+    data_root: PathBuf,
+}
+
+impl SessionLog {
+    /// The log of the machine whose data root is `data_root`.
+    pub fn new(data_root: impl Into<PathBuf>) -> Self {
+        Self {
+            data_root: data_root.into(),
+        }
+    }
+
+    /// `<data>/sessions/<id>/session.log`.
+    pub fn path(&self, session_id: &str) -> PathBuf {
+        session_dir(&self.data_root, session_id).join(LOG_FILE)
+    }
+
+    /// Append `text` to the session's log, ending it with a newline if it does not have one.
+    ///
+    /// A failure is a `warn`: a log that could not be written is a diagnosability problem, never a reason
+    /// to fail the thing that was being logged.
+    pub fn append(&self, session_id: &str, text: &str) {
+        if text.is_empty() {
             return;
         }
         // A guard, not a rule about ids: this is the one place in the crate that turns a string into a path
@@ -211,7 +280,7 @@ impl Exits {
             );
             return;
         }
-        let path = self.log_path(session_id);
+        let path = self.path(session_id);
         let written = (|| -> std::io::Result<()> {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -220,8 +289,8 @@ impl Exits {
                 .create(true)
                 .append(true)
                 .open(&path)?;
-            file.write_all(stderr.as_bytes())?;
-            if !stderr.ends_with('\n') {
+            file.write_all(text.as_bytes())?;
+            if !text.ends_with('\n') {
                 file.write_all(b"\n")?;
             }
             Ok(())
@@ -235,19 +304,6 @@ impl Exits {
                 "the session log could not be written"
             );
         }
-    }
-
-    /// `<data>/sessions/<id>/session.log`.
-    fn log_path(&self, session_id: &str) -> PathBuf {
-        session_dir(&self.data_root, session_id).join(LOG_FILE)
-    }
-
-    /// One state change through the one function that writes states (ADR-0016), with a failure logged:
-    /// the row is what happened, and the event is the report of it.
-    async fn transition(&self, session_id: &str, trigger: Trigger, reason: Option<&str>) {
-        Transitioner::new(Arc::clone(&self.database), self.events.clone())
-            .apply_logged(session_id, trigger, reason)
-            .await;
     }
 }
 

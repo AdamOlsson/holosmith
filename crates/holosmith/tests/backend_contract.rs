@@ -141,7 +141,10 @@ async fn the_docker_backend_passes_the_conformance_suite() {
     // HS-025/HS-028, and each names what it could not do when it fails (`tests/worktree.rs` and
     // `tests/container.rs` are where their effects are asserted).
     let dir = TempDir::new("contract-docker");
-    let docker = DockerBackend::new(ContainerSettings::at(dir.file("projects")));
+    let docker = DockerBackend::new(ContainerSettings::at(
+        dir.file("projects"),
+        dir.file("data"),
+    ));
     let session = session();
     let failures = Failures {
         any: docker.provision(&session, Step::Pi).await.map(|_| ()),

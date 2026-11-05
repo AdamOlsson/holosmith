@@ -54,14 +54,9 @@ pub const NAME_PREFIX: &str = "s_";
 /// The prefix of every session network: `agents_<id>` (spec item 2).
 pub const NETWORK_PREFIX: &str = "agents_";
 
-/// The command the container runs until HS-031 attaches the agent's stdio.
+/// The command the container runs is pi's RPC loop (HS-031, [`crate::agent::COMMAND`]); until HS-030 the
+/// container was detached on `sleep infinity`, and this constant is what replaced that placeholder.
 ///
-/// A placeholder, and it says so: from this story on the container exists, is mounted, is hardened and is
-/// limited, and nothing inside it is working yet — which is exactly what this build can truthfully claim.
-/// The image must have `sleep` (any POSIX system does). HS-031 replaces this with pi in RPC mode over the
-/// container's stdin, and the `--detach` above with an attached process.
-pub const IDLE_COMMAND: [&str; 2] = ["sleep", "infinity"];
-
 /// The name of a session's private network.
 pub fn network_name(session_id: &str) -> String {
     format!("{NETWORK_PREFIX}{session_id}")
@@ -120,10 +115,12 @@ impl Mount {
     }
 }
 
-/// The four mounts of spec item 1, in the order the spec lists them.
+/// The four mounts of spec item 1 and the agent directory of spec item 2, in the order the spec lists
+/// them.
 ///
-/// A struct rather than a `Vec<Mount>` so a caller cannot drop one: all four are the isolation, and three
-/// of them without the fourth is a weaker thing than the spec describes.
+/// A struct rather than a `Vec<Mount>` so a caller cannot drop one: all four git mounts are the isolation,
+/// and three of them without the fourth is a weaker thing than the spec describes. The fifth is HS-031's:
+/// pi's own directory, which is not an isolation rule but the place pi keeps its configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mounts {
     /// `<worktree>:/work`: the agent's files, writable, at a fresh path.
@@ -134,14 +131,22 @@ pub struct Mounts {
     pub hooks: Mount,
     /// `<project>/.git/config:<project>/.git/config:ro`: the same, by another route.
     pub config: Mount,
+    /// `<data>/sessions/<id>/pi-home` at its own path: pi's configuration, writable (spec item 2).
+    ///
+    /// Writable because pi writes into it (`auth.json`, `models-store.json` were both created by the first
+    /// launch this was measured with), and at its own path rather than the spec's illustrative
+    /// `/home/agent/.pi/agent` for the reason ADR-0035 gives about `--user`: the image decides its user, and
+    /// Docker creates a missing mount *destination* as a root-owned directory the image's own user cannot
+    /// write. `PI_CODING_AGENT_DIR` is the path's other half.
+    pub agent: Mount,
 }
 
 impl Mounts {
-    /// The mounts for the session `worktree` names.
+    /// The mounts for the session whose worktree is `worktree` and whose agent directory is `home`.
     ///
     /// The paths are the worktree's own ([`Worktree`]), so the naming rule lives in one place: this
     /// function derives nothing and decides nothing.
-    pub fn of(worktree: &Worktree) -> Self {
+    pub fn of(worktree: &Worktree, home: PathBuf) -> Self {
         let git_dir = worktree.repository.join(".git");
         Self {
             worktree: Mount {
@@ -168,18 +173,30 @@ impl Mounts {
                 read_only: true,
                 source: Source::File,
             },
+            agent: Mount {
+                host: home.clone(),
+                at: home,
+                read_only: false,
+                source: Source::Directory,
+            },
         }
     }
 
     /// Every mount, in the spec's order — the order they are passed to `docker run`, and the order a
     /// diagnostic lists them in.
-    pub fn all(&self) -> [&Mount; 4] {
-        [&self.worktree, &self.git_dir, &self.hooks, &self.config]
+    pub fn all(&self) -> [&Mount; 5] {
+        [
+            &self.worktree,
+            &self.git_dir,
+            &self.hooks,
+            &self.config,
+            &self.agent,
+        ]
     }
 
     /// The `-v` arguments, two per mount.
     pub fn arguments(&self) -> Vec<String> {
-        let mut arguments = Vec::with_capacity(8);
+        let mut arguments = Vec::with_capacity(10);
         for mount in self.all() {
             arguments.push("-v".to_string());
             arguments.push(mount.argument());
@@ -269,12 +286,19 @@ impl Default for Limits {
 /// The machine's container settings: everything a container needs that is not the session itself.
 ///
 /// One value so the backend takes one argument rather than seven, and so there is exactly one place that
-/// knows where the projects root, the image, the daemon's address and the limits come from
-/// ([`Self::of`]). Tests build one with [`Self::at`], which is the same value with the defaults.
+/// knows where the projects root, the data root, the image, the daemon's address, the limits and the agent's
+/// own environment come from ([`Self::of`]). Tests build one with [`Self::at`], which names both roots.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContainerSettings {
     /// The machine's projects root: `<projects>/.worktrees/<id>` and `<projects>/<project>` hang off it.
     pub projects_root: PathBuf,
+    /// The machine's data root: `<data>/sessions/<id>/pi-home` is the agent's directory (HS-031), which is
+    /// a mount source, and `<data>/sessions/<id>/session.log` is where the launch line goes.
+    ///
+    /// It has to be a path the **daemon** can see, because that directory is bind-mounted into the
+    /// container: a data root on a tmpfs the daemon does not share gives the agent an empty directory and no
+    /// error (the same fact ADR-0035 records for the projects root).
+    pub data_root: PathBuf,
     /// The image a container runs: `agent_image`.
     pub image: String,
     /// The daemon's address, as `docker -H` takes it; `None` is the CLI's own default.
@@ -283,12 +307,18 @@ pub struct ContainerSettings {
 }
 
 impl ContainerSettings {
-    /// The settings for a machine whose projects root is `projects_root`, everything else default.
+    /// The settings for a machine whose two roots are `projects_root` and `data_root`, everything else
+    /// default.
     ///
-    /// The defaults come from [`Config::default`] rather than from a second copy, so a test that builds a
-    /// machine this way is testing the same numbers a served one would use.
-    pub fn at(projects_root: impl Into<PathBuf>) -> Self {
-        Self::of(&Config::default()).with_projects_root(projects_root)
+    /// Both roots are arguments rather than defaults: the config's default data root is `/var/lib/holosmith`,
+    /// and a test that built a machine from the defaults would create a directory a real deployment owns.
+    /// The numbers come from [`Config::default`] rather than from a second copy, so a test that builds a
+    /// machine this way is testing the same limits a served one would use.
+    pub fn at(projects_root: impl Into<PathBuf>, data_root: impl Into<PathBuf>) -> Self {
+        let mut settings = Self::of(&Config::default());
+        settings.projects_root = projects_root.into();
+        settings.data_root = data_root.into();
+        settings
     }
 
     /// The same settings on another projects root, for a test that builds its own.
@@ -301,6 +331,7 @@ impl ContainerSettings {
     pub fn of(config: &Config) -> Self {
         Self {
             projects_root: config.projects_root.clone(),
+            data_root: config.data_root.clone(),
             image: config.agent_image.clone(),
             docker_host: config.docker_host.clone(),
             limits: Limits {
@@ -319,9 +350,10 @@ impl ContainerSettings {
 
 /// One session's container: the image it runs, the name it takes, and how it is mounted.
 ///
-/// HS-028 adds the lifecycle flags (`--rm`, `-i`, `--init`), the network and the limits; HS-036 makes the
-/// network real. This story's half is the mounts and the hardening, and it is one builder on purpose:
-/// a second place that spells `--cap-drop ALL` would be a place to forget it.
+/// HS-028 added the lifecycle flags (`--rm`, `-i`, `--init`), the network and the limits; HS-031 turns the
+/// container into the agent, so the run vector also carries pi's five environment variables and the
+/// command itself. This story's half is one builder on purpose: a second place that spells `--cap-drop ALL`
+/// or the launch command would be a place to forget it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionContainer {
     /// The image the container runs: `agent_image` (spec item 10 §3 builds it).
@@ -332,6 +364,12 @@ pub struct SessionContainer {
     pub session_id: String,
     /// `agents_<id>`: the private network this container joins, and the only one it joins (HS-028).
     pub network: String,
+    /// `<data>/sessions/<id>/pi-home`: pi's own directory, as `PI_CODING_AGENT_DIR` carries it (HS-031).
+    pub home: PathBuf,
+    /// The model the row chose, as `--model` carries it (HS-031).
+    pub model: String,
+    /// The thinking level the row chose, as `--thinking` carries it (HS-031).
+    pub thinking: String,
     pub mounts: Mounts,
     pub limits: Limits,
 }
@@ -341,23 +379,30 @@ impl SessionContainer {
     ///
     /// The mounts are derived from the session row's project and id, never read back from its
     /// `worktree` column: the naming rule has one home, and a row written by an older binary would
-    /// otherwise decide where the container's files are.
+    /// otherwise decide where the container's files are. The agent directory is the one mount the row
+    /// does not name at all: it is `<data>/sessions/<id>/pi-home` by construction ([`crate::agent::home`]).
     pub fn of(settings: &ContainerSettings, session: &Session) -> Self {
         let worktree = Worktree::of(&settings.projects_root, &session.project, &session.id);
+        let home = crate::agent::home(&settings.data_root, &session.id);
         Self {
             image: settings.image.clone(),
             name: format!("{NAME_PREFIX}{}", session.id),
             session_id: session.id.clone(),
             network: network_name(&session.id),
-            mounts: Mounts::of(&worktree),
+            home: home.clone(),
+            model: session.model.clone(),
+            thinking: session.thinking.clone(),
+            mounts: Mounts::of(&worktree, home),
             limits: settings.limits,
         }
     }
 
-    /// The `docker run` arguments, up to and including the image.
+    /// The `docker run` arguments, from `run` to the last of the agent's own arguments.
     ///
-    /// Everything before the image is a flag, so this is exactly the prefix HS-028 and HS-036 extend: the
-    /// image is the first non-flag argument, and whatever runs inside the container follows it.
+    /// Everything up to the image is a flag, so the image is the first non-flag argument and whatever runs
+    /// inside the container follows it. The vector is **attached** (`-i`, no `--detach`): the server holds
+    /// this process's stdin and stdout, which is pi's RPC channel, and its exit code, which is what
+    /// [`crate::exit`] classifies (HS-031, ADR-0036's "until HS-031").
     ///
     /// `--user` is deliberately absent. The image's own default user is what runs the agent, and the
     /// deploy step (HS-047) is what guarantees that user is the one that owns the host's files. Naming a
@@ -366,9 +411,9 @@ impl SessionContainer {
     pub fn run_args(&self) -> Vec<String> {
         let mut arguments = vec![
             "run".to_string(),
-            // `--detach` until HS-031: pi speaks RPC over the container's stdin, and an attached process
-            // with piped stdio is that story's change. Everything else in spec item 6's run line is here.
-            "--detach".to_string(),
+            // `-i` and not `-t`: stdin stays open for the RPC commands, and a terminal would wrap pi's
+            // JSONL in escape sequences and redraw it.
+            "-i".to_string(),
             // The two flags that make a stop leave nothing behind and a killed container not become a
             // zombie: `--rm` is spec item 6's, and `--init` puts a reaping init in as pid 1, so the
             // agent's own children are not the container's problem.
@@ -398,9 +443,25 @@ impl SessionContainer {
             "--pids-limit".to_string(),
             self.limits.pids.to_string(),
         ];
+        // pi's environment (spec item 2): its own directory, and the four switches that keep it from
+        // refreshing anything, checking for a release, sending telemetry, or sending a provider call
+        // through the egress proxy that is not there yet.
+        arguments.push("--env".to_string());
+        arguments.push(format!("PI_CODING_AGENT_DIR={}", self.home.display()));
+        for (name, value) in crate::agent::ENVIRONMENT {
+            arguments.push("--env".to_string());
+            arguments.push(format!("{name}={value}"));
+        }
         arguments.extend(self.mounts.arguments());
         arguments.push(self.image.clone());
-        arguments.extend(IDLE_COMMAND.map(str::to_string));
+        arguments.extend(crate::agent::COMMAND.map(str::to_string));
+        // The row's own two choices, as flags rather than only as the seeded settings file: measured in
+        // `pi-agent:local` with `PI_OFFLINE=1`, `get_state` answers `model.id: "unknown"` and
+        // `thinkingLevel: "off"` when neither is on the command line, and the real values when they are.
+        arguments.push("--model".to_string());
+        arguments.push(self.model.clone());
+        arguments.push("--thinking".to_string());
+        arguments.push(self.thinking.clone());
         arguments
     }
 }
@@ -433,6 +494,7 @@ mod tests {
     fn settings() -> ContainerSettings {
         ContainerSettings {
             projects_root: PathBuf::from("/srv/holosmith/projects"),
+            data_root: PathBuf::from("/var/lib/holosmith"),
             image: "agent-image:0.1.0".to_string(),
             docker_host: None,
             limits: Limits::default(),
@@ -443,8 +505,9 @@ mod tests {
         SessionContainer::of(&settings(), &session("holosmith", "0123456789abcdef"))
     }
 
+    /// The five mounts: spec item 1's four, then the agent's own directory (spec item 2).
     #[test]
-    fn the_four_mounts_are_the_specs_four_in_its_order() {
+    fn the_four_git_mounts_and_the_agent_directory_are_the_specs_five() {
         let mounts = container().mounts;
         let rendered: Vec<String> = mounts.all().iter().map(|mount| mount.argument()).collect();
         assert_eq!(
@@ -456,6 +519,8 @@ mod tests {
                  /srv/holosmith/projects/holosmith/.git/hooks:ro",
                 "/srv/holosmith/projects/holosmith/.git/config:\
                  /srv/holosmith/projects/holosmith/.git/config:ro",
+                "/var/lib/holosmith/sessions/0123456789abcdef/pi-home:\
+                 /var/lib/holosmith/sessions/0123456789abcdef/pi-home",
             ]
         );
     }
@@ -527,18 +592,69 @@ mod tests {
                 .unwrap_or_else(|| panic!("{flag} is missing from {arguments:?}"));
             assert_eq!(arguments[at + 1], value, "{flag}");
         }
+        assert!(
+            !arguments.iter().any(|argument| argument == "--user"),
+            "the image's own user runs the agent; naming a uid here would be a guessed second answer"
+        );
+    }
+
+    /// The container is attached and runs pi (HS-031): no `--detach`, one `-i`, and the agent's command.
+    #[test]
+    fn the_container_is_attached_and_runs_pi_in_rpc_mode() {
+        let container = container();
+        let arguments = container.run_args();
+        assert!(
+            arguments.contains(&"-i".to_string()),
+            "stdin stays open for the RPC commands: {arguments:?}"
+        );
+        assert!(
+            !arguments.contains(&"--detach".to_string()),
+            "a detached container has no stdio to talk to pi over: {arguments:?}"
+        );
         let image = arguments
             .iter()
             .position(|argument| argument == "agent-image:0.1.0")
             .expect("the image is in the run vector");
+        let launched = &arguments[image + 1..];
         assert_eq!(
-            &arguments[image + 1..],
-            IDLE_COMMAND,
-            "the image is followed by the placeholder command until HS-031 runs pi"
+            launched,
+            [
+                "pi",
+                "--mode",
+                "rpc",
+                "--no-session",
+                "--approve",
+                "--model",
+                "claude-sonnet-4.5",
+                "--thinking",
+                "high",
+            ],
+            "spec item 2's launch line, with the row's own model and thinking level"
         );
-        assert!(
-            !arguments.iter().any(|argument| argument == "--user"),
-            "the image's own user runs the agent; naming a uid here would be a guessed second answer"
+    }
+
+    /// The five launch variables of spec item 2: the agent's directory and the four switches.
+    #[test]
+    fn the_launch_environment_is_the_agent_directory_and_four_switches() {
+        let container = container();
+        let arguments = container.run_args();
+        let mut environment: Vec<String> = Vec::new();
+        for (index, argument) in arguments.iter().enumerate() {
+            if argument == "--env" {
+                environment.push(arguments[index + 1].clone());
+            }
+        }
+        assert_eq!(
+            environment,
+            [
+                "HS_SESSION_ID=0123456789abcdef".to_string(),
+                "PI_CODING_AGENT_DIR=/var/lib/holosmith/sessions/0123456789abcdef/pi-home"
+                    .to_string(),
+                "NO_PROXY=key-proxy".to_string(),
+                "PI_OFFLINE=1".to_string(),
+                "PI_SKIP_VERSION_CHECK=1".to_string(),
+                "PI_TELEMETRY=0".to_string(),
+            ]
         );
     }
 
@@ -546,11 +662,14 @@ mod tests {
     fn a_mount_whose_source_is_not_on_disk_is_reported_rather_than_created() {
         // `docker run -v` creates a missing source as a root-owned empty directory, so a projects root
         // that is not there would give the agent an empty `/work` and no error at all.
-        let mounts = Mounts::of(&Worktree::of(
-            Path::new("/nonexistent/projects"),
-            "holosmith",
-            "0123456789abcdef",
-        ));
+        let mounts = Mounts::of(
+            &Worktree::of(
+                Path::new("/nonexistent/projects"),
+                "holosmith",
+                "0123456789abcdef",
+            ),
+            PathBuf::from("/nonexistent/data/sessions/0123456789abcdef/pi-home"),
+        );
         let error = mounts
             .check()
             .expect_err("nothing is missing only if nothing exists");
@@ -564,6 +683,7 @@ mod tests {
             "/nonexistent/projects/holosmith/.git",
             "/nonexistent/projects/holosmith/.git/hooks",
             "/nonexistent/projects/holosmith/.git/config",
+            "/nonexistent/data/sessions/0123456789abcdef/pi-home",
         ] {
             assert!(
                 sentence.contains(&format!("{path} is not there")),
@@ -586,7 +706,12 @@ mod tests {
         // `.git` is right; the worktree directory is a file this time.
         std::fs::remove_dir_all(projects.join(".worktrees/0123456789abcdef")).expect("writable");
         std::fs::write(projects.join(".worktrees/0123456789abcdef"), "").expect("writable");
-        let mounts = Mounts::of(&Worktree::of(&projects, "holosmith", "0123456789abcdef"));
+        std::fs::create_dir_all(dir.join("data/sessions/0123456789abcdef/pi-home"))
+            .expect("writable");
+        let mounts = Mounts::of(
+            &Worktree::of(&projects, "holosmith", "0123456789abcdef"),
+            dir.join("data/sessions/0123456789abcdef/pi-home"),
+        );
         let error = mounts
             .check()
             .expect_err("a file where a directory belongs");

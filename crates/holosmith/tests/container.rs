@@ -197,6 +197,9 @@ fn session(id: &str) -> Session {
 fn settings(projects_root: &Path) -> ContainerSettings {
     ContainerSettings {
         projects_root: projects_root.to_path_buf(),
+        // The agent's directory is `<data>/sessions/<id>/pi-home` and it is a mount source, so the daemon
+        // has to be able to see it: the scratch root is under `target/` for that reason (ADR-0035).
+        data_root: projects_root.join("data"),
         image: image(),
         docker_host: None,
         limits: Limits::default(),
@@ -265,12 +268,16 @@ fn v1_holds_the_hardened_git_mounts_answer_the_way_spec_item_one_says() {
     let container = container(&scratch.path, ID_V1);
     let mounts = container.mounts.clone();
 
-    // The mount check the container step asks before it creates anything: all four sources are there, of
+    // The agent's directory is a mount source since HS-031, and the container step is what makes it; V1
+    // never provisions, so it makes it here.
+    std::fs::create_dir_all(&mounts.agent.host).expect("the agent directory is creatable");
+
+    // The mount check the container step asks before it creates anything: all five sources are there, of
     // the kind their mount needs, because `docker run -v` would create a missing one as an empty
     // directory and mount nothing.
     mounts
         .check()
-        .expect("the four mount sources exist on a real worktree");
+        .expect("the five mount sources exist on a real worktree");
     assert_eq!(mounts.config.source, Source::File);
     let config_before =
         std::fs::read_to_string(&mounts.config.host).expect("the config is readable");
@@ -428,6 +435,7 @@ fn the_container_step_runs_a_limited_container_with_no_way_out() {
     scratch.project();
     let settings = ContainerSettings {
         projects_root: scratch.path.clone(),
+        data_root: scratch.path.join("data"),
         image: image(),
         docker_host: None,
         limits: TEST_LIMITS,
@@ -441,10 +449,7 @@ fn the_container_step_runs_a_limited_container_with_no_way_out() {
 
     // The two steps, through the real backend: the network first (a container cannot join one that is not
     // there), then the container. Both are the shipped implementation, not a copy of its arguments.
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("a runtime is buildable");
+    let runtime = runtime();
     runtime.block_on(async {
         assert_eq!(
             backend
@@ -462,6 +467,10 @@ fn the_container_step_runs_a_limited_container_with_no_way_out() {
         );
     });
     assert_eq!(container.network, network_name(ID_RUN));
+    assert!(
+        wait_running(&docker, &container.name),
+        "the container the step launched never came up"
+    );
 
     // Everything spec item 6 and HS-028's acceptance name, read out of `docker inspect` — the only place a
     // running container's real configuration is visible.
@@ -523,8 +532,8 @@ fn the_container_step_runs_a_limited_container_with_no_way_out() {
     );
     assert_eq!(
         field("{{len .HostConfig.Binds}}"),
-        "4",
-        "the mounts are not the four: {binds}"
+        "5",
+        "the mounts are not the four and the agent directory: {binds}"
     );
     assert_ne!(field("{{.HostConfig.NetworkMode}}"), "host");
     assert_eq!(
@@ -565,6 +574,11 @@ fn the_container_step_runs_a_limited_container_with_no_way_out() {
 }
 
 /// A runtime for the tests that drive the backend's `async` methods.
+///
+/// Every test holds **one** for its whole body, and that is not tidiness: since HS-031 the container step
+/// spawns the agent and the tasks that read its pipes, so the container lives exactly as long as the
+/// runtime that launched it. A per-call runtime dropped the agent (and with it the container, through
+/// `--rm`) the moment the step returned — measured: `docker inspect` then said "no such object".
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
@@ -573,9 +587,14 @@ fn runtime() -> tokio::runtime::Runtime {
         .expect("a runtime is buildable")
 }
 
-/// A started session: worktree, network and container, through the real backend.
-fn start(backend: &DockerBackend, session: &Session) {
-    runtime().block_on(async {
+/// A started session: network and container through the real backend, and the container is up.
+///
+/// `start` waits for the container rather than returning when the step does: since HS-031 the container
+/// step *spawns* the attached `docker run` and returns, and the daemon creates the container a moment later
+/// (measured here at several seconds — far longer than the step). A test that inspected straight after the
+/// step read "no such object" and called it a bug in the backend.
+fn start(runtime: &tokio::runtime::Runtime, backend: &DockerBackend, session: &Session) {
+    runtime.block_on(async {
         backend
             .provision(session, Step::Network)
             .await
@@ -585,6 +604,28 @@ fn start(backend: &DockerBackend, session: &Session) {
             .await
             .expect("the container step works");
     });
+    let docker = Docker::new(None);
+    assert!(
+        wait_running(&docker, &format!("s_{}", session.id)),
+        "the container the step launched never came up"
+    );
+}
+
+/// Wait until a container of this name is running, up to thirty seconds.
+///
+/// The bound is generous on purpose: the daemon creates the container after `docker run` has answered the
+/// CLI's request, and on a loaded machine that has been measured at several seconds.
+fn wait_running(docker: &Docker, name: &str) -> bool {
+    for _ in 0..600 {
+        if docker
+            .inspect(name, "{{.State.Status}}")
+            .is_ok_and(|status| status == "running")
+        {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
 }
 
 /// Wait for a container to be gone, up to two seconds.
@@ -626,6 +667,7 @@ fn a_second_start_never_fails_on_a_leftover_name() {
     if !ready() {
         return;
     }
+    let runtime = runtime();
     let scratch = Scratch::new("start", ID_START);
     scratch.project();
     let settings = settings(&scratch.path);
@@ -636,7 +678,7 @@ fn a_second_start_never_fails_on_a_leftover_name() {
     rm_container(&container.name);
     docker.remove_network(&container.network);
 
-    start(&backend, &session);
+    start(&runtime, &backend, &session);
     let first = docker
         .inspect(&container.name, "{{.Id}}")
         .expect("the first container");
@@ -650,7 +692,7 @@ fn a_second_start_never_fails_on_a_leftover_name() {
     // Stop it: `--rm` makes the daemon remove it — but not before `docker stop` returns. Measured here: the
     // removal is the daemon's own work after the process has exited, so it lands a moment later. That window
     // is exactly why the spec asks for `rm -f` before every start rather than trusting the flag.
-    runtime().block_on(async {
+    runtime.block_on(async {
         backend.stop(&session).await.expect("a stop works");
     });
     assert!(
@@ -659,7 +701,7 @@ fn a_second_start_never_fails_on_a_leftover_name() {
     );
 
     // …and a start after that — the "leftover" case the spec's `rm -f` is for — succeeds.
-    start(&backend, &session);
+    start(&runtime, &backend, &session);
     let second = docker
         .inspect(&container.name, "{{.Id}}")
         .expect("the second container");
@@ -675,15 +717,32 @@ fn a_second_start_never_fails_on_a_leftover_name() {
     // know it is there. Plant one under the name and start anyway — after waiting out the `--rm` removal the
     // stop above started, or the plant itself races it (the review of this story caught the second stop
     // here with no wait, one line after the first one had one).
-    runtime().block_on(async {
+    runtime.block_on(async {
         backend.stop(&session).await.expect("a stop works");
     });
     assert!(
         wait_gone(&docker, &container.name),
         "the stop before the plant left the container behind for two seconds"
     );
+    // A container this process cannot stop, because it does not know it is there: the run vector with
+    // `--detach` and a command that stays alive, which is what a leftover from a crashed server looks like.
+    let mut planted = container.run_args();
+    planted.remove(
+        planted
+            .iter()
+            .position(|a| a == "-i")
+            .expect("-i is in the vector"),
+    );
+    planted.insert(1, "--detach".to_string());
+    let image_at = planted
+        .iter()
+        .position(|argument| argument == &container.image)
+        .expect("the vector names its image");
+    planted.truncate(image_at + 1);
+    planted.push("sleep".to_string());
+    planted.push("30".to_string());
     let output = Command::new("docker")
-        .args(container.run_args())
+        .args(&planted)
         .output()
         .expect("docker runs");
     assert!(
@@ -698,7 +757,7 @@ fn a_second_start_never_fails_on_a_leftover_name() {
         String::from_utf8_lossy(&output.stdout).trim(),
         "the planted container is not the one under the name"
     );
-    start(&backend, &session);
+    start(&runtime, &backend, &session);
     assert_ne!(
         docker
             .inspect(&container.name, "{{.Id}}")
@@ -707,7 +766,7 @@ fn a_second_start_never_fails_on_a_leftover_name() {
         "the start did not replace the leftover container"
     );
 
-    runtime().block_on(async {
+    runtime.block_on(async {
         backend.delete(&session).await.expect("the teardown works");
     });
 }
@@ -720,6 +779,7 @@ fn removing_the_container_loses_nothing_the_worktree_holds() {
     if !ready() {
         return;
     }
+    let runtime = runtime();
     let scratch = Scratch::new("resume", ID_RESUME);
     scratch.project();
     let settings = settings(&scratch.path);
@@ -730,7 +790,7 @@ fn removing_the_container_loses_nothing_the_worktree_holds() {
     rm_container(&container.name);
     docker.remove_network(&container.network);
 
-    start(&backend, &session);
+    start(&runtime, &backend, &session);
     exec(
         &container.name,
         "cd /work && echo written-by-the-container > from-container.txt && \
@@ -740,7 +800,7 @@ fn removing_the_container_loses_nothing_the_worktree_holds() {
     let head = exec(&container.name, &format!("git rev-parse agent/{ID_RESUME}"));
 
     // The container goes away entirely — stopped, then removed — and comes back.
-    runtime().block_on(async {
+    runtime.block_on(async {
         backend.stop(&session).await.expect("a stop works");
     });
     assert!(
@@ -752,9 +812,13 @@ fn removing_the_container_loses_nothing_the_worktree_holds() {
         "the removal is idempotent"
     );
 
-    runtime().block_on(async {
+    runtime.block_on(async {
         backend.resume(&session).await.expect("a resume works");
     });
+    assert!(
+        wait_running(&docker, &container.name),
+        "the resume's container never came up"
+    );
     assert_eq!(
         docker
             .inspect(&container.name, "{{.State.Status}}")
@@ -782,7 +846,7 @@ fn removing_the_container_loses_nothing_the_worktree_holds() {
         "the file the container wrote is not on the host"
     );
 
-    runtime().block_on(async {
+    runtime.block_on(async {
         backend.delete(&session).await.expect("the teardown works");
     });
 }
@@ -825,6 +889,10 @@ async fn two_starts_of_one_session_do_not_race() {
         }
     }
     assert!(failures.is_empty(), "a start raced another: {failures:?}");
+    assert!(
+        wait_running(&docker, &container.name),
+        "no container came up after eight concurrent starts"
+    );
     assert_eq!(
         docker
             .inspect(&container.name, "{{.State.Status}}")
