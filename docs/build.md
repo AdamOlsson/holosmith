@@ -168,8 +168,8 @@ session is still `starting` — live and not evictable — and asserts the `409 
 the sentence that says nothing was idle), and exit classification (`case_exit_classification`, which
 evicts a session of its own and reads the victim's `expected_stop` out of `app.db` with `python3`'s
 `sqlite3` — no client is sent the flag, ADR-0038 — then resumes that session and asserts the new
-container cleared it; the container's *exit*, which is the other half of the story, has no observer
-until HS-031 attaches pi's stdio), the prompt's turn coalesced (`case_event_coalescing`, which
+container cleared it; the container's *exit* is `case_agent_launch`'s other half, below), the prompt's
+turn coalesced (`case_event_coalescing`, which
 makes its own session, prompts it, and asserts the replay holds no more delta rows than the script's
 frames, one message id and the script's first and last sentences in order — the merge itself cannot be
 shown here, because the stub paces eight commit windows apart; see ADR-0031), and compaction
@@ -198,11 +198,18 @@ session row afterwards and no `.worktrees` directory), and the hardened mounts (
 which needs no server at all: it builds a real repository and worktree under `target/`, runs one real
 container with the spec's four mounts and `--cap-drop ALL`, and asserts the three writes fail on the host
 as well as in the container, the three git commands work, the process is not root and neither `mount
--o remount,rw /` nor `umount /work` is allowed — V1, see ADR-0035), and the container (`case_docker_container`, which boots a Docker run over a real
-repository and asserts that the row ends `error` at the **agent** step — so the network and the container
-steps both reached a real daemon — and that no container, no network and no worktree are left behind; the
-flags themselves are `docker inspect`'s, which only `tests/container.rs` can read, because the provisioner
-takes the container back when the agent step fails, exactly as ADR-0015 says; see ADR-0036). A case that
+-o remount,rw /` nor `umount /work` is allowed — V1, see ADR-0035), the agent (`case_agent_launch`, which
+boots a Docker run over a real repository **and a data root under `target/`** — the agent's directory is a
+mount source, so the daemon has to see the data root too, ADR-0039 — creates a session, waits for `idle`
+(pi answered a `get_state`), and asserts the seeded `<data>/sessions/<id>/pi-home/settings.json`, the launch
+line in `session.log`, `docker inspect`'s command and environment, and that the row's `worktree` is
+recorded; then it removes the container out from under the server and asserts the row becomes `error`
+with a reason — spec item 6's third row, observed by the attached stdio HS-030 had no observer for — and
+last that a `DELETE ?force=true` takes the row, the log, the worktree and the session's own directory;
+see ADR-0039), and the resume over a live agent (`case_docker_resume`, which creates a session, waits for
+`idle`, removes its container, waits for `error`, `POST /resume`s, and asserts the row reaches `idle`
+again with a running container over the same worktree, then deletes its own session so the run's cap is
+left as it found it; see ADR-0037/ADR-0039). A case that
 must assert
 one code keeps every higher guard check correct, or it asserts another guard's code under its own
 name.
@@ -367,9 +374,9 @@ fallback is not in use. The image is the config key `agent_image` (default `agen
 `--user` is deliberately not passed: the image's own user must be non-root, which the V1 checks assert
 rather than a guessed uid that would hand the agent's files to somebody the host does not own.
 
-**One container per session, detached, limited and on a network of its own** (HS-028, ADR-0036): a
-`docker run --detach --rm --init --name s_<id> --network agents_<id> --cap-drop ALL --security-opt
-no-new-privileges --workdir /work --cpus … --memory …m --pids-limit …` with the four mounts and
+**One container per session, limited and on a network of its own** (HS-028, ADR-0036): a
+`docker run -i --rm --init --name s_<id> --network agents_<id> --cap-drop ALL --security-opt
+no-new-privileges --workdir /work --cpus … --memory …m --pids-limit …` with the five mounts and
 `-e HS_SESSION_ID=<id>`. The network is `docker network create --internal agents_<id>`; `--internal` is the
 isolation, and it is why the container can reach nothing but its own network. Three keys bound it, all
 integers because a config value has no decimal and Docker reads `0` as *unlimited*, so all three refuse
@@ -381,9 +388,27 @@ zero:
 | `container_memory_mb` | 4096 | `--memory <n>m` |
 | `container_pids` | 512 | `--pids-limit` |
 
-Until HS-031 attaches pi's stdio the container runs `sleep infinity` (the placeholder is
-`container::IDLE_COMMAND`), which is what lets `docker inspect` show the flags before there is an agent to
-run in them.
+Since HS-031 the container **is the agent**: `run` is attached (`-i`, never `--detach`) and ends with
+`pi --mode rpc --no-session --approve --model <row> --thinking <row>`, with `PI_CODING_AGENT_DIR` pointing
+at `<data>/sessions/<id>/pi-home` (a fifth mount, at its own host path) and the four switches that keep pi
+off the network: `NO_PROXY=key-proxy`, `PI_OFFLINE=1`, `PI_SKIP_VERSION_CHECK=1`, `PI_TELEMETRY=0`. The
+server holds that process's stdio — its stdout is pi's JSONL, its stdin takes commands, and its exit code
+and stderr are what `exit::Exits` classifies. "Ready" is a protocol fact: a `get_state` command and the
+`response` record that repeats its `id`, under `READY_TIMEOUT` (30 s); the version assertion is
+`docker run --rm --network none --entrypoint pi <image> --version` against `pins/pi.txt`, asked once per
+process; and `agent::launch_line` writes one line into `session.log` before the process starts. See
+ADR-0039.
+
+Three things bite here:
+
+- **A mount's source has to exist before the container step**, so the agent directory is made and seeded
+  first — and it lives under the **data root**, so a Docker session's data root must be a path the daemon
+  can see, exactly as the projects root already had to be (ADR-0035).
+- **The container appears seconds after the step returns.** The step's success means the process was
+  spawned, not that the container is up; anything that inspects one waits for it (`tests/*`'s
+  `wait_running`), and the gate's case waits for the row to say `idle`, which is after pi answered.
+- **A killed docker CLI does not stop its container.** The container outlives a crashed server, which is
+  HS-044's reconcile; the next start's `rm -f` is what makes it boring in the meantime.
 
 **Every start is `docker rm -f s_<id>` then `docker run`** (HS-029, ADR-0037), and the two are serialised
 per session, because two starts interleaved produce "the container name is already in use" — which is one

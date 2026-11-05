@@ -327,7 +327,7 @@ serve_cases=(
   case_docker_preflight
   case_worktree_refusal
   case_container_mounts
-  case_docker_container
+  case_agent_launch
   case_docker_resume
 )
 
@@ -457,12 +457,28 @@ case_container_mounts() {
 #
 # Its projects root lives under `target/` because the daemon resolves bind-mount sources in the host's
 # namespace and `$WORK` is on `/tmp` (ADR-0035's measurement).
-case_docker_container() {
-  local name=case_docker_container status=0 response body id image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
-  local root="$repo_root/target/verify-docker-$$" projects="$repo_root/target/verify-docker-$$/projects"
-  local repo="$repo_root/target/verify-docker-$$/projects/holosmith"
+# HS-031's proof from the artifact: a Docker boot runs the session's network, its container **and the
+# agent**, so a create reaches `idle` and the container is pi in RPC mode with the session's own agent
+# directory mounted into it. Then the container is removed from under the server, and the exit the attached
+# stdio observed is classified: the row is `error` with the last of what pi printed, exactly spec item 6's
+# third row.
+#
+# The container's flags are `tests/container.rs`'s (the API cannot show them, and `docker inspect` is the only
+# place a running container's real configuration is visible). What this case adds is the *artifact's* half:
+# the four provisioning steps end in `idle`, the launch line and the seed are on disk where the data root
+# says, and the delete takes all of it away.
+#
+# Its projects root **and its data root** live under `target/` because the daemon resolves bind-mount
+# sources in the host's namespace and `$WORK` is on `/tmp` (ADR-0035): since HS-031 a data root the daemon
+# cannot see would mount an empty agent directory and fail the handshake, silently.
+case_agent_launch() {
+  local name=case_agent_launch body id image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
+  local root="$repo_root/target/verify-agent-$$" projects="$repo_root/target/verify-agent-$$/projects"
+  local repo="$repo_root/target/verify-agent-$$/projects/holosmith"
+  local data="$repo_root/target/verify-agent-$$/data"
+  local home log
   if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
-    printf 'SKIP %s: no Docker daemon answers (tests/container.rs is the same check)\n' "$name"
+    printf 'SKIP %s: no Docker daemon answers (tests/agent.rs is the same check)\n' "$name"
     return 0
   fi
   if ! docker image inspect "$image" >/dev/null 2>&1; then
@@ -475,26 +491,26 @@ case_docker_container() {
   git -C "$repo" init --quiet . || fail "$name/git" "git init did not work in $repo"
   git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet \
     --allow-empty -m "the first commit" || fail "$name/git" "git commit did not work in $repo"
-  # The limits and the image are keys, so the boot proves the config carries them into a real `docker run`;
-  # `idle_stop_min = 0` because this boot lasts a second and a sweeper would only be noise.
-  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\nagent_image = "%s"\ncontainer_cpus = 1\ncontainer_memory_mb = 256\ncontainer_pids = 64\nmin_free_gb = 1\nidle_stop_min = 0\n' \
-    "$owner" "$projects" "$image" >"$WORK/config-container.toml"
-  start_serve "$WORK/config-container.toml" "$WORK/data-container"
+  # The image is a key, and so is every limit, so the boot proves the config carries them into a real `docker
+  # run`. `idle_stop_min = 0` because this boot lasts seconds and a sweeper would only be noise.
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\nagent_image = "%s"\ncontainer_cpus = 1\ncontainer_memory_mb = 512\ncontainer_pids = 128\nmin_free_gb = 1\nidle_stop_min = 0\n' \
+    "$owner" "$projects" "$image" >"$WORK/config-agent.toml"
+  start_serve "$WORK/config-agent.toml" "$data"
 
   fetch_body "${name}_create" POST /api/sessions \
     '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
     "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
-    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-container-1" ||
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-agent-1" ||
     fail "${name}_create/no_answer" "POST /api/sessions did not answer"
   expect_status "${name}_create" "$(answer "${name}_create")" 202
   body="$(cat "$WORK/responses/${name}_create.body")"
   id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
   [ -n "$id" ] || fail "${name}_create/id" "the response names no id: $body"
 
-  # The row is what the wait is on: the network and container steps go to a real daemon, so they take as
-  # long as `docker run` takes.
+  # The row is the wait: four steps against a real daemon, the last of them a container start plus pi's
+  # handshake. `idle` is the story's demo — pi answered, so the session can take a prompt.
   body=""
-  for _ in $(seq 1 300); do
+  for _ in $(seq 1 900); do
     fetch "${name}_row" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
       fail "${name}_row/no_answer" "GET /api/sessions/$id did not answer"
     body="$(cat "$WORK/responses/${name}_row.body")"
@@ -504,54 +520,117 @@ case_docker_container() {
     esac
   done
   expect_status "${name}_row" "$(answer "${name}_row")" 200
-  printf '%s\n' "$body" | grep -qF '"status":"error"' ||
-    fail "${name}_row/status" "the session did not end error: $body"
-  assertions=$((assertions + 1))
-  # The pi step: proof that the two steps before it succeeded against a real daemon.
-  printf '%s\n' "$body" | grep -qF 'the pi step' ||
-    fail "${name}_row/reason" "the failure is not the agent step's: $body"
-  assertions=$((assertions + 1))
-  printf '%s\n' "$body" | grep -qF 'HS-031' ||
-    fail "${name}_row/story" "the reason does not name the story that fills the agent step: $body"
+  printf '%s\n' "$body" | grep -qF '"status":"idle"' ||
+    fail "${name}_row/status" "the session did not become idle: $body"
   assertions=$((assertions + 1))
   printf '%s\n' "$body" | grep -qF "\"worktree\":\"$projects/.worktrees/$id\"" ||
     fail "${name}_row/worktree" "the row does not record the worktree path: $body"
   assertions=$((assertions + 1))
 
-  # Nothing left behind: the container, its network and the worktree are all gone, and the registration is
-  # back to the repository alone.
+  # The agent's own directory, seeded from the template with the row's two preferences (spec item 2).
+  home="$data/sessions/$id/pi-home"
+  log="$data/sessions/$id/session.log"
+  [ -f "$home/settings.json" ] ||
+    fail "${name}/seed" "the agent directory was not seeded at $home"
+  assertions=$((assertions + 1))
+  grep -qF 'claude-sonnet-4.5' "$home/settings.json" ||
+    fail "${name}/seed_model" "the seed does not carry the row's model: $(cat "$home/settings.json")"
+  assertions=$((assertions + 1))
+  grep -qF 'high' "$home/settings.json" ||
+    fail "${name}/seed_thinking" "the seed does not carry the row's thinking level"
+  assertions=$((assertions + 1))
+  # The launch line, so a failed launch is diagnosable from the data root.
+  [ -f "$log" ] || fail "${name}/log" "there is no session.log at $log"
+  grep -qF "launched $image" "$log" ||
+    fail "${name}/launch_line" "the launch line is missing or does not name the image: $(cat "$log")"
+  assertions=$((assertions + 1))
+  grep -qF 'project trust approved' "$log" ||
+    fail "${name}/trust" "the launch line does not record the trust decision: $(cat "$log")"
+  assertions=$((assertions + 1))
+
+  # The container really is pi, attached, with the session's agent directory in its environment.
+  docker inspect --format '{{.State.Running}}' "s_$id" 2>/dev/null | grep -qx true ||
+    fail "${name}/container" "the session's container is not running"
+  assertions=$((assertions + 1))
+  docker inspect --format '{{json .Config.Cmd}}' "s_$id" 2>/dev/null | grep -qF '"--mode"' ||
+    fail "${name}/cmd" "the container is not running pi in RPC mode"
+  assertions=$((assertions + 1))
+  docker inspect --format '{{json .Config.Env}}' "s_$id" 2>/dev/null |
+    grep -qF "PI_CODING_AGENT_DIR=$home" ||
+    fail "${name}/env" "the agent directory is not in the container's environment"
+  assertions=$((assertions + 1))
+
+  # The exit classifier's third row, from the artifact: removing the container out from under the server ends
+  # the attached process, and the row becomes `error` with what pi printed.
+  docker rm --force "s_$id" >/dev/null 2>&1 || true
+  body=""
+  for _ in $(seq 1 300); do
+    fetch "${name}_crashed" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "${name}_crashed/no_answer" "GET /api/sessions/$id did not answer"
+    body="$(cat "$WORK/responses/${name}_crashed.body")"
+    case "$body" in
+      *'"status":"error"'*) break ;;
+    esac
+    sleep 0.1
+  done
+  printf '%s\n' "$body" | grep -qF '"status":"error"' ||
+    fail "${name}_crashed/status" "the removed container did not leave an error row: $body"
+  assertions=$((assertions + 1))
+  printf '%s\n' "$body" | grep -qF '"reason":null' &&
+    fail "${name}_crashed/reason" "the crash recorded no reason: $body"
+  assertions=$((assertions + 1))
+
+  # The delete takes the row, the event log, the worktree and the session's own directory.
+  fetch "${name}_delete" DELETE "/api/sessions/$id?force=true" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_delete/no_answer" "DELETE did not answer"
+  expect_status "${name}_delete" "$(answer "${name}_delete")" 202
+  # The removal is a background task (the 202 promised it), so the row is polled for its 404 rather than
+  # asserted once: a `deleting` row answers 200 and is not a failure.
+  local gone=""
+  for _ in $(seq 1 300); do
+    fetch "${name}_gone" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "${name}_gone/no_answer" "GET /api/sessions/$id did not answer"
+    gone="$(answer "${name}_gone" | sed -n '1s/^HTTP\/1\.[01] \([0-9][0-9][0-9]\).*/\1/p')"
+    [ "$gone" = "404" ] && break
+    sleep 0.1
+  done
+  check "${name}_gone/status" "404" "$gone"
   if docker container inspect "s_$id" >/dev/null 2>&1; then
-    fail "${name}/container_left" "the failed session left its container behind"
+    fail "${name}/container_left" "the delete left the container behind"
   fi
   assertions=$((assertions + 1))
   if docker network inspect "agents_$id" >/dev/null 2>&1; then
-    fail "${name}/network_left" "the failed session left its network behind"
+    fail "${name}/network_left" "the delete left the network behind"
   fi
   assertions=$((assertions + 1))
   [ ! -d "$projects/.worktrees/$id" ] ||
-    fail "${name}/worktree_left" "the failed session left its worktree at $projects/.worktrees/$id"
+    fail "${name}/worktree_left" "the delete left the worktree at $projects/.worktrees/$id"
+  assertions=$((assertions + 1))
+  [ ! -d "$data/sessions/$id" ] ||
+    fail "${name}/session_dir_left" "the delete left the session's own directory at $data/sessions/$id"
   assertions=$((assertions + 1))
   check "$name/registrations" "1" \
     "$(git -C "$repo" worktree list --porcelain | grep -c '^worktree ' || true)"
 
-  # Its server is left running: `phase_serve` stops whatever is up after the last case, and a case that
-  # stopped its own would leave that call with no pid to signal (HS-027's review found this shape in
-  # `case_worktree`'s python guard).
+  # Its server is left running: `phase_serve` stops whatever is up after the last case.
   rm -rf "$root"
 }
 
-# HS-029's proof from the artifact: a session can be resumed, and the resume replaces whatever container the
-# first create left. The API has no `stop` (ADR-0022), so the observable sequence is create → error at the
-# agent step → `POST /resume` → 202 → error at the agent step again, with nothing left behind either time.
+# HS-029's proof from the artifact, now over a live agent: a session reaches `idle`, the container dies from
+# under it (the row is `error`, the exit classified), and `POST /resume` brings it back to `idle` with the same
+# worktree and a new container. The resume's container step is the path that clears the expected-stop flag
+# (HS-030) and the launch that replaces an exit nobody is waiting for (HS-031).
 #
-# Its projects root lives under `target/` for the same reason `case_docker_container`'s does: the daemon
-# resolves bind-mount sources in the host's namespace and `$WORK` is on `/tmp` (ADR-0035).
+# Its projects root and data root live under `target/` for `case_agent_launch`'s reason.
 case_docker_resume() {
-  local name=case_docker_resume response body id image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
+  local name=case_docker_resume body id image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
   local root="$repo_root/target/verify-resume-$$" projects="$repo_root/target/verify-resume-$$/projects"
   local repo="$repo_root/target/verify-resume-$$/projects/holosmith"
+  local data="$repo_root/target/verify-resume-$$/data"
   if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
-    printf 'SKIP %s: no Docker daemon answers (tests/container.rs is the same check)\n' "$name"
+    printf 'SKIP %s: no Docker daemon answers (tests/agent.rs is the same check)\n' "$name"
     return 0
   fi
   if ! docker image inspect "$image" >/dev/null 2>&1; then
@@ -565,23 +644,21 @@ case_docker_resume() {
   git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet \
     --allow-empty -m "the first commit" || fail "$name/git" "git commit did not work in $repo"
   printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\nagent_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
-    "$owner" "$projects" "$image" >"$WORK/config-resume.toml"
-  start_serve "$WORK/config-resume.toml" "$WORK/data-resume"
+    "$owner" "$projects" "$image" >"$WORK/config-resume-agent.toml"
+  start_serve "$WORK/config-resume-agent.toml" "$data"
 
   fetch_body "${name}_create" POST /api/sessions \
     '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
     "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
-    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-resume-1" ||
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-resume-agent-1" ||
     fail "${name}_create/no_answer" "POST /api/sessions did not answer"
   expect_status "${name}_create" "$(answer "${name}_create")" 202
   body="$(cat "$WORK/responses/${name}_create.body")"
   id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
   [ -n "$id" ] || fail "${name}_create/id" "the response names no id: $body"
 
-  # Wait for the first provisioning attempt to finish: its teardown is what makes a leftover impossible, and
-  # the resume is what must work anyway.
   body=""
-  for _ in $(seq 1 300); do
+  for _ in $(seq 1 900); do
     fetch "${name}_row1" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
       fail "${name}_row1/no_answer" "GET /api/sessions/$id did not answer"
     body="$(cat "$WORK/responses/${name}_row1.body")"
@@ -590,45 +667,62 @@ case_docker_resume() {
       *) break ;;
     esac
   done
-  printf '%s\n' "$body" | grep -qF 'the pi step' ||
-    fail "${name}_row1/reason" "the first attempt did not reach the agent step: $body"
+  printf '%s\n' "$body" | grep -qF '"status":"idle"' ||
+    fail "${name}_row1/status" "the first attempt did not reach idle: $body"
   assertions=$((assertions + 1))
 
-  # A resume of an `error` session: 202, then `starting`, then the agent step again — which means the
-  # network and container steps ran a second time over a session whose container the first attempt removed.
-  fetch_body "${name}_resume" POST "/api/sessions/$id/resume" '' \
-    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
-    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
-    fail "${name}_resume/no_answer" "POST /api/sessions/$id/resume did not answer"
-  expect_status "${name}_resume" "$(answer "${name}_resume")" 202
-
+  # The container dies from under the server: the attached process ends, and the classifier records an
+  # `error` (spec item 6's third row) — which is what makes the resume below a real one.
+  docker rm --force "s_$id" >/dev/null 2>&1 || true
   body=""
   for _ in $(seq 1 300); do
     fetch "${name}_row2" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
       fail "${name}_row2/no_answer" "GET /api/sessions/$id did not answer"
     body="$(cat "$WORK/responses/${name}_row2.body")"
     case "$body" in
-      *'"status":"starting"'*) sleep 0.1 ;;
       *'"status":"error"'*) break ;;
+    esac
+    sleep 0.1
+  done
+  printf '%s\n' "$body" | grep -qF '"status":"error"' ||
+    fail "${name}_row2/status" "the removed container did not leave an error row: $body"
+  assertions=$((assertions + 1))
+
+  fetch_body "${name}_resume" POST "/api/sessions/$id/resume" '' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_resume/no_answer" "POST /api/sessions/$id/resume did not answer"
+  expect_status "${name}_resume" "$(answer "${name}_resume")" 202
+
+  # The resume's container step re-creates the network and the container and launches pi again; the row is
+  # `idle` only once the handshake answered.
+  body=""
+  for _ in $(seq 1 900); do
+    fetch "${name}_row3" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "${name}_row3/no_answer" "GET /api/sessions/$id did not answer"
+    body="$(cat "$WORK/responses/${name}_row3.body")"
+    case "$body" in
+      *'"status":"starting"'*) sleep 0.1 ;;
       *) break ;;
     esac
   done
-  printf '%s\n' "$body" | grep -qF 'the pi step' ||
-    fail "${name}_row2/reason" "the resumed attempt did not reach the agent step: $body"
+  printf '%s\n' "$body" | grep -qF '"status":"idle"' ||
+    fail "${name}_row3/status" "the resumed attempt did not reach idle: $body"
   assertions=$((assertions + 1))
-  # Nothing left behind after the second teardown either.
-  if docker container inspect "s_$id" >/dev/null 2>&1; then
-    fail "${name}/container_left" "the resumed session left its container behind"
-  fi
+  docker inspect --format '{{.State.Running}}' "s_$id" 2>/dev/null | grep -qx true ||
+    fail "${name}/container" "the resume left no running container"
   assertions=$((assertions + 1))
-  if docker network inspect "agents_$id" >/dev/null 2>&1; then
-    fail "${name}/network_left" "the resumed session left its network behind"
-  fi
-  assertions=$((assertions + 1))
+
+  # Cleaning up its own session: the gate's cap is one live session, and this case's would otherwise be the
+  # next case's eviction victim.
+  fetch "${name}_delete" DELETE "/api/sessions/$id?force=true" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_delete/no_answer" "DELETE did not answer"
+  expect_status "${name}_delete" "$(answer "${name}_delete")" 202
   # Its server is left running: `phase_serve` stops whatever is up after the last case.
   rm -rf "$root"
 }
-
 # The health payload: exactly four keys, and the uptime is not predictable, so the assertion is
 # the prefix and the closing brace (the shape tests/http_contract.rs uses).
 case_health() {
