@@ -452,7 +452,12 @@ The branch a session's work is merged into.
 _Avoid_: Main, trunk, destination
 
 **WIP snapshot**:
-A commit of a session's uncommitted work, stored under a hidden ref, that never touches the branch or working tree.
+A commit of a session's uncommitted work at `refs/holosmith/wip/<id>`, stored by a **temporary index**
+(`GIT_INDEX_FILE`) so the branch, the working tree and the session's own index are never touched. The
+identity is `holosmith <holosmith@localhost>`; a tree equal to `HEAD` removes the ref instead of writing a
+commit that says nothing. It runs on every `agent_settled` (`Turn::finished`), before every stop
+(`Stopper::stop`) and before a delete. Its machine names are `snapshot::take` and
+`holosmith container snapshot`.
 _Avoid_: Stash, backup, autosave, checkpoint
 
 **Project backup**:

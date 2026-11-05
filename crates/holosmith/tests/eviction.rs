@@ -203,7 +203,7 @@ async fn a_create_at_the_cap_stops_the_idle_session_and_takes_its_slot() {
         lifecycle(&stub, &first).contains(&Call::Stop)
     })
     .await;
-    assert_eq!(lifecycle(&stub, &first), [Call::Stop]);
+    assert_eq!(lifecycle(&stub, &first), [Call::Snapshot, Call::Stop]);
     assert_eq!(lifecycle(&stub, &second), []);
     wait_until("the eviction's event is committed", || {
         events(&state, &first).len() > before.len()

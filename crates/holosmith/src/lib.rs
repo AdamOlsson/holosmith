@@ -29,6 +29,7 @@ pub mod schema;
 pub mod selftest;
 pub mod serve;
 pub mod sessions;
+pub mod snapshot;
 mod sql;
 pub mod stop;
 pub mod sweeper;

@@ -266,6 +266,7 @@ async fn the_ladder_forces_the_stop_when_the_agent_ignores_the_abort() {
             holosmith::backend::Call::StartTurn,
             holosmith::backend::Call::ClearQueue,
             holosmith::backend::Call::Abort,
+            holosmith::backend::Call::Snapshot,
             holosmith::backend::Call::Stop,
             // The resume goes through the provisioner, which runs the four steps again.
             holosmith::backend::Call::Provision(holosmith::backend::Step::Worktree),

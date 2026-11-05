@@ -373,6 +373,9 @@ async fn a_delete_ends_a_running_turn_before_it_snapshots() {
         [
             Call::ClearQueue,
             Call::Abort,
+            // `Stopper` snapshots before every stop (HS-042), then the delete takes its own snapshot
+            // after the turn ended (the reason the two are separate calls).
+            Call::Snapshot,
             Call::Stop,
             Call::Snapshot,
             Call::Delete,
@@ -412,7 +415,10 @@ async fn the_ladder_ends_a_turn_without_bringing_the_session_back() {
         .copied()
         .filter(|call| !matches!(call, Call::Provision(_) | Call::Undo(_)))
         .collect();
-    assert_eq!(after_end, [Call::ClearQueue, Call::Abort, Call::Stop]);
+    assert_eq!(
+        after_end,
+        [Call::ClearQueue, Call::Abort, Call::Snapshot, Call::Stop]
+    );
     // The other half of "without bringing the session back": no transition leaves `stopped`, so the
     // only event after the forced stop is the stop itself.
     let resumed: Vec<String> = {
@@ -460,7 +466,13 @@ async fn a_failing_snapshot_on_a_running_session_stops_the_turn_and_still_refuse
     // …and nothing was removed: the session is still there, `stopped`, and resumable.
     assert_eq!(
         lifecycle(&stub),
-        [Call::ClearQueue, Call::Abort, Call::Stop, Call::Snapshot]
+        [
+            Call::ClearQueue,
+            Call::Abort,
+            Call::Snapshot,
+            Call::Stop,
+            Call::Snapshot,
+        ]
     );
 }
 

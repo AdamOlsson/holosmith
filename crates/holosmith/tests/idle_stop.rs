@@ -186,8 +186,8 @@ async fn a_quiet_idle_session_is_stopped_and_its_slot_is_freed() {
     .await;
     assert_eq!(
         lifecycle(&stub, &id),
-        [Call::Stop],
-        "the idle stop did more to the backend than stop it"
+        [Call::Snapshot, Call::Stop],
+        "the idle stop took a snapshot and then stopped"
     );
 
     // The story's fourth bullet: the transition is in the *event* log, with the reason a client reads.

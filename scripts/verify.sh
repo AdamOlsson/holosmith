@@ -359,6 +359,7 @@ serve_cases=(
   case_docker_turn
   case_network_selftest
   case_key_proxy
+  case_snapshot
   case_egress_proxy
   case_internet_toggle
   case_schema_newer
@@ -1577,6 +1578,55 @@ case_network_selftest() {
     fail "$name/left-behind" "the probe network outlived the boot"
   fi
   assertions=$((assertions + 1))
+}
+
+# HS-042: the WIP snapshot as the shipped artifact runs it. No daemon, no server: a real repository and a
+# real linked worktree, one uncommitted change, and then the four questions the story's acceptance asks —
+# the ref points at the change, the branch and HEAD did not move, the index is untouched, and a tree equal
+# to HEAD removes the ref. `tests/snapshot.rs` covers the same function; this is the gate's use of it.
+case_snapshot() {
+  local name=case_snapshot root="$repo_root/target/verify-snapshot-$$" id=0123456789abcdef
+  local project="$root/project" worktree="$root/worktree" out head
+  rm -rf "$root"
+  mkdir -p "$project" || fail "$name/mkdir" "could not create $project"
+  git -C "$project" init --quiet -b main . || fail "$name/git" "git init did not work"
+  git -C "$project" config user.name verify
+  git -C "$project" config user.email verify@example
+  printf 'base\n' >"$project/tracked.txt"
+  git -C "$project" add tracked.txt
+  git -C "$project" commit --quiet -m base || fail "$name/git" "git commit did not work"
+  git -C "$project" worktree add --quiet -b "agent/$id" "$worktree" HEAD ||
+    fail "$name/worktree" "git worktree add did not work"
+  head="$(git -C "$worktree" rev-parse HEAD)"
+  printf 'changed but not committed\n' >"$worktree/tracked.txt"
+  printf 'new file\n' >"$worktree/new.txt"
+
+  out="$(cd "$worktree" && HS_SESSION_ID="$id" "$artifact" container snapshot)" ||
+    fail "$name/take" "container snapshot failed: $out"
+  check "$name/take-output" "written refs/holosmith/wip/$id" "$out"
+  check "$name/ref-tracked" "changed but not committed" \
+    "$(git -C "$project" show "refs/holosmith/wip/$id:tracked.txt")"
+  check "$name/ref-new" "new file" \
+    "$(git -C "$project" show "refs/holosmith/wip/$id:new.txt")"
+  check "$name/branch" "$head" "$(git -C "$worktree" rev-parse HEAD)"
+  [ -z "$(git -C "$worktree" diff --cached --name-only)" ] ||
+    fail "$name/index" "the snapshot moved the worktree's index"
+  assertions=$((assertions + 1))
+  git -C "$worktree" status --porcelain | grep -q 'tracked.txt' ||
+    fail "$name/worktree" "the snapshot changed the working tree"
+  assertions=$((assertions + 1))
+
+  # A tree equal to HEAD is "nothing to keep": the ref goes instead of another commit.
+  printf 'base\n' >"$worktree/tracked.txt"
+  rm "$worktree/new.txt"
+  out="$(cd "$worktree" && HS_SESSION_ID="$id" "$artifact" container snapshot)" ||
+    fail "$name/remove" "container snapshot failed on a clean tree: $out"
+  check "$name/remove-output" "removed refs/holosmith/wip/$id" "$out"
+  if git -C "$project" rev-parse --verify --quiet "refs/holosmith/wip/$id" >/dev/null; then
+    fail "$name/ref-left" "the ref survived a clean tree"
+  fi
+  assertions=$((assertions + 1))
+  rm -rf "$root"
 }
 
 # HS-039: the key store and the key proxy's refusal path, with no daemon and no internet. The forwarding half

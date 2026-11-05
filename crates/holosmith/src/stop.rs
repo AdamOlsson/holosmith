@@ -51,6 +51,18 @@ impl Stopper {
     /// exit that follows either way is one we asked for. Only a *row* failure is logged here — the
     /// backend's failure is the caller's to report, exactly as it was before this routine existed.
     pub async fn stop(&self, session: &Session) -> Result<(), BackendError> {
+        // Spec item 9's "a stop never loses uncommitted work": take the snapshot before the flag and the
+        // container, because after the stop there may be no process left to write the worktree. A failure is
+        // logged and the stop goes ahead — the stop's caller asked for a container to be stopped, not for a
+        // git command to veto it (HS-019's delete is where a failure is a refusal).
+        if let Err(error) = self.backend.snapshot(session).await {
+            tracing::error!(
+                target: "holosmith::stop",
+                session = %session.id,
+                %error,
+                "the WIP snapshot failed before a stop; the worktree still holds the work"
+            );
+        }
         self.record(session);
         self.backend.stop(session).await
     }

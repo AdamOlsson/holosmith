@@ -311,6 +311,11 @@ impl Turn {
                 // HS-022's own shape: a turn that finished after its deadline records `turn_timeout`
                 // even though it stopped by itself. A turn that ended some *other* way keeps that
                 // ending's reason: an operator's abort is not the budget's to relabel.
+                // Every `agent_settled` leaves a WIP ref before the row moves (HS-042, spec item 9). A snapshot
+                // failure is logged and does not change the turn's ending: the turn did finish, and making a
+                // failed git command turn a completed turn into an `error` row would lose the transcript it
+                // just produced. HS-043's delete is where a snapshot failure is a refusal.
+                self.snapshot(session).await;
                 let reason = match reason {
                     Some(reason) => Some(reason),
                     None => self.settled_over_budget(&session.id).await,
@@ -337,6 +342,18 @@ impl Turn {
                 self.transition(session, Trigger::UnexpectedExit, Some(&reason))
                     .await;
             }
+        }
+    }
+
+    /// Take the session's WIP snapshot, reporting a failure without changing the turn's ending.
+    async fn snapshot(&self, session: &Session) {
+        if let Err(error) = self.backend.snapshot(session).await {
+            tracing::error!(
+                target: "holosmith::turn",
+                session = %session.id,
+                %error,
+                "the turn settled but its WIP snapshot failed; the worktree still holds the work"
+            );
         }
     }
 

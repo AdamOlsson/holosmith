@@ -266,7 +266,8 @@ remember to place the new case before it.
 is what makes this a growing gate rather than a snapshot: a story that adds a route or a
 behaviour has one obvious place to prove the shipped binary does it. A case that needs a setting the
 rest of the run must not carry gets a boot of its own (see `case_token_budget`, `case_usage_survives_resume`,
-`case_compaction`, `case_history`, `case_backup`, `case_worktree` and `case_worktree_refusal`), the
+`case_compaction`, `case_history`, `case_backup`, `case_worktree`, `case_worktree_refusal` and
+`case_snapshot`), the
 Internet-access checkbox (`case_internet_toggle`, described above), and a database from a newer release
 (`case_schema_newer`, which needs no daemon: it boots the artifact twice over one data root, rewrites the
 recorded `schema_version` to 99 in between with `python3`'s `sqlite3`, and asserts that the second boot's

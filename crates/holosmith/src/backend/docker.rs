@@ -41,6 +41,7 @@ use crate::exit::SessionLog;
 use crate::key::{self, Store as KeyStore};
 use crate::rpc::{self, Mapping};
 use crate::sessions::Session;
+use crate::snapshot;
 use crate::tool::Store;
 use crate::worktree::{Refusal, Worktree, refuse, repository_of};
 
@@ -245,11 +246,6 @@ impl DockerBackend {
     /// other in this backend, and [`crate::worktree::refuse`] is where the rules are.
     pub fn refuse_project(&self, project: &str) -> Result<(), Refusal> {
         refuse(&repository_of(&self.settings.projects_root, project))
-    }
-
-    /// Every operation's refusal, in one place so the reason always names the operation.
-    fn refuse(operation: &str) -> BackendError {
-        BackendError::unsupported("docker", operation)
     }
 
     /// The id of one command this backend writes, unique for the process's lifetime.
@@ -1022,8 +1018,28 @@ impl SessionBackend for DockerBackend {
         Some(ExitWatcher::new(watcher))
     }
 
-    async fn snapshot(&self, _session: &Session) -> Result<(), BackendError> {
-        Err(Self::refuse("snapshot"))
+    async fn snapshot(&self, session: &Session) -> Result<(), BackendError> {
+        let worktree = self.worktree(session).path;
+        let index = self
+            .settings
+            .data_root
+            .join("sessions")
+            .join(&session.id)
+            .join("wip.index");
+        let id = session.id.clone();
+        let taken = tokio::task::spawn_blocking(move || snapshot::take(&worktree, &index, &id))
+            .await
+            .map_err(|error| {
+                BackendError::failed(format!("the snapshot: git did not finish ({error})"))
+            })?
+            .map_err(|error| BackendError::failed(format!("the snapshot: {error}")))?;
+        tracing::debug!(
+            target: "holosmith::backend",
+            session = %session.id,
+            result = taken.as_str(),
+            "the WIP snapshot is taken"
+        );
+        Ok(())
     }
 }
 
@@ -1220,7 +1236,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_the_snapshot_still_refuses_and_a_turn_with_no_agent_names_the_fix() {
+    async fn a_turn_with_no_agent_names_the_fix_and_a_snapshot_with_no_worktree_says_so() {
         // `stop` and `resume` left this list in HS-029, and the turn's four operations left it in HS-032: a
         // prompt, a steer, a `clear_queue` and an abort are pi's RPC commands now. What is left is the WIP
         // snapshot, which is HS-042's.
@@ -1245,13 +1261,15 @@ mod tests {
                 format!("{subject}: this session has no agent process — resume it")
             );
         }
+        // There is no worktree at the backend's `/nonexistent/projects`, so the snapshot now fails for the
+        // reason an operator can act on rather than because a story had not landed yet.
         let snapshot = backend
             .snapshot(&session)
             .await
-            .expect_err("the WIP snapshot is HS-042's");
-        assert_eq!(
-            snapshot.to_string(),
-            "the docker backend does not implement snapshot yet"
+            .expect_err("there is no worktree to snapshot");
+        assert!(
+            snapshot.to_string().contains("there is no worktree at"),
+            "{snapshot}"
         );
     }
 

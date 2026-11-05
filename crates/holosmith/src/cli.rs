@@ -52,6 +52,11 @@ pub enum Cmd {
         #[command(subcommand)]
         action: KeyAction,
     },
+    /// Container helpers, used inside a session's container.
+    Container {
+        #[command(subcommand)]
+        action: ContainerAction,
+    },
 }
 
 /// The proxies a container runs (spec item 2's "internal subcommands").
@@ -75,6 +80,13 @@ pub enum ProxyAction {
         #[arg(long, value_name = "PATH")]
         keys: Option<PathBuf>,
     },
+}
+
+/// The container helpers (spec item 9's `hs-snapshot` logic).
+#[derive(Debug, Subcommand)]
+pub enum ContainerAction {
+    /// Save the worktree's uncommitted work at `refs/holosmith/wip/<HS_SESSION_ID>`.
+    Snapshot,
 }
 
 /// The three key subcommands (spec CLI phase 1).
