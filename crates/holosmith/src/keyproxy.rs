@@ -45,10 +45,14 @@ pub const MAX_HEAD: usize = 64 * 1024;
 /// mistake or an attempt to make the proxy the memory the container is not allowed to be.
 pub const MAX_BODY: usize = 32 * 1024 * 1024;
 
+/// How many connections the machine-wide proxy will serve at once. Each may hold a `MAX_BODY`, so an
+/// unbounded accept loop would let one session spend the memory every other session's model calls need.
+pub const MAX_CONNECTIONS: usize = 64;
+
 /// How long a client may take to send its head.
 pub const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long the TLS client may take to answer its first byte. A provider that never answers is a 504.
+/// How long the TLS client may take to answer its first byte. A provider that never answers is a 502.
 pub const FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The CA bundle the agent image carries.
@@ -330,12 +334,17 @@ impl Record {
 
 /// Serve forever, one task per connection.
 pub async fn serve(listener: TcpListener, store: Arc<Store>) {
+    let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
+                let Ok(permit) = Arc::clone(&slots).acquire_owned().await else {
+                    return;
+                };
                 let store = Arc::clone(&store);
                 tokio::spawn(async move {
                     handle(stream, &store).await;
+                    drop(permit);
                     tracing::debug!(target: "holosmith::keyproxy", peer = %peer, "the connection is closed");
                 });
             }
@@ -349,7 +358,7 @@ pub async fn serve(listener: TcpListener, store: Arc<Store>) {
 
 /// One connection: read a head, validate the dummy, read the body, forward, stream back.
 pub async fn handle(mut stream: TcpStream, store: &Store) {
-    let head_text = match read_head(&mut stream).await {
+    let (head_text, leftover) = match read_head(&mut stream).await {
         Some(head) => head,
         None => {
             let _ = respond(&mut stream, 400, "the request head is not HTTP/1.1").await;
@@ -433,7 +442,7 @@ pub async fn handle(mut stream: TcpStream, store: &Store) {
     {
         return;
     }
-    let body = match read_body(&mut stream, &head).await {
+    let body = match read_body(&mut stream, &head, leftover).await {
         Ok(body) => body,
         Err(sentence) => {
             let _ = respond(&mut stream, 400, &sentence).await;
@@ -530,6 +539,7 @@ async fn forward(mut client: TcpStream, head: &Head, session: &str, request: Vec
     let mut first_buffer = [0u8; 16 * 1024];
     let first = tokio::time::timeout(FIRST_BYTE_TIMEOUT, stdout.read(&mut first_buffer)).await;
     let (up, mut down) = (body as u64, 0u64);
+    let mut status = "forwarded";
     match first {
         Ok(Ok(0)) | Err(_) => {
             let _ = child.kill().await;
@@ -545,6 +555,15 @@ async fn forward(mut client: TcpStream, head: &Head, session: &str, request: Vec
         Ok(Ok(read)) => {
             if client.write_all(&first_buffer[..read]).await.is_err() {
                 let _ = child.kill().await;
+                Record {
+                    session: session.to_string(),
+                    provider: provider.id,
+                    host: provider.host,
+                    status: "client-closed",
+                    up,
+                    down,
+                }
+                .log();
                 return;
             }
             down += read as u64;
@@ -562,6 +581,7 @@ async fn forward(mut client: TcpStream, head: &Head, session: &str, request: Vec
             Ok(0) => break,
             Ok(read) => {
                 if client.write_all(&buffer[..read]).await.is_err() {
+                    status = "client-closed";
                     break;
                 }
                 down += read as u64;
@@ -574,16 +594,19 @@ async fn forward(mut client: TcpStream, head: &Head, session: &str, request: Vec
         session: session.to_string(),
         provider: provider.id,
         host: provider.host,
-        status: "forwarded",
+        status,
         up,
         down,
     }
     .log();
 }
 
-async fn read_head(stream: &mut TcpStream) -> Option<String> {
+async fn read_head<R>(stream: &mut R) -> Option<(String, Vec<u8>)>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
     let mut buffer = Vec::with_capacity(1024);
-    tokio::time::timeout(HEAD_TIMEOUT, async {
+    let end = tokio::time::timeout(HEAD_TIMEOUT, async {
         loop {
             let mut chunk = [0u8; 1024];
             let read = stream.read(&mut chunk).await.ok()?;
@@ -591,10 +614,8 @@ async fn read_head(stream: &mut TcpStream) -> Option<String> {
                 return None;
             }
             buffer.extend_from_slice(&chunk[..read]);
-            if buffer.windows(4).any(|window| window == b"\r\n\r\n")
-                || buffer.windows(2).any(|window| window == b"\n\n")
-            {
-                return Some(());
+            if let Some(end) = head_end(&buffer) {
+                return Some(end);
             }
             if buffer.len() >= MAX_HEAD {
                 return None;
@@ -603,35 +624,123 @@ async fn read_head(stream: &mut TcpStream) -> Option<String> {
     })
     .await
     .ok()
-    .flatten()
-    .and_then(|()| String::from_utf8(buffer).ok())
+    .flatten()?;
+    let leftover = buffer.split_off(end);
+    let head = String::from_utf8(buffer).ok()?;
+    Some((head, leftover))
 }
 
-async fn read_body(stream: &mut TcpStream, head: &Head) -> Result<Vec<u8>, String> {
+/// Where the head ends, including its blank line: the first `\r\n\r\n` or `\n\n`.
+fn head_end(buffer: &[u8]) -> Option<usize> {
+    for (index, window) in buffer.windows(4).enumerate() {
+        if window == b"\r\n\r\n" {
+            return Some(index + 4);
+        }
+    }
+    for (index, window) in buffer.windows(2).enumerate() {
+        if window == b"\n\n" {
+            return Some(index + 2);
+        }
+    }
+    None
+}
+
+/// The request body, starting with whatever arrived in the same read as the head.
+///
+/// This is the P1 the review of HS-039 found: a client that writes head and body in one `send` leaves the
+/// body in the head's last read, and a `read_exact` from the socket alone waits forever for bytes that are
+/// already in memory. [`read_head`] now hands the leftover over, and this function seeds the body with it.
+async fn read_body<R>(stream: &mut R, head: &Head, leftover: Vec<u8>) -> Result<Vec<u8>, String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut reader = Prefixed {
+        stream,
+        pending: leftover,
+    };
     if head.chunked {
-        return read_chunked(stream).await;
+        return read_chunked(&mut reader).await;
     }
     let Some(length) = head.content_length else {
+        if !reader.pending.is_empty() {
+            return Err("a request with a body and no Content-Length is refused".to_string());
+        }
         return Ok(Vec::new());
     };
-    let mut body = vec![0u8; length];
-    stream
-        .read_exact(&mut body)
-        .await
-        .map_err(|error| format!("the request body ended before its Content-Length ({error})"))?;
+    if reader.pending.len() > length {
+        return Err("the request body is longer than its Content-Length".to_string());
+    }
+    let mut body = std::mem::take(&mut reader.pending);
+    let missing = length - body.len();
+    let mut rest = vec![0u8; missing];
+    if missing > 0 {
+        reader.stream.read_exact(&mut rest).await.map_err(|error| {
+            format!("the request body ended before its Content-Length ({error})")
+        })?;
+    }
+    body.extend_from_slice(&rest);
     Ok(body)
 }
 
-async fn read_chunked(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
+/// A body reader that starts with the bytes the head's read already consumed.
+struct Prefixed<'a, R> {
+    stream: &'a mut R,
+    pending: Vec<u8>,
+}
+
+impl<R> Prefixed<'_, R>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    async fn read_exact(&mut self, out: &mut [u8]) -> std::io::Result<()> {
+        let taken = self.pending.len().min(out.len());
+        out[..taken].copy_from_slice(&self.pending[..taken]);
+        self.pending.drain(..taken);
+        if taken < out.len() {
+            self.stream.read_exact(&mut out[taken..]).await?;
+        }
+        Ok(())
+    }
+
+    async fn read_line(&mut self) -> Result<String, String> {
+        let mut line = Vec::new();
+        loop {
+            let mut byte = [0u8; 1];
+            if self.pending.is_empty() {
+                self.stream
+                    .read_exact(&mut byte)
+                    .await
+                    .map_err(|error| format!("the request ended early ({error})"))?;
+            } else {
+                byte[0] = self.pending.remove(0);
+            }
+            if byte[0] == b'\n' {
+                break;
+            }
+            if byte[0] != b'\r' {
+                line.push(byte[0]);
+            }
+            if line.len() > MAX_HEAD {
+                return Err("a request line is longer than this proxy accepts".to_string());
+            }
+        }
+        String::from_utf8(line).map_err(|_| "a request line is not UTF-8".to_string())
+    }
+}
+
+async fn read_chunked<R>(reader: &mut Prefixed<'_, R>) -> Result<Vec<u8>, String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
     let mut body = Vec::new();
     loop {
-        let line = read_line(stream).await?;
+        let line = reader.read_line().await?;
         let size = usize::from_str_radix(line.trim().split(';').next().unwrap_or("0").trim(), 16)
             .map_err(|_| "a chunk size was not hexadecimal".to_string())?;
         if size == 0 {
             // Trailer headers, then the blank line.
             loop {
-                if read_line(stream).await?.is_empty() {
+                if reader.read_line().await?.is_empty() {
                     break;
                 }
             }
@@ -641,35 +750,14 @@ async fn read_chunked(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
             return Err("the chunked body is larger than this proxy accepts".to_string());
         }
         let mut chunk = vec![0u8; size];
-        stream
+        reader
             .read_exact(&mut chunk)
             .await
             .map_err(|error| format!("a chunk ended early ({error})"))?;
         body.extend_from_slice(&chunk);
-        let _ = read_line(stream).await?;
+        let _ = reader.read_line().await?;
     }
     Ok(body)
-}
-
-async fn read_line(stream: &mut TcpStream) -> Result<String, String> {
-    let mut line = Vec::new();
-    loop {
-        let mut byte = [0u8; 1];
-        stream
-            .read_exact(&mut byte)
-            .await
-            .map_err(|error| format!("the request ended early ({error})"))?;
-        if byte[0] == b'\n' {
-            break;
-        }
-        if byte[0] != b'\r' {
-            line.push(byte[0]);
-        }
-        if line.len() > MAX_HEAD {
-            return Err("a request line is longer than this proxy accepts".to_string());
-        }
-    }
-    String::from_utf8(line).map_err(|_| "a request line is not UTF-8".to_string())
 }
 
 async fn respond(stream: &mut TcpStream, status: u16, body: &str) -> std::io::Result<()> {
@@ -744,6 +832,46 @@ mod tests {
         let text = upstream(&parsed, "sk-real", b"{}");
         assert!(text.contains("Authorization: Bearer sk-real\r\n"), "{text}");
         assert!(text.starts_with("POST /v1/chat/completions HTTP/1.1\r\n"));
+    }
+
+    #[tokio::test]
+    async fn a_body_that_arrives_with_the_head_is_not_lost() {
+        // The P1 the review found: a client that writes head and body in one segment used to leave the
+        // body in the head's read and then wait forever for bytes already in memory.
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        use tokio::io::AsyncWriteExt;
+        client
+            .write_all(
+                b"POST /anthropic/v1/messages HTTP/1.1\r\nHost: key-proxy:8080\r\nContent-Length: 2\r\n\r\n{}",
+            )
+            .await
+            .expect("the request is written");
+        client.shutdown().await.expect("the client closes");
+        let (head, leftover) = read_head(&mut server).await.expect("the head arrives");
+        let parsed = parse(&head).expect("the head parses");
+        let body = read_body(&mut server, &parsed, leftover)
+            .await
+            .expect("the coalesced body is read");
+        assert_eq!(body, b"{}");
+    }
+
+    #[tokio::test]
+    async fn a_chunked_body_that_arrives_with_the_head_is_not_lost() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        use tokio::io::AsyncWriteExt;
+        client
+            .write_all(
+                b"POST /anthropic/v1/messages HTTP/1.1\r\nHost: key-proxy:8080\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n",
+            )
+            .await
+            .expect("the request is written");
+        client.shutdown().await.expect("the client closes");
+        let (head, leftover) = read_head(&mut server).await.expect("the head arrives");
+        let parsed = parse(&head).expect("the head parses");
+        let body = read_body(&mut server, &parsed, leftover)
+            .await
+            .expect("the coalesced chunked body is read");
+        assert_eq!(body, b"{}");
     }
 
     #[test]

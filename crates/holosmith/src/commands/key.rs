@@ -37,8 +37,8 @@ fn set(store: &Store, provider: &str) -> ExitCode {
         eprintln!("holosmith: key set: cannot read the key from stdin: {error}");
         return ExitCode::FAILURE;
     }
-    // One trailing newline is a shell's, not part of the key; any other whitespace is refused rather than
-    // trimmed, because a key with a space in it pasted by mistake should be visible.
+    // One trailing newline (and a shell's CR) is not part of the key. The store trims any other surrounding
+    // whitespace, so a key pasted with a accidental blank line still works; the value is never echoed here.
     let key = key.strip_suffix('\n').unwrap_or(&key);
     let key = key.strip_suffix('\r').unwrap_or(key);
     match store.set_provider(provider, key) {

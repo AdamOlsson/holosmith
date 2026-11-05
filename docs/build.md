@@ -223,9 +223,9 @@ see ADR-0039), and the resume over a live agent (`case_docker_resume`, which cre
 again with a running container over the same worktree, then deletes its own session so the run's cap is
 left as it found it; see ADR-0037/ADR-0039), and the turn (`case_docker_turn`, which prompts a session whose
 container is pi in RPC mode and asserts the prompt is **accepted** by the handler and then ended by pi's own
-answer — a session's network is `--internal`, its pi-home holds only a dummy key, and the gate's machine has no
-stored provider key, so pi refuses the `prompt` command before a stream exists; what the row carries is pi's
-sentence, not this build's; the
+answer — a session's network is `--internal`, its pi-home has no provider key (the gate's machine stores none,
+so `models.json` has an empty provider object), so pi refuses the `prompt` command before a stream exists; what
+the row carries is pi's sentence, not this build's; the
 container must still be running afterwards, and a resume-then-prompt must work a second time, which is what
 proves the RPC path is repeatable rather than a one-off and what found the removal-supersedes-the-launch bug
 ADR-0040 records; see ADR-0040), and the key store and key proxy's refusal path (`case_key_proxy`, which needs no server, no daemon

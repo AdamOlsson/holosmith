@@ -486,7 +486,8 @@ impl DockerBackend {
         })?;
         let secrets = store.load().map_err(|error| {
             BackendError::failed(format!(
-                "the container step: the key store could not be read ({error})"
+                "the container step: the key store {} could not be read ({error}); repair or remove it, then                  resume this session",
+                store.path().display()
             ))
         })?;
         let models = home.join("models.json");

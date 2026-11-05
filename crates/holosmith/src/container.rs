@@ -623,7 +623,7 @@ impl KeyProxy {
     pub fn of(config: &Config) -> Result<Self, String> {
         let Some(binary) = std::env::current_exe().ok() else {
             return Err(
-                "the key proxy runs this binary, and this process could not name its own executable, so no                  proxy container was started"
+                "the key proxy runs this binary, and this process could not name its own executable, so no proxy container was started"
                     .to_string(),
             );
         };
@@ -947,6 +947,65 @@ mod tests {
                 .count(),
             1,
             "{arguments:?}"
+        );
+    }
+
+    #[test]
+    fn the_key_proxy_mounts_only_the_binary_and_the_key_file() {
+        let proxy = KeyProxy {
+            image: "agent-image:0.1.0".to_string(),
+            binary: PathBuf::from("/usr/local/bin/holosmith"),
+            keys: PathBuf::from("/var/lib/holosmith/secrets/keys.toml"),
+        };
+        let arguments = proxy.run_args();
+        let flag = |name: &str| -> String {
+            arguments[arguments.iter().position(|a| a == name).expect(name) + 1].clone()
+        };
+        assert_eq!(arguments[0], "run");
+        assert!(arguments.contains(&"--detach".to_string()));
+        assert_eq!(flag("--name"), crate::key::KEY_PROXY_NAME);
+        assert_eq!(flag("--network"), crate::docker::EGRESS_NETWORK);
+        assert_eq!(flag("--network-alias"), crate::key::KEY_PROXY_ALIAS);
+        assert_eq!(flag("--restart"), "unless-stopped");
+        assert_eq!(flag("--cap-drop"), "ALL");
+        assert_eq!(flag("--security-opt"), "no-new-privileges");
+        assert_eq!(
+            flag("-v"),
+            "/usr/local/bin/holosmith:/usr/local/bin/holosmith:ro"
+        );
+        // Very deliberately two: the binary and the key file. A third would be a data root or a project, and
+        // this container has no business reading either.
+        let mounts: Vec<&String> = arguments
+            .iter()
+            .enumerate()
+            .filter(|(index, argument)| {
+                *argument == "-v"
+                    || arguments
+                        .get(index + 1)
+                        .is_some_and(|next| next == *argument)
+            })
+            .map(|(_, argument)| argument)
+            .collect();
+        assert_eq!(mounts.len(), 2, "{arguments:?}");
+        assert!(
+            arguments.iter().any(|argument| argument
+                == "/var/lib/holosmith/secrets/keys.toml:/var/lib/holosmith/secrets/keys.toml:ro"),
+            "the key file is mounted read-only at its own path: {arguments:?}"
+        );
+        let image = arguments
+            .iter()
+            .position(|argument| argument == "agent-image:0.1.0")
+            .expect("the image is in the run vector");
+        assert_eq!(
+            &arguments[image + 1..],
+            [
+                "proxy",
+                "key",
+                "--listen",
+                "0.0.0.0:8080",
+                "--keys",
+                "/var/lib/holosmith/secrets/keys.toml",
+            ]
         );
     }
 

@@ -1805,8 +1805,13 @@ case_internet_toggle() {
   git -C "$projects/holosmith" -c user.name=verify -c user.email=verify@example commit --quiet \
     --allow-empty -m "the first commit" || fail "$name/git" "git commit did not work"
   # `allow = ["crates.io"]` on purpose: a 403 is only evidence of an allow-list if the list is not empty.
-  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "docker"\nprojects_root = "%s"\nagent_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n\n[egress]\nallow = ["crates.io"]\n' \
-    "$owner" "$projects" "$image" >"$WORK/config-toggle.toml"
+  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "docker"\nprojects_root = "%s"\ndata_root = "%s"\nagent_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n\n[egress]\nallow = ["crates.io"]\n' \
+    "$owner" "$projects" "$data" "$image" >"$WORK/config-toggle.toml"
+  # A real key is present for this boot, so "the session never sees it" is measured rather than true by
+  # absence. The session's own `models.json` carries the dummy; `hs_key` is the only mount of `keys.toml`.
+  printf 'sk-ant-toggle-real-do-not-leak\n' |
+    "$artifact" --config "$WORK/config-toggle.toml" key set anthropic >/dev/null ||
+    fail "$name/key-set" "could not seed the toggle boot's provider key"
   start_serve "$WORK/config-toggle.toml" "$data"
 
   # `wait_for_idle_docker`, not `wait_for_idle_id`: a Docker create ends with pi's ready handshake.
@@ -1969,6 +1974,25 @@ PROBE
       esac
     fi
   done
+
+  # The real key is in `keys.toml` and nowhere a session can reach: not in the session's directory (which is a
+  # mount), not in the container's environment, and not in its mounts. `models.json` is the only file the agent
+  # reads that could carry a key, and it carries the dummy.
+  real_key='sk-ant-toggle-real-do-not-leak'
+  for id in "$off_id" "$on_id"; do
+    if grep -R -F "$real_key" "$data/sessions/$id" >/dev/null 2>&1; then
+      fail "${name}_$( [ "$id" = "$off_id" ] && echo off || echo on )_key_leak" \
+        "the real provider key reached $data/sessions/$id"
+    fi
+    if docker inspect "s_$id" --format '{{json .Config.Env}} {{json .Mounts}}' 2>/dev/null | grep -F "$real_key" >/dev/null; then
+      fail "${name}_$( [ "$id" = "$off_id" ] && echo off || echo on )_container_key" \
+        "the real provider key reached the session container's environment or mounts"
+    fi
+    assertions=$((assertions + 1))
+  done
+  docker inspect hs_key --format '{{range .Mounts}}{{.Source}} {{end}}' 2>/dev/null | grep -q 'secrets/keys.toml' ||
+    fail "$name/key_mount" "hs_key does not mount the key file, so the key proxy cannot read it"
+  assertions=$((assertions + 1))
 
   # The environment: identical in both cases once each session's own id is normalised — the acceptance's "the
   # difference is topology, not configuration", read off the containers the daemon is really running and over

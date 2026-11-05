@@ -11,8 +11,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use holosmith::backend::Backends;
+use holosmith::container::ContainerSettings;
+use holosmith::db::{Database, OpenOptions};
+use holosmith::deleter::Deleter;
+use holosmith::events::StreamRegistry;
 use holosmith::key::{KEY_PROXY_ALIAS, KEY_PROXY_PORT, Store};
 use holosmith::keyproxy;
+use holosmith::runtime::Backend;
+use holosmith::sessions::{Session, Status};
 
 struct TempDir {
     path: PathBuf,
@@ -105,6 +112,52 @@ async fn a_valid_dummy_with_no_stored_provider_key_is_a_503() {
     assert!(response.starts_with("HTTP/1.1 503 "), "{response}");
     assert!(response.contains("key set anthropic"), "{response}");
     serve.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_delete_flow_revokes_the_sessions_dummy_key() {
+    let directory = TempDir::new("revoke");
+    let store = Store::new(directory.path.join("secrets/keys.toml"));
+    let dummy = store.dummy_for("0123456789abcdef").expect("a dummy");
+    assert!(Store::session_of(&store.load().expect("the store reads"), &dummy).is_some());
+    let database = Database::open(
+        &directory.path.join("app.db"),
+        OpenOptions::default(),
+        1_760_000_000,
+    )
+    .expect("the test database opens");
+    let session = Session {
+        id: "0123456789abcdef".to_string(),
+        project: "holosmith".to_string(),
+        model: "claude-sonnet-4.5".to_string(),
+        thinking: "high".to_string(),
+        worktree: String::new(),
+        base_commit: None,
+        status: Status::Deleting,
+        status_reason: None,
+        client_key: None,
+        network: false,
+        created_at: 1_760_000_000,
+        last_active_at: 1_760_000_000,
+        stopped_at: None,
+        usage_in: 0,
+        usage_out: 0,
+    };
+    let deleter = Deleter::new(
+        Backends::for_run(
+            Backend::Stub,
+            ContainerSettings::at(directory.path.join("projects"), directory.path.join("data")),
+        ),
+        Arc::new(std::sync::Mutex::new(database)),
+        StreamRegistry::new(),
+        store.path().to_path_buf(),
+    );
+    deleter.remove(&session).await;
+    let secrets = store.load().expect("the store reads after the delete");
+    assert!(
+        Store::session_of(&secrets, &dummy).is_none(),
+        "the deleted session's dummy is still usable: {secrets:?}"
+    );
 }
 
 #[test]

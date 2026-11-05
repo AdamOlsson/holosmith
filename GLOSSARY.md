@@ -64,7 +64,9 @@ The directory holding the git repositories that sessions are created against, de
 _Avoid_: Project root, workspace, repos dir
 
 **Secrets file**:
-The file at `<data>/secrets/keys.toml`, mode 0600, holding the provider API keys that the key proxy uses. The config loader never reads it.
+The file at `<data>/secrets/keys.toml`, mode 0600, holding the provider API keys that the key proxy uses
+(`[providers]`) and the per-session dummy keys it validates (`[sessions]`). The config loader never reads it;
+`hs_key` is the only container that mounts it.
 _Avoid_: Keys config, credentials file
 
 ### Sessions and turns
@@ -508,7 +510,8 @@ a session that asked for no internet access would reach one anyway). The probe r
 once bare, once with the proxy joined — because a silence is only evidence if the alias answers the moment
 something is attached; the second run is a `debug`/`warn` line and never a verdict, since a proxy that will not
 join fails a download rather than a session. Its machine names are `selftest::run`, `selftest::Outcome`,
-`selftest::PROXY_TARGET`, `selftest::pair` and `templates/selftest-probe.js`.
+`selftest::PROXY_TARGET`, `selftest::KEY_PROXY_TARGET`, `selftest::pair`, `selftest::key_pair` and
+`templates/selftest-probe.js`.
 _Avoid_: Health check, smoke test, probe
 
 **Key proxy**:

@@ -368,7 +368,7 @@ fn key_pair(runner: &dyn Runner, image: &str) {
         tracing::debug!(
             target: "holosmith::selftest",
             proxy = crate::key::KEY_PROXY_NAME,
-            "the key proxy is not running, so the off case's legitimate answer — the key proxy's alias — was              not measured"
+            "the key proxy is not running, so the off case's legitimate answer — the key proxy's alias — was not measured"
         );
         return;
     };
@@ -384,19 +384,19 @@ fn key_pair(runner: &dyn Runner, image: &str) {
         Ok(report) if report.code == REACHED => tracing::debug!(
             target: "holosmith::selftest",
             proxy = %proxy,
-            "the key proxy answers on the probe's network, which is the one address a session without internet              access may reach"
+            "the key proxy answers on the probe's network, which is the one address a session without internet access may reach"
         ),
         Ok(report) => tracing::warn!(
             target: "holosmith::selftest",
             proxy = %proxy,
             reached = %report.reached.trim(),
             complaint = %report.complaint.trim(),
-            "the key proxy was joined to the probe's network and its alias did not answer, so a session's model              calls will fail"
+            "the key proxy was joined to the probe's network and its alias did not answer, so a session's model calls will fail"
         ),
         Err(error) => tracing::warn!(
             target: "holosmith::selftest",
             %error,
-            "the key proxy's half of the self-test could not be measured: a session's model path may be a word              rather than a route"
+            "the key proxy's half of the self-test could not be measured: a session's model path may be a word rather than a route"
         ),
     }
 }

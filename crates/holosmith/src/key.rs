@@ -196,9 +196,9 @@ impl Store {
 
     /// Make the secrets directory and an empty key file, mode 0600, if they are not there.
     ///
-    /// Called at boot and before the key proxy starts. A directory that already exists is left alone (an
-    /// operator may have changed its group); only the file's mode is enforced, because 0600 is the story's
-    /// acceptance rather than a default.
+    /// Called at boot and before the key proxy starts. Both modes are enforced: the directory 0700 and the
+    /// file 0600. A pre-existing directory is reset rather than trusted, because a secret left group-readable
+    /// is the one failure mode this file cannot recover from by being read again.
     pub fn ensure_file(&self) -> Result<(), KeyError> {
         let _guard = lock();
         let directory = self

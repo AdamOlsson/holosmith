@@ -371,7 +371,7 @@ fn start_key_proxy(config: &Config) {
             target: "holosmith::serve",
             path = %store.path().display(),
             %error,
-            "no key proxy was started: the key file could not be prepared, and a mount of a missing source is              an empty directory"
+            "no key proxy was started: the key file could not be prepared, and a mount of a missing source is an empty directory"
         );
         return;
     }
@@ -386,7 +386,7 @@ fn start_key_proxy(config: &Config) {
         tracing::warn!(
             target: "holosmith::serve",
             binary = %proxy.binary.display(),
-            "no key proxy was started: this process's own binary is not a file at its own path, so a container              mounted from it would start from an empty directory"
+            "no key proxy was started: this process's own binary is not a file at its own path, so a container mounted from it would start from an empty directory"
         );
         return;
     }
@@ -394,7 +394,7 @@ fn start_key_proxy(config: &Config) {
         tracing::warn!(
             target: "holosmith::serve",
             keys = %proxy.keys.display(),
-            "no key proxy was started: the key file is not a file, and mounting it would give the proxy a              directory"
+            "no key proxy was started: the key file is not a file, and mounting it would give the proxy a directory"
         );
         return;
     }
@@ -412,7 +412,7 @@ fn start_key_proxy(config: &Config) {
             target: "holosmith::serve",
             container = crate::key::KEY_PROXY_NAME,
             seconds = bound.as_secs(),
-            "the key proxy did not start within its bound and was abandoned: a session's model calls will find              nothing at its proxy address"
+            "the key proxy did not start within its bound and was abandoned: a session's model calls will find nothing at its proxy address"
         ),
         Err(error) => tracing::warn!(
             target: "holosmith::serve",
