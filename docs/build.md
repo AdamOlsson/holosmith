@@ -224,7 +224,16 @@ answer — a session's network is `--internal` and it holds no provider key unti
 `prompt` command before a stream exists, and what the row carries is pi's sentence, not this build's; the
 container must still be running afterwards, and a resume-then-prompt must work a second time, which is what
 proves the RPC path is repeatable rather than a one-off and what found the removal-supersedes-the-launch bug
-ADR-0040 records; see ADR-0040). A case that
+ADR-0040 records; see ADR-0040), and the egress
+proxy's refusals (`case_egress_proxy`, which needs no server, no daemon and no internet: it starts the shipped
+artifact as `proxy egress` on a loopback port with two allow-listed names and asks it four questions over a
+plain socket — `GET` gets `405`, `CONNECT` to port 80 gets `403`, an unlisted host gets `403`, and
+`localhost`, **on** the list, gets `403` because its address is inside the machine — then asserts the log's
+one line per answer carries the session id from the proxy username, the host and the byte counts. The allow
+path needs a real allow-listed host, so it is a unit test over a local echo server (`src/egress.rs`) and
+the story's demo; a case that claimed to prove it would be proving nothing, or would need the internet.
+ADR-0045).
+A case that
 must assert
 one code keeps every higher guard check correct, or it asserts another guard's code under its own
 name.
@@ -389,7 +398,12 @@ per transaction, and never touches a session whose state is `starting`, `running
   `node`** — the network self-test's probe is a node script (HS-036, ADR-0044), and an image without node makes
   that test `Unknown` rather than failed, so a missing node is a `warn` at every boot instead of a red test. Its
   default user must not be root. A development machine can build one, or tag the image it has:
-  `docker tag pi-agent:local agent-image:<version>`.
+  `docker tag pi-agent:local agent-image:<version>`. That image also runs the **egress proxy** (HS-037,
+  ADR-0045), and it needs nothing added for that: the container executes *this* binary, mounted read-only at
+  its own host path, so the artifact (static musl) is the whole requirement — which means the **daemon has to
+  be able to see the binary's path**, exactly as it has to see the data root for the agent directory
+  (ADR-0039). A `serve` whose binary sits on a tmpfs the daemon does not share starts no proxy: one `warn`,
+  and a session that allows internet access reaches nothing through it.
 - Optional: **`qemu-aarch64-static`** (or point `HOLOSMITH_QEMU_AARCH64` at one) to run
   the aarch64 artifact on an x86_64 machine. It is a machine-local dev tool installed
   outside this repo; no script here downloads it. Without it the check prints one

@@ -344,6 +344,7 @@ serve_cases=(
   case_docker_resume
   case_docker_turn
   case_network_selftest
+  case_egress_proxy
 )
 
 # V1 (HS-027): the hardened `.git` mounts, measured on a real daemon. Three writes must fail, three git
@@ -1543,6 +1544,95 @@ case_network_selftest() {
     fail "$name/left-behind" "the probe network outlived the boot"
   fi
   assertions=$((assertions + 1))
+}
+
+# HS-037: the egress proxy, on the wire and with no daemon and no internet. What it proves is the four
+# refusals spec item 2 names — anything that is not CONNECT, a port that is not 443, a host that is not on
+# the allow-list, and a name that resolves inside the machine *even when it is on the list* — plus that the
+# log line attributes the request to the session in the proxy username. The allow path needs a real
+# allow-listed host, so it is a unit test over a local echo server (`src/egress.rs`) and the story's demo;
+# a gate case that claimed to prove it would be proving nothing, or would need the internet.
+case_egress_proxy() {
+  local name=case_egress_proxy log="$WORK/egress.log" statuses port proxy_pid
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to speak HTTP to the proxy (src/egress.rs covers the wire)\n' "$name"
+    return 0
+  fi
+  # A port the kernel gives us, then released: the proxy binds it a moment later, which is the same bet
+  # `tests/` make when they ask for port 0.
+  port="$(python3 - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+)"
+  "$artifact" proxy egress --listen "127.0.0.1:$port" --allow crates.io --allow localhost \
+    >"$log" 2>&1 &
+  proxy_pid=$!
+  for _ in $(seq 1 100); do
+    grep -q 'the egress proxy is listening' "$log" 2>/dev/null && break
+    kill -0 "$proxy_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  grep -q "listen=127.0.0.1:$port" "$log" ||
+    fail "$name/listen" "the proxy did not report its bound address: $(cat "$log")"
+  # `allow=2` is the list it was given, so a proxy that read nothing is visible.
+  grep -q 'allow=2' "$log" || fail "$name/allow" "the proxy did not report its allow-list: $(cat "$log")"
+
+  # Four questions, one driver, one line of the form `<label> status` per answer. The proxy closes each
+  # connection after answering, which is why a fresh socket is opened per request.
+  statuses="$(python3 - "$port" <<'PY'
+import base64, socket, sys
+
+port = int(sys.argv[1])
+
+def ask(head):
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+        sock.sendall(head.encode())
+        answer = b""
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            answer += chunk
+    return answer.decode("utf-8", "replace")
+
+session = base64.b64encode(b"abcdef0123456789:pw").decode()
+questions = [
+    ("method", "GET http://crates.io/ HTTP/1.1\r\nHost: crates.io\r\n\r\n"),
+    ("port", "CONNECT crates.io:80 HTTP/1.1\r\n\r\n"),
+    ("listed", "CONNECT example.com:443 HTTP/1.1\r\nProxy-Authorization: Basic %s\r\n\r\n" % session),
+    ("inside", "CONNECT localhost:443 HTTP/1.1\r\n\r\n"),
+]
+for label, head in questions:
+    answer = ask(head)
+    print(label, answer.split("\r\n", 1)[0])
+PY
+)" || fail "$name/driver" "the python3 driver failed"
+
+  check "$name/not-connect" "method HTTP/1.1 405 Method Not Allowed" \
+    "$(grep '^method ' <<<"$statuses")"
+  check "$name/not-443" "port HTTP/1.1 403 Forbidden" "$(grep '^port ' <<<"$statuses")"
+  check "$name/not-listed" "listed HTTP/1.1 403 Forbidden" "$(grep '^listed ' <<<"$statuses")"
+  # `localhost` **is** on the allow-list and is refused anyway: the address rule wins (item 2's
+  # "regardless of the allow-list"), and this is the assertion that would pass if the check were skipped
+  # for a listed name.
+  check "$name/inside" "inside HTTP/1.1 403 Forbidden" "$(grep '^inside ' <<<"$statuses")"
+
+  # One line per answer, with the session id from the proxy username, the host and both byte counts: the
+  # refusal is what the operator (and this case) can grep.
+  grep -q 'session=abcdef0123456789 host=example.com status=not-listed' "$log" ||
+    fail "$name/attribution" "the log line did not attribute the request to the session: $(cat "$log")"
+  grep -q 'host=localhost status=inside' "$log" ||
+    fail "$name/inside-log" "the inside refusal is not in the log: $(cat "$log")"
+  grep -q 'bytes_up=0 bytes_down=0' "$log" ||
+    fail "$name/bytes" "a refusal did not log its bytes: $(cat "$log")"
+  assertions=$((assertions + 3))
+
+  kill -TERM "$proxy_pid" 2>/dev/null || true
+  wait "$proxy_pid" 2>/dev/null || true
 }
 
 # HS-014: the session screen is a path, not a route. `/sessions/<id>` is not a file the app ships,

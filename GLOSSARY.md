@@ -514,12 +514,25 @@ The per-session throwaway credential the agent holds instead of a real key.
 _Avoid_: Session key, placeholder, fake token
 
 **Egress proxy**:
-The only route from a session network to the internet. CONNECT to allow-listed hosts on 443 only.
+A **mode of this binary** (`holosmith proxy egress`), run as the `hs_egress` container on the `egress` network
+and joined to each session network that allowed internet access. It is the only route from a session network
+to the internet: `CONNECT` to port 443 only, allow-listed names only, and never a destination that resolves
+into the machine. It logs one line per answered request with the session, the host and the bytes. Its machine
+names are `egress::Rules`, `container::EgressProxy`, `container::PROXY_NAME` and `container::PROXY_ALIAS`.
 _Avoid_: Firewall, forward proxy, gateway
 
 **Allow-list**:
-The set of hostnames the egress proxy will connect to.
-_Avoid_: Whitelist, permitted hosts
+The set of **exact** hostnames the egress proxy will tunnel to (`[egress] allow`). A subdomain is a second
+entry, because a suffix match is the wildcard `config validate` refuses. It never contains a provider host:
+a model call goes through the key proxy.
+_Avoid_: Whitelist, permitted hosts, domain filter
+
+**Proxy username**:
+The session id a request carries as its `Proxy-Authorization` username — and therefore the session id in the
+container's `HTTPS_PROXY` (`http://<id>@egress-proxy:3128`). It is attribution, not authentication: the
+password is empty on purpose, because nothing checks it and a secret in an environment variable is what
+spec item 2 forbids. `egress-proxy` is the proxy's network **alias**, not its container name.
+_Avoid_: Proxy auth, proxy token, credentials
 
 **Session network**:
 The private internal Docker network one session's container joins: `agents_<id>`, created `--internal` so that
