@@ -48,6 +48,20 @@ pub const NETWORK: &str = "holosmith-selftest";
 /// unambiguous and a refusal still proves a route.
 pub const PUBLIC: &str = "1.1.1.1:443";
 
+/// The address the egress proxy answers on from a session's network — and therefore the address that must **not**
+/// answer on a network whose session asked for no internet access (HS-038, spec item 2's off case).
+///
+/// The alias a session's container resolves the proxy by, not the proxy's container name
+/// ([`crate::container::PROXY_ALIAS`]): the alias is what Docker's embedded DNS answers, so a name that does not
+/// resolve is proof that nothing is attached — measured on this machine as `EAI_AGAIN` on a network the proxy is
+/// not joined to, against `connected` on one where it is. That is the cleanest "nothing answers" there is, and it
+/// is the only fact that tells "off" from "the proxy is missing by accident".
+///
+/// **The key proxy is not here yet.** HS-039 adds it, and it belongs in this list: the off case's promise is that
+/// only the key proxy answers. A target nothing answers today would prove nothing, which is why it is one entry
+/// and not two with a comment.
+pub const PROXY_TARGET: &str = "egress-proxy:3128";
+
 /// The port the host is probed on.
 ///
 /// The convention for a daemon's unauthenticated TCP API, which is what makes it a *good* canary either way:
@@ -149,7 +163,9 @@ impl Runner for Docker {
     }
 
     fn targets(&self) -> Vec<String> {
-        let mut targets = vec![PUBLIC.to_string()];
+        // The proxy is asked about first only in this comment: the probe asks all of them at once, and a proxy
+        // that answers is `connected` — reached, by the rule the whole test rests on.
+        let mut targets = vec![PUBLIC.to_string(), PROXY_TARGET.to_string()];
         // The host, when this daemon's default bridge has a gateway to be reached through. A machine whose
         // daemon reports none (a rootless daemon, or no bridge at all) is not guessed at: the internet target
         // is still measured, and the sentence says which targets were tried.
@@ -219,6 +235,17 @@ pub fn run_with(runner: &dyn Runner, image: &str) -> Outcome {
 pub fn decide(report: &Report, targets: &[String]) -> Outcome {
     match report.code {
         0 => Outcome::Passed,
+        // Two findings, two sentences: a proxy that answers where nothing should leave is a wiring mistake
+        // (the session's `network` flag not reaching the topology), and one sentence that named both would be a
+        // checklist instead of the one thing to go and look at. A direct leak is the worse answer and wins.
+        REACHED if !leaked(report) => Outcome::Failed(format!(
+            "the egress proxy answered on the probe's internal network ({}) — sessions that asked for no internet \
+             access would reach it anyway: check that nothing joins {} to a network at startup and that a session's \
+             network is joined only when its row says it may be; `docker network inspect <network>` lists what \
+             is attached",
+            report.reached.trim(),
+            crate::container::PROXY_NAME,
+        )),
         REACHED => Outcome::Failed(format!(
             "a container on an internal network reached {} — this machine would run sessions that are not \
              isolated: check that the daemon has not been started with `--iptables=false`, that its default \
@@ -241,6 +268,28 @@ pub fn decide(report: &Report, targets: &[String]) -> Outcome {
             }
         )),
     }
+}
+
+/// Whether anything other than the egress proxy was reached — the question that decides which of the two
+/// `REACHED` sentences an operator reads.
+///
+/// The report's `reached` field is the probe's own words: `target verdict` pairs, comma-separated, in the order the
+/// probe printed them. The target is everything before the last space, because a target is `host:port` and a
+/// verdict is one word (`connected`, `refused`, `timed out`). A report that printed nothing counts as a leak: a
+/// probe that answered [`REACHED`] without naming a target is not a report this build can read, and the safe
+/// reading of an unreadable finding is the worse one.
+fn leaked(report: &Report) -> bool {
+    let targets: Vec<&str> = report
+        .reached
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| match entry.rsplit_once(' ') {
+            Some((target, _verdict)) => target,
+            None => entry,
+        })
+        .collect();
+    targets.is_empty() || targets.iter().any(|target| *target != PROXY_TARGET)
 }
 
 #[cfg(test)]
@@ -432,6 +481,107 @@ mod tests {
             panic!("a refusal is a reach");
         };
         assert!(sentence.contains("refused"), "{sentence}");
+    }
+
+    /// HS-038's off case, as three reports. The proxy answering where nothing should leave is its **own**
+    /// finding — a different fix from a leaking bridge — and a direct leak alongside it is the worse of the two,
+    /// so it keeps the isolation sentence.
+    #[test]
+    fn a_proxy_on_a_no_internet_network_is_its_own_finding() {
+        let targets = vec![
+            PUBLIC.to_string(),
+            PROXY_TARGET.to_string(),
+            format!("172.17.0.1:{HOST_PORT}"),
+        ];
+        let report = |reached: &str| Report {
+            code: REACHED,
+            reached: reached.to_string(),
+            complaint: String::new(),
+        };
+
+        // Only the proxy answered: the sentence names the proxy and the fix is the join, not the bridge.
+        let Outcome::Failed(sentence) =
+            decide(&report(&format!("{PROXY_TARGET} connected")), &targets)
+        else {
+            panic!("a proxy that answers on a network that asked for no internet is a finding");
+        };
+        assert!(
+            sentence.contains(crate::container::PROXY_NAME),
+            "the sentence names the container to go and look at: {sentence}"
+        );
+        assert!(
+            sentence.contains(PROXY_TARGET),
+            "and the address that answered: {sentence}"
+        );
+        assert!(
+            !sentence.contains("--iptables=false"),
+            "a bridge hint would send the operator to the wrong machine setting: {sentence}"
+        );
+
+        // The proxy *and* the internet: the leak outranks the wiring, so the isolation sentence is the one.
+        let Outcome::Failed(sentence) = decide(
+            &report(&format!("{PUBLIC} connected,{PROXY_TARGET} connected")),
+            &targets,
+        ) else {
+            panic!("a reached public address is always a finding");
+        };
+        assert!(sentence.contains("--iptables=false"), "{sentence}");
+        assert!(sentence.contains(PUBLIC), "{sentence}");
+
+        // Nothing reached at all is the pass, proxy target or not: the check must not turn every boot red.
+        assert_eq!(
+            decide(
+                &Report {
+                    code: 0,
+                    reached: String::new(),
+                    complaint: String::new(),
+                },
+                &targets,
+            ),
+            Outcome::Passed
+        );
+    }
+
+    #[test]
+    fn an_unreadable_reached_set_is_the_worse_reading() {
+        // `REACHED` with nothing printed cannot be attributed, and "something reached something" is not a pass.
+        // The point of the assertion is that the empty set falls through to neither the proxy sentence nor
+        // `Passed`: an unattributed finding is still a finding.
+        let targets = vec![PUBLIC.to_string(), PROXY_TARGET.to_string()];
+        let Outcome::Failed(sentence) = decide(
+            &Report {
+                code: REACHED,
+                reached: String::new(),
+                complaint: String::new(),
+            },
+            &targets,
+        ) else {
+            panic!("an unattributed finding is a finding");
+        };
+        assert!(sentence.contains("the internet or the host"), "{sentence}");
+    }
+
+    #[test]
+    fn the_probe_is_asked_about_the_proxy_by_its_alias() {
+        // The target is the *alias* Docker's embedded DNS answers on a network the proxy is joined to
+        // (`egress-proxy`), never the container's name (`hs_egress`): the container's name resolves on the
+        // `egress` network only, so a probe asking for it would pass on every machine, joined or not.
+        assert_eq!(
+            PROXY_TARGET,
+            format!("{}:{}", crate::container::PROXY_ALIAS, crate::egress::PORT),
+            "the probe's target is the address the container's own `HTTPS_PROXY` carries"
+        );
+        assert!(
+            !PROXY_TARGET.contains(crate::container::PROXY_NAME),
+            "the alias and the container name are two strings, and the probe asks the alias"
+        );
+        // The real machine's list is built from the same constant, so the production runner cannot drift from
+        // the sentence. `.targets()` needs no daemon: its host half shells out to `docker network inspect` and
+        // answers nothing when that fails, which is why only the two fixed targets are asserted here.
+        let docker = Docker::new(None);
+        let targets = docker.targets();
+        assert!(targets.contains(&PUBLIC.to_string()), "{targets:?}");
+        assert!(targets.contains(&PROXY_TARGET.to_string()), "{targets:?}");
     }
 
     #[test]

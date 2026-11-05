@@ -13,7 +13,7 @@
 use std::process::Command;
 
 use holosmith::docker::Docker;
-use holosmith::selftest::{self, Outcome, PUBLIC, REACHED, Runner};
+use holosmith::selftest::{self, Outcome, PROXY_TARGET, PUBLIC, REACHED, Runner};
 
 /// The image the probe runs in: the one sessions run, because a probe that used a different image would be
 /// measuring a different machine.
@@ -110,5 +110,134 @@ fn an_internal_network_reaches_nothing_while_the_default_bridge_reaches_the_host
         bridged.reached.contains(":2375") || bridged.reached.contains(PUBLIC),
         "the bridge control named nothing: {}",
         bridged.reached
+    );
+}
+
+/// HS-038's off case, measured the only way it can be: **the same network**, before and after something answers on
+/// the proxy's alias.
+///
+/// The unit tests decide what a report means; this test is what makes the report possible at all. It is the pair
+/// that matters — a probe that reported `0` on a network where a listener *is* attached would make the off case a
+/// claim rather than a measurement — and one network rather than two, so "the second network was different" is not
+/// an explanation for the difference.
+///
+/// The listener is a stand-in, not the machine's live `hs_egress`: joining the real proxy to a test network would
+/// hand a running session a route it did not ask for (the landmine HS-037's tests record). What is being measured
+/// is the question the boot asks — *does something answer on `egress-proxy:3128` from an internal network* — and a
+/// container listening on 3128 under that alias answers it exactly as the proxy does.
+#[test]
+fn a_listener_on_the_proxy_alias_is_what_the_off_case_looks_for() {
+    if !ready() {
+        return;
+    }
+    let docker = Docker::new(None);
+    let image = image();
+    if !docker.succeeds(&["image", "inspect", &image]) {
+        eprintln!("SKIP tests/selftest.rs: no image {image}");
+        return;
+    }
+    // Names of its own: a session's are `agents_<id>` and the machine's proxy is `hs_egress`.
+    let network = "holosmith-selftest-offcase";
+    let standin = "holosmith-selftest-standin";
+    let _ = docker.remove_container(standin);
+    let _ = docker.remove_network(network);
+    docker
+        .create_internal_network(network)
+        .expect("the test network can be created");
+
+    let targets = vec![PROXY_TARGET.to_string()];
+    let probe = |docker: &Docker| {
+        docker
+            .attempt(
+                &[
+                    "run".to_string(),
+                    "--rm".to_string(),
+                    "--network".to_string(),
+                    network.to_string(),
+                    image.clone(),
+                    "node".to_string(),
+                    "-e".to_string(),
+                    selftest::PROBE.to_string(),
+                ]
+                .into_iter()
+                .chain(targets.iter().cloned())
+                .collect::<Vec<String>>(),
+                selftest::PROBE_TIMEOUT,
+            )
+            .expect("the probe can be asked")
+            .expect("the probe finishes")
+    };
+
+    // Nothing is attached: the alias does not resolve, and that is the pass `selftest::run` reports today.
+    let bare = probe(&docker);
+    eprintln!(
+        "off case on {network}: exit {} reached {:?}",
+        bare.code, bare.reached
+    );
+    assert_eq!(
+        bare.code, 0,
+        "nothing should answer on a network with no proxy attached, and the probe said {}",
+        bare.reached
+    );
+
+    // The same network with a listener on the alias: now the probe must find it, or the check cannot fire and the
+    // off case is a claim.
+    let started = docker
+        .run_detached(
+            &[
+                "run".to_string(),
+                "--detach".to_string(),
+                "--rm".to_string(),
+                "--name".to_string(),
+                standin.to_string(),
+                "--network".to_string(),
+                network.to_string(),
+                "--network-alias".to_string(),
+                holosmith::container::PROXY_ALIAS.to_string(),
+                image.clone(),
+                "node".to_string(),
+                "-e".to_string(),
+                // One connection, one refusal, then on to the next: the probe only needs an answer.
+                "require('net').createServer((s) => { s.on('error', () => {}); \
+             s.end('HTTP/1.1 403 Forbidden\\r\\n\\r\\n'); }).listen(3128)"
+                    .to_string(),
+            ],
+            std::time::Duration::from_secs(60),
+        )
+        .expect("the stand-in can be started");
+    assert!(
+        started.is_some(),
+        "the stand-in listener did not start within its bound"
+    );
+
+    let attached = probe(&docker);
+    eprintln!(
+        "off case with a listener on the alias: exit {} reached {:?}",
+        attached.code, attached.reached
+    );
+    assert_eq!(
+        attached.code, REACHED,
+        "a listener on the alias must be a finding, or the off case proves nothing: {}",
+        attached.reached
+    );
+    assert!(
+        attached.reached.contains(PROXY_TARGET),
+        "the finding names the address that answered: {}",
+        attached.reached
+    );
+    // And the decision turns that report into the proxy's own sentence, not the bridge's.
+    let Outcome::Failed(sentence) = selftest::decide(&attached, &targets) else {
+        panic!("the report must refuse the boot");
+    };
+    assert!(
+        sentence.contains(holosmith::container::PROXY_NAME),
+        "the sentence names the container to look at: {sentence}"
+    );
+
+    docker.remove_container(standin);
+    docker.remove_network(network);
+    assert!(
+        !docker.succeeds(&["network", "inspect", network]),
+        "the test's network must not outlive it"
     );
 }
