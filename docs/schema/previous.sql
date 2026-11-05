@@ -2,18 +2,20 @@
 --
 -- This file is NOT a migration: it does not live in `crates/holosmith/migrations` (that directory is embedded
 -- in the binary and byte-grepped by scripts/check-static.sh), and nothing applies it. `tests/schema_previous.rs`
--- executes it into a throwaway database and asserts that every table and column it names still exists in this
--- build's schema -- so a migration that drops or renames any of them fails the gate, and a migration that adds
--- is invisible to it.
+-- runs it into a throwaway database and asserts that every table and column it names still exists in this
+-- build's schema -- so a migration that drops or renames any of them fails the gate. A migration that *adds*
+-- is invisible to it, because adding is the rule.
 --
 -- **Refresh it at release time**, from the release you are leaving, with
--- `scripts/schema-snapshot.sh <data root>/app.db`. A contract migration (`NNNN_contract_*.sql`) changes this file
--- in the same commit: that diff is the record of what was given up, and of the release that gave it up.
+-- `scripts/schema-snapshot.sh <data root>/app.db`, and commit it with the change that needed it. A contract
+-- migration (`NNNN_contract_*.sql`) changes this file in the same commit: that diff is the record of what was
+-- given up, and of the release that gave it up.
 --
--- Snapshot of the schema this build leaves behind: schema 4
--- (regenerate rather than edit; docs/build.md, "The database and its migrations").
+-- The very first file of a project's life is that build's own schema, because there is no earlier release to
+-- dump: that is this file's bootstrap case, and the provenance line below is what says which release it came
+-- from.
 
--- Written by scripts/schema-snapshot.sh from a database of holosmith 0.1.0, schema 4.
+-- Snapshot from a database of holosmith 0.1.0, schema 4 (scripts/schema-snapshot.sh).
 
 CREATE TABLE events (
     session_id TEXT NOT NULL,

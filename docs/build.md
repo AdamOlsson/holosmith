@@ -64,19 +64,22 @@ stop. The marker is read out of
 scripts/verify.sh
 ```
 
-Six phases, cheapest first, so a formatting slip cannot cost a two-minute musl build:
+Seven phases, cheapest first, so a formatting slip cannot cost a two-minute musl build:
 
 | Phase | Command |
 |---|---|
 | `fmt` | `cargo fmt --check` |
 | `clippy` | `cargo clippy --all-targets -- -D warnings` |
 | `test` | `cargo test` |
+| `migrations` | `cargo test --test schema_previous` (the expand/contract rule, HS-075) |
 | `build` | `scripts/build.sh` (which runs `build-web.sh` first and `check-static.sh` last) |
 | `embed` | `scripts/check-embed.sh` |
 | `serve` | the boot below and its cases |
 
 `cargo test` proves the code and never that the app was built, so the artifact phases come
-after it and before the boot: the binary is built (phase 4) before it is served (phase 6).
+after it and before the boot: the binary is built (phase 5) before it is served (phase 7).
+`migrations` is its own phase for a reason a test list cannot give: the rule it checks is one a
+migration author has to know about, and a failing run should name it (ADR-0047).
 `scripts/build.sh` is called once, because it already runs `scripts/build-web.sh`; calling
 both would run `npm ci` twice.
 
@@ -258,9 +261,15 @@ remember to place the new case before it.
 is what makes this a growing gate rather than a snapshot: a story that adds a route or a
 behaviour has one obvious place to prove the shipped binary does it. A case that needs a setting the
 rest of the run must not carry gets a boot of its own (see `case_token_budget`, `case_usage_survives_resume`,
-`case_compaction`, `case_history`, `case_backup`, `case_worktree` and `case_worktree_refusal`), and
-takes a place at the end of the array: nothing after it may assume the first boot's state, and a case
-that stops the server leaves the run with whatever boot it started.
+`case_compaction`, `case_history`, `case_backup`, `case_worktree` and `case_worktree_refusal`), the
+Internet-access checkbox (`case_internet_toggle`, described above), and a database from a newer release
+(`case_schema_newer`, which needs no daemon: it boots the artifact twice over one data root, rewrites the
+recorded `schema_version` to 99 in between with `python3`'s `sqlite3`, and asserts that the second boot's
+banner prints `schema 99`, that its one `warn` names both versions and the command that will refuse
+(`doctor`, HS-045), and that `GET /api/health` still answers `200` — the "serve continues so a rollback
+needs no restore" half of ADR-0047), and takes a place at the end of the array: nothing after it may
+assume the first boot's state, and a case that stops the server leaves the run with whatever boot it
+started.
 
 **The idle stop runs for the whole `serve` phase.** `idle_stop_min = 1` is the process's setting, so
 every case from `start_serve` on has a sweeper behind it and **no case may leave a session `idle` for a
@@ -326,36 +335,49 @@ test names a data root inside its own temporary directory, because `serve` now c
 migrates whatever root the config resolves to, and an omitted key resolves to the built-in
 default.
 
+**The event log is not append-only for ever.** Compaction (HS-060, ADR-0032) replaces the delta
+rows of messages completed more than 24 hours ago with one `message.snapshot` each, so an `events`
+row can disappear while `sessions.last_seq` stays where it was. Two consequences for anyone
+writing a statement against either table: a seq is **strictly increasing with gaps**, and the next
+seq is `last_seq + 1` rather than `MAX(seq) + 1` — deriving it from the rows would reuse a seq a
+snapshot already holds. Compaction runs in the background on a one-minute tick, folds one session
+per transaction, and never touches a session whose state is `starting`, `running` or `deleting`.
+
 ### The expand/contract rule, and the one file to refresh
 
-A migration may **add**. It may not drop or rename anything the previous release still uses — that is what makes
-`holosmith rollback` a symlink switch rather than a database restore (spec item 10, ADR-0047). Two things enforce
-it, and they catch different mistakes:
+A migration may **add**. It may not drop or rename anything the previous release still uses —
+that is what makes `holosmith rollback` a symlink switch rather than a database restore (spec
+item 10, ADR-0047). Two things enforce it, and they catch different mistakes:
 
-- **A destructive statement in a file that is not named as a contract migration is a test failure, immediately.**
-  `schema::contract_violations` refuses `DROP TABLE`, `ALTER TABLE … DROP COLUMN` and `RENAME` in any migration
-  whose slug is not `contract` or `contract_*`, matched on words rather than substrings. So the cleanup that follows
-  an expand ships as `0005_contract_drop_old_column.sql`, one release later, and a release that only expands cannot
+- **A destructive statement in a file that is not named as a contract migration is a test
+  failure, immediately.** `schema::contract_violations` refuses `DROP TABLE`, `ALTER TABLE …
+  DROP COLUMN` and `RENAME` in any migration whose slug is not `contract` or `contract_*`,
+  matched on words rather than substrings. So the cleanup that follows an expand ships as
+  `0005_contract_drop_old_column.sql`, one release later, and a release that only expands cannot
   contain one by accident.
-- **A snapshot of the previous release's schema is compared with this build's**, as a subset: every table and every
-  column in `docs/schema/previous.sql` must still exist. Drop or rename one and the subset test fails with the two
-  ways forward in its message. It is not under `crates/holosmith/migrations` on purpose — that directory is embedded
-  and byte-grepped into the artifact by `scripts/check-static.sh` — and the comparison is done by SQLite
-  (`sqlite_master`, `pragma_table_info`), not by a second SQL parser.
+- **A snapshot of the previous release's schema is compared with this build's**, as a subset:
+  every table and every column in `docs/schema/previous.sql` must still exist. Drop or rename one
+  and the subset test fails with the two ways forward in its message. It is not under
+  `crates/holosmith/migrations` on purpose — that directory is embedded and byte-grepped into the
+  artifact by `scripts/check-static.sh` — and the comparison is done by SQLite (`sqlite_master`,
+  `pragma_table_info`), not by a second SQL parser.
 
-`scripts/verify.sh` runs the subset test as the `migrations` phase, so a broken rule is named in the output rather
-than buried in a test list.
+`scripts/verify.sh` runs the subset test as the `migrations` phase, so a broken rule is named in
+the output rather than buried in a test list.
 
-**Refreshing the snapshot is a release step.** Take the release you are leaving — the simplest is to start its
-binary once with an empty `--data-dir`, which migrates it — and run:
+**Refreshing the snapshot is a release step.** Take the release you are leaving — the simplest is
+to start its binary once with an empty `--data-dir`, which migrates it — and run:
 
 ```bash
 scripts/schema-snapshot.sh <data root>/app.db    # writes docs/schema/previous.sql
 ```
 
-Commit the result *with* the change that needed it. A contract migration changes this file in the same commit, so
-the diff is the record of what that release gave up; that is the only mechanical form the "one release later" clause
-can take, because nothing in a repository knows which binary was promoted.
+Commit the result *with* the change that needed it. A contract migration changes this file in the
+same commit, so the diff is the record of what that release gave up; that is the only mechanical
+form the "one release later" clause can take, because nothing in a repository knows which binary
+was promoted. The first file of a project's life is necessarily that build's own schema, since
+there is no earlier release to dump; the file's provenance line says which release it came from,
+so a later reader is never guessing.
 
 A worked pair, as a migration author would write it:
 
@@ -370,23 +392,16 @@ ALTER TABLE sessions ADD COLUMN expected_stop INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE sessions DROP COLUMN retry_count;
 ```
 
-If you are tempted to write the second one in the same release as the first, the subset test is what will stop you:
-`retry_count` is still in the snapshot, and the message says either to keep it or to refresh the snapshot and say
-why rolling back past this release is acceptable.
+If you are tempted to write the second one in the same release as the first, the subset test is
+what will stop you: `retry_count` is still in the snapshot, and the message says either to keep it
+or to refresh the snapshot and say why rolling back past this release is acceptable.
 
-**A newer database is not a refusal to start.** If `schema_version` is *higher* than the binary's
-`schema::SCHEMA_VERSION`, `serve` warns and continues: an older binary over a newer database is exactly the rollback
-expand/contract exists to make safe. `schema::verdict` holds that decision and the sentence, the banner prints the
-**recorded** number (`database <path> schema <n>`), and `doctor` (HS-045) is where the sentence becomes a refusal —
-a check that runs before a start, rather than a service that refuses to come back up.
-
-**The event log is not append-only for ever.** Compaction (HS-060, ADR-0032) replaces the delta
-rows of messages completed more than 24 hours ago with one `message.snapshot` each, so an `events`
-row can disappear while `sessions.last_seq` stays where it was. Two consequences for anyone
-writing a statement against either table: a seq is **strictly increasing with gaps**, and the next
-seq is `last_seq + 1` rather than `MAX(seq) + 1` — deriving it from the rows would reuse a seq a
-snapshot already holds. Compaction runs in the background on a one-minute tick, folds one session
-per transaction, and never touches a session whose state is `starting`, `running` or `deleting`.
+**A newer database is not a refusal to start.** If `schema_version` is *higher* than the
+binary's `schema::SCHEMA_VERSION`, `serve` warns and continues: an older binary over a newer
+database is exactly the rollback expand/contract exists to make safe. `schema::verdict` holds that
+decision and the sentence, the banner prints the **recorded** number (`database <path> schema
+<n>`), and `doctor` (HS-045) is where the sentence becomes a refusal — a check that runs before a
+start, rather than a service that refuses to come back up.
 
 ## Prerequisites
 
@@ -404,12 +419,16 @@ per transaction, and never touches a session whose state is `starting`, `running
 - **git** for `scripts/build.sh`, and for a Docker run at runtime: the worktree step runs
   `git worktree`, `git rev-list` and `git branch` against the project repository on the host
   (HS-025). Not required by `cargo build` itself, and not required by `--backend stub`.
-- Optional: **`python3`** for `scripts/verify.sh`'s `case_worktree` and `case_compaction`. The first
-  answers the Docker preflight from a socket that says `200 OK` so a Docker boot can be driven on a
-  machine with no daemon; the second ages a session's event log with stdlib `sqlite3`, because the
-  compaction window is the spec's fixed 24 hours rather than a config key (ADR-0032). Without it each
-  case prints one `SKIP` line and the run passes; `cargo test`, `tests/worktree.rs` and
-  `tests/compaction.rs` cover the behaviour either way.
+- Optional: **`python3`** for the parts of the gate that read a database or speak a socket by hand:
+  `case_worktree` (answers the Docker preflight from a socket saying `200 OK`, so a Docker boot can be driven
+  on a machine with no daemon), `case_compaction` (ages a session's event log with stdlib `sqlite3`, because
+  the compaction window is the spec's fixed 24 hours rather than a config key — ADR-0032),
+  `case_exit_classification` and `case_usage_survives_resume` (read a column the API does not carry), the
+  history case, and `case_schema_newer` (writes a `schema_version` from the future). Without it each case
+  prints one `SKIP` line and the run passes; `cargo test` covers the behaviour either way.
+- Optional: **`python3`** for `scripts/schema-snapshot.sh`, the release step that refreshes
+  `docs/schema/previous.sql`: the `sqlite3` CLI is not installed and nothing in the gate may depend on it.
+  That script is not part of `verify.sh` — it is run by hand when a release is cut (ADR-0047).
 - **The development sandbox binds the host's Docker socket**, because every story from HS-027 on is a fact
   about a real `docker run` (`bwrap.sh`'s `DOCKER` binds). That is host root by another name — anything able
   to reach the socket can start a container with `/` mounted — so it is granted deliberately and only when

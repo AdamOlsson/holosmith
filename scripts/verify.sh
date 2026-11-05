@@ -3,8 +3,9 @@
 # ships serves (ADR-0003).
 #
 # Usage: scripts/verify.sh [--keep] [--no-build]
-# Six phases, cheapest first: cargo fmt --check, cargo clippy --all-targets -- -D warnings,
-# cargo test, scripts/build.sh (which runs scripts/build-web.sh and scripts/check-static.sh),
+# Seven phases, cheapest first: cargo fmt --check, cargo clippy --all-targets -- -D warnings,
+# cargo test, `cargo test --test schema_previous` (the expand/contract rule, HS-075),
+# scripts/build.sh (which runs scripts/build-web.sh and scripts/check-static.sh),
 # scripts/check-embed.sh, then serve: dist/<host-triple>/holosmith on a random port with a temp
 # config and a temp data dir, answering /api/health, the schema version, the app shell, the 404
 # envelope, every browser-facing guard refusal (ADR-0010), the create endpoint's 202/422/409
@@ -19,7 +20,8 @@
 # repository and taken back when the next step refuses, the three project refusals a create and a resume
 # answer with their own codes, the Internet-access checkbox measured on two real session networks (nothing
 # reachable directly, the proxy's alias resolvable in exactly one of them, and the flag as a network's endpoint
-# count after a resume), and a Docker preflight that
+# count after a resume), a boot over a database from a newer release (which continues and says who refuses), and a
+# Docker preflight that
 # refuses to start with one sentence naming the fix, with no CORS header
 # on any answer, and stopping on SIGTERM with exit 0.
 # --no-build skips the two artifact phases; --keep keeps the work dir of a successful run. On
@@ -1947,10 +1949,9 @@ db = sqlite3.connect(sys.argv[1])
 db.execute("INSERT INTO schema_version (version, name, applied_at) VALUES (99, 'from-the-future', 0)")
 db.commit()
 SQL
-  HOLOSMITH_LOG=info
-  export HOLOSMITH_LOG
+  # No `HOLOSMITH_LOG` here: the default filter is already `info`, which is what a `warn` needs, and the banner is
+  # written with `eprintln!` and cannot be filtered at all.
   start_serve "$WORK/config-schema-newer.toml" "$root/data" >/dev/null
-  unset HOLOSMITH_LOG
   grep -q '^database .* schema 99$' "$serve_err" ||
     fail "$name/banner" "the banner does not print the recorded schema: $(grep '^database ' "$serve_err" || true)"
   assertions=$((assertions + 1))
@@ -1968,8 +1969,9 @@ SQL
   fetch "$name" GET /api/health "Host: 127.0.0.1" ||
     fail "$name/no_answer" "GET /api/health did not answer over a newer database"
   expect_status "$name" "$(answer "$name")" 200
-  # Its server is left running for the phase's final `stop_serve`, so the scratch root — which holds its data root —
-  # goes with it rather than being removed here.
+  # Its server is left running for the phase's final `stop_serve` — that is the pattern every case that booted its
+  # own uses — and the scratch tree goes now, holding the data root it was migrated from.
+  rm -rf "$root"
 }
 
 # HS-014: the session screen is a path, not a route. `/sessions/<id>` is not a file the app ships,

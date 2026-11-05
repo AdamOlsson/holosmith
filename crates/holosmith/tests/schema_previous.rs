@@ -114,22 +114,28 @@ fn the_previous_releases_schema_is_still_a_subset_of_this_one() {
     let (dir, now) = current("schema-previous-subset");
     let then = previous();
 
-    // Non-vacuity, twice. A snapshot that names nothing passes every assertion below, and one refreshed from a
-    // database of some other build still passes a subset test that only looks at what the two happen to share —
-    // so the file is required to name this schema's tables, not merely to be a subset of it.
+    // Non-vacuity, in the only two directions that are **not** the rule. A snapshot that names nothing passes every
+    // assertion below, so it must name a schema at all: `schema_version` exists in every release, and a floor of ten
+    // columns is a truncation check rather than a fact about the schema. Anything stronger than this would be the
+    // rule's opposite — asserting that no table or column was *added* — and a first draft of this test did exactly
+    // that, which is why the comment is longer than the code (ADR-0047).
     let named: usize = then.values().map(BTreeSet::len).sum();
     assert!(
-        then.len() >= 3 && named >= 20,
-        "the snapshot names {} tables and {named} columns, which is not this schema ({})",
-        then.len(),
+        then.contains_key("schema_version"),
+        "the snapshot does not name schema_version, so it is not a holosmith schema ({})",
         dir.path().display()
     );
-    assert_eq!(
-        then.keys().collect::<Vec<_>>(),
-        now.keys().collect::<Vec<_>>(),
-        "the snapshot and this build disagree about which tables exist — one was dropped, or the snapshot was \
-         refreshed from another build ({})",
+    assert!(
+        named >= 10,
+        "the snapshot names {named} columns, which is a truncated file rather than a schema ({})",
         dir.path().display()
+    );
+    // The tables are **not** compared as sets: a release that adds one is the rule working, and so is a release
+    // that adds a column. `missing` reports the other direction — a table or column the snapshot names and this
+    // build does not have — which is the whole of the guarantee.
+    assert!(
+        !now.is_empty(),
+        "this build's schema is empty, so a subset test would pass over anything"
     );
 
     assert!(

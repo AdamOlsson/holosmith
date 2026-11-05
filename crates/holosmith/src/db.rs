@@ -302,18 +302,22 @@ pub fn apply_pending(
     let recorded = recorded_version(conn, path)?;
     // One decision, in `schema::verdict`, because the banner, the `warn` below and `doctor` (HS-045) all report the
     // same fact and a second comparison is a second chance to disagree (HS-075).
-    let verdict = schema::verdict(recorded, schema::SCHEMA_VERSION);
-    if verdict == schema::Verdict::Newer {
-        // Item 10: rolling `current` back to an older binary must not need a restore, and
-        // expand/contract is what makes continuing safe. `doctor` is where this refuses.
-        tracing::warn!(
-            database = %path.display(),
-            recorded,
-            binary = schema::SCHEMA_VERSION,
-            verdict = %verdict.sentence(recorded, schema::SCHEMA_VERSION),
-            "a newer release wrote this database; continuing without migrating it"
-        );
-        return Ok(recorded);
+    match schema::verdict(recorded, schema::SCHEMA_VERSION) {
+        // Item 10: rolling `current` back to an older binary must not need a restore, and expand/contract is what
+        // makes continuing safe. `doctor` is where this refuses; `serve` says so once and carries on.
+        schema::Verdict::Newer => {
+            tracing::warn!(
+                database = %path.display(),
+                recorded,
+                binary = schema::SCHEMA_VERSION,
+                verdict = %schema::Verdict::Newer.sentence(recorded, schema::SCHEMA_VERSION),
+                "a newer release wrote this database; continuing without migrating it"
+            );
+            return Ok(recorded);
+        }
+        // Nothing to do: the recorded version is the one this binary embeds.
+        schema::Verdict::Same => return Ok(recorded),
+        schema::Verdict::Older => {}
     }
     if !migrations
         .iter()

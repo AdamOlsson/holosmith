@@ -54,6 +54,14 @@ The consequence is the one worth having: the diff of that file *is* the record. 
 shows it in the snapshot, next to the contract migration that dropped it, and a reviewer sees both. The alternative
 — an exemption list in the test — is how this kind of rule rots.
 
+**The seed is a bootstrap, and the file says so.** The first snapshot of a project's life cannot be a previous
+release's, because there has never been one: it is this build's own schema, so on the day this story lands the
+subset test compares the schema with itself and passes for free. What keeps that from being a permanent hole is
+the file's own provenance line (which release the dump came from) and the release step that regenerates it — a
+mechanism this story can describe and cannot enforce, because nothing in a repository knows when a release was
+cut. Saying so is the honest form; a checker for it would be a checker for "did a human follow the release
+procedure", which is what a release note is for.
+
 ## A newer database is `serve`'s to survive and `doctor`'s to refuse
 
 The acceptance's third bullet ("`doctor` reports schema version and refuses to start when the database is newer
@@ -62,11 +70,12 @@ makes a *rollback* safe: an older binary over a newer database must still serve,
 the restore that expand/contract exists to avoid. Refusing is what makes a *start* safe: an operator about to run
 something must be told when the numbers disagree, and that is a check that runs before the service does.
 
-So `schema::verdict(recorded, binary)` is one function with three answers and one sentence each, and the three
-callers read it rather than comparing numbers themselves: `apply_pending` warns and continues, the banner prints
-the **recorded** number, and `doctor` (HS-045) is where the `Newer` sentence becomes a refusal. `serve`'s behaviour
-is unchanged; what changed is that the `warn` now carries the sentence, so the boot and the future refusal cannot
-drift apart.
+So `schema::verdict(recorded, binary)` is one function with three answers and one sentence each, and the callers
+that *decide* read it rather than comparing numbers themselves: `apply_pending` returns early on `Same` and warns
+and continues on `Newer`, and `doctor` (HS-045) is where the `Newer` sentence becomes a refusal. The banner prints
+the number the verdict is about — the **recorded** one, which is what `Database::schema_version()` already was.
+`serve`'s behaviour is unchanged; what changed is that the `warn` now carries the sentence, so the boot and the
+future refusal cannot drift apart.
 
 ## Consequences
 

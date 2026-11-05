@@ -141,9 +141,9 @@ pub fn check_embed(migrations: &[Migration]) -> Result<u32, EmbedError> {
 
 /// What a database's recorded schema version means to this binary (HS-075, spec item 10).
 ///
-/// One function rather than three comparisons, because three callers read the same fact and must not disagree:
-/// the startup banner prints the recorded number, [`crate::db::apply_pending`] decides whether to migrate, and
-/// `doctor` (HS-045) will decide whether to refuse.
+/// One function rather than a comparison at each caller, because the callers must not disagree:
+/// [`crate::db::apply_pending`] decides whether to migrate, the startup banner prints the number this verdict is
+/// about (the **recorded** one), and `doctor` (HS-045) will decide whether to refuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     /// The database is already the schema this binary embeds.
@@ -179,9 +179,9 @@ impl Verdict {
             ),
             Self::Newer => format!(
                 "the database is at schema {recorded}, which a newer release wrote, and this binary understands \
-                 {binary}: `holosmith doctor --quick` refuses to start on it, and `serve` continues only because \
-                 rolling `current` back must not need a database restore — that is what expand/contract buys \
-                 (spec item 10, ADR-0047)"
+                 {binary}: `doctor` (HS-045, not built yet) is what will refuse to start on it, and `serve` \
+                 continues only because rolling `current` back must not need a database restore — that is what \
+                 expand/contract buys (spec item 10, ADR-0047)"
             ),
         }
     }
@@ -190,9 +190,13 @@ impl Verdict {
 /// Migrations that drop or rename something without being named as contract migrations.
 ///
 /// ADR-0009's expand/contract rule: a destructive statement ships only in
-/// `NNNN_contract.sql` or `NNNN_contract_*.sql`. This is the reminder at the point where the
-/// rule is broken, not the enforcement — the real check compares this release with the
-/// previous one and belongs to the promotion machinery of phase 4 (HS-075+).
+/// `NNNN_contract.sql` or `NNNN_contract_*.sql`. This is the half that one file can answer — is this statement
+/// destructive at all, and was that deliberate? — and it is enforced: `cargo test` runs it over the embedded set.
+///
+/// The other half is the release-over-release question, which no single file can see: `tests/schema_previous.rs`
+/// compares `docs/schema/previous.sql` (the schema the previous release shipped) with this build's, as a subset,
+/// and ADR-0047 records both halves and how the snapshot is refreshed. A `_contract_` migration makes this
+/// function quiet and is then caught by that test until the snapshot is refreshed in the same commit.
 pub fn contract_violations(migrations: &[Migration]) -> Vec<String> {
     migrations
         .iter()
@@ -330,9 +334,9 @@ mod tests {
 
     #[test]
     fn a_destructive_statement_outside_a_contract_migration_is_refused() {
-        // ADR-0009: expand/contract is enforced by the name, because the real check compares
-        // releases and belongs to phase 4. This is the reminder at the point of breakage, so
-        // each case below proves the rule fires rather than passing over today's one file.
+        // ADR-0009/ADR-0047: this half of expand/contract is enforced by the name, and each case below proves the
+        // rule fires rather than passing over today's one file. The release-over-release half is
+        // `tests/schema_previous.rs`.
         let migration = |name: &'static str, sql: &'static str| Migration {
             number: 2,
             name,
