@@ -312,6 +312,7 @@ serve_cases=(
   case_sessions_list
   case_session_detail
   case_session_screen
+  case_tool_output
   case_prompt_turn
   case_turn_timeout
   case_prompt_bad_body
@@ -1358,6 +1359,58 @@ case_session_detail() {
   response="$(answer "$name")"
   expect_status "$name" "$response" 404
   expect_header "$name" "$response" content-type "application/json"
+  expect_code "$name" "$response" not_found
+}
+
+# HS-033: one tool call's full output is a file, and the route serves it — while a name that cannot be a
+# filename is refused rather than joined to a path. The file is written here because the stub's turn calls no
+# tool: `tests/rpc.rs` is where a real turn's tool output is stored by the pump, and `tests/tool_output.rs`
+# where the route's answers are asserted beside it. What only the shipped artifact can add is that the route
+# is in *this* binary's table, off *this* data root, with the guards as they ship.
+case_tool_output() {
+  local name=case_tool_output response tool dir size
+  tool=call_00_9hlt8we6459oa420spsp3mju
+  dir="$WORK/data/sessions/$created_id/tool"
+  mkdir -p "$dir" || fail "$name/mkdir" "could not create $dir"
+  # Two megabytes, so the served answer is far larger than any payload and the read stays bounded.
+  dd if=/dev/zero bs=1024 count=2048 2>/dev/null | tr '\0' 'x' >"$dir/$tool.txt" ||
+    fail "$name/write" "could not write $dir/$tool.txt"
+
+  fetch "$name" GET "/api/sessions/$created_id/tool-output/$tool" "Host: 127.0.0.1" ||
+    fail "$name/no_answer" "GET the tool-output route did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 200
+  expect_header "$name" "$response" content-type "text/plain; charset=utf-8"
+  size="$(wc -c <"$WORK/responses/$name.body")"
+  check "$name/bytes" 2097152 "$(printf '%s' "$size" | tr -d ' ')"
+
+  # A name that cannot be a filename is not a path to join: each of these is the envelope's `not_found`, and
+  # none of them reaches a file outside the session's tool directory.
+  name=case_tool_output_traversal
+  local id
+  for id in '..' '%2e%2e%2f..%2fapp.db' '..%2F..%2Fapp.db' 'a%2Fb' '%2e%2e' 'with%20space'; do
+    fetch "$name" GET "/api/sessions/$created_id/tool-output/$id" "Host: 127.0.0.1" ||
+      fail "$name/no_answer" "GET a traversal ($id) did not answer"
+    response="$(answer "$name")"
+    expect_status "$name" "$response" 404
+    expect_header "$name" "$response" content-type "application/json"
+    expect_code "$name" "$response" not_found
+    case "$(cat "$WORK/responses/$name.body")" in
+      *SQLite*)
+        fail "$name/leak" "a traversal reached the database"
+        ;;
+      *)
+        assertions=$((assertions + 1))
+        ;;
+    esac
+  done
+
+  # An output nobody stored, on a session that exists: the same code, its own sentence.
+  name=case_tool_output_missing
+  fetch "$name" GET "/api/sessions/$created_id/tool-output/call_nothing_here" "Host: 127.0.0.1" ||
+    fail "$name/no_answer" "GET a stored-nothing output did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 404
   expect_code "$name" "$response" not_found
 }
 
