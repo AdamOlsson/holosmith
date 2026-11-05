@@ -366,8 +366,16 @@ Which of a message's two kinds of output a delta belongs to: `text`, the answer,
 _Avoid_: Channel, stream, type, part
 
 **Message id**:
-The identifier a delta and a snapshot name, and the key a transcript holds one block under. Minted by the producer, unique within a session; its machine name is `message_id` in the payload.
+The identifier a delta and a snapshot name, and the key a transcript holds one block under. Minted by the producer, unique within a session; its machine name is `message_id` in the payload. pi's messages carry no id, so the **mapping** mints one per assistant message: `msg-<the process's start instant>-<a process-wide counter>`, the stub's shape for the stub's reason — a restarted process that began again at `msg-1` would fold a new turn's deltas into a previous turn's block against a durable log.
 _Avoid_: Message key, uuid, index
+
+**Record**:
+One JSON object pi printed on its stdout in RPC mode, framed by a lone LF (`docs/rpc.md`), before it means anything to this build: a `response` to a command, a session event, an extension UI request, or the process's own bookkeeping. A record is not an **event** — it becomes at most one frame, or none — and the word is deliberately not "message", which is pi's and the transcript's. The reader that splits them is `agent::read_records`; `agent::Received` is what a turn is handed.
+_Avoid_: Line, message, frame, event
+
+**Mapping**:
+The one translation from a **record** to a **frame** (an event's kind and payload): `src/rpc.rs`'s `Mapping::map`, one record in and at most one frame out, plus the two facts a turn's stream needs (which message id is being streamed, how many records it declined). Pure — no clock, no database, no agent — so a fixture recorded from a real turn replays through the code a container drives. `rpc::pump` is the loop that appends what it maps, and a record the mapping has no frame for is counted and dropped, never fatal.
+_Avoid_: Adapter, translator, decoder, serializer
 
 **Message snapshot**:
 One event that replaces the deltas of an old message with its whole state: `{"message_id", "text", "thinking"}`. It is the transcript's only replacing frame — a client applies it by message id, so receiving one after partial deltas is safe — and it takes the highest seq among the delta rows it replaces, which is the one place a seq is reused. Its machine name is `MESSAGE_SNAPSHOT` and its event kind is `message.snapshot`.

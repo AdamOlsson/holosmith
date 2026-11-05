@@ -209,7 +209,13 @@ last that a `DELETE ?force=true` takes the row, the log, the worktree and the se
 see ADR-0039), and the resume over a live agent (`case_docker_resume`, which creates a session, waits for
 `idle`, removes its container, waits for `error`, `POST /resume`s, and asserts the row reaches `idle`
 again with a running container over the same worktree, then deletes its own session so the run's cap is
-left as it found it; see ADR-0037/ADR-0039). A case that
+left as it found it; see ADR-0037/ADR-0039), and the turn (`case_docker_turn`, which prompts a session whose
+container is pi in RPC mode and asserts the prompt is **accepted** by the handler and then ended by pi's own
+answer — a session's network is `--internal` and it holds no provider key until HS-039, so pi refuses the
+`prompt` command before a stream exists, and what the row carries is pi's sentence, not this build's; the
+container must still be running afterwards, and a resume-then-prompt must work a second time, which is what
+proves the RPC path is repeatable rather than a one-off and what found the removal-supersedes-the-launch bug
+ADR-0040 records; see ADR-0040). A case that
 must assert
 one code keeps every higher guard check correct, or it asserts another guard's code under its own
 name.
@@ -326,6 +332,12 @@ per transaction, and never touches a session whose state is `starting`, `running
   to reach the socket can start a container with `/` mounted — so it is granted deliberately and only when
   the socket exists; a machine without a daemon gets no binds and every Docker check skips. A reviewing
   agent inside this sandbox can therefore create containers, which is the point and also the risk.
+- **The mapping's fixtures** are committed, not generated: `crates/holosmith/tests/fixtures/pi-turn-*.jsonl`
+  are two real turns' records from the image the Docker stories run, replayed by `tests/rpc.rs` through the
+  production mapping (ADR-0040). They are refreshed by hand — one prompt against a container with the
+  operator's own provider credentials and network access — and `tests/rpc.rs`'s
+  `a_fixture_whose_frames_drifted_fails_this_guard` is what makes a silent refresh visible. Neither the gate
+  nor any test needs a provider key, a daemon or the network, because the records are already committed.
 - Optional: a **Docker daemon and one image** for `scripts/verify.sh`'s `case_container_mounts` and for
   `tests/container.rs`. Both check V1 — the hardened `.git` mounts — against a real container, and both
   print one `SKIP` line and pass without a daemon, because a machine without one is a supported machine
