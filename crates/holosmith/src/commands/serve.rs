@@ -118,6 +118,13 @@ pub fn run(args: ServeArgs) -> ExitCode {
                      step that needs it will say so"
                 ),
             }
+            // The **egress proxy** on that network: one container per machine, and the only route out a
+            // session's container has (HS-037, spec item 2). It is started here rather than per session because
+            // it is the machine's; the network step joins it to a session's own network when that session
+            // allowed internet access, which is item 2's "topology, not configuration". A failure is one
+            // `warn`: a machine without a proxy still serves sessions, and those sessions reach nothing
+            // outside their own network — the off case the spec already supports.
+            start_egress_proxy(&loaded.config);
             // The **self-test**: the isolation is enforced by the kernel, so it is measured rather than
             // asserted. Only a *proven* leak refuses the boot; a probe that could not run is a `warn`, because
             // a machine that cannot verify is not the same fact as a machine that was measured to leak (and a
@@ -279,6 +286,42 @@ pub fn run(args: ServeArgs) -> ExitCode {
             eprintln!("holosmith: serve: cannot start the async runtime: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Start the machine's egress proxy container, replacing one an earlier run left behind (HS-037).
+///
+/// Called once per Docker boot, after the `egress` network exists, from [`run`]'s startup path — so it is
+/// synchronous, and every failure is a `warn` rather than a refusal (see the call site for why). The
+/// container is **replaced** on every boot because the allow-list is an argument, not a mount: a changed
+/// `[egress] allow` must take effect without an operator restarting anything by hand.
+fn start_egress_proxy(config: &Config) {
+    let proxy = match crate::container::EgressProxy::of(config) {
+        Ok(proxy) => proxy,
+        Err(sentence) => {
+            tracing::warn!(target: "holosmith::serve", sentence = %sentence, "no egress proxy was started");
+            return;
+        }
+    };
+    let docker = Docker::new(config.docker_host.clone());
+    // `rm -f` first, for spec item 6's reason applied to a container that is not a session's: `--restart
+    // unless-stopped` means a stopped proxy keeps its name, and a name in use is a start that fails for a
+    // reason about Docker rather than about this machine.
+    docker.remove_container(crate::container::PROXY_NAME);
+    match docker.run_detached(&proxy.run_args()) {
+        Ok(_) => tracing::debug!(
+            target: "holosmith::serve",
+            container = crate::container::PROXY_NAME,
+            allow = proxy.allow.len(),
+            "the egress proxy is running"
+        ),
+        Err(error) => tracing::warn!(
+            target: "holosmith::serve",
+            container = crate::container::PROXY_NAME,
+            %error,
+            "the egress proxy could not be started: a session that allows internet access will find nothing \
+             at its proxy address, so its downloads fail at once rather than leaving"
+        ),
     }
 }
 

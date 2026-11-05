@@ -54,6 +54,34 @@ pub const NAME_PREFIX: &str = "s_";
 /// The prefix of every session network: `agents_<id>` (spec item 2).
 pub const NETWORK_PREFIX: &str = "agents_";
 
+/// The egress proxy's container (HS-037, spec item 2).
+///
+/// One per machine, not one per session: it is attached to the machine's `egress` network and, per session,
+/// to that session's own network ([`PROXY_ALIAS`] is how a container finds it). The name is item 10's
+/// (`hs_egress`) because `uninstall` and `doctor` (HS-045) both have to find it by name.
+pub const PROXY_NAME: &str = "hs_egress";
+
+/// The name a session's container resolves the egress proxy by (spec item 2's `http://egress-proxy:3128`).
+///
+/// A **network alias**, not a container name: the proxy is joined to a session's network with
+/// `docker network connect --alias`, and Docker's embedded DNS answers a container's name and its aliases on
+/// the networks the asker shares with it. Nothing resolves outside the session's own networks, which is the
+/// other half of "resolve nothing externally".
+pub const PROXY_ALIAS: &str = "egress-proxy";
+
+/// The variable a session's container finds the proxy in, and the only route out it has (spec item 2).
+pub const PROXY_ENV: &str = "HTTPS_PROXY";
+
+/// The value [`PROXY_ENV`] carries for a session: `http://<id>@egress-proxy:3128`.
+///
+/// The session id is the proxy's **username**, which is how a request is attributed to a session (item 2), and
+/// the password is empty — nothing checks it, and a secret in an environment variable is exactly what item 2
+/// forbids. `NO_PROXY=key-proxy` ([`crate::agent::ENVIRONMENT`]) keeps a provider call off this route: the key
+/// proxy is what makes a model work (HS-039), not this one.
+pub fn proxy_url(session_id: &str) -> String {
+    format!("http://{session_id}@{PROXY_ALIAS}:{}", crate::egress::PORT)
+}
+
 /// The command the container runs is pi's RPC loop (HS-031, [`crate::agent::COMMAND`]); until HS-030 the
 /// container was detached on `sleep infinity`, and this constant is what replaced that placeholder.
 ///
@@ -452,6 +480,12 @@ impl SessionContainer {
             arguments.push("--env".to_string());
             arguments.push(format!("{name}={value}"));
         }
+        // The only route out (spec item 2): the proxy's address and this session's id as its username. Item 2's
+        // environment is advisory, which is why the enforcement is `--internal` plus the proxy's own attach —
+        // but a client that does not *know* the proxy's address reaches nothing at all, so this is what makes
+        // an allow-listed download work while a direct one fails.
+        arguments.push("--env".to_string());
+        arguments.push(format!("{PROXY_ENV}={}", proxy_url(&self.session_id)));
         arguments.extend(self.mounts.arguments());
         arguments.push(self.image.clone());
         arguments.extend(crate::agent::COMMAND.map(str::to_string));
@@ -462,6 +496,94 @@ impl SessionContainer {
         arguments.push(self.model.clone());
         arguments.push("--thinking".to_string());
         arguments.push(self.thinking.clone());
+        arguments
+    }
+}
+
+/// The egress proxy's container: the machine's one route out, as a `docker run` vector (HS-037, spec item 2).
+///
+/// Three things about it are load-bearing and easy to lose:
+///
+/// * **It is not per session.** One container, attached to the machine's `egress` network and, per session,
+///   to that session's own network — the second half of "a container's only route out". [`crate::docker`]'s
+///   `connect` is what joins them, and the network's *alias* is what makes `egress-proxy` resolve.
+/// * **It is detached with a restart policy**, unlike a session's container: it has no stdio to hold and no
+///   exit to classify, and `unless-stopped` is the spec's own word. `--rm` and `--restart` conflict, so a
+///   restart policy means a stopped proxy leaves its name behind — the next start's `rm -f` is what clears it.
+/// * **It runs this binary**, mounted read-only at its own host path (item 1's identity rule). The image's
+///   own base is irrelevant because the artifact is static; HS-048 ships `holosmith-proxy:<version>` and this
+///   mount goes away, which is exactly the one field ([`ContainerSettings`]) that names both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EgressProxy {
+    /// The image the container runs, from `agent_image` until HS-048 builds a proxy image.
+    pub image: String,
+    /// This build's binary: both what is mounted and what is run.
+    pub binary: PathBuf,
+    /// The domains a tunnel may target, from `[egress] allow`.
+    pub allow: Vec<String>,
+}
+
+impl EgressProxy {
+    /// The machine's proxy, or the sentence explaining why this build cannot start one.
+    ///
+    /// Built from the **config**, not from [`ContainerSettings`]: the proxy is the machine's container, not a
+    /// session's — it has no session, no mounts and no limits of its own — so the three things it needs (the
+    /// image, the allow-list and this binary's own path) are the machine's settings verbatim.
+    ///
+    /// The only refusal is "this process does not know its own path": every other input has a default, and a
+    /// missing image or a missing daemon is the daemon's answer to `docker run`, which the caller logs.
+    pub fn of(config: &Config) -> Result<Self, String> {
+        let Some(binary) = std::env::current_exe().ok() else {
+            return Err(
+                "the egress proxy runs this binary, and this process could not name its own executable, so \
+                 no proxy container was started"
+                    .to_string(),
+            );
+        };
+        Ok(Self {
+            image: config.agent_image.clone(),
+            binary,
+            allow: config.egress.allow.clone(),
+        })
+    }
+
+    /// The `docker run` arguments, from `run` to the last `--allow`.
+    ///
+    /// `--entrypoint` rather than relying on the image's: the image is a session's image (a shell, pi, git),
+    /// and its entrypoint is whatever that base does. `--cap-drop ALL` and `no-new-privileges` are here for the
+    /// same reason they are on a session's container — a proxy that can open a raw socket is a proxy that is
+    /// not a proxy — and it needs no mount of the data root, the projects root or the daemon's socket.
+    pub fn run_args(&self) -> Vec<String> {
+        let binary = self.binary.display().to_string();
+        let mut arguments = vec![
+            "run".to_string(),
+            // Detached: nothing reads this container's stdio. `--rm` cannot be passed with `--restart`.
+            "--detach".to_string(),
+            "--name".to_string(),
+            PROXY_NAME.to_string(),
+            "--network".to_string(),
+            crate::docker::EGRESS_NETWORK.to_string(),
+            "--restart".to_string(),
+            "unless-stopped".to_string(),
+            "--cap-drop".to_string(),
+            "ALL".to_string(),
+            "--security-opt".to_string(),
+            "no-new-privileges".to_string(),
+            // The binary, at its own host path, read-only: the container runs the artifact the server is.
+            "-v".to_string(),
+            format!("{binary}:{binary}:ro"),
+            "--entrypoint".to_string(),
+            binary,
+            self.image.clone(),
+            "proxy".to_string(),
+            "egress".to_string(),
+            "--listen".to_string(),
+            format!("0.0.0.0:{}", crate::egress::PORT),
+        ];
+        for domain in &self.allow {
+            arguments.push("--allow".to_string());
+            arguments.push(domain.clone());
+        }
         arguments
     }
 }
@@ -654,7 +776,116 @@ mod tests {
                 "PI_OFFLINE=1".to_string(),
                 "PI_SKIP_VERSION_CHECK=1".to_string(),
                 "PI_TELEMETRY=0".to_string(),
+                // The only route out, with this session's id as the proxy's username (HS-037, item 2).
+                "HTTPS_PROXY=http://0123456789abcdef@egress-proxy:3128".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn the_proxy_url_is_the_sessions_id_as_the_username_and_no_secret() {
+        // The acceptance's two bullets reconcile here: the proxy's address is `egress-proxy:3128`, and the
+        // *username* is the session id — which is what `Proxy-Authorization` carries and what the proxy's log
+        // line attributes a request to. The password is empty on purpose: nothing checks it, and a secret in an
+        // environment variable is what item 2 forbids.
+        assert_eq!(
+            proxy_url("0123456789abcdef"),
+            "http://0123456789abcdef@egress-proxy:3128"
+        );
+        assert_eq!(PROXY_ALIAS, "egress-proxy");
+        assert_eq!(crate::egress::PORT, 3128);
+        assert!(
+            !proxy_url("x").trim_start_matches("http://").contains(":@"),
+            "an empty password would be a colon; there is no password at all"
+        );
+    }
+
+    #[test]
+    fn the_proxy_container_is_detached_restarting_and_lives_on_the_egress_network() {
+        let proxy = EgressProxy {
+            image: "agent-image:0.1.0".to_string(),
+            binary: PathBuf::from("/usr/local/bin/holosmith"),
+            allow: vec!["crates.io".to_string(), "static.crates.io".to_string()],
+        };
+        let arguments = proxy.run_args();
+        assert_eq!(arguments[0], "run");
+        assert!(
+            arguments.contains(&"--detach".to_string()),
+            "nothing reads the proxy's stdio: {arguments:?}"
+        );
+        assert!(
+            !arguments.contains(&"--rm".to_string()),
+            "`--rm` and `--restart` conflict, so a restart policy rules it out: {arguments:?}"
+        );
+        let flag = |name: &str| -> String {
+            arguments[arguments.iter().position(|a| a == name).expect(name) + 1].clone()
+        };
+        assert_eq!(flag("--name"), PROXY_NAME);
+        assert_eq!(flag("--network"), crate::docker::EGRESS_NETWORK);
+        assert_eq!(
+            flag("--restart"),
+            "unless-stopped",
+            "spec item 10's deploy step"
+        );
+        assert_eq!(flag("--cap-drop"), "ALL");
+        assert_eq!(flag("--security-opt"), "no-new-privileges");
+        // The binary is mounted read-only at its own host path and is the entrypoint: one artifact, no second
+        // program inside the image (ADR-0045).
+        assert_eq!(
+            flag("-v"),
+            "/usr/local/bin/holosmith:/usr/local/bin/holosmith:ro"
+        );
+        assert_eq!(flag("--entrypoint"), "/usr/local/bin/holosmith");
+        // The command is the proxy's own subcommand, with the allow-list as arguments rather than as a mount
+        // the container would have to read.
+        let image = arguments
+            .iter()
+            .position(|argument| argument == "agent-image:0.1.0")
+            .expect("the image is in the run vector");
+        assert_eq!(
+            &arguments[image + 1..],
+            [
+                "proxy",
+                "egress",
+                "--listen",
+                "0.0.0.0:3128",
+                "--allow",
+                "crates.io",
+                "--allow",
+                "static.crates.io",
+            ]
+        );
+        // No mount of the data root, the projects root or the daemon's socket: the proxy reads nothing and
+        // writes nothing, so there is nothing for it to reach.
+        assert_eq!(
+            arguments
+                .iter()
+                .filter(|argument| *argument == "-v")
+                .count(),
+            1,
+            "{arguments:?}"
+        );
+    }
+
+    #[test]
+    fn the_proxy_takes_the_machines_image_and_allow_list_and_this_binarys_own_path() {
+        // Built from the config rather than from `ContainerSettings`: the proxy has no session, so it has no
+        // mounts and no limits, and the binary it runs is *this* one (ADR-0045). `current_exe` answers for the
+        // test binary here, which is all this needs — the path is what is mounted, not what is executed here.
+        let config = Config {
+            agent_image: "agent-image:0.1.0".to_string(),
+            egress: crate::config::Egress {
+                allow: vec!["crates.io".to_string()],
+            },
+            ..Config::default()
+        };
+        let proxy = EgressProxy::of(&config).expect("this process knows its own path");
+        assert_eq!(proxy.image, "agent-image:0.1.0");
+        assert_eq!(proxy.allow, ["crates.io"]);
+        assert_eq!(
+            Some(proxy.binary.clone()),
+            std::env::current_exe().ok(),
+            "the binary is this process's, not a guess at an install path"
         );
     }
 

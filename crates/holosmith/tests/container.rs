@@ -28,7 +28,8 @@ use std::process::{Command, Output};
 
 use holosmith::backend::{DockerBackend, Provisioned, SessionBackend, Step};
 use holosmith::container::{
-    ContainerSettings, Limits, Mounts, SessionContainer, Source, network_name,
+    ContainerSettings, Limits, Mounts, PROXY_ALIAS, PROXY_NAME, SessionContainer, Source,
+    network_name,
 };
 use holosmith::docker::Docker;
 use holosmith::sessions::{Session, Status};
@@ -43,6 +44,7 @@ const ID_RUN: &str = "fedcba9876543210";
 const ID_RESUME: &str = "aaaabbbbccccdddd";
 const ID_START: &str = "1111222233334444";
 const ID_RACE: &str = "9999888877776666";
+const ID_PROXY: &str = "5555666677778888";
 
 /// A scratch repository under the workspace's `target/`, which the daemon can see.
 ///
@@ -932,4 +934,85 @@ async fn two_starts_of_one_session_do_not_race() {
         .delete(&session(ID_RACE))
         .await
         .expect("the teardown works");
+}
+
+/// HS-037: the egress proxy's place is a session network's, and a teardown has to take it off again.
+///
+/// What this measures is **this build's join and leave**, not the proxy's own behaviour (`src/egress.rs`
+/// proves the rules and the bytes without a daemon, and the gate's `case_egress_proxy` proves the wire).
+/// The stand-in is `sleep infinity` in the same image under the same name: the container that runs the
+/// proxy needs the shipped artifact mounted, and `cargo test` runs before `scripts/build.sh` has to have
+/// produced one.
+///
+/// The last two assertions are the load-bearing pair: `docker network rm` **refuses** a network that still
+/// has an endpoint on it, which is why the teardown leaves before it removes — and a `deleting` row is what
+/// ADR-0023 says a delete must never leave behind.
+#[test]
+fn the_egress_proxy_joins_a_session_network_under_its_alias_and_leaves_it() {
+    if !ready() {
+        return;
+    }
+    let docker = Docker::new(None);
+    let network = network_name(ID_PROXY);
+    docker.remove_container(PROXY_NAME);
+    let _ = docker.remove_network(&network);
+    docker
+        .create_internal_network(&network)
+        .expect("the session network is creatable");
+
+    let started = Command::new("docker")
+        .args([
+            "run",
+            "--detach",
+            "--name",
+            PROXY_NAME,
+            "--network",
+            holosmith::docker::EGRESS_NETWORK,
+            &image(),
+            "sleep",
+            "infinity",
+        ])
+        .output()
+        .expect("docker runs");
+    assert!(
+        started.status.success(),
+        "the stand-in proxy did not start: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    assert!(
+        wait_running(&docker, PROXY_NAME),
+        "the stand-in proxy never came up"
+    );
+
+    docker
+        .join_network(&network, PROXY_NAME, PROXY_ALIAS)
+        .expect("the proxy joins the session network");
+    // The **alias**, not the name: `egress-proxy` is what a session's container resolves, and Docker's DNS
+    // answers it only because the join named it.
+    let aliases = docker
+        .inspect(
+            PROXY_NAME,
+            &format!("{{{{(index .NetworkSettings.Networks \"{network}\").Aliases}}}}"),
+        )
+        .unwrap_or_else(|error| panic!("the proxy's networks cannot be read: {error}"));
+    assert!(
+        aliases.contains(PROXY_ALIAS),
+        "the session network knows the proxy by {PROXY_ALIAS}: {aliases}"
+    );
+
+    // A network with a live endpoint on it does not come off, which is why the teardown leaves first.
+    assert!(
+        !docker.remove_network(&network),
+        "a network whose endpoint is still attached must not be removable"
+    );
+    assert!(
+        docker.leave_network(&network, PROXY_NAME),
+        "the leave works"
+    );
+    assert!(
+        docker.remove_network(&network),
+        "and the network comes off once nothing is on it"
+    );
+
+    docker.remove_container(PROXY_NAME);
 }

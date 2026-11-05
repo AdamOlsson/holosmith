@@ -332,7 +332,58 @@ impl DockerBackend {
             network = %self.network(session),
             "the session's network is up"
         );
+        self.apply_proxy(session).await;
         Ok(Provisioned::Nothing)
+    }
+
+    /// Join the machine's egress proxy to this session's network, or leave it off (HS-037, spec item 2).
+    ///
+    /// Item 2 makes the checkbox **topology, not configuration**: the same `HTTPS_PROXY` is in a container
+    /// either way, and what changes is whether anything answers on that address. So a create whose row says
+    /// `network = false` is a network the proxy is *not* joined to, and a resume applies the same rule over a
+    /// network that survived its stop — which is why this is one function used by both.
+    ///
+    /// **A failure is a `warn`, never a refusal.** A proxy that is not there fails a package download, not a
+    /// session: item 2's off case is a supported case, a machine whose proxy image is not built yet must still
+    /// run sessions, and the alternative — failing a create over a machine-wide container — would take the
+    /// control UI down with the thing the operator needs it for. The refusal that *is* a refusal is
+    /// `--internal`, and HS-036 measures that with a probe rather than trusting this process.
+    async fn apply_proxy(&self, session: &Session) {
+        let network = self.network(session);
+        let wanted = session.network;
+        let joined = Self::docker(Step::Network, self.settings.docker(), move |docker| {
+            if wanted {
+                docker.join_network(
+                    &network,
+                    crate::container::PROXY_NAME,
+                    crate::container::PROXY_ALIAS,
+                )?;
+            } else {
+                docker.leave_network(&network, crate::container::PROXY_NAME);
+            }
+            Ok(())
+        })
+        .await;
+        match (joined, wanted) {
+            (Ok(()), true) => tracing::debug!(
+                target: "holosmith::backend",
+                session = %session.id,
+                proxy = crate::container::PROXY_NAME,
+                "the egress proxy is on the session's network"
+            ),
+            (Ok(()), false) => tracing::debug!(
+                target: "holosmith::backend",
+                session = %session.id,
+                "the session asked for no internet access, so the egress proxy is not on its network"
+            ),
+            (Err(error), _) => tracing::warn!(
+                target: "holosmith::backend",
+                session = %session.id,
+                %error,
+                "the egress proxy could not be joined to (or left off) this session's network: the session \
+                 will reach nothing outside its own network, which is what item 2's off case is"
+            ),
+        }
     }
 
     /// The container itself, running pi (spec item 6, HS-031).
@@ -566,6 +617,27 @@ impl DockerBackend {
     /// daemon could not say" (a `warn`), because a wedged daemon and a clean absence are different facts.
     async fn remove_network(&self, session: &Session) {
         let name = self.network(session);
+        // Leave first: `docker network rm` refuses a network that still has an endpoint on it, and the egress
+        // proxy is one for as long as the session allowed internet access (HS-037). A detach that fails — the
+        // proxy is already gone, the network never had it — is the ordinary answer, not a reason to skip the
+        // removal, so its result is not read.
+        let leaving = Self::docker(Step::Network, self.settings.docker(), {
+            let name = name.clone();
+            move |docker| {
+                docker.leave_network(&name, crate::container::PROXY_NAME);
+                Ok(())
+            }
+        })
+        .await;
+        if let Err(error) = leaving {
+            tracing::debug!(
+                target: "holosmith::backend",
+                session = %session.id,
+                %error,
+                "the egress proxy could not be detached from the session's network; the removal below is \
+                 still the one that decides"
+            );
+        }
         let removed = Self::docker(Step::Network, self.settings.docker(), move |docker| {
             Ok(docker.remove_network(&name))
         })
@@ -763,6 +835,9 @@ impl SessionBackend for DockerBackend {
             docker.create_internal_network(&network)
         })
         .await?;
+        // The proxy joins the re-created network too (HS-037): a resume of a session that may use the internet
+        // must not come back without it, and a resume of one that may not must not come back with it.
+        self.apply_proxy(session).await;
         self.start_container(session).await
     }
 

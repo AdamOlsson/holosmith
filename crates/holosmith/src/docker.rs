@@ -217,6 +217,52 @@ impl Docker {
         self.succeeds(&["network", "rm", name])
     }
 
+    /// Join `container` to `network` under `alias`, replacing any connection it already had.
+    ///
+    /// The egress proxy is what a session's container can reach, and it reaches it by the **alias** rather
+    /// than by the container's name: `docker network connect --alias` is what puts `egress-proxy` in the
+    /// session network's DNS, and the proxy is joined to a network of its own as well, so the alias is the only
+    /// spelling that means the same thing from both sides (HS-037, spec item 2).
+    ///
+    /// **A disconnect first**, so this is idempotent without reading Docker's English: a second `connect`
+    /// answers `endpoint with name … already exists in network`, and a resume runs this again over a network
+    /// that survived an earlier stop. Forcing the disconnect first also re-applies the alias when it changed.
+    pub fn join_network(
+        &self,
+        network: &str,
+        container: &str,
+        alias: &str,
+    ) -> Result<(), DockerError> {
+        let _ = self.succeeds(&["network", "disconnect", "--force", network, container]);
+        self.run(&["network", "connect", "--alias", alias, network, container])
+            .map(|_| ())
+    }
+
+    /// Detach `container` from `network`, answering `false` when it was not attached.
+    ///
+    /// Load-bearing rather than tidy: `docker network rm` refuses a network with an active endpoint, and a
+    /// session's network has one for as long as the egress proxy is joined to it (HS-037). ADR-0023's rule is
+    /// that a delete leaves no `deleting` row, so the teardown leaves the network before it removes it.
+    pub fn leave_network(&self, network: &str, container: &str) -> bool {
+        self.succeeds(&["network", "disconnect", "--force", network, container])
+    }
+
+    /// Run a **detached** container from an argument vector and answer the container id Docker printed.
+    ///
+    /// The one caller is the egress proxy (HS-037): nothing reads its stdio and nothing classifies its exit, so
+    /// unlike a session's container it is `--detach` and its lifetime is the restart policy's. Every other
+    /// `docker run` in this build is attached and goes through [`Docker::command_line`].
+    pub fn run_detached(&self, arguments: &[String]) -> Result<String, DockerError> {
+        let borrowed: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        self.run(&borrowed).map(|id| id.trim().to_string())
+    }
+
+    /// Whether a container is *running* (not merely present), which is the question a proxy asks about itself.
+    pub fn running(&self, name: &str) -> bool {
+        self.inspect(name, "{{.State.Running}}")
+            .is_ok_and(|running| running == "true")
+    }
+
     /// Remove a container by force, answering `false` when it was not there (spec item 6's "ignore
     /// not-found", which HS-029 uses before every start and the teardown uses after a failure).
     pub fn remove_container(&self, name: &str) -> bool {
