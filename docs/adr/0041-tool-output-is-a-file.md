@@ -66,6 +66,12 @@ ADR-0019's table pinned `tool.start` as `{"tool_id", "name", "arguments"}` and `
   filename, a full disk) still leaves a frame, because the tool ran; a frame that claimed a reference to
   nothing would be a dead link the operator could not tell from a slow one.
 
+**Amended by ADR-0043:** `tool.end` also carries `images: [{index, mime, output_ref}]`, additively, and only
+when a picture was stored — one file per image block beside this file, under `<tool_id>-<block index>.<ext>`,
+served by its own route with the type the *file* has. So a call's result is still one block, a frame whose
+result held no image answers exactly the payload above, and this story's "an image block is not retained" is
+now the opposite: HS-035 retains it, and `details`/`structuredContent` are what remain unkept.
+
 ## The file, and why the mapping is not the writer
 
 The mapping is one record in, at most one frame out, with no clock, no database and no I/O — which is what lets

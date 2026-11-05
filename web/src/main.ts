@@ -82,6 +82,9 @@ type ToolBlock = {
   meta: HTMLElement;
   output: HTMLElement;
   full: HTMLAnchorElement;
+  // One anchor per picture the result carried (HS-035). They are links rather than inline images: the bytes
+  // are a file, and drawing it on a phone is a screen decision nothing owns yet (ADR-0043).
+  images: HTMLElement;
 };
 
 // The key the create carries. `crypto.randomUUID` is the platform's own UUID, but it exists only in
@@ -478,8 +481,12 @@ function toolBlock(id: string): ToolBlock {
   // the server computed, so it is never text from the agent).
   const full = make("a", "tool-full", "full output");
   full.hidden = true;
-  element.append(name, arguments_, meta, output, full);
-  return { element, name, arguments_, meta, output, full };
+  // The pictures the result carried, one link each. Filled by `tool.end` and never replaced afterwards: a
+  // call's result is one frame, so there is nothing a later one could add.
+  const images = make("div", "tool-images");
+  images.hidden = true;
+  element.append(name, arguments_, meta, output, full, images);
+  return { element, name, arguments_, meta, output, full, images };
 }
 
 // Append one piece of output to a kind's node. This is the whole of the 10k-event rule: a text node
@@ -589,6 +596,17 @@ function applyChange(
       block.full.setAttribute("href", change.outputRef);
       block.full.hidden = false;
     }
+    // The pictures: one `<a>` per image, labelled with the block's index and its mime, so an operator can
+    // open the bytes a tool returned without the transcript carrying a byte of them. Built with
+    // `createElement` + `textContent` like every other node, and the href is the path the *server* computed.
+    block.images.replaceChildren(
+      ...change.images.map((image) => {
+        const link = make("a", "tool-image", `image ${image.index} · ${image.mime}`);
+        link.setAttribute("href", image.outputRef);
+        return link;
+      }),
+    );
+    block.images.hidden = change.images.length === 0;
     return;
   }
   const block = blocks.get(change.messageId);

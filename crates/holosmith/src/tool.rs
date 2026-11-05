@@ -237,9 +237,11 @@ impl Store {
     /// exist and a dead reference cannot be produced.
     ///
     /// **A second result for one tool id replaces the first**, the rule [`Store::store`] keeps for the text,
-    /// and it includes the *type*: the stale names are removed before the new one is written, so a tool that
-    /// answered a PNG once and a GIF the next time cannot leave a reader looking at the older image under the
-    /// extension the read side tries first.
+    /// and it includes the *type* and the *set*: every image file this tool has that the result being stored
+    /// does not name is removed before the new ones are written, so a call that answered two pictures once and
+    /// one the next time cannot leave the second one answering a request no frame names — and a PNG answered
+    /// where a GIF is answered now cannot leave the older file under the extension the read side tries first.
+    /// The decode comes first, so a body this build refuses does not keep a stale file alive either.
     pub fn store_images(
         &self,
         session_id: &str,
@@ -255,10 +257,13 @@ impl Store {
             );
             return Vec::new();
         };
-        let mut stored = Vec::with_capacity(images.len());
+        // Decoded first, so the sweep below knows exactly which (index, type) pairs will exist.
+        let mut decoded: Vec<Decoded> = Vec::with_capacity(images.len());
         for image in images {
             // The bound is checked from the encoded length, before a byte is allocated for the decoded body:
-            // a record that claims a gigabyte of image must not be a gigabyte of memory first.
+            // a record that claims a gigabyte of image must not be a gigabyte of memory *for the decode* (the
+            // record itself was read by `agent::read_records`, which reads one line and has no bound — ADR-0043
+            // records that rather than pretending this check covers it).
             let Some(bytes) = decode_base64(&image.data) else {
                 tracing::warn!(
                     target: "holosmith::tool",
@@ -270,15 +275,34 @@ impl Store {
                 );
                 continue;
             };
-            let extension = extension_of(&image.mime);
-            let path = directory.join(format!("{}.{extension}", stem(tool_id, image.index)));
-            remove_siblings(&directory, tool_id, image.index);
+            decoded.push(Decoded {
+                index: image.index,
+                extension: extension_of(&image.mime),
+                mime: image.mime.clone(),
+                bytes,
+            });
+        }
+        let keep: Vec<(usize, &'static str)> = decoded
+            .iter()
+            .map(|one| (one.index, one.extension))
+            .collect();
+        sweep(&directory, tool_id, &keep);
+
+        let mut stored = Vec::with_capacity(decoded.len());
+        for Decoded {
+            index,
+            extension,
+            mime,
+            bytes,
+        } in decoded
+        {
+            let path = directory.join(format!("{}.{extension}", stem(tool_id, index)));
             if let Err(error) = write_bytes(&path, &bytes) {
                 tracing::warn!(
                     target: "holosmith::tool",
                     session = %session_id,
                     tool = %tool_id,
-                    index = image.index,
+                    index,
                     path = %path.display(),
                     %error,
                     "an image in a tool result could not be written"
@@ -286,9 +310,9 @@ impl Store {
                 continue;
             }
             stored.push(StoredImage {
-                index: image.index,
-                mime: image.mime.clone(),
-                reference: image_reference(session_id, tool_id, image.index),
+                index,
+                mime,
+                reference: image_reference(session_id, tool_id, index),
             });
         }
         stored
@@ -399,23 +423,65 @@ fn image_reference(session_id: &str, tool_id: &str, index: usize) -> String {
     format!("/api/sessions/{session_id}/tool-image/{tool_id}/{index}")
 }
 
-/// Remove every name one image could have been stored under, so a second result replaces the first.
+/// One image that decoded, waiting to be written.
+struct Decoded {
+    index: usize,
+    extension: &'static str,
+    mime: String,
+    bytes: Vec<u8>,
+}
+
+/// Remove every stored image of this tool that `keep` does not name.
 ///
-/// A tool id repeated with a different type is the case: without this, the earlier `.png` would still answer a
-/// request for the later `.bin`, and the read side would hand back an image the frame no longer names.
-fn remove_siblings(directory: &Path, tool_id: &str, index: usize) {
-    for (extension, _) in IMAGE_TYPES
-        .iter()
-        .copied()
-        .chain(std::iter::once((UNNAMED_EXTENSION, UNNAMED_TYPE)))
-    {
-        let path = directory.join(format!("{}.{extension}", stem(tool_id, index)));
-        match std::fs::remove_file(&path) {
+/// A tool id is repeated only if the agent repeats it, and then the later result is the one worth having — but
+/// "the later result" is a **set**, not one file: the same call can answer two pictures once and one the next
+/// time, and the type can change as well. So the rule is one sweep rather than a removal per index:
+/// `<tool_id>-<digits>.<known extension>` is this tool's own name, and a name whose pair is not in `keep` is a
+/// file no frame will ever name again.
+///
+/// The digits are what make it exact: `<tool_id>-<digits>` cannot be another tool's stem, because that one
+/// would have digits after *its* own id and a `-` before them would have to be part of an id — and pi's ids
+/// (`call_<base32>`) contain no `-`. The extension must be one this build writes, so nothing else in the
+/// directory is touched.
+fn sweep(directory: &Path, tool_id: &str, keep: &[(usize, &'static str)]) {
+    let prefix = format!("{tool_id}-");
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(rest) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        let Some((digits, extension)) = rest.split_once('.') else {
+            continue;
+        };
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        let known = IMAGE_TYPES.iter().any(|(named, _)| *named == extension)
+            || extension == UNNAMED_EXTENSION;
+        if !known {
+            continue;
+        }
+        let Ok(index) = digits.parse::<usize>() else {
+            continue;
+        };
+        if keep
+            .iter()
+            .any(|(kept, kept_extension)| *kept == index && *kept_extension == extension)
+        {
+            continue;
+        }
+        match std::fs::remove_file(entry.path()) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => tracing::debug!(
                 target: "holosmith::tool",
-                path = %path.display(),
+                path = %entry.path().display(),
                 %error,
                 "a superseded image could not be removed"
             ),
@@ -460,7 +526,15 @@ pub fn decode_base64(text: &str) -> Option<Vec<u8>> {
     if end % 4 == 1 {
         return None;
     }
-    if end / 4 * 3 > IMAGE_CAP {
+    // The trailing group decides the last byte or two: three characters are two bytes and two are one, so a
+    // cap that counted only whole groups would let `IMAGE_CAP + 2` through on an unpadded body.
+    let decoded = end / 4 * 3
+        + match end % 4 {
+            2 => 1,
+            3 => 2,
+            _ => 0,
+        };
+    if decoded > IMAGE_CAP {
         return None;
     }
     let mut bytes = Vec::with_capacity(end / 4 * 3 + 2);
@@ -863,6 +937,68 @@ mod tests {
             store.read_image(SESSION, TOOL, 0),
             Some((b"second".to_vec(), "image/gif")),
             "the read side tries png first, so the stale png had to go"
+        );
+    }
+
+    #[test]
+    fn a_second_result_that_carries_fewer_images_leaves_none_of_the_first_behind() {
+        // "A second result replaces the first" is a claim about a *set*, not about one index: the same call can
+        // answer two pictures once and one the next time, and a file no frame names must not still answer its
+        // route. The neighbour is a different tool id whose stem begins with this one's — the case a prefix
+        // match would get wrong.
+        let scratch = Scratch::new("image-sweep");
+        let store = Store::new(&scratch.0);
+        store.store_images(
+            SESSION,
+            TOOL,
+            &[
+                image(0, "image/png", b"first"),
+                image(1, "image/png", b"second"),
+            ],
+        );
+        // A second tool whose id starts with the first's: `call_x-` must not be swept by `call_x`'s rule.
+        store.store_images(SESSION, "call_x-9", &[image(0, "image/png", b"neighbour")]);
+        assert_eq!(
+            store.read_image(SESSION, TOOL, 1),
+            Some((b"second".to_vec(), "image/png"))
+        );
+        store.store_images(SESSION, TOOL, &[image(0, "image/png", b"only")]);
+        assert_eq!(
+            store.read_image(SESSION, TOOL, 0),
+            Some((b"only".to_vec(), "image/png"))
+        );
+        assert!(
+            store.read_image(SESSION, TOOL, 1).is_none(),
+            "the image the later result does not carry is still served, and no frame names it"
+        );
+        assert_eq!(
+            store.read_image(SESSION, "call_x-9", 0),
+            Some((b"neighbour".to_vec(), "image/png")),
+            "the sweep must be this tool's own names, not a prefix of every name"
+        );
+    }
+
+    #[test]
+    fn the_cap_counts_the_trailing_group_so_an_unpadded_body_cannot_exceed_it() {
+        // Groups of four are not the whole story: three leftover characters are two bytes and two are one. A cap
+        // that counted only whole groups would let `IMAGE_CAP + 2` bytes through, against the constant's own
+        // promise of "the most bytes one stored image holds".
+        let quarter = |bytes: usize| "A".repeat(bytes / 3 * 4 + (bytes % 3) * 4 / 3);
+        assert!(
+            decode_base64(&quarter(IMAGE_CAP - 2)).is_some(),
+            "just under the cap"
+        );
+        assert!(
+            decode_base64(&quarter(IMAGE_CAP)).is_some(),
+            "exactly the cap"
+        );
+        assert!(
+            decode_base64(&quarter(IMAGE_CAP + 1)).is_none(),
+            "one byte over the cap, with an unpadded body"
+        );
+        assert!(
+            decode_base64(&quarter(IMAGE_CAP + 2)).is_none(),
+            "two bytes over the cap, which is what a whole-group count would have allowed"
         );
     }
 

@@ -476,28 +476,13 @@ impl Agent {
             let mut waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
             waiting.insert(id.to_string(), sender);
         }
-        let mut line = serde_json::to_vec(&command).unwrap_or_default();
-        line.push(b'\n');
         // The write is bounded as well as the answer (`docs/rpc.md`: honour stdin backpressure). A process
-        // that stops reading its stdin would otherwise hold this mutex for ever, and the bound would never
+        // that stops reading its stdin would otherwise hold the mutex for ever, and the bound would never
         // start: the handshake's payload is tiny, but HS-032's commands are not, and a session stuck in
         // `starting` because a `write_all` blocked is exactly the hang the bound exists to prevent.
-        let written = tokio::time::timeout(timeout, async {
-            let mut stdin = self.stdin.lock().await;
-            stdin.write_all(&line).await?;
-            stdin.flush().await
-        })
-        .await;
-        match written {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                self.forget(id);
-                return Err(AgentError::Write(error));
-            }
-            Err(_) => {
-                self.forget(id);
-                return Err(AgentError::Timeout(timeout));
-            }
+        if let Err(error) = self.write_line(&command, timeout).await {
+            self.forget(id);
+            return Err(error);
         }
         match tokio::time::timeout(timeout, receiver).await {
             Ok(Ok(reply)) => Ok(reply),
@@ -527,9 +512,19 @@ impl Agent {
     /// [`RESPOND_TIMEOUT`] because the payload is small and its only failure mode is a process that stopped
     /// reading.
     pub async fn respond(&self, line: Value) -> Result<(), AgentError> {
-        let mut bytes = serde_json::to_vec(&line).unwrap_or_default();
+        self.write_line(&line, RESPOND_TIMEOUT).await
+    }
+
+    /// One JSONL line on the agent's stdin, under `bound`.
+    ///
+    /// The one spelling of the write, shared by [`Agent::request`] and [`Agent::respond`] because the two
+    /// differ only in what they do about the answer: the first waits for it, the second has none to wait for.
+    /// The bound covers the write as well as the lock it takes, and closing the gate on a process that stopped
+    /// reading is what keeps a session from parking a worker for ever.
+    async fn write_line(&self, line: &Value, bound: Duration) -> Result<(), AgentError> {
+        let mut bytes = serde_json::to_vec(line).unwrap_or_default();
         bytes.push(b'\n');
-        let written = tokio::time::timeout(RESPOND_TIMEOUT, async {
+        let written = tokio::time::timeout(bound, async {
             let mut stdin = self.stdin.lock().await;
             stdin.write_all(&bytes).await?;
             stdin.flush().await
@@ -538,7 +533,7 @@ impl Agent {
         match written {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(AgentError::Write(error)),
-            Err(_) => Err(AgentError::Timeout(RESPOND_TIMEOUT)),
+            Err(_) => Err(AgentError::Timeout(bound)),
         }
     }
 

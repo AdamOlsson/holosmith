@@ -156,6 +156,31 @@ fn writer_handle_with(database: Arc<Mutex<Database>>, options: WriterOptions) ->
     events::spawn(database, options).0
 }
 
+/// Base64, the way pi encodes an image's `data` field.
+///
+/// A test-side encoder and not a build-side one: nothing in this build ever *encodes* base64 — the decoder is
+/// the half under test — and a body has to be written the way pi writes one. It lives here rather than in each
+/// test file so the store's tests and the route's tests cannot disagree about what a valid body looks like.
+pub fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for group in bytes.chunks(3) {
+        let mut held = [0u32; 3];
+        for (slot, byte) in group.iter().enumerate() {
+            held[slot] = u32::from(*byte);
+        }
+        let packed = (held[0] << 16) | (held[1] << 8) | held[2];
+        for place in 0..4 {
+            if place <= group.len() {
+                out.push(ALPHABET[((packed >> (18 - 6 * place)) & 0x3f) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 /// The version this build reports, for a payload that names it.
 pub fn version() -> String {
     VersionInfo::current().version

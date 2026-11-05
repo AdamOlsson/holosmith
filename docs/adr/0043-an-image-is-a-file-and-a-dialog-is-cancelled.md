@@ -33,13 +33,21 @@ gains one write, and the contract gains one kind.
   shows.
 - **The bytes are decoded in the store, not in the mapping.** `tool::decode_base64` is written out — forty
   lines, standard alphabet, optional padding — because the alternative is a dependency for one input. The cap
-  (`IMAGE_CAP`, the spec's 5 MB) is checked **from the encoded length before anything is allocated**: the input
-  is agent-controlled text, and a record claiming a gigabyte of image must not be a gigabyte of memory on the
-  way to being refused. An invalid or oversized body is a `warn` and no entry, so the frame's `images` names
-  exactly the files that exist and a dead reference cannot be produced.
-- **A second result for one tool id replaces the first, type included.** The read side tries the extensions in
-  a fixed order, so a stale `.png` from an earlier call would otherwise answer for a later `.gif`; the stale
-  names are removed before the new one is written, the rule HS-033's text file already keeps.
+  (`IMAGE_CAP`, the spec's 5 MB) is applied to the **decoded** length, and it is computed from the encoded
+  length **before the decode allocates**: the body is agent-controlled text, and counting it as whole
+  four-character groups would let `IMAGE_CAP + 2` bytes through on an unpadded one, so the trailing group
+  counts too. What this does **not** bound is the *record*: `agent::read_records` reads one line with no
+  length limit (HS-032's reader), so a gigabyte of base64 is a gigabyte of memory before this function is
+  reached. That is recorded here rather than papered over — bounding a record is that reader's decision and
+  its own story. An invalid or oversized body is a `warn` and no entry, so the frame's `images` names exactly
+  the files that exist and a dead reference cannot be produced.
+- **A second result for one tool id replaces the first — the whole set, not just the same index.** The read
+  side tries the extensions in a fixed order and answers an index nobody names, so a stale `.png` from an
+  earlier result would answer for a later `.gif`, and an index the later result does not carry would answer at
+  all although no frame names it. So the files are decoded first and then every `<tool_id>-<digits>.<known
+  extension>` that the new set does not name is removed — one sweep, whose digit requirement is what keeps it
+  from touching another tool whose id merely begins with this one. HS-033's text file keeps the same rule for
+  its one name.
 - **`tool.end` gains `images: [{index, mime, output_ref}]` additively, and only when one was stored.** A call
   whose result held none answers exactly ADR-0041's payload, and a row written before this key still draws.
 
@@ -98,8 +106,10 @@ table of kinds gains one, and ADR-0019's gains the `images` key:
 - **Answering a dialog.** A phone would have to type into it, and nothing in this build presents the question.
   The cancel is the honest answer until a story owns a form; every dialog method it cancels is recorded, so the
   log says what was asked.
-- **Rendering the image itself.** The frame names a URL and a mime, and the page links it. A thumbnail, a
-  lightbox or an inline `<img>` is a screen decision with a size cost on a phone, and no story owns it yet.
+- **Drawing the image.** The frame names a URL and a mime, and the transcript draws **one link per picture**
+  (`image 1 · image/png`), which is this story's "rendered **or linked**". An inline `<img>`, a thumbnail or a
+  lightbox is a screen decision with a size cost on a phone and a second fetch policy, and no story owns it
+  yet.
 - **A second replacing frame.** `message.snapshot` still has exactly one producer (ADR-0032).
 - **What a delete keeps.** Image files are a session's own directory, so HS-043's keep-rules own their fate.
 - **Deleting images or bounding their number.** One tool result can carry several blocks; each is stored, and

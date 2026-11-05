@@ -244,6 +244,19 @@ button:disabled {
   margin-top: 0.25rem;
 }
 
+/* One link per picture a tool's result carried (HS-035): the bytes are a file, so the block names them rather
+   than carrying them. */
+.tool-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+
+.tool-image {
+  font-size: 0.75rem;
+}
+
 .tool-output {
   font-family: ui-monospace, monospace;
   font-size: 0.8125rem;
@@ -282,7 +295,7 @@ button:disabled {
 /* Something the turn could not do (HS-035): one block per turn.error frame, drawn like a steer's and marked
    so an operator can see it was the machine that acted, not them. */
 .turn-error {
-  border-left: 2px solid color-mix(in srgb, #c0392b 55%, transparent);
+  border-left: 2px solid color-mix(in srgb, #b3261e 55%, transparent);
   padding-left: 0.75rem;
   overflow-wrap: anywhere;
 }

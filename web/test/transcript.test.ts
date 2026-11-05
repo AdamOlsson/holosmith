@@ -165,6 +165,8 @@ test("a tool call is its own block, in its own order, never a message", () => {
       status: null,
       durationMs: null,
       outputRef: null,
+      // HS-035's key: a frame written before it existed carries no pictures, which is the empty list.
+      images: [],
     },
   );
 
@@ -196,6 +198,7 @@ test("a tool call is its own block, in its own order, never a message", () => {
     status: "ok",
     durationMs: 400,
     outputRef: "/api/sessions/0123456789abcdef/tool-output/tool-1",
+    images: [],
   });
   assert.deepEqual(end, [
     {
@@ -205,6 +208,7 @@ test("a tool call is its own block, in its own order, never a message", () => {
       status: "ok",
       durationMs: 400,
       outputRef: "/api/sessions/0123456789abcdef/tool-output/tool-1",
+      images: [],
     },
   ]);
   assert.deepEqual(transcript.toolOrder(), ["tool-1", "tool-2"]);
@@ -220,6 +224,7 @@ test("a tool.end without its tool.start creates the block first", () => {
     status: null,
     durationMs: null,
     outputRef: null,
+    images: [],
   });
   assert.deepEqual(changes, [
     { op: "tool", toolId: "tool-9" },
@@ -230,6 +235,7 @@ test("a tool.end without its tool.start creates the block first", () => {
       status: null,
       durationMs: null,
       outputRef: null,
+      images: [],
     },
   ]);
   assert.deepEqual(transcript.toolOrder(), ["tool-9"]);
@@ -492,7 +498,11 @@ test("a cancelled extension dialog is one block per frame, drawn once, and it is
   assert.deepEqual(transcript.order(), []);
   assert.deepEqual(transcript.toolOrder(), []);
   // Two dialogs in one turn are two blocks, and the second does not overwrite the first.
-  const second = { type: "error", reason: "an extension asked for confirm, and a session cannot answer a dialog, so it was cancelled", method: "confirm" } as const;
+  const second = {
+    type: "error",
+    reason: "an extension asked for confirm, and a session cannot answer a dialog, so it was cancelled",
+    method: "confirm",
+  } as const;
   assert.deepEqual(transcript.apply(second), [
     { op: "error", reason: second.reason, method: "confirm" },
   ]);
@@ -753,6 +763,7 @@ test("a tool.end carries the verdict, the duration and the output's own address"
       status: "error",
       durationMs: 1234,
       outputRef: "/api/sessions/0123456789abcdef/tool-output/tool-1",
+      images: [],
     },
   );
   // A duration that is not a whole number of milliseconds is not a duration: both refusals are the same
@@ -768,6 +779,7 @@ test("a tool.end carries the verdict, the duration and the output's own address"
     status: "ok",
     durationMs: null,
     outputRef: null,
+    images: [],
   });
   // The change the DOM half applies, in one object: no second frame can update a tool block.
   const transcript = new Transcript();
@@ -784,6 +796,7 @@ test("a tool.end carries the verdict, the duration and the output's own address"
     status: "ok",
     durationMs: 20,
     outputRef: "/api/sessions/0123456789abcdef/tool-output/tool-1",
+    images: [],
   });
   assert.deepEqual(change, {
     op: "tool-end",
@@ -792,6 +805,7 @@ test("a tool.end carries the verdict, the duration and the output's own address"
     status: "ok",
     durationMs: 20,
     outputRef: "/api/sessions/0123456789abcdef/tool-output/tool-1",
+    images: [],
   });
 });
 
@@ -811,4 +825,56 @@ test("a message.end that reports nothing is the same as one that reports no usag
   });
   // And the sentence the screen draws for it: a turn settled and nothing was reported.
   assert.equal(budgetNotice({ settled: 1, usage: false }), "no usage reported — the token budget has nothing to count");
+});
+
+test("a tool.end names the pictures its result carried, and one it cannot link is dropped", () => {
+  // HS-035: the frame carries the block's index, pi's mime and the path that serves the bytes — never a byte of
+  // the picture, for the reason a tool's output is a file (the log is replayed on every reconnect).
+  const payload = JSON.stringify({
+    tool_id: "call_1",
+    name: "read",
+    output: "Read image file [image/png][image]",
+    status: "ok",
+    duration_ms: 73,
+    output_ref: "/api/sessions/s/tool-output/call_1",
+    images: [
+      { index: 1, mime: "image/png", output_ref: "/api/sessions/s/tool-image/call_1/1" },
+      // No path: there is nothing to link, so it is dropped rather than drawn as a dead anchor.
+      { index: 2, mime: "image/png" },
+      // Not an object at all.
+      "image",
+      // No index: the pair the frame is keyed by is incomplete.
+      { mime: "image/png", output_ref: "/api/sessions/s/tool-image/call_1/3" },
+    ],
+  });
+  const frame = parseFrame("tool.end", payload);
+  assert.deepEqual(frame, {
+    type: "tool-end",
+    toolId: "call_1",
+    output: "Read image file [image/png][image]",
+    status: "ok",
+    durationMs: 73,
+    outputRef: "/api/sessions/s/tool-output/call_1",
+    images: [{ index: 1, mime: "image/png", outputRef: "/api/sessions/s/tool-image/call_1/1" }],
+  });
+  // The transcript hands the list to the page unchanged: a picture is nothing the model folds or counts.
+  const transcript = new Transcript();
+  transcript.apply({ type: "tool-start", toolId: "call_1", name: "read", arguments: "{}" });
+  const changes = transcript.apply(frame as Frame);
+  assert.deepEqual(changes, [
+    {
+      op: "tool-end",
+      toolId: "call_1",
+      output: "Read image file [image/png][image]",
+      status: "ok",
+      durationMs: 73,
+      outputRef: "/api/sessions/s/tool-output/call_1",
+      images: [{ index: 1, mime: "image/png", outputRef: "/api/sessions/s/tool-image/call_1/1" }],
+    },
+  ]);
+  // And `images` being something other than a list is the empty list, not a crash: a frame is text off a wire.
+  for (const wrong of [JSON.stringify({ tool_id: "call_1", images: {} }), JSON.stringify({ tool_id: "call_1", images: 7 })]) {
+    const parsed = parseFrame("tool.end", wrong);
+    assert.deepEqual((parsed as { images: unknown }).images, [], wrong);
+  }
 });

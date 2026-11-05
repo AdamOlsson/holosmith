@@ -379,8 +379,9 @@ per transaction, and never touches a session whose state is `starting`, `running
   (`png`, `jpg`, `gif`, `webp`) and a type this build cannot name is kept as `.bin` and served as
   `application/octet-stream`. It is served by `GET /api/sessions/{id}/tool-image/{tool_id}/{index}`, the index
   being the block's position in `result.content`; `tool.end`'s `images` names the pair, so nothing about the
-  type comes from the request. The cap is 5 MiB **decoded** per image, and it is refused before anything is
-  allocated.
+  type comes from the request. The cap is 5 MiB of **decoded** bytes, and a body over it is refused from its
+  encoded length before the decode allocates. The transcript draws one link per picture rather than the picture
+  itself (ADR-0043).
 - Optional: a **Docker daemon and one image** for `scripts/verify.sh`'s `case_container_mounts` and for
   `tests/container.rs`. Both check V1 — the hardened `.git` mounts — against a real container, and both
   print one `SKIP` line and pass without a daemon, because a machine without one is a supported machine

@@ -20,6 +20,15 @@ export type SessionState = "starting" | "idle" | "running" | "stopped" | "error"
 // coalescing rule ("consecutive deltas of the same kind and message") is per kind.
 export type DeltaKind = "text" | "thinking";
 
+// One picture a tool's result carried, as `tool.end` names it (HS-035): the block's index in pi's result, its
+// mime type, and the path that serves its bytes. The page links it rather than drawing it in — an inline image
+// on a phone is a screen decision with a size cost, and nothing owns it yet (ADR-0043).
+export type ToolImage = {
+  index: number;
+  mime: string;
+  outputRef: string;
+};
+
 // One parsed frame of the session's stream.
 export type Frame =
   | { type: "delta"; messageId: string; delta: DeltaKind; text: string }
@@ -38,6 +47,9 @@ export type Frame =
       durationMs: number | null;
       // The path the full output can be fetched from, or `null` when nothing was stored.
       outputRef: string | null;
+      // The pictures the result carried (HS-035), each with the path that serves it. Empty for a frame
+      // written before the key existed, and for a call that returned none.
+      images: ToolImage[];
     }
   | { type: "boundary"; boundary: "start" | "end" }
   | { type: "steer"; text: string }
@@ -62,6 +74,7 @@ export type Change =
       status: string | null;
       durationMs: number | null;
       outputRef: string | null;
+      images: ToolImage[];
     }
   | { op: "boundary"; boundary: "start" | "end"; turn: number }
   | { op: "steer"; text: string }
@@ -158,6 +171,32 @@ function usage(payload: Record<string, unknown>): { input: number; output: numbe
   return { input, output };
 }
 
+// A tool result's pictures: the entries that name a path, in the order the frame gave them.
+//
+// An entry this page cannot link is dropped rather than drawn as a dead anchor, the same rule a tool block's
+// own `output_ref` follows — and a frame with no `images` key (everything written before HS-035) is the empty
+// list, so an old row renders exactly as it did.
+function toolImages(value: unknown): ToolImage[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const images: ToolImage[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      continue;
+    }
+    const fields = entry as Record<string, unknown>;
+    const index = fields["index"];
+    const mime = text(fields["mime"]);
+    const outputRef = text(fields["output_ref"]);
+    if (!count(index) || mime === null || outputRef === null || outputRef === "") {
+      continue;
+    }
+    images.push({ index, mime, outputRef });
+  }
+  return images;
+}
+
 // One SSE frame as a `Frame`, or `null` for anything this screen does not render. An unknown event
 // type is not an error: HS-032, HS-033 and HS-034 add kinds (`tool.*`, usage) to the same stream,
 // and a page that refused what it did not know would need a release to render a tool call.
@@ -226,6 +265,7 @@ export function parseFrame(eventType: string, data: string): Frame | null {
       status: text(fields["status"]),
       durationMs: count(duration) ? duration : null,
       outputRef: text(fields["output_ref"]),
+      images: toolImages(fields["images"]),
     };
   }
   const id = messageId(fields);
@@ -327,6 +367,7 @@ export class Transcript {
           status: frame.status,
           durationMs: frame.durationMs,
           outputRef: frame.outputRef,
+          images: frame.images,
         });
       }
       return changes;

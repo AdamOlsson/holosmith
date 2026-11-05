@@ -466,7 +466,7 @@ One image a tool's result carried, stored as its own file beside the call's text
 which serves the bytes with the type the *file* has. The bytes are never in an event payload, for the
 reason a **tool call**'s output is a file, and the `index` is the block's position in pi's
 `result.content`. The text of the same result keeps `[image]`, so a result with no store still says one
-was there.
+was there, and the transcript draws **one link per picture** rather than the picture itself.
 _Avoid_: Attachment, picture, screenshot, image blob
 
 **Changes view**:

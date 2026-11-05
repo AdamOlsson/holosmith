@@ -18,7 +18,7 @@ use holosmith::sessions::{NewSession, Session};
 use holosmith::tool::{Image, Store, truncated_marker};
 
 mod support;
-use support::{Served, TempDir, fetch};
+use support::{Served, TempDir, base64, fetch};
 
 /// The drain deadline each test gives `serve`, so a socket a test forgot to drop cannot hold it open.
 const GRACE: Duration = Duration::from_millis(100);
@@ -245,27 +245,6 @@ fn image(index: usize, mime: &str, bytes: &[u8]) -> Image {
         mime: mime.to_string(),
         data: base64(bytes),
     }
-}
-
-/// The encoder these tests need and the build does not: a body must be written the way pi writes it.
-fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for group in bytes.chunks(3) {
-        let mut held = [0u32; 3];
-        for (slot, byte) in group.iter().enumerate() {
-            held[slot] = u32::from(*byte);
-        }
-        let packed = (held[0] << 16) | (held[1] << 8) | held[2];
-        for place in 0..4 {
-            if place <= group.len() {
-                out.push(ALPHABET[((packed >> (18 - 6 * place)) & 0x3f) as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
 }
 
 /// A four-pixel PNG's leading bytes: enough that a wrong content type or a base64 body served verbatim would be
