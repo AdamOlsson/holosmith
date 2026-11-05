@@ -1682,7 +1682,7 @@ case_internet_toggle() {
   # lesson).
   local projects="$root/projects"
   local data="$root/data"
-  local off_id on_id body label id verdicts env_off env_on got count want running why pair
+  local off_id="" on_id="" body label id verdicts env_off env_on got count want running why pair
   # The probe's verdict words, spelled the way the `case` patterns below need them: a shell `$CONNECTING` would be
   # an unbound variable, because the node constants live inside the heredoc where the shell cannot see them.
   local not_listed="HTTP/1.1 403 Forbidden"
@@ -1726,10 +1726,14 @@ case_internet_toggle() {
     printf '%s\n' "$body" | grep -qF "\"network\":$([ "$label" = on ] && echo true || echo false)" ||
       fail "${name}_${label}_create/network" "the row does not carry the choice it was given: $body"
     assertions=$((assertions + 1))
-    if [ "$label" = off ]; then off_id="$id"; else on_id="$id"; fi
     # Both ids, so a `fail` between the creates and the deletes leaves neither container nor network behind.
-    docker_session_id="$off_id"
-    docker_second_session_id="$on_id"
+    if [ "$label" = off ]; then
+      off_id="$id"
+      docker_session_id="$id"
+    else
+      on_id="$id"
+      docker_second_session_id="$id"
+    fi
     wait_for_idle_docker "${name}_${label}_idle" "$id"
     docker network inspect "agents_$id" >/dev/null 2>&1 ||
       fail "${name}_${label}_network" "the create left no agents_$id network"
