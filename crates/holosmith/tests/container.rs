@@ -940,21 +940,30 @@ async fn two_starts_of_one_session_do_not_race() {
 ///
 /// What this measures is **this build's join and leave**, not the proxy's own behaviour (`src/egress.rs`
 /// proves the rules and the bytes without a daemon, and the gate's `case_egress_proxy` proves the wire).
-/// The stand-in is `sleep infinity` in the same image under the same name: the container that runs the
-/// proxy needs the shipped artifact mounted, and `cargo test` runs before `scripts/build.sh` has to have
-/// produced one.
+/// The stand-in is `sleep infinity` in the same image under a name of its own — a test that ran under
+/// `hs_egress` would replace a live machine's proxy and leave it absent until the next boot, so it skips
+/// instead when a proxy is already running.
 ///
-/// The last two assertions are the load-bearing pair: `docker network rm` **refuses** a network that still
-/// has an endpoint on it, which is why the teardown leaves before it removes — and a `deleting` row is what
-/// ADR-0023 says a delete must never leave behind.
+/// The last assertion is the load-bearing one: `docker network rm` **refuses** a network that still has an
+/// endpoint on it, so a teardown that forgot the detach would leave the network behind with a `warn` — and a
+/// `deleting` row is what ADR-0023 says a delete must never leave. It drives `SessionBackend::undo`, not
+/// `Docker`, so the assertion is about the backend's order and not about the helper it calls.
 #[test]
 fn the_egress_proxy_joins_a_session_network_under_its_alias_and_leaves_it() {
     if !ready() {
         return;
     }
+    const STAND_IN: &str = "hs_egress_test";
     let docker = Docker::new(None);
+    if docker.running(PROXY_NAME) {
+        eprintln!(
+            "SKIP tests/container.rs: an egress proxy is running on this machine, and this test must not \
+             replace it"
+        );
+        return;
+    }
     let network = network_name(ID_PROXY);
-    docker.remove_container(PROXY_NAME);
+    docker.remove_container(STAND_IN);
     let _ = docker.remove_network(&network);
     docker
         .create_internal_network(&network)
@@ -965,7 +974,7 @@ fn the_egress_proxy_joins_a_session_network_under_its_alias_and_leaves_it() {
             "run",
             "--detach",
             "--name",
-            PROXY_NAME,
+            STAND_IN,
             "--network",
             holosmith::docker::EGRESS_NETWORK,
             &image(),
@@ -980,18 +989,18 @@ fn the_egress_proxy_joins_a_session_network_under_its_alias_and_leaves_it() {
         String::from_utf8_lossy(&started.stderr)
     );
     assert!(
-        wait_running(&docker, PROXY_NAME),
+        wait_running(&docker, STAND_IN),
         "the stand-in proxy never came up"
     );
 
     docker
-        .join_network(&network, PROXY_NAME, PROXY_ALIAS)
+        .join_network(&network, STAND_IN, PROXY_ALIAS)
         .expect("the proxy joins the session network");
     // The **alias**, not the name: `egress-proxy` is what a session's container resolves, and Docker's DNS
     // answers it only because the join named it.
     let aliases = docker
         .inspect(
-            PROXY_NAME,
+            STAND_IN,
             &format!("{{{{(index .NetworkSettings.Networks \"{network}\").Aliases}}}}"),
         )
         .unwrap_or_else(|error| panic!("the proxy's networks cannot be read: {error}"));
@@ -1005,14 +1014,18 @@ fn the_egress_proxy_joins_a_session_network_under_its_alias_and_leaves_it() {
         !docker.remove_network(&network),
         "a network whose endpoint is still attached must not be removable"
     );
+    // And the backend's own teardown is the thing that leaves before it removes: `undo` of the network step,
+    // which is what the provisioner calls when a later step fails and what a delete runs.
+    let scratch = Scratch::new("proxy", ID_PROXY);
+    let backend = DockerBackend::new(settings(&scratch.path));
+    let runtime = tokio::runtime::Runtime::new().expect("a runtime");
+    runtime
+        .block_on(backend.undo(&session(ID_PROXY), Step::Network))
+        .expect("the network step can be undone");
     assert!(
-        docker.leave_network(&network, PROXY_NAME),
-        "the leave works"
-    );
-    assert!(
-        docker.remove_network(&network),
-        "and the network comes off once nothing is on it"
+        !docker.succeeds(&["network", "inspect", &network]),
+        "the network is gone after the backend's own teardown"
     );
 
-    docker.remove_container(PROXY_NAME);
+    docker.remove_container(STAND_IN);
 }

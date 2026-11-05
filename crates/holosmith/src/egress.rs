@@ -55,6 +55,10 @@ pub const MAX_HEAD: usize = 8 * 1024;
 /// How long a client may take to send its request head.
 pub const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The longest pause between two failed `accept`s: a listener that is gone must not fill the log at full speed,
+/// and a transient failure must not cost more than a moment.
+pub const ACCEPT_BACKOFF: Duration = Duration::from_secs(5);
+
 /// How long a name may take to resolve, and a connection to be made. Both are `warn`-worthy failures rather
 /// than a hung request, and neither is a policy about the machine.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -227,8 +231,10 @@ pub struct Rules {
 }
 
 impl Rules {
-    /// The rules an `[egress] allow` list makes. Entries are lowercased and a trailing root dot dropped, so
-    /// `Crates.IO` and `crates.io.` are the same rule the config pass already validated as one domain.
+    /// The rules an `[egress] allow` list makes. Entries are lowercased and a trailing root dot dropped, so a
+    /// `--allow Crates.IO` typed on a command line is the same rule as the `crates.io` the config pass would
+    /// have demanded in the file (it refuses an uppercase entry; the flag is normalised instead of refused,
+    /// because a container has no file to correct).
     pub fn new<I, S>(allow: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -243,6 +249,8 @@ impl Rules {
         }
     }
 
+    /// The rules as they were written, normalised: what a listener prints at startup and what the log line's
+    /// neighbouring `allow=<n>` counts.
     pub fn allow(&self) -> &[String] {
         &self.allow
     }
@@ -326,6 +334,13 @@ pub fn address_problem(address: IpAddr) -> Option<&'static str> {
                 Some("link-local (fe80::/10)")
             } else if is_v6_unique_local(v6) {
                 Some("a unique local address (fc00::/7)")
+            } else if is_v6_site_local(v6) {
+                Some("a site-local address (fec0::/10)")
+            } else if let Some(embedded) = embedded_v4(v6) {
+                // 6to4, NAT64 and IPv4-compatible addresses all *carry* a v4 destination, and a route for one of
+                // them reaches exactly that v4 address: `64:ff9b::7f00:1` is `127.0.0.1` on a NAT64 network. One
+                // recursion, so the check is as deep as the addressing is.
+                ipv4_problem(embedded)
             } else {
                 None
             }
@@ -339,6 +354,9 @@ fn ipv4_problem(address: Ipv4Addr) -> Option<&'static str> {
         Some("loopback (127.0.0.0/8)")
     } else if address.is_unspecified() {
         Some("the unspecified address")
+    } else if a == 0 {
+        // The rest of 0.0.0.0/8 is "this network" (RFC 1122): a `connect` to 0.0.0.1 is a connect to this machine.
+        Some("this network (0.0.0.0/8)")
     } else if address.is_link_local() {
         Some("link-local (169.254.0.0/16)")
     } else if a == 10 || (a == 172 && (16..=31).contains(&b)) || (a == 192 && b == 168) {
@@ -356,6 +374,39 @@ fn is_v6_link_local(address: Ipv6Addr) -> bool {
 
 fn is_v6_unique_local(address: Ipv6Addr) -> bool {
     (address.segments()[0] & 0xfe00) == 0xfc00
+}
+
+/// `fec0::/10`, the deprecated site-local range: the same "inside this network" claim as `fc00::/7`.
+fn is_v6_site_local(address: Ipv6Addr) -> bool {
+    (address.segments()[0] & 0xffc0) == 0xfec0
+}
+
+/// The IPv4 address an IPv6 address carries, for the three prefixes that carry one: 6to4 (`2002::/16`), NAT64
+/// (`64:ff9b::/96`) and IPv4-compatible (`::a.b.c.d`, which `to_ipv4` also answers for `::` and `::1` — both
+/// checked before this runs).
+fn embedded_v4(address: Ipv6Addr) -> Option<Ipv4Addr> {
+    let segments = address.segments();
+    if segments[0] == 0x2002 {
+        return Some(Ipv4Addr::new(
+            (segments[1] >> 8) as u8,
+            segments[1] as u8,
+            (segments[2] >> 8) as u8,
+            segments[2] as u8,
+        ));
+    }
+    if segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2..6] == [0, 0, 0, 0] {
+        return Some(Ipv4Addr::new(
+            (segments[6] >> 8) as u8,
+            segments[6] as u8,
+            (segments[7] >> 8) as u8,
+            segments[7] as u8,
+        ));
+    }
+    // IPv4-compatible: six zero segments, then the address. `to_ipv4` answers `None` for anything else.
+    if segments[..6] == [0, 0, 0, 0, 0, 0] {
+        return address.to_ipv4();
+    }
+    None
 }
 
 /// One answered request, which is what the log line renders.
@@ -398,11 +449,14 @@ impl Record {
     }
 }
 
-/// Serve until the listener fails, one task per connection.
+/// Serve forever, one task per connection: nothing in this process stops the loop, and the signals that do are
+/// the caller's (see [`crate::commands::proxy`]).
 pub async fn serve(listener: TcpListener, rules: Arc<Rules>) {
+    let mut failures: u32 = 0;
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
+                failures = 0;
                 let rules = Arc::clone(&rules);
                 tokio::spawn(async move {
                     handle(stream, &rules).await;
@@ -414,16 +468,22 @@ pub async fn serve(listener: TcpListener, rules: Arc<Rules>) {
                 });
             }
             Err(error) => {
-                // An accept that fails is a listener this process can no longer serve on. A tight retry loop
-                // on a broken listener would spin a core and log nothing readable, so the error is logged
-                // and the loop yields; the process's own supervisor (systemd, or the container's restart
-                // policy) is what replaces it.
+                // An accept that fails is a listener this process can no longer serve on, and the two failure
+                // modes want different things: a transient one (a full backlog, a connection that died between
+                // `accept` and the return) should be retried at once, and a permanent one (a listener that is
+                // gone) should not spin a core filling the log. So the pause **escalates** with consecutive
+                // failures and resets on a success, and the process's own supervisor (systemd, or the
+                // container's restart policy) is what replaces a listener that never comes back.
+                failures = failures.saturating_add(1);
+                let pause = ACCEPT_BACKOFF.min(Duration::from_millis(100) * failures.min(60));
                 tracing::warn!(
                     target: "holosmith::egress",
                     %error,
+                    failures,
+                    pause_ms = pause.as_millis(),
                     "the egress proxy could not accept a connection"
                 );
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep(pause).await;
             }
         }
     }
@@ -437,12 +497,14 @@ pub async fn handle(mut stream: TcpStream, rules: &Rules) {
     let head = match read_head(&mut stream).await {
         Some(head) => head,
         None => {
-            let _ = respond(&mut stream, 400, "the request head could not be read").await;
+            let _ = respond(&mut stream, 400, NOT_A_HEAD).await;
+            Record::unreadable().log();
             return;
         }
     };
     let Some(request) = Request::parse(&head) else {
-        let _ = respond(&mut stream, 400, "the request head is not an HTTP request").await;
+        let _ = respond(&mut stream, 400, NOT_A_HEAD).await;
+        Record::unreadable().log();
         return;
     };
     let session = request
@@ -492,28 +554,134 @@ pub async fn handle(mut stream: TcpStream, rules: &Rules) {
             return;
         }
     }
-    let Some(mut upstream) = connect(&addresses).await else {
-        let refusal = Refusal::Unreachable {
-            host: target.host.clone(),
-            detail: "nothing answered on port 443".to_string(),
+    Record::tunnel(stream, &target.host, session, &addresses)
+        .await
+        .log();
+}
+
+/// `NOT_A_HEAD`: the one sentence both 400 paths answer, so they cannot drift apart.
+const NOT_A_HEAD: &str =
+    "the request head is not a CONNECT request: send CONNECT host:port HTTP/1.1";
+
+/// Tunnel one connection to the first of `addresses` that answers, and answer the record of what happened.
+///
+/// Separate from [`handle`] for one reason: the targets here have already passed the policy, so a test can drive
+/// this against a listener on a loopback port — which the policy refuses — and still exercise the `200` that
+/// must carry **no body** and the byte counting that must survive an error. `src/egress.rs`'s own test does
+/// exactly that, because the story's demo is the only other thing that would have caught it (`curl` answered
+/// `wrong version number` when the `200` carried a `Content-Length`).
+///
+/// **The counts are `AtomicU64`s the copy loop bumps as bytes move**, not the return value of a `copy`: a copy
+/// that fails reports no count at all, so a tunnel that carried a megabyte and then died would log
+/// `bytes_up=0` — precisely the request an operator wants the numbers for.
+impl Record {
+    /// The record for a head that could not be read: no host, no session, no bytes, and a word of its own.
+    fn unreadable() -> Self {
+        Self {
+            session: UNATTRIBUTED.to_string(),
+            host: UNATTRIBUTED.to_string(),
+            status: "not-http",
+            up: 0,
+            down: 0,
+        }
+    }
+
+    /// Tunnel `stream` to `addresses` and answer the record: `allowed` with what moved, or `unreachable` when
+    /// nothing answered or the `200` could not be written.
+    pub(crate) async fn tunnel(
+        mut stream: TcpStream,
+        host: &str,
+        session: String,
+        addresses: &[SocketAddr],
+    ) -> Self {
+        let Some(upstream) = connect(addresses).await else {
+            let _ = respond(
+                &mut stream,
+                502,
+                &format!("{host} could not be reached: nothing answered on port {TLS_PORT}"),
+            )
+            .await;
+            return Self {
+                session,
+                host: host.to_string(),
+                status: "unreachable",
+                up: 0,
+                down: 0,
+            };
         };
-        let _ = respond(&mut stream, refusal.status(), &refusal.sentence()).await;
-        Record::refused(&session, &refusal).log();
-        return;
-    };
-    if establish(&mut stream).await.is_err() {
-        return;
+        if establish(&mut stream).await.is_err() {
+            // The client left before the tunnel existed: nothing moved, and the connection is not a request the
+            // proxy can answer.
+            return Self {
+                session,
+                host: host.to_string(),
+                status: "unanswered",
+                up: 0,
+                down: 0,
+            };
+        }
+        let (up, down) = pump_both(stream, upstream).await;
+        Self {
+            session,
+            host: host.to_string(),
+            status: "allowed",
+            up,
+            down,
+        }
     }
-    let counted = tokio::io::copy_bidirectional(&mut stream, &mut upstream).await;
-    let (up, down) = counted.unwrap_or((0, 0));
-    Record {
-        session,
-        host: target.host,
-        status: "allowed",
-        up,
-        down,
+}
+
+/// Copy in both directions until both are done, counting bytes **as they move**.
+///
+/// `tokio::io::copy_bidirectional` is the tidier call and it is what this used to be, but it answers `(0, 0)`
+/// when either direction fails, which is the one case an operator reads the line for. Two `copy`-shaped loops
+/// over a split connection count each chunk before the next read, so an error costs the chunk that failed and
+/// nothing else. A `shutdown` on the far side is how the other half learns the stream ended.
+async fn pump_both(stream: TcpStream, upstream: TcpStream) -> (u64, u64) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let (mut client_read, mut client_write) = tokio::io::split(stream);
+    let (mut upstream_read, mut upstream_write) = tokio::io::split(upstream);
+    let up = AtomicU64::new(0);
+    let down = AtomicU64::new(0);
+    let (sent, received) = tokio::join!(
+        pump(&mut client_read, &mut upstream_write, &up),
+        pump(&mut upstream_read, &mut client_write, &down),
+    );
+    if let Err(error) = sent {
+        tracing::debug!(target: "holosmith::egress", %error, "the tunnel's upload stopped");
     }
-    .log();
+    if let Err(error) = received {
+        tracing::debug!(target: "holosmith::egress", %error, "the tunnel's download stopped");
+    }
+    (up.load(Ordering::Relaxed), down.load(Ordering::Relaxed))
+}
+
+/// One direction of a tunnel, counting every byte that reached the other side.
+async fn pump<R, W>(
+    from: &mut R,
+    to: &mut W,
+    counted: &std::sync::atomic::AtomicU64,
+) -> std::io::Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use std::sync::atomic::Ordering;
+
+    let mut buffer = vec![0u8; 16 * 1024];
+    loop {
+        let read = match from.read(&mut buffer).await {
+            Ok(0) => {
+                let _ = to.shutdown().await;
+                return Ok(());
+            }
+            Ok(read) => read,
+            Err(error) => return Err(error),
+        };
+        to.write_all(&buffer[..read]).await?;
+        counted.fetch_add(read as u64, Ordering::Relaxed);
+    }
 }
 
 /// Read up to the blank line, bounded by [`MAX_HEAD`] and [`HEAD_TIMEOUT`].
@@ -793,6 +961,13 @@ mod tests {
             ("100.127.255.254", "100.64.0.0/10"),
             ("fc00::1", "unique local"),
             ("fd12:3456::1", "unique local"),
+            ("fec0::1", "site-local"),
+            ("0.0.0.1", "this network"),
+            // Three IPv6 spellings that *carry* a v4 destination: on a host with a route for one of them
+            // `CONNECT <listed>:443` would reach that v4 address, which is why the check recurses.
+            ("2002:7f00:1::1", "loopback"),
+            ("64:ff9b::7f00:1", "loopback"),
+            ("::7f00:1", "loopback"),
             // The mapped spelling of a loopback address: one spelling deep would let this through.
             ("::ffff:127.0.0.1", "loopback"),
             ("::ffff:10.0.0.1", "RFC 1918"),
@@ -810,6 +985,8 @@ mod tests {
             "100.128.0.1",
             "192.169.0.1",
             "2606:4700:4700::1111",
+            "2002:0101:0101::1",
+            "64:ff9b::101:101",
         ] {
             let address: IpAddr = address.parse().expect("an address");
             assert_eq!(address_problem(address), None, "{address} is outside");
@@ -871,11 +1048,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_tunnel_copies_both_ways_and_counts_the_bytes() {
-        // The allow path, without the internet: `handle`'s decision is a unit test above, so what is left to
-        // prove is that the bytes really move and are counted. The upstream is a loopback echo server on a
-        // port of its own — which the *policy* would refuse, which is why this drives `copy_bidirectional`
-        // through the same call `handle` makes rather than a `CONNECT`.
+    async fn a_tunnel_answers_a_200_with_no_body_copies_both_ways_and_counts_the_bytes() {
+        // The allow path, without the internet and **below the policy**: the addresses here are loopback, which
+        // `address_problem` refuses — so this drives `Record::tunnel`, the function `handle` calls once the
+        // policy has said yes. That is deliberate: the `200` a `CONNECT` gets must carry **no body** (the first
+        // version answered with a `Content-Length` and `curl` said `wrong version number`, which no unit test
+        // covering only the refusals would have caught), and the counts must be the bytes that moved.
         let upstream = TcpListener::bind("127.0.0.1:0").await.expect("a port");
         let address = upstream.local_addr().expect("an address");
         let echo = tokio::spawn(async move {
@@ -889,25 +1067,80 @@ mod tests {
                 socket.write_all(&buffer[..read]).await.expect("a write");
             }
         });
-        let server = TcpListener::bind("127.0.0.1:0").await.expect("a port");
-        let client_address = server.local_addr().expect("an address");
-        let proxy = tokio::spawn(async move {
-            let (stream, _) = server.accept().await.expect("a connection");
-            let mut stream = stream;
-            let mut other = TcpStream::connect(address).await.expect("the upstream");
-            tokio::io::copy_bidirectional(&mut stream, &mut other)
-                .await
-                .expect("a tunnel")
+        let proxy = TcpListener::bind("127.0.0.1:0").await.expect("a port");
+        let client_address = proxy.local_addr().expect("an address");
+        let tunnel = tokio::spawn(async move {
+            let (stream, _) = proxy.accept().await.expect("a connection");
+            Record::tunnel(
+                stream,
+                "example.com",
+                "abcdef0123456789".to_string(),
+                &[address],
+            )
+            .await
         });
-        let mut client = TcpStream::connect(client_address).await.expect("the proxy");
+
+        let mut client = TcpStream::connect(client_address)
+            .await
+            .expect("the tunnel");
+        let mut head = Vec::new();
+        loop {
+            let mut byte = [0u8; 1];
+            client.read_exact(&mut byte).await.expect("a read");
+            head.push(byte[0]);
+            if head.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        assert_eq!(
+            String::from_utf8(head).expect("ascii"),
+            "HTTP/1.1 200 Connection Established\r\n\r\n",
+            "a tunnel's answer is the status line and a blank line, and nothing after it"
+        );
+
         client.write_all(b"hello egress").await.expect("a write");
         let mut answer = [0u8; 12];
         client.read_exact(&mut answer).await.expect("a read");
         assert_eq!(&answer, b"hello egress");
         drop(client);
-        let (up, down) = proxy.await.expect("the tunnel ends");
-        assert_eq!((up, down), (12, 12), "both directions are counted");
+        let record = tunnel.await.expect("the tunnel ends");
+        assert_eq!(record.status, "allowed");
+        assert_eq!(record.session, "abcdef0123456789");
+        assert_eq!(record.host, "example.com");
+        assert_eq!(
+            (record.up, record.down),
+            (12, 12),
+            "both directions are counted"
+        );
         echo.abort();
+    }
+
+    #[tokio::test]
+    async fn a_tunnel_nothing_answers_is_a_502_and_a_record_with_no_bytes() {
+        let proxy = TcpListener::bind("127.0.0.1:0").await.expect("a port");
+        let client_address = proxy.local_addr().expect("an address");
+        // A port nothing listens on: the tunnel is refused *after* the policy said yes, which is the "reachable
+        // name, nothing behind it" case a container meets when its allow-listed host is down.
+        let dead = TcpListener::bind("127.0.0.1:0").await.expect("a port");
+        let dead_address = dead.local_addr().expect("an address");
+        drop(dead);
+        let tunnel = tokio::spawn(async move {
+            let (stream, _) = proxy.accept().await.expect("a connection");
+            Record::tunnel(
+                stream,
+                "example.com",
+                UNATTRIBUTED.to_string(),
+                &[dead_address],
+            )
+            .await
+        });
+        let mut client = TcpStream::connect(client_address).await.expect("the proxy");
+        let mut answer = String::new();
+        client.read_to_string(&mut answer).await.expect("a read");
+        assert!(answer.starts_with("HTTP/1.1 502"), "{answer}");
+        let record = tunnel.await.expect("the tunnel ends");
+        assert_eq!(record.status, "unreachable");
+        assert_eq!((record.up, record.down), (0, 0));
     }
 
     #[tokio::test]

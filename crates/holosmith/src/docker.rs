@@ -144,29 +144,27 @@ impl Docker {
         Some(gateway)
     }
 
-    /// Run `docker <arguments>` under a bound and answer its exit code with what it printed, for the one caller
-    /// that reads them rather than the text: the network self-test's probe reports by exit code (HS-036).
+    /// Run `docker <arguments>` under a **bound**, answering `Ok(None)` when the bound expired and the child was
+    /// killed.
     ///
-    /// **Bounded, unlike every other call here**, because this one runs on the startup path: a daemon that
-    /// accepts a `docker run` and then wedges would otherwise hang the boot before the listener binds, which is
-    /// exactly what [`crate::preflight`]'s `PING_TIMEOUT` exists to prevent for its own check. `Ok(None)` is the
-    /// bound expiring and the child being killed — the caller reads it as "the probe did not finish", which is
-    /// not a verdict about the machine.
-    pub fn attempt(
+    /// The one primitive every startup-path call needs: a daemon that accepts a request and then wedges must not
+    /// hang the boot before the listener binds. It is a separate function from [`Docker::run`] because the two
+    /// want different things from the same CLI — `run` waits forever and answers a string, and the callers here
+    /// answer "it did not finish" rather than a sentence about what Docker said.
+    fn bounded(
         &self,
-        arguments: &[String],
+        arguments: &[&str],
         bound: std::time::Duration,
-    ) -> Result<Option<crate::selftest::Report>, DockerError> {
-        let borrowed: Vec<&str> = arguments.iter().map(String::as_str).collect();
+    ) -> Result<Option<std::process::Output>, DockerError> {
         let mut child = self
             .command()
-            .args(&borrowed)
+            .args(arguments)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(|error| {
                 DockerError::new(
-                    &borrowed,
+                    arguments,
                     format!("the docker command could not be run ({error})"),
                 )
             })?;
@@ -182,7 +180,7 @@ impl Docker {
                 Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
                 Err(error) => {
                     return Err(DockerError::new(
-                        &borrowed,
+                        arguments,
                         format!("the docker command could not be waited on ({error})"),
                     ));
                 }
@@ -190,10 +188,64 @@ impl Docker {
         }
         let output = child.wait_with_output().map_err(|error| {
             DockerError::new(
-                &borrowed,
+                arguments,
                 format!("the docker command printed nothing readable ({error})"),
             )
         })?;
+        Ok(Some(output))
+    }
+
+    /// Run a **detached** container under a bound, answering its container id.
+    ///
+    /// The egress proxy's start (HS-037) is the caller: `--detach` means the CLI returns as soon as the daemon has
+    /// created the container, and `--restart unless-stopped` means its lifetime is the daemon's, not this
+    /// process's. It is **bounded** because it runs on the startup path — where a `docker run` can also have to
+    /// pull the image first — and `Ok(None)` is "the start did not finish", not a verdict about the machine.
+    pub fn run_detached(
+        &self,
+        arguments: &[String],
+        bound: std::time::Duration,
+    ) -> Result<Option<String>, DockerError> {
+        let borrowed: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        let Some(output) = self.bounded(&borrowed, bound)? else {
+            return Ok(None);
+        };
+        if !output.status.success() {
+            return Err(DockerError::new(
+                &borrowed,
+                first_line(
+                    &String::from_utf8_lossy(&output.stderr),
+                    output.status.code(),
+                ),
+            ));
+        }
+        Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        ))
+    }
+
+    /// Remove a container by force under a bound, answering whether it happened — the startup path's spelling of
+    /// [`Docker::remove_container`], and the same question (spec item 6's "ignore not-found").
+    pub fn remove_container_bounded(&self, name: &str, bound: std::time::Duration) -> bool {
+        self.bounded(&["rm", "--force", name], bound)
+            .is_ok_and(|output| output.is_some_and(|output| output.status.success()))
+    }
+
+    /// Run `docker <arguments>` under a bound and answer the self-test's report: the probe's exit code and what it
+    /// printed (HS-036).
+    ///
+    /// The probe reports by **exit code**, so this is the one caller that reads the code rather than the text.
+    /// `Ok(None)` is the bound expiring and the child being killed — "the probe did not finish", which is not a
+    /// verdict about the machine.
+    pub fn attempt(
+        &self,
+        arguments: &[String],
+        bound: std::time::Duration,
+    ) -> Result<Option<crate::selftest::Report>, DockerError> {
+        let borrowed: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        let Some(output) = self.bounded(&borrowed, bound)? else {
+            return Ok(None);
+        };
         Ok(Some(crate::selftest::Report {
             // A process killed by a signal has no code of its own; -1 is "not success and not a number Docker
             // gave us", which the self-test reads as a probe that did not finish.
@@ -245,16 +297,6 @@ impl Docker {
     /// that a delete leaves no `deleting` row, so the teardown leaves the network before it removes it.
     pub fn leave_network(&self, network: &str, container: &str) -> bool {
         self.succeeds(&["network", "disconnect", "--force", network, container])
-    }
-
-    /// Run a **detached** container from an argument vector and answer the container id Docker printed.
-    ///
-    /// The one caller is the egress proxy (HS-037): nothing reads its stdio and nothing classifies its exit, so
-    /// unlike a session's container it is `--detach` and its lifetime is the restart policy's. Every other
-    /// `docker run` in this build is attached and goes through [`Docker::command_line`].
-    pub fn run_detached(&self, arguments: &[String]) -> Result<String, DockerError> {
-        let borrowed: Vec<&str> = arguments.iter().map(String::as_str).collect();
-        self.run(&borrowed).map(|id| id.trim().to_string())
     }
 
     /// Whether a container is *running* (not merely present), which is the question a proxy asks about itself.

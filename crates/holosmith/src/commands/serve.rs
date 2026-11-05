@@ -303,17 +303,44 @@ fn start_egress_proxy(config: &Config) {
             return;
         }
     };
+    // `-v` of a path the daemon cannot see creates an empty root-owned *directory*, and `--entrypoint` then
+    // fails with a sentence about the container rather than about this machine (ADR-0035's measurement, the
+    // same one the agent directory has). A binary that is not a file here is a start that cannot work, said in
+    // the words of what is actually wrong.
+    if !proxy.binary.is_file() {
+        tracing::warn!(
+            target: "holosmith::serve",
+            binary = %proxy.binary.display(),
+            "no egress proxy was started: this process's own binary is not a file at its own path, so a \
+             container mounted from it would start from an empty directory"
+        );
+        return;
+    }
     let docker = Docker::new(config.docker_host.clone());
     // `rm -f` first, for spec item 6's reason applied to a container that is not a session's: `--restart
     // unless-stopped` means a stopped proxy keeps its name, and a name in use is a start that fails for a
     // reason about Docker rather than about this machine.
-    docker.remove_container(crate::container::PROXY_NAME);
-    match docker.run_detached(&proxy.run_args()) {
-        Ok(_) => tracing::debug!(
+    //
+    // Both calls are **bounded**, and this is the one place in the boot that could otherwise block before the
+    // listener binds: a `docker run` of an image this machine does not have pulls it first, and a daemon that
+    // accepts a request and then wedges would take the control UI down with it — the screen an operator needs in
+    // order to see that anything is wrong. `Docker::attempt`'s bound is the same rule for the self-test's probe
+    // (HS-036); this one is the proxy's.
+    let bound = crate::container::PROXY_START_TIMEOUT;
+    docker.remove_container_bounded(crate::container::PROXY_NAME, bound);
+    match docker.run_detached(&proxy.run_args(), bound) {
+        Ok(Some(_)) => tracing::debug!(
             target: "holosmith::serve",
             container = crate::container::PROXY_NAME,
             allow = proxy.allow.len(),
             "the egress proxy is running"
+        ),
+        Ok(None) => tracing::warn!(
+            target: "holosmith::serve",
+            container = crate::container::PROXY_NAME,
+            seconds = bound.as_secs(),
+            "the egress proxy did not start within its bound and was abandoned: a session that allows internet \
+             access will find nothing at its proxy address"
         ),
         Err(error) => tracing::warn!(
             target: "holosmith::serve",

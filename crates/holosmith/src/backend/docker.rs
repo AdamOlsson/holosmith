@@ -321,6 +321,11 @@ impl DockerBackend {
     /// died, and HS-044 is what reconciles that at startup) — creating one twice is not an error worth
     /// failing a session over.
     async fn provision_network(&self, session: &Session) -> Result<Provisioned, BackendError> {
+        // Serialised with a start and a delete of the same session, like the container step: this step now
+        // *changes an endpoint* on the network (it joins the proxy), and a delete that landed between the join
+        // and its own leave-then-`rm` would re-attach the proxy to a network the delete is removing — leaving an
+        // endpoint nobody owns and a `warn` instead of a teardown (HS-037).
+        let _start = self.start_lock(&session.id).await;
         let network = self.network(session);
         Self::docker(Step::Network, self.settings.docker(), move |docker| {
             docker.create_internal_network(&network)
@@ -623,20 +628,27 @@ impl DockerBackend {
         // removal, so its result is not read.
         let leaving = Self::docker(Step::Network, self.settings.docker(), {
             let name = name.clone();
-            move |docker| {
-                docker.leave_network(&name, crate::container::PROXY_NAME);
-                Ok(())
-            }
+            move |docker| Ok(docker.leave_network(&name, crate::container::PROXY_NAME))
         })
         .await;
-        if let Err(error) = leaving {
-            tracing::debug!(
+        match leaving {
+            Ok(true) => {}
+            // The ordinary answer for a session that allowed no internet access, or one whose network never had
+            // the proxy on it: there was nothing to detach.
+            Ok(false) => tracing::debug!(
+                target: "holosmith::backend",
+                session = %session.id,
+                "the egress proxy was not on the session's network, so there was nothing to detach"
+            ),
+            // Only a task that did not finish reaches here (`docker::succeeds` reads no answer at all), so the
+            // sentence says that rather than pretending Docker refused.
+            Err(error) => tracing::warn!(
                 target: "holosmith::backend",
                 session = %session.id,
                 %error,
-                "the egress proxy could not be detached from the session's network; the removal below is \
-                 still the one that decides"
-            );
+                "the egress proxy could not be detached from the session's network: the removal below decides \
+                 what happened to the network itself"
+            ),
         }
         let removed = Self::docker(Step::Network, self.settings.docker(), move |docker| {
             Ok(docker.remove_network(&name))

@@ -110,8 +110,28 @@ a package download, not a session. It is also what keeps a machine whose proxy i
 serve — and the control UI is the one screen an operator needs to read when something is wrong with the
 proxies.
 
+## The start is bounded, and the counts survive a failed tunnel
+
+Two details that a later story would otherwise undo:
+
+- **Starting the container is a bounded `docker run`.** It runs before the listener binds, and a machine whose
+  `agent_image` is not present makes `docker run` *pull* — so an unbounded call here turns the one screen an
+  operator needs into a boot that waits on a registry (`Docker::bounded`, with
+  `container::PROXY_START_TIMEOUT`). The rule is ADR-0044's, applied to the second container that starts at boot.
+- **The bytes are counted as they move**, not read off a `copy`'s return value: a copy that fails answers no
+  count at all, so a tunnel that carried a megabyte and then died would log `bytes_up=0`, which is exactly the
+  request an operator reads the line for. The upload and the download are two counted loops over a split socket,
+  and the `200` a `CONNECT` gets carries **no body at all** — a `Content-Length` there is read as the first TLS
+  record, which is how the story's own demo found it (`curl`: `wrong version number`).
+
 ## What is left, on purpose
 
+- **The host-binding gap is not closed here, and it is now HS-046's to record.** ADR-0044 measured that a
+  container can reach anything the host binds to `0.0.0.0` at its own network's bridge address — the control
+  listener included. This proxy refuses to *tunnel* to such an address, but a container that speaks to the
+  gateway directly never asks the proxy, so item 4's guards remain that path's defence. Closing it (a firewall
+  on the bridge, or a network driver that does not answer) is the phase-1 verification run's decision, and it is
+  named here rather than dropped.
 - The provider hosts are **not** on the allow-list, because the key proxy is what makes a model call work
   (HS-039). `NO_PROXY=key-proxy` is already in the launcher's environment for that reason.
 - HTTPS is opaque to a `CONNECT` tunnel, so an allow-listed host is an exfiltration channel. Item 2 lists that

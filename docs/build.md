@@ -231,12 +231,9 @@ plain socket — `GET` gets `405`, `CONNECT` to port 80 gets `403`, an unlisted 
 `localhost`, **on** the list, gets `403` because its address is inside the machine — then asserts the log's
 one line per answer carries the session id from the proxy username, the host and the byte counts. The allow
 path needs a real allow-listed host, so it is a unit test over a local echo server (`src/egress.rs`) and
-the story's demo; a case that claimed to prove it would be proving nothing, or would need the internet.
-ADR-0045).
-A case that
-must assert
-one code keeps every higher guard check correct, or it asserts another guard's code under its own
-name.
+the story's demo; a case that claimed to prove it would be proving nothing, or would need the internet
+(ADR-0045). A case that must assert one code keeps every higher guard check correct, or it asserts another
+guard's code under its own name.
 
 The CORS sweep is deliberately **not** in that array: it runs once after every case and checks
 that no answer the run saved carries an `access-control-*` header or `vary: origin`. Being

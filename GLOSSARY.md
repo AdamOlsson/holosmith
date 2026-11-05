@@ -523,8 +523,10 @@ _Avoid_: Firewall, forward proxy, gateway
 
 **Allow-list**:
 The set of **exact** hostnames the egress proxy will tunnel to (`[egress] allow`). A subdomain is a second
-entry, because a suffix match is the wildcard `config validate` refuses. It never contains a provider host:
-a model call goes through the key proxy.
+entry, because a suffix match is the wildcard `config validate` refuses. It **should** never contain a provider
+host — a model call goes through the key proxy — and nothing checks that for an operator: what holds the two
+apart is that the shipped list is empty, that provider calls are kept off this route by `NO_PROXY=key-proxy`, and
+that a review of an `[egress] allow` change is a review of where a session may send data.
 _Avoid_: Whitelist, permitted hosts, domain filter
 
 **Proxy username**:

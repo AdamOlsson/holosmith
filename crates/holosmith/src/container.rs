@@ -72,6 +72,15 @@ pub const PROXY_ALIAS: &str = "egress-proxy";
 /// The variable a session's container finds the proxy in, and the only route out it has (spec item 2).
 pub const PROXY_ENV: &str = "HTTPS_PROXY";
 
+/// How long starting the proxy container may take before the boot gives up on it (HS-037).
+///
+/// A **bound on the startup path**, for the reason [`crate::selftest::PROBE_TIMEOUT`] is one and
+/// [`crate::docker`]'s bounded calls exist: a `docker run` that has to pull the image, or a daemon that accepts
+/// the request and then wedges, must not keep the control listener from binding — that listener is the one
+/// screen an operator needs in order to see what is wrong. Generous, because a first run on a slow machine
+/// unpacks an image.
+pub const PROXY_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
 /// The value [`PROXY_ENV`] carries for a session: `http://<id>@egress-proxy:3128`.
 ///
 /// The session id is the proxy's **username**, which is how a request is attributed to a session (item 2), and
@@ -505,14 +514,15 @@ impl SessionContainer {
 /// Three things about it are load-bearing and easy to lose:
 ///
 /// * **It is not per session.** One container, attached to the machine's `egress` network and, per session,
-///   to that session's own network — the second half of "a container's only route out". [`crate::docker`]'s
-///   `connect` is what joins them, and the network's *alias* is what makes `egress-proxy` resolve.
+///   to that session's own network — the second half of "a container's only route out".
+///   [`crate::docker::Docker::join_network`] is what joins them, and the network's *alias* is what makes
+///   `egress-proxy` resolve.
 /// * **It is detached with a restart policy**, unlike a session's container: it has no stdio to hold and no
 ///   exit to classify, and `unless-stopped` is the spec's own word. `--rm` and `--restart` conflict, so a
 ///   restart policy means a stopped proxy leaves its name behind — the next start's `rm -f` is what clears it.
 /// * **It runs this binary**, mounted read-only at its own host path (item 1's identity rule). The image's
 ///   own base is irrelevant because the artifact is static; HS-048 ships `holosmith-proxy:<version>` and this
-///   mount goes away, which is exactly the one field ([`ContainerSettings`]) that names both.
+///   mount goes away, which is the one thing [`EgressProxy::of`] decides.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EgressProxy {
     /// The image the container runs, from `agent_image` until HS-048 builds a proxy image.
