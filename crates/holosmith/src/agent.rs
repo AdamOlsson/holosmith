@@ -141,10 +141,7 @@ pub fn seed(session: &Session) -> String {
     let mut document: Value = serde_json::from_str(TEMPLATE).unwrap_or_else(|_| json!({}));
     if let Some(object) = document.as_object_mut() {
         object.insert("defaultModel".to_string(), json!(session.model));
-        object.insert(
-            "defaultThinkingLevel".to_string(),
-            json!(session.thinking),
-        );
+        object.insert("defaultThinkingLevel".to_string(), json!(session.thinking));
     }
     let mut text = serde_json::to_string_pretty(&document).unwrap_or_default();
     text.push('\n');
