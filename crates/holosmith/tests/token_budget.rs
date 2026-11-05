@@ -430,3 +430,98 @@ async fn a_message_end_without_usage_adds_nothing_to_the_tally() {
         "a `message.end` with no usage reset or doubled the tally"
     );
 }
+
+/// The tool fixture: two assistant messages of a real turn, whose reported usage is a real provider's.
+const REAL_TURN: &str = include_str!("fixtures/pi-turn-tool.jsonl");
+
+/// What that turn reported, in the contract's two counts (ADR-0042 folds the cache counters into `in`):
+/// (1408 + 256) + (93 + 1664) prompt tokens and 76 + 5 generated ones.
+const REAL_IN: u64 = 1664 + 1757;
+const REAL_OUT: u64 = 76 + 5;
+
+/// Queue the fixture's frames on `state`'s writer through the production mapping — no agent, no container.
+///
+/// This is the "real backend" half of HS-034: the numbers in the row come from a provider's own report as pi
+/// printed it, mapped by `rpc::Mapping`, and nothing here writes a count by hand.
+async fn replay_real_turn(state: &AppState, session: &Session) {
+    let mut mapping = holosmith::rpc::Mapping::new(&session.id);
+    for line in REAL_TURN.lines().filter(|line| !line.trim().is_empty()) {
+        let record: Value = serde_json::from_str(line).expect("every fixture line is JSON");
+        let Some((kind, payload)) = mapping.map(&record).into_frame() else {
+            continue;
+        };
+        state
+            .events
+            .append(holosmith::events::NewEvent {
+                session_id: session.id.clone(),
+                kind: kind.to_string(),
+                payload,
+                created_at: clock::unix_now(),
+            })
+            .await
+            .expect("the writer accepts the frame");
+    }
+}
+
+#[tokio::test]
+async fn a_real_turns_usage_becomes_the_sessions_tally_and_trips_the_ceiling() {
+    // The acceptance's third bullet, honestly: a container cannot complete a turn before the key proxy exists
+    // (HS-039), so "against the real backend" is a real turn's *records* through the production mapping and a
+    // real runner over the row they land in. Every number below is the provider's; only the container is
+    // HS-046's verification run.
+    let dir = TempDir::new("budget-real");
+    let stub = paced(200);
+    let state = with_stub(state_in(&dir, Config::default()), stub.clone());
+    let session = running(&state, "budget-real").await;
+
+    replay_real_turn(&state, &session).await;
+    wait_for_usage(&state, &session.id, REAL_IN, REAL_OUT).await;
+
+    // A ceiling under what the real turn cost, so the *next* turn is the one that is refused: the same shape
+    // spec item 13 describes, with the numbers a provider reported rather than a stub's script.
+    let ceiling = REAL_IN + REAL_OUT - 1;
+    runner(&state, &stub, None, Some(ceiling))
+        .run(row(&state, &session.id), "and again".to_string())
+        .await;
+
+    let ended = row(&state, &session.id);
+    assert_eq!(ended.status, Status::Idle, "the session did not come back");
+    assert_eq!(
+        ended.status_reason.as_deref(),
+        Some(BUDGET_EXCEEDED),
+        "a turn that started over a ceiling the real turn cost did not end"
+    );
+    assert!(
+        ended.usage_in >= REAL_IN && ended.usage_out >= REAL_OUT,
+        "the tally lost the real turn's counts: {ended:?}"
+    );
+}
+
+#[tokio::test]
+async fn counts_survive_a_stop_and_a_resume() {
+    // The tally is a column, and neither the ladder nor the provisioner touches it: a session that is stopped
+    // and brought back has spent what it spent, which is what "per session" in spec item 13 means.
+    let dir = TempDir::new("budget-resume");
+    let stub = paced(1);
+    let state = with_stub(state_in(&dir, Config::default()), stub.clone());
+    let session = running(&state, "budget-resume").await;
+
+    runner(&state, &stub, None, None)
+        .run(session.clone(), "read the app shell".to_string())
+        .await;
+    wait_for_usage(&state, &session.id, SPENT_IN, SPENT_OUT).await;
+
+    // The row's own path through the table: `idle -> stopped` by the sweeper's trigger, then the resume's two
+    // rows. No runner and no backend call, because the question is only what the column does.
+    drive(&state, &session.id, Trigger::IdleStop, None).await;
+    drive(&state, &session.id, Trigger::Resume, None).await;
+    drive(&state, &session.id, Trigger::PiReady, None).await;
+
+    let resumed = row(&state, &session.id);
+    assert_eq!(resumed.status, Status::Idle, "the resume did not finish");
+    assert_eq!(
+        (resumed.usage_in, resumed.usage_out),
+        (SPENT_IN, SPENT_OUT),
+        "the stop and the resume changed what the session had spent"
+    );
+}

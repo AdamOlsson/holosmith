@@ -153,7 +153,11 @@ fn the_recorded_text_turn_becomes_the_contracts_frames_in_order() {
         end.payload["message_id"], frames[0].payload["message_id"],
         "the message's deltas and its end share the id the mapping minted"
     );
-    assert_eq!(end.payload["usage"], json!({"in": 991, "out": 4}));
+    assert_eq!(
+        end.payload["usage"],
+        json!({"in": 1631, "out": 4}),
+        "991 prompt tokens plus 640 the provider served from its cache: what the message cost, which is\n         what the budget counts (HS-034, ADR-0042)"
+    );
     assert_eq!(end.payload["stop_reason"], "stop");
     assert_eq!(
         end.payload["tool_calls"],
@@ -193,6 +197,45 @@ fn the_recorded_thinking_turn_streams_thinking_before_text() {
     assert!(
         ids.iter().all(|id| **id == end.payload["message_id"]),
         "one message, one id: {ids:?}"
+    );
+}
+
+#[test]
+fn every_usage_the_fixtures_report_adds_up_to_pis_own_total() {
+    // The arithmetic in `usage()` — a prompt's cached part is part of what it cost — is asserted by pi's own
+    // `totalTokens` on every record of every committed turn, rather than by a constant this test could get
+    // wrong in the same way the code did. A provider that starts reporting `reasoning` outside `output`, or a
+    // cache counter that moves into `input`, fails here and says so.
+    let mut checked = 0;
+    for (name, fixture) in [("text", TEXT), ("thinking", THINKING), ("tool", TOOL)] {
+        for record in records(fixture) {
+            if record.get("type").and_then(Value::as_str) != Some("message_end") {
+                continue;
+            }
+            let message = &record["message"];
+            let Some(counts) = message.get("usage") else {
+                continue;
+            };
+            let Some(total) = counts.get("totalTokens").and_then(Value::as_u64) else {
+                continue;
+            };
+            let (frames, _, _, _) = mapped(&json!(record).to_string());
+            let end = frames
+                .iter()
+                .find(|frame| frame.kind == MESSAGE_END)
+                .unwrap_or_else(|| panic!("{name}: a usage record mapped to no message.end"));
+            let counts = &end.payload["usage"];
+            let sum = counts["in"].as_u64().expect("in") + counts["out"].as_u64().expect("out");
+            assert_eq!(
+                sum, total,
+                "{name}: the frame's two counts do not add up to pi's totalTokens: {counts} vs {total}"
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(
+        checked, 4,
+        "the fixtures hold four reported usages to check"
     );
 }
 
@@ -672,7 +715,7 @@ async fn the_pump_writes_the_recorded_turn_into_the_log_in_order() {
     assert_eq!(payload(0), json!({}));
     assert_eq!(payload(1)["kind"], "text");
     assert_eq!(payload(1)["text"], "hello world");
-    assert_eq!(payload(2)["usage"], json!({"in": 991, "out": 4}));
+    assert_eq!(payload(2)["usage"], json!({"in": 1631, "out": 4}));
     assert_eq!(payload(2)["message_id"], payload(1)["message_id"]);
     assert_eq!(payload(3), json!({}));
 

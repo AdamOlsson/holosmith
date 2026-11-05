@@ -142,6 +142,10 @@ prompt (`case_prompt_turn`, which asserts the 202 answers the row `running` and 
 session's stream until the turn settles, asserting the turn's six kinds in order and the
 `idle → running → idle` transitions; `case_prompt_bad_body` and `case_prompt_unknown_session`,
 which assert the `422 bad_body` and `404 not_found` envelopes), the turn timeout's quiet half
+(`case_usage_survives_resume`, which prompts a session on a boot of its own, reads the row's
+`usage_in`/`usage_out` out of `app.db` with `python3` (the API does not carry them — `Session` is pinned to its
+fifteen keys), then evicts that session by creating a second one at a cap of one, resumes it, and asserts the
+two counts are unchanged; without `python3` it prints one `SKIP` line), and the timeout's quiet half
 (`case_turn_timeout`, which prompts the same session twice with `turn_timeout_min = 1` and asserts each
 row comes back `idle` with no `status_reason` and that the runner wrote no deadline line — the gate
 cannot make the deadline *fire*, because the key is whole minutes and the stub's turn lasts a second, so
@@ -233,8 +237,8 @@ remember to place the new case before it.
 **Every later story adds at least one `case_*` function and one line in `serve_cases`.** That
 is what makes this a growing gate rather than a snapshot: a story that adds a route or a
 behaviour has one obvious place to prove the shipped binary does it. A case that needs a setting the
-rest of the run must not carry gets a boot of its own (see `case_token_budget`, `case_compaction`,
-`case_history`, `case_backup`, `case_worktree` and `case_worktree_refusal`), and
+rest of the run must not carry gets a boot of its own (see `case_token_budget`, `case_usage_survives_resume`,
+`case_compaction`, `case_history`, `case_backup`, `case_worktree` and `case_worktree_refusal`), and
 takes a place at the end of the array: nothing after it may assume the first boot's state, and a case
 that stops the server leaves the run with whatever boot it started.
 

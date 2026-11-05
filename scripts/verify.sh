@@ -331,6 +331,7 @@ serve_cases=(
   case_exit_classification
   case_create_at_cap_refused
   case_token_budget
+  case_usage_survives_resume
   case_compaction
   case_history
   case_backup
@@ -2302,6 +2303,91 @@ case_token_budget() {
       fail "${name}_row/usage" "the turn's usage was not persisted on the row: $body"
       ;;
   esac
+}
+
+# usage_of <data dir> <session id>: print the row's two token counts as `<in> <out>`, or `none` when the
+# row is gone.
+#
+# The tally is a row fact no client sees — `Session` is pinned to its fifteen keys and phase 1b may not change
+# the API (ADR-0038) — so `app.db` is the only place to read it, with the same `python3` reader
+# `expected_stop_of` and `case_compaction` use, and the same reason a case SKIPs without one.
+usage_of() {
+  python3 - "$1/app.db" "$2" <<'PY'
+import sqlite3, sys
+database, session = sys.argv[1], sys.argv[2]
+connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+row = connection.execute(
+    "select usage_in, usage_out from sessions where id = ?", (session,)
+).fetchone()
+print("none" if row is None else f"{row[0]} {row[1]}")
+PY
+}
+
+# HS-034's proof from the shipped artifact: a session's spend is a column that survives the two things this
+# machine really does to a session — an eviction that stops it, and a resume that brings it back. The numbers
+# come from the stub's script (1200 in, 340 out per turn), and they are read out of `app.db` because the API
+# does not carry them: `Session` is pinned to its fifteen keys (ADR-0038), so the row is the honest witness.
+#
+# Its own boot, for the reason `case_token_budget` has one: the shared config has a cap of one live session and
+# a case that owns both of its rows can evict one without guessing what came before it.
+case_usage_survives_resume() {
+  local name=case_usage_survives_resume response body first second counted
+  local create_body='{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}'
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to read app.db\n' "$name"
+    return 0
+  fi
+  # Leave the shared boot, as `case_token_budget` does, and leave this one running for whatever follows.
+  stop_serve
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "stub"\n' "$owner" >"$WORK/config-usage.toml"
+  start_serve "$WORK/config-usage.toml" "$WORK/data-usage"
+
+  fetch_body "${name}_first" POST /api/sessions "$create_body" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-usage-first" ||
+    fail "${name}_first/no_answer" "POST /api/sessions did not answer"
+  expect_status "${name}_first" "$(answer "${name}_first")" 202
+  body="$(cat "$WORK/responses/${name}_first.body")"
+  first="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$first" ] || fail "${name}_first/id" "the response names no id: $body"
+  wait_for_idle_id "${name}_first_idle" "$first"
+
+  fetch_body "${name}_prompt" POST "/api/sessions/$first/prompt" '{"prompt":"read the app shell"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_prompt/no_answer" "POST /api/sessions/$first/prompt did not answer"
+  expect_status "${name}_prompt" "$(answer "${name}_prompt")" 202
+  wait_for_idle_id "${name}_spent" "$first"
+
+  # The row the turn's `message.end` was added to. Polled, because the writer commits on its own tick: a read
+  # taken the instant the row says `idle` can be one frame short (HS-023's own lesson).
+  counted=none
+  for _ in $(seq 1 100); do
+    counted="$(usage_of "$WORK/data-usage" "$first")"
+    [ "$counted" = "none" ] || [ "$counted" = "0 0" ] || break
+    sleep 0.1
+  done
+  check "${name}_spent" "1200 340" "$counted"
+
+  # Evicted by the cap: a second create takes the only slot, and the first session is *stopped* rather than
+  # deleted, which is what leaves a row to resume.
+  fetch_body "${name}_second" POST /api/sessions "$create_body" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-usage-second" ||
+    fail "${name}_second/no_answer" "the second POST /api/sessions did not answer"
+  expect_status "${name}_second" "$(answer "${name}_second")" 202
+  wait_for_reason_id "${name}_evicted" "$first" evicted
+
+  fetch_body "${name}_resume" POST "/api/sessions/$first/resume" "" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_resume/no_answer" "POST /api/sessions/$first/resume did not answer"
+  expect_status "${name}_resume" "$(answer "${name}_resume")" 202
+  wait_for_idle_id "${name}_resumed" "$first"
+
+  second="$(usage_of "$WORK/data-usage" "$first")"
+  check "${name}_resumed" "1200 340" "$second"
 }
 
 # expected_stop_of <database> <session>: print one row's expected-stop flag, or `none` when the row is

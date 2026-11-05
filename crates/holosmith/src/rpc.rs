@@ -621,16 +621,28 @@ fn role(record: &Value) -> Option<&str> {
     record.get("message")?.get("role")?.as_str()
 }
 
-/// An assistant message's usage as the contract's two counts, or `None` when pi reported neither.
+/// An assistant message's usage as the contract's two counts, or `None` when the agent reported nothing.
 ///
-/// `in` is pi's `input` and `out` its `output` — the two counts a provider bills for the message itself. The
-/// cache counters are separate fields and are deliberately not folded in: HS-034 owns "real token counts" and
-/// with it any decision about how a cached prompt is counted, and inventing the arithmetic here would make
-/// that story's numbers disagree with this one's.
+/// **A prompt's cached part is part of what it cost** (HS-034, ADR-0042). pi reports `input`, `output`,
+/// `cacheRead`, `cacheWrite`, `reasoning` and `totalTokens`, and a conversation with a warm prompt is mostly
+/// cache reads: counting only `input` would make the budget a fraction of the bill. So
+/// `in = input + cacheRead + cacheWrite` and `out = output`. `reasoning` is **not** added: the fixtures show it
+/// already inside `output` (the thinking turn reports 1492 in, 10 out and `reasoning: 4`, with
+/// `totalTokens: 1502`). The arithmetic is not this comment's to assert — `tests/rpc.rs` checks
+/// `in + out == totalTokens` on every record of every committed fixture, which is what makes a provider that
+/// changes its mind visible.
+///
+/// **A report of nothing is not a report.** A provider that answers zeroes would otherwise leave the screen
+/// unable to say "no usage reported" and the budget counting a zero for ever, so a sum of zero answers `None`
+/// — the same answer as a message with no `usage` at all. Spec item 13 has one condition, not two.
 fn usage(message: &Value) -> Option<Value> {
     let counts = message.get("usage")?;
-    let input = counts.get("input")?.as_u64()?;
-    let output = counts.get("output")?.as_u64()?;
+    let part = |field: &str| counts.get(field).and_then(Value::as_u64).unwrap_or(0);
+    let input = part("input") + part("cacheRead") + part("cacheWrite");
+    let output = part("output");
+    if input == 0 && output == 0 {
+        return None;
+    }
     Some(json!({ "in": input, "out": output }))
 }
 
@@ -766,9 +778,45 @@ mod tests {
         let (kind, payload) = frames.last().expect("the message ended");
         assert_eq!(kind, MESSAGE_END);
         assert_eq!(payload["message_id"], frames[0].1["message_id"]);
-        assert_eq!(payload["usage"], json!({"in": 991, "out": 4}));
+        assert_eq!(
+            payload["usage"],
+            json!({"in": 1003, "out": 4}),
+            "991 prompt tokens plus the 12 the message reports as cache reads"
+        );
         assert_eq!(payload["stop_reason"], "toolUse");
         assert_eq!(payload["tool_calls"], json!(["bash", "read"]));
+    }
+
+    #[test]
+    fn a_usage_of_nothing_is_no_usage_at_all() {
+        // Spec item 13's condition is one: "if pi does not report usage, the token budget is disabled". A
+        // provider that answers zeroes is reporting nothing, and a `usage` key of zeroes would leave the screen
+        // unable to say so and the budget counting for ever.
+        let mut mapping = mapping();
+        let (frames, _) = run(
+            &mut mapping,
+            &[json!({"type": "message_end", "message": {
+                "role": "assistant",
+                "stopReason": "stop",
+                "content": [],
+                "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0},
+            }})],
+        );
+        assert_eq!(frames[0].0, MESSAGE_END);
+        assert!(
+            frames[0].1.get("usage").is_none(),
+            "a zero report became a usage key: {}",
+            frames[0].1
+        );
+        // And a message whose prompt was all cache still reports something: the cache is what it cost.
+        let (frames, _) = run(
+            &mut mapping,
+            &[json!({"type": "message_end", "message": {
+                "role": "assistant", "stopReason": "stop", "content": [],
+                "usage": {"input": 0, "output": 0, "cacheRead": 512, "cacheWrite": 0, "totalTokens": 512},
+            }})],
+        );
+        assert_eq!(frames[0].1["usage"], json!({"in": 512, "out": 0}));
     }
 
     #[test]
