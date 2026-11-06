@@ -28,8 +28,9 @@
 # says `not yet run`, every row carries its verdict and an automation this repository has, and V11 is
 # still deferred to phase 3), and a Docker preflight that
 # refuses to start with one sentence naming the fix, with no CORS header
-# on any answer, and stopping on SIGTERM with exit 0. Each case prints `ok <case>` once it passes, so
-# the run's own output says which check each verdict in that table rests on (HS-046).
+# on any answer, and stopping on SIGTERM with exit 0. Each case prints `ok <case>` once it passes — a
+# case that printed SKIP withholds that line, so the log can never call a check that measured nothing a
+# pass — which makes the run's own output say which check each verdict in that table rests on (HS-046).
 # --no-build skips the two artifact phases; --keep keeps the work dir of a successful run. On
 # failure this prints FAIL <assertion> and keeps the work dir (config, banner, every answer).
 # Downloads nothing and needs neither curl nor jq: every request is a /dev/tcp fetch. `case_worktree`
@@ -414,33 +415,38 @@ serve_cases=(
   case_doctor_full
 )
 
-# HS-046: the spec's vertical-slice table is the record of phase 1's verification run, and this is what keeps
+# HS-046: the spec's verification table is the record of phase 1's verification run, and this is what keeps
 # it honest after the story that filled it. It reads `HolosmithSpec.md`'s eleven V rows and asserts four things:
 # no V1-V10 row still says "not yet run"; each carries a verdict (`**pass**` or `**fail**`, the words the
 # table's own column uses); each names an automation this repository really has — a `case_*` in serve_cases,
 # a `tests/*.rs` under the crate, a `scripts/*.sh`, or the by-hand procedure in `docs/build.md` — and V11 still
 # says it is deferred to phase 3 (HS-070), because that is the one row a phase-2 story may not fill.
 #
-# It is deliberately not a second copy of the table: it reads the rows out of the spec, so a row a later story
-# adds is measured by the same four rules. The eleven-row count is the non-vacuity guard — a broken read (a
-# renamed heading, a table that moved out of the file) would otherwise pass every other assertion over nothing.
-# The mapping it enforces is the story's own deliverable: a cell names the case that filled it, and "every row
-# is automated" stops being prose the moment a case is renamed (ADR-0055).
+# It is deliberately not a second copy of the table: it reads every `V<n>` row out of the spec whatever its
+# number, so a row a later story adds is measured by the same rules. The eleven-row count is what keeps that
+# honest in both directions — a broken read (a renamed heading, a table that moved out of the file) fails
+# instead of passing over nothing, and adding a twelfth row is a deliberate edit here rather than a row the
+# case walks past. A row that says `fail` must also name the fallback it took, because acceptance bullet 2
+# asks for the fallback and not only the verdict. The mapping it enforces is the story's own deliverable: a
+# cell names the case that filled it, and "every row is automated" stops being prose the moment a case is
+# renamed (ADR-0055).
 #
-# It needs no server, no daemon and no image, which is why it runs first: a table that has rotted should fail
-# the gate in its first second rather than after ten minutes of Docker.
+# It needs no server, no daemon and no image, which is why it runs first in serve_cases: a table that has
+# rotted fails the serve phase before any Docker case, rather than after ten minutes of them.
 case_verification_table() {
   local name=case_verification_table
   local spec="$repo_root/HolosmithSpec.md"
-  local rows gate_cases n row cell token tokens
+  local rows row_count gate_cases n row cell token tokens
   [ -f "$spec" ] || fail "$name/spec" "$spec is not there: the table is phase 1's record"
-  rows="$(grep -E '^\| V(1[01]|[1-9]) \|' "$spec" || true)"
-  n="$(printf '%s\n' "$rows" | grep -c . || true)"
-  check "$name/rows" 11 "$n"
+  # Every `| V<n> |` row, whatever its number: the count below is what makes adding a row a deliberate edit
+  # here instead of a row nothing reads.
+  rows="$(grep -E '^\| V[0-9][0-9]* \|' "$spec" || true)"
+  row_count="$(printf '%s\n' "$rows" | grep -c . || true)"
+  check "$name/rows" 11 "$row_count"
   # The cases this gate really runs, so a cell naming one that has been renamed or dropped fails here instead
   # of quoting a check nobody runs any more.
   gate_cases="$(printf '%s\n' "${serve_cases[@]}")"
-  for n in 1 2 3 4 5 6 7 8 9 10 11; do
+  for n in $(printf '%s\n' "$rows" | sed -n 's/^| V\([0-9][0-9]*\) |.*/\1/p'); do
     row="$(printf '%s\n' "$rows" | grep -E "^\| V$n \|" || true)"
     [ -n "$row" ] || fail "$name/V$n" "no V$n row in $spec"
     # The Result cell is the row's last field: strip the closing pipe, then everything up to the last one.
@@ -457,9 +463,15 @@ case_verification_table() {
       assertions=$((assertions + 2))
       continue
     fi
-    printf '%s\n' "$cell" | grep -q '\*\*pass' ||
-      printf '%s\n' "$cell" | grep -q '\*\*fail' ||
-      fail "$name/V$n" "V$n carries no verdict (**pass** or **fail**): $cell"
+    if printf '%s\n' "$cell" | grep -q '\*\*fail'; then
+      # Acceptance bullet 2: a failure records which fallback was taken, not only that it failed.
+      printf '%s\n' "$cell" | grep -qi 'fallback' ||
+        fail "$name/V$n" "V$n says fail and records no fallback: $cell"
+      assertions=$((assertions + 1))
+    else
+      printf '%s\n' "$cell" | grep -q '\*\*pass' ||
+        fail "$name/V$n" "V$n carries no verdict (**pass** or **fail**): $cell"
+    fi
     assertions=$((assertions + 1))
     tokens="$(printf '%s\n' "$cell" |
       grep -o -E 'case_[a-z0-9_]+|tests/[a-z0-9_]+\.rs|scripts/[a-z0-9-]+\.sh|docs/build\.md' || true)"
@@ -5153,13 +5165,27 @@ phase_serve() {
     >"$WORK/config.toml"
 
   start_serve
-  local case_fn
+  local case_fn case_out skipped=0
   for case_fn in "${serve_cases[@]}"; do
-    "$case_fn"
-    # One line per case, so a green run names what it proved and a reader can point at the case a
-    # verdict in HolosmithSpec.md's verification table rests on (HS-046).
-    printf 'ok %s\n' "$case_fn"
+    # A case's own standard output is captured so the loop can tell a case that measured something from one
+    # that printed SKIP and returned. An `ok` for a case that skipped would log a pass for a check that never
+    # ran, which is the one shape this gate may not have (HS-046's review); nothing is swallowed, the lines are
+    # printed below in order whatever they are.
+    case_out="$WORK/case.out"
+    "$case_fn" >"$case_out"
+    cat "$case_out"
+    if grep -q '^SKIP' "$case_out"; then
+      skipped=$((skipped + 1))
+    else
+      # One line per case that measured something, so a green run names what it proved and a reader can point
+      # at the case a verdict in HolosmithSpec.md's verification table rests on (HS-046).
+      printf 'ok %s\n' "$case_fn"
+    fi
   done
+  if [ "$skipped" -gt 0 ]; then
+    printf 'SKIP %d of %d cases measured nothing: their `ok` line is withheld, and the SKIP lines above say why\n' \
+      "$skipped" "${#serve_cases[@]}"
+  fi
   # After every case, so the sweep covers all of them and any case a later story appends.
   case_no_cors_header
   stop_serve

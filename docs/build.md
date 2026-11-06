@@ -300,13 +300,15 @@ image and prints one `SKIP` line without them — the bug it exists to catch fai
 daemon" is not that bug. It boots a `stub` backend of its own, because a create on a Docker boot refuses a project
 the machine does not hold and which boot is running when it starts is not its business).
 
-One case is about the *record* rather than the binary: `case_verification_table` reads `HolosmithSpec.md`'s
-vertical-slice rows and asserts that no V1–V10 row still says "not yet run", that each carries a verdict, that
-each names an automation this repository really has (a `case_*` in `serve_cases`, a `tests/*.rs`, a
-`scripts/*.sh`, or the by-hand section below), and that V11 still says it is deferred to phase 3 (HS-070). It
-needs no server, no daemon and no image; the eleven-row count is what makes a broken read fail instead of
-passing over nothing, and its first position in the array is the gate's own rule that the cheapest check runs
-first — a rotted table should cost a second, not ten minutes of Docker (HS-046, ADR-0055).
+One case is about the *record* rather than the binary: `case_verification_table` reads every `V<n>` row of
+`HolosmithSpec.md`'s verification table and asserts that no V1–V10 row still says "not yet run", that each carries
+a verdict, that a `fail` row also names the fallback taken, that each names an automation this repository really
+has (a `case_*` in `serve_cases`, a `tests/*.rs`, a `scripts/*.sh`, or the by-hand section below), and that V11
+still says it is deferred to phase 3 (HS-070). It needs no server, no daemon and no image. The eleven-row count
+is what keeps the read honest in both directions: a broken read (a renamed heading, a table that moved) fails
+instead of passing over nothing, and a twelfth row is a deliberate edit here rather than a row the case walks
+past. It runs first in `serve_cases`, so a table that has rotted fails the serve phase before any Docker case
+rather than after ten minutes of them (HS-046, ADR-0055).
 
 …and — since HS-045 — **`doctor` itself**: `case_doctor_quick` runs the artifact's quick list three times over a
 machine it builds (a `_ping` socket it answers, two ports the kernel gives it, a data root under `target/`): once
@@ -332,12 +334,12 @@ that no answer the run saved carries an `access-control-*` header or `vary: orig
 outside the loop is what makes it cover a case a later story appends, without anyone having to
 remember to place the new case before it.
 
-**Every later story adds at least one `case_*` function and one line in `serve_cases`.** That
-is what makes this a growing gate rather than a snapshot: a story that adds a route or a
-behaviour has one obvious place to prove the shipped binary does it, and since HS-046 every case prints one
-`ok <case>` line when it passes, so a green run names what it proved instead of only counting it. A case that
-needs a setting the
-rest of the run must not carry gets a boot of its own (see `case_token_budget`, `case_usage_survives_resume`,
+**Every later story adds at least one `case_*` function and one line in `serve_cases`.** That is what makes
+this a growing gate rather than a snapshot: a story that adds a route or a behaviour has one obvious place to
+prove the shipped binary does it, and since HS-046 every case prints one `ok <case>` line when it passes — a case
+that printed `SKIP` withholds it, so a skip can never read as a pass — which is what makes a green run name what
+it proved instead of only counting it. A case that needs a setting the rest of the run must not carry gets a
+boot of its own (see `case_token_budget`, `case_usage_survives_resume`,
 `case_compaction`, `case_history`, `case_backup`, `case_worktree` and `case_worktree_refusal`), the
 Internet-access checkbox (`case_internet_toggle`, described above), and a database from a newer release
 (`case_schema_newer`, which needs no daemon: it boots the artifact twice over one data root, rewrites the
@@ -701,7 +703,7 @@ Three things bite on a real machine:
 ## Verifying the credential path by hand (V3, V4, V5)
 
 These three checks need something no gate may require: **a real provider key**. So they are run by hand, their
-results are written into `HolosmithSpec.md`'s vertical-slice table, and the gate keeps only the half that needs
+results are written into `HolosmithSpec.md`'s verification table, and the gate keeps only the half that needs
 no key (`case_key_proxy` sends a request through the proxy with a stand-in `openssl` on `PATH`, and asserts the
 bytes the proxy produces: one `Content-Length`, the body after the blank line, and the stored key swapped in).
 The table's V3, V4 and V5 cells name this section, which is what makes them a procedure rather than a claim —

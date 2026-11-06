@@ -709,4 +709,4 @@ recording the verdict, the automation that produced it (a `case_*` in `scripts/v
 is the record: there is no second document, `case_verification_table` fails the gate when a row rots, and V11 stays
 deferred to phase 3. A result cell is not a `Finding`: a Finding is one of `doctor`'s checks, while a cell is a
 verification row's verdict *and* the automation that stands behind it.
-_Avoid_: Checklist, test matrix, verification report, phase-1 report
+_Avoid_: Vertical-slice table, checklist, test matrix, verification report, phase-1 report
