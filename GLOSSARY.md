@@ -700,3 +700,13 @@ _Avoid_: Result, verdict (`Verdict` is the schema's word), status
 **Admin socket**:
 The local unix socket used for commands that must never be reachable over HTTP.
 _Avoid_: Control socket, IPC
+
+**Verification table**:
+The eleven checks V1–V11 in `HolosmithSpec.md` that phase 1 must run on a real Docker host, each with the condition
+that makes it a pass, the fallback to take if it fails, and a **result cell** (the table's own `Result` column)
+recording the verdict, the automation that produced it (a `case_*` in `scripts/verify.sh`'s `serve_cases`, a
+`tests/*.rs`, a `scripts/*.sh`, or `docs/build.md`'s by-hand procedure) and, on a failure, the fallback taken. It
+is the record: there is no second document, `case_verification_table` fails the gate when a row rots, and V11 stays
+deferred to phase 3. A result cell is not a `Finding`: a Finding is one of `doctor`'s checks, while a cell is a
+verification row's verdict *and* the automation that stands behind it.
+_Avoid_: Checklist, test matrix, verification report, phase-1 report

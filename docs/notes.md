@@ -1444,3 +1444,31 @@ it rather than adding a caveat beside it.
   (one connection made and closed server-side, so `(port, peer)` sat in TIME_WAIT) succeeded, and a *live* listener on
   the same port still answered `AddrInUse`. So "in use" in `doctor`'s port check means a listener, not a leftover
   socket, and a restart `serve` would bind is never refused.
+
+### Landmines: the verification run (HS-046)
+
+- **The spec's `Result` column is the only record of a verification row** (ADR-0055). Do not write a
+  `docs/verification/…` report beside it: the cells already carry the verdict, the automation and the fallback,
+  and `case_verification_table` reads *those*. A cell's last field is what the case reads, so **never put a `|`
+  inside a cell** — it would silently move the field the verdict is looked for in.
+- **A cell names something the repository can run**, and the case checks that it exists: a `case_*` must be in
+  `serve_cases`, a `tests/*.rs` is resolved under `crates/holosmith/`, a `scripts/*.sh` and `docs/build.md` at the
+  repo root. So renaming a case is a two-file change (the script *and* the cell it fills), which is the point.
+- **The gate prints one `ok <case>` line per case since HS-046.** Before that a green run could say how many cases
+  passed but not which, so a demo could not show the case a row rests on. If a future change makes the output
+  shape matter, remember `ok serve: N cases` is still the last line of the loop and the count is
+  `grep -c '^ok case_'`.
+- **V3–V5 cannot be re-run on this machine: there is no provider key anywhere.** `/var/lib/holosmith` does not
+  exist and the gate stores none (`case_key_proxy`'s store is its own work dir), so their cells quote HS-040's
+  recorded by-hand run and name `docs/build.md`'s section. A session that wants them *measured* again has to mint
+  a key first — and must not put it anywhere a gate can read.
+- **A verification row is not a `doctor` check** unless it needs neither a session nor a key. V2 is one; V1 would
+  re-spell the mount vector ADR-0035 keeps in one place, V6/V7/V9 need a session, V8 is `cargo test`'s fixture
+  replay and V10 is the build. "`doctor --full` automates as many as it can" is a per-row fact, now recorded per
+  row, not a licence to widen `doctor` until it starts containers.
+- **`docker network ls | grep -x egress` never matches** (the resume checklist carried that line): the output is
+  `ID NAME DRIVER SCOPE`, so the row is `4ef0ec3fa08a   egress   bridge   local`. `grep -w egress` is the probe; the
+  written form failed on a machine that *had* the network, which reads as "the machine is missing it".
+- **A Docker `serve` gate run leaves `hs_egress`/`hs_key` running** (HS-037's note, hit again here): they are one
+  line of `docker ps` and the next `tests/container.rs` run skips its real egress path while they are up. Remove
+  them by name before a change that touches the proxy.
