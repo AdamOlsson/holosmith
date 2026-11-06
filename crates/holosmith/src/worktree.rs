@@ -532,6 +532,24 @@ pub fn refuse(repository: &Path) -> Result<(), Refusal> {
     }
 }
 
+/// Every worktree path `repository` registers, in git's own (resolved) spelling (HS-044).
+///
+/// The startup reconcile's reader. A directory under `<projects>/.worktrees/` that no row owns is an orphan,
+/// and whether a repository registered it decides how it goes: a registered one is taken with
+/// `git worktree remove` (which cleans the administrative entry too, and with [`Retained::Unknown`] keeps the
+/// branch), an unregistered one is left to the filesystem because nothing registered anything.
+///
+/// A path is printed raw and unquoted by `--porcelain` (HS-025's measurement), which is why the caller
+/// compares canonicalised parents rather than trusting one spelling of the projects root.
+pub fn registrations(repository: &Path) -> Result<Vec<PathBuf>, GitError> {
+    let listing = git_run(repository, &["worktree", "list", "--porcelain"])?;
+    Ok(listing
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .map(PathBuf::from)
+        .collect())
+}
+
 /// Run one git command in `repository` and answer its trimmed stdout; a non-zero exit is a failure.
 fn git_run(repository: &Path, args: &[&str]) -> Result<String, GitError> {
     let output = git_output(repository, args)?;

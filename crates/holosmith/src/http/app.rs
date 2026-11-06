@@ -36,6 +36,7 @@ use crate::http::tool_image;
 use crate::http::tool_output;
 use crate::ladder::Ladder;
 use crate::provisioner::Provisioner;
+use crate::reconcile::Reconciler;
 use crate::runtime::Runtime;
 use crate::sessions::state::Transitioner;
 use crate::stop::Stopper;
@@ -178,6 +179,22 @@ impl AppState {
     /// so a test can drive the wiring `serve` uses rather than a second one.
     pub fn compactor(&self) -> Compactor {
         Compactor::new(Arc::clone(&self.database))
+    }
+
+    /// The startup reconcile, wired to this state's rows, backend, writer, config and this run's backend
+    /// (HS-044).
+    ///
+    /// Here for the same reason as the six above, and with one extra job: the *runtime* backend decides
+    /// whether the name half runs at all (containers and networks exist only in a Docker run), so the two
+    /// words `serve` resolved — the config's and this run's — cannot be mixed up by a caller.
+    pub fn reconciler(&self) -> Reconciler {
+        Reconciler::new(
+            Arc::clone(&self.database),
+            self.events.clone(),
+            self.backend.clone(),
+            &self.config,
+            self.runtime.backend,
+        )
     }
 }
 

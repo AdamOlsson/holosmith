@@ -294,6 +294,23 @@ pub fn run(args: ServeArgs) -> ExitCode {
             "the compaction task is running"
         );
         let compactor = state.compactor().spawn();
+        // The **startup reconcile** (HS-044, V9): what a `kill -9` left behind, put right **before the first
+        // request is answered**. It is awaited rather than spawned, and that is a measurement (this story's
+        // demo found it): a boot-time sweep that runs concurrently with the first create can take the
+        // worktree that create has just made, because the sweep's row snapshot predates the row. Awaiting
+        // here costs a couple of bounded daemon questions and one `git` per project, and the listener has
+        // already bound, so a client waits instead of being told the wrong thing. The *restarts* are tasks of
+        // their own inside the pass, so provisioning still happens off the serving path.
+        //
+        // Its own state is a `debug!` line because the banner is the eight lines `tests/serve_cli.rs` pins
+        // byte for byte, and the order inside the pass is the contract: the crash transition, then the names
+        // no row owns, then the restarts (see `crate::reconcile`).
+        tracing::debug!(
+            target: "holosmith::serve",
+            backend = backend.as_str(),
+            "the startup reconcile is running"
+        );
+        state.reconciler().run().await;
         // The preview listener's own context: the origin an upgrade must come from, the rows, and the one
         // question it cannot answer itself — where a session's container is on its own network (HS-041).
         let preview_context = preview::Context::of(

@@ -1356,3 +1356,42 @@ it rather than adding a caveat beside it.
 - **`StreamTarget` carries one `showState` now, not `badge` + `updateComposer`.** The delete affordance was
   the fourth reader of "a state changed", and the split is what HS-020's blocker was about; a fifth copy
   would be the same bug with a new name.
+
+### Landmines: the startup reconcile (HS-044)
+
+- **A sweep that runs as a background task beside a create takes the worktree the create just made.** The pass
+  reads the rows once at the top; a create accepted in the first milliseconds of a boot inserts its row and
+  runs its worktree step while the sweep still holds that snapshot, so the sweep sees "a directory no row owns"
+  and removes it — and the create's container step then fails with `the worktree cannot be mounted: … is not
+  there` (this story's own demo, first run). The pass is therefore **awaited before the listener answers**
+  (ADR-0053), not spawned like the sweeper; its restarts are still `Provisioner::spawn` tasks. A future
+  background caller (a `doctor`, a periodic sweep) has to re-read the rows *and* the names under one lock-free
+  ordering of its own, which is why the pure `plan` takes both lists as arguments.
+- **The crash's reason has to be written twice or the row loses it.** The transition into `starting` records the
+  crash, but the re-provision's own `starting → idle` clears `status_reason` (`set_status` writes the reason it
+  was given, and the provisioner gave `None`), so the row would come back plain `idle` and the page would show
+  nothing. `Provisioner::with_settle_reason` is the fix, and `Transitioner::apply` is still the only writer; the
+  failure ending deliberately keeps the failure's sentence instead.
+- **A row is ahead of its event, again.** `tests/reconcile.rs` waits for the *payload* to be committed before
+  reading the log (`wait_for_payload`), because "the row says idle" is one writer tick earlier than the event.
+  The same applies to `sessions.last_seq`: read the counter only after the settle's event landed.
+- **The counter had no reader.** `sessions::repository::bump_last_seq` is `pub(crate)` (exactly one writer), so
+  a test could not read `last_seq` at all; `last_seq(id)` was added for this story's claim and for HS-046. It is
+  the sessions repository's because it is a `sessions` statement, and `MAX(seq)` is *not* the same number once
+  compaction has removed rows (ADR-0032).
+- **`sessions::is_id` is the one answer to "what is an id".** The sweep decides "the build's name or not" with it
+  (16 lowercase hex), not with a second copy: Docker's `name=` filter is a substring match, so `name=s_` also
+  answers a container called `hs_s_things`, and the prefix-plus-shape check in Rust is the rule.
+- **`git worktree remove --force` of an *unregistered* path is not a removal** (git exits 128), so the sweep
+  follows every removal with `remove_dir_all` for a directory git never registered — the shape a killed start
+  leaves — and `Retained::Unknown` is how it keeps the branch when there is no row to ask (ADR-0052).
+- **`worktree list --porcelain` prints raw, resolved paths** (HS-025), so the sweep compares canonicalised
+  *parents* against `<projects>/.worktrees` — the same measurement `Worktree::registered` already lives with.
+- **A stub boot must not sweep anything, but it must still reconcile the rows.** A hub has no daemon and no
+  worktrees; the row half runs for every backend (that is what makes it measurable on a hub), the name half only
+  for `Backend::Docker`.
+- **The gate's two cases own their state.** `case_reconcile` kills `-9` a *real* turn (the stub emits a frame
+  every 200 ms and the prompt's 202 moves the row to `running` before the first one, so the kill lands mid-turn)
+  and a real provision (four 200 ms steps); `case_reconcile_orphans` needs the daemon and the image and sets
+  `docker_second_session_id` to the fake id, so a `fail` in the middle leaves neither the orphan container nor
+  its network behind.

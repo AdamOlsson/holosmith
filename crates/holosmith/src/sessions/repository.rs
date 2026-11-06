@@ -412,6 +412,21 @@ impl<'a> SessionRepository<'a> {
             .map_err(|error| RepoError::sqlite("bump_last_seq", error))
     }
 
+    /// The counter's current value for this session, or `None` when there is no such row (HS-044).
+    ///
+    /// A **reader**, and the only one: the counter is bumped by [`Self::bump_last_seq`] inside the event
+    /// insert's transaction, and what a crash must not do is reset it (ADR-0013). So the reconcile's own
+    /// claim — "no duplicate or missing seq" — needs to read `last_seq` and compare it with the log, which is
+    /// a sessions statement and therefore lives here.
+    pub fn last_seq(&self, id: &str) -> Result<Option<i64>, RepoError> {
+        self.connection
+            .query_row("SELECT last_seq FROM sessions WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(|error| RepoError::sqlite("last_seq", error))
+    }
+
     /// The rows a filter matches, in the filter's own order. The collection readers' one statement,
     /// so `list` and `idle_before` differ in their filter and not in how they read a row.
     /// `operation` is the public method the statement belongs to, so the error names it.

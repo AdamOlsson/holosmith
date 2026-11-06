@@ -269,6 +269,77 @@ impl Docker {
         self.succeeds(&["network", "rm", name])
     }
 
+    /// Remove a network under a bound, answering whether it happened — the startup reconcile's spelling of
+    /// [`Docker::remove_network`] (HS-044), for [`Docker::remove_container_bounded`]'s reason: it runs before
+    /// the listener has an answer for anybody, so a wedged daemon may cost the bound and not the boot.
+    pub fn remove_network_bounded(&self, name: &str, bound: std::time::Duration) -> bool {
+        self.bounded(&["network", "rm", name], bound)
+            .is_ok_and(|output| output.is_some_and(|output| output.status.success()))
+    }
+
+    /// Every container the daemon knows, by name, as the startup reconcile reads them (HS-044, spec item 6).
+    ///
+    /// The filter is the spec's own (`docker ps -a --filter name=s_`), and it is **not** the rule that decides
+    /// what is the build's: Docker's name filter is a substring match, so `name=s_` also answers a container
+    /// called `hs_s_things`. The naming convention is checked in Rust ([`crate::reconcile`]), which is why
+    /// this answers the daemon's answer and nothing more.
+    pub fn container_names(
+        &self,
+        filter: &str,
+        bound: std::time::Duration,
+    ) -> Result<Vec<String>, DockerError> {
+        let by_name = format!("name={filter}");
+        self.names(
+            &["ps", "-a", "--filter", &by_name, "--format", "{{.Names}}"],
+            bound,
+        )
+    }
+
+    /// Every network the daemon knows, by name, for the same reason as [`Docker::container_names`] (HS-044).
+    pub fn network_names(
+        &self,
+        filter: &str,
+        bound: std::time::Duration,
+    ) -> Result<Vec<String>, DockerError> {
+        let by_name = format!("name={filter}");
+        self.names(
+            &[
+                "network",
+                "ls",
+                "--filter",
+                &by_name,
+                "--format",
+                "{{.Name}}",
+            ],
+            bound,
+        )
+    }
+
+    /// One listing under a bound: `--format` answers one name per line, so nothing Docker *says* is read
+    /// (ADR-0035's rule — a template asks for the field rather than parsing a sentence).
+    fn names(
+        &self,
+        arguments: &[&str],
+        bound: std::time::Duration,
+    ) -> Result<Vec<String>, DockerError> {
+        let Some(output) = self.bounded(arguments, bound)? else {
+            return Err(DockerError::new(
+                arguments,
+                format!("docker did not finish within {}s", bound.as_secs()),
+            ));
+        };
+        if !output.status.success() {
+            return Err(DockerError::new(
+                arguments,
+                first_line(
+                    &String::from_utf8_lossy(&output.stderr),
+                    output.status.code(),
+                ),
+            ));
+        }
+        Ok(listed_names(&String::from_utf8_lossy(&output.stdout)))
+    }
+
     /// Join `container` to `network` under `alias`, replacing any connection it already had.
     ///
     /// The egress proxy is what a session's container can reach, and it reaches it by the **alias** rather
@@ -344,6 +415,18 @@ impl Docker {
     }
 }
 
+/// The names one `--format` listing printed: one per line, trimmed, empties dropped.
+///
+/// Split here rather than by each caller because a listing is the only place Docker answers a *list* of
+/// things, and the newline that ends the last line is not a name.
+fn listed_names(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// The first line of a tool's stderr, or a status-only sentence when it printed nothing.
 fn first_line(stderr: &str, code: Option<i32>) -> String {
     let line = stderr
@@ -412,6 +495,19 @@ mod tests {
             "no such image".into(),
         );
         assert_eq!(run.to_string(), "docker run: no such image");
+    }
+
+    #[test]
+    fn a_listing_is_one_name_per_line_and_a_blank_line_is_not_one() {
+        assert_eq!(
+            listed_names("s_0123456789abcdef\nagents_0123456789abcdef\n\n  hs_egress  \n"),
+            vec![
+                "s_0123456789abcdef".to_string(),
+                "agents_0123456789abcdef".to_string(),
+                "hs_egress".to_string()
+            ]
+        );
+        assert!(listed_names("").is_empty());
     }
 
     #[test]

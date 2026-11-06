@@ -48,6 +48,14 @@ pub struct Provisioner {
     /// lives in ([`Exits::for_database`]), so the two handles this runner already has are all an exit's
     /// consequences need.
     exits: Exits,
+    /// What the success ending records when the run is a **recovery** rather than a request (HS-044).
+    ///
+    /// `None` — every provisioner a create or a resume builds — settles to a bare `idle`. A startup
+    /// recovery of a row that was `running` settles to `idle` **with** `interrupted`, so the reason survives
+    /// the re-provision and the row the operator comes back to says what happened to the turn. The failure
+    /// ending ignores it: a recovery that failed is `error` with the failure's own sentence, which is more
+    /// useful than the crash's word.
+    settle_reason: Option<String>,
 }
 
 impl Provisioner {
@@ -58,7 +66,18 @@ impl Provisioner {
             database,
             events,
             exits,
+            settle_reason: None,
         }
+    }
+
+    /// The same provisioner, settling with `reason` (HS-044).
+    ///
+    /// The reconcile is the only caller: a row that was `running` when the process died comes back `idle`
+    /// with `interrupted` as the row's reason, which is the badge the operator reads and the one fact the
+    /// page has about the turn that was cut.
+    pub fn with_settle_reason(mut self, reason: Option<&str>) -> Self {
+        self.settle_reason = reason.map(str::to_string);
+        self
     }
 
     /// Hand `session` to a background task and return immediately.
@@ -257,9 +276,10 @@ impl Provisioner {
     }
 
     /// The success ending: `starting -> idle` through the one state function, which writes the row
-    /// and emits the event in that order.
+    /// and emits the event in that order. `settle_reason` is the recovery's word, when there is one.
     async fn settle(&self, session: &Session) {
-        self.transition(session, Trigger::PiReady, None).await;
+        self.transition(session, Trigger::PiReady, self.settle_reason.as_deref())
+            .await;
     }
 
     /// The failure ending: `starting -> error` with `reason`, through the same function.

@@ -24,6 +24,7 @@ pub mod pins;
 pub mod preflight;
 pub mod preview;
 pub mod provisioner;
+pub mod reconcile;
 pub mod rpc;
 pub mod runtime;
 pub mod schema;

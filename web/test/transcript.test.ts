@@ -404,6 +404,18 @@ test("a badge shows a one-word reason as it is", () => {
   assert.equal(stateText("idle", null), "idle", "a reasonless row is its state alone");
 });
 
+test("interrupted is a reason on an idle row, not a state and not a notice", () => {
+  // HS-044: a `kill -9` mid-turn comes back as an `idle` row whose reason says what happened to the turn.
+  // The badge is the only place the operator learns it — so it has to render, and it must not borrow a
+  // sentence from the two reasons that promise nothing was lost (`stoppedNotice` is for stopped rows, and
+  // an interrupted turn is not a loss to explain but a fact to state).
+  assert.equal(stateText("idle", "interrupted"), "idle · interrupted");
+  assert.equal(stoppedNotice("interrupted"), null);
+  for (const state of ["starting", "idle", "running", "stopped", "error", "deleting"] as const) {
+    assert.notEqual(state, "interrupted" as never, "interrupted became a state");
+  }
+});
+
 test("a badge shows a multi-line reason's last line, clipped", () => {
   // HS-030's unexpected exit is the first reason that is more than a sentence: the last few lines the
   // container printed, one per line. The badge has room for one of them, and the useful one is the last —
