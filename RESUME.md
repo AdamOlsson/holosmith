@@ -882,7 +882,7 @@ then the sections below. It is a reference: everything there is a measurement or
 
 | Read | Why it bears on a preview listener |
 | --- | --- |
-| Cross-cutting: *Build and toolchain*, *Tests*, *HTTP and the envelope*, *Web*, *Config and docs*, *Reviews*, *Demos* | True of every story. The demo and the gate-case rules are where preview work is most likely to go wrong. |
+| Cross-cutting: *Build and toolchain*, *Tests*, *HTTP and the envelope*, *Data and state*, *Web*, *Config and docs*, *Reviews*, *Demos* | True of every story. The demo and the gate-case rules are where preview work is most likely to go wrong. |
 | *Landmines: Docker — mounts, containers, starts* | A container name is `s_<id>`, a network's is `agents_<id>`, `docker inspect` is the only place real flags and addresses are visible, and a path the daemon cannot see is not a mount. |
 | *Landmines: the network self-test* / *the egress proxy* / *the checkbox's pair* | The internal-network and alias facts this issue measures against, including the one thing an internal network's gateway *does* answer (ADR-0044). |
 | *Landmines: the agent launch* | The data root must be host-visible, the container appears seconds after the step returns, and a killed CLI does not stop its container. |
