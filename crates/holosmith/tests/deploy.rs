@@ -295,6 +295,7 @@ fn labels_from_args(args: &[String]) -> BTreeMap<String, String> {
             "HOLOSMITH_VERSION" => images::LABEL_VERSION,
             "HOLOSMITH_GIT_TAG" => images::LABEL_GIT_TAG,
             "HOLOSMITH_PI_VERSION" => images::LABEL_PI,
+            "HOLOSMITH_BINARY_SHA256" => images::LABEL_BINARY,
             "HOLOSMITH_TOOLCHAINS" => images::LABEL_TOOLCHAINS,
             _ => continue,
         };
@@ -306,7 +307,10 @@ fn labels_from_args(args: &[String]) -> BTreeMap<String, String> {
 
 /// The labels an image built by this binary carries, as `docker image inspect` would answer them.
 fn expected_labels(kind: Kind, config: &Config) -> BTreeMap<String, String> {
-    let expectation = Expectation::of(kind, config);
+    // The digest this process would build from, memoised by the product itself: the test binary is tens of
+    // megabytes and an unoptimised SHA-256 is slow, and the production path asks the same question.
+    let digest = images::own_digest().expect("the test binary is readable");
+    let expectation = Expectation::of_digest(kind, config, &digest);
     labels_from_args(&images::build_arguments(&kind.image(), &expectation))
 }
 
@@ -1296,6 +1300,51 @@ fn step_three_names_the_label_that_differs() {
     assert!(
         step.sentence.starts_with("1 action:"),
         "the plan does not count one build: {}",
+        step.sentence
+    );
+}
+
+#[test]
+fn step_three_sees_a_rebuilt_artifact_through_the_digest_label() {
+    // The review's P1: `git describe --dirty` is the same for two builds of one tree, so version + tag + pi
+    // compared equal over an image holding the *previous* binary while `hs_egress` kept serving it. Every label is
+    // this binary's except the digest — which is the state a rebuild that did not bump anything produces — and the
+    // step must plan a build that names it. Delete the `LABEL_BINARY` arm of `mismatches` and this test fails with
+    // `satisfied`.
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("deploy-images-rebuilt");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let config = config(Some(format!("unix://{}", socket.display())));
+    let target = Target::resolve(Some(dir.file("root")));
+    let deployed = target.config(&config);
+    let mut agent = expected_labels(Kind::Agent, &deployed);
+    agent.insert(images::LABEL_BINARY.to_string(), "0".repeat(64));
+    let machine = Fake::new()
+        .with_labels(
+            &images::proxy_image(),
+            expected_labels(Kind::Proxy, &deployed),
+        )
+        .with_labels(&images::agent_image(), agent);
+
+    let planned = deploy::run(&deployed, &target, &real_tools(&dir), &machine, true);
+    let step = line(&planned, DeployStep::Images);
+    assert_eq!(step.word, Word::Needs, "{}", step.sentence);
+    for fact in [
+        images::agent_image(),
+        "binary-sha256".to_string(),
+        "0".repeat(64),
+        images::own_digest().expect("this test's own binary is readable"),
+    ] {
+        assert!(
+            step.sentence.contains(&fact),
+            "the reason does not name {fact}: {}",
+            step.sentence
+        );
+    }
+    assert!(
+        !step.sentence.contains(&images::proxy_image()),
+        "a current image is in the plan for a build: {}",
         step.sentence
     );
 }

@@ -124,11 +124,12 @@ cleanup() {
   done
   docker_session_id=""
   docker_second_session_id=""
-  # HS-048's image case starts the two proxies from the image it built, under its own names (`hs_images_*`), so a
-  # `fail` in the middle does not leave a container the next run's `--name` would trip over. Its images stay: every
-  # later `serve` boot starts the proxies from them.
+  # HS-048's image case starts the two proxies from the image it built — its own `hs_images_*` pair and the deploy's
+  # `hs_egress`/`hs_key` — so a `fail` in the middle does not leave a container the next run's `--name` would trip
+  # over (and a leftover `hs_egress` would make the *next* run's untag fail, which is how the absent state stops
+  # being absent). Its images stay: every later `serve` boot starts the proxies from them.
   local image_container
-  for image_container in $(docker ps -aq --filter 'name=hs_images_' 2>/dev/null || true); do
+  for image_container in $(docker ps -aq --filter 'name=hs_images_' --filter 'name=hs_egress' --filter 'name=hs_key' 2>/dev/null || true); do
     docker rm --force "$image_container" >/dev/null 2>&1 || true
   done
   # shellcheck disable=SC2086 # deliberate word splitting: each id is one word, and an empty list is no words.
@@ -5056,13 +5057,25 @@ case_server_images() {
   version="$(sed -n 's/^version //p' <<<"$plain")"
   tag="$(sed -n 's/^git_tag //p' <<<"$plain")"
   pin="$(tr -d '[:space:]' <"$repo_root/pins/pi.txt")"
-  [ -n "$version" ] && [ -n "$tag" ] && [ -n "$pin" ] ||
+  # The fifth label's value: the artifact's own bytes. `sha256sum` is what an operator would run to check it.
+  sha="$(sha256sum "$artifact" | cut -d' ' -f1)"
+  [ -n "$version" ] && [ -n "$tag" ] && [ -n "$pin" ] && [ -n "$sha" ] ||
     fail "$name/version" "the artifact's version report is incomplete: $plain"
   proxy="holosmith-proxy:$version"
   agent="agent-image:$version"
 
-  # This case owns the absent state: both tags go before the deploy, so the build that follows is a real one.
+  # This case owns the absent state: the deploy's own proxy containers go first (a running container pins the image
+  # it was started from, so an untag with them up fails and the build that follows would be a no-op), then both tags
+  # are removed — and the removal is *asserted*, because "the image was already there" is exactly the state this
+  # case exists to rule out.
+  timeout 120 docker rm -f hs_egress hs_key >/dev/null 2>&1 || true
   timeout 120 docker image rm -f "$proxy" "$agent" >/dev/null 2>&1 || true
+  for image in "$proxy" "$agent"; do
+    if docker image inspect "$image" >/dev/null 2>&1; then
+      fail "$name/absent" "$image survived its removal, so the build below would not be measured"
+    fi
+    assertions=$((assertions + 1))
+  done
   rm -rf "$root"
   mkdir -p "$root"
   printf '[providers]\nopencode-go = "sk-opencode-go-verify"\n\n[sessions]\nverify-session = "hs-dummy-verify"\n' \
@@ -5086,11 +5099,12 @@ case_server_images() {
   assertions=$((assertions + 1))
 
   # The labels, on both tags: the three facts this binary knows about itself.
-  for label in version git-tag pi-version; do
+  for label in version git-tag pi-version binary-sha256; do
     case "$label" in
       version) wanted="$version" ;;
       git-tag) wanted="$tag" ;;
       pi-version) wanted="$pin" ;;
+      binary-sha256) wanted="$sha" ;;
     esac
     for image in "$proxy" "$agent"; do
       labels="$(docker image inspect --format '{{json .Config.Labels}}' "$image" 2>/dev/null)" ||
@@ -5128,8 +5142,14 @@ case_server_images() {
       fail "$name/agent/$package" "$package is not installed in the agent image: $answer"
     check "$name/agent/$package/name" "$package" "$answer"
   done
-  check "$name/agent/uid" "1000" \
-    "$(timeout 120 docker run --rm --network none --entrypoint id "$agent" -u 2>&1)"
+  # The image's own user is the *invoking* user's uid — that is ADR-0035's rule (a worktree the host can commit to),
+  # and it is not a constant: 1000 is the base's `node`, which happens to be this sandbox's uid. A non-root guard is
+  # what the invariant needs on top, because uid 0 would pass the equality on a root-owned machine.
+  invoking_uid="$(id -u)"
+  image_uid="$(timeout 120 docker run --rm --network none --entrypoint id "$agent" -u 2>&1)"
+  check "$name/agent/uid" "$invoking_uid" "$image_uid"
+  [ "$image_uid" != "0" ] || fail "$name/agent/root" "the agent image runs as root, so a session's files are root's"
+  assertions=$((assertions + 1))
   timeout 120 docker run --rm --network none --entrypoint /usr/local/bin/holosmith \
     "$agent" container snapshot --help >/dev/null 2>&1 ||
     fail "$name/agent/snapshot" 'this binary: `container snapshot --help` does not run in the agent image'

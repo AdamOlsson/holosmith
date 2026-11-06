@@ -10,8 +10,10 @@
 //! - **The daemon is handed a tar on stdin**, not a directory: `docker build -` reads a context from an
 //!   archive, which is the only way to build without a directory on disk that holds a copy of this binary.
 //! - **The image's labels are the read.** `server deploy`'s second run must be honestly `satisfied`, and the
-//!   four `org.holosmith.*` labels are what says an image was built by *this* binary — not a tag, which any
-//!   `docker tag` can move, and not a build timestamp, which says nothing about what is inside.
+//!   five `org.holosmith.*` labels are what says an image was built by *this* binary — not a tag, which any
+//!   `docker tag` can move, and not a build timestamp, which says nothing about what is inside. One of them is a
+//!   digest of the bytes the build copies, because `git describe --dirty` names the same tree twice and the
+//!   acceptance's word is *the binary*.
 //! - **The architecture is checked once, before the first build.** A daemon on another machine (a
 //!   `docker_host` pointing at a socket elsewhere) builds images for *its* architecture, and an image whose
 //!   base is `arm64` cannot run the `x86_64` binary the archive put in it.
@@ -36,7 +38,8 @@ pub const AGENT_DOCKERFILE: &str = include_str!("../images/agent.Dockerfile");
 /// Where the binary lives inside both images (`--entrypoint`, and `holosmith container snapshot`).
 pub const BINARY_IN_IMAGE: &str = "/usr/local/bin/holosmith";
 
-/// The four labels a built image carries, all under this build's own namespace.
+/// The five labels an image carries (four on the proxy, plus the toolchain list on the agent), all under this
+/// build's own namespace.
 ///
 /// Read back by step 3's skip rule and by `doctor`, so the spelling is a contract: an image built by another
 /// tool and labelled differently is "not built from this binary's Dockerfile" rather than "close enough".
@@ -44,6 +47,15 @@ pub const LABEL_VERSION: &str = "org.holosmith.version";
 pub const LABEL_GIT_TAG: &str = "org.holosmith.git-tag";
 pub const LABEL_PI: &str = "org.holosmith.pi-version";
 pub const LABEL_TOOLCHAINS: &str = "org.holosmith.toolchains";
+/// The SHA-256 of the binary bytes the image was built from — the label that makes the skip rule see a
+/// **rebuilt** artifact.
+///
+/// The git tag alone cannot answer that question. `HOLOSMITH_GIT_TAG` is `git describe --tags --always --dirty`
+/// (`build.rs`), so two builds of the same commit — or of the same *dirty tree*, which is what a working tree
+/// gets — carry the same tag while their bytes differ: edit a file, rebuild, deploy, and a label set of
+/// version + tag + pi says `satisfied` over an image holding the previous binary, while `hs_egress` keeps
+/// running it. The acceptance's word is "the binary", so the read measures the binary.
+pub const LABEL_BINARY: &str = "org.holosmith.binary-sha256";
 
 /// One image build's bound: a first build installs pi over the network.
 ///
@@ -94,34 +106,65 @@ impl Kind {
     ///
     /// A list rather than four constants compared by hand, so that "which labels does this image have" is one
     /// answer that [`Expectation::mismatches`] and the tests both read.
+    /// The label keys this image carries: the proxy's four, and the agent's plus its toolchain list.
+    ///
+    /// A list rather than five constants compared by hand, so that "which labels does this image have" is one
+    /// answer that [`Expectation::mismatches`] and the tests both read.
     pub fn tags(self) -> &'static [&'static str] {
         match self {
-            Self::Proxy => &[LABEL_VERSION, LABEL_GIT_TAG, LABEL_PI],
-            Self::Agent => &[LABEL_VERSION, LABEL_GIT_TAG, LABEL_PI, LABEL_TOOLCHAINS],
+            Self::Proxy => &[LABEL_VERSION, LABEL_GIT_TAG, LABEL_PI, LABEL_BINARY],
+            Self::Agent => &[
+                LABEL_VERSION,
+                LABEL_GIT_TAG,
+                LABEL_PI,
+                LABEL_BINARY,
+                LABEL_TOOLCHAINS,
+            ],
         }
     }
 }
 
 /// What one image's labels must say, from this binary's own values.
 ///
-/// Built from `env!` at compile time and from the config's `agent_toolchains`: an image is current when its
-/// labels are exactly this, which is why nothing here reads a build timestamp or an image id — a rebuild of
-/// identical inputs would change both and still be current by any measure the machine can act on.
+/// Built from `env!` at compile time, from the config's `agent_toolchains`, and from a **digest of the binary
+/// bytes the build will copy**: an image is current when its labels are exactly this, which is why nothing here
+/// reads a build timestamp or an image id — a rebuild of identical inputs would change both and still be
+/// current. The binary is in the list because it is the one input a tag cannot describe: two builds of the same
+/// commit (or of the same dirty tree) carry the same `git describe`, and an image built from the older one would
+/// otherwise read as current.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Expectation {
     pub version: String,
     pub git_tag: String,
     pub pi_version: String,
+    /// Lowercase hex SHA-256 of the program the build's archive hands the daemon.
+    pub binary: String,
     pub toolchains: Option<Vec<String>>,
 }
 
 impl Expectation {
     /// This binary's values for `kind`, with the toolchains only where the Dockerfile has them.
-    pub fn of(kind: Kind, config: &Config) -> Self {
+    ///
+    /// It reads `binary`, because the digest is a property of those bytes and nothing else: a `Expectation`
+    /// without one would be a skip rule blind to the very thing the acceptance names, so the constructor cannot
+    /// produce it.
+    pub fn of(kind: Kind, config: &Config, binary: &Path) -> Result<Self, String> {
+        Ok(Self::of_digest(kind, config, &digest(binary)?))
+    }
+
+    /// The same expectation from a digest the caller already computed.
+    ///
+    /// This is what `server deploy` and `doctor` use, through [`own_digest`]: the value is *this process's* bytes,
+    /// it cannot change while the process runs, and hashing a multi-megabyte artifact once per step 3 is work
+    /// nobody asked for. Nothing can invent a digest this way that is not a file's: the only producer of the
+    /// argument in the product is [`own_digest`], and the tests take theirs from the same function or from
+    /// [`digest`] over the artifact they build.
+    pub fn of_digest(kind: Kind, config: &Config, binary: &str) -> Self {
         Self {
             version: env!("CARGO_PKG_VERSION").to_string(),
             git_tag: env!("HOLOSMITH_GIT_TAG").to_string(),
             pi_version: pins::pi_version().to_string(),
+            binary: binary.to_string(),
             toolchains: (kind == Kind::Agent).then(|| config.agent_toolchains.clone()),
         }
     }
@@ -143,6 +186,7 @@ impl Expectation {
             LABEL_VERSION => Some(self.version.clone()),
             LABEL_GIT_TAG => Some(self.git_tag.clone()),
             LABEL_PI => Some(self.pi_version.clone()),
+            LABEL_BINARY => Some(self.binary.clone()),
             LABEL_TOOLCHAINS => self
                 .toolchains
                 .as_ref()
@@ -155,6 +199,11 @@ impl Expectation {
     ///
     /// The sentence names the label by its last word (`pi-version`, not `org.holosmith.pi-version`) and carries
     /// both values, because the operator's question is "what did I build against" and the fix is a rebuild.
+    ///
+    /// An **empty toolchain list** is the one expectation a missing label satisfies: `--build-arg
+    /// HOLOSMITH_TOOLCHAINS=` gives the Dockerfile an empty value, and whether a `LABEL key=""` survives in
+    /// `Config.Labels` is the daemon's business, not the machine's. A machine whose image installs no extra
+    /// package must not rebuild on every deploy (nor fail `doctor`) because of an empty string.
     pub fn mismatches(&self, labels: &BTreeMap<String, String>) -> Vec<String> {
         let mut sentences = Vec::new();
         for key in self.keys() {
@@ -163,6 +212,7 @@ impl Expectation {
             };
             match labels.get(*key) {
                 Some(found) if *found == wanted => {}
+                None if wanted.is_empty() => {}
                 Some(found) => sentences.push(format!(
                     "its {} label says {found}, and this binary's is {wanted}",
                     label_word(key)
@@ -183,7 +233,7 @@ impl Expectation {
     /// `{{json .Config.Labels}}`, which [`parse_labels`] turns into an empty map — so "no labels" and "someone
     /// else's labels and none of ours" arrive here as the same answer, and both mean the same thing: there is
     /// nothing to compare, rather than something that compared unequal. That distinction is the whole reason this
-    /// is a predicate instead of an `is_empty()`: an image carrying one of the four keys with a different value is
+    /// is a predicate instead of an `is_empty()`: an image carrying one of the keys with a different value is
     /// *not* unbuilt, and must be reported key by key.
     pub fn unbuilt(&self, labels: &BTreeMap<String, String>) -> bool {
         self.keys().iter().all(|key| !labels.contains_key(*key))
@@ -200,6 +250,7 @@ impl Expectation {
             ("HOLOSMITH_VERSION".to_string(), self.version.clone()),
             ("HOLOSMITH_GIT_TAG".to_string(), self.git_tag.clone()),
             ("HOLOSMITH_PI_VERSION".to_string(), self.pi_version.clone()),
+            ("HOLOSMITH_BINARY_SHA256".to_string(), self.binary.clone()),
         ];
         if let Some(toolchains) = &self.toolchains {
             pairs.push(("HOLOSMITH_TOOLCHAINS".to_string(), toolchains.join(" ")));
@@ -214,9 +265,139 @@ fn label_word(key: &str) -> &'static str {
         LABEL_VERSION => "version",
         LABEL_GIT_TAG => "git-tag",
         LABEL_PI => "pi-version",
+        LABEL_BINARY => "binary-sha256",
         LABEL_TOOLCHAINS => "toolchains",
         _ => "label",
     }
+}
+
+/// The SHA-256 of a file, lowercase hex: what `org.holosmith.binary-sha256` carries (HS-048).
+///
+/// Written here rather than taken from a crate: this build's dependencies are fixed (`--locked`), the only
+/// question asked of it is "are these the same bytes", and forty lines checked against the standard's own test
+/// vectors are easier to trust than a dependency nothing else needs. It is **not** a security boundary — the
+/// producer and the consumer of the label are the same program — but it is the real algorithm, so an operator
+/// can compare it with `sha256sum` on the artifact and see why a deploy wants to rebuild.
+pub fn digest(path: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|error| {
+        format!(
+            "the binary at {} could not be read for its digest ({error}): an image's labels name the bytes it was \
+             built from, and a read that cannot measure them cannot say whether an image is current",
+            path.display()
+        )
+    })?;
+    Ok(hex(&sha256(&bytes)))
+}
+
+/// The SHA-256 of **this process's own binary**, hashed once per process.
+///
+/// Which binary a deploy builds from and which one an image's label must match are the same question — this
+/// one — so it is asked once. A failed read is cached too: a process whose own path cannot be read will not
+/// grow one, and a second failure costs the same sentence.
+pub fn own_digest() -> Result<String, String> {
+    static DIGEST: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
+    DIGEST
+        .get_or_init(|| {
+            let path = std::env::current_exe().map_err(|error| {
+                format!(
+                    "this process's own path could not be read ({error}): an image's labels name the bytes it \
+                     was built from, so nothing can say whether an image is current without them"
+                )
+            })?;
+            digest(&path)
+        })
+        .clone()
+}
+
+/// Lowercase hex, two characters per byte.
+fn hex(bytes: &[u8]) -> String {
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(text, "{byte:02x}");
+    }
+    text
+}
+
+/// SHA-256 (FIPS 180-4), the compression function written out.
+///
+/// The test vectors at the bottom of this module are the standard's: `""`, `"abc"` and the two-block
+/// `"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"`, which is one block's worth of padding plus a
+/// tail and catches an off-by-one in the length field.
+fn sha256(data: &[u8]) -> [u8; 32] {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+    let mut state: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+    // Padding: one set bit, zeros to 56 mod 64, then the message's length in bits as a big-endian u64.
+    let mut message = data.to_vec();
+    let bits = (data.len() as u64).wrapping_mul(8);
+    message.push(0x80);
+    while message.len() % 64 != 56 {
+        message.push(0);
+    }
+    message.extend_from_slice(&bits.to_be_bytes());
+    // `as_chunks` rather than `chunks_exact`: the padding above makes the length a multiple of the block, so the
+    // remainder is empty by construction and the compiler can see that.
+    for block in message.as_chunks::<64>().0 {
+        let mut schedule = [0_u32; 64];
+        for (index, word) in block.as_chunks::<4>().0.iter().enumerate() {
+            schedule[index] = u32::from_be_bytes(*word);
+        }
+        for index in 16..64 {
+            let s0 = schedule[index - 15].rotate_right(7)
+                ^ schedule[index - 15].rotate_right(18)
+                ^ (schedule[index - 15] >> 3);
+            let s1 = schedule[index - 2].rotate_right(17)
+                ^ schedule[index - 2].rotate_right(19)
+                ^ (schedule[index - 2] >> 10);
+            schedule[index] = schedule[index - 16]
+                .wrapping_add(s0)
+                .wrapping_add(schedule[index - 7])
+                .wrapping_add(s1);
+        }
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = state;
+        for index in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let choice = (e & f) ^ (!e & g);
+            let t1 = h
+                .wrapping_add(s1)
+                .wrapping_add(choice)
+                .wrapping_add(K[index])
+                .wrapping_add(schedule[index]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let majority = (a & b) ^ (a & c) ^ (b & c);
+            let t2 = s0.wrapping_add(majority);
+            h = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(t1);
+            d = c;
+            c = b;
+            b = a;
+            a = t1.wrapping_add(t2);
+        }
+        for (slot, value) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
+            *slot = slot.wrapping_add(value);
+        }
+    }
+    let mut out = [0_u8; 32];
+    for (chunk, value) in out.as_chunks_mut::<4>().0.iter_mut().zip(state) {
+        chunk.copy_from_slice(&value.to_be_bytes());
+    }
+    out
 }
 
 /// The child's answer: whether the build succeeded, and its combined output.
@@ -402,10 +583,10 @@ pub fn failure(image: &str, text: &str) -> String {
     };
     if last.is_empty() {
         return format!(
-            "the build of {image} failed{at} and printed nothing, so nothing was tagged {image}"
+            "the build of {image} failed{at} and printed nothing, so no new image was tagged {image}"
         );
     }
-    format!("the build of {image} failed{at}, and nothing was tagged {image}: {last}")
+    format!("the build of {image} failed{at}, and no new image was tagged {image}: {last}")
 }
 
 /// `text` cut to `limit` characters, with an ellipsis when it was longer.
@@ -434,31 +615,32 @@ pub enum Status {
 
 /// Read one image's labels and compare them with `expectation`.
 ///
-/// The answer is always `Ok`: a daemon that cannot answer becomes a `Missing`/`Stale` carrying what it said,
-/// because a read that failed would stop the run at step 3 in a *dry run* — and a dry run's whole job is to
-/// print the plan, including the plan for a machine it cannot fully measure.
-pub fn read(images: &dyn Images, kind: Kind, expectation: &Expectation) -> Result<Status, String> {
+/// Every arm is an answer: a daemon that cannot answer becomes a `Missing`/`Stale` carrying what it said, because
+/// a read that failed would stop the run at step 3 in a *dry run* — and a dry run's whole job is to print the
+/// plan, including the plan for a machine it cannot fully measure. The `Result` this once had never carried an
+/// `Err`, and a signature that promises an error nothing produces invites a caller's dead arm.
+pub fn read(images: &dyn Images, kind: Kind, expectation: &Expectation) -> Status {
     let image = kind.image();
     match images.labels(&image) {
-        Ok(Some(labels)) if expectation.unbuilt(&labels) => Ok(Status::Stale(format!(
+        Ok(Some(labels)) if expectation.unbuilt(&labels) => Status::Stale(format!(
             "{image} carries no Holosmith labels, so it was not built from this binary's Dockerfile"
-        ))),
+        )),
         Ok(Some(labels)) => {
             let mismatches = expectation.mismatches(&labels);
             if mismatches.is_empty() {
-                Ok(Status::Current)
+                Status::Current
             } else {
-                Ok(Status::Stale(format!(
+                Status::Stale(format!(
                     "{image} does not match this binary: {}",
                     mismatches.join("; ")
-                )))
+                ))
             }
         }
-        Ok(None) => Ok(Status::Missing(format!("{image} is not on this machine"))),
+        Ok(None) => Status::Missing(format!("{image} is not on this machine")),
         // There but unreadable is not "absent": the image is there, and what cannot be compared is a build.
-        Err(said) => Ok(Status::Stale(format!(
+        Err(said) => Status::Stale(format!(
             "{image} is there, but its labels could not be read ({said})"
-        ))),
+        )),
     }
 }
 
@@ -508,6 +690,7 @@ pub fn architecture(images: &dyn Images, target: &str) -> Result<String, String>
 pub fn ensure(
     images: &dyn Images,
     binary: &Path,
+    digest: &str,
     config: &Config,
     pending: &[(Kind, String)],
 ) -> Result<String, String> {
@@ -516,7 +699,7 @@ pub fn ensure(
     }
     architecture(images, env!("HOLOSMITH_TARGET"))?;
     for (kind, _) in pending {
-        let expectation = Expectation::of(*kind, config);
+        let expectation = Expectation::of_digest(*kind, config, digest);
         let tag = kind.image();
         let context = archive(kind.dockerfile(), binary)?;
         let arguments = build_arguments(&tag, &expectation);
@@ -535,4 +718,32 @@ pub fn ensure(
         if tags.len() == 1 { "" } else { "s" },
         tags.join(", ")
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sha256_matches_the_standards_vectors() {
+        // FIPS 180-4's own examples — the empty message, one single-block message, and one whose padding crosses a
+        // block boundary (which is what catches an off-by-one in the length field). The label's value is only as
+        // trustworthy as this function, and an operator can check it with `sha256sum` on the artifact.
+        for (input, wanted) in [
+            (
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                "abc",
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+            (
+                "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+                "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+            ),
+        ] {
+            assert_eq!(hex(&sha256(input.as_bytes())), wanted, "{input:?}");
+        }
+    }
 }

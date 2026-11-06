@@ -766,7 +766,13 @@ fn image_check(
         Ok(found) => found,
         Err(sentence) => return Finding::fail(Check::Image, sentence),
     };
-    let expected = Expectation::of(Kind::Agent, config);
+    // The expected labels include a digest of *this* binary, which is the bytes a build run from here would copy:
+    // a doctor that compared the label set without one could not tell an image built from last week's artifact from
+    // one built from this one (ADR-0057).
+    let expected = match crate::images::own_digest() {
+        Ok(digest) => Expectation::of_digest(Kind::Agent, config, &digest),
+        Err(sentence) => return Finding::fail(Check::Image, sentence),
+    };
     match machine.image_labels(image) {
         // The image answered a run and then was not there: the daemon is answering two questions about the same
         // image inconsistently, which is a machine problem rather than an image's verdict — and it must not read
@@ -795,10 +801,11 @@ fn image_check(
                     Check::Image,
                     format!(
                         "the agent image {image} runs pi {found} and carries this binary's labels (version {}, \
-                         git tag {}, pi {}, toolchains {})",
+                         git tag {}, pi {}, binary sha256 {}…, toolchains {})",
                         expected.version,
                         expected.git_tag,
                         expected.pi_version,
+                        &expected.binary[..12],
                         expected.toolchains.unwrap_or_default().join(" ")
                     ),
                 );

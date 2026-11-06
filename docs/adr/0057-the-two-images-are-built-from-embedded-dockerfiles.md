@@ -67,26 +67,38 @@ hand. Refreshing a digest is a deliberate edit to the Dockerfile.
 
 ## The pins arrive as build arguments, so `pins/pi.txt` stays the only copy
 
-The Dockerfiles contain no version literal. `HOLOSMITH_VERSION`, `HOLOSMITH_GIT_TAG` and
-`HOLOSMITH_PI_VERSION` come from the binary's own `env!` and `pins::pi_version()` as `--build-arg`s, and the
-Dockerfile writes them as labels. The pinned pi version therefore has exactly one tracked copy, which
-`tests/pin_single_source.rs` already guards and which now also covers the two new files — the test's own
-`include_str!` of `pins/pi.txt` is what `tests/images.rs` compares them against.
+The Dockerfiles contain no version literal. `HOLOSMITH_VERSION`, `HOLOSMITH_GIT_TAG`, `HOLOSMITH_PI_VERSION`
+and `HOLOSMITH_BINARY_SHA256` come from the binary's own `env!`, `pins::pi_version()` and a digest of its own
+bytes as `--build-arg`s, and the Dockerfile writes them as labels. The pinned pi version therefore has exactly
+one tracked copy, which `tests/pin_single_source.rs` already guards and which now also covers the two new
+files — the test's own `include_str!` of `pins/pi.txt` is what `tests/images.rs` compares them against.
 
-## The labels are the read: four, and the fourth is load-bearing
+## The labels are the read: five, and two of them exist because a tag cannot answer
 
-`org.holosmith.version`, `org.holosmith.git-tag`, `org.holosmith.pi-version` on both images, and
-`org.holosmith.toolchains` on the agent image.
+`org.holosmith.version`, `org.holosmith.git-tag`, `org.holosmith.pi-version` and
+`org.holosmith.binary-sha256` on both images, plus `org.holosmith.toolchains` on the agent image.
 
-The fourth is not decoration. Without it, a changed `agent_toolchains` would leave every label equal and the
-skip rule would answer `satisfied` for an image whose contents had changed — the acceptance's "skipped when
-the binary and the **pinned versions** are unchanged" read as a licence to keep a stale image. It is
-comma-joined for `docker image inspect` and space-joined as `--build-arg`, because the Dockerfile's
-`apt-get install … ${HOLOSMITH_TOOLCHAINS}` has to read it as several packages.
+Two are not decoration, and each closes a hole the other labels leave open:
+
+- **`toolchains`** — without it, a changed `agent_toolchains` would leave every label equal and the skip rule
+  would answer `satisfied` for an image whose contents had changed. It is space-joined as `--build-arg` (the
+  Dockerfile's `apt-get install … ${HOLOSMITH_TOOLCHAINS}` reads it as several packages) and written as the
+  same string, because a `LABEL` line cannot rewrite what it was given.
+- **`binary-sha256`** — the acceptance's word is *the binary*, and the git tag does not name a binary. `git
+  describe --tags --always --dirty` is identical for two builds of the same commit, and also for two builds of
+  the same **dirty tree**, which is what every development machine has: edit a file, rebuild, deploy, and a
+  label set of version + tag + pi says `satisfied` over an image holding the previous artifact while
+  `hs_egress` keeps serving it. The digest is a read of the exact bytes the build's archive hands the daemon.
+
+The digest is the strong form of "nothing else was needed": a build **timestamp** says nothing about what is
+inside, and an image **id** changes on every rebuild of identical inputs, so both would turn a no-op deploy
+into a rebuild. SHA-256 is written out in `images.rs` (fifteen lines of schedule and compression, checked
+against the standard's own vectors) rather than taken from a crate, because the only question asked of it is
+"are these the same bytes" and `--locked` means a dependency is a decision; an operator can compare the label
+with `sha256sum` on the artifact, which is the point of choosing a standard digest over an opaque hash.
 
 The labels are one word per fact and they are the image's: `pins/pi.txt` remains pi's single source, and the
-label is what a *built* image says about itself. Nothing reads an image id or a creation timestamp — a
-rebuild of identical inputs changes both and would still be current by any measure the machine can act on.
+label is what a *built* image says about itself.
 
 ## The names are the binary's, and the config's default is the same function
 
@@ -107,12 +119,15 @@ a blank *name* is refused, because `apt-get install ""` is a build that fails on
 
 ## The skip rule is the labels, and only the labels
 
-Each image is `satisfied` when its labels carry every expected key with this binary's values, and the sentence
-otherwise names what differs (`… its pi-version label says 0.79.1, and this binary's is 0.80.0`). No artifact
-hash: the git tag already carries `-dirty` for a tree that is not a commit, and a second invariant is a second
-thing to keep true. A daemon that cannot answer is *not* an error on this path — it is `Missing`/`Stale` with
-what it said — because a read that failed would stop a **dry run** at step 3, and a dry run's job is to print
-the plan for the machine it has.
+Each image is `satisfied` when its labels carry every expected key with this binary's values — including the
+digest of the program the build would copy — and the sentence otherwise names what differs (`… its pi-version
+label says 0.79.1, and this binary's is 0.80.0`, `… its binary-sha256 label says 9c1f…, and this binary's is
+4e0a…`). No build timestamp and no image id: a rebuild of identical inputs changes both and would still be
+current by any measure the machine can act on. A daemon that cannot answer is *not* an error on this path — it
+is `Missing`/`Stale` with what it said — because a read that failed would stop a **dry run** at step 3, and a
+dry run's job is to print the plan for the machine it has. The read's signature is `Status`, not
+`Result<Status, String>`: every arm is an answer, and a `Result` whose `Err` nothing produces invites a
+caller's dead branch (the first draft had one).
 
 ## The architecture is checked once, before the first build
 
@@ -128,12 +143,15 @@ run stays a plan.
 
 `images::failure` parses the daemon's own shape — the layer (` > [2/2] RUN apk add …:`), the instruction with
 the Dockerfile around it (`   2 | >>> RUN apk add …`) and the child's last non-empty line, clipped — and
-answers one sentence that says nothing was tagged. Measured: a failed `docker build -t <tag>` leaves **no
-image under that tag**, so "does not leave a half-tagged image" is the daemon's behaviour and the step's
-sentence says so; the tests assert `docker image inspect` answers "no such image" after the deliberately
-broken build, rather than trusting the claim.
+answers one sentence that says **no new image was tagged**. Measured: a failed `docker build -t <tag>` leaves
+no image under a tag that was new, so "does not leave a half-tagged image" is the daemon's behaviour. The
+sentence says "no **new** image" rather than "nothing was tagged", because the other reachable state is a
+tag that already pointed at an older image: a failed rebuild leaves that one in place, and a sentence claiming
+the tag is empty would be a lie an operator could catch with `docker image ls` (it did, in review). The tests
+assert `docker image inspect` answers "no such image" after the deliberately broken build into a fresh tag,
+rather than trusting the claim.
 
-## The proxies stop mounting the binary
+## The proxies stop mounting the binary, and run as the key store's owner
 
 `EgressProxy`/`KeyProxy` used to run *this* artifact mounted read-only at its own host path, which is why a
 `serve` whose binary sits on a tmpfs the daemon cannot see started no proxy at all (ADR-0045). They now run
@@ -142,32 +160,56 @@ the binary inside the image *is* this release's, which is the identity rule the 
 key store's directory mount stays, because that is data rather than code. `proxies::start_egress` and
 `start_key` therefore ask `Containers::image_exists` instead of `is_file`-ing the binary, and answer a sentence
 naming the image and `holosmith server deploy` when it is absent — a boot without it warns once and reaches
-nothing, where before it warned for a different reason.
+nothing, before it warned for a different reason.
+
+The key proxy also gained `--user` — the **owner of the key file** — and that is not tuning. The store is a
+0700 directory and a 0600 file belonging to the user `serve` runs as, and the container is
+`--cap-drop ALL`, which takes root's `DAC_OVERRIDE` with it: a container running as uid 0 cannot read the
+machine's own file, fails to prepare the store it can see, exits 1, and `--restart unless-stopped` loops it.
+The **first gate run of this story measured exactly that**, and the reason it had never shown up before is the
+decision this replaces: the old proxy image was the agent image, whose base user happened to be uid 1000. An
+identity that is an accident of a base image is not an identity. Taking the owner from the file makes it a
+fact, and `start_key` **refuses** when the file's owner and the mounted directory's owner disagree, because no
+single `--user` can then be right and the operator is the only one who can choose. The uid is asserted against
+the *invoking* user in the gate, not against `1000`: the invariant is ADR-0035's (the host can commit what the
+container wrote), and 1000 is only this sandbox's spelling of it.
 
 ## `doctor` compares the labels, in the finding it already had
 
 The acceptance's "so `doctor` can compare them" is new behaviour and it belongs in the existing `image`
 finding rather than in a second one: one check word per fact (ADR-0028, ADR-0054). After the pi check passes,
-`image_check` reads the configured `agent_image`'s labels and has three arms:
+`image_check` reads the configured `agent_image`'s labels — against an expectation built from *this* binary's
+bytes, so the digest is compared too — and has four arms:
 
-- labels equal to this binary's expectation → **pass**, naming version, git tag, pi and the toolchains;
+- labels equal to this binary's expectation → **pass**, naming version, git tag, pi, the leading twelve
+  characters of the digest and the toolchains;
 - labels present and differing → **fail**, naming every differing key with both values and the fix (a deploy,
   or `agent_image` pointing elsewhere) — which is what makes a stale image a finding rather than a mystery;
-- no labels at all → **pass** on the pi sentence, saying the image was not built by this binary's image step.
-  This machine's `pi-agent:local` is that arm, and a hard failure there would call a supported machine broken.
+- no Holosmith label at all (Docker answers `null`, which `parse_labels` turns into an **empty map** — not
+  `None`, which is "the image is not there") → **pass** on the pi sentence, saying the image was not built by
+  this binary's image step. This machine's `pi-agent:local` is that arm, and a hard failure there would call a
+  supported machine broken;
+- the image answered a run and then was not there for the inspect → **fail**, because that is a daemon
+  answering two questions inconsistently and it must not pass as "unlabelled".
 
 The labels are read through the same Docker implementation `images::Images` uses, so there is one reader.
 
 ## The gate builds, because a case that skips on its own bug is the P1
 
-`case_server_images` is new and runs **first** among the cases that need the daemon — before every case whose
-boot starts the proxies, because after this story a `serve` cannot start `hs_egress`/`hs_key` without the proxy
-image. It owns its state: it removes both tags, deploys, asserts `changed`, the four labels, the agent image's
-contents (`pi --version` = `pins/pi.txt`, `git --version`, each configured toolchain, `id -u` = 1000,
-`holosmith container snapshot --help`), both proxies answering from the image with **no** binary bind in
-`docker inspect`, a second deploy saying `satisfied` with unchanged image ids, and `doctor --full`'s `image:
-pass:` line naming the labels. It keeps the two images at the end, because the cases after it boot servers
-that start proxies from them, and removes only its own containers and scratch root.
+`case_server_images` is new and runs **first among the cases whose boot starts the proxies** (it is not the
+first daemon case — `case_create_session`, `case_worktree` and the delete case precede it and need the daemon
+for other reasons), because after this story a `serve` cannot start `hs_egress`/`hs_key` without the proxy
+image. It owns its state and **asserts it owns it**: the deploy's own two containers are removed first (a
+running container pins the image it was started from, so an untag with them up fails), then both tags, and
+`docker image inspect` must answer "no such image" for both before the deploy — because "the image was already
+there" is exactly the state that would make its `changed` meaningless. It then asserts the five labels, the
+agent image's contents (`pi --version` = `pins/pi.txt`, `git --version`, each configured toolchain, `id -u`
+equal to the **invoking** user's and not zero, `holosmith container snapshot --help`), both proxies answering
+from the image with **no** binary bind in `docker inspect`, a second deploy saying `satisfied` with unchanged
+image ids, and `doctor --full`'s `image: pass:` line naming the labels. It keeps the two images at the end,
+because the cases after it boot servers that start proxies from them, and removes only its own containers and
+scratch root. Its first build needs outbound network (pi and the toolchains come from two package managers),
+which `BUILD_TIMEOUT`'s doc comment says and the case's prerequisite list therefore repeats.
 
 `case_server_deploy` moves with it: its dry run now asserts `3. images: needs:` instead of an owner line, its
 partial run stops at step 3 (`failed`, naming the image) because a `_ping` socket cannot build, and its online

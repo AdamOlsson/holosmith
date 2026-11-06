@@ -703,11 +703,13 @@ the context is an archive holding the Dockerfile and the running binary. Its mac
 _Avoid_: Container image, docker image, image pull, base image
 
 **Image label**:
-One of the four `org.holosmith.*` values a built image carries — version, git tag, pinned pi, and (on the agent
-image only) the toolchain list — written by the Dockerfile from build arguments and read back by `server
-deploy`'s step 3 skip rule and by `doctor`'s `image` finding. An image with no Holosmith labels is one another
-tool built (`pi-agent:local`), which is a supported machine rather than a mismatch. Its machine names are
-`images::LABEL_VERSION`, `LABEL_GIT_TAG`, `LABEL_PI` and `LABEL_TOOLCHAINS`.
+One of the five `org.holosmith.*` values a built image carries — version, git tag, pinned pi, the SHA-256 of the
+binary it was built from, and (on the agent image only) the toolchain list — written by the Dockerfile from
+build arguments and read back by `server deploy`'s step 3 skip rule and by `doctor`'s `image` finding. The
+digest is what makes a **rebuilt** artifact a rebuild: `git describe` is the same for two builds of the same
+commit, dirty tree included. An image with no Holosmith labels is one another tool built (`pi-agent:local`),
+which is a supported machine rather than a mismatch. Its machine names are `images::LABEL_VERSION`,
+`LABEL_GIT_TAG`, `LABEL_PI`, `LABEL_BINARY` and `LABEL_TOOLCHAINS`.
 _Avoid_: Tag, annotation, metadata, image version
 
 **Doctor**:

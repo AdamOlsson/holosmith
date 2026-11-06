@@ -129,18 +129,24 @@ fn the_image_names_carry_this_binarys_version() {
             images::LABEL_VERSION,
             images::LABEL_GIT_TAG,
             images::LABEL_PI,
+            images::LABEL_BINARY,
             images::LABEL_TOOLCHAINS,
         ],
         [
             "org.holosmith.version",
             "org.holosmith.git-tag",
             "org.holosmith.pi-version",
+            "org.holosmith.binary-sha256",
             "org.holosmith.toolchains",
         ],
         "a label key is a contract with every image already built"
     );
-    assert_eq!(Kind::Proxy.tags().len(), 3);
-    assert_eq!(Kind::Agent.tags().len(), 4);
+    assert_eq!(
+        Kind::Proxy.tags().len(),
+        4,
+        "the proxy image carries no toolchain label"
+    );
+    assert_eq!(Kind::Agent.tags().len(), 5);
     assert_eq!(Kind::Proxy.image(), images::proxy_image());
     assert_eq!(Kind::Agent.image(), images::agent_image());
     assert_eq!(Kind::Proxy.dockerfile(), images::PROXY_DOCKERFILE);
@@ -166,6 +172,7 @@ fn labels_of(expectation: &Expectation) -> BTreeMap<String, String> {
             "HOLOSMITH_VERSION" => images::LABEL_VERSION,
             "HOLOSMITH_GIT_TAG" => images::LABEL_GIT_TAG,
             "HOLOSMITH_PI_VERSION" => images::LABEL_PI,
+            "HOLOSMITH_BINARY_SHA256" => images::LABEL_BINARY,
             "HOLOSMITH_TOOLCHAINS" => images::LABEL_TOOLCHAINS,
             _ => continue,
         };
@@ -176,10 +183,21 @@ fn labels_of(expectation: &Expectation) -> BTreeMap<String, String> {
     labels
 }
 
+/// An `Expectation` built from this test binary's own bytes, which is what `Expectation::of` demands.
+///
+/// The digest is a read of a real file, so no test can construct an image's expected labels without one — that is
+/// the point of the fifth label (ADR-0057).
+fn expectation(kind: Kind, config: &Config) -> Expectation {
+    // The product's own memoised digest of this process: the test binary is tens of megabytes and an unoptimised
+    // SHA-256 is slow, and the bytes cannot change under a single process.
+    let digest = images::own_digest().expect("the test binary is readable");
+    Expectation::of_digest(kind, config, &digest)
+}
+
 #[test]
 fn a_mismatch_names_the_key_and_both_values() {
     let config = Config::default();
-    let agent = Expectation::of(Kind::Agent, &config);
+    let agent = expectation(Kind::Agent, &config);
     // The build arguments are the facts the Dockerfile labels with, and the toolchain list is one word there
     // because `apt-get install` reads it as several packages.
     assert_eq!(
@@ -197,6 +215,7 @@ fn a_mismatch_names_the_key_and_both_values() {
                 "HOLOSMITH_PI_VERSION".to_string(),
                 holosmith::pins::pi_version().to_string()
             ),
+            ("HOLOSMITH_BINARY_SHA256".to_string(), agent.binary.clone()),
             (
                 "HOLOSMITH_TOOLCHAINS".to_string(),
                 config.agent_toolchains.join(" ")
@@ -272,7 +291,7 @@ fn a_mismatch_names_the_key_and_both_values() {
         "{}",
         sentences[0]
     );
-    let proxy = Expectation::of(Kind::Proxy, &config);
+    let proxy = expectation(Kind::Proxy, &config);
     assert_eq!(proxy.mismatches(&toolchains), Vec::<String>::new());
 }
 
@@ -397,7 +416,7 @@ fn the_failure_sentence_names_the_instruction_the_layer_and_what_the_child_said(
         "holosmith-proxy:0.1.0",
         "RUN apk add --no-cache not-a-package-at-all",
         "[2/2] RUN",
-        "nothing was tagged",
+        "no new image was tagged",
         "did not complete successfully",
     ] {
         assert!(
@@ -425,7 +444,7 @@ fn the_failure_sentence_names_the_instruction_the_layer_and_what_the_child_said(
         "agent-image:0.1.0",
         "COPY missing-file /x",
         "[2/2] COPY",
-        "nothing was tagged",
+        "no new image was tagged",
         "/missing-file",
     ] {
         assert!(
@@ -442,7 +461,7 @@ fn the_failure_sentence_names_the_instruction_the_layer_and_what_the_child_said(
     let nothing = images::failure("agent-image:0.1.0", "");
     assert!(nothing.contains("agent-image:0.1.0"), "{nothing}");
     assert!(nothing.contains("printed nothing"), "{nothing}");
-    assert!(nothing.contains("nothing was tagged"), "{nothing}");
+    assert!(nothing.contains("no new image was tagged"), "{nothing}");
 }
 
 // ---- the read, over a fake -----------------------------------------------------------------
@@ -493,12 +512,11 @@ impl images::Images for Labelled {
 #[test]
 fn the_read_answers_missing_no_labels_stale_current_and_unreadable() {
     let config = Config::default();
-    let expectation = Expectation::of(Kind::Agent, &config);
+    let expectation = expectation(Kind::Agent, &config);
     let image = images::agent_image();
     let read = |answer| {
         let fake = Labelled::answering(answer);
-        let status =
-            images::read(&fake, Kind::Agent, &expectation).expect("a read is always an answer");
+        let status = images::read(&fake, Kind::Agent, &expectation);
         (status, fake.asked())
     };
 
@@ -606,7 +624,16 @@ fn artifact() -> Option<PathBuf> {
         return path.is_file().then_some(path);
     }
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]
+    // The host's own triple first: a Dockerfile whose base resolves to the *daemon's* architecture builds an
+    // image whose entrypoint is the artifact copied into it, so an x86_64 artifact on an arm64 machine is a
+    // container that cannot `exec` — the mistake `images::architecture` refuses on the deploy path (ADR-0057).
+    let mut targets = vec![env!("HOLOSMITH_TARGET")];
+    targets.extend(
+        ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]
+            .into_iter()
+            .filter(|target| *target != env!("HOLOSMITH_TARGET")),
+    );
+    targets
         .into_iter()
         .flat_map(|target| {
             [
@@ -703,6 +730,7 @@ fn a_built_proxy_image_runs_both_proxies_and_a_broken_build_leaves_no_tag() {
             .get("pi_version")
             .expect("the artifact reports its pi version")
             .clone(),
+        binary: images::digest(&binary).expect("the artifact is readable"),
         toolchains: None,
     };
     assert_eq!(
@@ -782,8 +810,8 @@ fn a_built_proxy_image_runs_both_proxies_and_a_broken_build_leaves_no_tag() {
         "the failure does not name the instruction: {sentence}"
     );
     assert!(
-        sentence.contains("nothing was tagged"),
-        "the failure does not say nothing was tagged: {sentence}"
+        sentence.contains("no new image was tagged"),
+        "the failure does not say no new image was tagged: {sentence}"
     );
     let (there, _) = docker(&["image", "inspect", BROKEN]);
     assert!(

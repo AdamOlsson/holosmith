@@ -33,8 +33,9 @@
 //! [`Target`] is *where* the deploy installs: the system paths, or a tree an operator names with `--root` so the
 //! whole install can be driven — and tested — by an unprivileged user. It prefixes `data_root` and
 //! `projects_root` (and therefore everything inside them), and **nothing the deploy reads about the machine**: the
-//! listen addresses, `docker_host`, [`crate::doctor::SYSTEMD_DIR`] and step 4's binary mount source stay as they
-//! are, because they describe the host rather than the install tree. Privilege follows the same flag — with no
+//! listen addresses, `docker_host` and [`crate::doctor::SYSTEMD_DIR`] stay as they are, because they describe
+//! the host rather than the install tree (step 4's proxies used to mount this binary; since ADR-0057 they run
+//! the image the machine built, so there is no install-tree path in their vector at all). Privilege follows the same flag — with no
 //! `--root` each write is one child prefixed by `sudo`, and with one the tree is the invoking user's — and the flag
 //! decides rather than a uid, since "may I write this tree" is a property of the tree.
 //!
@@ -986,40 +987,54 @@ fn failed(step: DeployStep, sentence: String) -> Line {
 /// Step 3: the two images, built from the Dockerfiles embedded in this binary (HS-048, ADR-0057).
 ///
 /// The read is each image's **labels**, compared with what this binary would build: not the tag, which any
-/// `docker tag` can move, and not a build timestamp, which says nothing about what is inside. That is what makes
-/// a second deploy honestly `satisfied` and a deploy after an upgrade a rebuild.
+/// `docker tag` can move, and not a build timestamp, which says nothing about what is inside. One of those labels
+/// is a digest of the binary the build copies, because the git tag cannot tell two builds of the same commit (or
+/// of the same dirty tree) apart — a rebuilt artifact is a rebuild, and the acceptance's word is "the binary".
 ///
-/// The build is on the apply path only, and it needs this process's own binary: the context is an archive holding
-/// the Dockerfile and this program, so a deploy that cannot name its own path fails the step rather than shipping
-/// an image with nothing in it.
+/// The binary is read before the read as well as before the apply: the digest is a property of those bytes, so a
+/// deploy that cannot read its own path cannot say whether an image is current, and says that instead of claiming
+/// `satisfied` on three strings.
 fn images_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
+    // The digest of *this* binary, hashed once: it is the label that makes a rebuilt artifact a rebuild, and the
+    // read needs it as much as the apply does — a read that skipped it would answer `satisfied` over an image
+    // holding the previous program (the review found exactly that before this line existed).
+    let digest = match images::own_digest() {
+        Ok(digest) => digest,
+        Err(sentence) => return failed(DeployStep::Images, sentence),
+    };
+    // Both expectations up front, so the loop below and the `satisfied` sentence read the same two values.
+    let proxy = Expectation::of_digest(ImageKind::Proxy, config, &digest);
+    let agent = Expectation::of_digest(ImageKind::Agent, config, &digest);
     // Proxy first, which is also the build order: it is the smaller image and the one step 4 needs, so a machine
     // that runs out of room or of the build bound has what its proxies run before the larger one.
     let mut pending: Vec<(ImageKind, String)> = Vec::new();
-    for kind in [ImageKind::Proxy, ImageKind::Agent] {
-        let expectation = Expectation::of(kind, config);
-        match images::read(machine, kind, &expectation) {
-            Ok(Status::Current) => {}
-            // The reason is the read's own sentence, so the plan says *why* a build is coming rather than only
-            // that one is.
-            Ok(Status::Missing(reason) | Status::Stale(reason)) => pending.push((kind, reason)),
-            Err(sentence) => return failed(DeployStep::Images, sentence),
+    for (kind, expectation) in [(ImageKind::Proxy, &proxy), (ImageKind::Agent, &agent)] {
+        // The reason is the read's own sentence, so the plan says *why* a build is coming rather than only that
+        // one is.
+        match images::read(machine, kind, expectation) {
+            Status::Current => {}
+            Status::Missing(reason) | Status::Stale(reason) => pending.push((kind, reason)),
         }
     }
     let remark = image_remark(config);
     if pending.is_empty() {
-        let expected = Expectation::of(ImageKind::Agent, config);
+        // The proxy image carries four labels and the agent image five — the toolchain list is the agent's, because
+        // the proxy installs no toolchain — so the sentence gives the shared four one clause and the agent's list
+        // its own. The digest is clipped: a line an operator reads with 64 hex characters in it is a line nobody
+        // finishes, and the twelve characters it does carry are enough to see two builds differ.
         return Line {
             step: DeployStep::Images,
             word: Word::Satisfied,
             sentence: format!(
-                "{} and {} carry this binary's labels: version {}, git tag {}, pi {}, toolchains {}{remark}",
+                "{} and {} carry this binary's labels: version {}, git tag {}, pi {}, binary sha256 {}…, and \
+                 the agent image's toolchains {}{remark}",
                 ImageKind::Proxy.image(),
                 ImageKind::Agent.image(),
-                expected.version,
-                expected.git_tag,
-                expected.pi_version,
-                expected.toolchains.unwrap_or_default().join(" ")
+                agent.version,
+                agent.git_tag,
+                agent.pi_version,
+                &agent.binary[..12],
+                agent.toolchains.unwrap_or_default().join(" ")
             ),
         };
     }
@@ -1038,12 +1053,12 @@ fn images_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
                 DeployStep::Images,
                 format!(
                     "no image was built: this process's own path could not be read ({error}), and the build's \
-                     context is an archive holding the Dockerfile and this binary"
+                     context is an archive holding the Dockerfile and this program"
                 ),
             );
         }
     };
-    match images::ensure(machine, &binary, config, &pending) {
+    match images::ensure(machine, &binary, &digest, config, &pending) {
         Ok(sentence) => Line {
             step: DeployStep::Images,
             word: Word::Changed,

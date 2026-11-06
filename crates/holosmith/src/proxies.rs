@@ -190,6 +190,31 @@ pub fn start_key(config: &Config, containers: &dyn Containers) -> Result<Started
             proxy.keys.display()
         ));
     }
+    // **The file and the directory it lives in must have one owner.** The container runs as the key file's owner
+    // (`KeyProxy::run_args`) because `--cap-drop ALL` takes root's `DAC_OVERRIDE`, and it must then traverse the
+    // mounted *directory*, which is 0700. One `--user` cannot satisfy both when they disagree, and the failure is
+    // a container that cannot stat the file it was mounted, exits 1 and restarts forever — which arrives as a
+    // network error two layers away. So this refuses with a sentence naming both, because no flag can be right
+    // and the operator is the only one who can choose.
+    if let (Some(file), Some(directory)) = (
+        std::fs::metadata(&proxy.keys).ok(),
+        std::fs::metadata(proxy.mount()).ok(),
+    ) {
+        use std::os::unix::fs::MetadataExt as _;
+        if (file.uid(), file.gid()) != (directory.uid(), directory.gid()) {
+            return Err(format!(
+                "no key proxy was started: {} belongs to {}:{} and the directory it is mounted through, {}, to \
+                 {}:{} — the container runs as the file's owner, so it could not read the directory (mode 0700), \
+                 and a container that cannot stat its mount exits and restarts forever (`chown -R` one of them)",
+                proxy.keys.display(),
+                file.uid(),
+                file.gid(),
+                proxy.mount().display(),
+                directory.uid(),
+                directory.gid()
+            ));
+        }
+    }
     containers.replace(key::KEY_PROXY_NAME, &proxy.run_args(), START_TIMEOUT)?;
     Ok(Started {
         container: key::KEY_PROXY_NAME,
@@ -224,9 +249,9 @@ fn image_there(
         return Ok(());
     }
     Err(format!(
-        "no {proxy} was started: the image {image} is not on this machine, so the container would have nothing to \
-         run — `holosmith server deploy`'s step 3 builds it from the Dockerfile embedded in this binary, and \
-         {without}"
+        "no {proxy} was started: the image {image} was not found on this machine (either it is not there or the \
+         daemon did not answer), so the container would have nothing to run — `holosmith server deploy`'s step 3 \
+         builds it from the Dockerfile embedded in this binary, and {without}"
     ))
 }
 
@@ -303,7 +328,7 @@ mod tests {
                 what,
                 crate::images::proxy_image().as_str(),
                 "holosmith server deploy",
-                "is not on this machine",
+                "was not found on this machine",
             ] {
                 assert!(
                     sentence.contains(fact),

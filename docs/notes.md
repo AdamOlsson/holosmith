@@ -1546,8 +1546,10 @@ it rather than adding a caveat beside it.
 - **A failed `docker build -t <tag>` does not create the tag — and does not move it either.** Measured: after
   a failed build `docker image inspect <tag>` answers "no such image" *when the tag was new*. If the tag
   already pointed at an older image, that image stays; so an absence check is not a skip rule and a failed
-  rebuild is not "the image is gone". The skip rule is the labels, which is also why the deploy's read never
-  treats "the daemon could not answer" as "not built" in anything but the plan's direction.
+  rebuild is not "the image is gone". That is also why the failure sentence says **no new image was tagged**
+  rather than "nothing was tagged": the second sentence is false in the one state a rebuild actually produces.
+  The skip rule is the labels, which is also why the deploy's read never treats "the daemon could not answer"
+  as "not built" in anything but the plan's direction.
 - **The base digests are manifest-list digests, and `docker manifest inspect -v` does not contain them.** The
   `FROM` line records the index digest (`alpine:3` → `sha256:3f4d6b32…`, `node:24-bookworm-slim` →
   `sha256:01d566e8…`), which is what makes one Dockerfile resolve to the machine's own architecture. Checking
@@ -1563,15 +1565,40 @@ it rather than adding a caveat beside it.
 - **After this story a `serve` boot cannot start a proxy without the proxy image.** `proxies::start_*` asks
   `Containers::image_exists` and warns with a sentence naming `holosmith server deploy` step 3; the boot still
   succeeds, and a session that allows internet access reaches nothing. That is also why `case_server_images`
-  runs **first** among the daemon cases and keeps both images: every later case whose boot starts the proxies
-  depends on them, and a case that removed them at the end would break the suite in a way that looks like a
-  different bug. `HOLOSMITH_TEST_IMAGE` (`pi-agent:local`) still serves the cases that are not about images,
+  runs **first among the cases whose boot starts the proxies** (not the first daemon case — `case_create_session`
+  and friends precede it) and keeps both images: every later case whose boot starts the proxies depends on them,
+  and a case that removed them at the end would break the suite in a way that looks like a different bug. Its
+  "absent state" is **asserted, not assumed**: a running container pins the image it was started from, so
+  `docker image rm` fails while `hs_egress` is up — an interrupted earlier run is the normal cause — and the
+  build that follows would be a no-op inside a case that claims to have measured a build. It removes the deploy's
+  own two containers first and then checks `docker image inspect` answers "no such image" before deploying. `HOLOSMITH_TEST_IMAGE` (`pi-agent:local`) still serves the cases that are not about images,
   and it is a valid `agent_image` — `doctor`'s `image` finding says once that it carries no Holosmith labels
   rather than failing, because a hand-built image is a supported machine.
-- **The fourth label is a skip rule, not decoration.** `org.holosmith.toolchains` on the agent image is what
-  makes a changed `agent_toolchains` a rebuild: without it every label would still match, and the deploy would
-  answer `satisfied` for an image whose contents no longer match the config. The same reason `config/schema.rs`
-  counts keys: `agent_toolchains` moved `KNOWN_KEYS.len()` to 33 and the golden file with it.
+- **Two of the five labels are skip rules, not decoration.** `org.holosmith.toolchains` on the agent image is
+  what makes a changed `agent_toolchains` a rebuild: without it every label would still match, and the deploy
+  would answer `satisfied` for an image whose contents no longer match the config. `org.holosmith.binary-sha256`
+  is the same argument for the artifact itself, and it was **the review's P1**: `git describe --tags --always
+  --dirty` is identical for two builds of the same commit — and for two builds of the same *dirty tree*, which
+  is what every development machine has — so version + tag + pi compared equal over an image holding the
+  previous binary, while `hs_egress` kept serving it. Do not "simplify" the read back to three strings: the
+  gate cannot catch that, because it deletes the tags to force a build. The SHA-256 is written out in
+  `images.rs` (no dependency for it) so an operator can check the label with `sha256sum` on the artifact. The
+  same reason `config/schema.rs` counts keys: `agent_toolchains` moved `KNOWN_KEYS.len()` to 33 and the golden
+  file with it.
+- **An empty `agent_toolchains` list must not rebuild, and a missing label is not a mismatch for it.** An empty
+  list is a legitimate machine (git, openssl and CA certificates only), so `--build-arg HOLOSMITH_TOOLCHAINS=`
+  gives the Dockerfile an empty value; whether a `LABEL key=""` survives in `Config.Labels` is the daemon's
+  business, so `Expectation::mismatches` accepts an absent toolchain label when this binary's list is empty.
+  Without that, an empty-list machine would rebuild on every deploy and fail `doctor` forever.
+- **The key proxy runs as the key store's owner, and that is not tuning.** The store is a 0700 directory and a
+  0600 file belonging to the user `serve` runs as, and the container is `--cap-drop ALL`, which takes root's
+  `DAC_OVERRIDE` with it — a container running as uid 0 cannot read the file, exits 1 and `--restart
+  unless-stopped` loops it. HS-048's first gate run measured exactly that; the old proxy image only worked
+  because its base's user happened to be uid 1000, which is an accident, not an identity. `KeyProxy::run_args`
+  takes `--user` from the key **file**'s owner, and `proxies::start_key` **refuses** when the file's owner and
+  the mounted directory's owner disagree, because one `--user` cannot satisfy both and no flag is right then.
+  The gate asserts the uid equals the *invoking* user's and is not zero — 1000 is only this sandbox's spelling
+  of ADR-0035's rule.
 - **The architecture guard exists because `docker_host` may be another machine.** `COPY holosmith` puts the
   *running* artifact into the image, so a daemon building for a different architecture produces an image whose
   entrypoint cannot start — a failure that would surface as a proxy that will not run, minutes later. The

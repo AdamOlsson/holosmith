@@ -768,12 +768,19 @@ fn full_adds_the_self_test_the_proxies_and_the_image() {
 }
 
 /// The `org.holosmith.*` labels an image built by this binary carries, as `docker image inspect` answers them.
+///
+/// Built from a real `Expectation`, so the digest is the bytes of the test run's own artifact — the label a
+/// rebuild at the same `git describe` would change (ADR-0057).
 fn labels(config: &Config) -> BTreeMap<String, String> {
-    let expectation = images::Expectation::of(images::Kind::Agent, config);
+    // The product's own memoised digest of this process: the test binary is tens of megabytes and an unoptimised
+    // SHA-256 is slow.
+    let digest = images::own_digest().expect("the test binary is readable");
+    let expectation = images::Expectation::of_digest(images::Kind::Agent, config, &digest);
     let mut labels = BTreeMap::from([
         (images::LABEL_VERSION.to_string(), expectation.version),
         (images::LABEL_GIT_TAG.to_string(), expectation.git_tag),
         (images::LABEL_PI.to_string(), expectation.pi_version),
+        (images::LABEL_BINARY.to_string(), expectation.binary),
     ]);
     labels.insert(
         images::LABEL_TOOLCHAINS.to_string(),

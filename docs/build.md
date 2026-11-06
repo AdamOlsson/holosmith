@@ -344,18 +344,25 @@ tail names the URL and `holosmith key set` (ADR-0056). A run whose remaining ste
 with an `incomplete: 3 of 7` line; only a failed step exits 1.
 
 …and since HS-048, **`case_server_images`** is the one case whose subject is the build itself, and it runs
-**first among the cases that need the daemon**: after this story a `serve` boot cannot start `hs_egress`/`hs_key`
-without the proxy image, so every later Docker case depends on the images it leaves behind. It owns the absent
-state — both tags go before its deploy — and asserts four things: the four `org.holosmith.*` labels on the two
-images (version, git tag and pinned pi on both; the toolchain list on the agent image only); the agent image's
-contents (`pi --version` is `pins/pi.txt`, `git --version`, each configured toolchain, `id -u` 1000, and
-`holosmith container snapshot --help`); the proxy image serving **both** proxies from one entrypoint with no bind
-of the host's binary in `docker inspect` (a `403` for a host off the allow-list, and the key proxy's own refusal
-for a provider path it does not know); and the same deploy again saying `satisfied` with both image ids
-unchanged. It also reads `doctor --full`'s `image` line back, which is the label comparison through its other
-caller. It needs the daemon and `python3` (one `SKIP` line without either, which `tests/images.rs` covers), and
-it **keeps both images** while removing its own containers and scratch root — `case_server_deploy`'s online half
-removes the tags *it* built because that case asserts `changed` (ADR-0057).
+**first among the cases whose boot starts the proxies** (not the first daemon case: `case_create_session`,
+`case_worktree` and the delete case precede it and need the daemon for other reasons): after this story a `serve`
+boot cannot start `hs_egress`/`hs_key` without the proxy image, so every later case that starts a server with the
+Docker backend depends on the images it leaves behind. It owns the absent state and **asserts it does**: the
+deploy's own `hs_egress`/`hs_key` go first — a running container pins the image it was started from, so an untag
+with them up fails and the deploy below would rebuild nothing — then both tags, and `docker image inspect` must
+answer "no such image" for both before the deploy runs. It asserts the five `org.holosmith.*` labels on the two
+images (version, git tag, pinned pi and the binary's SHA-256 on both, compared with the artifact's own `version`
+lines and `sha256sum`; the toolchain list on the agent image only); the agent image's contents (`pi --version` is
+`pins/pi.txt`, `git --version`, each configured toolchain, `id -u` equal to the **invoking** user's — ADR-0035's
+rule, not a base image's literal — and `holosmith container snapshot --help`); the proxy image serving **both**
+proxies from one entrypoint with no bind of the host's binary in `docker inspect` (a `403` for a host off the
+allow-list, and the key proxy's own refusal for a provider path it does not know); and the same deploy again
+saying `satisfied` with both image ids unchanged. It also reads `doctor --full`'s `image` line back, which is the
+label comparison through its other caller. It needs the daemon, `python3`, and **outbound network for the first
+build** (pi and the toolchains come from two package managers), and prints one `SKIP` line without the first two
+— which `tests/images.rs` covers, apart from the network. It **keeps both images** while removing its own
+containers and scratch root — `case_server_deploy`'s online half removes the tags *it* built because that case
+asserts `changed` (ADR-0057).
 
 One rule for every case above and below: a case that must assert one code keeps every higher guard check correct,
 or it asserts another guard's code under its own name.
