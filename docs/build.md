@@ -302,8 +302,9 @@ the machine does not hold and which boot is running when it starts is not its bu
 
 …and — since HS-045 — **`doctor` itself**: `case_doctor_quick` runs the artifact's quick list three times over a
 machine it builds (a `_ping` socket it answers, two ports the kernel gives it, a data root under `target/`): once
-on a machine that passes, where it asserts the report's header, one line per check with its outcome, the two
-honest `unknown` lines this machine has (no systemd, no `tailscaled`), the free-port sentences and a tally with no
+on a machine that passes, where it asserts the report's header, one line per check with its outcome, that the
+`systemd` and `tailscale` lines each say what they measured (both are `unknown` on a machine with no systemd and
+no `tailscaled` daemon, and both are a `pass` where they are there), the free-port sentences and a tally with no
 failure; once with a `python3` listener **holding** the control port, where `ports` must fail with the sentence
 that names the holder and the exit code must be 1 (`ExecStartPre`'s whole point); and once with `docker_host` at a
 socket that cannot exist, where the `docker` line carries the sentence `serve` refuses with and every other check
@@ -334,8 +335,9 @@ recorded `schema_version` to 99 in between with `python3`'s `sqlite3`, and asser
 banner prints `schema 99`, that its one `warn` names both versions and the command that refuses
 (`doctor`), and that `GET /api/health` still answers `200` — the "serve continues so a rollback needs no
 restore" half of ADR-0047 — and then that `doctor --quick` **exits 1 with the same sentence**, the refusing
-half HS-045 built), and takes a place at the end of the array: nothing after it may assume the first boot's
-state, and a case that stops the server leaves the run with whatever boot it started.
+half HS-045 built), and takes a place near the end of the array: nothing after it may assume the first boot's
+state, and a case that stops the server leaves the run with whatever boot it started (`case_doctor_full` follows
+it as the last case, booting a Docker server of its own).
 
 **The idle stop runs for the whole `serve` phase.** `idle_stop_min = 1` is the process's setting, so
 every case from `start_serve` on has a sweeper behind it and **no case may leave a session `idle` for a

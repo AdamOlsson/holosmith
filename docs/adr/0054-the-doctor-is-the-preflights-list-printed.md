@@ -1,6 +1,7 @@
 # The doctor is the preflight's list, printed, with a depth flag
 
-HS-045 is spec item 10 §1 and §7, V2, and the CLI's `holosmith doctor [--quick or --full]` row:
+HS-045 is spec item 10 §1 and §7, V2, and the CLI's `holosmith doctor [--quick or --full]` row — the slice's
+acceptance, which is also the issue body, is:
 
 > `--quick`: Linux with systemd where applicable, Docker reachable, git ≥ 2.38, Tailscale logged in, free disk
 > ≥ `min_free_gb`, required ports free. `--full` adds: egress self-test, network-off probe, `hs_egress`/`hs_key`
@@ -77,9 +78,10 @@ has waited for `/api/health`, when `serve` holds both ports. So "in use" means t
 | `--full` | `pass` | `pass` **when the control port's `/api/health` answers 200** — the machine is serving, which is the state step 7 runs in; otherwise `fail` as above |
 
 One fact decides both port lines: `--full` asks the health endpoint once, and a held preview port is read against
-the same answer, because a machine whose control port is serving is a machine whose preview listener bound too
-(`serve` binds both or neither). Without that split, a healthy server could never pass `doctor --full` — the
-command item 10 §7 exists for would always exit 1.
+that same answer. A preview listener that failed to bind is one `warn` and the boot carries on (ADR-0051), so a
+serving machine with a free preview port is a `pass` anyway ("the port is free"); a *held* preview port on a
+machine whose control port is not answering `/api/health` is somebody else's listener and fails. Without the
+split, a healthy server could never pass `doctor --full` — the command item 10 §7 exists for would always exit 1.
 
 A `:0` listener is `pass` with a sentence saying there is nothing to hold, which is what the gate's own config
 asks for; a test holds a real port to prove the failing arm, and a real listener that answers health to prove the
@@ -98,6 +100,13 @@ yet)" was amended in the same commit, because it is no longer true.
 A missing file is `pass`, not a finding: a machine that has never served has no database, and `serve` creates one.
 A file that cannot be read is `fail` — `serve` cannot open it either, and "unknown" would hide the one thing the
 operator has to fix.
+
+**The same shape answers a data root that does not exist yet**, and that arm is what keeps the two readers
+agreeing on a fresh machine: `serve` creates the directory before its preflight (`commands/serve.rs`), while
+`doctor --quick` is item 10 §1 — which `server deploy` runs *before* step 2 creates anything. `df` on a missing
+path is an error, so answering that error as "the disk is full" would fail a fresh host on the check `serve`
+passes, with a sentence naming a fix that does not exist. There is no filesystem to measure, so `disk` is
+`unknown` there and says so.
 
 ## V2 is a trial, and the trial-merge fallback is not implemented
 

@@ -3048,10 +3048,11 @@ SQL
   grep -q 'newer release wrote' "$WORK/$name.doctor.out" ||
     fail "$name/doctor/sentence" "the refusal is not the warning's sentence: $(cat "$WORK/$name.doctor.out")"
   assertions=$((assertions + 1))
-  # One failure and no more: the schema is the case's subject, and a case whose exit code came from a full disk or
-  # somebody else's port would pass for the wrong reason.
-  line="$(grep -c '^[a-z][a-z]*: fail: ' "$WORK/$name.doctor.out" || true)"
-  check "$name/doctor/one_failure" 1 "$line"
+  # One `database` line, and it is the failure. Counting *every* failure here would let a hub whose Tailscale is
+  # logged out fail this case under the schema's name (a legitimate `fail` that is not this case's subject) — the
+  # rule that a case asserts its own guard's answer, not another's.
+  line="$(grep -c '^database: ' "$WORK/$name.doctor.out" || true)"
+  check "$name/doctor/one_database_line" 1 "$line"
   # And it is really serving: a refused boot would have exited, so a 200 here is the "continues" half of the claim.
   fetch "$name" GET /api/health "Host: 127.0.0.1" ||
     fail "$name/no_answer" "GET /api/health did not answer over a newer database"
@@ -4802,8 +4803,13 @@ case_doctor_quick() {
   esac
   line="$(grep '^tailscale: ' "$WORK/$name.out" || true)"
   case "$line" in
-    'tailscale: pass: '* | 'tailscale: unknown: '* | 'tailscale: fail: '*'tailscale up'*) assertions=$((assertions + 1)) ;;
-    *) fail "$name/tailscale" "the tailscale line names no outcome: $line" ;;
+    'tailscale: pass: '*logged-in* | \
+      'tailscale: unknown: '*did\ not\ answer* | \
+      'tailscale: unknown: '*not\ runnable* | \
+      'tailscale: fail: '*tailscale\ up*)
+      assertions=$((assertions + 1))
+      ;;
+    *) fail "$name/tailscale" "the tailscale line does not say what it measured: $line" ;;
   esac
 
   # 2. A held control port, before a start: the failure `ExecStartPre` exists for.
@@ -4880,7 +4886,7 @@ case_doctor_full() {
   local name=case_doctor_full image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
   # Two `local`s, not one: `set -u` expands `$root` before `local` assigns it (HS-038's landmine, hit again).
   local root="$repo_root/target/verify-doctor-full-$$"
-  local data="$root/data" control preview status=0 line pinned networks
+  local data="$root/data" control preview status=0 pinned networks
   if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
     printf 'SKIP %s: no Docker daemon answers (tests/doctor.rs drives the same checks over a fake machine)\n' "$name"
     return 0

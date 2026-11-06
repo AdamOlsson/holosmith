@@ -1433,8 +1433,14 @@ it rather than adding a caveat beside it.
   tree's id); the conflict is exit 1 and, after the tree's id, `<mode> <oid> <stage>\t<path>` lines. Measured on
   2.43. The trial asserts both — a shim that exits 0 for both is what a first draft's "kind of works" git did, and
   the check has to fail on it.
-- **`doctor --full`'s proxy lines pass only at item 10 §7's moment.** `serve` starts `hs_egress`/`hs_key` on every
-  Docker boot and nothing stops them, so a `--full` run against a machine that is not serving reports both as
-  failures — correctly. The gate's own case therefore boots its own Docker `serve` first, and a demo has to do the
-  same or paste a failure it did not mean. Leave the proxies of *someone else's* server alone; remove the ones
-  your own demo started by name.
+- **`doctor --full`'s proxy lines pass only at item 10 §7's moment, and "not serving" has two shapes.** `serve`
+  starts `hs_egress`/`hs_key` with `--restart unless-stopped` and nothing stops them, so a machine whose server
+  *stopped* still reads two `proxy: pass` (the containers are running), while a machine that has **never** served
+  reads two failures — correctly, because item 10 §7 runs `--full` right after a deploy. The gate's case and any
+  demo therefore boot their own Docker `serve` first, or they paste a failure they did not mean. Leave the proxies
+  of *someone else's* server alone; remove the ones your own demo started by name.
+- **`std::net::TcpListener::bind` sets `SO_REUSEADDR`, so doctor and serve agree about a TIME_WAIT port** — measured
+  for HS-045's review, which suspected the two binders differed: a std bind over a port the server had just released
+  (one connection made and closed server-side, so `(port, peer)` sat in TIME_WAIT) succeeded, and a *live* listener on
+  the same port still answered `AddrInUse`. So "in use" in `doctor`'s port check means a listener, not a leftover
+  socket, and a restart `serve` would bind is never refused.

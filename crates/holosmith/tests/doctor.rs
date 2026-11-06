@@ -460,8 +460,9 @@ fn an_old_git_fails_the_version_and_leaves_the_merge_trial_unmeasured() {
     let mut config = config(&dir, Some(format!("unix://{}", socket.display())));
     config.role = Role::Server;
     std::fs::create_dir_all(&config.data_root).expect("the data root is creatable");
-    // The shim's other answers are a *new* git's exit code, so a merge check that ran would pass: the only
-    // reason it is not measured is the version, which is what this asserts.
+    // The shim answers a new git's version but not a new git's `merge-tree` (it exits 0 for both trials), so a
+    // merge check that ran would *fail*: that it is "not measured" instead is the evidence the version is what
+    // stopped it, and the run has one failure rather than two.
     let report = doctor::run(
         &config,
         Depth::Quick,
@@ -600,6 +601,33 @@ fn a_newer_database_is_the_one_failure_that_keeps_adr_0047s_promise() {
         Some(99),
         "the doctor migrated the database it was asked to refuse"
     );
+
+    // The other two arms. A database behind this release is a *pass* — the next start migrates it, and forward-only
+    // migrations are what make that safe — and a file that is not a SQLite database at all is a failure, because
+    // `serve` cannot open it either and `unknown` would hide the one thing to fix.
+    let connection = rusqlite::Connection::open(&path).expect("the scratch database reopens");
+    connection
+        .execute("DELETE FROM schema_version", [])
+        .expect("the version rows are deletable");
+    drop(connection);
+    let report = doctor::run(&config, Depth::Quick, &tools, &FakeMachine::healthy());
+    let database = finding(&report, Check::Database);
+    assert_eq!(database.outcome, Outcome::Pass, "{}", says(database));
+    assert!(
+        says(database).contains("migrates it"),
+        "an older database does not say the next start migrates it: {}",
+        says(database)
+    );
+
+    std::fs::write(&path, "this is not a database").expect("the scratch file is writable");
+    let report = doctor::run(&config, Depth::Quick, &tools, &FakeMachine::healthy());
+    let database = finding(&report, Check::Database);
+    assert_eq!(database.outcome, Outcome::Fail, "{}", says(database));
+    assert!(
+        says(database).contains("could not be read"),
+        "{}",
+        says(database)
+    );
 }
 
 #[test]
@@ -632,6 +660,25 @@ fn a_hub_reports_no_docker_git_or_merge_finding() {
         "a hub's list failed on a check it does not have:\n{}",
         report.render()
     );
+
+    // `--full` on a hub still prints the container questions and cannot measure any of them (item 10 §6 runs step 7
+    // here too), and the sentence must name the *hub* rather than a `docker` line the report does not contain.
+    let report = doctor::run(
+        &config,
+        Depth::Full,
+        &tools(&dir, "2.37.4"),
+        &FakeMachine::healthy(),
+    );
+    for check in [Check::Network, Check::Proxy, Check::Image] {
+        let finding = finding(&report, check);
+        assert_eq!(finding.outcome, Outcome::Unknown, "{}", says(finding));
+        assert!(
+            says(finding).contains("a hub runs no sessions"),
+            "{} blames a check the report does not have: {}",
+            check,
+            says(finding)
+        );
+    }
 }
 
 #[test]

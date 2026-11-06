@@ -279,13 +279,8 @@ pub fn check_with(config: &Config, tools: &Tools) -> Vec<Complaint> {
 
 /// Every check this module answers, passed or failed, in the order they are printed.
 ///
-/// [`check`] is its ".failures()": one list, one spelling of each sentence, so `serve`'s refusal and
-/// `doctor`'s report cannot say different things about one machine (ADR-0028, ADR-0054).
-pub fn report(config: &Config) -> Vec<Finding> {
-    report_with(config, &Tools::default())
-}
-
-/// [`report`], with the two external programs named.
+/// [`check`] is its failures: one list, one spelling of each sentence, so `serve`'s refusal and `doctor`'s report
+/// cannot say different things about one machine (ADR-0028, ADR-0054).
 pub fn report_with(config: &Config, tools: &Tools) -> Vec<Finding> {
     vec![
         docker(config.docker_host.as_deref()),
@@ -507,7 +502,24 @@ fn parse_git_version(text: &str) -> Option<(u64, u64)> {
 }
 
 /// `min_free_gb` free on the data root's filesystem.
+///
+/// **A data root that is not there yet is not a disk problem**, and that arm is why `doctor` and `serve` can agree
+/// about a fresh machine: `serve` creates the directory before it asks (`commands/serve.rs`), so on `serve`'s path
+/// there is always a filesystem to measure — while `doctor --quick` is item 10 §1, which `server deploy` runs before
+/// step 2 has created anything. `df` on a missing path is an error, so answering that error as *the disk is full*
+/// would make a fresh host fail the check `serve` passes, and the sentence would name a fix that does not exist.
+/// There is no filesystem to measure, so the outcome is `unknown` and the sentence says so (ADR-0054).
 fn disk(config: &Config, df: &Path) -> Finding {
+    if !config.data_root.exists() {
+        return Finding::unknown(
+            Check::Disk,
+            format!(
+                "there is no data root at {} yet, so there is no filesystem to measure and `serve` creates one at \
+                 startup: this is not a disk problem, and `min_free_gb` is checked from the first boot on",
+                config.data_root.display()
+            ),
+        );
+    }
     let output = match Command::new(df).arg("-Pk").arg(&config.data_root).output() {
         Ok(output) if output.status.success() => output,
         Ok(output) => {
@@ -610,6 +622,29 @@ mod tests {
             Complaint::of(&Finding::unknown(Check::Tailscale, "no daemon")),
             None
         );
+    }
+
+    #[test]
+    fn a_data_root_that_is_not_there_yet_is_not_a_disk_problem() {
+        // `doctor --quick` is item 10 §1, which runs before the deploy creates anything, while `serve` creates the
+        // directory before it asks. A `df` on the missing path is an error, and answering that as "the disk is
+        // full" would make a fresh host fail the check `serve` passes (ADR-0054).
+        let config = Config {
+            data_root: std::env::temp_dir().join(format!(
+                "holosmith-no-such-data-root-{}",
+                std::process::id()
+            )),
+            ..Config::default()
+        };
+        let finding = disk(&config, Path::new("df-that-is-never-run"));
+        assert_eq!(finding.outcome, Outcome::Unknown);
+        assert!(finding.sentence.contains("serve"), "{}", finding.sentence);
+        assert!(
+            finding.sentence.contains("min_free_gb"),
+            "{}",
+            finding.sentence
+        );
+        assert!(!finding.sentence.contains("free some space"));
     }
 
     #[test]

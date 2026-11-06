@@ -78,8 +78,12 @@ fn tools(dir: &TempDir, version: &str, available_kb: u64) -> Tools {
 
 /// A config whose data root is inside `dir` and whose daemon is `docker_host`.
 fn config(dir: &TempDir, docker_host: Option<String>) -> Config {
+    let data_root = dir.path().join("data");
+    // The directory exists, because that is the state `serve` is in when it asks: it creates the data root first,
+    // and a missing one is a different finding (`doctor`'s, ADR-0054).
+    std::fs::create_dir_all(&data_root).expect("the data root is creatable");
     Config {
-        data_root: dir.path().join("data"),
+        data_root,
         docker_host,
         ..Config::default()
     }

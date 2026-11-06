@@ -686,7 +686,9 @@ _Avoid_: Revert, downgrade
 **Doctor**:
 The preflight and self-test command that decides whether a machine may run sessions: `doctor --quick` is the
 list `serve` refuses on and the unit file's `ExecStartPre`, and `doctor --full` adds the network self-test,
-the two proxies and the agent image's pi version. Its exit code is non-zero iff a **finding** failed.
+the two proxies and the agent image's pi version. Its exit code is non-zero iff a **finding** failed. Its
+machine names are `doctor::run`, `Depth`, `Tools`, `Machine` and `Report`; the network self-test keeps its own
+`selftest::Outcome`, which is the report's entry for that check and not a second vocabulary.
 _Avoid_: Healthcheck, verify
 
 **Finding**:

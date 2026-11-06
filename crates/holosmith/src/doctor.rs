@@ -170,7 +170,7 @@ impl Report {
             "doctor: {} findings: {} pass, {} fail, {} unknown",
             self.findings.len(),
             count(Outcome::Pass),
-            count(Outcome::Fail),
+            self.failures().count(),
             count(Outcome::Unknown)
         );
         text
@@ -211,10 +211,24 @@ pub fn run(config: &Config, depth: Depth, tools: &Tools, machine: &dyn Machine) 
     findings.push(database(config));
     if depth == Depth::Full {
         let image = config.agent_image.as_str();
-        findings.push(network(machine, image, docker_ok));
-        findings.push(proxy(machine, PROXY_NAME, PROXY_ALIAS, docker_ok));
-        findings.push(proxy(machine, KEY_PROXY_NAME, KEY_PROXY_ALIAS, docker_ok));
-        findings.push(image_check(machine, image, docker_ok));
+        // Why the container questions have no verdict, in the words the report can stand behind: a `hub` is not
+        // asked them at all (item 10 §6), and a server whose daemon did not answer is a different fact. Saying
+        // "the docker check above failed" on a hub would name a line the report does not have.
+        let because = if config.role == Role::Hub {
+            "a hub runs no sessions, so item 10 §6 asks it no Docker question"
+        } else {
+            "the docker check above failed"
+        };
+        findings.push(network(machine, image, docker_ok, because));
+        findings.push(proxy(machine, PROXY_NAME, PROXY_ALIAS, docker_ok, because));
+        findings.push(proxy(
+            machine,
+            KEY_PROXY_NAME,
+            KEY_PROXY_ALIAS,
+            docker_ok,
+            because,
+        ));
+        findings.push(image_check(machine, image, docker_ok, because));
     }
     Report { depth, findings }
 }
@@ -642,11 +656,14 @@ fn write(dir: &Path, name: &str, body: &str) -> Result<(), String> {
 /// network-off probe**: a container on a temporary internal network that reaches neither the internet, nor the
 /// host, nor the egress proxy's alias. The proxy-joined pass is [`selftest::pair`], a `debug`/`warn` line rather
 /// than a verdict, which is why one outcome speaks for both halves here.
-fn network(machine: &dyn Machine, image: &str, docker_ok: bool) -> Finding {
+fn network(machine: &dyn Machine, image: &str, docker_ok: bool, because: &str) -> Finding {
     if !docker_ok {
         return Finding::unknown(
             Check::Network,
-            not_measured("the isolation and the network-off probe need a container"),
+            not_measured(
+                "the isolation and the network-off probe need a container",
+                because,
+            ),
         );
     }
     match machine.selftest(image) {
@@ -661,11 +678,20 @@ fn network(machine: &dyn Machine, image: &str, docker_ok: bool) -> Finding {
 }
 
 /// Whether one of the machine's proxies is up. Read, never started: `serve`'s boot owns them (ADR-0045/0048).
-fn proxy(machine: &dyn Machine, name: &str, alias: &str, docker_ok: bool) -> Finding {
+fn proxy(
+    machine: &dyn Machine,
+    name: &str,
+    alias: &str,
+    docker_ok: bool,
+    because: &str,
+) -> Finding {
     if !docker_ok {
         return Finding::unknown(
             Check::Proxy,
-            not_measured(&format!("whether {name} is running needs the daemon")),
+            not_measured(
+                &format!("whether {name} is running needs the daemon"),
+                because,
+            ),
         );
     }
     if machine.running(name) {
@@ -688,11 +714,14 @@ fn proxy(machine: &dyn Machine, name: &str, alias: &str, docker_ok: bool) -> Fin
 ///
 /// The same two functions HS-031 asserts with at a launch — [`agent::version_of`] and [`agent::version_check`] —
 /// asked on demand, so the sentence an operator reads here is the one a session would fail with.
-fn image_check(machine: &dyn Machine, image: &str, docker_ok: bool) -> Finding {
+fn image_check(machine: &dyn Machine, image: &str, docker_ok: bool, because: &str) -> Finding {
     if !docker_ok {
         return Finding::unknown(
             Check::Image,
-            not_measured("asking the image for its pi version needs the daemon"),
+            not_measured(
+                "asking the image for its pi version needs the daemon",
+                because,
+            ),
         );
     }
     match machine.image_pi(image) {
@@ -713,12 +742,9 @@ fn image_check(machine: &dyn Machine, image: &str, docker_ok: bool) -> Finding {
     }
 }
 
-/// The one sentence a Docker-dependent check answers with when the daemon is the reason it was not asked.
-fn not_measured(what: &str) -> String {
-    format!(
-        "{what}, and the docker check above failed: this is not a verdict about the machine, and a daemon that \
-         answers `_ping` is the fix"
-    )
+/// The sentence a container-dependent check answers with when it was not asked, and why.
+fn not_measured(what: &str, because: &str) -> String {
+    format!("{what}, and {because}: this is not a verdict about the machine")
 }
 
 #[cfg(test)]
@@ -845,6 +871,56 @@ mod tests {
     }
 
     #[test]
+    fn a_port_this_machine_cannot_bind_names_the_address_and_not_a_holder() {
+        // TEST-NET-1 is not an address this machine has, so the error is not `AddrInUse` and the sentence must not
+        // tell the operator to stop a process (there is none).
+        let finding = port("192.0.2.1:9".parse().expect("an address"), "control", None);
+        assert_eq!(finding.outcome, Outcome::Fail);
+        assert!(
+            finding.sentence.contains("cannot be bound"),
+            "{}",
+            finding.sentence
+        );
+        assert!(
+            !finding.sentence.contains("ss -ltnp"),
+            "{}",
+            finding.sentence
+        );
+    }
+
+    #[test]
+    fn a_tailscale_that_cannot_be_run_is_not_measured() {
+        let missing = std::env::temp_dir().join(format!(
+            "holosmith-no-such-tailscale-{}",
+            std::process::id()
+        ));
+        let finding = tailscale(&missing);
+        assert_eq!(finding.outcome, Outcome::Unknown);
+        assert!(
+            finding.sentence.contains("not runnable"),
+            "{}",
+            finding.sentence
+        );
+    }
+
+    #[test]
+    fn a_merge_trial_that_cannot_run_is_not_a_verdict() {
+        // The scratch path is a file, so the trial cannot make its directory: "could not measure" is not "this git
+        // cannot merge" (ADR-0044's rule, one check over).
+        let blocker = std::env::temp_dir().join(format!("holosmith-doctor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&blocker);
+        std::fs::write(&blocker, "not a directory").expect("the blocker is writable");
+        let finding = merge(Path::new("git"), true);
+        let _ = std::fs::remove_file(&blocker);
+        assert_eq!(finding.outcome, Outcome::Unknown, "{}", finding.sentence);
+        assert!(
+            finding.sentence.contains("could not run"),
+            "{}",
+            finding.sentence
+        );
+    }
+
+    #[test]
     fn health_is_measured_and_not_assumed() {
         // A listener that answers `/api/health` with a 200 and one that answers nothing: the two answers the
         // `--full` moment turns on.
@@ -876,17 +952,34 @@ mod tests {
 
     #[test]
     fn a_docker_dependent_check_without_a_daemon_is_not_a_verdict() {
-        let unknown = not_measured("the isolation needs a container");
-        assert!(unknown.contains("docker check"), "{unknown}");
+        // Two different reasons, and the sentence must say the right one: a server whose daemon failed, and a hub
+        // that is asked no Docker question at all (item 10 §6) — the second used to name a line the report does not
+        // have.
+        let failed = not_measured(
+            "the isolation needs a container",
+            "the docker check above failed",
+        );
+        assert!(failed.contains("docker check"), "{failed}");
+        let hub = not_measured(
+            "the isolation needs a container",
+            "a hub runs no sessions, so item 10 §6 asks it no Docker question",
+        );
+        assert!(!hub.contains("above failed"), "{hub}");
+        assert!(hub.contains("hub"), "{hub}");
         // The reason this matters: `serve` may run a `stub` backend on a machine with no daemon, and `doctor`
         // must still print its list rather than claiming a leak.
-        let finding = network(&NoDaemon, "image", false);
+        let finding = network(&NoDaemon, "image", false, "the docker check above failed");
         assert_eq!(finding.outcome, Outcome::Unknown);
     }
 
     #[test]
     fn a_missing_image_names_the_build_and_the_key() {
-        let finding = image_check(&NoDaemon, "agent-image:test", true);
+        let finding = image_check(
+            &NoDaemon,
+            "agent-image:test",
+            true,
+            "the docker check above failed",
+        );
         assert_eq!(finding.outcome, Outcome::Fail);
         assert!(
             finding.sentence.contains("agent-image:test"),
