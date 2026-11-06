@@ -1604,6 +1604,11 @@ it rather than adding a caveat beside it.
   entrypoint cannot start — a failure that would surface as a proxy that will not run, minutes later. The
   apply compares `{{.Server.Arch}}` (`amd64`/`arm64`) with `HOLOSMITH_TARGET`'s prefix once, before the first
   build. The **read** does not ask: a dry run must remain a plan on a machine whose daemon cannot answer.
+- **The image builds are large, and `doctor`'s disk finding measures the same filesystem.** Two agent-image
+  builds, a pair of musl artifacts and a long-lived debug `target/` left this machine at 979 MB free, and
+  `case_doctor_quick` failed with `disk: fail: … has 0 GB free and min_free_gb is 1` — a true finding about the
+  machine, not a flaky case. `cargo clean` and `docker builder prune -f` freed 17 GB. Leave headroom before
+  `scripts/verify.sh`; do not "fix" the case or the floor.
 - **Breaking a Dockerfile to test the failure needs the embedded const, not a copy.** The Dockerfiles are
   `include_str!`ed, so a gate case could only corrupt a copy on disk and would prove nothing. That arm lives in
   `tests/images.rs`, drives the production `Images` path into a **test-only** tag and asserts both halves:

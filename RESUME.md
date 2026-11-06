@@ -45,201 +45,175 @@ sandbox-specific incantation (§2).
 
 ---
 
-## 1. The issue this session picks up: `PER-80` — HS-048, embedded Dockerfiles and image builds
+## 1. The issue this session picks up: `PER-81` — HS-049, service install, secrets, VAPID and Tailscale origins
 
-**State when this file was written** (the story's last commit, `53791de`, is `origin/master` and the tree is
-clean apart from the operator's own `log.txt`/`orchestrate.sh`): **52 of 80 stories Done, 28 Backlog**, all in
-project `Holosmith`. `PER-80` is `Backlog`, it is the next in `HS-###` order, and its one blocker (`HS-047`,
-`PER-79`) is `Done` — so it is eligible. Nothing in the queue is blocked on the machine (§2).
+**State when this file was written** (the story's last commit is `origin/master` and the tree is clean apart
+from the operator's own `log.txt`/`orchestrate.sh`): **53 of 80 stories Done, 27 Backlog**, all in project
+`Holosmith`. `PER-81` is `Backlog`, it is the next in `HS-###` order, and its one blocker (`HS-048`, `PER-80`)
+is `Done` — so it is eligible. Nothing in the queue is blocked on the machine (§2).
 
-The last shipped story was `PER-79` (HS-047, `holosmith server deploy` (local), ADR-0056) — the second of
-phase 2's twenty-one, and the deploy's step framework. Its gate run — the one the ship comment pasted — was
-green: **70 cases, 859 assertions**, no `SKIP` line; `cargo test` is **835 tests across 47 targets**, and
-`web/`'s runner is **52**.
+The last shipped story was `PER-80` (HS-048, embedded Dockerfiles and image builds, **ADR-0057**) — the third
+of phase 2's twenty-one. Its gate run — the one the ship comment pasted — was green: **71 cases, 896
+assertions**, no `SKIP` line; `cargo test` is **855 tests across 48 targets**, and `web/`'s runner is **52**.
 
 ### 1.1 The slice (verbatim from `docs/stories/phase-2-deployable-mvp.md`; Linear's body is the same text)
 
-> ### HS-048 — Embedded Dockerfiles and image builds
+> ### HS-049 — Service install, secrets, VAPID and Tailscale origins
 >
-> **As** the operator **I want** the images to come from the binary **so that** there is no separate artifact to
-> keep in sync.
+> **As** the operator **I want** the service to start on boot and be reachable over HTTPS **so that** the phone
+> experience exists.
 >
-> - **Size:** M · **Blocked by:** HS-047 · **Spec:** What `server deploy` does (step 3), Build and release
-> - **Demo:** a fresh host ends up with `holosmith-proxy:<version>` and `agent-image:<version>`, both pinned.
+> - **Size:** M · **Blocked by:** HS-048 · **Spec:** What `server deploy` does (steps 2, 5, 6)
+> - **Demo:** reboot the host; the app answers at the tailnet control origin and previews answer on the preview
+>   origin.
 >
 > **Acceptance**
-> - [ ] Both Dockerfiles are embedded; `holosmith-proxy:<version>` is the static binary on a minimal base and
->   serves both proxies.
-> - [ ] `agent-image:<version>` pins the pi version and base image digest, and contains git, the configured
->   toolchains, and the binary for helper subcommands.
-> - [ ] Image builds are skipped when the binary and pinned versions are unchanged.
-> - [ ] The image labels carry version, git tag and pinned pi version, so `doctor` can compare them.
-> - [ ] A build failure names the layer and does not leave a half-tagged image.
-
-`docs/stories/**` is **not edited** (§7). This is an **M** story: §5 says write the plan yourself.
+> - [ ] Creates the `holosmith` service user (in the docker group), the data directory, `/etc/holosmith/config.toml`, a 0700 secrets directory and the admin socket directory.
+> - [ ] Generates VAPID keys at first start if absent and never regenerates them.
+> - [ ] Installs and starts `holosmith.service` with `Restart=on-failure` and `ExecStartPre=holosmith doctor --quick`.
+> - [ ] Configures `tailscale serve` for the control origin on 443 and the preview origin on 8444.
+> - [ ] Ownership and modes are asserted (secrets 0700, keys file 0600); a wrong mode fails `doctor`.
+>
+> `docs/stories/**` is **not edited** (§7). This is an **M** story: §5 says write the plan yourself.
 
 ### 1.2 The spec it closes
 
-`HolosmithSpec.md`'s **"What `server deploy` does"** step 3, and its **"Build and release"** section (five
-bullets: the two musl targets with the web app embedded, `version` printing the pinned pi and `doctor` failing
-on a differing image, "an upgrade rebuilds the two images only when the binary or a pinned version changed",
-self-development building in a builder container, and the systemd-on-Linux assumption). Read both, plus the
-`Commands` row for `server deploy`.
-
-Step 3's text, which is the story's contract:
-
-> Build two images from Dockerfiles embedded in the binary: `holosmith-proxy:<version>` (the static binary on a
-> minimal base, used for both proxies) and `agent-image:<version>` (pinned pi version and base image digest,
-> git, the toolchains named in the config, and the binary for the helper subcommands).
-
-The acceptance adds the two things the step text does not say: **the labels** (version, git tag, pinned pi, so
-`doctor` can compare them) and **"a build failure names the layer and does not leave a half-tagged image"**.
+`HolosmithSpec.md`'s **"What `server deploy` does"** steps **2** (the service user, the four paths, the modes),
+**5** (the unit file and its two lines), **6** (`tailscale serve` for the two origins) and the sentence after
+the list about the health wait; the `Commands` row for `server deploy`. Nothing else in the spec is this
+story's.
 
 ### 1.3 What already exists
 
-- **Step 3's slot is ready and `skipped`.** `crates/holosmith/src/deploy.rs` runs the seven steps as a pair per
-  step (a state read and an apply), and `DeployStep::Images` currently answers `Word::Skipped` with the sentence
-  `HS-048 builds … and fills this step`. Filling it means: a `read` (are the images there, with these labels?)
-  and an `apply` (build them, bounded, naming the layer on failure). `Report`'s words (`satisfied`, `needs`,
-  `changed`, `skipped`, `failed`) and the gate's greps already expect `3. images: <word>: …`.
-- **`proxies.rs` (new in HS-047) is the reason the proxy image exists.** Today both proxy containers run *this*
-  artifact, mounted read-only from its own host path (`EgressProxy::of`/`KeyProxy::of` take `current_exe()`,
-  `container.rs`), which is why a `serve` whose binary is on a tmpfs the daemon cannot see starts no proxy. The
-  image replaces that mount. **Its one hard requirement: `hs_key` runs `openssl s_client`** for TLS to the
-  provider (`keyproxy::forward`, ADR-0048), so the "minimal base" must carry `openssl` — `FROM scratch` cannot
-  work for the proxy image, and a proxy image without openssl breaks every model call with a 502.
-- **The agent image is a config value, not a build.** `agent_image` (config key, default
-  `agent-image:<binary version>`) is what a session's container, the self-test's probe and both proxies run;
-  `doctor --full`'s `image` finding compares the image's pi with `pins/pi.txt` (`agent::version_of` → `docker run
-  --rm --network none <image> pi --version`), and `agent::version_check` does the same at launch. **`doctor` does
-  not read labels today** — the acceptance's "so `doctor` can compare them" is new work.
-- **The pinned versions**: `pins/pi.txt` (exactly one tracked copy, `tests/pin_single_source.rs` guards it),
-  `build.rs`'s git tag (`HOLOSMITH_GIT_TAG` → `git describe` → `unknown`), `version.rs`'s four-line `version`
-  output. The three label values are already in the binary: version, tag, pi — `version --json` prints them.
-- **The embed pattern to copy**: `build_support/web_embed.rs` + `include_dir!` for the web app, a placeholder
-  marker, `scripts/check-embed.sh` (three cases), and `scripts/check-static.sh`'s byte-grep of the artifact for
-  the schema SQL. A Dockerfile embedded with `include_str!` wants the same two guards: a test that the const is
-  the file's bytes, and something the gate can grep in the artifact.
-- **`scripts/build.sh`** builds both musl targets into `dist/<triple>/` (the x86_64 artifact was **5,947,864
-  bytes** in this session's build) and runs `check-static.sh` last. `docs/build.md` still documents the by-hand
-  `docker tag pi-agent:local agent-image:<version>` — **this story replaces that step**, and `case_server_deploy`'s
-  online half currently *requires* an image that exists (`${HOLOSMITH_TEST_IMAGE:-pi-agent:local}`).
-- **The machine**: the daemon answers, images pull over the network, and `pi-agent:local` exists — node 24
-  `bookworm` base, user `node` (uid 1000), `PI_CODING_AGENT_DIR=/tmp/pi-agent`, **no labels at all**, entrypoint
-  `docker-entrypoint.sh`. `git` is present in it; so is `openssl`. That image is the shape `agent-image:<version>`
-  has to match, minus the hand-built parts.
-- **No Dockerfile exists anywhere in the tree.** `find` for one returns nothing.
+- **Step 2 is half-done and says so.** `crates/holosmith/src/deploy.rs`'s `files` step creates the data
+  directory, `config.toml` from `config::render`, the 0700 secrets directory with its 0600 `keys.toml`, and
+  `/run/holosmith` (or `<root>/run/holosmith`), each through one `install`/`chmod` child that `sudo` prefixes
+  when there is no `--root`. Its line **always** ends
+  `; the service user (in the docker group) and the VAPID keys are HS-049's, and this step does not read them`
+  — that is the half this story fills, and the sentence must move with it.
+- **Steps 5, 6 and 7 are `skipped`, naming this story.** Their sentences are `deploy.rs`'s `SERVICE`,
+  `ORIGINS` and `HEALTH` constants: `Restart=on-failure`, `ExecStartPre=holosmith doctor --quick`, the control
+  origin on 443 and the preview origin on 8444, and "the service whose boot makes the `/api/health` wait and
+  `doctor --full` mean something". `OWNERS` is now the one entry `("HS-049", &[Service, Origins, Health])`, so
+  filling any of them moves the summary line (`deploy: incomplete: N of 7`).
+- **The deploy's words and seam.** A step is a read and an apply; the five words and the failure semantics are
+  ADR-0056. `Machine` is `proxies::Containers + doctor::Machine + images::Images`; the child seam is
+  `Tools { doctor, command, … }` with `sudo` prefixing driven by `Target` (`--root` absent means system paths
+  and `sudo`). `--root` prefixes every *installed* path and nothing read about the machine.
+- **`doctor` already answers the two machine facts.** `systemd` is `/run/systemd/system` (an `unknown` here),
+  and `tailscale` is `status --json`'s `BackendState` (also `unknown` here — the CLI exists at
+  `/usr/bin/tailscale`, the daemon does not). Neither is this story's to invent; HS-049 is where they become
+  prerequisites, and `doctor`'s arms are the vocabulary to reuse.
+- **What the acceptance's last bullet lacks.** `doctor` has no finding that reads a path's **owner or mode**;
+  `case_doctor_quick`/`deploy` step 2 assert modes on the paths they just wrote, but nothing *checks* a mode
+  later. That is new work, and it is the acceptance's "a wrong mode fails `doctor`".
+- **`--root` and privilege.** With no `--root`, every write is one `sudo`-prefixed child; with `--root`, the
+  same child runs unprivileged. On this machine there is **no `sudo`**, so the system-path arm can only be
+  driven over shims (`tests/deploy.rs` already does exactly that, and `tests/doctor.rs` has the same seam).
+- **The machine** (§2): no systemd, no `tailscaled`, no `sudo`, no `useradd`/`usermod` — so steps 2's user,
+  5 and 6 are **unmeasurable here**; the demo must say so plainly and the gate's case must assert what it can
+  (the rendered unit's bytes, the `tailscale serve` argv through a shim, the modes, the VAPID file's "never
+  regenerated" rule) without pretending a boot happened.
 
 ### 1.4 What does not exist
 
-No `Dockerfile`, no build code, no label convention, no `holosmith-proxy` image, no config key for the
-"toolchains named in the config", and no gate case that builds an image. `doctor`'s `image` finding reads pi
-through the container and nothing else.
+No service user creation, no VAPID key material or its home, no unit-file rendering or install, no
+`tailscale serve` invocation, no ownership/mode finding in `doctor`, and no `case_*` for any of them.
 
 ### 1.5 The decisions that shape the design
 
-1. **The Dockerfile is embedded with `include_str!` and handed to the daemon, not written to disk for the
-   operator to find.** `docker build` needs a context, and the binary is the context's payload; the two honest
-   shapes are (a) `docker build -` with a tar on **stdin** — no temporary directory, no mount-source landmine —
-   or (b) a context directory under `target/`. (a) is the stronger one and is worth measuring first; both must
-   keep the mount-source rule (the daemon resolves paths in the *host's* namespace, `docs/notes.md`).
-2. **The build is bounded and its failure names the layer.** `docker build`'s output carries the step number,
-   the instruction and the error; the step's `failed` sentence has to carry the failing *instruction* and the
-   child's own last line, not 200 lines of context. "Does not leave a half-tagged image" has to be *measured*:
-   a failed `docker build -t` leaves no image (verify), and a build that tags may need the tag applied only
-   after success.
-3. **"Skipped when the binary and pinned versions are unchanged" is a state read**, exactly like step 2's: read
-   the images' **labels** (`docker image inspect --format '{{json .Config.Labels}}'`), compare version + git tag
-   + pi, and answer `satisfied`. That is the same value `doctor` compares — one reader, one table (ADR-0028's
-   rule applied to labels).
-4. **`doctor` grows the label comparison, or the acceptance's clause is unmeasured.** Today's finding is pi
-   only. The natural extension: `image` passes when the labels are present and equal to this binary's three
-   values, and its sentence names the ones that differ — which also makes "a stale image" a *finding* rather
-   than a mystery.
-5. **"The configured toolchains" has no config key.** `Config` has 32 keys and none of them names a toolchain,
-   so the plan must choose: a new key (then `tests/golden/config-default.toml` **and** `config/schema.rs`'s
-   `KNOWN_KEYS.len()` change with it — the landmine `docs/notes.md` names) or a documented fixed set in the
-   Dockerfile. Choose one, write it in the ADR, and do not leave a sentence that says "configured" over a
-   constant.
-6. **The base image digest is a literal in the Dockerfile**, refreshed deliberately — and it must be *pinned*,
-   as the acceptance says, not a floating tag. Where the digest is recorded (`pins/`? the Dockerfile itself?)
-   is a decision: `pins/pi.txt` is the one-copy rule for pi, and a second pins file is a second single source.
-7. **aarch64.** The two musl targets exist and `qemu-aarch64-static` runs the aarch64 artifact here, but the
-   images a host builds must match the **host's** architecture (a `Dockerfile` that `COPY`s the aarch64 binary
-   into an x86_64 base is a broken image that only fails at `exec`). Say which target the build picks and how.
-8. **The gate.** `case_server_deploy`'s online half needs an `agent_image` today. After this story the honest
-   case **builds both images** — which costs a Docker build plus pi's install over the network — so the plan
-   must decide whether the gate builds (once, bounded) or asserts labels/skip against a pre-built image, and
-   what it does on a machine with no network. A case that SKIPs on the bug it exists to catch is a P1.
-9. **Every story adds a `case_*`.** The natural shape: build both images from the artifact's own step 3 (or the
-   new subcommand), assert the four labels and that both containers *run* from the proxy image (both proxies
-   serve), then run the deploy again and assert step 3 says `satisfied` with no second build, then break the
-   Dockerfile on purpose and assert the failure names the layer and leaves no image behind.
+1. **Where VAPID keys live and what writes them.** They must survive an upgrade and never be regenerated
+   (the acceptance says so twice). The secrets directory is the obvious home (`<data>/secrets/`, 0700/0600
+   next to `keys.toml`), and `key::Store` is the precedent for "write once, never overwrite" — but a VAPID
+   key pair is not a provider key and `key set` must not touch it. Decide the file(s), the format (public +
+   private, base64url), who generates (deploy step 2, or `serve` at first start — the acceptance says "at
+   first start", which is the *service's* first start, and step 7's health wait is what observes it), and how
+   "never regenerated" is *measured* (a second run leaves the bytes identical).
+2. **The service user, and the docker group.** `useradd`/`usermod` are absent from this machine, so the plan
+   must decide what the child is (`useradd --system --create-home? --groups docker`) and how the gate proves
+   the argv without the program — the `Tools` seam exists for exactly this. Also: which paths become the
+   user's (`chown`), and whether `--root` skips the user entirely (an install tree an unprivileged operator
+   owns needs no system user; the deploy's own `--root` paragraph is the precedent).
+3. **The unit file.** `holosmith.service`'s full text is the deliverable: `User=`, `Group=`, `ExecStart=`,
+   `ExecStartPre=holosmith doctor --quick`, `Restart=on-failure`, `Environment=` (the config path, the data
+   root), `WantedBy=multi-user.target`. Where it is written (`/etc/systemd/system/`), how `systemctl
+   daemon-reload` + `enable --now` are invoked (one child, bounded), and what the read `satisfied` means
+   (the unit's bytes equal what this binary would write, and the unit is enabled — `systemctl is-enabled`).
+4. **`tailscale serve`'s actual argv** (two origins, 443 and 8444) — `tailscale serve --bg` with
+   `--set-path`? `https+insecure`? The spec's words are "configure `tailscale serve` for the control origin
+   (443) and the preview origin (8444)". Read `HolosmithSpec.md`'s single-binary/phone section for the origin
+   vocabulary before deciding, and make the argv assertable through the seam.
+5. **"A wrong mode fails `doctor`."** A new finding (one check word — ADR-0028/ADR-0054 forbid a second
+   vocabulary) that reads the installed paths' uid/mode, or an extension of an existing one? The acceptance
+   names `doctor`, not the deploy, so this is a `doctor --quick` finding (it belongs on the startup refusal
+   path) — decide and write it in the ADR.
+6. **What the boot does vs what the deploy does.** VAPID "at first start" suggests `serve` generates them on
+   a boot; the deploy's step 2 then only creates the directory. Decide which one owns it and make the other
+   read it — one owner, or two writers and a lie.
+7. **`--root` and the two origins.** `tailscale serve` on a `--root` install is still the machine's Tailscale;
+   the same asymmetry the deploy already documents (installed paths are prefixed, machine facts are not).
+8. **The gate.** A `case_server_service` (or two) that owns its state, drives the real deploy with `--root`
+   and **shims** on `PATH` for `useradd`, `systemctl` and `tailscale` (the `Tools`/`PATH` pattern
+   `case_key_proxy_request` uses for `openssl`), asserting the argv, the unit's bytes, the modes and the
+   VAPID file's "identical on the second run" rule; plus `tests/deploy.rs` arms for each step's read.
+   A case that SKIPs because the machine has no systemd would skip on the thing it exists to catch — so the
+   shim is the point, not a nicety.
+9. **The modes finding's arm on this machine.** The test suite runs as uid 1000, so an owner check must be
+   written to compare against the installing user rather than a constant `holosmith`.
 
 ### 1.6 The questions the plan must answer (before code)
 
-1. **How is the Dockerfile delivered to the daemon** — a tar on `docker build -`'s stdin, or a context under
-   `target/`? Which one can the gate and `tests/` drive without a mount-source surprise?
-2. **What is the proxy image's base**, given `openssl` is required by `hs_key`? (`FROM scratch` is out; a
-   distroless/static base with openssl is the narrow answer, and it needs measuring.)
-3. **Where do the two Dockerfiles live in the tree**, and what keeps them embedded (an `include_str!` const, a
-   test that compares it with the file, and a marker the gate can grep in the artifact)?
-4. **What exactly are the label keys**, and does `doctor`'s `image` finding grow them or does a second finding
-   appear? One word per fact: the labels are the image's, `pins/pi.txt` is pi's.
-5. **Toolchains: a config key or a constant?** If a key, the golden file and the key count move with it.
-6. **How is "unchanged" decided** — labels only, or labels plus the binary's own hash? The labels are the
-   acceptance's words; a hash is a second invariant.
-7. **Does the deploy's step 3 build both images on every first run** (minutes, network), and what does it do on
-   a machine with no network? The spec's "an upgrade rebuilds only when the binary or a pinned version changed"
-   is the skip rule, and the *first* build has nothing to skip.
-8. **What are the words?** `GLOSSARY.md` has no entry for an image build or a label set; check it before
-   inventing one (a **Deploy step** exists; an image is an image).
+1. **VAPID: who generates, where, in what format — and what makes "never regenerated" measurable?**
+2. **The service user's exact child argv, and what `--root` does about it.**
+3. **The unit file's full text, byte for byte, and its read's definition of `satisfied`.**
+4. **`tailscale serve`'s argv for both origins, and how it is asserted without a daemon.**
+5. **Does the modes/ownership check become a new `Check` word, or extend `database`/`disk`?** (One word per
+   fact.)
+6. **Which of steps 2, 5, 6 stays `skipped` on this machine, and what the summary line must then say?**
+7. **What the demo can honestly claim here** (no systemd, no `tailscaled`, no `sudo`, no `useradd`), and what
+   it must hand to a real host as the by-hand procedure in `docs/build.md`.
 
 ### 1.7 Acceptance, restated as checks
 
-- *"Both Dockerfiles are embedded; `holosmith-proxy:<version>` is the static binary on a minimal base and
-  serves both proxies"* — the consts are the files' bytes (a test), the artifact greps for a marker (the gate),
-  and a container from the built image answers both `proxy egress` and `proxy key` (the case).
-- *"`agent-image:<version>` pins the pi version and base image digest, and contains git, the configured
-  toolchains, and the binary for helper subcommands"* — the built image answers `pi --version` = `pins/pi.txt`,
-  `git --version` ≥ 2.38, `holosmith container snapshot --help` and the configured toolchains, and its
-  Dockerfile carries a digest.
-- *"Image builds are skipped when the binary and pinned versions are unchanged"* — a second apply reads the
-  labels and builds nothing (assert no `docker build` child ran, or that the image id did not change).
-- *"The image labels carry version, git tag and pinned pi version, so `doctor` can compare them"* — the labels
-  are asserted from `docker image inspect`, and `doctor`'s finding passes on them and fails when one is wrong.
-- *"A build failure names the layer and does not leave a half-tagged image"* — a deliberately broken Dockerfile
-  produces a sentence naming the failing instruction, and `docker image inspect <tag>` answers "no such image".
-- Plus the usual: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`,
-  `cd web && npm test && npx tsc --noEmit`, and `scripts/verify.sh` — all green on a clean tree (§3).
+- *"Creates the service user (in the docker group), the paths and the admin directory"* — step 2's line names
+  five items; the user's child argv is asserted through the shim; `--root` skips it and says so.
+- *"Generates VAPID keys at first start if absent and never regenerates them"* — the first run writes them
+  (0600, in the secrets directory), the second leaves the bytes identical, and `doctor` reads them rather than
+  writing.
+- *"Installs and starts `holosmith.service` with the two lines"* — the unit's bytes contain `Restart=on-failure`
+  and `ExecStartPre=holosmith doctor --quick`; the enabling children are asserted; the step's read answers
+  `satisfied` on a second run.
+- *"Configures `tailscale serve` for both origins"* — the argv through the shim carries 443 and 8444 and the
+  two origins the config names; a second run reads `tailscale serve status` (through the same seam) rather
+  than re-applying.
+- *"Ownership and modes are asserted; a wrong mode fails `doctor`"* — a real `chmod` on a temp install tree
+  makes the finding fail with both values in the sentence.
+- Plus the usual gates, and the summary line's `incomplete` count dropping as steps become real.
 
 ### 1.8 Non-goals
 
-The unit file and `tailscale serve` (HS-049), `status`/`logs`/`uninstall` (HS-050), the admin socket (HS-051),
-`--ssh`/`--binary` and `hub deploy` (HS-072/073), the builder-container self-development path (HS-076), and
-`upgrade`/`rollback` (HS-078/079) — but the *skip rule* this story implements is what HS-078 depends on.
+`status`/`logs`/`uninstall` (HS-050), the admin socket itself (HS-051 — only its directory is step 2's), the
+VAPID **consumer** (HS-066's notifications), `hub deploy`, `--ssh`/`--binary` (HS-072/073), `upgrade`/
+`rollback` (HS-078/079), and the builder container (HS-076).
 
 ### 1.9 The demo
 
-On this machine: `server deploy --root target/…` reaches step 3 and builds both images (bounded); `docker image
-inspect` shows the four labels; a container from `holosmith-proxy:<version>` answers `proxy egress` and a
-session's key request; the same command again says `3. images: satisfied` and builds nothing; a deliberately
-broken Dockerfile fails the step with the failing layer named and leaves no image. Bound every child, keep every
-context under `target/`, and remove what you made by name (§2). **State plainly what was not measured**: this
-machine has no systemd and no `tailscaled`, so steps 5–6 stay `skipped`, and the deploy still ends `incomplete`
-until HS-049.
+On this machine: `server deploy --root target/…` reaches step 2 with the user and VAPID keys (asserted through
+the `Tools` shim, because there is no `useradd`), renders and installs the unit into the tree, and *reads*
+`tailscale serve status` through a stand-in binary; a second run says `satisfied` for those steps with the
+VAPID bytes unchanged; a `chmod 0644` on the installed `keys.toml` makes `doctor --quick` fail with a sentence
+naming both modes and the fix. **State plainly what was not measured**: no systemd, no `tailscaled`, no
+`sudo`, so no boot happened and the "reachable over HTTPS" half of the demo is a by-hand procedure, not a
+measurement — and the deploy still ends `incomplete` for whichever of steps 5–7 this machine cannot satisfy.
 
 ### 1.10 What the next agent needs back
 
 When you write the state back (§5, step 10): §1 becomes the **next** issue — by `PROMPT.md`'s ranking that is
-`PER-81` (HS-049, service install, secrets, VAPID and Tailscale origins, **Size M**, blocked by HS-048) *if*
-HS-048 ships, and `PER-80` again if it does not — with the same shape. Refresh the counts, the ADR number you
-took (**ADR-0057** is next unless HS-048 takes none), the last gate run's own numbers, and replace §9's row with
-this story's (short — one paragraph). Anything you learned that is **not** state and **not** an ADR goes into
-`docs/notes.md` under a new `### Landmines: …` heading, never into §1. Then kill what you started (§5, step 11).
-
----
-
+`PER-82` (HS-050, `status`/`logs`/`uninstall`) *if* HS-049 ships, and `PER-81` again if it does not — with the
+same shape. Refresh the counts, the ADR number you took (**ADR-0058** is next unless HS-049 takes none), the
+last gate run's own numbers, and replace §9's row with this story's (short — one paragraph). Anything you
+learned that is **not** state and **not** an ADR goes into `docs/notes.md` under a new `### Landmines: …`
+heading, never into §1. Then kill what you started (§5, step 11).
 ## 2. Environment (already repaired — do not redo)
 
 Everything below lives **outside the repo** and survives. If this is a fresh container, redo it exactly
@@ -271,7 +245,7 @@ export does not have `chromium` at the top level); and Chromium must be launched
 `--no-sandbox`, because its own namespace sandbox cannot nest inside ours. A third, learned in HS-020:
 **`networkidle` never settles** on the sessions list, because a live row holds an `EventSource` open —
 navigate with `domcontentloaded` and wait for the rows.
-**Available since this session: a real Docker daemon.** `docker version` shows a 29.9.2 server, `/var/run/docker.sock` exists,
+**Available since HS-024: a real Docker daemon.** `docker version` shows a 29.9.2 server, `/var/run/docker.sock` exists,
 `docker run` works and images pull over the network. `bwrap.sh` binds the host's socket at
 `/var/run/docker.sock` (`DOCKER=()` … `--bind "$sock" /var/run/docker.sock`), so a `docker` inside the
 sandbox drives the real daemon — that is host root by another name and it is granted deliberately; a
@@ -281,8 +255,11 @@ story uses**: its pi version equals `pins/pi.txt` exactly (`agent::version_check
 including network access for `alpine:3` and friends. **A preview demo needs `node` inside the container** —
 this image has it, and so must any image `agent_image` points at (HS-036 learned that the hard way: a missing
 node is exit 127, not a test failure). **A `serve` boot starts `hs_egress` and `hs_key` and they outlive
-it**, so a gate run or a demo leaves both running: remove them (`docker rm -f hs_egress hs_key`) when you
-want `tests/container.rs`'s egress-proxy test to run its *real* path, which it skips while a proxy is running.
+it**, so a gate run or a demo leaves both running: remove them (`docker rm -f hs_egress hs_key`) when you want
+`tests/container.rs`'s egress-proxy test to run its *real* path, which it skips while a proxy is running. Since
+HS-048 both proxies run `holosmith-proxy:<version>`, built by `server deploy`'s step 3, so a boot on a machine
+that has never deployed warns once and starts no proxy — and the gate's `case_server_images` is what leaves that
+image behind for every later case.
 The machine's own `egress` network must exist for that test (`docker network create egress` is the call a boot
 makes) — a cleanup removed it once and the test failed on setup at HS-043's baseline.
 
@@ -568,6 +545,14 @@ crates/holosmith/
                             `home`/`ensure_home`/`seed`/`launch_line`, `version_of`/`version_check`
                             /`version_sentence`
   templates/pi-home/settings.json  the seed's template, embedded with `include_str!` (no secrets)
+  images/{proxy,agent}.Dockerfile  the two recipes `server deploy`'s step 3 builds from (HS-048, ADR-0057),
+                            `include_str!`ed by `src/images.rs`; markers greped out of the artifact by
+                            `scripts/check-static.sh`
+  src/images.rs             the image builds (HS-048, ADR-0057): the two names, `Kind`, the five `LABEL_*`,
+                            `Expectation` (`of`/`of_digest`/`mismatches`/`unbuilt`/`build_args`), `digest`/
+                            `own_digest` (a hand-written SHA-256), `archive` (ustar with uid/gid/mtime zero),
+                            `build_arguments`, `failure`, `Status`/`read`, `architecture`, `ensure`, the
+                            `Images` seam
   src/container.rs          the session's container (HS-027/028/029, ADR-0035/0036/0037): `KeyProxy::mount` is
                             the **directory** `<data>/secrets` since HS-040 (a file mount pins the inode the store
                             renames away); `Mounts`
@@ -724,6 +709,8 @@ crates/holosmith/
                             sessions_api, events,
                             streams, provisioning, state_machine, session_list, session_screen,
                             turns, abort, steer, resume, delete, eviction, idle_stop, turn_timeout,
+                            deploy (the seven steps over shims), images (the embedded consts, the ustar, the
+                            failure sentence, and a daemon-gated build of a test tag), doctor,
                             token_budget, preflight, doctor (every check's arms over shims, a fake `Machine`,
                             a real bound port and a real health listener, a real database in each schema state,
                             and a real git for the merge trial), backend_contract, worktree, reconcile (the row half and
@@ -752,9 +739,9 @@ scripts/check-static.sh     file/readelf, empty-root serve + cmp against web/dis
 scripts/check-embed.sh      the three embed cases (present / absent warns / required fails)
 scripts/verify.sh           the one-command gate (see §3)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0055          read the recent ones before planning anything
+docs/adr/0001…0057          read the recent ones before planning anything
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-78, PER-91…PER-93, PER-97, PER-107  each a verbatim review + a `## Resolution` table
+docs/review/PER-33…PER-80, PER-91…PER-93, PER-97, PER-107  each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -987,7 +974,7 @@ three such edits have cost a review finding each.
 
 ## 7. Decisions taken on the operator's behalf (do not silently undo)
 
-Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0055`, one line each in
+Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0057`, one line each in
 `docs/stories/README.md`): read the recent ones before planning, and **amend rather than rewrite** — an ADR
 a later story changes gets a "Superseded by ADR-00xx" note (0012/0013, and 0026 amended 0020).
 
@@ -1046,19 +1033,20 @@ from those three; do not carry old sessions' ledgers in this file.
 If you stop before the issue ships, say so explicitly, name the next action, and leave the tree clean and the
 gates green — **a half-finished story is worse than an honest stop**.
 
-**The last shipped story** (`PER-79`, HS-047, ADR-0056; commits `4fc0b93`, `2fc3aa5`, `53791de`):
-`holosmith server deploy` (local), the second of phase 2 — and the framework the rest of phase 2 fills. A step is
-a **state read** and an **apply**, printed as one line `<n>. <step>: <word>: <sentence>` with five words
-(`satisfied`/`needs`/`changed`/`skipped`/`failed`); steps 3 (HS-048) and 5, 6, 7 (HS-049) are `skipped` and name
-their owner, step 2 creates the four paths and names the service user and VAPID keys it leaves to HS-049, and
-steps 1, 2 and 4 are real (`doctor --quick`'s list with `ports` downgraded because a re-run on a serving machine
-is the spec's promise; the install tree through one `install`/`chmod` child that `sudo` prefixes for the system
-paths and not for `--root`; the `egress` network plus both proxies through the recipe it shares with `serve`'s
-boot). The resume is the same command, `--dry-run` included. Its review's four P2s were all real — the worst was
-a failed *dry run* resuming as an installer, and the one a demo cannot show: `min_free_gb` was never measured on
-the first deploy because `preflight::disk` answers `unknown` for a data root that does not exist yet. Gate: **70
-cases, 859 assertions**, no `SKIP`; `cargo test` 835/47, `web` 52. Its full record is Linear,
-`docs/review/PER-79.md` and `git log`; do not carry it forward.
+**The last shipped story** (`PER-80`, HS-048, ADR-0057; commits `af074f1`, `50d151c`): the two images are
+built from Dockerfiles **embedded in the artifact**, handed to the daemon as a **tar on stdin**, so no path
+crosses into its namespace. `holosmith-proxy:<version>` is the static binary on `alpine:3` **plus openssl and CA
+certificates** (`hs_key` spawns `openssl s_client`) and both proxies now run it instead of mounting the host's
+binary; `agent-image:<version>` is `node:24-bookworm-slim` with pi at the pin, git and the new config key
+`agent_toolchains` (which moved `KNOWN_KEYS` to 33 and the golden file). Both bases are pinned by manifest-list
+digest, the apply refuses a daemon building for another architecture, and a failure names the instruction and
+the layer and says **no new image was tagged**. The skip rule is the images' **five labels** — version, git tag,
+pinned pi, the binary's **SHA-256**, and the agent's toolchain list — read by step 3 and by `doctor`'s `image`
+finding through one seam. The review's P1 was the acceptance itself: three strings are not "the binary", and
+`git describe --dirty` is the same for two builds of one dirty tree, so the digest label is what makes a rebuilt
+artifact a rebuild (its guard in `tests/deploy.rs` fails if that arm is removed). The gate run behind the ship
+note: **71 cases, 896 assertions**, no `SKIP`; `cargo test` 855/48, `web` 52. Its full record is Linear,
+`docs/review/PER-80.md` and `git log`; do not carry it forward.
 
 **One thing this build does not do, recorded rather than discovered:** a resumed session's pi has **no
 memory** of earlier turns (`--no-session`; the transcript is Holosmith's log). Replaying the log into a new pi
