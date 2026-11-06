@@ -1,4 +1,4 @@
-# RESUME — one issue per session (next: PER-73 / HS-041, the preview listener)
+# RESUME — one issue per session (next: PER-75 / HS-043, delete keeps what is worth keeping)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating procedure and
 still governs the cycle; this file is the state of the world, and it adds one rule of its own:
@@ -45,212 +45,184 @@ sandbox-specific incantation (§2).
 
 ---
 
-## 1. The issue this session picks up: `PER-73` — HS-041, preview listener (V7)
+## 1. The issue this session picks up: `PER-75` — HS-043, delete hardening and what is kept
 
-**State when this file was written** (`HEAD` = `origin/master` = the commit that last edited this section —
-`git log -1 -- RESUME.md`; tree clean apart from the operator's own `log.txt`/`orchestrate.sh`): **46 of 80
-stories Done, 34 Backlog**, all in project `Holosmith`. `PER-73` is `Backlog`, it is the next in `HS-###` order, and its only blocker (`HS-038`,
-`PER-70`) is `Done` — so it is eligible. Nothing in the queue is blocked on the machine: the daemon, the
-agent image and this build's proxies all work here (§2).
+**State when this file was written** (`HEAD` = `origin/master` = `ae80439`; tree clean apart from the operator's
+own `log.txt`/`orchestrate.sh`): **47 of 80 stories Done, 33 Backlog**, all in project `Holosmith`. `PER-75` is
+`Backlog`, it is the next in `HS-###` order, and its only blocker (`HS-042`, `PER-74`) is `Done` — so it is
+eligible. Nothing in the queue is blocked on the machine: the daemon, the agent image and this build's proxies all
+work here (§2).
 
-The last shipped story was `PER-72` (HS-040, the credential path — V3–V5 pass against a real key, and the run
-found two defects in the key proxy; ADR-0050). Eleven stories have been built against a real `docker run`,
-and the last gate run was green.
+The last shipped story was `PER-73` (HS-041, the preview listener — V7 **passes**; the listener is the binary's
+third byte tunnel; ADR-0051). Twelve stories have been built against a real `docker run`, and the last gate run was
+green: **62 cases, 650 assertions**.
 
 ### 1.1 The slice (verbatim from `docs/stories/phase-1b-docker-backend.md`; Linear's body is the same text)
 
-> ### HS-041 — Preview listener (V7)
+> ### HS-043 — Delete hardening and what is kept
 >
-> **As** the operator **I want** to open a session's dev server from my phone **so that** I can look at what
-> the agent built.
+> **As** the operator **I want** delete to keep whatever is worth keeping **so that** "delete" is not a synonym
+> for "lose".
 >
-> - **Size:** M · **Blocked by:** HS-038 · **Spec:** item 3, V7
-> - **Demo:** a stub HTTP server in a container is reachable at `http://<preview-origin>/local/<id>/` from
->   another machine, and a WebSocket through it works.
+> - **Size:** M · **Blocked by:** HS-042 · **Spec:** item 9
+> - **Demo:** delete a session with unmerged commits and an uncommitted change; the branch and the wip ref are
+>   still there and the recovery command is printed.
 >
 > **Acceptance**
-> - [ ] A second listener serves only `/<host>/<id>/*` (HTTP and WebSocket) and has no API routes at all.
-> - [ ] WebSocket upgrades check that `Origin` is the preview origin.
-> - [ ] Local sessions use the host name `local`; the route is forward-compatible with hub routing (HS-069).
-> - [ ] The session screen links to the preview URL for its origin.
-> - [ ] **V7 gate:** the host can fetch from a stub HTTP server inside a container on an internal session
->   network; if it cannot, the documented fallback is implemented — the preview proxy runs as a container on
->   the session network — and recorded.
+> - [ ] Snapshot runs before delete; failure → 409 `unsaved_work` unless `?force=true`.
+> - [ ] Branch `agent/<id>` is kept when it has commits beyond base and is not merged into a target branch.
+> - [ ] `refs/holosmith/wip/<id>` is kept when it differs from the branch.
+> - [ ] The delete response and the UI show the recovery command: `git branch rescue refs/holosmith/wip/<id>`.
+> - [ ] Worktree, session directory and network are removed; the row is deleted last.
 
 `docs/stories/**` is **not edited** (§7).
 
 ### 1.2 The spec it proves
 
-`HolosmithSpec.md` item 3, in full:
+`HolosmithSpec.md` item 9, the parts this story owns:
 
-> - The server runs a second listener, the preview listener, that serves only `/<host>/<id>/*` (HTTP and
->   WebSocket) and has no API routes. Publish it as its own origin, for example `tailscale serve
->   --https=8444`. The control UI is on 443, so an agent-written dev build can never share an origin with it.
-> - WebSocket upgrades on the preview listener check that the Origin is the preview origin.
-> - Routing for other machines: the hub's preview listener forwards `/<host>/<id>/*` to that machine's
->   preview listener over the Tailnet, including WebSocket upgrades. Local sessions use the host name
->   `local`.
-> - Residual risk: previews of different sessions share the preview origin with each other. Acceptable
->   because they are all yours.
+> - Delete flow (returns 202, state `deleting`): abort if running; snapshot; `docker stop`; `git worktree remove
+>   --force`; remove the session directory and network; delete the row. If the snapshot fails, delete returns 409
+>   `unsaved_work` unless `?force=true`.
+> - Kept in the repository: branch `agent/<id>` if it has commits beyond the base and is not merged into a target
+>   branch, and `refs/holosmith/wip/<id>` if it differs from the branch. Recover with `git branch rescue
+>   refs/holosmith/wip/<id>`.
 
-and the spec's own "to verify in the vertical slice" list names this issue's measurement in its own words:
-*"that the host can reach a container's IP on an internal network (needed for the preview). Fallback: run
-the preview proxy as a container on the session network."* V7's row in the spec's table:
-
-| V | What | Pass | Fallback | Result |
-| --- | --- | --- | --- | --- |
-| V7 | Host to container reach (item 3) | The host can fetch from a stub HTTP server inside a container on an internal session network | Run the preview proxy as a container on the session network | `not yet run (HS-041)` |
-
-The Result column is HS-040's addition; **this story fills V7's cell.** Also note what item 3 does *not*
-require: no auth on previews (the shared-origin risk is accepted in writing), no TLS (that is `tailscale
-serve` at deploy time, a phase-2 story), and no HTTP `Origin` check (only *upgrades* are named).
+Note what item 9 does **not** ask for: no fetch of the worktree's files, no bundle, no new config key (the targets
+are `[merge] targets`, which already exists), and no change to *how* a delete is requested.
 
 ### 1.3 What already exists
 
-- **The two config keys**, validated, golden-filed, banner-printed — the only preview code in the tree:
-  - `config.preview_listen: SocketAddr` (default `127.0.0.1:8081`) and `config.preview_origin: Origin`
-    (default `http://localhost:8081`) in `src/config/mod.rs`, both in `tests/golden/config-default.toml`;
-  - `preview_listen` must differ from `control_listen` and `preview_origin` from `control_origin`
-    (`preview_listen_problem` / `preview_origin_problem`), each with a `tests/serve_cli.rs` test.
-- **The banner line** `preview_listen 127.0.0.1:8081 (configured, not bound until HS-041)`
-  (`src/commands/serve.rs`). Two pinned facts come with it: `tests/serve_cli.rs` asserts **that exact
-  string**, and asserts a stub boot's banner is **exactly eight lines** at the default filter. So this story
-  rewrites that line (the port will be bound) *and* its assertion, and adds **no** ninth line — a startup
-  `info!` fails a gate test (that is why some startup facts are `debug!`).
-- **The listener shape to copy**: `serve::run` (listener + `StopSignal` + `ServeOptions` + a bounded drain,
-  ADR-0007) and the `Routes`/`App` seam (`src/http/app.rs`, `src/http/mod.rs`): one `axum::serve`, one
-  `Router::layer`, both pinned by `tests/guards.rs`. A second listener is a second `App`-shaped value, not a
-  second spelling of `axum::serve` in a handler.
-- **The container side**: `container::network_name(id)` = `agents_<id>`, created `--internal`;
-  `Docker::inspect(name, format)` is the only way to read a container's address; `Docker::running(name)`.
-  Two containerised proxies are already joined to every session network under an alias — `hs_egress` as
-  `egress-proxy` (`EgressProxy`, ADR-0045) and `hs_key` as `key-proxy` (`KeyProxy`, ADR-0048), joined by the
-  **network step**. That is the fallback's machinery, already built and already tested.
-- **A byte tunnel without a protocol library**: `src/egress.rs`'s `pump`/`pump_both` (two counted loops over
-  a split socket, `AtomicU64` byte counts) and `src/keyproxy.rs`'s `forward`. `egress.rs` is also the model
-  for "pure rules, thin tokio layer", and both are modes of this one binary (`holosmith proxy …`) — so the
-  fallback, if the measurement demands it, is a third mode, not a second program.
-- **The page**: `web/src/main.ts`'s `sessionScreen(id, session)`; anything that is a *rule* (a sentence, a
-  path, a state's affordance) belongs in `web/src/transcript.ts` and gets a `web/test/transcript.test.ts`
-  case.
+- **The whole delete flow except the keep-rules.** `DELETE /api/sessions/{id}[?force=true]`
+  (`http/sessions.rs::delete`) ends a running turn through the ladder's `end_turn` (reason `deleted`), takes the
+  snapshot, answers `409 unsaved_work` when it fails and the request did not force, applies `Trigger::Delete`, and
+  answers **202 with the row**. The removal is `Deleter::spawn` (`src/deleter.rs`, ADR-0023): revoke the session's
+  dummy key (HS-039, `key::Store::revoke`) → `backend.delete` (container, worktree, session directory, network) →
+  the row **and its event log in one transaction** → close the session's streams. `DELETED` is the ladder's word.
+- **`worktree::Worktree::remove` deletes the branch unconditionally**, and that is the one line this story changes:
+  `worktree remove --force` (when registered) → `git branch -D` (when the branch exists) → `git worktree prune`.
+  Its doc says so; `tests/worktree.rs` is where a real repository is used (`support` has `repository`/`git`/`head`/
+  `branch_exists`/`worktrees`).
+- **The two facts the keep-rule needs**: `Worktree::ahead` (a `git rev-list --count <base>..agent/<id>`) answers
+  "commits beyond the base", and `git merge-base --is-ancestor <branch> <target>` (not yet used anywhere) answers
+  "already merged". `Worktree` is sync and std-only and the backend calls it on `spawn_blocking`.
+- **The WIP ref**: `src/snapshot.rs` (HS-042, ADR-0049) writes `refs/holosmith/wip/<id>` from a temporary index,
+  **removes** it when the tree equals `HEAD`, and exposes `REF_PREFIX`/`reference(id)`. Nothing deletes it today,
+  so "kept" is already true for the ref; what is missing is the *report* and the comparison against the branch.
+- **The merge targets** are a validated config key: `[merge] targets` (default `["main", "master"]`), read by
+  nothing yet — item 12's stories (HS-054…HS-057) will be its first other reader.
+- **The page has no delete affordance at all**: `web/src/main.ts` draws the session screen and the composer, the
+  API has `DELETE`, and `case_delete_session` drives it over HTTP. The sentences live in `web/src/transcript.ts`
+  (`stoppedNotice`, `stoppedDetail`, `createFailure`), each with a `web/test/transcript.test.ts` case.
+- **The delete's own gate case** is `case_delete_session` (`scripts/verify.sh`): 202 → `deleting` → the row that is
+  gone, and `case_delete_without_the_client_header` for the guard.
 
 ### 1.4 What does not exist
 
-Nothing serves `preview_listen`. There is no route table for `/<host>/<id>/*`, no mapping from a session id
-to a container address and port, no upgrade handling, no link in `web/`, and **no V7 measurement anywhere**.
-Also relevant: `axum` is 0.8 **without its `ws` feature** and `Cargo.lock` holds no WebSocket crate, so an
-upgrade is either axum's `ws` (a feature + lock change) or the tunnel spelling above — decide, and say which
-and why.
+No keep-rule (the branch always goes), no merged-into-a-target check, no comparison of the wip ref against the
+branch, nothing on the delete response beyond the row, no recovery sentence anywhere in `web/`, **no delete button
+on any screen**, and no test that asserts a branch *survives* a delete.
 
-### 1.5 The decision that shapes the design: measure V7 first
+### 1.5 The decisions that shape the design
 
-Do the measurement **before** the design is fixed, and whatever it says, record it:
-
-1. Start a container on an `--internal` network running a stub HTTP server (the image has node; a
-   `node -e` one-liner), take its address from `docker inspect`, and ask **the host** to fetch
-   `http://<container ip>:<port>/`.
-2. If the host reaches it, the preview listener is an in-process proxy to that address and the rest of the
-   issue is small.
-3. If it does not, implement the spec's documented fallback: the preview proxy runs **as a container on the
-   session network**, the way `hs_egress`/`hs_key` do. How the *host* then reaches that container is the
-   second half of the same measurement (a published port, or the container joined to a second network as
-   well) — measure both, do not guess. ADR-0044's measured limit is the reason to be careful here: an
-   internal network's own gateway *does* answer from inside it, so "the host cannot reach in" and "the
-   container cannot reach out" are separate facts.
-4. The answer goes into an **ADR** — the next number is **ADR-0051** — and into two indexes in the same
-   commit: the ADR list in `docs/stories/README.md` (its count is **fifty** today, and its bullet list, and
-   a reviewer checks the links resolve) and, when it changes what the spec claims, the spec's V7 row.
+1. **Where the keep-rule lives.** `Worktree::remove` is the function that deletes the branch, so the rule is either
+   inside it (`remove` takes "what to keep") or in `Deleter` (which would have to run git itself, in a module that
+   has none). The precedent is ADR-0029: one `worktree.rs` value holds every host git command. Recommend: a value
+   the rule answers (`Retained { branch: bool, wip: bool }` plus the sentences/commands it implies) computed by
+   `worktree.rs` from the repository, and `remove` told what not to delete — so `tests/worktree.rs` can prove the
+   rule on a real repo without a daemon, a backend or a delete request.
+2. **"Not merged into a target branch"**. `--is-ancestor` per target, and a target that does not exist in this
+   repository is not a merge (a machine may have only `main` or only `master`; the default list names both). Say in
+   the ADR what a repository with neither does — the branch is kept, because "cannot tell" must not mean "delete".
+3. **The response's shape.** The row is the API body everywhere (ADR-0038 kept `expected_stop` off the wire for
+   that reason). The story asks for the recovery command *in the delete response*, so decide the vehicle: an
+   additive key on the 202 (recommended — it is the delete's own answer, and no other route has to carry it), or a
+   new route/field on the row. Amend the contract test in the same commit either way.
+4. **The UI half, and the button it implies.** "The delete response **and the UI** show the recovery command" cannot
+   be satisfied without an affordance: the page has no delete button today. Decide whether this story adds one (with
+   the notice) or records the gap in the ADR and leaves the button to whoever owns the screen next. The phase-1b
+   "nothing may require a UI change" sentence is a warning, not a veto: the story names the UI, so it owns it
+   (contrast ADR-0046, where no element was owed and the copy was cut).
+5. **What "kept" means for the ref when the tree equals HEAD.** `Snapshot::take` **removes** the ref in that case
+   (ADR-0049), so a delete after such a snapshot has nothing to keep and must not print a recovery command for a ref
+   that is not there. The rule is "kept when it differs from the branch", which is exactly what the snapshot's own
+   `Taken::Removed` records.
 
 ### 1.6 The questions the plan must answer
 
 Answer each with a precedent, and record the answers in the Linear plan comment before any code exists.
 
-1. **The upstream port.** The spec names no port for a container's dev server. In precedent order:
-   (a) a config key — then `tests/golden/config-default.toml`, `KNOWN_KEYS.len()` (**31** today, asserted in
-   `config/schema.rs`) and `config show`'s re-validation all move in the same commit; (b) the port from
-   `docker inspect`'s exposed ports — nothing to configure, the image or the agent decides; (c) a
-   per-session column — a schema change, the most expensive of the three. Pick one, justify it.
-2. **The path the upstream sees.** `/<host>/<id>/` is a prefix that must be stripped before forwarding, and
-   a dev server that emits absolute URLs needs its own base. Say in the ADR what is **not** rewritten, so a
-   later story does not believe it was promised.
-3. **Which requests are refused.** Item 3 requires the *upgrade's* `Origin` to equal `preview_origin`. Say
-   what a plain `GET` with a foreign `Origin` gets (item 3 does not require a check; a preview is readable
-   by anyone who can reach the port), what an unknown `host` segment answers (`404` — this build knows only
-   `local`; other names are HS-069's), and what a non-`GET`/non-upgrade method gets.
-4. **The page's link.** The session screen must link to the preview URL, so the page needs
-   `preview_origin` — and both cheap vehicles are pinned **today**: `case_app_shell` compares `GET /`
-   byte-for-byte with `web/dist/index.html`, and `GET /api/health` is exactly four keys (`health.rs`'s own
-   test *and* `tests/http_contract.rs`). Choose the vehicle, amend that pin **in the same commit** as the
-   link, and say why in the ADR. Phase 1b's "nothing may require a UI or API change" is a warning that this
-   addition is a *link and nothing else*; the story itself owns the link, so the phase sentence is not a
-   veto (contrast ADR-0046, where no element was owed and the copy was cut).
-5. **Shutdown and a bind that fails.** The second listener takes the same `StopSignal` and the same bounded
-   drain. Decide whether a preview bind that fails is a refusal (the control listener's own shape, one
-   sentence naming the fix) or a `warn` (HS-036's precedent: the control UI is the screen an operator needs
-   when something else is broken), and justify it in the ADR.
+1. **Which branch name survives, and what the base is.** The keep-rule is "commits beyond the base": the row's
+   `base_commit` is what `ahead` already uses, but a resume re-provisions and a row written by an older binary may
+   have no `base_commit`. Say which wins (`ahead`'s `base_commit.or(branch head)` rule is already written down).
+2. **What the operator is told.** One sentence naming the branch, one naming the ref and the exact recovery
+   command, and where they are shown (the 202's body and the page). The command is the spec's:
+   `git branch rescue refs/holosmith/wip/<id>`.
+3. **What a delete of a *stopped* or *error* session keeps** — the same rules, because the branch and the ref
+   outlive the container; a session that never ran has nothing ahead of its base, so it keeps nothing.
+4. **What `?force=true` does to the keep-rules**: nothing. Force forgives a failed snapshot; it does not decide what
+   is deleted from the repository.
+5. **The order in `Deleter`.** The row is deleted last (already). Where the keep-rule's answer comes from — computed
+   before the backend's teardown, because after it the worktree is gone (and `ahead` needs it) — and how a failure
+   to read the repository is reported (a `warn`, and then *keep*: never delete on an unanswered question).
 
 ### 1.7 Acceptance, restated as checks
 
-Every bullet needs something that can fail, and at least one of them is a new `case_*` in
-`scripts/verify.sh` (§3 — the rule is in bold in `docs/build.md`, and the reviewer enforces it).
+Every bullet needs something that can fail, and at least one of them is a new `case_*` in `scripts/verify.sh`
+(§3 — the rule is in bold in `docs/build.md`, and the reviewer enforces it).
 
-- *"A second listener serves only `/<host>/<id>/*` and has no API routes."* → a Rust test that drives the
-  preview app directly: a path under `/<host>/<id>/` reaches the upstream, `/api/health` and `/api/sessions`
-  on the preview port answer `404` (not the envelope), and `/` is not the app shell. Prove it by adding a
-  route and watching the test go red.
-- *"Upgrades check the `Origin`."* → a test with a hand-written upgrade: the preview origin gets the
-  upstream's answer, a foreign origin is refused with a status that is asserted *with* its code, and a
-  missing `Origin` has a stated answer.
-- *"`local` is the host name; the route is forward-compatible."* → the parse is a named function over the
-  path (host segment, id, rest), tested for `local`, an unknown host (404), a malformed id, and a prefix
-  strip; the hub (HS-069) then needs no second parser.
-- *"The session screen links to the preview URL."* → a `web/test/transcript.test.ts` case for the URL's
-  construction (a sentence/path is a rule) plus the wired link in `sessionScreen`, and a `case_*` assertion
-  that the page the artifact serves contains the link (the artifact embeds `web/dist`, §3).
-- *"V7."* → the measurement itself, performed and pasted verbatim into the Linear ship note, its Result in
-  the spec's table, and — where a machine can carry it — a `case_*` that skips properly when there is no
-  daemon (one `SKIP` line, and a skip that a deleted feature would *not* produce: a gate case that SKIPs on
-  the bug it exists to catch is this project's P1).
+- *"Snapshot before delete; failure → 409 `unsaved_work` unless forced"* — already implemented (HS-019/042);
+  the story re-asserts it and must not regress it: `tests/delete.rs` and `case_delete_session`. If the snapshot's
+  result now decides the answer, the pair (`Taken::Written` / `Taken::Removed`) is where.
+- *"Branch kept when ahead of base and not merged into a target"* — `tests/worktree.rs` on a real repository: a
+  branch with a commit ahead of `main` survives `remove`; a branch merged into `main` does not; a branch with no
+  commits beyond its base does not; a repository with only `master` (no `main`) keeps the unmerged branch.
+  Prove each by deleting the guard and watching the test go red.
+- *"`refs/holosmith/wip/<id>` kept when it differs from the branch"* — a test that takes a snapshot with an
+  uncommitted change, runs the teardown, and asserts the ref is still there (`git rev-parse`) while a snapshot whose
+  tree `equals` HEAD leaves no ref and therefore no command.
+- *"The response and the UI show the recovery command"* — an assertion on the 202's body (the exact command, with
+  the session's id) plus a `web/test/transcript.test.ts` case for the sentence/rule, plus the wired element, plus a
+  `case_*` assertion that the shipped page carries it (the artifact embeds `web/dist`, §3).
+- *"Worktree, session directory and network are removed; the row is deleted last"* — already implemented and
+  already gated (`case_delete_session`, `tests/delete.rs`); the story must keep the *order* (the row's removal is
+  the last step of `Deleter`) and prove the branch's survival does not keep the worktree.
 
 Then `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `cd web && npm test &&
-npx tsc --noEmit`, and `scripts/verify.sh` — all green on a clean tree (§3), plus the story's own demo run
-against the **shipped artifact** (§1.9).
+npx tsc --noEmit`, and `scripts/verify.sh` — all green on a clean tree (§3), plus the story's own demo run against
+the **shipped artifact** (§1.9).
 
 ### 1.8 Non-goals
 
-- **Hub forwarding** (`/<other-host>/…` → another machine over the Tailnet) is HS-069, phase 2. This issue
-  only leaves the route *shapeable* into it.
-- **No TLS, no `tailscale serve` configuration, no auth on previews.** Item 3 publishes the listener's
-  origin and accepts the shared-origin risk in writing.
-- **No dev-server lifecycle.** Starting the agent's build inside the container is the agent's job; nothing
-  here starts, watches or stops it.
-- **No change to an existing control route**, no new npm dependency, no rewriting of a preview's HTML, and
-  no `doctor` check for the preview port (HS-045).
-- **No second `axum::serve` in a handler.** The seam in `http/app.rs` is pinned by `tests/guards.rs`.
+- **Merge itself** (`merge`/`squash`/fast-forward) is HS-054 – HS-057. This story only *reads* whether a merge
+  happened.
+- **Publish** (HS-057), the **Changes view** (HS-052/HS-053), the **Changes sheet** (HS-058).
+- **No bundle, no archive, no `git gc`**: item 9 names two refs and no file.
+- **No new config key**: `[merge] targets` already exists and is validated.
+- **No expiry** of a kept branch or ref (HS-064 owns stopped-session expiry, and this story's refs are not a row).
+- **No change to how a delete is requested** (the route, the query, the 202) beyond the additive key the story owns.
 
 ### 1.9 The demo
 
-The story's demo, from the shipped artifact, on this machine's real daemon: a container on an internal
-session network running a stub HTTP server, fetched **from the host** through the preview listener at
-`http://<preview-origin>/local/<id>/`, and a WebSocket round trip through the same path. "From another
-machine" cannot be faked here — do what is honest and say what you did (a second address of this host, e.g.
-`127.0.0.1` and the bridge gateway address, with the container in neither). There is no WebSocket crate and
-the image has no `ws` package, so the WebSocket half is a hand-written handshake (`Sec-WebSocket-Key`, expect
-`101`) and one frame each way in node or `python3` — dependency-free and sufficient. Bound every background
-process, kill it by its own pid, and launch the demo from a script file, not an inline `&` chain.
+Delete a session with unmerged commits and an uncommitted change, from the shipped artifact on this machine's real
+daemon: create a session against a real project (a plain checkout, ADR-0030), let it reach `idle`, then make a
+commit on `agent/<id>` in the worktree and leave a file modified (the agent's own work is simulated — say so), call
+`DELETE`, and show: the 202's body carrying the recovery command, `git branch -a` still holding `agent/<id>`,
+`git rev-parse refs/holosmith/wip/<id>` still answering, the worktree and the session directory gone, and
+`git branch rescue refs/holosmith/wip/<id>` succeeding against the kept ref. Bound every background process, kill it
+by its own pid, **and remove every container and network the demo made in the script's trap** (§6's newest
+landmine: the last session's demo left a container behind because its trap only killed `serve`).
 
 ### 1.10 What the next agent needs back
 
 When you write the state back (§5, step 10): §1 becomes the **next** issue — by `PROMPT.md`'s ranking, that is
-`PER-75` (HS-043 — delete hardening and what is kept), then `PER-76` (HS-044), `PER-77` (HS-045) and
-`PER-78` (HS-046, the phase-1 verification run that is the gate for phase 2) — with the same shape: slice,
-spec, what exists, what does not, the decision that shapes the design, the acceptance as checks, non-goals,
-the demo. Refresh the counts, the ADR number you took and the last gate run's own numbers, and replace §9's
-row with this story's (short — one paragraph). Anything you learned that is **not** state and **not** an ADR
-goes into `docs/notes.md` under a new `### Landmines: …` heading, never into §1. Then kill what you started
-(§5, step 11) — a session that leaves a child or a container behind blocks the next one.
-
----
+`PER-76` (HS-044 — startup reconcile and crash safety, V9), then `PER-77` (HS-045 — `doctor`), `PER-78` (HS-046,
+the phase-1 verification run that is the gate for phase 2) — with the same shape: slice, spec, what exists, what
+does not, the decision that shapes the design, the acceptance as checks, non-goals, the demo. Refresh the counts,
+the ADR number you took (**ADR-0052** is next) and the last gate run's own numbers, and replace §9's row with this
+story's (short — one paragraph). Anything you learned that is **not** state and **not** an ADR goes into
+`docs/notes.md` under a new `### Landmines: …` heading, never into §1. Then kill what you started (§5, step 11) —
+a session that leaves a child or a container behind blocks the next one.
 
 ## 2. Environment (already repaired — do not redo)
 
@@ -450,7 +422,7 @@ itself runs `build-web.sh` — `npm test` then Vite — and `check-static.sh` la
 (`scripts/check-embed.sh`), then `serve` — the **shipped musl artifact** booted on `--port 0` with a temp data
 dir, running its cases plus a CORS sweep, then torn down with `SIGTERM` and an asserted exit 0. **The run
 prints its own case and assertion counts — quote those, never a number copied out of this file.** It takes
-~9 min (both musl targets, the Docker cases and `case_idle_stop`'s real minute). `--no-build` skips `build`
+~10 min (both musl targets, the Docker cases, `case_idle_stop`'s real minute and `case_preview`'s container). `--no-build` skips `build`
 and `embed`; `--keep` keeps the work dir.
 
 Some cases bring their own boot, and they are the ones a new story is most likely to collide with:
@@ -464,6 +436,7 @@ Some cases bring their own boot, and they are the ones a new story is most likel
 | `case_egress_proxy` | **no** server, daemon, internet or key: it starts the artifact as `proxy egress` on a loopback port and asks it four questions over a socket |
 | `case_schema_newer` | no daemon; boots the artifact over a schema-99 database |
 | `case_key_proxy_request` | a stand-in `openssl` on `PATH`; asserts the bytes the key proxy really sends |
+| `case_preview` | **its own boot** (stub backend, own data root, `preview_listen = "127.0.0.1:0"`) and, for its second half, the daemon and `agent_image` — it makes its own `s_<id>` container on an `--internal` `agents_<id>` and prints one `SKIP` line without them; the first half always runs and puts the shared boot back |
 
 A story is not done until the gates are green on a clean tree, and then you run the story's own demo
 yourself and paste its output.
@@ -712,9 +685,9 @@ scripts/check-static.sh     file/readelf, empty-root serve + cmp against web/dis
 scripts/check-embed.sh      the three embed cases (present / absent warns / required fails)
 scripts/verify.sh           the one-command gate (see §3)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0050          read the recent ones before planning anything
+docs/adr/0001…0051          read the recent ones before planning anything
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-72, PER-74, PER-91…PER-93, PER-97, PER-107  each a verbatim review + a `## Resolution` table
+docs/review/PER-33…PER-74, PER-91…PER-93, PER-97, PER-107  each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -754,11 +727,12 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   that snapshot is a **release step** (`scripts/schema-snapshot.sh`), not a story's, and a contract migration
   changes it in the same commit. `schema::verdict` is the sentence `serve` warns with on a newer database and
   `doctor` will refuse with (ADR-0047).
-- **What is left of the network half:** the preview listener (HS-041), the delete's keep-rules (HS-043),
-  startup reconcile (HS-044), `doctor` (HS-045), the phase-1 verification run (HS-046), merge, publish, the hub,
-  releases, the stopped-session expiry (HS-064), and any **delete affordance in `web/`** (the API has the
-  endpoint; the page has no button). The key proxy (HS-039) and its **verification** (HS-040 — V3, V4 and V5 all
-  pass, and the run found and fixed two defects) and the WIP snapshot (HS-042) are done, and the spec's
+- **What is left of the network half:** the delete's keep-rules (HS-043) — and with them the **delete affordance
+  `web/` does not have** —, startup reconcile (HS-044), `doctor` (HS-045), and the phase-1 verification run
+  (HS-046). The preview listener (HS-041) is done: the binary's third byte tunnel, `/‹host›/‹id›/*` with the
+  prefix stripped and an upgrade's `Origin` checked, and **V7 passes** (the host reaches a container on an
+  `--internal` network, measured directly and through the artifact). The key proxy (HS-039) and its
+  **verification** (HS-040 — V3, V4 and V5 pass) and the WIP snapshot (HS-042) are done, and the spec's
   verification table has a **Result** column that HS-046 finishes filling.
 - **The log is now read in two shapes and written by two producers of two kinds.** The stream replays a
   *window* (`history_window`, default 50) and says so with `history.truncated`; `GET …/events/history`
@@ -823,7 +797,7 @@ read-only and may run in parallel.
 2. **Plan.** For an **L** story, give a fresh `delegate` child a grilling brief
    (`~/.agents/skills/grilling/SKILL.md` + `domain-modeling`): it puts **one** round of questions to *you*
    via `contact_supervisor`, and you answer with `subagent_supervisor({action:"reply", …})`. For **S/M**
-   (HS-041 is M), write the plan yourself — it is faster and the analysis is usually already done. Either
+   (HS-043 is M), write the plan yourself — it is faster and the analysis is usually already done. Either
    way: state the environment facts, name the files to read, list the decisions already settled, and
    **pre-answer the obvious round-2 questions**. A planner may write only `GLOSSARY.md` and a new
    `docs/adr/*.md`.
@@ -842,8 +816,8 @@ read-only and may run in parallel.
 6. **Review** with a fresh `reviewer` child running `~/.agents/skills/code-review/SKILL.md`, read-only,
    against `<fixed point>...HEAD` plus untracked files, spec axis sourced from the Linear body + story slice
    + spec items. `git add -A` first and write `git diff --cached <fp>` to
-   `/tmp/holosmith/reviews/PER-73-diff.txt` so new files appear. **The reviewer has no shell and no write
-   tool**: check its claims, and *you* save the review verbatim to `docs/review/PER-73.md`. **Commit before
+   `/tmp/holosmith/reviews/PER-75-diff.txt` so new files appear. **The reviewer has no shell and no write
+   tool**: check its claims, and *you* save the review verbatim to `docs/review/PER-75.md`. **Commit before
    launching it** — a child reading a tree that moves under it stalls.
 7. **Fix** in the same session (or with a fresh `worker`), triaging every finding as fixed or
    dismissed-with-citation; a "won't fix" without a citation is not acceptable. Re-run the gates. Append a
@@ -899,14 +873,15 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 The catalogue lives in **`docs/notes.md`** — read the **cross-cutting** sections before you start anything,
 then the sections below. It is a reference: everything there is a measurement or a review finding.
 
-| Read | Why it bears on a preview listener |
+| Read | Why it bears on what a delete keeps |
 | --- | --- |
-| Cross-cutting: *Build and toolchain*, *Tests*, *HTTP and the envelope*, *Data and state*, *Web*, *Config and docs*, *Reviews*, *Demos* | True of every story. The demo and the gate-case rules are where preview work is most likely to go wrong. |
-| *Landmines: Docker — mounts, containers, starts* | A container name is `s_<id>`, a network's is `agents_<id>`, `docker inspect` is the only place real flags and addresses are visible, and a path the daemon cannot see is not a mount. |
-| *Landmines: the network self-test* / *the egress proxy* / *the checkbox's pair* | The internal-network and alias facts this issue measures against, including the one thing an internal network's gateway *does* answer (ADR-0044). |
-| *Landmines: the agent launch* | The data root must be host-visible, the container appears seconds after the step returns, and a killed CLI does not stop its container. |
-| *Landmines: project refusals and coalescing* / *compaction* / *history and backup* | The gate's own traps: the cap is one live session, a case that makes a session must delete it, `local a=… b="$a"` is unbound under `set -u`. |
-| `docs/notes.md` §"The transcript's contract" | Not this issue's subject, but it is the contract the next story will assume. |
+| Cross-cutting: *Build and toolchain*, *Tests*, *HTTP and the envelope*, *Data and state*, *Web*, *Config and docs*, *Reviews*, *Demos* | True of every story. The **Web** and **Demos** sections are where this one is most likely to go wrong: the page has no delete affordance today, and a demo's trap must remove its container, not only its server. |
+| *Landmines: worktrees (HS-025)* | The worktree is `‹projects›/.worktrees/‹id›`, its `.git` is a **file** pointing into the project's `.git/worktrees/‹id›`, `remove` is `worktree remove --force` then `branch -D` then `prune`, and teardown treats a missing worktree, branch or project as success — so a keep-rule must be expressed in *this* module or it will not be applied at all. |
+| *Landmines: Docker — mounts, containers, starts* | A container is `s_<id>`, a network `agents_<id>`, and a teardown detaches the proxies before `network rm` — the delete's step order is what keeps that true. |
+| *Landmines: the expected-stop flag and the exit classifier* | A delete stops a running session through the ladder and `Stopper`, and the exit it provokes must not be classified as an unexpected death (`docker rm -f` supersedes the launch first, ADR-0040). |
+| *Landmines: project refusals and coalescing* | The row's removal is one transaction that also deletes its event log, and the writer **drops** an event whose session has gone — so a delete must not be read as "the log is authoritative about what happened". |
+| *Landmines: the credential path* | The delete's first step is `key::Store::revoke`: a dummy key that spends money must stop working the moment the operator asked. |
+| *Landmines: the preview listener* | Not this issue's subject, but its last bullet is the newest and the most expensive: a demo's trap owes Docker the container and the network, and a leftover `s_*` container made the *next* gate run fail two pi-launch tests. |
 
 Three rules worth repeating here because they are the most expensive to relearn: **a test that cannot fail
 is worse than no test** (mutate the behaviour and watch it go red); **a gate case that SKIPs on the bug it
@@ -947,7 +922,7 @@ cd /home/adamolsson/projects/holosmith
 git status --short                                  # clean apart from log.txt/orchestrate.sh
 . ~/.pi/toolchains/env.sh                           # ALWAYS before cargo/rustc
 python3 /tmp/lin.py issues | grep -v ' Done ' | head # recreate /tmp/lin.py first (§2)
-python3 /tmp/lin.py issue PER-73                    # scoped, Backlog, the issue §1 names
+python3 /tmp/lin.py issue PER-75                    # scoped, Backlog, the issue §1 names
 docker version                                      # the daemon must answer, or V7 cannot be measured
 docker image inspect pi-agent:local                 # the image the Docker stories run
 scripts/verify.sh                                   # baseline green, ~9–12 min (it prints its own counts)
@@ -955,7 +930,7 @@ scripts/verify.sh                                   # baseline green, ~9–12 mi
 
 If the baseline is red before you touch anything, that is the first thing you fix — and say so in Linear.
 
-Then start §5 on **§1's issue** (`PER-73`, HS-041) and stop after step 11.
+Then start §5 on **§1's issue** (`PER-75`, HS-043) and stop after step 11.
 
 Before you begin, check that the last session left nothing behind — `subagent({action:"list"})` should show
 no run in progress, `docker ps` none of its containers, and `git status --short` should look like the line
@@ -974,12 +949,18 @@ from those three; do not carry old sessions' ledgers in this file.
 If you stop before the issue ships, say so explicitly, name the next action, and leave the tree clean and the
 gates green — **a half-finished story is worse than an honest stop**.
 
-**The last shipped story** (`PER-72`, HS-040, ADR-0050; commits `4d0340f`, `5334b7f`, `ceab154`, handoff
-`f9626f5`): V3, V4 and V5 pass against a real provider key, and the run found two defects in the key proxy,
-both fixed — `upstream` returned a `Content-Length` with no body behind it, and `hs_key` mounted
-`keys.toml` as a *file* that a temp-file-and-rename store cannot reach. Review *OK with notes*, no P1. Demo:
-15/15 claims against the shipped artifact on a real daemon. Its full record is Linear and
-`docs/review/PER-72.md`; do not carry it forward.
+**The last shipped story** (`PER-73`, HS-041, ADR-0051; commits `432c281`, `23eeed4`, `c0c18b6`, `151d8a6`,
+`8e71786`, `ae80439`): the preview listener is the binary's **third byte tunnel** —
+`src/preview.rs` + a `src/tunnel.rs` extracted from `egress.rs` — serving only `/<host>/<id>/*`, stripping the
+prefix, relaying bodies and upgrades transparently, refusing an upgrade whose `Origin` is missing or foreign
+(403), an unknown host or id (404) and a container that is not there (502), and answering the unslashed root with
+a 308 so a page's relative URLs resolve. `preview_upstream_port` is a new config key (31 → 32) and
+`HS_PREVIEW_PORT` tells the container which port to serve on; `preview_origin` is `GET /api/health`'s fifth key
+and the session screen links to `/local/<id>/` on it. **V7 passes** and is recorded in the spec's table; the
+spec's fallback is deliberately not built. Review *OK with notes*: 7 standards + 3 spec findings, no P1, nine fixed
+and one dismissed with a citation. Demo: the host fetching a container's dev server directly, through the listener,
+from a second host address, a WebSocket round trip, a foreign-origin refusal and the shipped page's link bytes.
+Its full record is Linear, `docs/review/PER-73.md` and `git log`; do not carry it forward.
 
 **One thing this build does not do, recorded rather than discovered:** a resumed session's pi has **no
 memory** of earlier turns (`--no-session`; the transcript is Holosmith's log). Replaying the log into a new pi
