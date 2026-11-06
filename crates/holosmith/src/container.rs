@@ -48,6 +48,13 @@ pub const WORKDIR: &str = "/work";
 /// The variable that tells anything inside the container which session it is (spec item 1).
 pub const SESSION_ID_ENV: &str = "HS_SESSION_ID";
 
+/// The variable that tells a session's container which port the preview listener forwards to (HS-041).
+///
+/// The machine pins the number (`preview_upstream_port`) and the listener dials it, so an agent that picked a
+/// port of its own would build something nobody can open. One `--env` closes that: the number the config names
+/// is the number the container is told to serve on.
+pub const PREVIEW_PORT_ENV: &str = "HS_PREVIEW_PORT";
+
 /// The prefix of every container name: `s_<id>` (spec item 6).
 pub const NAME_PREFIX: &str = "s_";
 
@@ -341,6 +348,10 @@ pub struct ContainerSettings {
     /// The daemon's address, as `docker -H` takes it; `None` is the CLI's own default.
     pub docker_host: Option<String>,
     pub limits: Limits,
+    /// The port a session's dev server is expected to listen on inside its container, from
+    /// `preview_upstream_port` (HS-041): the preview listener forwards `/<host>/<id>/…` to it, so the container
+    /// is told it as `HS_PREVIEW_PORT` rather than left to guess a number the listener would not forward to.
+    pub preview_port: u16,
 }
 
 impl ContainerSettings {
@@ -376,6 +387,7 @@ impl ContainerSettings {
                 memory_mb: config.container_memory_mb,
                 pids: config.container_pids,
             },
+            preview_port: config.preview_upstream_port,
         }
     }
 
@@ -409,6 +421,9 @@ pub struct SessionContainer {
     pub thinking: String,
     pub mounts: Mounts,
     pub limits: Limits,
+    /// The port the preview listener forwards to inside this container (HS-041), carried as
+    /// [`PREVIEW_PORT_ENV`].
+    pub preview_port: u16,
 }
 
 impl SessionContainer {
@@ -431,6 +446,7 @@ impl SessionContainer {
             thinking: session.thinking.clone(),
             mounts: Mounts::of(&worktree, home),
             limits: settings.limits,
+            preview_port: settings.preview_port,
         }
     }
 
@@ -471,6 +487,9 @@ impl SessionContainer {
             WORKDIR.to_string(),
             "--env".to_string(),
             format!("{SESSION_ID_ENV}={}", self.session_id),
+            // What this session's dev server is expected to listen on: the machine's one preview port.
+            "--env".to_string(),
+            format!("{PREVIEW_PORT_ENV}={}", self.preview_port),
             // The three limits: a runaway agent is bounded in CPU, memory and processes, so
             // "it cannot take the machine down" is a kernel fact rather than a hope.
             "--cpus".to_string(),
@@ -724,6 +743,7 @@ mod tests {
             image: "agent-image:0.1.0".to_string(),
             docker_host: None,
             limits: Limits::default(),
+            preview_port: 3000,
         }
     }
 
@@ -859,9 +879,10 @@ mod tests {
         );
     }
 
-    /// The five launch variables of spec item 2: the agent's directory and the four switches.
+    /// The launch variables of spec item 2 — the agent's directory and the four switches — and the one port
+    /// HS-041 adds: what the preview listener will forward to, so the container is told rather than left to guess.
     #[test]
-    fn the_launch_environment_is_the_agent_directory_and_four_switches() {
+    fn the_launch_environment_is_the_agent_directory_four_switches_and_the_preview_port() {
         let container = container();
         let arguments = container.run_args();
         let mut environment: Vec<String> = Vec::new();
@@ -874,6 +895,7 @@ mod tests {
             environment,
             [
                 "HS_SESSION_ID=0123456789abcdef".to_string(),
+                "HS_PREVIEW_PORT=3000".to_string(),
                 "PI_CODING_AGENT_DIR=/var/lib/holosmith/sessions/0123456789abcdef/pi-home"
                     .to_string(),
                 "NO_PROXY=key-proxy".to_string(),

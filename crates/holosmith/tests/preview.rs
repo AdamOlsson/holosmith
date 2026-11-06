@@ -227,21 +227,6 @@ async fn a_path_reaches_the_dev_server_with_its_prefix_stripped() {
 }
 
 #[tokio::test]
-async fn a_root_with_no_trailing_slash_is_the_dev_servers_root() {
-    let dir = TempDir::new("preview-root");
-    let (upstream, seen) = dev(Dev::Answer(
-        "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
-    ))
-    .await;
-    let (listening, id) = Listening::start(&dir, Ok(upstream)).await;
-    let response = get(listening.address, &format!("/local/{id}"), &[]).await;
-    assert_eq!(response.status, 200);
-    let seen = seen.lock().expect("the record is not poisoned").clone();
-    assert!(seen[0].starts_with("GET / HTTP/1.1\r\n"), "{:?}", seen[0]);
-    listening.finish().await;
-}
-
-#[tokio::test]
 async fn a_body_that_arrived_with_the_head_still_reaches_the_dev_server() {
     let dir = TempDir::new("preview-body");
     let (upstream, seen) = dev(Dev::Answer(
@@ -483,6 +468,36 @@ async fn an_upgrade_with_no_origin_is_refused() {
         response.body
     );
     assert!(seen.lock().expect("the record is not poisoned").is_empty());
+    listening.finish().await;
+}
+
+#[tokio::test]
+async fn a_slashless_path_is_redirected_to_the_slashed_one() {
+    // A page served from `/local/<id>` has that as its base URL, so its relative `./assets/x.js` would resolve
+    // to `/local/assets/x.js` — a different host segment, and a 404. The browser is sent to the slashed path,
+    // which is also the one the session screen links to. An upgrade is not a page and is not redirected.
+    let dir = TempDir::new("preview-slash");
+    let (upstream, seen) = dev(Dev::Answer(
+        "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
+    ))
+    .await;
+    let (listening, id) = Listening::start(&dir, Ok(upstream)).await;
+    let response = get(listening.address, &format!("/local/{id}"), &[]).await;
+    assert_eq!(response.status, 308);
+    assert_eq!(response.header("location"), Some(&*format!("/local/{id}/")));
+    assert!(
+        seen.lock().expect("the record is not poisoned").is_empty(),
+        "a redirected path reached the dev server"
+    );
+    // The slashed path is served, and the query survives the redirect.
+    let response = get(listening.address, &format!("/local/{id}/?x=1"), &[]).await;
+    assert_eq!(response.status, 200);
+    let seen = seen.lock().expect("the record is not poisoned").clone();
+    assert!(
+        seen[0].starts_with("GET /?x=1 HTTP/1.1\r\n"),
+        "{:?}",
+        seen[0]
+    );
     listening.finish().await;
 }
 

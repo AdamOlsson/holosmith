@@ -74,6 +74,14 @@ pub struct Route {
     pub id: String,
     /// Everything after the id, as the upstream sees it: `/`, `/index.html`, `/api/x?y=1`.
     pub rest: String,
+    /// Whether the client named the session's **root** without its trailing slash: `/local/<id>` but not
+    /// `/local/<id>/` and not `/local/<id>/anything`.
+    ///
+    /// Both spellings reach the upstream as `/`, but a **page** served from the unslashed one has
+    /// `/local/<id>` as its base URL, so its relative `./assets/x.js` resolves to `/local/assets/x.js` — a
+    /// different host segment, and a 404. Only that shape is redirected, and only a browser is: an upgrade
+    /// is not a page.
+    pub slashless_root: bool,
 }
 
 impl Route {
@@ -103,7 +111,7 @@ impl Route {
         if host != HOST {
             return Err(Refusal::UnknownHost(host.to_string()));
         }
-        if !is_session_id(id) {
+        if !crate::sessions::is_id(id) {
             return Err(Refusal::UnknownSession(id.to_string()));
         }
         let tail = segments.next().unwrap_or("");
@@ -116,6 +124,7 @@ impl Route {
             host: host.to_string(),
             id: id.to_string(),
             rest,
+            slashless_root: tail.is_empty() && !path.ends_with('/'),
         })
     }
 
@@ -123,16 +132,16 @@ impl Route {
     pub fn path(id: &str) -> String {
         format!("/{HOST}/{id}/")
     }
-}
 
-/// Whether `id` has the shape a session id has: sixteen lowercase hexadecimal characters (ADR-0011).
-///
-/// Checked before the database is asked, so a segment that cannot be an id never becomes a query.
-pub fn is_session_id(id: &str) -> bool {
-    id.len() == 16
-        && id
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    /// The slashed path this route would be at, keeping the query: where a slashless request is sent.
+    pub fn slashed_path(&self) -> String {
+        let mut target = format!("/{}/{}/", self.host, self.id);
+        if let Some((_, query)) = self.rest.split_once('?') {
+            target.push('?');
+            target.push_str(query);
+        }
+        target
+    }
 }
 
 /// What this listener answers a request it will not proxy, and why.
@@ -167,66 +176,87 @@ pub enum Refusal {
 }
 
 impl Refusal {
+    /// The status, the code and the sentence, from **one** match.
+    ///
+    /// One rather than three, for the reason the control listener keeps one constructor (`ApiError::new`,
+    /// ADR-0008): a new variant is then one edit, and there is no way for a variant to have a status and no
+    /// sentence. The two accessors below are what a caller reads out of this.
+    fn parts(&self) -> (u16, &'static str, String) {
+        match self {
+            Self::NotAPath { path } => (
+                // "Not Found" for a path, a host or a session: the three are one answer to a browser ("there is
+                // nothing here") and three sentences to a reader.
+                404,
+                "preview_not_a_path",
+                format!(
+                    "{path} is not a preview path: this listener serves /{HOST}/<session>/<path> only"
+                ),
+            ),
+            // One sentence for both readers: `/api/health` is `/<host>/<id>` to this listener, so a control API
+            // path lands here too, and claiming `api` is a machine would be a sentence that is wrong about the
+            // thing it names. What is true either way is where previews live and where another machine's do.
+            Self::UnknownHost(host) => (
+                404,
+                "preview_unknown_host",
+                format!(
+                    "this machine serves its own sessions as /{HOST}/<session>/<path>, so /{host}/ is not a \
+                     preview it serves; another machine's sessions are the hub's, which forwards them"
+                ),
+            ),
+            Self::UnknownSession(id) => (
+                404,
+                "preview_unknown_session",
+                format!("no session is called {id}"),
+            ),
+            Self::NoContainer { id, detail } => (
+                502,
+                "preview_no_container",
+                format!("session {id} has no running container, so it has no dev server: {detail}"),
+            ),
+            Self::Unreachable {
+                id,
+                address,
+                detail,
+            } => (
+                502,
+                "preview_unreachable",
+                format!("session {id} answered nothing at {address}: {detail}"),
+            ),
+            Self::Unreadable { detail } => (
+                500,
+                "preview_unreadable",
+                format!("the session could not be read: {detail}"),
+            ),
+            Self::ForeignOrigin { expected, sent } => (
+                403,
+                "preview_foreign_origin",
+                match sent {
+                    Some(sent) => format!(
+                        "a WebSocket upgrade must carry the preview origin, which is {expected}, not {sent}"
+                    ),
+                    None => format!(
+                        "a WebSocket upgrade must carry the preview origin, {expected}, and this one carried \
+                         none"
+                    ),
+                },
+            ),
+        }
+    }
+
     /// The status line this refusal answers with.
     pub fn status(&self) -> u16 {
-        match self {
-            // "Not Found" for a path, a host or a session, because the listener serves none of them: the
-            // three are one answer to a browser ("there is nothing here") and three sentences to a reader.
-            Self::NotAPath { .. } | Self::UnknownHost(_) | Self::UnknownSession(_) => 404,
-            Self::NoContainer { .. } | Self::Unreachable { .. } => 502,
-            Self::Unreadable { .. } => 500,
-            Self::ForeignOrigin { .. } => 403,
-        }
+        self.parts().0
     }
 
     /// The word a log line or a test names this refusal by. Not part of any body: nothing on this listener
     /// emits ADR-0008's envelope.
     pub fn code(&self) -> &'static str {
-        match self {
-            Self::NotAPath { .. } => "preview_not_a_path",
-            Self::UnknownHost(_) => "preview_unknown_host",
-            Self::UnknownSession(_) => "preview_unknown_session",
-            Self::NoContainer { .. } => "preview_no_container",
-            Self::Unreachable { .. } => "preview_unreachable",
-            Self::Unreadable { .. } => "preview_unreadable",
-            Self::ForeignOrigin { .. } => "preview_foreign_origin",
-        }
+        self.parts().1
     }
 
     /// The one sentence the browser reads, which names the fix where there is one.
     pub fn sentence(&self) -> String {
-        match self {
-            Self::NotAPath { path } => format!(
-                "{path} is not a preview path: this listener serves /{HOST}/<session>/<path> only"
-            ),
-            // One sentence for both readers: `/api/health` is `/<host>/<id>` to this listener, so a control API
-            // path lands here too, and claiming `api` is a machine would be a sentence that is wrong about the
-            // thing it names. What is true either way is where previews live and where another machine's do.
-            Self::UnknownHost(host) => format!(
-                "this machine serves its own sessions as /{HOST}/<session>/<path>, so /{host}/ is not a preview \
-                 it serves; another machine's sessions are the hub's, which forwards them"
-            ),
-            Self::UnknownSession(id) => format!("no session is called {id}"),
-            Self::NoContainer { id, detail } => {
-                format!("session {id} has no running container, so it has no dev server: {detail}")
-            }
-            Self::Unreachable {
-                id,
-                address,
-                detail,
-            } => format!("session {id} answered nothing at {address}: {detail}"),
-            Self::Unreadable { detail } => {
-                format!("the session could not be read: {detail}")
-            }
-            Self::ForeignOrigin { expected, sent } => match sent {
-                Some(sent) => format!(
-                    "a WebSocket upgrade must carry the preview origin, which is {expected}, not {sent}"
-                ),
-                None => format!(
-                    "a WebSocket upgrade must carry the preview origin, {expected}, and this one carried none"
-                ),
-            },
-        }
+        self.parts().2
     }
 }
 
@@ -602,6 +632,20 @@ pub async fn handle(mut stream: TcpStream, context: &Context) {
             return;
         }
     };
+    // A page asked for without its trailing slash is sent to the slashed path, because that is the base URL its
+    // own relative URLs resolve against (`Route::slashed`). An upgrade is not a page, so it is left alone: a
+    // redirected handshake is not a handshake.
+    if route.slashless_root && !parsed.upgrade {
+        let target = route.slashed_path();
+        let _ = redirect(&mut stream, &target).await;
+        tracing::debug!(
+            target: "holosmith::preview",
+            path = %parsed.target,
+            location = %target,
+            "preview redirected to its slashed path"
+        );
+        return;
+    }
     // Item 3's one rule, checked before anything is asked of the machine: an upgrade from anywhere but the
     // preview origin never reaches a dev server.
     if parsed.upgrade && !context.from_preview_origin(parsed.origin.as_deref()) {
@@ -711,6 +755,19 @@ async fn refuse(stream: &mut TcpStream, refusal: &Refusal, head: &Head) {
 
 /// The one sentence both 400 paths answer, so they cannot drift apart.
 const NOT_A_HEAD: &str = "this listener reads one HTTP/1.1 request, and what arrived was not one";
+
+/// The one redirect this listener makes: a page asked for without its trailing slash.
+///
+/// `308` rather than `301`/`302`, because the method and the body must survive it: `/local/<id>` and
+/// `/local/<id>/` are the same resource, and a dev server's form post deserves the same answer a `GET` gets.
+async fn redirect(stream: &mut TcpStream, location: &str) -> std::io::Result<()> {
+    let head = format!(
+        "HTTP/1.1 308 Permanent Redirect\r\nLocation: {location}\r\nContent-Length: 0\r\n\
+         Connection: close\r\n\r\n"
+    );
+    stream.write_all(head.as_bytes()).await?;
+    stream.flush().await
+}
 
 /// One plain-text answer, for every status that is not a proxied exchange.
 async fn respond(stream: &mut TcpStream, status: u16, sentence: &str) -> std::io::Result<()> {
@@ -922,6 +979,28 @@ mod tests {
         let (head, rest) = split_head("GET /x HTTP/1.1\r\n\r\n");
         assert_eq!(head, "GET /x HTTP/1.1\r\n\r\n");
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn only_the_slashless_root_is_redirected_and_the_query_survives() {
+        let route = Route::strip("/local/0123456789abcdef").expect("a preview path");
+        assert!(route.slashless_root);
+        assert_eq!(route.slashed_path(), format!("/local/{ID}/"));
+        let route = Route::strip("/local/0123456789abcdef?x=1").expect("a preview path");
+        assert!(route.slashless_root);
+        assert_eq!(route.slashed_path(), format!("/local/{ID}/?x=1"));
+        // A path that already ends in the slash is not redirected, and neither is one deeper than the root: only
+        // the session's own root has a base URL a browser would resolve its relative URLs against.
+        for path in [
+            "/local/0123456789abcdef/",
+            "/local/0123456789abcdef/a/b",
+            "/local/0123456789abcdef/a/",
+        ] {
+            assert!(
+                !Route::strip(path).expect(path).slashless_root,
+                "{path} must not be redirected"
+            );
+        }
     }
 
     #[test]

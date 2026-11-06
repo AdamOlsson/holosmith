@@ -77,6 +77,18 @@ impl Serialize for Status {
     }
 }
 
+/// Whether `id` has the shape a session id has: sixteen lowercase hexadecimal characters (ADR-0011).
+///
+/// One home, because more than one place asks the same question about a string that came from somewhere else —
+/// the preview listener's path (HS-041), `container snapshot`'s `HS_SESSION_ID`, and anything that must decide
+/// "could this be a row" before it reads one. A second copy would be a second answer to "what is an id".
+pub fn is_id(id: &str) -> bool {
+    id.len() == 16
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
 /// One `sessions` row. `PartialEq` is what makes "reads back identically" an assertion rather
 /// than a field-by-field ceremony.
 ///

@@ -93,12 +93,16 @@ naming the path and `scripts/build.sh`.
 The boot is `serve --config <work>/config.toml --port 0 --data-dir <work>/data`. `--port 0`
 asks the kernel for the port and is also what makes `serve` re-derive `control_origin` from
 the bound address (ADR-0007), so the case for a request that passes the guards sends exactly
-the origin the guard compares; `control_listen` and `control_origin` are both read from the
-startup banner, never assumed. The data root is inside the work dir, so a run never touches
+the origin the guard compares; `control_listen`, `control_origin` and — since HS-041 — the
+**preview listener's** bound address are all read from the startup banner, never assumed, because
+the config asks the kernel for that port too (`preview_listen = "127.0.0.1:0"`) so that a boot of a
+case's own and this one cannot collide over `8081`. A boot whose preview could not bind is a `warn`
+and the banner says so, so `start_serve` fails rather than pretending: the case that exercises the
+listener needs it. The data root is inside the work dir, so a run never touches
 `/var/lib/holosmith` (ADR-0009), and the config file carries `owner`, `max_live_sessions = 1`,
-`backend = "stub"`, `idle_stop_min = 1` and `turn_timeout_min = 1`: the `bad_owner` case, the create
-cases, provisioning, the idle stop and the turn timeout's quiet half are the only reasons that file
-exists. Some cases bring a boot of their own, because the setting they need must not be process-wide.
+`backend = "stub"`, `idle_stop_min = 1`, `turn_timeout_min = 1` and `preview_listen`: the
+`bad_owner` case, the create cases, provisioning, the idle stop, the turn timeout's quiet half and
+the preview case are the only reasons that file exists. Some cases bring a boot of their own, because the setting they need must not be process-wide.
 `case_token_budget` stops the server and starts the same artifact with `config-budget.toml` and
 `data-budget/`, because `max_session_tokens` is process-wide and every other case prompts a session of
 its own — with a ceiling under the stub's per-turn spend, a dozen assertions would be reading the budget
@@ -258,7 +262,19 @@ are node's `net.connect`, the same script shape the self-test's probe uses. The 
 container shows: the proxy is detached, the container is killed (the row's `unexpected_exit` lands it in `error`),
 `POST /resume` brings it back, and the network's **endpoint count** is 1 for the off session and 2 for the on one —
 detaching first is what makes that a rejoin rather than an inheritance, and a wrong flag cannot survive it; see
-ADR-0046).
+ADR-0046); and — since HS-041 — the **preview listener** (`case_preview`, which is two halves. The first needs
+no daemon: on its own boot it asks the preview port for `/api/health`, `/api/sessions` and `/`, which must answer
+`404` with a sentence rather than ADR-0008's envelope, for another machine's host name and for a well-formed id no
+row holds, which must answer `404`, for an upgrade carrying a foreign `Origin` and one carrying none, which must
+answer `403`, and it greps the shipped page's own script asset for the bytes the session screen's link is made of.
+The second half is V7: it starts a container on an `--internal` `agents_<id>` named `s_<id>` the way the convention
+names a session's container, asks the **host** directly first — so a failure says which half is wrong — then fetches
+`/local/<id>/` through the shipped artifact, and does a WebSocket round trip with a hand-written handshake in
+`python3` against a hand-written echo in the container's `node` (this build has no WebSocket crate and the image has
+no `ws` package, which is exactly why the listener is a byte tunnel; ADR-0051). It needs the daemon **and** the
+image and prints one `SKIP` line without them — the bug it exists to catch fails the first half, so a skip for "no
+daemon" is not that bug. It boots a `stub` backend of its own, because a create on a Docker boot refuses a project
+the machine does not hold and which boot is running when it starts is not its business).
 
 One rule for every case above and below: a case that must assert one code keeps every higher guard check correct,
 or it asserts another guard's code under its own name.

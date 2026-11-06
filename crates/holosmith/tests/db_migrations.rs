@@ -267,7 +267,7 @@ fn start_serve(dir: &TempDir, name: &str, data_root: &Path) -> (std::process::Ch
     fs::write(
         &config,
         format!(
-            "control_listen = \"127.0.0.1:0\"\npreview_listen = \"127.0.0.1:8081\"\n\
+            "control_listen = \"127.0.0.1:0\"\npreview_listen = \"127.0.0.1:0\"\n\
              data_root = \"{}\"\n",
             data_root.display()
         ),

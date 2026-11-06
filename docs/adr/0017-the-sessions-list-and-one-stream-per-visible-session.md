@@ -23,7 +23,8 @@ that can drift from the columns, and the create's answer is already the same row
 client therefore decodes one thing whether a session arrived from the list or from a 202.
 
 `network_default` rides here rather than on `/api/health` because the health payload is pinned at
-four keys (ADR-0009's banner rule and HS-003's payload test) and because the screen needs both
+four keys (ADR-0009's banner rule and HS-003's payload test; **amended by ADR-0051**, which makes it five by adding
+`preview_origin`, the one setting a screen needs on a phone and the only vehicle that costs no new request) and because the screen needs both
 answers to draw itself. One round trip, no new endpoint. The alternative — a `GET /api/config` that
 the browser could read a single boolean out of — hands the browser the machine's whole configuration
 and owns a disclosure question far larger than the checkbox needs; if a later story wants more than
@@ -148,7 +149,10 @@ real.
   from a foreign `Host` before the list is read, and `GET /api/sessions` recorded `ReadOnly` while
   `POST` on the same path stays mutating.
 - The health payload keeps its four keys. A later story that needs a second machine setting on the
-  screen extends the list object or argues for the config endpoint here.
+  screen extends the list object or argues for the config endpoint here. **Amended by ADR-0051:** it
+  is five, and the fifth is `preview_origin` — the session screen's preview link needs the origin, and
+  the page already fetches health before it draws, so the alternative (a `GET /api/config`) would own
+  the disclosure question this paragraph declines to open.
 - The screen stays one column, `max-width: 32rem`, with 44 px controls, and adds no dependency: the
   shell is still Vite and TypeScript, `EventSource`, `crypto.randomUUID` and `fetch` are the
   platform, and no framework, router or state library arrives with the first list.

@@ -123,6 +123,7 @@ impl Scratch {
             image: image.to_string(),
             docker_host: None,
             limits: Limits::default(),
+            preview_port: 3000,
         }
     }
 }

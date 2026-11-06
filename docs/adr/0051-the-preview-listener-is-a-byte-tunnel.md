@@ -53,10 +53,15 @@ enum and attributes a broken connection to the right listener.
 ## The port is a config key, because nothing else knows it
 
 `docker image inspect pi-agent:local --format '{{json .Config.ExposedPorts}}'` answers `null`: the agent image
-declares no exposed port, so "read the port from the container" has nothing to read, and the agent chooses its own
-dev-server port at run time. The three candidates were a key, the image's exposed ports, and a per-session column.
-The key won: the ports option is empty (measured), and a column is a schema change for a value no row knows better
-than the operator.
+declares no exposed port, so "read the port from the container" has nothing to read — and an agent left to pick its
+own dev-server port would build something the listener never dials. The three candidates were a key, the image's
+exposed ports, and a per-session column. The key won: the ports option is empty (measured), and a column is a
+schema change for a value no row knows better than the operator.
+
+The key is only half of it, so the same commit closes the other half: a session's container is told the port as
+`HS_PREVIEW_PORT` (`container::PREVIEW_PORT_ENV`), next to `HS_SESSION_ID`. A number the machine pins and the
+container is never told is a preview nobody can open, and which port an agent should serve on is the machine's
+decision — it is the one the listener forwards to.
 
 `preview_upstream_port` (default `3000`, refuses `0`) is **one key for every session**, because each container has
 its own network namespace — two sessions may both listen on 3000 inside their own container without touching each
@@ -109,8 +114,11 @@ A preview bind that fails is **one `warn`, and the boot continues**: the control
 needs when something else on the machine already holds that port (HS-036's rule), and `config` already refuses
 `preview_listen == control_listen`, which is the collision that is a mistake rather than an accident. The banner
 line says it in as many words — `preview_listen unavailable (<addr>: <reason>)` — so the line can never claim a
-listener this run does not have, and the eight-line startup contract is still eight lines (a `warn` is a tracing
-line, not a banner line).
+listener this run does not have. **The banner is still eight lines**; stderr is eight lines plus that one `warn`,
+because a `warn` at the default filter is a tracing line and not a banner line — which is why
+`a_preview_port_that_is_taken_is_a_warning_and_the_control_listener_still_serves` counts the banner's lines by
+excluding the `warn` it is there to assert. A healthy boot's stderr is still exactly eight, which is the pin
+`the_startup_lines_are_exact_and_name_the_bound_port` holds.
 
 `preview_listen_problem` gained one clause to make `127.0.0.1:0` usable for both listeners: a port of `0` is the
 kernel's to choose, so two of them are not a collision. The rule is about sharing a port, not about sharing a

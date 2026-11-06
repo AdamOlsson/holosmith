@@ -654,7 +654,7 @@ it rather than adding a caveat beside it.
 
 - **Config output** uses `# <key> unset` rather than omitting an unset optional, and `config show` output
   must re-validate clean. `tests/golden/config-default.toml` pins the exact output, so **a new config
-  key means updating the golden file and `KNOWN_KEYS.len()`** (thirty-one today, asserted in
+  key means updating the golden file and `KNOWN_KEYS.len()`** (thirty-two today, asserted in
   `config/schema.rs`).
 - **`docs/build.md` is a story deliverable, not orchestrator-only.** If a story changes prerequisites or
   gates, the doc is in scope, and its prose must be reflowed (~100 columns), not just appended to.
@@ -1292,6 +1292,10 @@ it rather than adding a caveat beside it.
   asks the host *directly* first so a failure says which half is wrong. Its WebSocket half is a hand-written
   handshake in `python3` and a hand-written echo in the container's `node -e`: the image has no `ws` package and
   this build has no WebSocket crate, and that is exactly why a byte tunnel is the right shape.
+- **The container is told the preview port (`HS_PREVIEW_PORT`), and that is the half people forget.** The config
+  pins one number (`preview_upstream_port`), the listener dials it, and `container::run_args` passes it in beside
+  `HS_SESSION_ID` — a pinned port the container was never told is a preview nobody can open. An agent that picks a
+  port of its own builds something no one can look at.
 - **`preview_origin` is the published origin, never the bound port.** `--port 0` re-derives `control_origin` because
   the flag asked the kernel for a port; nothing does that for the preview, because the origin is the name a phone
   browses (`tailscale serve --https=8444` maps to it). A case that binds `127.0.0.1:0` and sends `Origin:

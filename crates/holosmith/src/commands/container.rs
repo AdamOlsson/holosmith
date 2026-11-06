@@ -9,13 +9,10 @@ use std::process::ExitCode;
 
 use crate::snapshot;
 
-/// A session id as the database makes it: sixteen lowercase hexadecimal characters. The id is joined into a
-/// temporary path, so the check is the same rule `tool::valid_id` enforces for a filename one segment down.
+/// A session id as the database makes it. The id is joined into a temporary path, so the rule is
+/// [`crate::sessions::is_id`]'s — the one home for "what is a session id" (HS-041).
 fn valid_id(id: &str) -> bool {
-    id.len() == 16
-        && id
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    crate::sessions::is_id(id)
 }
 
 pub fn run_snapshot() -> ExitCode {

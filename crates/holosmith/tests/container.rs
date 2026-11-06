@@ -205,6 +205,7 @@ fn settings(projects_root: &Path) -> ContainerSettings {
         image: image(),
         docker_host: None,
         limits: Limits::default(),
+        preview_port: 3000,
     }
 }
 
@@ -455,6 +456,7 @@ fn the_container_step_runs_a_limited_container_with_no_way_out() {
         image: image(),
         docker_host: None,
         limits: TEST_LIMITS,
+        preview_port: 3000,
     };
     let backend = DockerBackend::new(settings.clone());
     let docker = settings.docker();

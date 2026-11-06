@@ -972,7 +972,7 @@ case_docker_turn() {
   rm -rf "$root"
 }
 
-# The health payload: exactly four keys, and the uptime is not predictable, so the assertion is
+# The health payload: exactly five keys, and the uptime is not predictable, so the assertion is
 # the prefix and the closing brace (the shape tests/http_contract.rs uses).
 case_health() {
   local name=case_health response content_type body expected
@@ -2390,7 +2390,9 @@ case_preview() {
     start_serve
     return 0
   fi
-  upstream_port="$("$artifact" config show --config "$WORK/config.toml" |
+  # From the config this case's own boot read, not the shared one: a stub listening on a port the listener does
+  # not forward to would report the disagreement as a preview failure.
+  upstream_port="$("$artifact" config show --config "$WORK/config-preview.toml" |
     sed -n 's/^preview_upstream_port = \([0-9][0-9]*\)$/\1/p')"
   [ -n "$upstream_port" ] ||
     fail "$name/upstream_port" "config show names no preview_upstream_port"
