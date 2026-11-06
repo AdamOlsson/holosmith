@@ -1724,9 +1724,10 @@ PY
   mkdir -p "$fake"
   cat >"$fake/openssl" <<'SH'
 #!/bin/sh
-# Stand in for "openssl s_client": capture what the proxy writes, then answer one complete HTTP response.
-# `count` rather than a read-until-EOF, because the proxy deliberately keeps our stdin open.
-dd bs=1 count="$CAPTURE_BYTES" of="$CAPTURE" 2>/dev/null
+# Stand in for "openssl s_client": capture what the proxy writes, then answer one complete HTTP response. One
+# bounded read rather than a read-until-EOF, because the proxy deliberately keeps our stdin open — and one read
+# is enough, since the proxy writes a whole request in a single write.
+dd bs=8192 count=1 of="$CAPTURE" 2>/dev/null
 printf 'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok'
 SH
   chmod +x "$fake/openssl"
@@ -1742,7 +1743,7 @@ s.close()
 PY
 )"
   rm -f "$capture"
-  PATH="$fake:$PATH" CAPTURE="$capture" CAPTURE_BYTES=$((${#body} + 400)) \
+  PATH="$fake:$PATH" CAPTURE="$capture" \
     "$artifact" proxy key --listen "127.0.0.1:$port2" --keys "$root/data/secrets/keys.toml" \
     >"$WORK/responses/$name-provider.log" 2>&1 &
   keyproxy_pid=$!
@@ -1789,6 +1790,12 @@ PY
     fail "$name/provider-body" "the forwarded request ends without the body: $(tail -c 200 "$capture" | tr -d '\r')"
   fi
   assertions=$((assertions + 1))
+
+  # The store this half wrote by hand is not what the rest of the case asserts on: put the anthropic key back and
+  # drop the provider this check added, so `key remove anthropic` last assertion still means what it says.
+  printf '%s\n' "$key" | "$artifact" --config "$config" key set anthropic >/dev/null 2>&1 ||
+    fail "$name/restore" "could not restore the anthropic key after the provider check"
+  "$artifact" --config "$config" key remove opencode-go >/dev/null 2>&1 || true
   "$artifact" --config "$config" key remove anthropic >/dev/null 2>&1 ||
     fail "$name/remove" "key remove failed"
   [ -z "$("$artifact" --config "$config" key list)" ] ||
