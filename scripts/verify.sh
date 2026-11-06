@@ -396,6 +396,7 @@ serve_cases=(
   case_worktree
   case_docker_preflight
   case_doctor_quick
+  case_server_deploy
   case_worktree_refusal
   case_container_mounts
   case_agent_launch
@@ -4822,6 +4823,51 @@ case_docker_preflight() {
 #
 # `tests/doctor.rs` is where every check's arms are driven over shims, including the ones no gate machine can
 # produce (a logged-out Tailscale, a git 2.37, an image running another pi).
+# HS-047's `server deploy`, from the shipped artifact. Two halves that skip independently, because the bugs it
+# exists to catch are of two kinds — the framework and the words, which need no daemon, and the install and the
+# two proxies on a real one (ADR-0056).
+#
+# The **offline** half answers `GET /_ping` from a socket it starts, so step 1 passes on a machine with no
+# daemon, and asserts four things: the dry run lists the seven steps in the spec's order with steps 3, 5, 6 and 7
+# naming the story that still owns them, and leaves the install root **absent**; a run whose `docker_host` names a
+# socket that cannot exist stops at step 1 and prints the resume command as its last line; a run that gets past
+# step 1 and then fails step 4 — the same `_ping` socket answers the ping and nothing else — leaves step 2's files
+# on disk, evaluates no later step at all, and prints the same runnable resume command.
+#
+# The **online** half needs the daemon and an image `agent_image` names (today a `docker tag` of the test image,
+# because step 3 builds nothing until HS-048): a real install into a root under `target/` — step 2's four paths
+# with their modes, step 4's two containers — and then the same command again, where steps 1, 2 and 4 say
+# `satisfied`, the tree's listing and `config.toml`'s bytes are identical, and `keys.toml` was not rewritten. That
+# is the acceptance's "the second run changes nothing", as a comparison rather than an absence of output.
+#
+# A run whose remaining steps are later stories' exits **0** with an `incomplete` line; only a failed step exits
+# 1. `tests/deploy.rs` is where the words, the order, the modes and the `sudo` seam are driven over shims.
+
+# The config a fresh host would have, written by the case rather than by the deploy: `data_root` is deliberately
+# left at its default, because `--root` is what prefixes it and a file that already named the prefixed path would
+# be prefixed twice (ADR-0056).
+deploy_config() {
+  local path="$1" control="$2" preview="$3" docker_host="$4" image="$5"
+  cat >"$path" <<EOF
+owner = "$owner"
+role = "server"
+backend = "stub"
+control_listen = "127.0.0.1:$control"
+preview_listen = "127.0.0.1:$preview"
+docker_host = "$docker_host"
+agent_image = "$image"
+min_free_gb = 1
+EOF
+}
+
+# Every entry under a directory, sorted, each with its mode and size: what "the second run changed nothing" is
+# compared against. A listing rather than a hash so a failure names the entry that moved.
+deploy_listing() {
+  find "$1" -mindepth 1 2>/dev/null | sort | while IFS= read -r entry; do
+    printf '%s %s\n' "$entry" "$(stat -c '%a %s' "$entry")"
+  done
+}
+
 case_doctor_quick() {
   local name=case_doctor_quick root="$repo_root/target/verify-doctor-$$"
   local control preview status word line
@@ -4953,6 +4999,219 @@ PY
   kill "$socket_pid" 2>/dev/null || true
   wait "$socket_pid" 2>/dev/null || true
   socket_pid=""
+  rm -rf "$root"
+}
+
+case_server_deploy() {
+  local name=case_server_deploy root="$repo_root/target/verify-deploy-$$"
+  local image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
+  local control preview status line got entry n
+
+  # ---- the offline half: step 1 against a `_ping` socket, and the two failures ----------------------
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s/offline: no python3 to answer `_ping` (tests/deploy.rs covers the words, the order and the sudo seam)\n' "$name"
+  else
+    rm -rf "$root"
+    mkdir -p "$root"
+    control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+    preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a second port"
+    socket_pid="$(fake_docker_ping "$root/docker.sock")"
+    for _ in $(seq 1 100); do
+      [ -S "$root/docker.sock" ] && break
+      sleep 0.05
+    done
+    [ -S "$root/docker.sock" ] || fail "$name/socket" "the fake daemon socket never appeared"
+    deploy_config "$WORK/config-deploy-offline.toml" "$control" "$preview" "unix://$root/docker.sock" "$image"
+
+    # 1. The dry run: the seven steps in the spec's order, and an install root that does not appear.
+    status=0
+    "$artifact" server deploy --dry-run --root "$root/install" \
+      --config "$WORK/config-deploy-offline.toml" >"$WORK/$name.dry.out" 2>&1 || status=$?
+    check "$name/dry/exit" 0 "$status"
+    got="$(sed -n 's/^\([1-7]\)\. .*/\1/p' "$WORK/$name.dry.out" | tr -d '\n')"
+    check "$name/dry/order" "1234567" "$got"
+    for entry in preflight files images proxies service origins health; do
+      grep -q "^[1-7]\. $entry: \(needs\|satisfied\|skipped\|failed\): " "$WORK/$name.dry.out" ||
+        fail "$name/dry/$entry" "no $entry line in the dry run: $(cat "$WORK/$name.dry.out")"
+      assertions=$((assertions + 1))
+    done
+    grep -q '^2\. files: needs: ' "$WORK/$name.dry.out" ||
+      fail "$name/dry/plan" "the dry run does not say what step 2 would do: $(cat "$WORK/$name.dry.out")"
+    assertions=$((assertions + 1))
+    # A step another story owns is a skip that names it, never a pass (ADR-0056).
+    while read -r n entry line; do
+      grep -q "^$n\. $entry: skipped: .*$line" "$WORK/$name.dry.out" ||
+        fail "$name/dry/skip$n" "step $n is not a skip naming $line: $(cat "$WORK/$name.dry.out")"
+      assertions=$((assertions + 1))
+    done <<'OWNERS'
+3 images HS-048
+5 service HS-049
+6 origins HS-049
+7 health HS-049
+OWNERS
+    [ ! -e "$root/install" ] || fail "$name/dry/root" "the dry run created $root/install"
+    assertions=$((assertions + 1))
+    grep -q '^deploy: 7 steps: ' "$WORK/$name.dry.out" ||
+      fail "$name/dry/summary" "no summary line: $(cat "$WORK/$name.dry.out")"
+    assertions=$((assertions + 1))
+    grep -q '^deploy: incomplete: 4 of 7 steps' "$WORK/$name.dry.out" ||
+      fail "$name/dry/incomplete" "the summary does not say four steps are still other stories': $(cat "$WORK/$name.dry.out")"
+    assertions=$((assertions + 1))
+    grep -q '^deploy: url: http' "$WORK/$name.dry.out" ||
+      fail "$name/dry/url" "no URL in the tail: $(cat "$WORK/$name.dry.out")"
+    assertions=$((assertions + 1))
+    grep -q '^deploy: next: holosmith key set <provider>' "$WORK/$name.dry.out" ||
+      fail "$name/dry/next" "the next steps name no key command: $(cat "$WORK/$name.dry.out")"
+    assertions=$((assertions + 1))
+
+    # 2. A daemon that cannot be there: step 1 fails, nothing after it is evaluated, and the last line is the
+    #    resume command — the same command, with the resolved paths, and without `--dry-run`.
+    deploy_config "$WORK/config-deploy-absent.toml" "$control" "$preview" "unix://$root/absent.sock" "$image"
+    status=0
+    "$artifact" server deploy --root "$root/absent-install" \
+      --config "$WORK/config-deploy-absent.toml" >"$WORK/$name.absent.out" 2>&1 || status=$?
+    check "$name/absent/exit" 1 "$status"
+    grep -q '^1\. preflight: failed: .*absent\.sock' "$WORK/$name.absent.out" ||
+      fail "$name/absent/step1" "step 1 does not name the daemon: $(cat "$WORK/$name.absent.out")"
+    assertions=$((assertions + 1))
+    if grep -q '^2\. ' "$WORK/$name.absent.out"; then
+      fail "$name/absent/stop" "a run that failed at step 1 evaluated step 2: $(cat "$WORK/$name.absent.out")"
+    fi
+    assertions=$((assertions + 1))
+    line="$(tail -n 1 "$WORK/$name.absent.out")"
+    case "$line" in
+      'deploy: resume: holosmith server deploy --config '*config-deploy-absent.toml*' --root '*absent-install) assertions=$((assertions + 1)) ;;
+      *) fail "$name/absent/resume" "the last line is not the runnable resume command: $line" ;;
+    esac
+    case "$line" in
+      *--dry-run*) fail "$name/absent/resume/dry" "the resume command carries --dry-run: $line" ;;
+      *) assertions=$((assertions + 1)) ;;
+    esac
+
+    # 3. A run that gets past step 1 and then fails step 4: that same socket answers `_ping` and nothing else,
+    #    so step 2's files are on disk when the run stops and the machine is describable.
+    status=0
+    "$artifact" server deploy --root "$root/partial" \
+      --config "$WORK/config-deploy-offline.toml" >"$WORK/$name.partial.out" 2>&1 || status=$?
+    check "$name/partial/exit" 1 "$status"
+    grep -q '^1\. preflight: satisfied: ' "$WORK/$name.partial.out" ||
+      fail "$name/partial/step1" "step 1 did not pass: $(cat "$WORK/$name.partial.out")"
+    assertions=$((assertions + 1))
+    grep -q '^2\. files: changed: ' "$WORK/$name.partial.out" ||
+      fail "$name/partial/step2" "step 2 did not create the files: $(cat "$WORK/$name.partial.out")"
+    assertions=$((assertions + 1))
+    grep -q '^3\. images: skipped: ' "$WORK/$name.partial.out" ||
+      fail "$name/partial/step3" "step 3 is not a skip: $(cat "$WORK/$name.partial.out")"
+    assertions=$((assertions + 1))
+    grep -q '^4\. proxies: failed: ' "$WORK/$name.partial.out" ||
+      fail "$name/partial/step4" "step 4 did not fail against a `_ping` socket: $(cat "$WORK/$name.partial.out")"
+    assertions=$((assertions + 1))
+    if grep -q '^5\. ' "$WORK/$name.partial.out"; then
+      fail "$name/partial/stop" "a run that failed at step 4 evaluated step 5: $(cat "$WORK/$name.partial.out")"
+    fi
+    assertions=$((assertions + 1))
+    [ -f "$root/partial/etc/holosmith/config.toml" ] ||
+      fail "$name/partial/left" "the failed run left no config.toml, so the machine is not describable"
+    assertions=$((assertions + 1))
+    [ -d "$root/partial/var/lib/holosmith/secrets" ] ||
+      fail "$name/partial/left/secrets" "the failed run left no secrets directory"
+    assertions=$((assertions + 1))
+    line="$(tail -n 1 "$WORK/$name.partial.out")"
+    case "$line" in
+      'deploy: resume: holosmith server deploy --config '*"--root $root/partial") assertions=$((assertions + 1)) ;;
+      *) fail "$name/partial/resume" "the last line is not the runnable resume command: $line" ;;
+    esac
+    if grep -q '^deploy: url: ' "$WORK/$name.partial.out"; then
+      fail "$name/partial/url" "a failed run printed the URL as though it had installed something"
+    fi
+    assertions=$((assertions + 1))
+    kill "$socket_pid" 2>/dev/null || true
+    wait "$socket_pid" 2>/dev/null || true
+    socket_pid=""
+  fi
+
+  # ---- the online half: a real install, and then the same command again ----------------------------
+  if ! command -v docker >/dev/null 2>&1 || ! docker version >/dev/null 2>&1 ||
+    ! docker image inspect "$image" >/dev/null 2>&1; then
+    printf 'SKIP %s/online: no docker daemon or no %s image (step 3 builds one in HS-048; tests/deploy.rs covers the rest)\n' \
+      "$name" "$image"
+    rm -rf "$root"
+    return 0
+  fi
+  # `hs_egress`/`hs_key` are the machine's names: a leftover from an earlier case would make this case's first
+  # run read `satisfied`, so it takes them over and removes its own at the end.
+  timeout 60 docker rm -f hs_egress hs_key >/dev/null 2>&1 || true
+  rm -rf "$root"
+  mkdir -p "$root"
+  control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a second port"
+  deploy_config "$WORK/config-deploy-online.toml" "$control" "$preview" "unix:///var/run/docker.sock" "$image"
+
+  status=0
+  "$artifact" server deploy --root "$root/install" \
+    --config "$WORK/config-deploy-online.toml" >"$WORK/$name.online.out" 2>&1 || status=$?
+  check "$name/online/exit" 0 "$status"
+  grep -q '^2\. files: changed: ' "$WORK/$name.online.out" ||
+    fail "$name/online/step2" "step 2 did not create the files: $(cat "$WORK/$name.online.out")"
+  assertions=$((assertions + 1))
+  grep -q '^4\. proxies: changed: ' "$WORK/$name.online.out" ||
+    fail "$name/online/step4" "step 4 did not start the proxies: $(cat "$WORK/$name.online.out")"
+  assertions=$((assertions + 1))
+  check "$name/online/config/mode" 644 "$(stat -c '%a' "$root/install/etc/holosmith/config.toml")"
+  check "$name/online/data/mode" 755 "$(stat -c '%a' "$root/install/var/lib/holosmith")"
+  check "$name/online/secrets/mode" 700 "$(stat -c '%a' "$root/install/var/lib/holosmith/secrets")"
+  check "$name/online/keys/mode" 600 "$(stat -c '%a' "$root/install/var/lib/holosmith/secrets/keys.toml")"
+  check "$name/online/admin/mode" 700 "$(stat -c '%a' "$root/install/run/holosmith")"
+  # The file it wrote is the machine it measured: the prefixed data root, and a file that re-reads clean.
+  grep -q "^data_root = \"$root/install/var/lib/holosmith\"$" "$root/install/etc/holosmith/config.toml" ||
+    fail "$name/online/config/data_root" "the written config does not name the prefixed data root: $(cat "$root/install/etc/holosmith/config.toml")"
+  assertions=$((assertions + 1))
+  status=0
+  "$artifact" config validate --config "$root/install/etc/holosmith/config.toml" >/dev/null 2>&1 || status=$?
+  check "$name/online/config/valid" 0 "$status"
+  docker ps --format '{{.Names}}' | grep -qx hs_egress ||
+    fail "$name/online/egress" "hs_egress is not running"
+  assertions=$((assertions + 1))
+  docker ps --format '{{.Names}}' | grep -qx hs_key || fail "$name/online/key" "hs_key is not running"
+  assertions=$((assertions + 1))
+  docker network ls | grep -qw egress || fail "$name/online/network" "the egress network is not there"
+  assertions=$((assertions + 1))
+  grep -q '^deploy: url: http' "$WORK/$name.online.out" ||
+    fail "$name/online/url" "a completed run printed no URL: $(cat "$WORK/$name.online.out")"
+  assertions=$((assertions + 1))
+
+  # The second run: the acceptance's "changes nothing", as a comparison of the tree, the config's bytes and the
+  # key file the deploy must never rewrite.
+  deploy_listing "$root/install" >"$WORK/$name.tree1"
+  cp "$root/install/etc/holosmith/config.toml" "$WORK/$name.config1"
+  cp "$root/install/var/lib/holosmith/secrets/keys.toml" "$WORK/$name.keys1"
+  status=0
+  "$artifact" server deploy --root "$root/install" \
+    --config "$WORK/config-deploy-online.toml" >"$WORK/$name.again.out" 2>&1 || status=$?
+  check "$name/again/exit" 0 "$status"
+  while read -r n entry; do
+    grep -q "^$n\. $entry: satisfied: " "$WORK/$name.again.out" ||
+      fail "$name/again/$n" "step $n is not satisfied on the second run: $(cat "$WORK/$name.again.out")"
+    assertions=$((assertions + 1))
+  done <<'AGAIN'
+1 preflight
+2 files
+4 proxies
+AGAIN
+  deploy_listing "$root/install" >"$WORK/$name.tree2"
+  cmp -s "$WORK/$name.tree1" "$WORK/$name.tree2" ||
+    fail "$name/again/tree" "the second run changed the tree: $(diff "$WORK/$name.tree1" "$WORK/$name.tree2" 2>&1 | head -5)"
+  assertions=$((assertions + 1))
+  cmp -s "$WORK/$name.config1" "$root/install/etc/holosmith/config.toml" ||
+    fail "$name/again/config" "the second run rewrote config.toml"
+  assertions=$((assertions + 1))
+  cmp -s "$WORK/$name.keys1" "$root/install/var/lib/holosmith/secrets/keys.toml" ||
+    fail "$name/again/keys" "the second run rewrote keys.toml, which holds every stored provider key"
+  assertions=$((assertions + 1))
+  grep -q '^deploy: incomplete: 4 of 7 steps' "$WORK/$name.again.out" ||
+    fail "$name/again/incomplete" "the second run does not say four steps are still other stories': $(cat "$WORK/$name.again.out")"
+  assertions=$((assertions + 1))
+  timeout 60 docker rm -f hs_egress hs_key >/dev/null 2>&1 || true
   rm -rf "$root"
 }
 

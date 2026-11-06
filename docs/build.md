@@ -326,6 +326,23 @@ is gone afterwards; it needs the daemon **and** the image, and prints one `SKIP`
 the bug it exists to catch (a missing `network` line fails while the machine serves). It stops the shared boot and
 leaves its own running, so it is last.
 
+…and since HS-047, **`server deploy`**: `case_server_deploy` has two halves that skip independently, because the
+bugs it exists to catch are of two kinds. The **offline** half needs `python3` and nothing else: a `_ping` socket
+it answers stands in for the daemon, and the case asserts that the dry run lists the seven steps in the spec's
+order with steps 3, 5, 6 and 7 naming the story that still owns them, that an install root under `target/` does
+**not appear** afterwards, that a run whose `docker_host` names a socket that cannot exist stops at step 1 with
+the resume command as its last line, and that a run which gets past step 1 and then fails step 4 (that same
+socket, which answers `_ping` and nothing else) leaves step 2's files on disk, prints the resume command with the
+resolved `--root`/`--config`, and evaluates no later step at all. The **online** half needs the daemon and an
+`agent_image` that exists (today a `docker tag pi-agent:local agent-image:<version>`, because step 3 builds
+nothing until HS-048): it removes any `hs_egress`/`hs_key` an earlier case left behind — those are the machine's
+names, and a leftover would make its own first run read `satisfied` — then runs a real deploy into a root under
+`target/`, asserting step 2's four paths with their modes (0755, 0644, 0700, 0600, 0700), step 4 `changed` with
+both containers running, and then the same command again, where steps 1, 2 and 4 say `satisfied`, the tree's
+listing and `config.toml`'s bytes are byte-identical, and the tail names the URL and `holosmith key set`
+(ADR-0056). A run whose remaining steps are later stories' ends **0** with an `incomplete` line; only a failed
+step exits 1.
+
 One rule for every case above and below: a case that must assert one code keeps every higher guard check correct,
 or it asserts another guard's code under its own name.
 
@@ -501,8 +518,14 @@ start, rather than a service that refuses to come back up.
   static and has no TLS stack, ADR-0048). The image this repository tests with carries it; a missing binary is a
   502 from the proxy, not a silent fallback.
 - **`tailscale`** and **systemd** only for what needs them: `doctor` reports a machine without either as
-  `unknown` rather than failing (a LAN-only machine and a hand-run `serve` are supported), and `server deploy`
-  (HS-049) is where they become prerequisites (ADR-0054).
+  `unknown` rather than failing (a LAN-only machine and a hand-run `serve` are supported). `server deploy` runs
+  `doctor --quick` as its step 1 (HS-047), so a machine without them gets through step 1; its steps 5 and 6 —
+  the unit file and `tailscale serve` — are HS-049's, and those are where the two become prerequisites
+  (ADR-0054, ADR-0056).
+- **`install` and `chmod`** (coreutils), and **`sudo`** on a machine whose paths are the system's, for
+  `holosmith server deploy` (HS-047): every file action is one `install`/`chmod` child, and it is prefixed by
+  `sudo` unless `--root` builds the tree as the invoking user (ADR-0056). The gate needs neither: its case
+  installs under `target/` with `--root`, so no step takes the privileged path.
 - **git** for `scripts/build.sh`, and for a Docker run at runtime: the worktree step runs
   `git worktree`, `git rev-list` and `git branch` against the project repository on the host
   (HS-025). Not required by `cargo build` itself, and not required by `--backend stub`.
