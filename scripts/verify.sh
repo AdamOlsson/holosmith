@@ -20,8 +20,11 @@
 # repository and taken back when the next step refuses, the three project refusals a create and a resume
 # answer with their own codes, the Internet-access checkbox measured on two real session networks (nothing
 # reachable directly, the proxy's alias resolvable in exactly one of them, and the flag as a network's endpoint
-# count after a resume), a boot over a database from a newer release (which continues and says who refuses), and a
-# Docker preflight that
+# count after a resume), a `kill -9` of the server mid-turn and a restart (the row comes back idle with
+# `interrupted`, the seqs stay unique and the counter is the log's highest), the names a crash leaves behind
+# swept on a real daemon (a leftover container, an orphan network and worktree directory gone, a kept branch
+# and ref kept, the session's container replaced under the same name), a boot over a database from a newer
+# release (which continues and says who refuses), and a Docker preflight that
 # refuses to start with one sentence naming the fix, with no CORS header
 # on any answer, and stopping on SIGTERM with exit 0.
 # --no-build skips the two artifact phases; --keep keeps the work dir of a successful run. On
@@ -386,6 +389,8 @@ serve_cases=(
   case_docker_resume
   case_docker_turn
   case_delete_keeps_the_work
+  case_reconcile
+  case_reconcile_orphans
   case_network_selftest
   case_key_proxy
   case_key_proxy_request
@@ -1084,6 +1089,162 @@ case_delete_keeps_the_work() {
   # Its server is left running: `phase_serve` stops whatever is up after the last case.
 }
 
+case_reconcile() {
+  local name=case_reconcile body id other seqs_checked=1
+  local root="$repo_root/target/verify-reconcile-$$"
+  local data="$root/data"
+  # The counter is a column no client is sent (`Session` is the API's body), so it is read the way
+  # `case_exit_classification` reads `expected_stop`. Without python3 the row half still runs and the counter
+  # half prints one SKIP line: `tests/reconcile.rs` covers it.
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to read sessions.last_seq and the committed seqs (tests/reconcile.rs covers the counter)\n' "$name"
+    seqs_checked=0
+  fi
+  stop_serve
+  rm -rf "$root"
+  mkdir -p "$root" || fail "$name/mkdir" "could not create $root"
+  printf 'owner = "%s"\nmax_live_sessions = 3\nbackend = "stub"\nidle_stop_min = 0\nturn_timeout_min = 0\n' \
+    "$owner" >"$WORK/config-reconcile.toml"
+  start_serve "$WORK/config-reconcile.toml" "$data"
+
+  # The turn's session, provisioned the way the product provisions one.
+  fetch_body "${name}_create" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-reconcile-1" ||
+    fail "${name}_create/no_answer" "POST /api/sessions did not answer"
+  expect_status "${name}_create" "$(answer "${name}_create")" 202
+  body="$(cat "$WORK/responses/${name}_create.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id" ] || fail "${name}_create/id" "the response names no id: $body"
+  wait_for_idle_id "${name}_idle" "$id"
+
+  # A second session, killed while it is still provisioning: item 7's "any row still in `starting` is either
+  # resumed or set to `error`, and never left dangling". The stub spends 200 ms a step, so the kill below lands
+  # while this row is `starting` — and the assertion is made *before* the kill, so it cannot pass by luck.
+  fetch_body "${name}_create2" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-reconcile-2" ||
+    fail "${name}_create2/no_answer" "POST /api/sessions did not answer"
+  expect_status "${name}_create2" "$(answer "${name}_create2")" 202
+  body="$(cat "$WORK/responses/${name}_create2.body")"
+  other="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$other" ] || fail "${name}_create2/id" "the response names no id: $body"
+  fetch "${name}_other" GET "/api/sessions/$other" "Host: 127.0.0.1" ||
+    fail "${name}_other/no_answer" "GET /api/sessions/$other did not answer"
+  case "$(cat "$WORK/responses/${name}_other.body")" in
+    *'"status":"starting"'*) assertions=$((assertions + 1)) ;;
+    *) fail "${name}_other/starting" "the second session was not provisioning: $(cat "$WORK/responses/${name}_other.body")" ;;
+  esac
+
+  # The turn. Its 202 moved the row to `running` before the stub's first frame (200 ms later), so the kill
+  # below is in the middle of a turn and not between two of them.
+  fetch_body "${name}_prompt" POST "/api/sessions/$id/prompt" '{"prompt":"read the app shell"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_prompt/no_answer" "POST /api/sessions/$id/prompt did not answer"
+  expect_status "${name}_prompt" "$(answer "${name}_prompt")" 202
+  fetch "${name}_running" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+    fail "${name}_running/no_answer" "GET /api/sessions/$id did not answer"
+  case "$(cat "$WORK/responses/${name}_running.body")" in
+    *'"status":"running"'*) assertions=$((assertions + 1)) ;;
+    *) fail "${name}_running" "the prompt did not put the row in running: $(cat "$WORK/responses/${name}_running.body")" ;;
+  esac
+
+  # **The crash**: no drain, no signal handler, no last event. `kill -9` is the story's own word.
+  kill -9 "$serve_pid" || fail "${name}/kill" "could not kill the server (pid $serve_pid)"
+  wait "$serve_pid" 2>/dev/null || true
+  serve_pid=""
+
+  # The restart: the shipped artifact again, on the same data root.
+  start_serve "$WORK/config-reconcile.toml" "$data"
+
+  # The turn is recorded as a reason, not a state: the row comes back `idle` and *says* the turn was cut.
+  body=""
+  for _ in $(seq 1 300); do
+    fetch "${name}_back" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "${name}_back/no_answer" "GET /api/sessions/$id did not answer"
+    body="$(cat "$WORK/responses/${name}_back.body")"
+    case "$body" in
+      *'"status":"idle"'*) break ;;
+    esac
+    sleep 0.1
+  done
+  case "$body" in
+    *'"status":"idle"'*) assertions=$((assertions + 1)) ;;
+    *) fail "${name}_back/status" "the crashed turn's session did not come back idle: $body" ;;
+  esac
+  case "$body" in
+    *'"status_reason":"interrupted"'*) assertions=$((assertions + 1)) ;;
+    *) fail "${name}_back/reason" "the restarted row does not carry the turn's word: $body" ;;
+  esac
+  case "$body" in
+    *'"status":"interrupted"'*)
+      fail "${name}_back/state" "interrupted became a state: $body"
+      ;;
+    *) assertions=$((assertions + 1)) ;;
+  esac
+
+  # The row that was `starting` was resumed, and it is idle rather than dangling.
+  wait_for_idle_id "${name}_other_idle" "$other"
+
+  # The transition is in the committed log, not only on the row: a reason on a session.status event.
+  fetch_sse_until "${name}_log" "/api/sessions/$id/events" '"reason":"interrupted"' "Host: 127.0.0.1" ||
+    fail "${name}_log/no_answer" "GET /api/sessions/$id/events did not answer"
+  case "$(cat "$WORK/responses/${name}_log.body")" in
+    *'"from":"running","to":"starting","step":null,"reason":"interrupted"'*) assertions=$((assertions + 1)) ;;
+    *) fail "${name}_log/payload" "the log does not hold the crash transition: $(cat "$WORK/responses/${name}_log.body")" ;;
+  esac
+
+  # No row is left claiming a turn is running.
+  fetch "${name}_list" GET /api/sessions "Host: 127.0.0.1" ||
+    fail "${name}_list/no_answer" "GET /api/sessions did not answer"
+  case "$(cat "$WORK/responses/${name}_list.body")" in
+    *'"status":"running"'*) fail "${name}_list/running" "a row is still running after the restart" ;;
+    *) assertions=$((assertions + 1)) ;;
+  esac
+
+  # **V9's seq half**: no duplicate and no missing seq, and the counter is the log's highest.
+  if [ "$seqs_checked" -eq 1 ]; then
+    if ! python3 - "$data/app.db" "$id" "$other" >"$WORK/responses/$name.seq" 2>&1 <<'PY'
+import sqlite3, sys
+path, *ids = sys.argv[1:]
+db = sqlite3.connect(path)
+for session in ids:
+    row = db.execute("SELECT last_seq FROM sessions WHERE id = ?", (session,)).fetchone()
+    if row is None:
+        print(f"{session}: no row")
+        sys.exit(1)
+    last = row[0]
+    seqs = [
+        seq
+        for seq in db.execute(
+            "SELECT seq FROM events WHERE session_id = ? ORDER BY seq", (session,)
+        )
+    ]
+    if not seqs:
+        print(f"{session}: no committed events")
+        sys.exit(1)
+    if seqs != list(range(1, len(seqs) + 1)):
+        print(f"{session}: the seqs are not 1..n: {seqs}")
+        sys.exit(1)
+    if last != seqs[-1]:
+        print(f"{session}: last_seq {last} is not the highest committed seq {seqs[-1]}")
+        sys.exit(1)
+print("ok")
+PY
+    then
+      fail "$name/seq" "$(cat "$WORK/responses/$name.seq")"
+    fi
+    assertions=$((assertions + 1))
+  fi
+
+  # Its server is left running: `phase_serve` stops whatever is up after the last case, and the next case that
+  # needs its own boot stops it.
+  rm -rf "$root"
+}
+
 # The health payload: exactly five keys, and the uptime is not predictable, so the assertion is
 # the prefix and the closing brace (the shape tests/http_contract.rs uses).
 case_health() {
@@ -1653,6 +1814,153 @@ case_tool_image() {
     esac
   done
 }
+
+# HS-044's other half, on a real daemon: the names a crash leaves behind that no row owns. The live session's
+# container is replaced under the same name (which is what "no name conflict" means), a container and a network
+# with no row go, and a worktree directory no row owns goes **while its branch and its snapshot ref stay**
+# (HS-043, ADR-0052). The machine's own `hs_egress`/`hs_key` are not the build's session names and are left.
+#
+# It boots its own server because it kills one: `kill -9` takes the attached `docker run` with it, which is the
+# leftover spec item 6 names. Its scratch lives under `target/` because the daemon must be able to see the
+# projects root a mount comes from (ADR-0035's measurement).
+case_reconcile_orphans() {
+  local name=case_reconcile_orphans body id image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
+  local fake=9999999999999999
+  local root="$repo_root/target/verify-reconcile-orphans-$$"
+  local projects="$root/projects" repo="$root/projects/holosmith" data="$root/data"
+  local before after branch wip
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    printf 'SKIP %s: no Docker daemon answers (tests/reconcile.rs and the reconcile itself are the same check)\n' "$name"
+    return 0
+  fi
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    printf 'SKIP %s: no image %s (HOLOSMITH_TEST_IMAGE names another)\n' "$name" "$image"
+    return 0
+  fi
+  stop_serve
+  rm -rf "$root"
+  mkdir -p "$repo" || fail "$name/mkdir" "could not create $repo"
+  git -C "$repo" init --quiet . || fail "$name/git" "git init did not work in $repo"
+  git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet \
+    --allow-empty -m "the first commit" || fail "$name/git" "git commit did not work in $repo"
+  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "docker"\nprojects_root = "%s"\nagent_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
+    "$owner" "$projects" "$image" >"$WORK/config-reconcile-orphans.toml"
+  start_serve "$WORK/config-reconcile-orphans.toml" "$data"
+
+  fetch_body "${name}_create" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-reconcile-orphans-1" ||
+    fail "${name}_create/no_answer" "POST /api/sessions did not answer"
+  expect_status "${name}_create" "$(answer "${name}_create")" 202
+  body="$(cat "$WORK/responses/${name}_create.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id" ] || fail "${name}_create/id" "the response names no id: $body"
+  docker_session_id="$id"
+  body=""
+  for _ in $(seq 1 900); do
+    fetch "${name}_idle" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "${name}_idle/no_answer" "GET /api/sessions/$id did not answer"
+    body="$(cat "$WORK/responses/${name}_idle.body")"
+    case "$body" in
+      *'"status":"starting"'*) sleep 0.1 ;;
+      *) break ;;
+    esac
+  done
+  printf '%s\n' "$body" | grep -qF '"status":"idle"' ||
+    fail "${name}_idle/status" "the session did not reach idle: $body"
+  assertions=$((assertions + 1))
+  before="$(docker inspect --format '{{.Id}}' "s_$id" 2>/dev/null)" ||
+    fail "$name/container" "the running session has no container"
+
+  # The orphans, all of them under names no row has. `docker_second_session_id` is what the EXIT trap removes,
+  # so a `fail` below cannot leave them behind.
+  docker_second_session_id="$fake"
+  docker create --name "s_$fake" "$image" true >/dev/null ||
+    fail "$name/orphan_container" "could not create the orphan container"
+  docker network create --internal "agents_$fake" >/dev/null ||
+    fail "$name/orphan_network" "could not create the orphan network"
+  mkdir -p "$projects/.worktrees" || fail "$name/mkdir" "could not create the worktrees root"
+  git -C "$repo" worktree add --quiet -b "agent/$fake" "$projects/.worktrees/$fake" HEAD ||
+    fail "$name/orphan_worktree" "could not make the orphan worktree"
+  git -C "$projects/.worktrees/$fake" -c user.name=verify -c user.email=verify@example commit \
+    --quiet --allow-empty -m "the agent's work" ||
+    fail "$name/orphan_commit" "could not commit in the orphan worktree"
+  branch="$(git -C "$repo" rev-parse "agent/$fake")"
+  wip="refs/holosmith/wip/$fake"
+  git -C "$repo" update-ref "$wip" "$branch" ||
+    fail "$name/orphan_ref" "could not write the snapshot ref"
+
+  # The crash, then the restart.
+  kill -9 "$serve_pid" || fail "$name/kill" "could not kill the server (pid $serve_pid)"
+  wait "$serve_pid" 2>/dev/null || true
+  serve_pid=""
+  start_serve "$WORK/config-reconcile-orphans.toml" "$data"
+
+  # The sweep is a task, so it is waited for: the container and the network both have to go.
+  for _ in $(seq 1 240); do
+    if ! docker inspect "s_$fake" >/dev/null 2>&1 &&
+      ! docker network ls --format '{{.Name}}' | grep -qx "agents_$fake"; then
+      break
+    fi
+    sleep 0.25
+  done
+  if docker inspect "s_$fake" >/dev/null 2>&1; then
+    fail "$name/orphan_container/gone" "the reconcile left a container no row owns"
+  fi
+  assertions=$((assertions + 1))
+  if docker network ls --format '{{.Name}}' | grep -qx "agents_$fake"; then
+    fail "$name/orphan_network/gone" "the reconcile left a network no row owns"
+  fi
+  assertions=$((assertions + 1))
+  [ ! -e "$projects/.worktrees/$fake" ] ||
+    fail "$name/orphan_worktree/gone" "the reconcile left a worktree directory no row owns"
+  assertions=$((assertions + 1))
+  # **What a crash must never cost**: the branch and the snapshot ref (HS-043's rule).
+  check "$name/branch" "$branch" "$(git -C "$repo" rev-parse --verify --quiet "agent/$fake")"
+  check "$name/ref" "$branch" "$(git -C "$repo" rev-parse --verify --quiet "$wip")"
+
+  # The session that was live came back: same name, a **new** container, and the daemon accepted the name —
+  # which is what "no name conflict" means.
+  body=""
+  for _ in $(seq 1 900); do
+    fetch "${name}_back" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "${name}_back/no_answer" "GET /api/sessions/$id did not answer"
+    body="$(cat "$WORK/responses/${name}_back.body")"
+    case "$body" in
+      *'"status":"starting"'*) sleep 0.1 ;;
+      *) break ;;
+    esac
+  done
+  printf '%s\n' "$body" | grep -qF '"status":"idle"' ||
+    fail "${name}_back/status" "the restarted session did not reach idle: $body"
+  assertions=$((assertions + 1))
+  after="$(docker inspect --format '{{.Id}}' "s_$id" 2>/dev/null)" ||
+    fail "$name/back/container" "the restarted session has no container"
+  [ "$after" != "$before" ] ||
+    fail "$name/back/container/replaced" "the restart kept the container the crash left"
+  assertions=$((assertions + 1))
+  docker inspect --format '{{.State.Running}}' "s_$id" 2>/dev/null | grep -qx true ||
+    fail "$name/back/container/running" "the replaced container is not running"
+  assertions=$((assertions + 1))
+  # The machine's own proxies are not session names, so the sweep must not have taken them.
+  docker inspect "hs_egress" >/dev/null 2>&1 ||
+    fail "$name/proxy" "the sweep removed the machine's egress proxy"
+  assertions=$((assertions + 1))
+
+  # Cleaning up: the session's row, container and network, and the fake pair (already gone).
+  fetch "${name}_delete" DELETE "/api/sessions/$id?force=true" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_delete/no_answer" "DELETE did not answer"
+  expect_status "${name}_delete" "$(answer "${name}_delete")" 202
+  wait_for_gone "${name}_gone" "$id"
+  docker_session_id=""
+  docker_second_session_id=""
+  rm -rf "$root"
+  # Its server is left running: `phase_serve` stops whatever is up after the last case.
+}
+
 
 # HS-036: this machine's isolation, measured. The probe is `tests/selftest.rs`'s subject too, with a bridge
 # control; what only the *shipped artifact* can add is that a real boot runs it, that the answer is in the log,
