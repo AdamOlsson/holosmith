@@ -33,13 +33,18 @@ carries the owning story in its sentence, in the dry run and in the real run ali
 says how many steps are still other stories' (`deploy: incomplete: 4 of 7 steps belong to later stories`).
 **Amended by ADR-0057:** HS-048 fills step 3, so the count is three and the example reads
 `deploy: incomplete: 3 of 7 steps belong to later stories`.
+**Amended by ADR-0058:** HS-049 fills steps 5, 6 and 7, so **nothing** in `server deploy` is `skipped`: the owner
+table, the three `skipped` sentences and the `deploy: incomplete:` line are deleted, and the tally keeps its shape
+with `skipped` always zero.
 
 **A step that is only half this release's says which half it did.** Step 2 creates the four paths the tree
 already writes and does **not** create the service user or the VAPID keys, so its line always carries
 `; the service user (in the docker group) and the VAPID keys are HS-049's, and this step does not read them`.
 The same rule as `skipped`, one level down: a line that reports a pass must say what it did *not* read, or
 "all 6 paths are present with their modes" reads as the whole of item 10 step 2 when it is three of its five
-items.
+items. **Amended by ADR-0058:** step 2 does all five of its items, so the `REMAINDER` remark is gone and the line
+names what it wrote; under `--root` it carries `; --root: no service user is created, because the tree belongs to
+the invoking user`, which is the same rule turned around.
 
 **The exit code is 1 iff a step failed, and 0 otherwise — including when four steps were skipped.** The
 acceptance's failure semantics are about a *failing* step, so a machine that got everything this release can
@@ -48,6 +53,8 @@ script that reads only the exit code will believe a partial install succeeded; t
 printed on every run that reaches the end, not only when something was skipped, so the distinction is never
 carried by the exit code alone. When HS-048 and HS-049 land, the same command stops skipping and the same
 run ends 0 having installed everything — no second entry point, no flag to remove.
+**Amended by ADR-0058:** HS-049 landed, so nothing is skipped and the `incomplete` line is gone: the exit code and
+the tally now say the same thing, and a run that reaches step 7 installed everything this release can install.
 
 **Step 7 is HS-049's entirely** — both its `/api/health` wait and its `doctor --full`. The wait is
 unsatisfiable here because nothing starts `serve` (step 5 is the unit file) and `doctor --full` asserts the
@@ -139,6 +146,9 @@ Steps 5 and 6 were **not measured**: this machine has no systemd (`/proc/1/comm`
 whatever `agent_image` names — on this machine `pi-agent:local`, tagged by hand as `docs/build.md` says.
 **Amended by ADR-0057:** step 3 builds both images from the Dockerfiles embedded in the binary, and the proxies
 run `holosmith-proxy:<version>` instead of whatever `agent_image` names.
+**Amended by ADR-0058:** steps 5, 6 and 7 are measured now — through the gate's `tailscale` and `/api/health`
+stand-ins and `tests/deploy.rs`'s recorders — and a machine without systemd or a Tailscale daemon **fails** at the
+step that needs it instead of skipping it.
 
 **"A fresh host ends with a working HTTPS URL" (phase 2's exit criterion) is therefore HS-048's and HS-049's
 demo, not this story's.** What this story proves is the framework and the three steps whose machinery exists:

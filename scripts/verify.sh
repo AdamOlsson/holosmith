@@ -26,7 +26,9 @@
 # and ref kept, the session's container replaced under the same name), a boot over a database from a newer
 # release (which continues and says who refuses), the verification table itself (no V1-V10 row still
 # says `not yet run`, every row carries its verdict and an automation this repository has, and V11 is
-# still deferred to phase 3), and a Docker preflight that
+# still deferred to phase 3), the service, the keys and the origins a deploy installs in a case of their own
+# straight after `case_server_deploy` (`case_server_service`: the unit's bytes, the VAPID pair, both `tailscale`
+# argvs and `doctor`'s `perms` arms), and a Docker preflight that
 # refuses to start with one sentence naming the fix, with no CORS header
 # on any answer, and stopping on SIGTERM with exit 0. Each case prints `ok <case>` once it passes — a
 # case that printed SKIP withholds that line, so the log can never call a check that measured nothing a
@@ -406,6 +408,7 @@ serve_cases=(
   case_doctor_quick
   case_server_images
   case_server_deploy
+  case_server_service
   case_worktree_refusal
   case_container_mounts
   case_agent_launch
@@ -4838,21 +4841,26 @@ case_docker_preflight() {
 #
 # The **offline** half answers `GET /_ping` from a socket it starts, so step 1 passes on a machine with no
 # daemon, and asserts four things: the dry run lists the seven steps in the spec's order, step 3 planning a build
-# of both images while steps 5, 6 and 7 name the story that still owns them, and leaves the install root
-# **absent**; a run whose `docker_host` names a socket that cannot exist stops at step 1 and prints the resume
-# command as its last line; a run that gets past step 1 and then fails step 3 — that same `_ping` socket answers
-# the ping and nothing a build needs — leaves step 2's files on disk, evaluates no later step at all, and prints
-# the same runnable resume command.
+# of both images, steps 5, 6 and 7 planning what they would do (none of them is a skip since HS-049, and the
+# report has no `incomplete` line), and leaves the install root **absent**; a run whose `docker_host` names a
+# socket that cannot exist stops at step 1 and prints the resume command as its last line; a run that gets past
+# step 1 and then fails step 3 — that same `_ping` socket answers the ping and nothing a build needs — leaves
+# step 2's files on disk, evaluates no later step at all, and prints the same runnable resume command. A dry run
+# **reads** step 6 (`tailscale serve status --json`), so this half puts the shim on PATH; that read and the
+# `/api/health` wait are the two machine facts a plan cannot be made without.
 #
 # The **online** half needs the daemon and an image `agent_image` names (today a `docker tag` of the test image,
 # which this case does not build — step 3 builds `agent-image:<version>`, and the line says the config's
 # `agent_image` names something else): a real install into a root under `target/` — step 2's four paths with their
-# modes, step 3's two images, step 4's two containers — and then the same command again, where steps 1, 2, 3 and 4
-# say `satisfied`, the tree's listing and `config.toml`'s bytes are identical, and `keys.toml` was not rewritten.
-# That is the acceptance's "the second run changes nothing", as a comparison rather than an absence of output.
+# modes, step 3's two images, step 4's two containers, step 5's unit, step 6's two origins and step 7's health —
+# and then the same command again, where all seven steps say `satisfied`, the tree's listing and `config.toml`'s
+# bytes are identical, `keys.toml` was not rewritten, and the shim applied no second origin. That is the
+# acceptance's "the second run changes nothing", as a comparison rather than an absence of output. Step 6 and
+# step 7 are answered by `deploy_machine_shims` and `health_responder`: this machine has neither a `tailscaled`
+# nor a unit boot, and a case that assumed one would be a gate that only passes on a machine that already serves.
 #
-# A run whose remaining steps are later stories' exits **0** with an `incomplete` line; only a failed step exits
-# 1. `tests/deploy.rs` is where the words, the order, the modes and the `sudo` seam are driven over shims.
+# Only a failed step exits 1. `tests/deploy.rs` is where the words, the order, the modes and the `sudo` seam are
+# driven over shims.
 
 # The config a fresh host would have, written by the case rather than by the deploy: `data_root` is deliberately
 # left at its default, because `--root` is what prefixes it and a file that already named the prefixed path would
@@ -4881,6 +4889,121 @@ deploy_listing() {
   done
 }
 
+# One `tailscale` for the two questions a deploy run asks it (HS-049): step 6 **reads** `serve status --json` and
+# applies each origin with `serve --bg --yes --https=<port> <target>`, and `doctor`'s tailscale finding asks
+# `status --json`. One program because both go through the name on PATH, and the state file is the answer a read gets
+# back — one `<port> <target>` line per origin — so a second deploy is `satisfied` for the reason a real one would
+# be, and a run that applied nothing says `needs`. That read is what a plan is made of, so even a `--dry-run` asks
+# it; a machine with no `tailscaled` (this one) cannot answer, which is why every case that reaches step 6 puts this
+# directory first on PATH. `tests/deploy.rs` drives both arms of the same seam over a fake `status`.
+#
+# Every invocation is one line in <log>, `tailscale <all args>`, which is how a case asserts what the deploy asked
+# for. The two paths arrive through the environment rather than being written into the script — the shape
+# `case_key_proxy_request`'s fake `openssl` uses — so the body stays a plain `sh` script with no quoting of its own.
+deploy_machine_shims() {
+  local dir="$1" log="$2" state="$3"
+  mkdir -p "$dir" || fail "deploy_machine_shims/mkdir" "could not create $dir"
+  export HS_SHIM_LOG="$log" HS_SHIM_STATE="$state"
+  cat >"$dir/tailscale" <<'SHIM'
+#!/bin/sh
+# The gate's tailscale: record the call, then answer as the caller expects. Nothing here talks to a daemon.
+set -eu
+log="$HS_SHIM_LOG"
+state="$HS_SHIM_STATE"
+{
+  printf 'tailscale'
+  for arg in "$@"; do
+    printf ' %s' "$arg"
+  done
+  printf '\n'
+} >>"$log"
+case "${1:-}" in
+  serve)
+    # The read: one `Web` entry per origin, `Handlers["/"].Proxy` the target — `ipn.ServeConfig`'s shape.
+    if [ "${2:-}" = "status" ]; then
+      [ "$#" -eq 3 ] || exit 1
+      [ "$3" = "--json" ] || exit 1
+      entries=""
+      if [ -f "$state" ]; then
+        while read -r port target; do
+          [ -n "$port" ] || continue
+          if [ -n "$entries" ]; then
+            entries="$entries,"
+          fi
+          entries="$entries\"holosmith.test.ts.net:$port\":{\"Handlers\":{\"/\":{\"Proxy\":\"$target\"}}}"
+        done <"$state"
+      fi
+      printf '{"Web":{%s}}\n' "$entries"
+      exit 0
+    fi
+    # The apply: `serve --bg --yes --https=<port> <target>`, so the port is $4 and the target $5 — $2 and $3 are
+    # the two flags, and a shim that read those as the port would write `--yes --https=8444` into the state and make
+    # every run after the first re-apply forever.
+    [ "$#" -eq 5 ] || exit 1
+    [ "$2" = "--bg" ] || exit 1
+    [ "$3" = "--yes" ] || exit 1
+    case "$4" in
+      --https=*) port="${4#--https=}" ;;
+      *) exit 1 ;;
+    esac
+    target="$5"
+    # A temp file and a rename, so a read in the same run never sees half a list.
+    : >"$state.new"
+    if [ -f "$state" ]; then
+      while read -r served_port served_target; do
+        [ -n "$served_port" ] || continue
+        if [ "$served_port" = "$port" ]; then
+          continue
+        fi
+        printf '%s %s\n' "$served_port" "$served_target" >>"$state.new"
+      done <"$state"
+    fi
+    printf '%s %s\n' "$port" "$target" >>"$state.new"
+    mv "$state.new" "$state"
+    ;;
+  status)
+    # `doctor`'s question, which is also what makes step 1's tailscale finding a pass rather than an unknown.
+    [ "$#" -eq 2 ] || exit 1
+    [ "$2" = "--json" ] || exit 1
+    printf '{"BackendState":"Running"}\n'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+SHIM
+  chmod 0755 "$dir/tailscale"
+}
+
+# One background `python3` answering `200` to every `GET` on 127.0.0.1:<port> for the rest of the run, printing the
+# pid it left behind (HS-049).
+#
+# Two callers ask one question and both need a *listener*: `server deploy`'s step 7 waits for `GET /api/health`
+# before it calls a start successful, and `doctor`'s port check reads "the port is held and `/api/health` answers" as
+# the serving pass. A responder is all this machine can offer there — there is no systemd and no unit boot — which is
+# why the body is unimportant: what is measured is that something holds the port and answers 200, not what it says.
+health_responder() {
+  python3 - "$1" <<'PY' >/dev/null 2>&1 &
+import socket, sys
+
+body = b'{"status":"ok","version":"verify"}'
+server = socket.socket()
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("127.0.0.1", int(sys.argv[1])))
+server.listen(16)
+while True:
+    connection, _ = server.accept()
+    connection.recv(4096)
+    connection.sendall(
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n"
+        % len(body)
+        + body
+    )
+    connection.close()
+PY
+  echo $!
+}
+
 case_doctor_quick() {
   local name=case_doctor_quick root="$repo_root/target/verify-doctor-$$"
   local control preview status word line
@@ -4890,7 +5013,10 @@ case_doctor_quick() {
     return 0
   fi
   rm -rf "$root"
-  mkdir -p "$root/data"
+  # `install -d -m 0755` rather than `mkdir -p`: `doctor`'s `perms` compares the data root against 0755 because that
+  # is what `server deploy` writes, and this shell's umask makes `mkdir -p` write 0775 — the fixture has to be the
+  # machine the deploy leaves, not this shell's umask.
+  install -d -m 0755 "$root/data" || fail "$name/mkdir" "could not create $root/data"
   control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
   preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a second port"
   socket_pid="$(fake_docker_ping "$root/docker.sock")"
@@ -5044,7 +5170,7 @@ PY
 case_server_images() {
   local name=case_server_images root="$repo_root/target/verify-images-$$"
   local proxy agent version tag pin plain status labels id_before control preview line answer
-  local egress_ip key_ip binds container package
+  local egress_ip key_ip binds container package shims log state
   if ! command -v docker >/dev/null 2>&1 || ! docker version >/dev/null 2>&1; then
     printf 'SKIP %s: no Docker daemon answers (tests/images.rs builds a test tag and reads it back)\n' "$name"
     return 0
@@ -5087,9 +5213,23 @@ case_server_images() {
   # session's container would run what the deploy installed. `data_root` and `projects_root` stay at their defaults
   # because `--root` prefixes them, and this case's `--root` is under `target/` (ADR-0035's mount-source rule).
   images_config "$WORK/config-images.toml" "$control" "$preview" "$version"
+  # Steps 5, 6 and 7 are HS-049's and are real now, so a `--root` deploy reaches them: step 6 **reads**
+  # `tailscale serve status --json`, and step 7 waits for `/api/health` and then runs `doctor --full`. This machine
+  # has no `tailscaled` and nothing serving, so the two stand-ins answer instead — what this case asserts is the
+  # deploy's own reads and the images they leave, not a daemon that happens to be up.
+  shims="$WORK/$name.shims"
+  log="$WORK/$name.tailscale.log"
+  state="$WORK/$name.tailscale.state"
+  rm -f "$log" "$state"
+  deploy_machine_shims "$shims" "$log" "$state"
+  holder_pid="$(health_responder "$control")"
+  for _ in $(seq 1 100); do
+    if (exec 3<>/dev/tcp/127.0.0.1/"$control") 2>/dev/null; then break; fi
+    sleep 0.05
+  done
 
   status=0
-  "$artifact" server deploy --root "$root/install" --config "$WORK/config-images.toml" \
+  PATH="$shims:$PATH" "$artifact" server deploy --root "$root/install" --config "$WORK/config-images.toml" \
     >"$WORK/$name.deploy.out" 2>&1 || status=$?
   [ "$status" -eq 0 ] ||
     fail "$name/deploy/exit" "the deploy exited $status: $(tail -20 "$WORK/$name.deploy.out")"
@@ -5202,7 +5342,7 @@ case_server_images() {
   # The second deploy: `satisfied`, and neither image was rebuilt.
   id_before="$(docker image inspect --format '{{.Id}}' "$proxy") $(docker image inspect --format '{{.Id}}' "$agent")"
   status=0
-  "$artifact" server deploy --root "$root/install" --config "$WORK/config-images.toml" \
+  PATH="$shims:$PATH" "$artifact" server deploy --root "$root/install" --config "$WORK/config-images.toml" \
     >"$WORK/$name.again.out" 2>&1 || status=$?
   [ "$status" -eq 0 ] ||
     fail "$name/again/exit" "the second deploy exited $status: $(tail -20 "$WORK/$name.again.out")"
@@ -5215,7 +5355,9 @@ case_server_images() {
 
   # `doctor --full` on the machine the deploy just built: the image line names the version and the tag, which is
   # the label comparison read back through its other caller — and it runs the self-test, which is the measurement
-  # that the agent image can be a session's image at all.
+  # that the agent image can be a session's image at all. This one is deliberately **not** given the shim: a
+  # Tailscale that cannot be asked is `unknown` here, which is not a failure, and the deploy above is where the
+  # origins were measured.
   status=0
   "$artifact" doctor --full --config "$root/install/etc/holosmith/config.toml" \
     >"$WORK/$name.doctor.out" 2>&1 || status=$?
@@ -5232,7 +5374,11 @@ case_server_images() {
   # Its own containers and its scratch go, and so do the two the deploy's step 4 started: `hs_key` mounts a
   # directory inside this case's tree, so removing the tree under a running container would leave it crash-looping
   # on a mount source that is no longer there. **Both images stay** (see this case's comment), which is what a later
-  # `serve` boot needs to start the proxies again.
+  # `serve` boot needs to start the proxies again. The responder goes first: it is this case's listener, and the next
+  # case picks its own port.
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  holder_pid=""
   timeout 60 docker rm -f "hs_images_egress_$$" "hs_images_key_$$" hs_egress hs_key >/dev/null 2>&1 || true
   rm -rf "$root"
 }
@@ -5294,6 +5440,7 @@ case_server_deploy() {
   local name=case_server_deploy root="$repo_root/target/verify-deploy-$$"
   local image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
   local control preview status line got entry n version
+  local shims log state target count
 
   # ---- the offline half: step 1 against a `_ping` socket, and the two failures ----------------------
   if ! command -v python3 >/dev/null 2>&1; then
@@ -5310,10 +5457,16 @@ case_server_deploy() {
     done
     [ -S "$root/docker.sock" ] || fail "$name/socket" "the fake daemon socket never appeared"
     deploy_config "$WORK/config-deploy-offline.toml" "$control" "$preview" "unix://$root/docker.sock" "$image"
+    # A dry run reads step 6 (`tailscale serve status --json` is what the plan is made of), so the shim is on PATH
+    # even for a run that installs nothing. Steps 5, 6 and 7 are this story's now, so nothing here is a skip.
+    shims="$WORK/$name.shims"
+    log="$WORK/$name.tailscale.log"
+    state="$WORK/$name.tailscale.state"
+    deploy_machine_shims "$shims" "$log" "$state"
 
     # 1. The dry run: the seven steps in the spec's order, and an install root that does not appear.
     status=0
-    "$artifact" server deploy --dry-run --root "$root/install" \
+    PATH="$shims:$PATH" "$artifact" server deploy --dry-run --root "$root/install" \
       --config "$WORK/config-deploy-offline.toml" >"$WORK/$name.dry.out" 2>&1 || status=$?
     check "$name/dry/exit" 0 "$status"
     got="$(sed -n 's/^\([1-7]\)\. .*/\1/p' "$WORK/$name.dry.out" | tr -d '\n')"
@@ -5326,20 +5479,45 @@ case_server_deploy() {
     grep -q '^2\. files: needs: ' "$WORK/$name.dry.out" ||
       fail "$name/dry/plan" "the dry run does not say what step 2 would do: $(cat "$WORK/$name.dry.out")"
     assertions=$((assertions + 1))
-    # Step 3 is this story's, so the dry run plans it: two images to build, and neither is on this machine.
+    # Step 3 is HS-048's, so the dry run plans it: two images to build, and neither is on this machine.
     grep -q '^3\. images: needs: ' "$WORK/$name.dry.out" ||
       fail "$name/dry/images" "the dry run does not plan step 3: $(cat "$WORK/$name.dry.out")"
     assertions=$((assertions + 1))
-    # A step another story owns is a skip that names it, never a pass (ADR-0056).
-    while read -r n entry line; do
-      grep -q "^$n\. $entry: skipped: .*$line" "$WORK/$name.dry.out" ||
-        fail "$name/dry/skip$n" "step $n is not a skip naming $line: $(cat "$WORK/$name.dry.out")"
-      assertions=$((assertions + 1))
-    done <<'OWNERS'
-5 service HS-049
-6 origins HS-049
-7 health HS-049
-OWNERS
+    # Steps 5, 6 and 7 are this story's, which is the claim that replaces the skip-owner loop: each plans what it
+    # would do, and the sentence names the thing it would touch — the unit's path, both origins with their HTTPS
+    # ports, and the wait step 7 is.
+    line="$(grep '^5\. service: needs: ' "$WORK/$name.dry.out" || true)"
+    [ -n "$line" ] || fail "$name/dry/service" "the dry run does not plan step 5: $(cat "$WORK/$name.dry.out")"
+    case "$line" in
+      *"$root/install/etc/systemd/system/holosmith.service"*) assertions=$((assertions + 1)) ;;
+      *) fail "$name/dry/service/unit" "step 5 does not name the unit it would install: $line" ;;
+    esac
+    line="$(grep '^6\. origins: needs: ' "$WORK/$name.dry.out" || true)"
+    [ -n "$line" ] || fail "$name/dry/origins" "the dry run does not plan step 6: $(cat "$WORK/$name.dry.out")"
+    for target in "--https=443 http://127.0.0.1:$control" "--https=8444 http://127.0.0.1:$preview"; do
+      case "$line" in
+        *"$target"*) assertions=$((assertions + 1)) ;;
+        *) fail "$name/dry/origins/ports" "step 6 does not plan '$target': $line" ;;
+      esac
+    done
+    line="$(grep '^7\. health: needs: ' "$WORK/$name.dry.out" || true)"
+    [ -n "$line" ] || fail "$name/dry/health" "the dry run does not plan step 7: $(cat "$WORK/$name.dry.out")"
+    for target in "127.0.0.1:$control" '/api/health' 'doctor --full'; do
+      case "$line" in
+        *"$target"*) assertions=$((assertions + 1)) ;;
+        *) fail "$name/dry/health/sentence" "step 7 does not name '$target': $line" ;;
+      esac
+    done
+    # No step is a skip any more, and no line says another story owns one: `skipped` keeps its word in the five-word
+    # vocabulary and loses its producer (ADR-0056), which is a fact about the report and not about a step's line.
+    if grep -q ': skipped: ' "$WORK/$name.dry.out"; then
+      fail "$name/dry/skipped" "a step is still a skip: $(grep ': skipped: ' "$WORK/$name.dry.out")"
+    fi
+    assertions=$((assertions + 1))
+    if grep -q '^deploy: incomplete: ' "$WORK/$name.dry.out"; then
+      fail "$name/dry/incomplete" "the report says a step belongs to a later story: $(cat "$WORK/$name.dry.out")"
+    fi
+    assertions=$((assertions + 1))
     [ ! -e "$root/install" ] || fail "$name/dry/root" "the dry run created $root/install"
     assertions=$((assertions + 1))
     grep -q '^deploy: 7 steps: ' "$WORK/$name.dry.out" ||
@@ -5347,9 +5525,6 @@ OWNERS
     assertions=$((assertions + 1))
     grep -q '^deploy: into ' "$WORK/$name.dry.out" ||
       fail "$name/dry/into" "the report does not say which tree it describes: $(cat "$WORK/$name.dry.out")"
-    assertions=$((assertions + 1))
-    grep -q '^deploy: incomplete: 3 of 7 steps' "$WORK/$name.dry.out" ||
-      fail "$name/dry/incomplete" "the summary does not say three steps are still other stories': $(cat "$WORK/$name.dry.out")"
     assertions=$((assertions + 1))
     grep -qx "deploy: url: http://localhost:$control" "$WORK/$name.dry.out" ||
       fail "$name/dry/url" "the tail names no URL this machine will serve: $(cat "$WORK/$name.dry.out")"
@@ -5445,6 +5620,11 @@ OWNERS
   fi
 
   # ---- the online half: a real install, and then the same command again ----------------------------
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s/online: no python3 to pick ports and answer `/api/health` (tests/deploy.rs covers the rest)\n' "$name"
+    rm -rf "$root"
+    return 0
+  fi
   if ! command -v docker >/dev/null 2>&1 || ! docker version >/dev/null 2>&1 ||
     ! docker image inspect "$image" >/dev/null 2>&1; then
     printf 'SKIP %s/online: no docker daemon or no %s image (step 4 starts the proxies from the built proxy image; tests/deploy.rs covers the rest)\n' \
@@ -5464,10 +5644,27 @@ OWNERS
   mkdir -p "$root"
   control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
   preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a second port"
+  # Both runs go through one shim directory, so the second run's step 6 is answered by what the first one wrote —
+  # and its log is what says the second run applied nothing.
+  shims="$WORK/$name.online-shims"
+  log="$WORK/$name.online-tailscale.log"
+  state="$WORK/$name.online-tailscale.state"
+  rm -f "$log" "$state"
+  deploy_machine_shims "$shims" "$log" "$state"
+  # Step 7 waits for `/api/health`, and its in-process `doctor --full` reads a *held* control port as the serving
+  # pass — so one responder on the config's control port is what makes `7. health: satisfied:` a measurement.
+  # Nothing on this machine starts the unit (there is no systemd), and `cleanup()` kills this if a `fail` gets in
+  # first. Step 1 stays `satisfied` with the port held: `preflight` remarks it rather than failing it, because
+  # re-running a deploy on a serving machine is a promise the spec makes.
+  holder_pid="$(health_responder "$control")"
+  for _ in $(seq 1 100); do
+    if (exec 3<>/dev/tcp/127.0.0.1/"$control") 2>/dev/null; then break; fi
+    sleep 0.05
+  done
   deploy_config "$WORK/config-deploy-online.toml" "$control" "$preview" "unix:///var/run/docker.sock" "$image"
 
   status=0
-  "$artifact" server deploy --root "$root/install" \
+  PATH="$shims:$PATH" "$artifact" server deploy --root "$root/install" \
     --config "$WORK/config-deploy-online.toml" >"$WORK/$name.online.out" 2>&1 || status=$?
   check "$name/online/exit" 0 "$status"
   grep -q '^2\. files: changed: ' "$WORK/$name.online.out" ||
@@ -5479,6 +5676,27 @@ OWNERS
   grep -q '^4\. proxies: changed: ' "$WORK/$name.online.out" ||
     fail "$name/online/step4" "step 4 did not start the proxies: $(cat "$WORK/$name.online.out")"
   assertions=$((assertions + 1))
+  # The three steps this story made real, from the run that really applied them.
+  grep -q '^5\. service: changed: ' "$WORK/$name.online.out" ||
+    fail "$name/online/step5" "step 5 did not install the unit: $(cat "$WORK/$name.online.out")"
+  assertions=$((assertions + 1))
+  grep -q '^6\. origins: changed: ' "$WORK/$name.online.out" ||
+    fail "$name/online/step6" "step 6 did not configure the two origins: $(cat "$WORK/$name.online.out")"
+  assertions=$((assertions + 1))
+  grep -q '^7\. health: satisfied: ' "$WORK/$name.online.out" ||
+    fail "$name/online/step7" "step 7 did not find the machine serving: $(cat "$WORK/$name.online.out")"
+  assertions=$((assertions + 1))
+  grep -q '^deploy: 7 steps: ' "$WORK/$name.online.out" ||
+    fail "$name/online/summary" "no tally line: $(cat "$WORK/$name.online.out")"
+  assertions=$((assertions + 1))
+  # The two origins, as the argv the deploy asked for: the shim's log is the only place that is measurable.
+  for target in "--https=443 http://127.0.0.1:$control" "--https=8444 http://127.0.0.1:$preview"; do
+    # `--` before the pattern: the argv starts with `--https=`, and grep would read it as an option of its own.
+    grep -qF -- "$target" "$log" || fail "$name/online/origins" "the deploy did not serve '$target': $(cat "$log")"
+    assertions=$((assertions + 1))
+  done
+  count="$(grep -c 'serve --bg' "$log" || true)"
+  check "$name/online/origins/count" 2 "$count"
   check "$name/online/config/mode" 644 "$(stat -c '%a' "$root/install/etc/holosmith/config.toml")"
   check "$name/online/data/mode" 755 "$(stat -c '%a' "$root/install/var/lib/holosmith")"
   check "$name/online/secrets/mode" 700 "$(stat -c '%a' "$root/install/var/lib/holosmith/secrets")"
@@ -5506,12 +5724,12 @@ OWNERS
   assertions=$((assertions + 1))
 
   # The second run: the acceptance's "changes nothing", as a comparison of the tree, the config's bytes and the
-  # key file the deploy must never rewrite.
+  # two files the deploy must never rewrite (the provider keys and the VAPID pair).
   deploy_listing "$root/install" >"$WORK/$name.tree1"
   cp "$root/install/etc/holosmith/config.toml" "$WORK/$name.config1"
   cp "$root/install/var/lib/holosmith/secrets/keys.toml" "$WORK/$name.keys1"
   status=0
-  "$artifact" server deploy --root "$root/install" \
+  PATH="$shims:$PATH" "$artifact" server deploy --root "$root/install" \
     --config "$WORK/config-deploy-online.toml" >"$WORK/$name.again.out" 2>&1 || status=$?
   check "$name/again/exit" 0 "$status"
   while read -r n entry; do
@@ -5523,6 +5741,9 @@ OWNERS
 2 files
 3 images
 4 proxies
+5 service
+6 origins
+7 health
 AGAIN
   deploy_listing "$root/install" >"$WORK/$name.tree2"
   cmp -s "$WORK/$name.tree1" "$WORK/$name.tree2" ||
@@ -5534,9 +5755,289 @@ AGAIN
   cmp -s "$WORK/$name.keys1" "$root/install/var/lib/holosmith/secrets/keys.toml" ||
     fail "$name/again/keys" "the second run rewrote keys.toml, which holds every stored provider key"
   assertions=$((assertions + 1))
-  grep -q '^deploy: incomplete: 3 of 7 steps' "$WORK/$name.again.out" ||
-    fail "$name/again/incomplete" "the second run does not say three steps are still other stories': $(cat "$WORK/$name.again.out")"
+  # Step 6's `satisfied` is a read that answered, which is why nothing was applied twice: the shim's log carries the
+  # same two `serve --bg` lines it had after the first run.
+  check "$name/again/origins" "$count" "$(grep -c 'serve --bg' "$log" || true)"
+  timeout 60 docker rm -f hs_egress hs_key >/dev/null 2>&1 || true
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  holder_pid=""
+  rm -rf "$root"
+}
+
+# HS-049's machine steps from the shipped artifact: the VAPID pair and the unit `server deploy` writes, the two
+# Tailscale origins it configures, and the `/api/health` wait that turns an install into "this machine is
+# serving" — with `doctor`'s `perms` as the finding that makes a wrong mode a *startup* refusal, because the unit's
+# `ExecStartPre` is `doctor --quick`.
+#
+# Two halves that skip independently:
+#
+#   **offline** builds the install tree by hand (`install -d`/`install -m`, so every mode is this case's own choice
+#   rather than a umask's) and reads `perms` on it three times: a pass, a fail after `chmod 0755` on the secrets
+#   directory — both modes and the fix in one sentence, and an exit code — and a pass once the mode is back. It then
+#   dry-runs the deploy over a `_ping` fake: steps 5, 6 and 7 are real work now, so the report plans what each would
+#   do and nothing says `skipped`. It needs the artifact, `sh`/`install`/`chmod`, python3 and the two shims — no
+#   daemon, no image.
+#   **online** applies the same seven steps into its own `--root`, with the tailscale shim on PATH and a responder
+#   holding the control port, and then runs the same command again: every step `satisfied`, the VAPID pair and the
+#   unit byte-for-byte identical, and the shim's log gaining no second `serve --bg`. It needs the daemon and an image.
+#
+# What neither half can measure is recorded where it belongs: nothing here asks systemd to load the unit (there is no
+# systemd on this machine, and a unit inside a `--root` tree is not one it could read — step 5's own sentence says
+# so), the origins exist only in the shim's answer (there is no `tailscaled`), and the service user, the `chown` and
+# `systemctl enable --now` of the system path are `tests/deploy.rs`'s recorders. `docs/build.md` is the by-hand
+# procedure for the parts only a real host can show.
+case_server_service() {
+  local name=case_server_service root="$repo_root/target/verify-service-$$"
+  local image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
+  local control preview status line count absent shims log state target vapid unit serve_bg
+
+  # ---- the offline half: `perms` on a hand-built tree, and the dry run's plan ----------------------
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s/offline: no python3 to pick ports and answer `_ping` (tests/doctor.rs owns the `perms` arms)\n' "$name"
+  else
+    rm -rf "$root"
+    # The tree `server deploy` writes, made by hand. `perms` reads modes and owners; the two files' *contents* are
+    # `vapid::is_pair`'s business — the deploy's read, not doctor's — so an empty keys.toml describes a deployed
+    # machine as far as this check is concerned.
+    install -d -m 0755 "$root/var/lib/holosmith" "$root/etc/holosmith" ||
+      fail "$name/tree" "could not create the install tree under $root"
+    install -d -m 0700 "$root/var/lib/holosmith/secrets" ||
+      fail "$name/tree/secrets" "could not create the secrets directory"
+    install -m 0600 /dev/null "$root/var/lib/holosmith/secrets/keys.toml" ||
+      fail "$name/tree/keys" "could not create keys.toml"
+    install -m 0600 /dev/null "$root/var/lib/holosmith/secrets/vapid.toml" ||
+      fail "$name/tree/vapid" "could not create vapid.toml"
+    control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+    preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a second port"
+    socket_pid="$(fake_docker_ping "$root/docker.sock")"
+    for _ in $(seq 1 100); do
+      [ -S "$root/docker.sock" ] && break
+      sleep 0.05
+    done
+    [ -S "$root/docker.sock" ] || fail "$name/socket" "the fake daemon socket never appeared"
+    # The shim first: `doctor`'s tailscale finding and the dry run's step 6 both ask through the name on PATH, and a
+    # machine whose own `tailscale` is logged out would otherwise make the pass below a failure that is not this
+    # case's subject.
+    shims="$WORK/$name.shims"
+    log="$WORK/$name.tailscale.log"
+    state="$WORK/$name.tailscale.state"
+    deploy_machine_shims "$shims" "$log" "$state"
+    # `data_root` is **in the file**, because `doctor --config` reads the file and nothing else: `--data-dir` and
+    # `--port` are `serve` overrides, so a doctor given only the file would answer about this machine's
+    # /var/lib/holosmith.
+    deploy_config "$WORK/config-service-doctor.toml" "$control" "$preview" "unix://$root/docker.sock" "$image"
+    printf 'data_root = "%s"\n' "$root/var/lib/holosmith" >>"$WORK/config-service-doctor.toml"
+
+    # 1. The modes the deploy writes: one `perms` line, and the two files this case made are not among the paths the
+    #    pass reports as ones it did not find.
+    status=0
+    PATH="$shims:$PATH" "$artifact" doctor --quick --config "$WORK/config-service-doctor.toml" \
+      >"$WORK/$name.modes.out" 2>&1 || status=$?
+    check "$name/modes/exit" 0 "$status"
+    count="$(grep -c '^perms: pass: ' "$WORK/$name.modes.out" || true)"
+    check "$name/modes/perms" 1 "$count"
+    line="$(grep '^perms: pass: ' "$WORK/$name.modes.out" || true)"
+    absent="$(printf '%s\n' "$line" | sed -n 's/.*not there yet: //p')"
+    case "$absent" in
+      *keys.toml* | *vapid.toml*)
+        fail "$name/modes/made" "the pass reports a file this case made as one it did not find: $line"
+        ;;
+      *) assertions=$((assertions + 1)) ;;
+    esac
+
+    # 2. A wrong mode is the refusal `ExecStartPre=… doctor --quick` exists for: one sentence carrying both modes
+    #    and the command that fixes it, and an exit code a boot would stop on.
+    chmod 0755 "$root/var/lib/holosmith/secrets"
+    status=0
+    PATH="$shims:$PATH" "$artifact" doctor --quick --config "$WORK/config-service-doctor.toml" \
+      >"$WORK/$name.mode.out" 2>&1 || status=$?
+    check "$name/mode/exit" 1 "$status"
+    line="$(grep '^perms: fail: ' "$WORK/$name.mode.out" || true)"
+    [ -n "$line" ] || fail "$name/mode/perms" "a 0755 secrets directory is not a failure: $(cat "$WORK/$name.mode.out")"
+    assertions=$((assertions + 1))
+    for target in 0700 0755 'chmod 0700'; do
+      case "$line" in
+        *"$target"*) assertions=$((assertions + 1)) ;;
+        *) fail "$name/mode/sentence" "the failure does not carry '$target': $line" ;;
+      esac
+    done
+
+    # 3. The mode back, the answer back.
+    chmod 0700 "$root/var/lib/holosmith/secrets"
+    PATH="$shims:$PATH" "$artifact" doctor --quick --config "$WORK/config-service-doctor.toml" \
+      >"$WORK/$name.restored.out" 2>&1 ||
+      fail "$name/restored/exit" "doctor --quick still fails once the mode is back: $(cat "$WORK/$name.restored.out")"
+    grep -q '^perms: pass: ' "$WORK/$name.restored.out" ||
+      fail "$name/restored/perms" "the restored mode is not a pass: $(cat "$WORK/$name.restored.out")"
+    assertions=$((assertions + 1))
+
+    # 4. The dry run's plan for the three steps this story made real. Step 6 is a **read**, so a plan asks it: the
+    #    shim is on PATH even for a run that installs nothing.
+    deploy_config "$WORK/config-service-dry.toml" "$control" "$preview" "unix://$root/docker.sock" "$image"
+    status=0
+    PATH="$shims:$PATH" "$artifact" server deploy --dry-run --root "$root/install" \
+      --config "$WORK/config-service-dry.toml" >"$WORK/$name.dry.out" 2>&1 || status=$?
+    check "$name/dry/exit" 0 "$status"
+    line="$(grep '^5\. service: needs: ' "$WORK/$name.dry.out" || true)"
+    [ -n "$line" ] || fail "$name/dry/service" "the dry run does not plan step 5: $(cat "$WORK/$name.dry.out")"
+    case "$line" in
+      *"$root/install/etc/systemd/system/holosmith.service"*) assertions=$((assertions + 1)) ;;
+      *) fail "$name/dry/service/unit" "step 5 does not name the unit it would install: $line" ;;
+    esac
+    line="$(grep '^6\. origins: needs: ' "$WORK/$name.dry.out" || true)"
+    [ -n "$line" ] || fail "$name/dry/origins" "the dry run does not plan step 6: $(cat "$WORK/$name.dry.out")"
+    for target in "--https=443 http://127.0.0.1:$control" "--https=8444 http://127.0.0.1:$preview"; do
+      case "$line" in
+        *"$target"*) assertions=$((assertions + 1)) ;;
+        *) fail "$name/dry/origins/ports" "step 6 does not plan '$target': $line" ;;
+      esac
+    done
+    line="$(grep '^7\. health: needs: ' "$WORK/$name.dry.out" || true)"
+    [ -n "$line" ] || fail "$name/dry/health" "the dry run does not plan step 7: $(cat "$WORK/$name.dry.out")"
+    for target in "127.0.0.1:$control" '/api/health' 'doctor --full'; do
+      case "$line" in
+        *"$target"*) assertions=$((assertions + 1)) ;;
+        *) fail "$name/dry/health/sentence" "step 7 does not name '$target': $line" ;;
+      esac
+    done
+    # 5. Neither a skip nor a story's remainder: steps 5, 6 and 7 are real now, so a report that says otherwise
+    #    carries the claim this story deleted (`skipped` keeps its word and loses its producer, ADR-0056).
+    if grep -q ': skipped: ' "$WORK/$name.dry.out"; then
+      fail "$name/dry/skipped" "a step is still a skip: $(grep ': skipped: ' "$WORK/$name.dry.out")"
+    fi
+    assertions=$((assertions + 1))
+    if grep -q '^deploy: incomplete: ' "$WORK/$name.dry.out"; then
+      fail "$name/dry/incomplete" "the report says a step belongs to a later story: $(cat "$WORK/$name.dry.out")"
+    fi
+    assertions=$((assertions + 1))
+    # 6. A dry run creates nothing, including the install tree this case would otherwise have to clean up.
+    [ ! -e "$root/install" ] || fail "$name/dry/root" "the dry run created $root/install"
+    assertions=$((assertions + 1))
+
+    kill "$socket_pid" 2>/dev/null || true
+    wait "$socket_pid" 2>/dev/null || true
+    socket_pid=""
+  fi
+
+  # ---- the online half: the seven steps applied, and then the same command again --------------------
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s/online: no python3 to pick ports and answer `/api/health` (tests/deploy.rs covers the steps)\n' "$name"
+    rm -rf "$root"
+    return 0
+  fi
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1 ||
+    ! docker image inspect "$image" >/dev/null 2>&1; then
+    printf 'SKIP %s/online: no docker daemon or no %s image (step 4 starts the proxies from the built proxy image; tests/deploy.rs covers the steps)\n' \
+      "$name" "$image"
+    rm -rf "$root"
+    return 0
+  fi
+  # `hs_egress`/`hs_key` are the machine's names: a leftover from an earlier case would make this case's first run
+  # read `satisfied`, so it takes them over and removes its own at the end.
+  timeout 60 docker rm -f hs_egress hs_key >/dev/null 2>&1 || true
+  rm -rf "$root"
+  mkdir -p "$root"
+  control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a second port"
+  shims="$WORK/$name.online-shims"
+  log="$WORK/$name.online-tailscale.log"
+  state="$WORK/$name.online-tailscale.state"
+  rm -f "$log" "$state"
+  deploy_machine_shims "$shims" "$log" "$state"
+  # Step 7 waits for `/api/health`, and its in-process `doctor --full` reads a *held* control port as the serving
+  # pass — so one responder on the config's control port is what makes `7. health: satisfied:` a measurement rather
+  # than a 60-second wait. Nothing here starts the unit (there is no systemd), and `cleanup()` kills this if a `fail`
+  # gets in first. Step 1 stays `satisfied` with the port held: `preflight` remarks a held port instead of failing
+  # it, because re-running a deploy on a serving machine is a promise the spec makes.
+  holder_pid="$(health_responder "$control")"
+  for _ in $(seq 1 100); do
+    if (exec 3<>/dev/tcp/127.0.0.1/"$control") 2>/dev/null; then break; fi
+    sleep 0.05
+  done
+  deploy_config "$WORK/config-service-online.toml" "$control" "$preview" "unix:///var/run/docker.sock" "$image"
+
+  status=0
+  PATH="$shims:$PATH" "$artifact" server deploy --root "$root/install" \
+    --config "$WORK/config-service-online.toml" >"$WORK/$name.online.out" 2>&1 || status=$?
+  check "$name/online/exit" 0 "$status"
+  for target in '^2\. files: changed: ' '^5\. service: changed: ' '^6\. origins: changed: ' '^7\. health: satisfied: '; do
+    grep -qE "$target" "$WORK/$name.online.out" ||
+      fail "$name/online/steps" "the first run does not say '$target': $(cat "$WORK/$name.online.out")"
+    assertions=$((assertions + 1))
+  done
+  grep -q '^deploy: 7 steps: ' "$WORK/$name.online.out" ||
+    fail "$name/online/summary" "no tally line: $(cat "$WORK/$name.online.out")"
   assertions=$((assertions + 1))
+
+  # The VAPID pair: mode 0600, and the two fields' own lengths are the format's proof — 65 bytes of uncompressed
+  # P-256 point and 32 bytes of scalar, unpadded base64url, which is 87 and 43 characters. `vapid.rs`'s unit tests
+  # own the DER walk and its vectors own these two lengths; what is measured here is the file the deploy installed.
+  vapid="$root/install/var/lib/holosmith/secrets/vapid.toml"
+  check "$name/vapid/mode" 600 "$(stat -c '%a' "$vapid")"
+  grep -qE '^public_key = "[A-Za-z0-9_-]{87}"$' "$vapid" ||
+    fail "$name/vapid/public" "public_key is not 87 base64url characters: $(cat "$vapid")"
+  assertions=$((assertions + 1))
+  grep -qE '^private_key = "[A-Za-z0-9_-]{43}"$' "$vapid" ||
+    fail "$name/vapid/private" "private_key is not 43 base64url characters: $(cat "$vapid")"
+  assertions=$((assertions + 1))
+
+  # The unit: mode 0644, the four lines the acceptance names, and **no** `User=` — naming a service user is the
+  # system path's half, and a unit inside a `--root` tree describes a machine this install does not have.
+  unit="$root/install/etc/systemd/system/holosmith.service"
+  check "$name/unit/mode" 644 "$(stat -c '%a' "$unit")"
+  for target in 'Restart=on-failure' "ExecStartPre=$artifact doctor --quick" "ExecStart=$artifact serve" \
+    'WantedBy=multi-user.target'; do
+    grep -qxF "$target" "$unit" || fail "$name/unit/line" "the unit does not carry '$target': $(cat "$unit")"
+    assertions=$((assertions + 1))
+  done
+  if grep -q '^User=' "$unit"; then
+    fail "$name/unit/user" "a --root unit names a service user this install does not create: $(cat "$unit")"
+  fi
+  assertions=$((assertions + 1))
+
+  # The two origins as the argv the deploy asked for: the shim's log is the only place that is measurable, and this
+  # machine has no `tailscaled` to ask afterwards.
+  for target in "--https=443 http://127.0.0.1:$control" "--https=8444 http://127.0.0.1:$preview"; do
+    # `--` before the pattern: the argv starts with `--https=`, and grep would read it as an option of its own.
+    grep -qF -- "$target" "$log" || fail "$name/origins" "the deploy did not serve '$target': $(cat "$log")"
+    assertions=$((assertions + 1))
+  done
+  serve_bg="$(grep -c 'serve --bg' "$log" || true)"
+  check "$name/origins/count" 2 "$serve_bg"
+
+  # The second run: every step `satisfied`, the two files byte-identical, and no second `serve --bg` — the read
+  # answered, so nothing was applied twice. That is the acceptance's "changes nothing", for the steps that make it
+  # expensive to get wrong.
+  cp "$vapid" "$WORK/$name.vapid1"
+  cp "$unit" "$WORK/$name.unit1"
+  status=0
+  PATH="$shims:$PATH" "$artifact" server deploy --root "$root/install" \
+    --config "$WORK/config-service-online.toml" >"$WORK/$name.again.out" 2>&1 || status=$?
+  check "$name/again/exit" 0 "$status"
+  while read -r n entry; do
+    grep -q "^$n\. $entry: satisfied: " "$WORK/$name.again.out" ||
+      fail "$name/again/$n" "step $n is not satisfied on the second run: $(cat "$WORK/$name.again.out")"
+    assertions=$((assertions + 1))
+  done <<'AGAIN'
+1 preflight
+2 files
+3 images
+4 proxies
+5 service
+6 origins
+7 health
+AGAIN
+  cmp -s "$WORK/$name.vapid1" "$vapid" ||
+    fail "$name/again/vapid" "the second run rewrote the VAPID pair, which invalidates every existing push subscription"
+  assertions=$((assertions + 1))
+  cmp -s "$WORK/$name.unit1" "$unit" || fail "$name/again/unit" "the second run rewrote the unit"
+  assertions=$((assertions + 1))
+  check "$name/again/origins" "$serve_bg" "$(grep -c 'serve --bg' "$log" || true)"
+
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  holder_pid=""
   timeout 60 docker rm -f hs_egress hs_key >/dev/null 2>&1 || true
   rm -rf "$root"
 }
@@ -5573,7 +6074,11 @@ case_doctor_full() {
   fi
   stop_serve
   rm -rf "$root"
-  mkdir -p "$data" "$root/projects"
+  # `install -d -m 0755` for the data root rather than `mkdir -p`: `perms` compares it against the 0755 `server
+  # deploy` writes, and this shell's umask makes `mkdir -p` write 0775 — the fixture has to be the machine the
+  # deploy leaves, not this shell's umask.
+  install -d -m 0755 "$data" || fail "$name/mkdir" "could not create $data"
+  mkdir -p "$root/projects"
   control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
   preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a second port"
   # The scratch lives under `target/` for ADR-0035's reason: the daemon resolves a mount's source in the host's

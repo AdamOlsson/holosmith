@@ -9,6 +9,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::thread::sleep;
@@ -629,6 +630,52 @@ fn a_data_dir_that_cannot_be_created_is_reported_before_anything_binds() {
         "{stderr}"
     );
     assert!(!stderr.contains("control_listen "), "{stderr}");
+}
+
+#[test]
+fn the_data_root_serve_creates_is_the_mode_the_deploy_writes_whatever_the_umask() {
+    // HS-049: `doctor`'s `perms` finding compares the install tree with the modes `server deploy` writes, and the
+    // data root's is 0755. `create_dir_all` uses the process's umask — 0775 on a machine whose umask is 0002 — so a
+    // root `serve` made itself would fail the *next* boot's `ExecStartPre` over a mode nothing changed. `umask` is
+    // a shell builtin and this crate denies `unsafe`, so the permissive umask arrives through a shell.
+    let dir = TempDir::new("data-root-mode");
+    let config = config(&dir);
+    let data = dir.file("data");
+    let stderr = dir.file("serve.err");
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "umask 0002; exec '{}' serve --config '{}' --port 0",
+            env!("CARGO_BIN_EXE_holosmith"),
+            config.display()
+        ))
+        .env_remove("HOLOSMITH_LOG")
+        .stdout(Stdio::null())
+        .stderr(fs::File::create(&stderr).expect("the log file is creatable"))
+        .spawn()
+        .expect("the binary starts through a shell");
+    // The banner is printed after the root is created and its mode set, so waiting for it is what makes the read
+    // below a fact rather than a race with the chmod.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut said = String::new();
+    while Instant::now() < deadline {
+        said = fs::read_to_string(&stderr).unwrap_or_default();
+        if said.contains("control_listen ") {
+            break;
+        }
+        sleep(Duration::from_millis(20));
+    }
+    let mode = fs::metadata(&data)
+        .expect("serve created the data root")
+        .permissions()
+        .mode()
+        & 0o777;
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(
+        mode, 0o755,
+        "serve made the data root {mode:04o}, which is the umask's mode and not the deploy's: {said}"
+    );
 }
 
 #[test]

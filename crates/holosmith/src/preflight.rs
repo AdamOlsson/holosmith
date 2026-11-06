@@ -87,6 +87,8 @@ pub enum Check {
     Ports,
     /// The database's schema against this binary's, read without migrating it (ADR-0047).
     Database,
+    /// The installed paths' owners and modes — the one check the deploy's own output must satisfy (HS-049).
+    Perms,
     /// Whether the machine's `hs_egress`/`hs_key` proxies are up.
     Proxy,
     /// Whether the configured agent image runs the pinned pi.
@@ -106,6 +108,7 @@ impl Check {
             Self::Tailscale => "tailscale",
             Self::Ports => "ports",
             Self::Database => "database",
+            Self::Perms => "perms",
             Self::Proxy => "proxy",
             Self::Image => "image",
         }

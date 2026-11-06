@@ -329,19 +329,42 @@ leaves its own running, so it is last.
 …and since HS-047, **`server deploy`**: `case_server_deploy` has two halves that skip independently, because the
 bugs it exists to catch are of two kinds. The **offline** half needs `python3` and nothing else: a `_ping` socket
 it answers stands in for the daemon, and the case asserts that the dry run lists the seven steps in the spec's
-order with step 3 planning the two images (`needs`) and steps 5, 6 and 7 naming the story that still owns them,
-that an install root under `target/` does **not appear** afterwards, that a run whose `docker_host` names a socket
-that cannot exist stops at step 1 with the resume command as its last line, and that a run which gets past step 1
-and then fails step 3 (that same socket answers `_ping` and nothing a build's label read needs) leaves step 2's
-files on disk, prints the resume command with the resolved `--root`/`--config`, and evaluates no later step at
-all. The **online** half needs the daemon and an `agent_image` that exists: it removes any `hs_egress`/`hs_key`
-an earlier case left behind — those are the machine's names, and a leftover would make its own first run read
-`satisfied` — removes both image tags step 3 builds (so its `changed` is a real build, layer-cached), then runs a
-real deploy into a root under `target/`, asserting step 2's four paths with their modes (0755, 0644, 0700, 0600,
-0700), step 3 `changed`, step 4 `changed` with both containers running, and then the same command again, where
-steps 1, 2, 3 and 4 say `satisfied`, the tree's listing and `config.toml`'s bytes are byte-identical, and the
-tail names the URL and `holosmith key set` (ADR-0056). A run whose remaining steps are later stories' ends **0**
-with an `incomplete: 3 of 7` line; only a failed step exits 1.
+order with step 3 planning the two images (`needs`) and steps 5, 6 and 7 planning real work — the unit's path, both
+`--https` targets and the `/api/health` wait — that **no** step is `skipped` and that the report has no `deploy:
+incomplete` line (ADR-0058), that an install root under `target/` does **not appear** afterwards, that a run whose
+`docker_host` names a socket that cannot exist stops at step 1 with the resume command as its last line, and that a
+run which gets past step 1 and then fails step 3 (that same socket answers `_ping` and nothing a build's label read
+needs) leaves step 2's files on disk, prints the resume command with the resolved `--root`/`--config`, and
+evaluates no later step at all. The **online** half needs the daemon and an `agent_image` that exists: it removes
+any `hs_egress`/`hs_key` an earlier case left behind — those are the machine's names, and a leftover would make its
+own first run read `satisfied` — removes both image tags step 3 builds (so its `changed` is a real build,
+layer-cached), then runs a real deploy into a root under `target/` with the `tailscale` stand-in on `PATH` and a
+`python3` responder holding the control port, asserting step 2's four paths with their modes (0755, 0644, 0700,
+0600, 0700) and the VAPID pair, step 3 `changed`, step 4 `changed` with both containers running, step 5 `changed`,
+step 6 `changed` and step 7 `satisfied`, and then the same command again, where **all seven** steps say `satisfied`,
+the tree's listing and `config.toml`'s bytes are byte-identical and the shim applied no second origin, and the tail
+names the URL and `holosmith key set` (ADR-0056, ADR-0058). Only a failed step exits 1; the `incomplete` line it
+used to print went with the steps that were still other stories'.
+
+…and since HS-049, **`case_server_service`** owns the three machine steps from the shipped artifact, in two halves
+that skip independently and print one `SKIP` line each. The **offline** half needs `python3` and nothing else: it
+builds the install tree by hand with `install -d`/`install -m` — so every mode is the case's own choice rather than
+this shell's umask — and reads `doctor --quick`'s `perms` line three times, a `pass`, a `fail` after `chmod 0755` on
+the secrets directory naming both `0700` and `0755` and the `chmod` that fixes it with exit 1, and a `pass` once
+the mode is back; then it dry-runs the deploy over a `_ping` socket and asserts the plans for steps 5, 6 and 7, that
+nothing is `skipped`, and that no `incomplete` line exists. The **online** half needs the daemon, an image and
+`python3`: a real `--root` install with the `tailscale` stand-in on `PATH` and the responder on the control port
+asserts `2. files: changed:`, `5. service: changed:`, `6. origins: changed:` and `7. health: satisfied:`, the VAPID
+file at 0600 with an 87-character `public_key` and a 43-character `private_key`, the unit at 0644 carrying
+`Restart=on-failure`, `ExecStartPre=<artifact> doctor --quick`, `ExecStart=<artifact> serve` and
+`WantedBy=multi-user.target` and **no** `User=` (that is the system path's half), and the shim's log carrying
+`--https=443 http://127.0.0.1:<control>` and `--https=8444 http://127.0.0.1:<preview>`; the second run is all seven
+`satisfied`, with the VAPID and unit bytes identical under `cmp` and no second `serve --bg` in the log. The two
+stand-ins are shared with `case_server_deploy` and live beside it: `deploy_machine_shims` writes the `tailscale`
+shim, which records every argv and answers `serve status --json` from the `<port> <target>` pairs it was asked to
+serve, and `health_responder` starts the `python3` listener that holds the control port. What neither half can
+measure — a unit systemd loads, a daemon it can ask, a `useradd` it may run — is `tests/deploy.rs`'s and the
+by-hand section near the end of this file (ADR-0058).
 
 …and since HS-048, **`case_server_images`** is the one case whose subject is the build itself, and it runs
 **first among the cases whose boot starts the proxies** (not the first daemon case: `case_create_session`,
@@ -538,17 +561,27 @@ start, rather than a service that refuses to come back up.
   `openssl s_client` to terminate the session's plaintext request and speak TLS to the provider (the artifact is
   static and has no TLS stack, ADR-0048). The image this repository tests with carries it; a missing binary is a
   502 from the proxy, not a silent fallback.
-- **`tailscale`** and **systemd** only for what needs them: `doctor` reports a machine without either as
-  `unknown` rather than failing (a LAN-only machine and a hand-run `serve` are supported). `server deploy` runs
-  `doctor --quick` as its step 1 (HS-047), so a machine without them gets through step 1; its steps 5 and 6 —
-  the unit file and `tailscale serve` — are HS-049's, and those are where the two become prerequisites
-  (ADR-0054, ADR-0056).
-- **`install` and `chmod`** (coreutils), and **`sudo`** on a machine whose paths are the system's, for
-  `holosmith server deploy` (HS-047): every file action is one `install`/`chmod` child, and it is prefixed by
-  `sudo` unless `--root` builds the tree as the invoking user (ADR-0056). The gate's **case** needs neither —
-  it installs under `target/` with `--root`, so no step takes the privileged path — but `cargo test` runs
-  `tests/deploy.rs`, which drives the host's `install` and `chmod` for real (by name, through `PATH`) to assert
-  the modes a real install produces. That is the same coreutils `preflight` already relies on for `df`.
+- **`tailscale`** and **systemd** for a deployed server — and they **are** prerequisites of a deploy now: `doctor`
+  reports a machine without either as `unknown` rather than failing (a LAN-only machine and a hand-run `serve` are
+  supported), and `server deploy` runs `doctor --quick` as its step 1 (HS-047), so such a machine still gets through
+  step 1. Step 5 (HS-049) writes the unit and runs `systemctl daemon-reload` and `systemctl enable --now
+  holosmith.service`, so a machine without systemd fails that step with systemd's own line, and step 6 configures
+  `tailscale serve` for the two origins, so a `tailscaled` that does not answer fails step 6 while `doctor`'s
+  `tailscale` finding stays `unknown` on the same machine — the same host, two different questions (ADR-0054,
+  ADR-0058).
+- **`install`, `chmod`, `id`, `stat`, `useradd`, `usermod` and `chown`** (coreutils, plus the account tools
+  `useradd`/`usermod`), **`openssl`**, and
+  **`sudo`** on a machine whose paths are the system's, for `holosmith server deploy` (HS-047, HS-049): every file
+  action is one `install`/`chmod` child, and it is prefixed by `sudo` unless `--root` builds the tree as the
+  invoking user (ADR-0056); step 2 reads `id -u`/`id -nG` and `stat -c %u` to decide whether the service user and the
+  tree's ownership are already what the unit's `User=` needs, and writes them with `useradd`/`usermod`/`chown`; and
+  `openssl ecparam -name prime256v1 -genkey -noout -outform DER` is what generates the machine's VAPID pair — the
+  same `openssl` the key proxy spawns at runtime, needed by the deploy as well as by the key proxy (ADR-0048,
+  ADR-0058). The gate's **case** needs none of them: it installs under `target/` with `--root`, so no step takes the
+  privileged path. `cargo test` runs `tests/deploy.rs`, which drives the host's `install` and `chmod` for real (by
+  name, through `PATH`) to assert the modes a real install produces, and asserts the
+  `useradd`/`usermod`/`chown`/`systemctl` argv through recorders that execute nothing. That is the same coreutils
+  `preflight` already relies on for `df`.
 - **git** for `scripts/build.sh`, and for a Docker run at runtime: the worktree step runs
   `git worktree`, `git rev-list` and `git branch` against the project repository on the host
   (HS-025). Not required by `cargo build` itself, and not required by `--backend stub`.
@@ -801,6 +834,63 @@ Two defects this procedure found, both fixed in HS-040 (ADR-0050), are worth che
 fails: a `502 the provider closed the connection before answering` means the forwarded request declared a
 `Content-Length` it did not carry, and `401 … session=- … status=bad-key` for a session that exists means the
 proxy is reading a `keys.toml` from before the create — a file mount rather than the directory.
+
+## Deploying a real host by hand
+
+`server deploy` is the supported path, and on a real host it is a handful of commands for an operator who has the
+artifact and `sudo`. **Copy the artifact to a stable path first**, because step 5's unit names the path of the
+binary that wrote it (`std::env::current_exe()`, ADR-0058) — a deploy run out of `target/debug` writes a unit
+pointing at `target/debug`, which `cargo clean` removes and which systemd could not read anyway.
+
+```bash
+scripts/build.sh
+sudo install -m 0755 dist/x86_64-unknown-linux-musl/holosmith /usr/local/bin/holosmith
+/usr/local/bin/holosmith server deploy --dry-run    # the plan, and it creates nothing
+/usr/local/bin/holosmith server deploy             # each write asks `sudo` for what it needs
+```
+
+Run it as yourself and let the `sudo` children ask: that is the shape ADR-0056 records, and the child inherits the
+deploy's stdin so a password prompt lands on your terminal. `--root` is for a tree you own and is what the gate
+uses; on a real host the deploy takes the system paths. The config it writes is `/etc/holosmith/config.toml`
+rendered from the defaults, so edit it **before** the first deploy if `projects_root`, the listen addresses or
+`docker_host` are not what this machine wants, and then run the deploy: step 2 rewrites that file when its
+rendering differs, and never touches `secrets/keys.toml` or `secrets/vapid.toml`.
+
+What each step does here: **2** creates the `holosmith` system user in the `docker` group, the data directory,
+`config.toml`, the 0700 secrets directory with its 0600 `keys.toml` and the VAPID pair in `vapid.toml`, and the
+admin socket directory, then `chown`s the tree to the service user, because `serve` runs as that user; **3** builds
+`holosmith-proxy` and `agent-image` from the Dockerfiles embedded in the artifact, and a first build pulls pi and
+the toolchains over the network; **4** creates the `egress` network and starts `hs_egress`/`hs_key` with
+`--restart unless-stopped`; **5** installs the unit, runs `systemctl daemon-reload` and then `systemctl enable
+--now holosmith.service`; **6** asks `tailscale serve` for the control origin on 443 and the preview origin on 8444;
+and **7** waits for `/api/health` and then runs `doctor --full`, so the run ends with the URL and the next steps
+(`holosmith key set <provider>`, and registering the machine in a hub).
+
+Those are the two origins the story's demo names — the control origin on 443 and the preview origin on 8444, on
+this machine's tailnet name — plus the one thing a deploy cannot do, which is survive a reboot. So reboot once and
+check that it did:
+
+```bash
+sudo reboot
+systemctl status holosmith.service             # active (running), and enabled
+systemctl is-enabled holosmith.service         # what step 5's read compares with
+sudo tailscale serve status                    # both origins, with their targets
+curl -fsS https://<machine>.<tailnet>.ts.net/api/health
+sudo holosmith doctor --full                   # as root, because `perms` reads the 0700 secrets directory
+```
+
+`doctor --full` is the same list the unit's `ExecStartPre` runs, plus the checks that only mean something on a
+serving machine: the network self-test, both proxies, the image's pi version, and a held port that answers
+`/api/health` read as the pass. A `perms` failure there names the mode, the mode it should be and the `chmod` that
+fixes it — and because it is `doctor --quick`, the same failure is what stops the unit from starting, so a reboot
+that reports `activating (auto-restart)` is a mode or an owner rather than a mystery.
+
+**What this repository's environment could not measure**, and therefore what this procedure is for: there is no
+systemd here (so no unit was ever loaded and no boot happened), no `tailscaled` (so the two origins existed only in
+the gate's stand-in answer), no `useradd` (so the service user, the three `chown`s and `systemctl enable --now` are
+`tests/deploy.rs`'s recorders) and no reboot. The plan, the unit's bytes, both `tailscale` argvs, the VAPID pair's
+identity across two runs and `doctor`'s `perms` arms are measured; "reachable over HTTPS" is this section, run on a
+machine that has the three programs this one does not (ADR-0058).
 
 ## Where the target settings live
 

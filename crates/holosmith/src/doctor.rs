@@ -27,6 +27,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -35,6 +36,7 @@ use crate::agent;
 use crate::config::{Config, Role};
 use crate::container::{PROXY_ALIAS, PROXY_NAME};
 use crate::db;
+use crate::deploy;
 use crate::docker::Docker;
 use crate::images::{Expectation, Kind};
 use crate::key::{KEY_PROXY_ALIAS, KEY_PROXY_NAME};
@@ -193,10 +195,10 @@ impl Report {
 /// Run the checks `depth` names, in the order the report prints them.
 ///
 /// The order is the operator's: the machine's init, then the three `serve` refuses on (with V2's merge trial
-/// beside git), then disk, Tailscale, the ports and the database; `--full` appends the container questions. A
-/// **hub** is not asked the Docker or git questions at all — item 10 §6's `hub deploy` runs step 1 "without the
-/// Docker and git checks", because a hub runs no sessions — while disk, Tailscale, ports and the database still
-/// belong to it.
+/// beside git), then disk, Tailscale, the ports, the database and the installed paths' modes; `--full` appends the
+/// container questions. A **hub** is not asked the Docker or git questions at all — item 10 §6's `hub deploy` runs
+/// step 1 "without the Docker and git checks", because a hub runs no sessions — while disk, Tailscale, ports, the
+/// database and the permissions still belong to it (a hub has a data root too).
 pub fn run(config: &Config, depth: Depth, tools: &Tools, machine: &dyn Machine) -> Report {
     let mut findings = vec![systemd(&tools.systemd)];
     let mut docker_ok = false;
@@ -222,6 +224,7 @@ pub fn run(config: &Config, depth: Depth, tools: &Tools, machine: &dyn Machine) 
     let serving = (depth == Depth::Full).then(|| health_answers(config.control_listen));
     findings.extend(ports(config, serving));
     findings.push(database(config));
+    findings.push(perms(config));
     if depth == Depth::Full {
         let image = config.agent_image.as_str();
         // Why the container questions have no verdict, in the words the report can stand behind: a `hub` is not
@@ -392,9 +395,13 @@ fn port(listen: SocketAddr, label: &str, serving: Option<bool>) -> Finding {
 /// Whether `GET /api/health` answers 200 on `listen` — the one question that tells "this machine is serving"
 /// from "something else holds the port".
 ///
+/// Public because it has two callers and must answer both the same way: this module's port check, and `server
+/// deploy`'s step 7, which waits on it before it calls a unit's start successful (HS-049). A second copy of the
+/// request would be a second meaning of "serving".
+///
 /// Hand-written like [`crate::preflight`]'s `_ping`, and for the same reason: one request, four lines, no client
 /// library. `/api/health` is guard-exempt, so no header but a `Host` is needed.
-fn health_answers(listen: SocketAddr) -> bool {
+pub fn health_answers(listen: SocketAddr) -> bool {
     if listen.port() == 0 {
         return false;
     }
@@ -459,6 +466,104 @@ fn database(config: &Config) -> Finding {
             ),
         ),
     }
+}
+
+/// The installed paths' modes and owners, against the one reference a machine has: its own data root's owner
+/// (spec item 10 step 2's modes, HS-049's "a wrong mode fails `doctor`").
+///
+/// One check rather than one per path: a [`Finding`] is one check and one sentence, and a tree whose modes are
+/// wrong is usually wrong in one way an operator fixes with one `chmod`. The reference is deliberately **not** a
+/// uid from `getuid` and not the service user's name — the deploy writes the tree as whoever it ran as and then
+/// chowns it, so "every installed path belongs to the same user as the data root" is the invariant that holds on
+/// every machine, `--root` included, without this module knowing what a service user is.
+///
+/// The limit is recorded rather than hidden: this asserts consistency and the modes the deploy writes, not "the
+/// right user owns it" — the latter is what the deploy's `chown` writes and what the unit's `User=` names.
+fn perms(config: &Config) -> Finding {
+    let data = &config.data_root;
+    let owner = match std::fs::metadata(data) {
+        Ok(metadata) => metadata.uid(),
+        // A machine that has not deployed has no install tree, and that is not a wrong mode: it is the third
+        // verdict, which is what keeps `doctor` runnable on a host that serves by hand.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Finding::unknown(
+                Check::Perms,
+                format!(
+                    "{} is not there yet: a machine that has not run `server deploy` has no install tree to check",
+                    data.display()
+                ),
+            );
+        }
+        Err(error) => {
+            return Finding::fail(
+                Check::Perms,
+                format!(
+                    "{} could not be read ({error}): the data root's owner is what every other installed path is \
+                     compared with",
+                    data.display()
+                ),
+            );
+        }
+    };
+    let secrets = data.join(crate::key::SECRETS_DIR);
+    let tree = [
+        (data.clone(), 0o755),
+        (secrets.clone(), 0o700),
+        (secrets.join(crate::key::KEYS_FILE), 0o600),
+        (crate::vapid::store(data), 0o600),
+        (PathBuf::from(deploy::ADMIN_DIR), 0o700),
+        (PathBuf::from(crate::config::DEFAULT_CONFIG_PATH), 0o644),
+    ];
+    let mut offenders = Vec::new();
+    let mut absent = Vec::new();
+    for (path, mode) in tree {
+        let metadata = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                absent.push(format!("{} {mode:04o}", path.display()));
+                continue;
+            }
+            Err(error) => {
+                return Finding::fail(
+                    Check::Perms,
+                    format!(
+                        "{} could not be read ({error}): its mode and its owner are what this check is for",
+                        path.display()
+                    ),
+                );
+            }
+        };
+        let found = metadata.permissions().mode() & 0o777;
+        if found != mode {
+            offenders.push(format!(
+                "{} is {found:04o} where `server deploy` writes {mode:04o}: chmod {mode:04o} {}",
+                path.display(),
+                path.display()
+            ));
+        }
+        if metadata.uid() != owner {
+            offenders.push(format!(
+                "{} is owned by {} where the data root's owner is {owner}: chown {owner}: {}",
+                path.display(),
+                metadata.uid(),
+                path.display()
+            ));
+        }
+    }
+    if let Some(first) = offenders.first() {
+        let mut sentence = first.clone();
+        if offenders.len() > 1 {
+            sentence.push_str(&format!("; also: {}", offenders[1..].join("; ")));
+        }
+        return Finding::fail(Check::Perms, sentence);
+    }
+    let mut sentence = format!(
+        "the installed paths have the modes `server deploy` writes and belong to the data root's owner ({owner})"
+    );
+    if !absent.is_empty() {
+        sentence.push_str(&format!("; not there yet: {}", absent.join(", ")));
+    }
+    Finding::pass(Check::Perms, sentence)
 }
 
 /// V2: `git merge-tree --write-tree` answers 0 for a clean merge and 1 with the path for a conflict.

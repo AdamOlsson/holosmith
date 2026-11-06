@@ -8,11 +8,10 @@
 //! Every step prints one line, `<n>. <step>: <word>: <sentence>`: [`DeployStep`]'s number is the spec's order and
 //! [`Word`] is the read's answer, one of five. The two that carry the design are:
 //!
-//! - **`skipped` is never `satisfied`.** Three of the seven steps have no body in this release — the unit file, the
-//!   origins and the health wait are HS-049's — and a step that prints
-//!   "already satisfied" over a check that read nothing is a lie of exactly the kind this list exists to prevent.
-//!   So a skipped step names its owning story in its sentence, and [`Report::render`]'s summary says how many
-//!   steps are still other stories' work.
+//! - **`skipped` is never `satisfied`.** A step that prints "already satisfied" over a check that read nothing is a
+//!   lie of exactly the kind this list exists to prevent, which is why the word is in [`Word`] at all. Since HS-049
+//!   every one of the seven steps has a body, so this release has no producer for it — ADR-0056's five words stay
+//!   the contract, and the tally line keeps printing the fourth count as zero.
 //! - **The first `failed` step stops the run.** Later steps are not evaluated at all: a machine whose preflight
 //!   failed has not earned an install, and a report that guessed at the remaining steps would describe a machine
 //!   nobody measured. The lines already printed are the describable state the acceptance asks for, and
@@ -44,9 +43,11 @@
 
 use std::fmt::{self, Write as _};
 use std::io::{ErrorKind, Write as _};
+use std::net::SocketAddr;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::config::{self, Config, Role};
 use crate::container;
@@ -56,38 +57,62 @@ use crate::images::{self, Expectation, Kind as ImageKind, Status};
 use crate::key;
 use crate::preflight::{self, Check, Outcome};
 use crate::proxies;
+use crate::vapid;
 
 /// The admin socket's directory (spec item 10 step 2's "admin socket directory", path fixed by HS-051).
-const ADMIN_DIR: &str = "/run/holosmith";
+///
+/// Public because it is a path `doctor`'s `perms` finding and HS-050's `uninstall` both have to know, and a second
+/// spelling of `/run/holosmith` is a second thing to change.
+pub const ADMIN_DIR: &str = "/run/holosmith";
 
-/// Step 5's sentence: the story that installs the unit file, and the two lines of it this release has decided.
-const SERVICE: &str = "HS-049 installs and starts `holosmith.service` (`Restart=on-failure`, `ExecStartPre=holosmith doctor \
-     --quick`)";
+/// The user `serve` runs as (spec item 10 step 2's "service user", named by the unit file's `User=`).
+pub const SERVICE_USER: &str = "holosmith";
 
-/// Step 6's sentence: the story that configures the two origins Tailscale serves.
-const ORIGINS: &str = "HS-049 configures `tailscale serve` for the control origin (443) and the preview origin \
-                       (8444)";
+/// The group the service user must be in: `serve` drives the machine's daemon through its socket.
+pub const SERVICE_GROUP: &str = "docker";
 
-/// Step 7's sentence: the story whose unit file is what makes a health wait mean anything.
-const HEALTH: &str = "HS-049 installs the service whose boot makes the `/api/health` wait and `doctor --full` mean something";
+/// The unit file's name, which is also the argument `systemctl` gets.
+pub const UNIT_NAME: &str = "holosmith.service";
+
+/// systemd's system-wide unit directory.
+pub const UNIT_DIR: &str = "/etc/systemd/system";
+
+/// The HTTPS port Tailscale serves the control origin on.
+pub const CONTROL_HTTPS: u16 = 443;
+
+/// The HTTPS port Tailscale serves the preview origin on.
+pub const PREVIEW_HTTPS: u16 = 8444;
+
+/// How long step 7's apply waits for `/api/health` before it calls the unit's start a failure.
+pub const HEALTH_WAIT: Duration = Duration::from_secs(60);
+
+/// How often that wait asks again. A serving unit answers in milliseconds; the interval is what a wait costs the
+/// command, and 250 ms is four asks a second for a minute.
+pub const HEALTH_POLL: Duration = Duration::from_millis(250);
 
 /// The remark a held port earns instead of failing the deploy — step 1's one divergence (see [`preflight`]).
 const HELD_PORT: &str =
     "; the control port is held — a re-run on a serving machine is not a failure here";
 
-/// The remark step 2's line always carries: the half of the spec's step 2 that HS-049 still owns.
+/// The remark a `--root` install carries where a system one names its service user: the half of step 2 no
+/// unprivileged tree can have.
 ///
-/// Without it, "all 6 paths are present with their modes" reads as the whole of item 10 step 2 when it is three
-/// of its five items — the same "a pass over part of a step" shape this list forbids for a skipped step, one
-/// level down.
-const REMAINDER: &str = "; the service user (in the docker group) and the VAPID keys are HS-049's, and this step does not read them";
+/// Without it, "all 7 paths are present with their modes" reads as the whole of item 10 step 2 when the user and
+/// the ownership were read about nothing — the same "say what you did not do" shape [`Word::Skipped`] carries.
+const ROOT_REMARK: &str =
+    "; --root: no service user is created, because the tree belongs to the invoking user";
+
+/// The remark step 5's line carries under `--root`: a unit in an install tree is not one systemd can load.
+const ROOT_UNIT_REMARK: &str = "; --root: the unit is in the tree, and this run did not ask systemd to load it (a unit under --root is not one \
+     systemd can read)";
 
 /// The spec's seven steps, in the spec's order (item 10, "What `server deploy` does").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DeployStep {
     /// 1. The preflight, as `doctor --quick`.
     Preflight,
-    /// 2. The install tree: the config file, the data root, the secrets and the admin socket directory.
+    /// 2. The install tree: the config file, the data root, the secrets (with the provider and the VAPID keys) and
+    ///    the admin socket directory, plus the service user and the tree's ownership.
     Files,
     /// 3. The two images embedded in the binary.
     Images,
@@ -155,7 +180,8 @@ pub enum Word {
     Needs,
     /// The apply ran and did them.
     Changed,
-    /// Another story owns this step's body, and the sentence names it.
+    /// Another story owns this step's body. Kept because it is one of ADR-0056's five words and the tally line is a
+    /// contract; since HS-049 every step has a body, so nothing in this release produces it.
     Skipped,
     /// The read or the apply failed; the run stops here.
     Failed,
@@ -225,9 +251,11 @@ impl Report {
         self.failed.is_some()
     }
 
-    /// The whole report as the operator reads it: the header, where it installed, one line per step, the tally,
-    /// and — because most of this release's steps are other stories' — the list of who owns what remains
-    /// (ADR-0056).
+    /// The whole report as the operator reads it: the header, where it installed, one line per step and the tally.
+    ///
+    /// The tally's four counts are always printed — `skipped` included, as zero — because a gate greps the line's
+    /// shape and a reader diffs two runs by it (ADR-0056). Since HS-049 there is no list of who owns what remains,
+    /// because nothing remains: the `deploy: incomplete:` line is gone, not hidden.
     pub fn render(&self) -> String {
         let count = |word: Word| self.lines.iter().filter(|line| line.word == word).count();
         let mut text = format!("deploy: {}\n", if self.dry_run { "dry run" } else { "run" });
@@ -247,46 +275,7 @@ impl Report {
             count(Word::Skipped),
             count(Word::Failed)
         );
-        let skipped = count(Word::Skipped);
-        if skipped > 0 {
-            let _ = writeln!(
-                text,
-                "deploy: incomplete: {skipped} of {} steps {} to later stories — {}",
-                DeployStep::ALL.len(),
-                if skipped == 1 { "belongs" } else { "belong" },
-                self.owners()
-            );
-        }
         text
-    }
-
-    /// Who owns the skipped steps, in the spec's order: `HS-049: service, origins, health`.
-    ///
-    /// A table rather than a sentence per step, so that the report and the step's own line cannot disagree about
-    /// which story a step belongs to.
-    fn owners(&self) -> String {
-        const OWNERS: [(&str, &[DeployStep]); 1] = [(
-            "HS-049",
-            &[DeployStep::Service, DeployStep::Origins, DeployStep::Health],
-        )];
-        let skipped: Vec<DeployStep> = self
-            .lines
-            .iter()
-            .filter(|line| line.word == Word::Skipped)
-            .map(|line| line.step)
-            .collect();
-        OWNERS
-            .iter()
-            .filter_map(|(owner, steps)| {
-                let words: Vec<&str> = steps
-                    .iter()
-                    .filter(|step| skipped.contains(step))
-                    .map(|step| step.word())
-                    .collect();
-                (!words.is_empty()).then(|| format!("{owner}: {}", words.join(", ")))
-            })
-            .collect::<Vec<String>>()
-            .join("; ")
     }
 }
 
@@ -303,26 +292,50 @@ impl<T: proxies::Containers + doctor::Machine + images::Images> Machine for T {}
 /// The external programs and paths the deploy and its preflight run, as a seam.
 ///
 /// [`doctor::Tools`] is embedded rather than copied, for step 1's reason: the preflight is the same list `serve`
-/// refuses on, so it is the same shims. The three additions are the writes' programs — `sudo` because the system
-/// paths need it, `install` and `chmod` because every file action is one child process — and they are `PathBuf`s
-/// for [`crate::preflight::Tools`]'s reason: this crate denies `unsafe` and so cannot set `PATH`, which leaves
-/// naming the program as the only way a test can point a write at a script it wrote.
+/// refuses on, so it is the same shims. The additions are the programs the steps run — `sudo` because the system
+/// paths need it; `install` and `chmod` because every file action is one child process; `openssl` because the VAPID
+/// pair is generated by one; `id`, `useradd`, `usermod`, `stat` and `chown` because the service user and the tree's
+/// ownership are read and written by them; and `systemctl` because step 5 asks systemd two questions. They are
+/// `PathBuf`s for [`crate::preflight::Tools`]'s reason: this crate denies `unsafe` and so cannot set `PATH`, which
+/// leaves naming the program as the only way a test can point a write at a script it wrote.
+///
+/// [`Tools::health_wait`] is the one field that is not a program, and it is here for the same seam's sake: step 7's
+/// deadline is a minute on a machine and a test may not spend it, so the caller that would otherwise wait owns the
+/// bound. Step 6 runs [`doctor::Tools::tailscale`] rather than a second field — the same program, asked with
+/// `serve` instead of `status`.
 #[derive(Debug, Clone)]
 pub struct Tools {
     pub doctor: doctor::Tools,
     pub sudo: PathBuf,
     pub install: PathBuf,
     pub chmod: PathBuf,
+    pub openssl: PathBuf,
+    pub id: PathBuf,
+    pub useradd: PathBuf,
+    pub usermod: PathBuf,
+    pub stat: PathBuf,
+    pub chown: PathBuf,
+    pub systemctl: PathBuf,
+    /// How long step 7's apply waits for `/api/health`; [`HEALTH_WAIT`] on a machine.
+    pub health_wait: Duration,
 }
 
 impl Default for Tools {
-    /// The programs from `PATH`, which is what a machine has.
+    /// The programs from `PATH`, which is what a machine has, and the spec's one-minute health deadline.
     fn default() -> Self {
         Self {
             doctor: doctor::Tools::default(),
             sudo: PathBuf::from("sudo"),
             install: PathBuf::from("install"),
             chmod: PathBuf::from("chmod"),
+            openssl: PathBuf::from("openssl"),
+            id: PathBuf::from("id"),
+            useradd: PathBuf::from("useradd"),
+            usermod: PathBuf::from("usermod"),
+            stat: PathBuf::from("stat"),
+            chown: PathBuf::from("chown"),
+            systemctl: PathBuf::from("systemctl"),
+            health_wait: HEALTH_WAIT,
         }
     }
 }
@@ -400,6 +413,14 @@ impl Target {
         self.prefixed(Path::new(ADMIN_DIR))
     }
 
+    /// `<root>/etc/systemd/system/holosmith.service`: the unit file step 5 writes.
+    ///
+    /// Prefixed like every other installed path, which is exactly why a `--root` unit is one systemd can never
+    /// load — the line says so rather than pretending the machine half happened.
+    pub fn unit_path(&self) -> PathBuf {
+        self.prefixed(&Path::new(UNIT_DIR).join(UNIT_NAME))
+    }
+
     /// The config this deploy installs from: a clone whose two roots are under `root`.
     ///
     /// The two roots are the only fields prefixed, and for a reason each: `data_root` is the tree step 2 creates,
@@ -460,9 +481,9 @@ pub fn run(
             DeployStep::Files => files(config, target, tools, dry_run),
             DeployStep::Images => images_line(config, machine, dry_run),
             DeployStep::Proxies => proxies_line(config, machine, dry_run),
-            DeployStep::Service => skipped(step, SERVICE),
-            DeployStep::Origins => skipped(step, ORIGINS),
-            DeployStep::Health => skipped(step, HEALTH),
+            DeployStep::Service => service(target, tools, dry_run),
+            DeployStep::Origins => origins(config, tools, dry_run),
+            DeployStep::Health => health(config, tools, machine, dry_run),
         };
         if line.word == Word::Failed {
             report.failed = Some(step);
@@ -473,15 +494,6 @@ pub fn run(
         }
     }
     report
-}
-
-/// A step whose body belongs to a later story, saying which one — never `satisfied` (ADR-0056).
-fn skipped(step: DeployStep, sentence: &str) -> Line {
-    Line {
-        step,
-        word: Word::Skipped,
-        sentence: sentence.to_string(),
-    }
 }
 
 /// Step 1: `doctor --quick`'s list, with one finding downgraded.
@@ -583,12 +595,17 @@ fn disk_of_the_nearest_ancestor(
         .map(|finding| (probe, finding))
 }
 
-/// Step 2: the install tree — four directories and two files, each checked for its bytes and its mode first.
+/// Step 2: the install tree — four directories and three files, the service user, and the tree's ownership.
 ///
-/// The two files are treated differently on purpose, and that difference is the security property of this step:
-/// `config.toml` is the deploy's own rendering and is rewritten when it differs, while `keys.toml` holds every
-/// stored provider key and is **never** written over — created when absent and mode-repaired with `chmod`, never
-/// with `install`, which truncates. Its bytes are not even read.
+/// The three files are treated differently on purpose, and that difference is the security property of this step:
+/// `config.toml` is the deploy's own rendering and is rewritten when it differs; `keys.toml` holds every stored
+/// provider key and is **never** written over — created when absent and mode-repaired with `chmod`, never with
+/// `install`, which truncates, and its bytes are not even read; and `vapid.toml` is generated once by `openssl`
+/// when it is absent and read-only afterwards, because regenerating it would silence every existing push
+/// subscription (HS-049).
+///
+/// The user and the ownership are not items: they are machine facts rather than install-tree paths, and under
+/// `--root` neither is read at all — the tree belongs to the invoking user, and the line says so instead.
 ///
 /// The staging directory is removed whatever happened: a failed step must leave nothing behind but the paths it
 /// managed to install.
@@ -614,6 +631,9 @@ enum Kind {
     Rendered(Vec<u8>),
     /// A file that belongs to the operator once it exists: created when absent, and never rewritten.
     Kept(Vec<u8>),
+    /// A file a child generates when absent (`openssl`'s key pair): never generated when it is there, and never
+    /// rewritten at all — a present file that is not a pair is a failure, not a file to replace.
+    Vapid,
 }
 
 /// One write, as a value: the read's answer and the apply's work are the same list.
@@ -628,6 +648,21 @@ enum Action {
     },
     /// `chmod <mode> <path>`: the bytes are right and the mode is not — and `install` would truncate them.
     Mode { path: PathBuf, mode: u32 },
+    /// The key pair is absent and a child generates it: `openssl` prints the SEC1 DER, and the rendered pair is
+    /// installed by the same `install -m 0600` every other file action uses.
+    Vapid { path: PathBuf },
+    /// `useradd --system --groups <group> --home-dir <home> --shell /usr/sbin/nologin <name>`: the service user
+    /// does not exist.
+    UserAdd {
+        name: String,
+        groups: String,
+        home: PathBuf,
+    },
+    /// `usermod -aG <group> <name>`: the user exists and the group does not have it.
+    UserMod { name: String, group: String },
+    /// `chown[-R] <name>:<name> <path>`: the tree is not the service user's, so `serve` (running as it) could not
+    /// write it.
+    Chown { path: PathBuf, recursive: bool },
 }
 
 impl Action {
@@ -642,12 +677,28 @@ impl Action {
                 format!("install -m {mode:04o} <staged> {}", path.display())
             }
             Self::Mode { path, mode } => format!("chmod {mode:04o} {}", path.display()),
+            // The child that writes the pair, as the program name rather than its output: the DER goes to a
+            // staging file on its way to `install`, and the destination is what an operator needs to see.
+            Self::Vapid { path } => format!(
+                "openssl ecparam -name prime256v1 -genkey -noout -outform DER > {}",
+                path.display()
+            ),
+            Self::UserAdd { name, groups, home } => format!(
+                "useradd --system --groups {groups} --home-dir {} --shell /usr/sbin/nologin {name}",
+                home.display()
+            ),
+            Self::UserMod { name, group } => format!("usermod -aG {group} {name}"),
+            Self::Chown { path, recursive } => format!(
+                "chown {}{SERVICE_USER}:{SERVICE_USER} {}",
+                if *recursive { "-R " } else { "" },
+                path.display()
+            ),
         }
     }
 }
 
-/// The four directories and two files of item 10 step 2, in the order they must be created — a file's directory
-/// first, because `install -m` does not make one.
+/// The four directories and three files of item 10 step 2, in the order they must be created — a file's directory
+/// first, because `install -m` does not make one, and the key pair after the 0700 directory it lives in.
 ///
 /// The only `Err` is [`config::render`]'s: a path in the config that is not UTF-8, which no config file can carry
 /// and which this step will not paper over with an empty body — a `config.toml` this deploy wrote and could not
@@ -692,6 +743,11 @@ fn items(config: &Config, target: &Target) -> Result<Vec<Item>, String> {
             kind: Kind::Kept(key::empty_text().into_bytes()),
         },
         Item {
+            path: vapid::store(&config.data_root),
+            mode: 0o600,
+            kind: Kind::Vapid,
+        },
+        Item {
             path: target.admin_dir(),
             mode: 0o700,
             kind: Kind::Directory,
@@ -699,12 +755,57 @@ fn items(config: &Config, target: &Target) -> Result<Vec<Item>, String> {
     ])
 }
 
-/// The apply: read every item, then run the pending actions in order, answering the step's line.
+/// What `id` answered about the service user before this run wrote anything.
+struct ServiceUser {
+    /// The uid, when the user exists — the owner the install tree is compared with.
+    uid: Option<String>,
+    /// Whether the group that owns the daemon's socket has the user.
+    grouped: bool,
+}
+
+impl ServiceUser {
+    /// The action that would make the user what the unit file's `User=` needs, or `None` when it already is.
+    fn pending(&self, home: &Path) -> Option<Action> {
+        if self.uid.is_none() {
+            return Some(Action::UserAdd {
+                name: SERVICE_USER.to_string(),
+                groups: SERVICE_GROUP.to_string(),
+                home: home.to_path_buf(),
+            });
+        }
+        (!self.grouped).then(|| Action::UserMod {
+            name: SERVICE_USER.to_string(),
+            group: SERVICE_GROUP.to_string(),
+        })
+    }
+}
+
+/// The apply: read the service user, then every item, then the ownership; then run the pending actions in order,
+/// answering the step's line.
+///
+/// The read is complete before the first write, so a plan and a run describe the same machine (ADR-0056). The three
+/// groups have an order the apply depends on: `useradd` before `chown`, because the chown names the user; the items
+/// before the chowns, because a chown of a path this run creates needs the path to exist; and the user before the
+/// items, because the tree a system-path install writes is `sudo`'s and belongs to the service user only after the
+/// chowns at the end.
 fn install(config: &Config, target: &Target, tools: &Tools, dry_run: bool, staging: &Path) -> Line {
     let items = match items(config, target) {
         Ok(items) => items,
         Err(sentence) => return failed(DeployStep::Files, sentence),
     };
+    // 1. The service user, read only where a service user is installed: under `--root` the tree is the invoking
+    // user's and there is nobody to create.
+    let mut user = Vec::new();
+    let mut uid = None;
+    if target.privileged() {
+        let read = match read_user(tools) {
+            Ok(read) => read,
+            Err(sentence) => return failed(DeployStep::Files, sentence),
+        };
+        uid.clone_from(&read.uid);
+        user.extend(read.pending(&config.data_root));
+    }
+    // 2. The seven paths.
     let mut pending = Vec::new();
     for item in &items {
         match read(item) {
@@ -713,22 +814,43 @@ fn install(config: &Config, target: &Target, tools: &Tools, dry_run: bool, stagi
             Err(sentence) => return failed(DeployStep::Files, sentence),
         }
     }
+    // 3. The ownership — the service user's, because `serve` writes the data root and the unit runs it as that user.
+    if target.privileged() {
+        match read_owner(config, target, tools, uid.as_deref()) {
+            Ok(chowns) => pending.extend(chowns),
+            Err(sentence) => return failed(DeployStep::Files, sentence),
+        }
+    }
+    let pending: Vec<Action> = user.into_iter().chain(pending).collect();
     if pending.is_empty() {
         return Line {
             step: DeployStep::Files,
             word: Word::Satisfied,
             sentence: format!(
-                "all {} paths are present with their modes: {}{REMAINDER}",
+                "all {} paths are present with their modes: {}{}",
                 items.len(),
-                present(&items)
+                present(&items),
+                match target.privileged() {
+                    true => format!(
+                        ", the service user {SERVICE_USER} is in the {SERVICE_GROUP} group, and the VAPID keys are in \
+                         {}",
+                        vapid::store(&config.data_root).display()
+                    ),
+                    false => ROOT_REMARK.to_string(),
+                }
             ),
         };
     }
+    let remark = if target.privileged() {
+        String::new()
+    } else {
+        ROOT_REMARK.to_string()
+    };
     if dry_run {
         return Line {
             step: DeployStep::Files,
             word: Word::Needs,
-            sentence: format!("{}{REMAINDER}", planned(&pending)),
+            sentence: format!("{}{remark}", planned(&pending)),
         };
     }
     for action in &pending {
@@ -739,8 +861,89 @@ fn install(config: &Config, target: &Target, tools: &Tools, dry_run: bool, stagi
     Line {
         step: DeployStep::Files,
         word: Word::Changed,
-        sentence: format!("{}{REMAINDER}", planned(&pending)),
+        sentence: format!("{}{remark}", planned(&pending)),
     }
+}
+
+/// Whether `id` says the service user exists and is in the daemon's group (spec item 10 step 2).
+///
+/// Two questions, each `id`'s exit code: `id -u <user>` answers a uid when the user exists, and `id -nG <user>` the
+/// groups it is in. A spawn failure is a **failure of the read**, not "there is no user": an `id` this machine does
+/// not have cannot tell the deploy whether to create one, and a deploy that guessed would run `useradd` over a user
+/// that is already there.
+fn read_user(tools: &Tools) -> Result<ServiceUser, String> {
+    let uid = ask(
+        &tools.id,
+        &["-u", SERVICE_USER],
+        "the deploy reads whether the service user exists before it creates it",
+    )?;
+    let Some(uid) = uid else {
+        return Ok(ServiceUser {
+            uid: None,
+            grouped: false,
+        });
+    };
+    let groups = ask(
+        &tools.id,
+        &["-nG", SERVICE_USER],
+        "the group that owns the daemon's socket is a fact the unit's `User=` depends on",
+    )?;
+    let groups = groups.ok_or_else(|| {
+        format!(
+            "`{} -nG {SERVICE_USER}` answered non-zero for a user `id -u` found: without its groups this step \
+             cannot say whether `usermod` is needed, and it will not add a user to a group it did not read",
+            tools.id.display()
+        )
+    })?;
+    Ok(ServiceUser {
+        uid: Some(uid),
+        grouped: groups
+            .split_whitespace()
+            .any(|group| group == SERVICE_GROUP),
+    })
+}
+
+/// The ownership writes the install tree needs, read from the uid `id` answered and the uids `stat` reports.
+///
+/// The reference is the **service user's** uid, read rather than spelled: that is the identity the unit's `User=`
+/// names and the one `serve` writes the tree as. All three installed roots are compared, not only the data root,
+/// because the admin directory lives on a tmpfs and is recreated by a privileged `install` after every reboot — a
+/// read that only looked at the data root would leave a root-owned 0700 directory the service user cannot put its
+/// socket in.
+///
+/// A path `stat` cannot answer for is one this run is about to create with `sudo install`, which makes it root's
+/// until the chown at the end of the same apply; a path that exists and is already the service user's earns
+/// nothing, which is what makes the second run's step 2 `satisfied`. A run that is creating the user has no uid to
+/// compare, so its tree is the chowns' too.
+fn read_owner(
+    config: &Config,
+    target: &Target,
+    tools: &Tools,
+    uid: Option<&str>,
+) -> Result<Vec<Action>, String> {
+    let roots = [
+        (config.data_root.clone(), true),
+        (target.etc_config(), false),
+        (target.admin_dir(), false),
+    ];
+    let Some(uid) = uid else {
+        return Ok(roots
+            .into_iter()
+            .map(|(path, recursive)| Action::Chown { path, recursive })
+            .collect());
+    };
+    let mut pending = Vec::new();
+    for (path, recursive) in roots {
+        let owner = ask(
+            &tools.stat,
+            &["-c", "%u", &path.display().to_string()],
+            "the tree `serve` writes must be the service user's, and each path's owner is what says whether it is",
+        )?;
+        if owner.as_deref().map(str::trim) != Some(uid) {
+            pending.push(Action::Chown { path, recursive });
+        }
+    }
+    Ok(pending)
 }
 
 /// The item list as a `satisfied` line prints it: each path with its mode, so a reader can see *what* was checked.
@@ -793,6 +996,8 @@ fn read(item: &Item) -> Result<Option<Action>, String> {
                     mode,
                     bytes: bytes.clone(),
                 },
+                // Absent is the one state that earns a generated pair (HS-049).
+                Kind::Vapid => Action::Vapid { path: path.clone() },
             }));
         }
         Err(error) => {
@@ -839,18 +1044,62 @@ fn read(item: &Item) -> Result<Option<Action>, String> {
                 })
             }
         }
+        Kind::Vapid => {
+            if !metadata.is_file() {
+                return Err(format!(
+                    "{} is not a file, and it is where the machine's Web Push key pair lives: move it aside — the \
+                     deploy generates this path only when it is absent",
+                    path.display()
+                ));
+            }
+            // The read never generates: absent is the only state that earns a key, which is what makes a second
+            // deploy leave the pair — and every push subscription made with it — alone (HS-049).
+            match vapid::is_pair(path) {
+                Ok(true) => wrong_mode.then(|| Action::Mode {
+                    path: path.clone(),
+                    mode,
+                }),
+                Ok(false) => Some(Action::Vapid { path: path.clone() }),
+                Err(sentence) => {
+                    return Err(format!(
+                        "{sentence}; it will not be regenerated, because every push subscription made against \
+                         this pair would stop working"
+                    ));
+                }
+            }
+        }
     })
 }
 
-/// One action as one child process.
+/// Whether `program` answered exit 0, and its stdout when it did.
 ///
-/// `install` for a directory or a file, `chmod` for a mode — and `sudo` in front of either when the target is the
-/// system's tree. A child that cannot be spawned and a child that answers non-zero are one failure with one
-/// sentence naming the program, the argv and what the child said: a `sudo` that is not installed is a fact about
-/// this machine, not a panic.
+/// These are the deploy's **questions** — `id`, `stat`, `systemctl is-enabled`, `tailscale serve status` — so none
+/// of them is prefixed by `sudo`: a question needs no privilege, and a spawn failure is a sentence rather than a
+/// "no" (a program this machine does not have cannot answer whether a user exists).
+fn ask(program: &Path, arguments: &[&str], because: &str) -> Result<Option<String>, String> {
+    let rendered = format!("{} {}", program.display(), arguments.join(" "));
+    let output = Command::new(program)
+        .args(arguments)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("`{rendered}` could not be run ({error}): {because}"))?;
+    Ok(output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string()))
+}
+
+/// One action as one child process, or — for the key pair — two.
+///
+/// `install` for a directory or a file, `chmod` for a mode, `useradd`/`usermod`/`chown` for the user and the
+/// ownership, and for the pair a generation followed by the same `install -m 0600` a file action uses. Every one
+/// goes through [`child`], so a spawn failure and a non-zero answer are one sentence shape wherever they happen: a
+/// `sudo` that is not installed is a fact about this machine, not a panic.
 fn apply(action: &Action, target: &Target, tools: &Tools, staging: &Path) -> Result<(), String> {
-    let (program, arguments) = match action {
-        Action::Directory { path, mode } => (
+    match action {
+        Action::Directory { path, mode } => child(
+            tools,
+            target,
             &tools.install,
             vec![
                 "-d".to_string(),
@@ -858,31 +1107,126 @@ fn apply(action: &Action, target: &Target, tools: &Tools, staging: &Path) -> Res
                 format!("{mode:04o}"),
                 path.display().to_string(),
             ],
-        ),
+        )
+        .map(drop),
         Action::File { path, mode, bytes } => {
             let staged = stage(staging, path, bytes)?;
-            (
-                &tools.install,
-                vec![
-                    "-m".to_string(),
-                    format!("{mode:04o}"),
-                    staged.display().to_string(),
-                    path.display().to_string(),
-                ],
-            )
+            install_staged(tools, target, &staged, path, *mode)
         }
-        Action::Mode { path, mode } => (
+        Action::Mode { path, mode } => child(
+            tools,
+            target,
             &tools.chmod,
             vec![format!("{mode:04o}"), path.display().to_string()],
-        ),
-    };
-    let (program, arguments) = match target.privileged() {
+        )
+        .map(drop),
+        Action::Vapid { path } => {
+            // The generation is a **read of a program's output**, not a write: it prints the DER to stdout, and the
+            // file is written by the `install` below. So it is not `sudo`-prefixed — asking for the password twice
+            // to write one file would be the only thing escalation bought here.
+            let generated = execute(
+                &tools.sudo,
+                false,
+                &tools.openssl,
+                vec![
+                    "ecparam".to_string(),
+                    "-name".to_string(),
+                    "prime256v1".to_string(),
+                    "-genkey".to_string(),
+                    "-noout".to_string(),
+                    "-outform".to_string(),
+                    "DER".to_string(),
+                ],
+            )?;
+            let pair = vapid::from_der(&generated.stdout)?;
+            let staged = stage(staging, path, vapid::render(&pair).as_bytes())?;
+            install_staged(tools, target, &staged, path, 0o600)
+        }
+        Action::UserAdd { name, groups, home } => child(
+            tools,
+            target,
+            &tools.useradd,
+            vec![
+                "--system".to_string(),
+                "--groups".to_string(),
+                groups.clone(),
+                "--home-dir".to_string(),
+                home.display().to_string(),
+                "--shell".to_string(),
+                "/usr/sbin/nologin".to_string(),
+                name.clone(),
+            ],
+        )
+        .map(drop),
+        Action::UserMod { name, group } => child(
+            tools,
+            target,
+            &tools.usermod,
+            vec!["-aG".to_string(), group.clone(), name.clone()],
+        )
+        .map(drop),
+        Action::Chown { path, recursive } => {
+            let mut arguments = Vec::new();
+            if *recursive {
+                arguments.push("-R".to_string());
+            }
+            arguments.push(format!("{SERVICE_USER}:{SERVICE_USER}"));
+            arguments.push(path.display().to_string());
+            child(tools, target, &tools.chown, arguments).map(drop)
+        }
+    }
+}
+
+/// `install -m <mode> <staged> <path>`: the one write every file action ends in, staged or generated.
+fn install_staged(
+    tools: &Tools,
+    target: &Target,
+    staged: &Path,
+    path: &Path,
+    mode: u32,
+) -> Result<(), String> {
+    child(
+        tools,
+        target,
+        &tools.install,
+        vec![
+            "-m".to_string(),
+            format!("{mode:04o}"),
+            staged.display().to_string(),
+            path.display().to_string(),
+        ],
+    )
+    .map(drop)
+}
+
+/// One action's child, prefixed by `sudo` when the target is the system's tree.
+///
+/// The one place an action's argv and its failure sentence are spelled, so a child that cannot be spawned and one
+/// that answers non-zero read the same whichever program ran. A successful child's [`Output`] is handed back
+/// because generating the key pair is a child whose **stdout** is the answer.
+fn child(
+    tools: &Tools,
+    target: &Target,
+    program: &Path,
+    arguments: Vec<String>,
+) -> Result<Output, String> {
+    execute(&tools.sudo, target.privileged(), program, arguments)
+}
+
+/// [`child`] without a target: the caller decides whether the system's privilege is involved.
+fn execute(
+    sudo: &Path,
+    escalate: bool,
+    program: &Path,
+    arguments: Vec<String>,
+) -> Result<Output, String> {
+    let (program, arguments) = match escalate {
         true => {
             let mut all = vec![program.display().to_string()];
             all.extend(arguments);
-            (tools.sudo.clone(), all)
+            (sudo.to_path_buf(), all)
         }
-        false => (program.clone(), arguments),
+        false => (program.to_path_buf(), arguments),
     };
     let rendered = format!("{} {}", program.display(), arguments.join(" "));
     // `stdin` is inherited so that `sudo` can ask for a password on the terminal it was run from: a deploy is an
@@ -890,16 +1234,16 @@ fn apply(action: &Action, target: &Target, tools: &Tools, staging: &Path) -> Res
     // every machine whose credential is not already cached (ADR-0056).
     let output = Command::new(&program)
         .args(&arguments)
-        .stdin(std::process::Stdio::inherit())
+        .stdin(Stdio::inherit())
         .output()
         .map_err(|error| {
             format!(
-                "`{rendered}` could not be run ({error}): the install tree is written by `install` and `chmod`, \
-                 each prefixed by `sudo` when the paths are the system's"
+                "`{rendered}` could not be run ({error}): the deploy reads and writes this machine one child at a \
+                 time, each prefixed by `sudo` when it changes the system's own tree"
             )
         })?;
     if output.status.success() {
-        return Ok(());
+        return Ok(output);
     }
     Err(format!(
         "`{rendered}` answered {} ({})",
@@ -1163,5 +1507,395 @@ fn proxies_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
         step: DeployStep::Proxies,
         word: Word::Changed,
         sentence,
+    }
+}
+
+/// Step 5: the systemd unit, rendered from this binary's own path (spec item 10 step 5, HS-049).
+///
+/// The bytes are the deliverable, which is why the rendering is a public function of exactly two facts — where the
+/// binary is, and whether this is a privileged install — and the read compares the file with it byte for byte. The
+/// path is [`std::env::current_exe`] and not the literal `holosmith`: this binary does not install itself, and an
+/// `ExecStart` resolved through systemd's `PATH` would be a coin flip between the artifact the operator just built
+/// and whatever else answers to the name.
+///
+/// `User=` and `Group=` are the two lines `--root` omits rather than blanks: a unit in an install tree is not one
+/// systemd can load, so naming a service user there would describe a machine that does not exist.
+pub fn unit_text(exe: &Path, privileged: bool) -> String {
+    let identity = if privileged {
+        format!("User={SERVICE_USER}\nGroup={SERVICE_USER}\n")
+    } else {
+        String::new()
+    };
+    format!(
+        "[Unit]\n\
+         Description=Holosmith server\n\
+         After=network-online.target docker.service\n\
+         Wants=network-online.target\n\
+         Requires=docker.service\n\
+         \n\
+         [Service]\n\
+         Type=simple\n\
+         {identity}\
+         ExecStartPre={exe} doctor --quick\n\
+         ExecStart={exe} serve\n\
+         Restart=on-failure\n\
+         RestartSec=5s\n\
+         KillMode=mixed\n\
+         TimeoutStopSec=30s\n\
+         \n\
+         [Install]\n\
+         WantedBy=multi-user.target\n",
+        exe = exe.display()
+    )
+}
+
+/// Step 5's read and apply: the file's bytes, and on a system-path install the two `systemctl` verbs that make
+/// systemd load it.
+fn service(target: &Target, tools: &Tools, dry_run: bool) -> Line {
+    let staging = staging_dir();
+    let line = service_line(target, tools, dry_run, &staging);
+    let _ = std::fs::remove_dir_all(&staging);
+    line
+}
+
+fn service_line(target: &Target, tools: &Tools, dry_run: bool, staging: &Path) -> Line {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(error) => {
+            return failed(
+                DeployStep::Service,
+                format!(
+                    "no unit was written: this process's own path could not be read ({error}), and `ExecStart` \
+                     names it because a program resolved through systemd's `PATH` is not the binary that wrote the \
+                     unit"
+                ),
+            );
+        }
+    };
+    let path = target.unit_path();
+    let bytes = unit_text(&exe, target.privileged());
+    // The unit's directory first: `install -m` does not make one, and under `--root` this step is the only thing
+    // that ever asks for `/etc/systemd/system`.
+    let directory = Item {
+        path: path
+            .parent()
+            .map_or_else(|| PathBuf::from(UNIT_DIR), Path::to_path_buf),
+        mode: 0o755,
+        kind: Kind::Directory,
+    };
+    let unit = Item {
+        path: path.clone(),
+        mode: 0o644,
+        kind: Kind::Rendered(bytes.clone().into_bytes()),
+    };
+    let mut files = Vec::new();
+    for item in [&directory, &unit] {
+        match read(item) {
+            Ok(Some(action)) => files.push(action),
+            Ok(None) => {}
+            Err(sentence) => return failed(DeployStep::Service, sentence),
+        }
+    }
+    // The machine half. `is-enabled` is one word and one exit code — the question "would a boot start this?" — which
+    // is why it is what `satisfied` is compared with rather than a parse of some other command's prose.
+    let enabled = if target.privileged() {
+        match ask(
+            &tools.systemctl,
+            &["is-enabled", UNIT_NAME],
+            "step 5 asks systemd whether the unit is enabled before it enables it",
+        ) {
+            Ok(answer) => answer.is_some(),
+            Err(sentence) => return failed(DeployStep::Service, sentence),
+        }
+    } else {
+        false
+    };
+    if files.is_empty() && enabled == target.privileged() {
+        let sentence = if target.privileged() {
+            format!(
+                "{} holds this binary's unit ({} bytes), and `systemctl is-enabled {UNIT_NAME}` answers enabled, so \
+                 systemd loads it at boot",
+                path.display(),
+                bytes.len()
+            )
+        } else {
+            format!(
+                "{} holds this binary's unit ({} bytes){ROOT_UNIT_REMARK}",
+                path.display(),
+                bytes.len()
+            )
+        };
+        return Line {
+            step: DeployStep::Service,
+            word: Word::Satisfied,
+            sentence,
+        };
+    }
+    // The machine half is planned whenever the step applies at all — a *changed* unit has to be re-read before it can
+    // be started, so `daemon-reload` is not only for the first install.
+    let mut plan: Vec<String> = files.iter().map(Action::describe).collect();
+    if target.privileged() {
+        plan.push("systemctl daemon-reload".to_string());
+        plan.push(format!("systemctl enable --now {UNIT_NAME}"));
+    }
+    if dry_run {
+        return Line {
+            step: DeployStep::Service,
+            word: Word::Needs,
+            sentence: counted(&plan),
+        };
+    }
+    for action in &files {
+        if let Err(sentence) = apply(action, target, tools, staging) {
+            return failed(DeployStep::Service, sentence);
+        }
+    }
+    if target.privileged() {
+        // `daemon-reload` first: `enable --now` on a unit systemd has not re-read would start the previous
+        // rendering, which is exactly the version an upgrade is replacing.
+        if let Err(sentence) = child(
+            tools,
+            target,
+            &tools.systemctl,
+            vec!["daemon-reload".to_string()],
+        ) {
+            return failed(DeployStep::Service, sentence);
+        }
+        if let Err(sentence) = child(
+            tools,
+            target,
+            &tools.systemctl,
+            vec![
+                "enable".to_string(),
+                "--now".to_string(),
+                UNIT_NAME.to_string(),
+            ],
+        ) {
+            return failed(DeployStep::Service, sentence);
+        }
+    }
+    Line {
+        step: DeployStep::Service,
+        word: Word::Changed,
+        sentence: counted(&plan),
+    }
+}
+
+/// The control origin's local target: what `tailscale serve` proxies :443 to.
+pub fn control_target(config: &Config) -> String {
+    format!("http://127.0.0.1:{}", config.control_listen.port())
+}
+
+/// The preview origin's local target: what `tailscale serve` proxies :8444 to.
+pub fn preview_target(config: &Config) -> String {
+    format!("http://127.0.0.1:{}", config.preview_listen.port())
+}
+
+/// Step 6: `tailscale serve` for the two origins (spec item 10 step 6, HS-049).
+///
+/// The read is Tailscale's own description of what it serves, not a file this deploy wrote: `serve status --json`
+/// answers one `Web` entry per host:port with the `Proxy` behind `/`, so "is :443 the control origin" is a field
+/// comparison. That also makes a second deploy honestly `satisfied`, and it means a Tailscale that cannot be asked
+/// is a **failure** rather than a pass — the deploy cannot configure what it cannot read.
+///
+/// Neither child is `sudo`-prefixed: `tailscale serve` writes to the daemon, not to a root path. `--root` changes
+/// nothing here either, because the origins are machine facts — the same asymmetry the docker socket has.
+fn origins(config: &Config, tools: &Tools, dry_run: bool) -> Line {
+    let status = match execute(
+        &tools.sudo,
+        false,
+        &tools.doctor.tailscale,
+        vec![
+            "serve".to_string(),
+            "status".to_string(),
+            "--json".to_string(),
+        ],
+    ) {
+        Ok(output) => output,
+        Err(sentence) => {
+            return failed(
+                DeployStep::Origins,
+                format!(
+                    "{sentence}: this deploy reads what it configures, so a Tailscale that cannot be asked is a \
+                     step that cannot be answered"
+                ),
+            );
+        }
+    };
+    let served = match served(&String::from_utf8_lossy(&status.stdout)) {
+        Ok(served) => served,
+        Err(sentence) => return failed(DeployStep::Origins, sentence),
+    };
+    let wanted = [
+        (CONTROL_HTTPS, control_target(config)),
+        (PREVIEW_HTTPS, preview_target(config)),
+    ];
+    let missing: Vec<&(u16, String)> = wanted
+        .iter()
+        .filter(|(port, target)| {
+            !served
+                .iter()
+                .any(|(served_port, proxy)| served_port == port && proxy == target)
+        })
+        .collect();
+    if missing.is_empty() {
+        return Line {
+            step: DeployStep::Origins,
+            word: Word::Satisfied,
+            sentence: format!(
+                "`tailscale serve status --json` answers both origins: {} → {} and {} → {}",
+                CONTROL_HTTPS, wanted[0].1, PREVIEW_HTTPS, wanted[1].1
+            ),
+        };
+    }
+    let plan: Vec<String> = missing
+        .iter()
+        .map(|(port, target)| format!("tailscale serve --bg --yes --https={port} {target}"))
+        .collect();
+    if dry_run {
+        return Line {
+            step: DeployStep::Origins,
+            word: Word::Needs,
+            sentence: counted(&plan),
+        };
+    }
+    // One child per missing origin, in the order the origins are read: a failure names the port it was configuring
+    // and stops, so the report never claims an origin that was not asked for.
+    for (port, target) in &missing {
+        if let Err(sentence) = execute(
+            &tools.sudo,
+            false,
+            &tools.doctor.tailscale,
+            vec![
+                "serve".to_string(),
+                "--bg".to_string(),
+                "--yes".to_string(),
+                format!("--https={port}"),
+                target.clone(),
+            ],
+        ) {
+            return failed(DeployStep::Origins, sentence);
+        }
+    }
+    Line {
+        step: DeployStep::Origins,
+        word: Word::Changed,
+        sentence: counted(&plan),
+    }
+}
+
+/// The `Proxy` behind `/` for every `Web` entry of `tailscale serve status --json`, as (port, target).
+///
+/// The shape is `ipn.ServeConfig`: `Web` is keyed by `host:port` and each entry's `Handlers["/"]` carries the
+/// `Proxy` this machine already serves there. An entry without one, or a key without a port, is not an origin this
+/// step configured — skipped rather than guessed at.
+fn served(json: &str) -> Result<Vec<(u16, String)>, String> {
+    let value: serde_json::Value = serde_json::from_str(json).map_err(|error| {
+        format!(
+            "`tailscale serve status --json` printed something that is not JSON ({error}): this deploy reads what \
+             it configures, so it can only compare what it can parse"
+        )
+    })?;
+    let mut served = Vec::new();
+    let Some(web) = value.get("Web").and_then(serde_json::Value::as_object) else {
+        return Ok(served);
+    };
+    for (host_port, entry) in web {
+        let Some((_, port)) = host_port.rsplit_once(':') else {
+            continue;
+        };
+        let Ok(port) = port.parse::<u16>() else {
+            continue;
+        };
+        let proxy = entry
+            .get("Handlers")
+            .and_then(|handlers| handlers.get("/"))
+            .and_then(|root| root.get("Proxy"))
+            .and_then(serde_json::Value::as_str);
+        if let Some(proxy) = proxy {
+            served.push((port, proxy.to_string()));
+        }
+    }
+    Ok(served)
+}
+
+/// Step 7: wait for `/api/health`, then ask `doctor --full` (spec item 10 step 7, HS-049).
+///
+/// The read is the same two questions the apply ends on — the endpoint answers **and** no finding fails — so a
+/// `satisfied` line here is "this machine is serving, measured", not "the unit was installed". Anything short of
+/// that goes to `needs`, because an apply is what can change it (it waits, and a start is what the wait is for).
+///
+/// The apply's failure is `doctor`'s own sentence, verbatim: step 1's rule, one level later — a deploy, `serve`'s
+/// refusal and `doctor`'s line cannot say different things about one machine.
+fn health(config: &Config, tools: &Tools, machine: &dyn Machine, dry_run: bool) -> Line {
+    let answering = doctor::health_answers(config.control_listen);
+    let measured = doctor::run(config, Depth::Full, &tools.doctor, machine);
+    if answering && !measured.failed() {
+        return Line {
+            step: DeployStep::Health,
+            word: Word::Satisfied,
+            sentence: format!(
+                "the control origin ({}) answers `GET /api/health`, and `doctor --full` reports {} findings with \
+                 none failing",
+                config.control_listen,
+                measured.findings.len()
+            ),
+        };
+    }
+    let plan = vec![
+        format!(
+            "wait for `/api/health` on {} for up to {} s",
+            config.control_listen,
+            tools.health_wait.as_secs()
+        ),
+        "doctor --full".to_string(),
+    ];
+    if dry_run {
+        return Line {
+            step: DeployStep::Health,
+            word: Word::Needs,
+            sentence: counted(&plan),
+        };
+    }
+    if !wait_for_health(config.control_listen, tools.health_wait) {
+        return failed(
+            DeployStep::Health,
+            format!(
+                "the control origin ({}) did not answer `/api/health` within {} s: `journalctl -u {UNIT_NAME} -n \
+                 50` names why the unit did not come up",
+                config.control_listen,
+                tools.health_wait.as_secs()
+            ),
+        );
+    }
+    let measured = doctor::run(config, Depth::Full, &tools.doctor, machine);
+    if let Some(finding) = measured.failures().next() {
+        return failed(DeployStep::Health, finding.sentence.clone());
+    }
+    Line {
+        step: DeployStep::Health,
+        word: Word::Changed,
+        sentence: counted(&plan),
+    }
+}
+
+/// Whether `listen` answers `GET /api/health` before `bound` elapses.
+///
+/// One function with two callers — this step's apply and `doctor`'s port check — so that "the endpoint answers"
+/// means one thing wherever the deploy or a report says it. The bound is a parameter rather than [`HEALTH_WAIT`]
+/// so both arms are testable in milliseconds: a wait that took a minute to prove it gives up would be a test
+/// nobody runs.
+pub fn wait_for_health(listen: SocketAddr, bound: Duration) -> bool {
+    let start = Instant::now();
+    loop {
+        if doctor::health_answers(listen) {
+            return true;
+        }
+        let elapsed = start.elapsed();
+        if elapsed >= bound {
+            return false;
+        }
+        // The last sleep is short: a wait that has 40 ms left should ask again in 40, not in a poll interval.
+        std::thread::sleep(HEALTH_POLL.min(bound - elapsed));
     }
 }

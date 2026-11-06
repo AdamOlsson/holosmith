@@ -1613,3 +1613,44 @@ it rather than adding a caveat beside it.
   `include_str!`ed, so a gate case could only corrupt a copy on disk and would prove nothing. That arm lives in
   `tests/images.rs`, drives the production `Images` path into a **test-only** tag and asserts both halves:
   the sentence names the instruction and the layer, and the tag does not exist afterwards.
+
+### Landmines: the service, the keys and the origins (HS-049)
+
+- **`openssl ecparam … -text` prints the parameters, not the numbers.** The private scalar and the public point
+  are in the DER, not in `-text`'s dump, so the generation child is `openssl ecparam -name prime256v1 -genkey
+  -noout -outform DER` and what it writes on stdout is a 121-byte SEC1 key: `30 77 02 01 01 04 20 <32-byte scalar>
+  a0 0a 06 08 2a8648ce3d030107 a1 44 03 42 00 04 <64-byte X||Y>`. `vapid::from_der` walks exactly that shape and
+  refuses anything else with a sentence naming what it expected; the `-text` form would have been a pair
+  half-understood, and a wrong signature is a failure only a phone would notice.
+- **`tailscale serve status --json` is `ipn.ServeConfig`, and the flags are not optional.** The shape is
+  `{"TCP":{"443":{"HTTPS":true}},"Web":{"<host>:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8080"}}}}}` — the
+  `Web` object keyed by `host:port`, with the origin's target behind `Handlers["/"].Proxy`. `--bg` is required or
+  the command blocks in the foreground, `--yes` keeps a first `serve` from prompting, and a gate stand-in **must
+  read the port from `$4` and the target from `$5`** of `serve --bg --yes --https=<port> <target>`: the first draft
+  read `$3`/`$4` and wrote `--yes --https=8444` into its own state, which made every run after the first re-apply
+  forever. Same family as ADR-0035's "ask for the field": the JSON is the read, the human text is prose.
+- **`systemctl` exists here but exits non-zero, and that is not a spawn error.** Measured: `/usr/bin/systemctl` is
+  present and answers `System has not been booted with systemd` because `/run/systemd/system` is absent, so step
+  5's failure is the child's own line rather than "could not be run". `useradd` and `usermod` are **absent**, so
+  the system path's user, its group and the three `chown`s are `tests/deploy.rs`'s recorders — a gate may not
+  create a system user, and a case that tried would only pass as root.
+- **A `--root` deploy must be driven with the musl artifact, not `target/debug/holosmith`.** Step 3 copies the
+  *running* binary into `alpine:3`, and a glibc debug binary starts with `exec /usr/local/bin/holosmith: no such
+  file or directory` (exit 255), so the proxies die seconds later and step 7 fails on `hs_egress is not running` —
+  a failure two steps away from its cause. Measured in this story's first demo; use `dist/<triple>/holosmith`.
+- **`--root` prefixes `data_root` as the config spells it.** A config that names an absolute `data_root` under
+  `target/` gives `<root>/home/…/target/…/data`, not `<root>/var/lib/holosmith`, and both look installed. The
+  gate's deploy configs therefore leave `data_root` at its default, so the tree reads `<root>/var/lib/holosmith`
+  and a case can name the paths it asserts (ADR-0056).
+- **`perms` made the data root's mode a startup finding, so `serve` had to set it.** `create_dir_all` gives the
+  process's umask — 0775 under umask 0002 — and `doctor --quick` is the unit's `ExecStartPre`, so a root `serve`
+  created would fail the *next* boot over a mode nothing had changed. `commands/serve.rs` now sets 0755 on a root
+  **it** created and leaves an operator's own mode alone, and the gate's `doctor` fixtures had to create theirs
+  with `install -d -m 0755`; a fixture made with `mkdir -p` is a machine the deploy never leaves.
+- **Step 7's read runs `doctor --full`, so a dry run runs the network self-test too.** The price is recorded rather
+  than hidden: a plan that read nothing is not a plan (ADR-0056), and the self-test removes the network it makes
+  (ADR-0044), so a dry run leaves no state — it spends seconds, and the alternative is a plan describing a machine
+  nobody measured.
+- **`scripts/verify.sh` is bash, not sh.** `sh -n` fails on it at `HEAD` (line 207's `local -a sent=("$@")`), so
+  `bash -n scripts/verify.sh` is the cheap check after every edit to it — cheaper than the minutes a full run
+  costs, and it catches the quoting mistake a heredoc full of shims invites.

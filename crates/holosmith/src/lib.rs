@@ -42,6 +42,7 @@ pub mod sweeper;
 pub mod tool;
 pub mod tunnel;
 pub mod turn;
+pub mod vapid;
 pub mod version;
 pub mod web;
 pub mod worktree;

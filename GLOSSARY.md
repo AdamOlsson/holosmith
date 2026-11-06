@@ -31,6 +31,14 @@ _Avoid_: Mode, type
 A machine that runs sessions. Has Docker, git and a projects root.
 _Avoid_: Worker, agent host, runner
 
+**Service user**:
+The `holosmith` system user a deployed server runs `serve` as, and the member of the `docker` group that lets it
+drive the machine's daemon: `useradd --system --groups docker --home-dir <data root> --shell /usr/sbin/nologin
+holosmith` on a privileged install, and the owner of the install tree after `server deploy` step 2's `chown`. Under
+`--root` there is none — the tree belongs to the invoking user, and the step's line says so. Its machine names are
+`deploy::SERVICE_USER` and `deploy::SERVICE_GROUP`.
+_Avoid_: Service account, holosmith user, deploy user (and a `--root` install has no service user at all)
+
 **Hub**:
 The single entry point you open in a browser. Forwards requests and previews to servers. Runs no sessions.
 _Avoid_: Controller, orchestrator, gateway
@@ -71,6 +79,16 @@ The file at `<data>/secrets/keys.toml`, mode 0600, holding the provider API keys
 `hs_key` is the only container that mounts anything of it, and what it mounts is the **directory**, because the
 file is written by rename and a file mount would pin the old inode (ADR-0050).
 _Avoid_: Keys config, credentials file
+
+**VAPID keys**:
+The machine's Web Push key pair at `<data>/secrets/vapid.toml`, mode 0600 inside the 0700 secrets directory: two
+unpadded base64url strings, the 65-byte uncompressed P-256 point with its leading `0x04` (87 characters) and the
+32-byte private scalar (43). `server deploy` step 2 writes it **once** and never regenerates it — absent is the
+only state that generates, and a present file that is not a pair is a failed step, because regenerating would stop
+every push subscription made against the old pair — and it holds no configuration: a JWT's `sub` claim is the
+consumer's (HS-066). Its machine names are `vapid::Pair` and `vapid::VAPID_FILE`.
+_Avoid_: VAPID credentials, push keys (and not the **secrets file**, which is the provider-key store `key set` owns
+and no deploy generates)
 
 ### Sessions and turns
 

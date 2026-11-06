@@ -20,12 +20,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use holosmith::clock;
-use holosmith::config::{Config, Role};
+use holosmith::config::{Config, DEFAULT_CONFIG_PATH, Role};
 use holosmith::db::{self, Database, OpenOptions};
+use holosmith::deploy;
 use holosmith::doctor::{self, Depth, Machine, Report, Tools};
 use holosmith::images;
+use holosmith::key;
 use holosmith::preflight::{self, Check, Finding, Outcome};
 use holosmith::selftest;
+use holosmith::vapid;
 
 mod support;
 use support::TempDir;
@@ -117,6 +120,17 @@ fn config(dir: &TempDir, docker_host: Option<String>) -> Config {
         preview_listen: "127.0.0.1:0".parse().expect("a listener address"),
         ..Config::default()
     }
+}
+
+/// The data root a deploy leaves: present, with the mode `server deploy` writes.
+///
+/// Every check that takes an existing data root needs it to be the mode `perms` expects — a directory made by
+/// `create_dir_all` is 0775 under a permissive umask, which is a wrong mode and would make the modes check a failure
+/// in tests whose subject is something else.
+fn deployed_data_root(config: &Config) {
+    std::fs::create_dir_all(&config.data_root).expect("the data root is creatable");
+    std::fs::set_permissions(&config.data_root, std::fs::Permissions::from_mode(0o755))
+        .expect("the data root's mode is settable");
 }
 
 /// A daemon that answers every `GET /_ping` the way a real one does, and how many it answered.
@@ -218,8 +232,9 @@ fn a_clean_machine_passes_quick_with_its_whole_list_in_order() {
     let socket = dir.file("docker.sock");
     let answered = fake_daemon(&socket);
     let mut config = config(&dir, Some(format!("unix://{}", socket.display())));
-    // A data root that exists is what `df` and the schema check are about; the checks create nothing.
-    std::fs::create_dir_all(&config.data_root).expect("the data root is creatable");
+    // A data root that exists is what `df`, the schema check and the modes check are about; the checks create
+    // nothing. Its mode is the one `server deploy` writes, because `perms` reads it.
+    deployed_data_root(&config);
     config.role = Role::Server;
     let report = doctor::run(
         &config,
@@ -253,7 +268,8 @@ fn a_clean_machine_passes_quick_with_its_whole_list_in_order() {
             "tailscale",
             "ports",
             "ports",
-            "database"
+            "database",
+            "perms"
         ],
         "the quick list is not the spec's list, in the spec's order:\n{}",
         report.render()
@@ -265,6 +281,7 @@ fn a_clean_machine_passes_quick_with_its_whole_list_in_order() {
         Check::Disk,
         Check::Tailscale,
         Check::Database,
+        Check::Perms,
     ] {
         assert_eq!(
             finding(&report, check).outcome,
@@ -282,7 +299,7 @@ fn a_clean_machine_passes_quick_with_its_whole_list_in_order() {
     assert_eq!(nth(&report, Check::Ports, 0).outcome, Outcome::Pass);
     assert_eq!(
         report.render().lines().last(),
-        Some("doctor: 9 findings: 8 pass, 0 fail, 1 unknown"),
+        Some("doctor: 10 findings: 9 pass, 0 fail, 1 unknown"),
         "the tally is not one line of the report"
     );
 }
@@ -296,7 +313,7 @@ fn a_held_port_is_a_failure_before_a_start_and_the_machine_serving_after_one() {
     let _answered = fake_daemon(&socket);
     let mut config = config(&dir, Some(format!("unix://{}", socket.display())));
     config.role = Role::Server;
-    std::fs::create_dir_all(&config.data_root).expect("the data root is creatable");
+    deployed_data_root(&config);
     let tools = Tools {
         preflight: preflight::Tools {
             git: PathBuf::from("git"),
@@ -376,7 +393,7 @@ fn a_docker_that_does_not_answer_is_one_failure_and_the_rest_still_prints() {
         Some(format!("unix://{}", dir.file("absent.sock").display())),
     );
     config.role = Role::Server;
-    std::fs::create_dir_all(&config.data_root).expect("the data root is creatable");
+    deployed_data_root(&config);
     let report = doctor::run(
         &config,
         Depth::Quick,
@@ -433,7 +450,7 @@ fn the_merge_trial_measures_a_real_repository_and_refuses_a_git_that_answers_wro
     fake_daemon(&socket);
     let mut config = config(&dir, Some(format!("unix://{}", socket.display())));
     config.role = Role::Server;
-    std::fs::create_dir_all(&config.data_root).expect("the data root is creatable");
+    deployed_data_root(&config);
     if std::process::Command::new("git")
         .arg("--version")
         .output()
@@ -473,7 +490,7 @@ fn an_old_git_fails_the_version_and_leaves_the_merge_trial_unmeasured() {
     fake_daemon(&socket);
     let mut config = config(&dir, Some(format!("unix://{}", socket.display())));
     config.role = Role::Server;
-    std::fs::create_dir_all(&config.data_root).expect("the data root is creatable");
+    deployed_data_root(&config);
     // The shim answers a new git's version but not a new git's `merge-tree` (it exits 0 for both trials), so a
     // merge check that ran would *fail*: that it is "not measured" instead is the evidence the version is what
     // stopped it, and the run has one failure rather than two.
@@ -507,7 +524,7 @@ fn tailscales_three_arms_are_measured() {
     fake_daemon(&socket);
     let mut config = config(&dir, Some(format!("unix://{}", socket.display())));
     config.role = Role::Server;
-    std::fs::create_dir_all(&config.data_root).expect("the data root is creatable");
+    deployed_data_root(&config);
 
     let arms = [
         ("echo '{\"BackendState\":\"Running\"}'", Outcome::Pass),
@@ -554,7 +571,7 @@ fn systemd_is_a_pass_where_it_is_there_and_unknown_where_it_is_not() {
     fake_daemon(&socket);
     let mut config = config(&dir, Some(format!("unix://{}", socket.display())));
     config.role = Role::Server;
-    std::fs::create_dir_all(&config.data_root).expect("the data root is creatable");
+    deployed_data_root(&config);
     let present = dir.file("run-systemd-system");
     std::fs::create_dir_all(&present).expect("the scratch directory is creatable");
     let mut tools = tools_with_real_git(&dir);
@@ -573,7 +590,7 @@ fn a_newer_database_is_the_one_failure_that_keeps_adr_0047s_promise() {
     let mut config = config(&dir, Some(format!("unix://{}", socket.display())));
     config.role = Role::Server;
     config.data_root = dir.file("data");
-    std::fs::create_dir_all(&config.data_root).expect("the data root is creatable");
+    deployed_data_root(&config);
     let tools = tools(&dir, "2.43.0");
 
     // No file: a machine that never served, which is not a finding.
@@ -703,7 +720,7 @@ fn full_adds_the_self_test_the_proxies_and_the_image() {
     fake_daemon(&socket);
     let mut config = config(&dir, Some(format!("unix://{}", socket.display())));
     config.role = Role::Server;
-    std::fs::create_dir_all(&config.data_root).expect("the data root is creatable");
+    deployed_data_root(&config);
     let tools = tools_with_real_git(&dir);
 
     let report = doctor::run(&config, Depth::Full, &tools, &FakeMachine::healthy());
@@ -799,7 +816,7 @@ fn full_compares_the_agent_images_labels_with_this_binarys() {
     fake_daemon(&socket);
     let mut config = config(&dir, Some(format!("unix://{}", socket.display())));
     config.role = Role::Server;
-    std::fs::create_dir_all(&config.data_root).expect("the data root is creatable");
+    deployed_data_root(&config);
     let tools = tools_with_real_git(&dir);
 
     // The image this binary builds: the pi agrees and the four labels say so, each by its own value.
@@ -913,4 +930,88 @@ fn the_report_is_the_preflights_sentences_and_not_a_second_copy() {
         assert_eq!(complaint.check, finding.check);
         assert_eq!(complaint.sentence, finding.sentence);
     }
+}
+
+#[test]
+fn the_installed_paths_modes_and_owners_are_one_finding() {
+    // One check for the whole tree, because that is how an operator fixes it: the first offender's sentence carries
+    // the path, both numbers and the command, and a `Finding` is one check and one sentence.
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("doctor-perms");
+    let socket = dir.file("docker.sock");
+    let _answered = fake_daemon(&socket);
+    let mut config = config(&dir, Some(format!("unix://{}", socket.display())));
+    config.role = Role::Server;
+    let tools = tools_with_real_git(&dir);
+    // The data root's own three paths, which is as much of the tree as a test can make: the admin directory and the
+    // config path are absolute machine paths, so this machine's are only read.
+    let secrets = config.data_root.join(key::SECRETS_DIR);
+    std::fs::create_dir_all(&secrets).expect("the secrets directory is creatable");
+    std::fs::set_permissions(&config.data_root, std::fs::Permissions::from_mode(0o755))
+        .expect("the data root's mode is settable");
+    std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o700))
+        .expect("the secrets directory's mode is settable");
+    for name in [key::KEYS_FILE, vapid::VAPID_FILE] {
+        let path = secrets.join(name);
+        std::fs::write(&path, "").expect("the installed file is writable");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("the installed file's mode is settable");
+    }
+
+    let report = doctor::run(&config, Depth::Quick, &tools, &FakeMachine::healthy());
+    let perms = finding(&report, Check::Perms);
+    assert_eq!(perms.outcome, Outcome::Pass, "{}", says(perms));
+    // A path the deploy has not written yet is not a wrong mode, and the pass says which ones it did not find.
+    assert!(says(perms).contains("not there yet"), "{}", says(perms));
+    for absent in [deploy::ADMIN_DIR, DEFAULT_CONFIG_PATH] {
+        if Path::new(absent).exists() {
+            continue;
+        }
+        assert!(
+            says(perms).contains(absent),
+            "the pass does not say {absent} is not there yet: {}",
+            says(perms)
+        );
+    }
+
+    // One wrong mode: a failure naming the path, both modes and the fix — and the only failure on this machine.
+    std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o755))
+        .expect("the secrets directory's mode is settable");
+    let report = doctor::run(&config, Depth::Quick, &tools, &FakeMachine::healthy());
+    let perms = finding(&report, Check::Perms);
+    assert_eq!(perms.outcome, Outcome::Fail, "{}", says(perms));
+    for fact in [
+        "0755".to_string(),
+        "0700".to_string(),
+        format!("chmod 0700 {}", secrets.display()),
+    ] {
+        assert!(
+            says(perms).contains(&fact),
+            "the failure does not carry {fact}: {}",
+            says(perms)
+        );
+    }
+    assert_eq!(
+        report.failures().count(),
+        1,
+        "one wrong mode was reported as more than one failure:\n{}",
+        report.render()
+    );
+
+    // A machine that has not deployed: no tree, so not a verdict about modes — the third answer, not a failure.
+    let mut missing = config.clone();
+    missing.data_root = dir.file("no-data-root");
+    let report = doctor::run(&missing, Depth::Quick, &tools, &FakeMachine::healthy());
+    let perms = finding(&report, Check::Perms);
+    assert_eq!(perms.outcome, Outcome::Unknown, "{}", says(perms));
+    assert!(
+        says(perms).contains("not there yet"),
+        "the unknown answer does not say what is missing: {}",
+        says(perms)
+    );
+    assert!(
+        !report.failed(),
+        "a machine that has not deployed failed `doctor`:\n{}",
+        report.render()
+    );
 }

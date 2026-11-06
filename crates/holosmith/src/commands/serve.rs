@@ -58,9 +58,27 @@ pub fn run(args: ServeArgs) -> ExitCode {
     // `serve` owns the data root: ADR-0006's handoff said `serve` creates no directories, so
     // this story creates it (ADR-0009), and a database that cannot be opened or migrated is a
     // startup failure before any port exists.
+    //
+    // The **mode** is `server deploy`'s: 0755. `create_dir_all` uses the process's umask, which is 0775 on a
+    // machine whose umask is 0002, and `doctor`'s `perms` finding compares the tree with the modes the deploy
+    // writes (HS-049) — so a root this process made would make the *next* boot's `ExecStartPre` fail a finding
+    // nothing changed. Only a directory this call created is reset: an operator's own mode is theirs.
+    let created = !loaded.config.data_root.exists();
     if let Err(error) = std::fs::create_dir_all(&loaded.config.data_root) {
         eprintln!(
             "holosmith: serve: cannot create the data root {}: {error}",
+            loaded.config.data_root.display()
+        );
+        return ExitCode::FAILURE;
+    }
+    if created
+        && let Err(error) = std::fs::set_permissions(
+            &loaded.config.data_root,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+    {
+        eprintln!(
+            "holosmith: serve: cannot set the data root {} to 0755: {error}",
             loaded.config.data_root.display()
         );
         return ExitCode::FAILURE;
