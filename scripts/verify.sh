@@ -2279,8 +2279,19 @@ PROBE
 # container (`s_<id>` on `agents_<id>`), because the shared boot's backend is the *stub*: the question here is
 # what the preview listener does with that address, not what the backend would have built there.
 case_preview() {
-  local name=case_preview response body id path label image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
+  local name=case_preview response body id label image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
   local upstream_port asset ws
+
+  # This case needs a boot of its own, for two reasons a shared one cannot give it: a **stub** backend, so the
+  # create below needs no project on disk (a Docker boot refuses a project the machine does not hold, and which
+  # one the boot before this left running is not this case's business), and a data root of its own, so the row it
+  # makes is invisible to every other case. The shared boot is put back afterwards, because the cases after this
+  # one talk to `$port` and the sessions `$created_id` names.
+  printf 'backend = "stub"\npreview_listen = "127.0.0.1:0"\n' >"$WORK/config-preview.toml"
+  if [ -n "$serve_pid" ] && kill -0 "$serve_pid" 2>/dev/null; then
+    stop_serve
+  fi
+  start_serve "$WORK/config-preview.toml" "$WORK/data-preview"
   [ -n "${preview_port:-}" ] ||
     fail "$name/banner" "the banner named no preview listener: $(cat "$serve_err")"
 
@@ -2348,8 +2359,13 @@ case_preview() {
   [ -n "$asset" ] || fail "$name/asset" "the app shell names no script: $(cat "$WORK/responses/$name-shell.body")"
   fetch "$name-asset" GET "$asset" "Host: 127.0.0.1" || fail "$name/asset" "GET $asset did not answer"
   expect_status "$name/asset" "$(answer "$name-asset")" 200
-  for ws in "/local/" "preview_origin"; do
-    if ! grep -q -- "$ws" "$WORK/responses/$name-asset.body"; then
+  # Three bytes of the link, each of which a deleted feature takes away: the class the anchor is given
+  # (`className="preview"` — esbuild minifies identifiers, not string literals), the health key it builds its URL
+  # from (`t.preview_origin`), and the host segment itself (the bundle keeps it as `"local"`, and the template
+  # that uses it is one character of arithmetic away from unreadable — the *shape* of the path is
+  # `web/test/transcript.test.ts`'s, which is where a rule is tested).
+  for ws in "preview_origin" '"local"' 'className="preview"'; do
+    if ! grep -q -F -- "$ws" "$WORK/responses/$name-asset.body"; then
       fail "$name/link" "the shipped page carries no $ws: the session screen's preview link is not in it"
     fi
     assertions=$((assertions + 1))
@@ -2358,14 +2374,20 @@ case_preview() {
   # ---- the second half: V7 itself ----------------------------------------------------------------
   if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
     printf 'SKIP %s: no Docker daemon, so V7 is not measured here (the first half ran)\n' "$name"
+    stop_serve
+    start_serve
     return 0
   fi
   if ! docker image inspect "$image" >/dev/null 2>&1; then
     printf 'SKIP %s: no image %s, so V7 is not measured here (the first half ran)\n' "$name" "$image"
+    stop_serve
+    start_serve
     return 0
   fi
   if ! command -v python3 >/dev/null 2>&1; then
     printf 'SKIP %s: no python3 for the WebSocket round trip (the first half ran)\n' "$name"
+    stop_serve
+    start_serve
     return 0
   fi
   upstream_port="$("$artifact" config show --config "$WORK/config.toml" |
@@ -2443,8 +2465,10 @@ print(connection.getresponse().status)
   response="$(answer "$label")"
   expect_status "$name/through" "$response" 200
   body="$(cat "$WORK/responses/$label.body")"
+  # The body is the container's own bytes, chunk framing and all: a tunnel relays them rather than re-encoding
+  # them, so the assertion is that the sentence arrived, not that it is the whole body.
   case "$body" in
-    "hello from a container at /"*) assertions=$((assertions + 1)) ;;
+    *"hello from a container at /"*) assertions=$((assertions + 1)) ;;
     *) fail "$name/through" "the container's answer did not arrive through the preview listener: $body" ;;
   esac
 
@@ -2500,20 +2524,14 @@ PYWS
   fi
   assertions=$((assertions + 1))
 
-  # What this case made, this case takes back: a live session is the next case's problem otherwise.
-  fetch "$name-delete" DELETE "/api/sessions/$id?force=true" \
-    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" "X-Holosmith-Client: 1" ||
-    fail "$name/delete" "DELETE /api/sessions/$id did not answer"
-  expect_status "$name/delete" "$(answer "$name-delete")" 202
-  local waited_delete=0
-  while [ "$waited_delete" -lt 100 ]; do
-    docker inspect "s_$id" >/dev/null 2>&1 || break
-    sleep 0.1
-    waited_delete=$((waited_delete + 1))
-  done
+  # What this case made of the machine, it takes back: the container and its network. No `DELETE` of the session
+  # is needed — this boot's data root dies with the work dir — but the container outlives the process, and a
+  # network with a live endpoint refuses to be removed, so the container goes first.
   docker rm --force "s_$id" >/dev/null 2>&1 || true
   docker network rm "agents_$id" >/dev/null 2>&1 || true
   docker_session_id=""
+  stop_serve
+  start_serve
 }
 
 case_schema_newer() {
