@@ -33,7 +33,7 @@ use holosmith::container::{
 };
 use holosmith::docker::Docker;
 use holosmith::sessions::{Session, Status};
-use holosmith::worktree::Worktree;
+use holosmith::worktree::{Retained, Worktree};
 
 /// The session ids the tests use: 16 lowercase hex, the shape the database generates (ADR-0011).
 ///
@@ -585,7 +585,7 @@ fn the_container_step_runs_a_limited_container_with_no_way_out() {
     // container and the network go away, and asking twice is not a failure.
     runtime.block_on(async {
         backend
-            .delete(&session)
+            .delete(&session, &Retained::nothing())
             .await
             .expect("the delete removes what the session owns");
     });
@@ -793,7 +793,10 @@ fn a_second_start_never_fails_on_a_leftover_name() {
     );
 
     runtime.block_on(async {
-        backend.delete(&session).await.expect("the teardown works");
+        backend
+            .delete(&session, &Retained::nothing())
+            .await
+            .expect("the teardown works");
     });
 }
 
@@ -873,7 +876,10 @@ fn removing_the_container_loses_nothing_the_worktree_holds() {
     );
 
     runtime.block_on(async {
-        backend.delete(&session).await.expect("the teardown works");
+        backend
+            .delete(&session, &Retained::nothing())
+            .await
+            .expect("the teardown works");
     });
 }
 
@@ -941,7 +947,7 @@ async fn two_starts_of_one_session_do_not_race() {
     );
 
     backend
-        .delete(&session(ID_RACE))
+        .delete(&session(ID_RACE), &Retained::nothing())
         .await
         .expect("the teardown works");
 }
@@ -958,12 +964,18 @@ async fn two_starts_of_one_session_do_not_race() {
 /// endpoint on it, so a teardown that forgot the detach would leave the network behind with a `warn` — and a
 /// `deleting` row is what ADR-0023 says a delete must never leave. It drives `SessionBackend::undo`, not
 /// `Docker`, so the assertion is about the backend's order and not about the helper it calls.
+/// The stand-in is `sleep infinity` in the same image, under the name the teardown **detaches**: the two
+/// detaches `remove_network` makes are by container name (`hs_key`, `hs_egress`), so a proxy under any other
+/// name cannot be taken off and `docker network rm` then refuses the network — which is exactly the
+/// assertion below, and a stand-in called something else made it unprovable (HS-043 measured that: the test
+/// skipped whenever a proxy *was* running, and failed whenever one was not). The name is only safe because of
+/// the SKIP above: with a live proxy on the machine this test does not run at all, and the stand-in is
+/// removed at the end.
 #[test]
 fn the_egress_proxy_joins_a_session_network_under_its_alias_and_leaves_it() {
     if !ready() {
         return;
     }
-    const STAND_IN: &str = "hs_egress_test";
     let docker = Docker::new(None);
     if docker.running(PROXY_NAME) {
         eprintln!(
@@ -972,8 +984,9 @@ fn the_egress_proxy_joins_a_session_network_under_its_alias_and_leaves_it() {
         );
         return;
     }
+    let stand_in = PROXY_NAME;
     let network = network_name(ID_PROXY);
-    docker.remove_container(STAND_IN);
+    docker.remove_container(stand_in);
     let _ = docker.remove_network(&network);
     docker
         .create_internal_network(&network)
@@ -984,7 +997,7 @@ fn the_egress_proxy_joins_a_session_network_under_its_alias_and_leaves_it() {
             "run",
             "--detach",
             "--name",
-            STAND_IN,
+            stand_in,
             "--network",
             holosmith::docker::EGRESS_NETWORK,
             &image(),
@@ -999,18 +1012,18 @@ fn the_egress_proxy_joins_a_session_network_under_its_alias_and_leaves_it() {
         String::from_utf8_lossy(&started.stderr)
     );
     assert!(
-        wait_running(&docker, STAND_IN),
+        wait_running(&docker, stand_in),
         "the stand-in proxy never came up"
     );
 
     docker
-        .join_network(&network, STAND_IN, PROXY_ALIAS)
+        .join_network(&network, stand_in, PROXY_ALIAS)
         .expect("the proxy joins the session network");
     // The **alias**, not the name: `egress-proxy` is what a session's container resolves, and Docker's DNS
     // answers it only because the join named it.
     let aliases = docker
         .inspect(
-            STAND_IN,
+            stand_in,
             &format!("{{{{(index .NetworkSettings.Networks \"{network}\").Aliases}}}}"),
         )
         .unwrap_or_else(|error| panic!("the proxy's networks cannot be read: {error}"));
@@ -1037,5 +1050,5 @@ fn the_egress_proxy_joins_a_session_network_under_its_alias_and_leaves_it() {
         "the network is gone after the backend's own teardown"
     );
 
-    docker.remove_container(STAND_IN);
+    docker.remove_container(stand_in);
 }
