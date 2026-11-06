@@ -342,7 +342,7 @@ Running `holosmith server deploy` and `holosmith hub deploy` on the same machine
 | Command | What it does |
 | --- | --- |
 | `holosmith serve [--config PATH]` | Runs in the foreground with the role from the config; systemd runs this |
-| `holosmith server deploy [--ssh user@host] [--binary PATH] [--dry-run]` | Installs and starts a server (steps below) |
+| `holosmith server deploy [--ssh user@host] [--binary PATH] [--root DIR] [--dry-run]` | Installs and starts a server (steps below); `--root` builds every installed path under `DIR`, as the invoking user |
 | `holosmith hub deploy [--ssh user@host] [--binary PATH] [--dry-run]` | Installs and starts a hub |
 | `holosmith hub host add <name> <url>`, `list`, `remove <name>` | Manages the registry from the CLI, with the same checks as `POST /api/hosts` |
 | `holosmith key set <provider>`, `list`, `remove` | Stores provider API keys for the key proxy; the key is read from stdin, never from arguments |
@@ -359,7 +359,11 @@ Internal subcommands, used inside containers: `holosmith proxy egress`, `holosmi
 
 ### What `server deploy` does
 
-It is idempotent: each step checks the current state first, so re-running is safe. `--dry-run` lists the steps without running them.
+It is idempotent: each step checks the current state first, so re-running is safe. `--dry-run` lists the steps
+without running them. Each step reports one of `satisfied`, `needs` (a dry run's plan), `changed`, `skipped`
+(with the story that still owns that step, never a pass) or `failed`; a run that fails stops at that step,
+leaves the steps before it in place and prints the command to re-run, because every step reads the state it
+would change.
 
 1. Preflight, as `doctor --quick`: Linux with systemd, Docker reachable, git 2.38 or newer, Tailscale logged in, free disk above `min_free_gb`, ports free.
 2. Create the service user `holosmith` (in the docker group), the data directory, `/etc/holosmith/config.toml`, a 0700 secrets directory and the admin socket directory. Generate the VAPID keys.

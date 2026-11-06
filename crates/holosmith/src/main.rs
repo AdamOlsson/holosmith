@@ -2,7 +2,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use holosmith::cli::{Cli, Cmd, ContainerAction, ProxyAction};
+use holosmith::cli::{Cli, Cmd, ContainerAction, ProxyAction, ServerAction};
 use holosmith::commands;
 use holosmith::config::Overrides;
 
@@ -50,6 +50,15 @@ fn main() -> ExitCode {
         }),
         Cmd::Container { action } => match action {
             ContainerAction::Snapshot => commands::container::run_snapshot(),
+        },
+        Cmd::Server { action } => match action {
+            ServerAction::Deploy { dry_run, root } => {
+                commands::deploy::run(commands::deploy::DeployArgs {
+                    config: cli.config,
+                    dry_run,
+                    root,
+                })
+            }
         },
     }
 }

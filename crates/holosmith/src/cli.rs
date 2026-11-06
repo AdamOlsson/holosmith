@@ -67,6 +67,26 @@ pub enum Cmd {
         #[command(subcommand)]
         action: ContainerAction,
     },
+    /// Install and start a server on this machine (spec item 10's seven steps).
+    Server {
+        #[command(subcommand)]
+        action: ServerAction,
+    },
+}
+
+/// What `server` does. `hub deploy` is phase 3 (HS-072) and has no subcommand yet, because a hub installs a
+/// different set of steps and the spec's own command name for it is `hub deploy`.
+#[derive(Debug, Subcommand)]
+pub enum ServerAction {
+    /// Run the deploy's seven steps in order, each checking the current state first. Re-running is safe.
+    Deploy {
+        /// Print each step's plan and change nothing. A broken machine still exits non-zero.
+        #[arg(long)]
+        dry_run: bool,
+        /// Install into this directory instead of the system paths, as the invoking user (no sudo).
+        #[arg(long, value_name = "DIR")]
+        root: Option<PathBuf>,
+    },
 }
 
 /// The proxies a container runs (spec item 2's "internal subcommands").

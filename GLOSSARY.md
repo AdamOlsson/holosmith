@@ -683,6 +683,16 @@ _Avoid_: Deploy, upgrade, rollout
 Pointing `current` back at the previous release.
 _Avoid_: Revert, downgrade
 
+**Deploy step**:
+One of the seven parts of `holosmith server deploy`, in the spec's order: `preflight`, `files`, `images`,
+`proxies`, `service`, `origins`, `health`. A deploy step is a **state read** and an **apply**: the read says
+whether the step is already satisfied and what is missing, the apply does the missing part, and `--dry-run`
+prints the read alone. Each one reports one of five words — **satisfied**, **needs** (a dry run's plan),
+**changed**, **skipped** (carrying the story that still owns the body, and never a pass) and **failed** (which
+stops the run and makes the resume command the last line). Its machine names are `deploy::DeployStep` and
+`DeployStep::ALL`, and `--root` is the install tree the step's paths are built under. It is not `Step`.
+_Avoid_: Install step, deploy phase, stage, deployment
+
 **Doctor**:
 The preflight and self-test command that decides whether a machine may run sessions: `doctor --quick` is the
 list `serve` refuses on and the unit file's `ExecStartPre`, and `doctor --full` adds the network self-test,

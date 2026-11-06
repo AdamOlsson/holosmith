@@ -1476,3 +1476,42 @@ it rather than adding a caveat beside it.
 - **A Docker `serve` gate run leaves `hs_egress`/`hs_key` running** (HS-037's note, hit again here): they are one
   line of `docker ps` and the next `tests/container.rs` run skips its real egress path while they are up. Remove
   them by name before a change that touches the proxy.
+
+### Landmines: the deploy, the ports and what `install` does to a key file (HS-047)
+
+- **`doctor --quick` fails a held port on purpose, and `deploy` is the one caller that must not.** `--quick`'s two
+  moments are *before a start* and, at `--full`, *after one* — so a held port is a failure at `--quick` and a pass
+  only when this machine's own `/api/health` answers. But the spec promises `server deploy` is safe to re-run, and a
+  re-run happens on a machine that is already serving. So step 1 downgrades **exactly one** finding, `ports`, to a
+  remark, and every other `fail` still stops the deploy. Do not "fix" that by widening `doctor` (its exit code is
+  `ExecStartPre`'s) and do not widen the exception: a non-`ports` failure must still stop the run, and
+  `tests/deploy.rs` has a test for each half.
+- **`install` truncates.** `keys.toml` holds every stored provider key, so step 2 creates it only when it is
+  absent (`install -m 0600` from a staged empty file) and repairs a wrong mode with `chmod`. An `install` over an
+  existing key file silently destroys the operator's keys and leaves a file that still passes every mode
+  assertion — this is the one mistake in step 2 that a demo cannot show.
+- **`--root` prefixes what the deploy *installs*, not what it *reads about the machine*.** `data_root` and
+  `projects_root` are prefixed (and the `config.toml` it writes carries the prefixed values); the docker socket,
+  `doctor::SYSTEMD_DIR`, the listen addresses and step 4's binary mount source are not. And `deploy::run` takes the
+  **already prefixed** `Config` — pass the unprefixed one and every path is prefixed twice (`<root><root>/var/…`),
+  which still creates directories and still looks installed.
+- **Step 4 reads readiness, not the allow-list.** Its read is the `egress` network plus both containers' `running`,
+  because a changed `[egress] allow` is an *argument* and takes effect on the next `serve` boot, which replaces both
+  proxies unconditionally (ADR-0037). Comparing `docker inspect`'s `Args` against `run_args` was rejected: it is a
+  second reading of one vector and it drifts.
+- **Step 7 cannot be `doctor --full`, and not because it is slow.** `--full` asserts the image and the proxies step 3
+  builds, so on a machine where step 3 is skipped the last step would fail for a reason another story owns. The
+  first draft of the plan waited for `/api/health` against a server the *gate* had booted — a measurement of the
+  harness. Steps 5–7 are HS-049's, and the URL and next steps are the command's tail.
+- **A run whose remaining steps belong to later stories exits 0.** The exit code is 1 iff a step *failed*; the
+  summary's `deploy: incomplete: 4 of 7 steps …` is what says the install is not finished. A script that reads only
+  the exit code will believe a partial install succeeded — that is deliberate (the acceptance's failure semantics
+  are about a failing step) and it is why the line is always printed, not only when steps were skipped.
+- **The gate's case takes over the machine's `hs_egress`/`hs_key` names.** A leftover proxy from `case_doctor_full`
+  or from a `serve` boot makes this case's own first run read `satisfied` for step 4, so it `rm -f`s both before it
+  starts and after it finishes. `case_doctor_full` deliberately leaves its own running, so the order in
+  `serve_cases` matters: `case_server_deploy` runs before it.
+- **`find | stat '%a %s'` is a listing, not a hash.** It catches a changed mode, size or set of names, and it will
+  not catch a rewrite that keeps all three — which is why the case also `cmp`s `config.toml` and `keys.toml`
+  byte-for-byte beside the listing. A second run that rewrote the config with identical bytes would pass the
+  listing and must fail the `cmp` only if the bytes differ, so the pair is what "changed nothing" means.

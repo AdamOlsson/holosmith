@@ -410,127 +410,45 @@ fn unavailable(config: &Config, error: &std::io::Error) {
 /// Start the machine's egress proxy container, replacing one an earlier run left behind (HS-037).
 ///
 /// Called once per Docker boot, after the `egress` network exists, from [`run`]'s startup path — so it is
-/// synchronous, and every failure is a `warn` rather than a refusal (see the call site for why). The
-/// container is **replaced** on every boot because the allow-list is an argument, not a mount: a changed
-/// `[egress] allow` must take effect without an operator restarting anything by hand.
+/// synchronous, and every failure is a `warn` rather than a refusal (see the call site for why). The recipe
+/// itself is [`crate::proxies::start_egress`], shared with `server deploy`'s step 4 (ADR-0056), which is why
+/// what is left here is the policy that is the boot's own: a `debug` line when it worked and one `warn` naming
+/// what this run loses when it did not.
 fn start_egress_proxy(config: &Config) {
-    let proxy = match crate::container::EgressProxy::of(config) {
-        Ok(proxy) => proxy,
-        Err(sentence) => {
-            tracing::warn!(target: "holosmith::serve", sentence = %sentence, "no egress proxy was started");
-            return;
-        }
-    };
-    // `-v` of a path the daemon cannot see creates an empty root-owned *directory*, and `--entrypoint` then
-    // fails with a sentence about the container rather than about this machine (ADR-0035's measurement, the
-    // same one the agent directory has). A binary that is not a file here is a start that cannot work, said in
-    // the words of what is actually wrong.
-    if !proxy.binary.is_file() {
-        tracing::warn!(
-            target: "holosmith::serve",
-            binary = %proxy.binary.display(),
-            "no egress proxy was started: this process's own binary is not a file at its own path, so a \
-             container mounted from it would start from an empty directory"
-        );
-        return;
-    }
     let docker = Docker::new(config.docker_host.clone());
-    // `rm -f` first, for spec item 6's reason applied to a container that is not a session's: `--restart
-    // unless-stopped` means a stopped proxy keeps its name, and a name in use is a start that fails for a
-    // reason about Docker rather than about this machine.
-    //
-    // Both calls are **bounded**, and this is the one place in the boot that could otherwise block before the
-    // listener binds: a `docker run` of an image this machine does not have pulls it first, and a daemon that
-    // accepts a request and then wedges would take the control UI down with it — the screen an operator needs in
-    // order to see that anything is wrong. `Docker::attempt`'s bound is the same rule for the self-test's probe
-    // (HS-036); this one is the proxy's.
-    let bound = crate::container::PROXY_START_TIMEOUT;
-    docker.remove_container_bounded(crate::container::PROXY_NAME, bound);
-    match docker.run_detached(&proxy.run_args(), bound) {
-        Ok(Some(_)) => tracing::debug!(
+    match crate::proxies::start_egress(config, &docker) {
+        Ok(started) => tracing::debug!(
             target: "holosmith::serve",
-            container = crate::container::PROXY_NAME,
-            allow = proxy.allow.len(),
+            container = started.container,
+            allow = started.allow,
             "the egress proxy is running"
         ),
-        Ok(None) => tracing::warn!(
+        Err(sentence) => tracing::warn!(
             target: "holosmith::serve",
-            container = crate::container::PROXY_NAME,
-            seconds = bound.as_secs(),
-            "the egress proxy did not start within its bound and was abandoned: a session that allows internet \
-             access will find nothing at its proxy address"
-        ),
-        Err(error) => tracing::warn!(
-            target: "holosmith::serve",
-            container = crate::container::PROXY_NAME,
-            %error,
-            "the egress proxy could not be started: a session that allows internet access will find nothing \
-             at its proxy address, so its downloads fail at once rather than leaving"
+            %sentence,
+            "the egress proxy is not running: a session that allows internet access will find nothing at its \
+             proxy address"
         ),
     }
 }
 
 /// Start the machine's key proxy container, replacing one an earlier run left behind (HS-039).
 ///
-/// The key file is created first, mode 0600, because it is a mount source: `-v` of a missing path creates an
-/// empty root-owned *directory* and the proxy would then read a directory as TOML (ADR-0035's measurement,
-/// applied to the second proxy). The temporary file + rename in [`crate::key::Store`] means a running proxy
-/// sees one complete file or the previous one, never a half-written key.
+/// [`crate::proxies::start_key`] is the recipe, and it is the same one `server deploy`'s step 4 runs (ADR-0056).
+/// The policy here is the boot's: a proxy that did not start costs its own `warn` and this run still serves its
+/// control UI, and its sessions fail a model call with a sentence rather than refusing to exist.
 fn start_key_proxy(config: &Config) {
-    let store = crate::key::Store::from_data_root(&config.data_root);
-    if let Err(error) = store.ensure_file() {
-        tracing::warn!(
-            target: "holosmith::serve",
-            path = %store.path().display(),
-            %error,
-            "no key proxy was started: the key file could not be prepared, and a mount of a missing source is an empty directory"
-        );
-        return;
-    }
-    let proxy = match crate::container::KeyProxy::of(config) {
-        Ok(proxy) => proxy,
-        Err(sentence) => {
-            tracing::warn!(target: "holosmith::serve", sentence = %sentence, "no key proxy was started");
-            return;
-        }
-    };
-    if !proxy.binary.is_file() {
-        tracing::warn!(
-            target: "holosmith::serve",
-            binary = %proxy.binary.display(),
-            "no key proxy was started: this process's own binary is not a file at its own path, so a container mounted from it would start from an empty directory"
-        );
-        return;
-    }
-    if !proxy.keys.is_file() {
-        tracing::warn!(
-            target: "holosmith::serve",
-            keys = %proxy.keys.display(),
-            "no key proxy was started: the key file is not a file, and mounting it would give the proxy a directory"
-        );
-        return;
-    }
     let docker = Docker::new(config.docker_host.clone());
-    let bound = crate::container::PROXY_START_TIMEOUT;
-    docker.remove_container_bounded(crate::key::KEY_PROXY_NAME, bound);
-    match docker.run_detached(&proxy.run_args(), bound) {
-        Ok(Some(_)) => tracing::debug!(
+    match crate::proxies::start_key(config, &docker) {
+        Ok(started) => tracing::debug!(
             target: "holosmith::serve",
-            container = crate::key::KEY_PROXY_NAME,
-            keys = %proxy.keys.display(),
+            container = started.container,
             "the key proxy is running"
         ),
-        Ok(None) => tracing::warn!(
+        Err(sentence) => tracing::warn!(
             target: "holosmith::serve",
-            container = crate::key::KEY_PROXY_NAME,
-            seconds = bound.as_secs(),
-            "the key proxy did not start within its bound and was abandoned: a session's model calls will find nothing at its proxy address"
-        ),
-        Err(error) => tracing::warn!(
-            target: "holosmith::serve",
-            container = crate::key::KEY_PROXY_NAME,
-            %error,
-            "the key proxy could not be started: a session's model calls will find nothing at its proxy address"
+            %sentence,
+            "the key proxy is not running: a session's model calls will find nothing at its proxy address"
         ),
     }
 }

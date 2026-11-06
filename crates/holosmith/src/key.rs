@@ -334,7 +334,12 @@ fn lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn empty_text() -> String {
+/// The empty store, which is what `ensure_file` creates and what `server deploy` stages.
+///
+/// `pub(crate)` rather than private because the deploy writes this file's *creation* from its own step: the one
+/// spelling of "an empty key store" has to be the one `key list` reads, or a deploy would create a file the key
+/// commands then refuse to parse.
+pub(crate) fn empty_text() -> String {
     "[providers]\n[sessions]\n".to_string()
 }
 
