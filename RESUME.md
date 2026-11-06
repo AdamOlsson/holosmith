@@ -1,4 +1,4 @@
-# RESUME — one issue per session (next: PER-75 / HS-043, delete keeps what is worth keeping)
+# RESUME — one issue per session (next: PER-76 / HS-044, startup reconcile and crash safety)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating procedure and
 still governs the cycle; this file is the state of the world, and it adds one rule of its own:
@@ -45,184 +45,202 @@ sandbox-specific incantation (§2).
 
 ---
 
-## 1. The issue this session picks up: `PER-75` — HS-043, delete hardening and what is kept
+## 1. The issue this session picks up: `PER-76` — HS-044, startup reconcile and crash safety (V9)
 
-**State when this file was written** (`HEAD` = `origin/master` = `ae80439`; tree clean apart from the operator's
-own `log.txt`/`orchestrate.sh`): **47 of 80 stories Done, 33 Backlog**, all in project `Holosmith`. `PER-75` is
-`Backlog`, it is the next in `HS-###` order, and its only blocker (`HS-042`, `PER-74`) is `Done` — so it is
-eligible. Nothing in the queue is blocked on the machine: the daemon, the agent image and this build's proxies all
-work here (§2).
+**State when this file was written** (the story's last commit, `7686706`, is `origin/master`; the handoff
+commit that carries this file is one further; tree clean apart from the
+operator's own `log.txt`/`orchestrate.sh`): **48 of 80 stories Done, 32 Backlog**, all in project `Holosmith`.
+`PER-76` is `Backlog`, it is the next in `HS-###` order, and its only blocker (`HS-043`, `PER-75`) is `Done` —
+so it is eligible. Nothing in the queue is blocked on the machine: the daemon, the agent image and this
+build's proxies all work here (§2).
 
-The last shipped story was `PER-73` (HS-041, the preview listener — V7 **passes**; the listener is the binary's
-third byte tunnel; ADR-0051). Twelve stories have been built against a real `docker run`, and the last gate run was
-green: **62 cases, 650 assertions**.
+The last shipped story was `PER-75` (HS-043, the delete's keep-rules — V9's predecessor; ADR-0052). The last
+gate run was green: **64 cases, 678 assertions**; `cargo test` is **783 tests across 45 binaries**, and
+`web/`'s runner is **51**.
 
 ### 1.1 The slice (verbatim from `docs/stories/phase-1b-docker-backend.md`; Linear's body is the same text)
 
-> ### HS-043 — Delete hardening and what is kept
+> ### HS-044 — Startup reconcile and crash safety (V9)
 >
-> **As** the operator **I want** delete to keep whatever is worth keeping **so that** "delete" is not a synonym
-> for "lose".
+> **As** the operator **I want** a crash to leave nothing orphaned **so that** restarting is always safe.
 >
-> - **Size:** M · **Blocked by:** HS-042 · **Spec:** item 9
-> - **Demo:** delete a session with unmerged commits and an uncommitted change; the branch and the wip ref are
->   still there and the recovery command is printed.
+> - **Size:** M · **Blocked by:** HS-043 · **Spec:** item 6, item 7, item 8, V9
+> - **Demo:** `kill -9` mid-turn, restart, and the session is `idle` with the turn marked `interrupted`, no
+>   duplicate seq, no name conflict, no orphan network.
 >
 > **Acceptance**
-> - [ ] Snapshot runs before delete; failure → 409 `unsaved_work` unless `?force=true`.
-> - [ ] Branch `agent/<id>` is kept when it has commits beyond base and is not merged into a target branch.
-> - [ ] `refs/holosmith/wip/<id>` is kept when it differs from the branch.
-> - [ ] The delete response and the UI show the recovery command: `git branch rescue refs/holosmith/wip/<id>`.
-> - [ ] Worktree, session directory and network are removed; the row is deleted last.
+> - [ ] `docker ps -a --filter name=s_` → remove any leftover container, then restart sessions that were live.
+> - [ ] Rows stuck in `starting` are either resumed or set to `error`; never left dangling.
+> - [ ] Orphaned `agents_*` networks and `.worktrees/*` directories are removed.
+> - [ ] A turn that was running is recorded as `interrupted` (a reason, not a state).
+> - [ ] **V9 gate:** the kill -9 scenario passes with no duplicate or missing seq and no name conflict.
 
 `docs/stories/**` is **not edited** (§7).
 
 ### 1.2 The spec it proves
 
-`HolosmithSpec.md` item 9, the parts this story owns:
-
-> - Delete flow (returns 202, state `deleting`): abort if running; snapshot; `docker stop`; `git worktree remove
->   --force`; remove the session directory and network; delete the row. If the snapshot fails, delete returns 409
->   `unsaved_work` unless `?force=true`.
-> - Kept in the repository: branch `agent/<id>` if it has commits beyond the base and is not merged into a target
->   branch, and `refs/holosmith/wip/<id>` if it differs from the branch. Recover with `git branch rescue
->   refs/holosmith/wip/<id>`.
-
-Note what item 9 does **not** ask for: no fetch of the worktree's files, no bundle, no new config key (the targets
-are `[merge] targets`, which already exists), and no change to *how* a delete is requested.
+`HolosmithSpec.md` item 6 (the third bullet: "Startup reconcile uses `docker ps -a --filter name=s_`, removes
+any leftover container, then restarts sessions that were live"), item 7's step 5 ("At startup, any row still
+in `starting` is either resumed or set to `error`, and orphaned networks, worktrees and containers are
+removed"), item 8's last table row ("server crash → recovery on startup → `starting`, then `idle`; a running
+turn is recorded as `interrupted`") and V9 ("`kill -9` of the server mid-turn, then restart: the session
+returns to idle with no duplicate or missing seq and no container name conflict"). V9's **Result** cell is
+empty and this story fills it — HS-046 closes the run.
 
 ### 1.3 What already exists
 
-- **The whole delete flow except the keep-rules.** `DELETE /api/sessions/{id}[?force=true]`
-  (`http/sessions.rs::delete`) ends a running turn through the ladder's `end_turn` (reason `deleted`), takes the
-  snapshot, answers `409 unsaved_work` when it fails and the request did not force, applies `Trigger::Delete`, and
-  answers **202 with the row**. The removal is `Deleter::spawn` (`src/deleter.rs`, ADR-0023): revoke the session's
-  dummy key (HS-039, `key::Store::revoke`) → `backend.delete` (container, worktree, session directory, network) →
-  the row **and its event log in one transaction** → close the session's streams. `DELETED` is the ladder's word.
-- **`worktree::Worktree::remove` deletes the branch unconditionally**, and that is the one line this story changes:
-  `worktree remove --force` (when registered) → `git branch -D` (when the branch exists) → `git worktree prune`.
-  Its doc says so; `tests/worktree.rs` is where a real repository is used (`support` has `repository`/`git`/`head`/
-  `branch_exists`/`worktrees`).
-- **The two facts the keep-rule needs**: `Worktree::ahead` (a `git rev-list --count <base>..agent/<id>`) answers
-  "commits beyond the base", and `git merge-base --is-ancestor <branch> <target>` (not yet used anywhere) answers
-  "already merged". `Worktree` is sync and std-only and the backend calls it on `spawn_blocking`.
-- **The WIP ref**: `src/snapshot.rs` (HS-042, ADR-0049) writes `refs/holosmith/wip/<id>` from a temporary index,
-  **removes** it when the tree equals `HEAD`, and exposes `REF_PREFIX`/`reference(id)`. Nothing deletes it today,
-  so "kept" is already true for the ref; what is missing is the *report* and the comparison against the branch.
-- **The merge targets** are a validated config key: `[merge] targets` (default `["main", "master"]`), read by
-  nothing yet — item 12's stories (HS-054…HS-057) will be its first other reader.
-- **The page has no delete affordance at all**: `web/src/main.ts` draws the session screen and the composer, the
-  API has `DELETE`, and `case_delete_session` drives it over HTTP. The sentences live in `web/src/transcript.ts`
-  (`stoppedNotice`, `stoppedDetail`, `createFailure`), each with a `web/test/transcript.test.ts` case.
-- **The delete's own gate case** is `case_delete_session` (`scripts/verify.sh`): 202 → `deleting` → the row that is
-  gone, and `case_delete_without_the_client_header` for the guard.
+- **Every durable piece the crash has to survive.** `sessions.last_seq` is the seq counter, bumped in the
+  same transaction as the event insert (never `MAX(seq)`, ADR-0009/HS-060); `EventWriter` batches on a 25 ms
+  tick and commits strictly before broadcasting; `sessions::repository` has `list(Option<Status>)`,
+  `get`, `live_count`, `set_worktree`, `take_expected_stop` and the rest, all behind the crate's
+  one-statement-per-table rule.
+- **The state machine's crash row is written down but nothing drives it**: `Trigger` has no crash trigger,
+  `interrupted` appears in `src/` only in comments and in `state.rs`'s "`ended` and `interrupted` are not
+  states" test. So "a running turn is recorded as `interrupted`" has a word and no producer.
+- **`Exits::record(session, code, stderr)`** (HS-030/HS-031, ADR-0038/0039) turns an observed exit into
+  `stopped` / `stopped · pi_exit` / `error` + the last stderr lines; its caller is the task the provisioner
+  spawns after the pi step, fed by the backend's attached-stdio `ExitWatcher`. A `kill -9` of the *server*
+  kills that attached `docker run` with it, so **nothing observes the container's exit** — the container
+  itself keeps running (`--rm` removes it only when it exits), which is exactly the leftover atomic step 1
+  names.
+- **`Provisioner::{spawn, run}`** re-runs the four steps for a row (a resume is just that: `ensure` is
+  create-or-adopt, ADR-0029), and `POST /resume` is the API that starts it. `Backends::for_run` decides
+  whether any of this is real: a stub boot has no container, no network and no worktree.
+- **`Docker`'s bounded family** (HS-037/HS-041): `inspect`, `container_exists`, `remove_container`,
+  `remove_container_bounded`, `running`, `stop_container`, `create_internal_network`, `remove_network`,
+  `join_network`/`leave_network`, `run_detached(args, bound)`. **There is no listing call** — nothing in
+  `src/docker.rs` runs `ps` — so the reconcile's `docker ps -a --filter name=s_` is new.
+- **The naming rules**: a container is `s_<id>`, a network `agents_<id>`, a worktree
+  `<projects>/.worktrees/<id>` (`worktree::Worktree::of`, `container::network_name`). A reconcile that reads
+  names must use these functions rather than re-spelling them.
+- **The startup sequence** (`commands/serve.rs`): preflight → (Docker) `egress` network + self-test →
+  `Database::open` (migrations) → writer → the tasks. A reconcile is a *task* off that path (§1.5).
+- **What `deleting` rows and the delete flow already promise**: a `deleting` row is re-runnable by repeating
+  the request (ADR-0023), and its teardown treats a missing worktree, branch, container or repository as
+  success. A reconcile must not "finish" someone's delete by removing the row — that is the operator's
+  request to retry.
+- **The gate's own crash-shaped facts**: `case_exit_classification` reads a row's `expected_stop` out of
+  `app.db` with `python3`, and `tests/exit.rs` + `tests/agent.rs` cover the classifier and the watcher. No
+  case kills a server.
 
 ### 1.4 What does not exist
 
-No keep-rule (the branch always goes), no merged-into-a-target check, no comparison of the wip ref against the
-branch, nothing on the delete response beyond the row, no recovery sentence anywhere in `web/`, **no delete button
-on any screen**, and no test that asserts a branch *survives* a delete.
+No `reconcile` module, no startup pass over rows or Docker names, no `Trigger` for a crash (so no way to
+record `interrupted`), no `docker ps` listing in `src/docker.rs`, no orphan-network or orphan-worktree sweep,
+no `case_*` that kills a server, and no V9 measurement of any kind. `docs/notes.md` has no landmine section
+for crash recovery either — the closest is the expected-stop/exit one.
 
 ### 1.5 The decisions that shape the design
 
-1. **Where the keep-rule lives.** `Worktree::remove` is the function that deletes the branch, so the rule is either
-   inside it (`remove` takes "what to keep") or in `Deleter` (which would have to run git itself, in a module that
-   has none). The precedent is ADR-0029: one `worktree.rs` value holds every host git command. Recommend: a value
-   the rule answers (`Retained { branch: bool, wip: bool }` plus the sentences/commands it implies) computed by
-   `worktree.rs` from the repository, and `remove` told what not to delete — so `tests/worktree.rs` can prove the
-   rule on a real repo without a daemon, a backend or a delete request.
-2. **"Not merged into a target branch"**. `--is-ancestor` per target, and a target that does not exist in this
-   repository is not a merge (a machine may have only `main` or only `master`; the default list names both). Say in
-   the ADR what a repository with neither does — the branch is kept, because "cannot tell" must not mean "delete".
-3. **The response's shape.** The row is the API body everywhere (ADR-0038 kept `expected_stop` off the wire for
-   that reason). The story asks for the recovery command *in the delete response*, so decide the vehicle: an
-   additive key on the 202 (recommended — it is the delete's own answer, and no other route has to carry it), or a
-   new route/field on the row. Amend the contract test in the same commit either way.
-4. **The UI half, and the button it implies.** "The delete response **and the UI** show the recovery command" cannot
-   be satisfied without an affordance: the page has no delete button today. Decide whether this story adds one (with
-   the notice) or records the gap in the ADR and leaves the button to whoever owns the screen next. The phase-1b
-   "nothing may require a UI change" sentence is a warning, not a veto: the story names the UI, so it owns it
-   (contrast ADR-0046, where no element was owed and the copy was cut).
-5. **What "kept" means for the ref when the tree equals HEAD.** `Snapshot::take` **removes** the ref in that case
-   (ADR-0049), so a delete after such a snapshot has nothing to keep and must not print a recovery command for a ref
-   that is not there. The rule is "kept when it differs from the branch", which is exactly what the snapshot's own
-   `Taken::Removed` records.
+1. **What "live" means at startup, and what happens to each row.** Suggested: `running` → `interrupted`
+   (a reason on the `idle` transition, or `running → idle` with reason `interrupted`), then re-provision if
+   the spec's table says the session comes back (`idle` after provisioning); `starting` → resume it if its
+   worktree can still be adopted, `error` if not (item 7's own words are "either resumed or set to `error`");
+   `idle`/`stopped`/`error` → untouched; `deleting` → left alone (the operator's retry). Write down which of
+   these is a *transition* (the table has no crash row, so a new trigger or a new row is needed — and
+   `apply` is the only writer) and which is a task.
+2. **Order: names first or rows first?** The acceptance's own order is containers → "restart sessions that
+   were live". Removing a container whose row says `idle` is safe (host directories hold the data); restarting
+   a session before its stale container is gone races the name. Recommend: sweep names (containers for
+   `s_<id>` with no live row or no `running` row, the `agents_*` networks and `.worktrees/*` directories that
+   belong to no row), then act on rows.
+3. **What must NOT be swept.** A kept branch and `refs/holosmith/wip/<id>` survive a delete on purpose
+   (HS-043, ADR-0052) — the reconcile must never delete a branch or a ref, and an orphan `.worktrees/<id>`
+   directory with no row is HS-043's "a crash left it" case. And a `deleting` row's container/network is the
+   delete's to remove, not the reconcile's. Say where the line is.
+4. **The stub backend.** `scripts/verify.sh` boots `backend = "stub"` and has no daemon on a hub machine, so
+   the reconcile must be a no-op (or a `debug` line) with no container names to read — and the gate's cases
+   must still be meaningful without a daemon. The pattern is `Backends`' own: the backend answers the question
+   (`refuse_project`, `retained`), or `runtime::Backend` gates the task.
+5. **`interrupted` on the wire and in the transcript.** A reason, not a state (item 8's sentence, ADR-0016) —
+   so it is `session.status`'s `reason` and the page's badge shows it (`stateText` already renders
+   `idle · interrupted`). Decide whether the page owes a sentence; `stoppedNotice` is for `stopped` states
+   only and HS-043's own landmine says a new word needs a new sentence *and* a test that it is not another's.
+6. **V9's measurement.** "No duplicate or missing seq" is a claim about `last_seq` and the log; "no name
+   conflict" is a claim about `docker run` after a crash left `s_<id>` behind. A gate case can `kill -9` the
+   served artifact mid-turn and restart it — but `case_*` must leave the machine clean, and the stub cannot
+   produce a mid-turn container. Decide what the case proves on a daemon-less machine (the row's
+   `interrupted` reason and the seq arithmetic, which need no daemon) and what needs the daemon and
+   `agent_image` (the leftover container and the name conflict).
 
 ### 1.6 The questions the plan must answer
 
 Answer each with a precedent, and record the answers in the Linear plan comment before any code exists.
 
-1. **Which branch name survives, and what the base is.** The keep-rule is "commits beyond the base": the row's
-   `base_commit` is what `ahead` already uses, but a resume re-provisions and a row written by an older binary may
-   have no `base_commit`. Say which wins (`ahead`'s `base_commit.or(branch head)` rule is already written down).
-2. **What the operator is told.** One sentence naming the branch, one naming the ref and the exact recovery
-   command, and where they are shown (the 202's body and the page). The command is the spec's:
-   `git branch rescue refs/holosmith/wip/<id>`.
-3. **What a delete of a *stopped* or *error* session keeps** — the same rules, because the branch and the ref
-   outlive the container; a session that never ran has nothing ahead of its base, so it keeps nothing.
-4. **What `?force=true` does to the keep-rules**: nothing. Force forgives a failed snapshot; it does not decide what
-   is deleted from the repository.
-5. **The order in `Deleter`.** The row is deleted last (already). Where the keep-rule's answer comes from — computed
-   before the backend's teardown, because after it the worktree is gone (and `ahead` needs it) — and how a failure
-   to read the repository is reported (a `warn`, and then *keep*: never delete on an unanswered question).
+1. **Where the reconcile lives.** A new `src/reconcile.rs` task with a seam like `preflight`'s `Tools`, or
+   methods on `Provisioner`/`Deleter`? The precedent is ADR-0023/ADR-0029: the module that owns the names owns
+   the questions about them — and `Docker` is the only thing that can read `ps`.
+2. **Which transition records the crash, and where the reason comes from.** `Transitioner::apply` is the only
+   writer; the crash is not the operator's request, so either a new `Trigger` (name it after the spec's word)
+   or an `apply_logged` with a reason. Say which and why, and what the table row is.
+3. **What a `starting` row's "resume" means when its worktree step never ran.** `ensure` is create-or-adopt,
+   so a re-provision works from nothing; the risk is a row that crashed *between* its ledger writes and its
+   worktree step. The `base_commit` question HS-043 answered (`ahead`'s, the row's wins) is the precedent.
+4. **What `docker ps -a --filter name=s_` is allowed to parse.** Docker's own English is never parsed
+   (ADR-0035's rule): `--format '{{.Names}}'` and the naming convention, then `inspect` for anything else.
+5. **How the sweep tells "an orphan" from "not mine".** `agents_<id>` where `<id>` is not a live row; a
+   `.worktrees/<id>` with no row and no registration. A name that is not the convention (`hs_egress`,
+   `hs_key`, the operator's own) is not the build's to remove.
+6. **Whether the reconcile can be run twice safely.** Startup is one call, but HS-046's verification run and
+   a `doctor` (HS-045) may want it again; "idempotent" is the same rule `Worktree::ensure` already follows.
 
 ### 1.7 Acceptance, restated as checks
 
-Every bullet needs something that can fail, and at least one of them is a new `case_*` in `scripts/verify.sh`
-(§3 — the rule is in bold in `docs/build.md`, and the reviewer enforces it).
+Every bullet needs something that can fail, and at least one of them is a new `case_*` in `scripts/verify.sh`.
 
-- *"Snapshot before delete; failure → 409 `unsaved_work` unless forced"* — already implemented (HS-019/042);
-  the story re-asserts it and must not regress it: `tests/delete.rs` and `case_delete_session`. If the snapshot's
-  result now decides the answer, the pair (`Taken::Written` / `Taken::Removed`) is where.
-- *"Branch kept when ahead of base and not merged into a target"* — `tests/worktree.rs` on a real repository: a
-  branch with a commit ahead of `main` survives `remove`; a branch merged into `main` does not; a branch with no
-  commits beyond its base does not; a repository with only `master` (no `main`) keeps the unmerged branch.
-  Prove each by deleting the guard and watching the test go red.
-- *"`refs/holosmith/wip/<id>` kept when it differs from the branch"* — a test that takes a snapshot with an
-  uncommitted change, runs the teardown, and asserts the ref is still there (`git rev-parse`) while a snapshot whose
-  tree `equals` HEAD leaves no ref and therefore no command.
-- *"The response and the UI show the recovery command"* — an assertion on the 202's body (the exact command, with
-  the session's id) plus a `web/test/transcript.test.ts` case for the sentence/rule, plus the wired element, plus a
-  `case_*` assertion that the shipped page carries it (the artifact embeds `web/dist`, §3).
-- *"Worktree, session directory and network are removed; the row is deleted last"* — already implemented and
-  already gated (`case_delete_session`, `tests/delete.rs`); the story must keep the *order* (the row's removal is
-  the last step of `Deleter`) and prove the branch's survival does not keep the worktree.
+- *"`docker ps -a --filter name=s_` → remove any leftover container, then restart sessions that were live"* —
+  a unit test over a `Docker` seam (the `preflight::Tools` pattern: a shim, not a real daemon) plus a
+  daemon case that kills `serve` with `-9` mid-turn, restarts it, and asserts no `s_<id>` survives with a
+  stale row and that the row is back to `idle`.
+- *"Rows stuck in `starting` are either resumed or set to `error`; never left dangling"* — a stub-boot test
+  that plants a `starting` row and asserts it does not stay there, plus the same for a row whose project is
+  gone (which must be `error` with a reason, not `starting`).
+- *"Orphaned `agents_*` networks and `.worktrees/*` directories are removed"* — with a daemon: a network and a
+  directory with no row go, one with a row stays; and **a kept branch and ref are never touched** (HS-043's
+  rule — that is the test that must not regress).
+- *"A turn that was running is recorded as `interrupted` (a reason, not a state)"* — the row is `idle` (or
+  `stopped`) with reason `interrupted` in the row **and** in the committed event log, and no row is ever in a
+  state called `interrupted`.
+- *"V9: no duplicate or missing seq, no name conflict"* — after `kill -9` and restart: `sessions.last_seq`
+  equals the highest committed seq, every event's seq is unique and gap-free *within the window the log
+  keeps* (compaction deletes rows, so state the claim carefully), and the restarted session's container is the
+  same name.
 
 Then `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `cd web && npm test &&
-npx tsc --noEmit`, and `scripts/verify.sh` — all green on a clean tree (§3), plus the story's own demo run against
-the **shipped artifact** (§1.9).
+npx tsc --noEmit`, and `scripts/verify.sh` — all green on a clean tree (§3), plus the story's own demo
+against the **shipped artifact** (§1.9).
 
 ### 1.8 Non-goals
 
-- **Merge itself** (`merge`/`squash`/fast-forward) is HS-054 – HS-057. This story only *reads* whether a merge
-  happened.
-- **Publish** (HS-057), the **Changes view** (HS-052/HS-053), the **Changes sheet** (HS-058).
-- **No bundle, no archive, no `git gc`**: item 9 names two refs and no file.
-- **No new config key**: `[merge] targets` already exists and is validated.
-- **No expiry** of a kept branch or ref (HS-064 owns stopped-session expiry, and this story's refs are not a row).
-- **No change to how a delete is requested** (the route, the query, the 202) beyond the additive key the story owns.
+- **`doctor`** (HS-045) and the **phase-1 verification run** (HS-046, which closes V9's row in the spec).
+- **Drain** (HS-051) and **service install** (HS-049): a graceful restart is not a crash.
+- **Session expiry** (HS-064), the **disk floor** (HS-062) and per-session caps (HS-063).
+- **A `docker events` watcher**: the attached process is the observation (ADR-0039) — a crash is the one case
+  it cannot observe, and that is what reconcile is for, not a second watcher.
+- **No change to how a delete, a resume or a create is requested.**
 
 ### 1.9 The demo
 
-Delete a session with unmerged commits and an uncommitted change, from the shipped artifact on this machine's real
-daemon: create a session against a real project (a plain checkout, ADR-0030), let it reach `idle`, then make a
-commit on `agent/<id>` in the worktree and leave a file modified (the agent's own work is simulated — say so), call
-`DELETE`, and show: the 202's body carrying the recovery command, `git branch -a` still holding `agent/<id>`,
-`git rev-parse refs/holosmith/wip/<id>` still answering, the worktree and the session directory gone, and
-`git branch rescue refs/holosmith/wip/<id>` succeeding against the kept ref. Bound every background process, kill it
-by its own pid, **and remove every container and network the demo made in the script's trap** (§6's newest
-landmine: the last session's demo left a container behind because its trap only killed `serve`).
+`kill -9` the served artifact mid-turn, then start it again, from the **shipped binary** on this machine's real
+daemon: create a session against a plain checkout (ADR-0030), let it reach `idle`, prompt it (pi's own refusal
+ends the turn in this build because the gate holds no provider key — say so, and use HS-032's fixtures'
+shape, or hold the turn with the stub if the intended subject is the turn's *end*), `kill -9` the serve pid,
+show the leftover `s_<id>` container and the `running` row, restart, and show: the session `idle` with reason
+`interrupted`, the log's seqs still unique and the row's `last_seq` equal to the last one, no `s_<id>`
+container left behind, and no `agents_<id>` network of a row that no longer exists. Bound every background
+process, kill it by its own pid, **and remove every container, network and proxy the demo made in the script's
+trap** (§6's landmine: `serve` starts `hs_egress`/`hs_key` and they outlive it — remove them by name).
 
 ### 1.10 What the next agent needs back
 
 When you write the state back (§5, step 10): §1 becomes the **next** issue — by `PROMPT.md`'s ranking, that is
-`PER-76` (HS-044 — startup reconcile and crash safety, V9), then `PER-77` (HS-045 — `doctor`), `PER-78` (HS-046,
-the phase-1 verification run that is the gate for phase 2) — with the same shape: slice, spec, what exists, what
-does not, the decision that shapes the design, the acceptance as checks, non-goals, the demo. Refresh the counts,
-the ADR number you took (**ADR-0052** is next) and the last gate run's own numbers, and replace §9's row with this
-story's (short — one paragraph). Anything you learned that is **not** state and **not** an ADR goes into
-`docs/notes.md` under a new `### Landmines: …` heading, never into §1. Then kill what you started (§5, step 11) —
-a session that leaves a child or a container behind blocks the next one.
+`PER-77` (HS-045 — `doctor --quick` and `doctor --full`), then `PER-78` (HS-046, the phase-1 verification run
+that is the gate for phase 2) — with the same shape: slice, spec, what exists, what does not, the decisions
+that shape the design, the acceptance as checks, non-goals, the demo. Refresh the counts, the ADR number you
+took (**ADR-0053** is next) and the last gate run's own numbers, and replace §9's row with this story's
+(short — one paragraph). Anything you learned that is **not** state and **not** an ADR goes into
+`docs/notes.md` under a new `### Landmines: …` heading, never into §1. Then kill what you started (§5,
+step 11) — a session that leaves a child or a container behind blocks the next one.
 
 ## 2. Environment (already repaired — do not redo)
 
@@ -264,7 +282,11 @@ story uses**: its pi version equals `pins/pi.txt` exactly (`agent::version_check
 2.39.5, node 24, default user `node` (uid **1000**, the host uid). Everything the Docker chain needs is here,
 including network access for `alpine:3` and friends. **A preview demo needs `node` inside the container** —
 this image has it, and so must any image `agent_image` points at (HS-036 learned that the hard way: a missing
-node is exit 127, not a test failure).
+node is exit 127, not a test failure). **A `serve` boot starts `hs_egress` and `hs_key` and they outlive
+it**, so a gate run or a demo leaves both running: remove them (`docker rm -f hs_egress hs_key`) when you
+want `tests/container.rs`'s egress-proxy test to run its *real* path, which it skips while a proxy is running.
+The machine's own `egress` network must exist for that test (`docker network create egress` is the call a boot
+makes) — a cleanup removed it once and the test failed on setup at HS-043's baseline.
 
 **pi's own RPC documentation is on this machine**:
 `~/.pi/agent/install/releases/1.5.0/node_modules/@earendil-works/pi-coding-agent/docs/rpc.md` (how to start
@@ -622,12 +644,16 @@ crates/holosmith/
                             — the three payload shapes it parses, ADR-0032), stream.rs (replay→live,
                             lag, `Item::Truncated`/`HISTORY_TRUNCATED`, the cut in the read step),
                             registry.rs (open-stream counts)
-  src/worktree.rs           the session's worktree (HS-025, ADR-0029): `Worktree::of` (the naming rule),
-                            `ensure` (create or adopt, answers `Ensured { base_commit, created }`), `ahead`
-                            (`rev-list --count`), `remove` (registered? → remove → branch −D → prune), and
-                            `GitError`; and since HS-026 the refusal reads (ADR-0030): `refuse`,
-                            `Refusal`, `repository_of`, `CONFIG_READ` (`--local --type=bool`). Sync and
-                            std-only; the backend calls it on `spawn_blocking`
+  src/worktree.rs           the session's worktree (HS-025, ADR-0029): `Worktree::of` (the naming rule; it
+                            carries `id` since HS-043), `ensure` (create or adopt, `Ensured { base_commit,
+                            created }`), `ahead` (`rev-list --count`), `remove(&Retained)` (registered? →
+                            remove → branch −D **only when not kept** → prune), and `GitError`; since
+                            HS-026 the refusal reads (ADR-0030): `refuse`, `Refusal`, `repository_of`,
+                            `CONFIG_READ` (`--local --type=bool`); and since HS-043 the keep-rule
+                            (ADR-0052): `retained(base, targets)` → `Retained::{Known { branch, wip },
+                            Unknown}` (`merges_into` per existing target, `differing_ref` by tree) and
+                            `Retained::{keeps_branch, recovery}`. Sync and std-only; the backend calls it on
+                            `spawn_blocking`
   src/egress.rs             the egress proxy (HS-037, ADR-0045): `Request::parse`/`username`, `Rules`
                             (`new`/`allow`/`permits`/`target`), `Target`, `Refusal` (status, word, sentence),
                             `address_problem`/`embedded_v4` (the ranges, IPv4-mapped, 6to4/NAT64/compatible),
@@ -674,9 +700,12 @@ web/                        Vite 7 + TypeScript, two screens (`/` and `/sessions
                             package-lock COMMITTED; main.ts is the DOM, transcript.ts the renderer's
                             rules (frame parsing, block model, affordances, `stoppedNotice` /
                             `stoppedDetail`, `budgetNotice`, `createFailure`, `parseTruncated`,
-                            `setTurnBase`, `historyPath`, and since HS-030 `stateText`/`headline` — a
-                            multi-line reason renders as its last line, clipped at `REASON_MAX`)
-web/test/transcript.test.ts 42 tests over synthetic frames, node's own runner (`npm test`)
+                            `setTurnBase`, `historyPath`, since HS-030 `stateText`/`headline` — a
+                            multi-line reason renders as its last line, clipped at `REASON_MAX` — and since
+                            HS-043 `deletedNotice`/`Kept`, `UNSAVED_WORK_NOTICE`, `FORCED_DELETE_LABEL`;
+                            `main.ts`'s `deleteSection` is the delete affordance, and `StreamTarget` carries
+                            one `showState` that patches badge, preview, composer and the affordance)
+web/test/transcript.test.ts 51 tests over synthetic frames, node's own runner (`npm test`)
 scripts/build-web.sh        npm ci + npm test + npm run build, asserts web/dist/index.html
 scripts/build.sh            web first, HOLOSMITH_REQUIRE_WEB=1, both musl targets → dist/<triple>/,
                             atomic copy, then check-static.sh. Uses `cargo build --locked`.
@@ -685,9 +714,9 @@ scripts/check-static.sh     file/readelf, empty-root serve + cmp against web/dis
 scripts/check-embed.sh      the three embed cases (present / absent warns / required fails)
 scripts/verify.sh           the one-command gate (see §3)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0051          read the recent ones before planning anything
+docs/adr/0001…0052          read the recent ones before planning anything
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-74, PER-91…PER-93, PER-97, PER-107  each a verbatim review + a `## Resolution` table
+docs/review/PER-33…PER-75, PER-91…PER-93, PER-97, PER-107  each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -727,9 +756,14 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   that snapshot is a **release step** (`scripts/schema-snapshot.sh`), not a story's, and a contract migration
   changes it in the same commit. `schema::verdict` is the sentence `serve` warns with on a newer database and
   `doctor` will refuse with (ADR-0047).
-- **What is left of the network half:** the delete's keep-rules (HS-043) — and with them the **delete affordance
-  `web/` does not have** —, startup reconcile (HS-044), `doctor` (HS-045), and the phase-1 verification run
-  (HS-046). The preview listener (HS-041) is done: the binary's third byte tunnel, `/‹host›/‹id›/*` with the
+- **What is left of the network half:** startup reconcile (HS-044), `doctor` (HS-045) and the phase-1
+  verification run (HS-046). The delete's keep-rules (HS-043) are done and ADR-0052: `agent/<id>` survives a
+  delete when it is ahead of its base and in no target, `refs/holosmith/wip/<id>` survives when its tree
+  differs from the branch, the 202 carries `kept` (one additive key on the flattened row) and is the same
+  decision the spawned removal applies, and the session screen has the **delete affordance it did not have**
+  — a Delete button, a confirm step and the forced retry a `409 unsaved_work` earns. **V9 is HS-044's**;
+  nothing else in the spec's table is unrun except V2 (HS-045/046), V6 (HS-046's run of HS-037's parts), V8,
+  V9 and V10. The preview listener (HS-041) is done: the binary's third byte tunnel, `/‹host›/‹id›/*` with the
   prefix stripped and an upgrade's `Origin` checked, and **V7 passes** (the host reaches a container on an
   `--internal` network, measured directly and through the artifact). The key proxy (HS-039) and its
   **verification** (HS-040 — V3, V4 and V5 pass) and the WIP snapshot (HS-042) are done, and the spec's
@@ -816,8 +850,8 @@ read-only and may run in parallel.
 6. **Review** with a fresh `reviewer` child running `~/.agents/skills/code-review/SKILL.md`, read-only,
    against `<fixed point>...HEAD` plus untracked files, spec axis sourced from the Linear body + story slice
    + spec items. `git add -A` first and write `git diff --cached <fp>` to
-   `/tmp/holosmith/reviews/PER-75-diff.txt` so new files appear. **The reviewer has no shell and no write
-   tool**: check its claims, and *you* save the review verbatim to `docs/review/PER-75.md`. **Commit before
+   `/tmp/holosmith/reviews/PER-<n>-diff.txt` so new files appear. **The reviewer has no shell and no write
+   tool**: check its claims, and *you* save the review verbatim to `docs/review/PER-<n>.md`. **Commit before
    launching it** — a child reading a tree that moves under it stalls.
 7. **Fix** in the same session (or with a fresh `worker`), triaging every finding as fixed or
    dismissed-with-citation; a "won't fix" without a citation is not acceptable. Re-run the gates. Append a
@@ -873,15 +907,15 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 The catalogue lives in **`docs/notes.md`** — read the **cross-cutting** sections before you start anything,
 then the sections below. It is a reference: everything there is a measurement or a review finding.
 
-| Read | Why it bears on what a delete keeps |
+| Read | Why it bears on startup reconcile and crash safety |
 | --- | --- |
-| Cross-cutting: *Build and toolchain*, *Tests*, *HTTP and the envelope*, *Data and state*, *Web*, *Config and docs*, *Reviews*, *Demos* | True of every story. The **Web** and **Demos** sections are where this one is most likely to go wrong: the page has no delete affordance today, and a demo's trap must remove its container, not only its server. |
-| *Landmines: worktrees (HS-025)* | The worktree is `‹projects›/.worktrees/‹id›`, its `.git` is a **file** pointing into the project's `.git/worktrees/‹id›`, `remove` is `worktree remove --force` then `branch -D` then `prune`, and teardown treats a missing worktree, branch or project as success — so a keep-rule must be expressed in *this* module or it will not be applied at all. |
-| *Landmines: Docker — mounts, containers, starts* | A container is `s_<id>`, a network `agents_<id>`, and a teardown detaches the proxies before `network rm` — the delete's step order is what keeps that true. |
-| *Landmines: the expected-stop flag and the exit classifier* | A delete stops a running session through the ladder and `Stopper`, and the exit it provokes must not be classified as an unexpected death (`docker rm -f` supersedes the launch first, ADR-0040). |
-| *Landmines: project refusals and coalescing* | The row's removal is one transaction that also deletes its event log, and the writer **drops** an event whose session has gone — so a delete must not be read as "the log is authoritative about what happened". |
-| *Landmines: the credential path* | The delete's first step is `key::Store::revoke`: a dummy key that spends money must stop working the moment the operator asked. |
-| *Landmines: the preview listener* | Not this issue's subject, but its last bullet is the newest and the most expensive: a demo's trap owes Docker the container and the network, and a leftover `s_*` container made the *next* gate run fail two pi-launch tests. |
+| Cross-cutting: *Build and toolchain*, *Tests*, *HTTP and the envelope*, *Data and state*, *Web*, *Config and docs*, *Reviews*, *Demos* | True of every story. The **Tests** and **Demos** sections are where this one is most likely to go wrong: a case that `kill -9`s a server has to bound, re-boot and clean up after itself, and a leftover `s_<id>` container is what HS-041's newest bullet paid for. |
+| *Landmines: the expected-stop flag and the exit classifier* | A crash is the one exit nothing observes: the attached `docker run` dies with the server, so the container survives and `Exits::record` never runs. The classifier's three answers and the launch generation (`ProcessEnd::NotCurrent`) are what a restart must not contradict. |
+| *Landmines: Docker — mounts, containers, starts* | `s_<id>` and `agents_<id>` are the names the sweep reads; every start is `rm -f` then `run` under a per-session lock, and a teardown detaches the proxies before `network rm`. A reconcile that races a start is the case the lock exists for. |
+| *Landmines: worktrees (HS-025)* | `<projects>/.worktrees/<id>`, a `.git` **file** pointing into the project, `ensure` is create-or-adopt, and a *directory* that exists but is not registered is explicitly **left alone for this story** — that is the orphan the reconcile now owns. |
+| *Landmines: what a delete keeps (HS-043)* | The reconcile must never sweep a kept branch or `refs/holosmith/wip/<id>`: a deleted session's work lives in those two names on purpose, an orphan `.worktrees/<id>` directory is where a crash left it, and a `deleting` row is the operator's retry rather than the reconcile's work. |
+| *Landmines: the agent launch* | The launch line, the generation and the exit's one report are what "a turn that was running is recorded as `interrupted`" has to agree with — a second watcher is not the answer (ADR-0039). |
+| *Landmines: project refusals and coalescing* | Rows and their events are one transaction each, `last_seq` is the durable counter, and the writer drops an event whose session has gone — so "no duplicate or missing seq" is a claim about a counter, not about `MAX(seq)`. |
 
 Three rules worth repeating here because they are the most expensive to relearn: **a test that cannot fail
 is worse than no test** (mutate the behaviour and watch it go red); **a gate case that SKIPs on the bug it
@@ -892,7 +926,7 @@ three such edits have cost a review finding each.
 
 ## 7. Decisions taken on the operator's behalf (do not silently undo)
 
-Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0050`, one line each in
+Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0052`, one line each in
 `docs/stories/README.md`): read the recent ones before planning, and **amend rather than rewrite** — an ADR
 a later story changes gets a "Superseded by ADR-00xx" note (0012/0013, and 0026 amended 0020).
 
@@ -922,15 +956,17 @@ cd /home/adamolsson/projects/holosmith
 git status --short                                  # clean apart from log.txt/orchestrate.sh
 . ~/.pi/toolchains/env.sh                           # ALWAYS before cargo/rustc
 python3 /tmp/lin.py issues | grep -v ' Done ' | head # recreate /tmp/lin.py first (§2)
-python3 /tmp/lin.py issue PER-75                    # scoped, Backlog, the issue §1 names
-docker version                                      # the daemon must answer, or V7 cannot be measured
+python3 /tmp/lin.py issue PER-76                    # scoped, Backlog, the issue §1 names
+docker version                                      # the daemon must answer, or V9 cannot be measured
 docker image inspect pi-agent:local                 # the image the Docker stories run
+docker network ls | grep -x egress                  # the proxy test's premise (§2)
+docker rm -f hs_egress hs_key 2>/dev/null           # so tests/container.rs runs its real path
 scripts/verify.sh                                   # baseline green, ~9–12 min (it prints its own counts)
 ```
 
 If the baseline is red before you touch anything, that is the first thing you fix — and say so in Linear.
 
-Then start §5 on **§1's issue** (`PER-75`, HS-043) and stop after step 11.
+Then start §5 on **§1's issue** (`PER-76`, HS-044) and stop after step 11.
 
 Before you begin, check that the last session left nothing behind — `subagent({action:"list"})` should show
 no run in progress, `docker ps` none of its containers, and `git status --short` should look like the line
@@ -949,18 +985,21 @@ from those three; do not carry old sessions' ledgers in this file.
 If you stop before the issue ships, say so explicitly, name the next action, and leave the tree clean and the
 gates green — **a half-finished story is worse than an honest stop**.
 
-**The last shipped story** (`PER-73`, HS-041, ADR-0051; commits `432c281`, `23eeed4`, `c0c18b6`, `151d8a6`,
-`8e71786`, `ae80439`): the preview listener is the binary's **third byte tunnel** —
-`src/preview.rs` + a `src/tunnel.rs` extracted from `egress.rs` — serving only `/<host>/<id>/*`, stripping the
-prefix, relaying bodies and upgrades transparently, refusing an upgrade whose `Origin` is missing or foreign
-(403), an unknown host or id (404) and a container that is not there (502), and answering the unslashed root with
-a 308 so a page's relative URLs resolve. `preview_upstream_port` is a new config key (31 → 32) and
-`HS_PREVIEW_PORT` tells the container which port to serve on; `preview_origin` is `GET /api/health`'s fifth key
-and the session screen links to `/local/<id>/` on it. **V7 passes** and is recorded in the spec's table; the
-spec's fallback is deliberately not built. Review *OK with notes*: 7 standards + 3 spec findings, no P1, nine fixed
-and one dismissed with a citation. Demo: the host fetching a container's dev server directly, through the listener,
-from a second host address, a WebSocket round trip, a foreign-origin refusal and the shipped page's link bytes.
-Its full record is Linear, `docs/review/PER-73.md` and `git log`; do not carry it forward.
+**The last shipped story** (`PER-75`, HS-043, ADR-0052; commits `d7e0feb`, `ef804b1`, `7686706`): a delete now
+keeps what is worth keeping. `Worktree::retained(base_commit, targets)` answers
+`Retained::{Known { branch, wip }, Unknown}` — the branch when it is ahead of its base and in no *existing*
+target (`merge-base --is-ancestor` per target; a missing target is not a merge, a repository with none keeps
+it), the snapshot ref when its tree differs from the branch's (`git diff --quiet`) — and `remove(&retained)` is
+told what not to delete. `Retained::Unknown` (an unreadable repository, a row with no `base_commit`) keeps the
+branch and claims nothing. The 202 is the row **flattened plus one key**, `kept` (`branch`, `wip`, `recovery`,
+three explicit nulls when nothing survived), computed *after* the snapshot and handed to the spawned removal so
+the answer and the teardown are one decision; the command `git branch rescue refs/holosmith/wip/<id>` is built
+once. The session screen gained the delete affordance it never had — a Delete button, a confirm step, the
+forced retry a `409 unsaved_work` earns, and the kept notice read from the answer. Review *OK with notes*: two
+P2 (a `kept: null` shape nothing tested, and the egress stand-in's name turning a failure into a silent skip)
+and four P3; five fixed, one dismissed with the ADR amended. Note: **V9 is still unrun** — that is HS-044's. Pre-existing at this story's baseline and fixed here: `tests/container.rs`'s egress-proxy test could
+never pass its real path (its stand-in was not the name a teardown detaches), and the machine's `egress`
+network was missing. Its full record is Linear, `docs/review/PER-75.md` and `git log`; do not carry it forward.
 
 **One thing this build does not do, recorded rather than discovered:** a resumed session's pi has **no
 memory** of earlier turns (`--no-session`; the transcript is Holosmith's log). Replaying the log into a new pi
