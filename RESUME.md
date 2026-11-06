@@ -1,4 +1,4 @@
-# RESUME — one issue per session (next: PER-80 / HS-048, embedded Dockerfiles and image builds)
+# RESUME — one issue per session (next: PER-82 / HS-050, `status`, `logs`, `uninstall`)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating procedure and
 still governs the cycle; this file is the state of the world, and it adds one rule of its own:
@@ -45,175 +45,188 @@ sandbox-specific incantation (§2).
 
 ---
 
-## 1. The issue this session picks up: `PER-81` — HS-049, service install, secrets, VAPID and Tailscale origins
+## 1. The issue this session picks up: `PER-82` — HS-050, `status`, `logs`, `uninstall`
 
 **State when this file was written** (the story's last commit is `origin/master` and the tree is clean apart
-from the operator's own `log.txt`/`orchestrate.sh`): **53 of 80 stories Done, 27 Backlog**, all in project
-`Holosmith`. `PER-81` is `Backlog`, it is the next in `HS-###` order, and its one blocker (`HS-048`, `PER-80`)
+from the operator's own `log.txt`/`orchestrate.sh`): **54 of 80 stories Done, 26 Backlog**, all in project
+`Holosmith`. `PER-82` is `Backlog`, it is the next in `HS-###` order, and its one blocker (`HS-049`, `PER-81`)
 is `Done` — so it is eligible. Nothing in the queue is blocked on the machine (§2).
 
-The last shipped story was `PER-80` (HS-048, embedded Dockerfiles and image builds, **ADR-0057**) — the third
-of phase 2's twenty-one. Its gate run — the one the ship comment pasted — was green: **71 cases, 896
-assertions**, no `SKIP` line; `cargo test` is **855 tests across 48 targets**, and `web/`'s runner is **52**.
+The last shipped story was `PER-81` (HS-049, the service install, the VAPID pair, the two Tailscale origins and
+the `perms` finding, **ADR-0058**) — the fourth of phase 2's twenty-one. Its gate run — the one the ship comment
+pasted — was green: **72 cases, 958 assertions**, no `SKIP` line; `cargo test` is **874 tests across 49 targets**
+in the gate's phase, and `web/`'s runner is **52**. It ended with `server deploy` installing a *machine*: nothing
+in the seven steps is `skipped` any more.
 
 ### 1.1 The slice (verbatim from `docs/stories/phase-2-deployable-mvp.md`; Linear's body is the same text)
 
-> ### HS-049 — Service install, secrets, VAPID and Tailscale origins
+> ### HS-050 — `status`, `logs`, `uninstall`
 >
-> **As** the operator **I want** the service to start on boot and be reachable over HTTPS **so that** the phone
-> experience exists.
+> **As** the operator **I want** to see and control the service from the CLI **so that** I do not need to remember systemd incantations.
 >
-> - **Size:** M · **Blocked by:** HS-048 · **Spec:** What `server deploy` does (steps 2, 5, 6)
-> - **Demo:** reboot the host; the app answers at the tailnet control origin and previews answer on the preview
->   origin.
+> - **Size:** S · **Blocked by:** HS-049 · **Spec:** Commands table
+> - **Demo:** `status` prints role, version, uptime, session counts, proxy health and last health of registered machines; `logs -f` streams.
 >
 > **Acceptance**
-> - [ ] Creates the `holosmith` service user (in the docker group), the data directory, `/etc/holosmith/config.toml`, a 0700 secrets directory and the admin socket directory.
-> - [ ] Generates VAPID keys at first start if absent and never regenerates them.
-> - [ ] Installs and starts `holosmith.service` with `Restart=on-failure` and `ExecStartPre=holosmith doctor --quick`.
-> - [ ] Configures `tailscale serve` for the control origin on 443 and the preview origin on 8444.
-> - [ ] Ownership and modes are asserted (secrets 0700, keys file 0600); a wrong mode fails `doctor`.
->
-> `docs/stories/**` is **not edited** (§7). This is an **M** story: §5 says write the plan yourself.
+> - [ ] `holosmith status` reports role, version, uptime, live/stopped session counts, proxy state, and last health per registered machine.
+> - [ ] `holosmith logs [-f] [--session ID]` reads journald, or a session's `session.log` when `--session` is given.
+> - [ ] `holosmith uninstall` removes the unit, proxies and networks but keeps data; `--purge` also removes data.
+> - [ ] Uninstall refuses to purge while sessions are live unless `--force`.
+
+`docs/stories/**` is **not edited** (§7). This is an **S** story: §5 says write the plan yourself — and it is the
+first story in this repository that is mostly a *reader* of state other stories wrote, so most of the plan is
+"which existing reader is this one".
 
 ### 1.2 The spec it closes
 
-`HolosmithSpec.md`'s **"What `server deploy` does"** steps **2** (the service user, the four paths, the modes),
-**5** (the unit file and its two lines), **6** (`tailscale serve` for the two origins) and the sentence after
-the list about the health wait; the `Commands` row for `server deploy`. Nothing else in the spec is this
-story's.
+`HolosmithSpec.md`'s **Commands** table, three rows:
+
+| Row | Words |
+| --- | --- |
+| `holosmith status` | "Role, version, uptime, session count, proxies, last health of registered machines" |
+| `holosmith logs [-f] [--session ID]` | "Server log from journald, or a session's `session.log`" |
+| `holosmith uninstall [--purge]` | "Removes unit, proxies and networks; `--purge` also removes data" |
+
+Nothing else in the spec is this story's: the admin socket and `drain` are HS-051, `upgrade`/`rollback` are
+HS-078/079, and `hub host ...` is phase 3.
 
 ### 1.3 What already exists
 
-- **Step 2 is half-done and says so.** `crates/holosmith/src/deploy.rs`'s `files` step creates the data
-  directory, `config.toml` from `config::render`, the 0700 secrets directory with its 0600 `keys.toml`, and
-  `/run/holosmith` (or `<root>/run/holosmith`), each through one `install`/`chmod` child that `sudo` prefixes
-  when there is no `--root`. Its line **always** ends
-  `; the service user (in the docker group) and the VAPID keys are HS-049's, and this step does not read them`
-  — that is the half this story fills, and the sentence must move with it.
-- **Steps 5, 6 and 7 are `skipped`, naming this story.** Their sentences are `deploy.rs`'s `SERVICE`,
-  `ORIGINS` and `HEALTH` constants: `Restart=on-failure`, `ExecStartPre=holosmith doctor --quick`, the control
-  origin on 443 and the preview origin on 8444, and "the service whose boot makes the `/api/health` wait and
-  `doctor --full` mean something". `OWNERS` is now the one entry `("HS-049", &[Service, Origins, Health])`, so
-  filling any of them moves the summary line (`deploy: incomplete: N of 7`).
-- **The deploy's words and seam.** A step is a read and an apply; the five words and the failure semantics are
-  ADR-0056. `Machine` is `proxies::Containers + doctor::Machine + images::Images`; the child seam is
-  `Tools { doctor, command, … }` with `sudo` prefixing driven by `Target` (`--root` absent means system paths
-  and `sudo`). `--root` prefixes every *installed* path and nothing read about the machine.
-- **`doctor` already answers the two machine facts.** `systemd` is `/run/systemd/system` (an `unknown` here),
-  and `tailscale` is `status --json`'s `BackendState` (also `unknown` here — the CLI exists at
-  `/usr/bin/tailscale`, the daemon does not). Neither is this story's to invent; HS-049 is where they become
-  prerequisites, and `doctor`'s arms are the vocabulary to reuse.
-- **What the acceptance's last bullet lacks.** `doctor` has no finding that reads a path's **owner or mode**;
-  `case_doctor_quick`/`deploy` step 2 assert modes on the paths they just wrote, but nothing *checks* a mode
-  later. That is new work, and it is the acceptance's "a wrong mode fails `doctor`".
-- **`--root` and privilege.** With no `--root`, every write is one `sudo`-prefixed child; with `--root`, the
-  same child runs unprivileged. On this machine there is **no `sudo`**, so the system-path arm can only be
-  driven over shims (`tests/deploy.rs` already does exactly that, and `tests/doctor.rs` has the same seam).
-- **The machine** (§2): no systemd, no `tailscaled`, no `sudo`, no `useradd`/`usermod` — so steps 2's user,
-  5 and 6 are **unmeasurable here**; the demo must say so plainly and the gate's case must assert what it can
-  (the rendered unit's bytes, the `tailscale serve` argv through a shim, the modes, the VAPID file's "never
-  regenerated" rule) without pretending a boot happened.
+- **The unit and the two proxies are one story old and their names are public.** `deploy::UNIT_NAME`
+  (`holosmith.service`), `deploy::UNIT_DIR` (`/etc/systemd/system`), `deploy::SERVICE_USER`/`SERVICE_GROUP`,
+  `deploy::Target::{unit_path, admin_dir, etc_config}`,
+  `deploy::CONTROL_HTTPS`/`PREVIEW_HTTPS` (443/8444), and `deploy::Tools` (the child seam: `systemctl`,
+  `tailscale`, `docker` through `proxies::Containers`). The proxies are `container::PROXY_NAME` (`hs_egress`),
+  `key::KEY_PROXY_NAME` (`hs_key`), `container::EgressProxy::run_args`, `proxies::{running, start_egress,
+  start_key, START_TIMEOUT}`, and the machine's network is `docker::EGRESS_NETWORK` (`egress`). A per-session
+  network is `container::network_name(id)`; `docker::{remove_container_bounded, remove_network_bounded,
+  container_names, network_names, running}` are the bounded family the startup path already uses.
+- **`uninstall` is the inverse of steps 5 and 6, and the halves already exist as reads and applies**: step 5's
+  read is the unit's bytes plus `systemctl is-enabled`; step 6's is `tailscale serve status --json`;
+  `proxies_line`'s read is the network plus both containers. Nothing about those has to be invented — the
+  question is which of them `uninstall` *reverses* (`systemctl disable --now`, the `tailscale serve reset` or a
+  per-port `serve clear`, `docker rm -f` the two proxies, `docker network rm egress`) and which it merely
+  reports.
+- **`status`'s four facts are each somebody's existing reader.** Role is `config.role`; version is
+  `version::VersionInfo` (what `holosmith version --json` prints); session counts are
+  `sessions::repository::{live_count, …}` (a `LIVE_COUNT` SQL constant) plus `Status::ALL` — there is **no**
+  per-status count query yet, so a `stopped` count is new work; proxy state is `proxies::running(config, machine)`;
+  the database is `db::recorded_without_migrating` + `schema::verdict` (ADR-0047).
+- **`logs`'s two sources.** A session's log is `<data>/sessions/<id>/session.log` (`exit::LOG_FILE`,
+  `exit::session_dir`), written by `Exits::record` (the launch line plus the stderr tail). The server's is
+  journald's: `journalctl -u holosmith.service` — the program exists on this machine but nothing is running
+  under it, so the arm is a shim's here (§1.5, §1.9).
+- **`--root` and the child seam.** Every write is one child through `deploy::Tools`/`child`/`execute` (sudo
+  prefixed when the paths are the system's), so `uninstall`'s children are assertable without a machine, and
+  `deploy::Target` is what tells a `--root` run from a real one. `deploy::Report`/`Line`/`Word` is the report
+  shape a destructive command may or may not reuse (§1.5).
+- **The database is the only thing that says "live".** `Status::{Starting, Idle, Running}` are live and
+  `{Stopped, Error, Deleting}` are not (`live_count`'s three parameters) — so "refuses to purge while sessions are
+  live" is one query, and the *machine's* containers are a second question (`docker ps`), which a purge should
+  probably not rely on.
+- **What does not exist at all**: the three subcommands (`cli.rs` has `serve`, `version`, `config`, `proxy`,
+  `doctor`, `key`, `container`, `server`), any uptime record (the process does not write one; `/proc` and the
+  unit's `ActiveEnterTimestamp` are the two candidates), a hosts registry ("last health of registered machines"
+  is HS-068's `POST /api/hosts`, phase 3 — so this line's honest answer on a phase-2 machine is `unknown` or
+  `none`), and any `case_*` for the three commands.
 
 ### 1.4 What does not exist
 
-No service user creation, no VAPID key material or its home, no unit-file rendering or install, no
-`tailscale serve` invocation, no ownership/mode finding in `doctor`, and no `case_*` for any of them.
+No `status`, no `logs`, no `uninstall`; no uptime record; no per-status session count; no journald reader; no
+`tailscale serve reset`/`clear` call; no removal of the unit; no `--purge`/`--force` refusal. And no decision
+about what `status` prints as "last health" when no host registry exists.
 
 ### 1.5 The decisions that shape the design
 
-1. **Where VAPID keys live and what writes them.** They must survive an upgrade and never be regenerated
-   (the acceptance says so twice). The secrets directory is the obvious home (`<data>/secrets/`, 0700/0600
-   next to `keys.toml`), and `key::Store` is the precedent for "write once, never overwrite" — but a VAPID
-   key pair is not a provider key and `key set` must not touch it. Decide the file(s), the format (public +
-   private, base64url), who generates (deploy step 2, or `serve` at first start — the acceptance says "at
-   first start", which is the *service's* first start, and step 7's health wait is what observes it), and how
-   "never regenerated" is *measured* (a second run leaves the bytes identical).
-2. **The service user, and the docker group.** `useradd`/`usermod` are absent from this machine, so the plan
-   must decide what the child is (`useradd --system --create-home? --groups docker`) and how the gate proves
-   the argv without the program — the `Tools` seam exists for exactly this. Also: which paths become the
-   user's (`chown`), and whether `--root` skips the user entirely (an install tree an unprivileged operator
-   owns needs no system user; the deploy's own `--root` paragraph is the precedent).
-3. **The unit file.** `holosmith.service`'s full text is the deliverable: `User=`, `Group=`, `ExecStart=`,
-   `ExecStartPre=holosmith doctor --quick`, `Restart=on-failure`, `Environment=` (the config path, the data
-   root), `WantedBy=multi-user.target`. Where it is written (`/etc/systemd/system/`), how `systemctl
-   daemon-reload` + `enable --now` are invoked (one child, bounded), and what the read `satisfied` means
-   (the unit's bytes equal what this binary would write, and the unit is enabled — `systemctl is-enabled`).
-4. **`tailscale serve`'s actual argv** (two origins, 443 and 8444) — `tailscale serve --bg` with
-   `--set-path`? `https+insecure`? The spec's words are "configure `tailscale serve` for the control origin
-   (443) and the preview origin (8444)". Read `HolosmithSpec.md`'s single-binary/phone section for the origin
-   vocabulary before deciding, and make the argv assertable through the seam.
-5. **"A wrong mode fails `doctor`."** A new finding (one check word — ADR-0028/ADR-0054 forbid a second
-   vocabulary) that reads the installed paths' uid/mode, or an extension of an existing one? The acceptance
-   names `doctor`, not the deploy, so this is a `doctor --quick` finding (it belongs on the startup refusal
-   path) — decide and write it in the ADR.
-6. **What the boot does vs what the deploy does.** VAPID "at first start" suggests `serve` generates them on
-   a boot; the deploy's step 2 then only creates the directory. Decide which one owns it and make the other
-   read it — one owner, or two writers and a lie.
-7. **`--root` and the two origins.** `tailscale serve` on a `--root` install is still the machine's Tailscale;
-   the same asymmetry the deploy already documents (installed paths are prefixed, machine facts are not).
-8. **The gate.** A `case_server_service` (or two) that owns its state, drives the real deploy with `--root`
-   and **shims** on `PATH` for `useradd`, `systemctl` and `tailscale` (the `Tools`/`PATH` pattern
-   `case_key_proxy_request` uses for `openssl`), asserting the argv, the unit's bytes, the modes and the
-   VAPID file's "identical on the second run" rule; plus `tests/deploy.rs` arms for each step's read.
-   A case that SKIPs because the machine has no systemd would skip on the thing it exists to catch — so the
-   shim is the point, not a nicety.
-9. **The modes finding's arm on this machine.** The test suite runs as uid 1000, so an owner check must be
-   written to compare against the installing user rather than a constant `holosmith`.
+1. **`status`'s shape and its "unknown" arms.** One line per fact (`key value`, the shape `holosmith version`
+   already prints and `docs/build.md` documents) or a table? What does it print for a machine that has never
+   deployed, for journald that does not answer, and for "last health per registered machine" while the registry
+   is HS-068's? The precedent that matters: `doctor` prints `check: pass|fail|unknown: sentence`, and `unknown`
+   with a sentence is this repository's honest third answer (ADR-0044/ADR-0054) — a `status` line that printed
+   `0` where it could not measure would be the one thing the whole build refuses to do. Also: exit code 0 unless
+   something *failed*, or always 0 because it is a report?
+2. **Uptime.** The three candidates: the process's own start (`serve` can print it, but `status` is a **second**
+   process, so it needs a file or `/proc`), the unit's `ActiveEnterTimestamp` (`systemctl show -p … --value`, a
+   child that answers only on a systemd machine), or `/proc/uptime`'s machine uptime (a different fact).
+   Decide which fact "uptime" is, and make the arm say which it measured. A `--root` or hand-run `serve` has no
+   unit, so the answer for it is a decision too.
+3. **`logs`'s journald invocation.** One child `journalctl -u holosmith.service -n <N> [-f]`, or a `serve`-owned
+   log file? The spec says journald, so the child is the shape; the decisions are the arguments (lines, `-f`'s
+   foreground behaviour, whether `--since` is reachable), what a machine without journald prints (a sentence and
+   exit 1, or the session-log arm's advice), and whether `--session` and `-f` combine (`tail -f` on
+   `session.log`, which is a file this build wrote, so it is a read of its own).
+4. **`uninstall`'s order and its refusals.** What it removes (the unit, `hs_egress`, `hs_key`, the `egress`
+   network, `agents_*` networks and per-session containers?) and in what order (the unit first, so nothing
+   restarts them; the networks after the containers that hold endpoints — `remove_network` already leaves
+   first). What it **keeps** (the data root, `secrets/keys.toml`, `vapid.toml`, the worktrees? the projects?).
+   `--purge` removes the data root — and its refusal is `--force` over `live_count`, which is the one place the
+   database decides a destructive command's answer. Does it reuse `deploy::Report`'s `Line`/`Word` shape (a step
+   is a read and an apply) or is a one-line report enough? ADR-0056's five words are a *deploy* contract; a second
+   command printing them would be a second user of a shape nobody documented for it.
+5. **Idempotency and the exit code.** `uninstall` on a machine that has nothing installed should say so and exit
+   0 (like a deploy's `satisfied`), not fail. A `systemctl` that answers non-zero because the unit is not there is
+   **not** a failure of the command — the same distinction `disable --now` on an absent unit makes.
+6. **The gate.** One `case_*` per command or one case with three halves? The `status` half needs a boot (its
+   counts and its proxy lines), `logs --session` needs a session's log (a stub create plus a simulated exit gives
+   one — the `case_exit_classification` pattern), and `uninstall` needs the `--root` + shims harness §D8 of
+   ADR-0058 built (`deploy_machine_shims`, `health_responder`) plus a `systemctl`/`docker` recorder. The rule
+   stands: a case that `SKIP`ped on the bug it exists to catch is this project's P1.
+7. **Where the code lives.** `commands/status.rs`, `commands/logs.rs`, `commands/uninstall.rs` answer; the reads
+   they share (a session count by status, the unit's state, the proxies') belong in the module that already owns
+   them (`sessions::repository`, `deploy`, `proxies`) rather than in a command — the "one reader" rule ADR-0054
+   states and `deploy::preflight` already follows.
+8. **No config key** unless a fact has no other home (a `status --json`? a log line count?). A new key moves
+   `KNOWN_KEYS` (33) and the golden file, and the story has no need for one yet.
 
 ### 1.6 The questions the plan must answer (before code)
 
-1. **VAPID: who generates, where, in what format — and what makes "never regenerated" measurable?**
-2. **The service user's exact child argv, and what `--root` does about it.**
-3. **The unit file's full text, byte for byte, and its read's definition of `satisfied`.**
-4. **`tailscale serve`'s argv for both origins, and how it is asserted without a daemon.**
-5. **Does the modes/ownership check become a new `Check` word, or extend `database`/`disk`?** (One word per
-   fact.)
-6. **Which of steps 2, 5, 6 stays `skipped` on this machine, and what the summary line must then say?**
-7. **What the demo can honestly claim here** (no systemd, no `tailscaled`, no `sudo`, no `useradd`), and what
-   it must hand to a real host as the by-hand procedure in `docs/build.md`.
+1. **What is `status`'s exact output, line by line, including the three arms that cannot measure (no unit, no
+   journald, no host registry)?**
+2. **Which fact is "uptime", and how is it read by a process that did not start the server?**
+3. **What is `logs`'s child argv, and what does it print where there is no journald?**
+4. **Does `uninstall` print deploy words, and what exactly does it remove, in what order, keeping what?**
+5. **What does `--purge` refuse on, and what does the refusal say?**
+6. **Which `case_*` proves each of the three, and which half can `SKIP` without skipping on its own subject?**
 
 ### 1.7 Acceptance, restated as checks
 
-- *"Creates the service user (in the docker group), the paths and the admin directory"* — step 2's line names
-  five items; the user's child argv is asserted through the shim; `--root` skips it and says so.
-- *"Generates VAPID keys at first start if absent and never regenerates them"* — the first run writes them
-  (0600, in the secrets directory), the second leaves the bytes identical, and `doctor` reads them rather than
-  writing.
-- *"Installs and starts `holosmith.service` with the two lines"* — the unit's bytes contain `Restart=on-failure`
-  and `ExecStartPre=holosmith doctor --quick`; the enabling children are asserted; the step's read answers
-  `satisfied` on a second run.
-- *"Configures `tailscale serve` for both origins"* — the argv through the shim carries 443 and 8444 and the
-  two origins the config names; a second run reads `tailscale serve status` (through the same seam) rather
-  than re-applying.
-- *"Ownership and modes are asserted; a wrong mode fails `doctor`"* — a real `chmod` on a temp install tree
-  makes the finding fail with both values in the sentence.
-- Plus the usual gates, and the summary line's `incomplete` count dropping as steps become real.
+- *"`status` reports role, version, uptime, live/stopped session counts, proxy state, and last health per
+  registered machine"* — one line per fact, each measured from the reader that owns it, and the host-health line
+  naming HS-068 in its `unknown` sentence rather than printing a zero.
+- *"`logs [-f] [--session ID]` reads journald, or a session's `session.log`"* — the child's argv is asserted
+  through a shim; a session id names `<data>/sessions/<id>/session.log` and an unknown one is the session API's
+  own `unknown_session` sentence; `-f` follows.
+- *"`uninstall` removes the unit, proxies and networks but keeps data"* — the children are asserted
+  (`systemctl disable --now`, the unit's file, `docker rm -f` both proxies, `docker network rm`), the data root
+  and `secrets/` are still there, and a second run exits 0 saying there is nothing left.
+- *"`--purge` also removes data; refuses while sessions are live unless `--force`"* — a live row makes it exit 1
+  with the count and the `--force` suggestion; `--force` removes the data root and says what it removed.
+- Plus the usual gates, one new `case_*`, and `docs/build.md`/`docs/notes.md`/`GLOSSARY.md`/an ADR (`0059`).
 
 ### 1.8 Non-goals
 
-`status`/`logs`/`uninstall` (HS-050), the admin socket itself (HS-051 — only its directory is step 2's), the
-VAPID **consumer** (HS-066's notifications), `hub deploy`, `--ssh`/`--binary` (HS-072/073), `upgrade`/
-`rollback` (HS-078/079), and the builder container (HS-076).
+The admin socket and `drain` (HS-051), `upgrade`/`rollback` (HS-078/079), `hub host ...` and the host registry
+(HS-068/HS-072), the VAPID consumer (HS-066), a `status --json` contract nobody asks for, `tailscale serve`
+*configuration* (HS-049's step 6 owns it; `uninstall` may only remove what it wrote), and any UI.
 
 ### 1.9 The demo
 
-On this machine: `server deploy --root target/…` reaches step 2 with the user and VAPID keys (asserted through
-the `Tools` shim, because there is no `useradd`), renders and installs the unit into the tree, and *reads*
-`tailscale serve status` through a stand-in binary; a second run says `satisfied` for those steps with the
-VAPID bytes unchanged; a `chmod 0644` on the installed `keys.toml` makes `doctor --quick` fail with a sentence
-naming both modes and the fix. **State plainly what was not measured**: no systemd, no `tailscaled`, no
-`sudo`, so no boot happened and the "reachable over HTTPS" half of the demo is a by-hand procedure, not a
-measurement — and the deploy still ends `incomplete` for whichever of steps 5–7 this machine cannot satisfy.
+On this machine: `status` against a real stub `serve` (its counts and both proxy lines), `logs --session <id>` on
+a session whose log the exit classifier wrote, `logs` against a `journalctl` stand-in, and `uninstall --root` over
+the `--root` install the previous story's demo leaves (with the `systemctl`/`docker` recorders), then a second
+`uninstall` saying nothing is left, and `uninstall --purge` refusing while a row is live and succeeding with
+`--force`. **Say plainly what was not measured**: no systemd (so `disable --now` and `journalctl` are stand-ins),
+no real `status` uptime from a unit, and no host registry — the "last health" line names its story.
 
 ### 1.10 What the next agent needs back
 
 When you write the state back (§5, step 10): §1 becomes the **next** issue — by `PROMPT.md`'s ranking that is
-`PER-82` (HS-050, `status`/`logs`/`uninstall`) *if* HS-049 ships, and `PER-81` again if it does not — with the
-same shape. Refresh the counts, the ADR number you took (**ADR-0058** is next unless HS-049 takes none), the
-last gate run's own numbers, and replace §9's row with this story's (short — one paragraph). Anything you
-learned that is **not** state and **not** an ADR goes into `docs/notes.md` under a new `### Landmines: …`
-heading, never into §1. Then kill what you started (§5, step 11).
+`PER-83` (HS-051, drain over the admin socket) *if* HS-050 ships, and `PER-82` again if it does not — with the
+same shape. Refresh the counts, the ADR number you took (**ADR-0059** is next unless HS-050 takes none), the last
+gate run's own numbers, and replace §9's row with this story's (short — one paragraph). Anything you learned that
+is **not** state and **not** an ADR goes into `docs/notes.md` under a new `### Landmines: …` heading, never into
+§1. Then kill what you started (§5, step 11).
+
 ## 2. Environment (already repaired — do not redo)
 
 Everything below lives **outside the repo** and survives. If this is a fresh container, redo it exactly
@@ -441,6 +454,7 @@ Some cases bring their own boot, and they are the ones a new story is most likel
 | `case_egress_proxy` | **no** server, daemon, internet or key: it starts the artifact as `proxy egress` on a loopback port and asks it four questions over a socket |
 | `case_schema_newer` | no daemon; boots the artifact over a schema-99 database |
 | `case_key_proxy_request` | a stand-in `openssl` on `PATH`; asserts the bytes the key proxy really sends |
+| `case_server_deploy`, `case_server_service` | two halves each: an **offline** one (`python3` for a `_ping` socket / a `/api/health` responder) and an **online** one (the daemon and an image) that drives a `--root` deploy with `deploy_machine_shims`' `tailscale` on `PATH`; they remove `hs_egress`/`hs_key` before and after, and `case_server_images` must have run first |
 | `case_preview` | **its own boot** (stub backend, own data root, `preview_listen = "127.0.0.1:0"`) and, for its second half, the daemon and `agent_image` — it makes its own `s_<id>` container on an `--internal` `agents_<id>` and prints one `SKIP` line without them; the first half always runs and puts the shared boot back |
 
 A story is not done until the gates are green on a clean tree, and then you run the story's own demo
@@ -483,7 +497,8 @@ crates/holosmith/
   src/main.rs               dispatcher only
   src/cli.rs                clap: version, config {validate,show,edit}, serve [--port|--data-dir|--backend],
                             proxy {egress --listen --allow}
-  src/commands/             version.rs, config.rs, serve.rs, proxy.rs (the egress proxy in the foreground)
+  src/commands/             version.rs, config.rs, serve.rs, proxy.rs, doctor.rs, key.rs, container.rs,
+                            deploy.rs (the seven steps' command: the config, the tail, the resume command)
   src/config/               mod.rs (typed Config, KeySpec walk, 32 keys), schema.rs, problem.rs,
                             render.rs, duration.rs, editor.rs
   src/backend/              mod.rs (Step, SessionBackend, `ProcessEnd`/`ExitWatcher`/`supervise`,
@@ -568,6 +583,9 @@ crates/holosmith/
                             `PROXY_START_TIMEOUT` (90 s); and since HS-039 the key proxy:
                             `KeyProxy` (`of(&Config)`, `run_args`), which mounts the key file read-only
                             and runs `proxy key` on `hs_key`
+  src/vapid.rs              the machine's Web Push key pair (HS-049, ADR-0058): `VAPID_FILE` (`vapid.toml`),
+                            `Pair`, `store`, `render`, `parse`, `is_pair`, `from_der` (the SEC1 walk), `base64url`/
+                            `unbase64url`; unit tests for the DER vector, RFC 4648's vectors and the three refusals
   src/key.rs                the provider/store half of HS-039 (ADR-0048), whose table gains `opencode-go` for
                             HS-040 (host `opencode.ai`, `/inference/go/anthropic`, `x-api-key`; ADR-0050):
                             `Provider`, `PROVIDERS`,
@@ -681,7 +699,10 @@ crates/holosmith/
                             is the **one** word table (docker, git, disk, network, systemd, merge, tailscale,
                             ports, database, proxy, image), `socket_sentence`, `MIN_GIT` (2.38)
   src/doctor.rs             `holosmith doctor`'s list (HS-045, ADR-0054): `Depth {Quick, Full}`,
-                            `Tools { preflight, tailscale, systemd }`, the `Machine` seam (`running`,
+                            `Tools { preflight, tailscale, systemd, config_path, admin_dir }` (the last two are the
+                            install tree's machine-wide paths, so `perms` reads the *caller's* tree — HS-049),
+                            `perms` (the installed paths' modes and owners, the data root's owner as the reference),
+                            the `Machine` seam (`running`,
                             `image_pi`, `selftest`, implemented by `Docker`), `run(config, depth, tools,
                             machine) -> Report`, `Report::{failed, failures, render}`; the checks it owns —
                             systemd (`/run/systemd/system`), the merge trial (a throwaway repo:
@@ -737,11 +758,14 @@ scripts/build.sh            web first, HOLOSMITH_REQUIRE_WEB=1, both musl target
 scripts/check-static.sh     file/readelf, empty-root serve + cmp against web/dist/index.html, marker
                             gate, app.db assertions, byte grep for the schema SQL, Cargo.lock guard
 scripts/check-embed.sh      the three embed cases (present / absent warns / required fails)
-scripts/verify.sh           the one-command gate (see §3)
+scripts/verify.sh           the one-command gate (see §3), including the two stand-ins HS-049 added:
+                            `deploy_machine_shims` (a `tailscale` that records argv and answers `serve status
+                            --json` from the pairs it was asked for) and `health_responder` (a `python3` that
+                            answers `/api/health` for a whole case)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0057          read the recent ones before planning anything
+docs/adr/0001…0058          read the recent ones before planning anything
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-80, PER-91…PER-93, PER-97, PER-107  each a verbatim review + a `## Resolution` table
+docs/review/PER-33…PER-81, PER-91…PER-93, PER-97, PER-107  each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -954,16 +978,17 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 The catalogue lives in **`docs/notes.md`** — read the **cross-cutting** sections before you start anything,
 then the sections below. It is a reference: everything there is a measurement or a review finding.
 
-| Read | Why it bears on the image builds (HS-048) |
+| Read | Why it bears on HS-050's three readers |
 | --- | --- |
-| Cross-cutting: *Build and toolchain*, *Tests*, *Config and docs*, *Demos*, *Reviews* | True of every story. **Build and toolchain** is this one's sharpest: the pinned pi version lives in `pins/pi.txt` and nowhere else (`tests/pin_single_source.rs`), `--locked` means a lock diff, never export `RUSTFLAGS`, and the artifact embeds `web/dist` so a rebuild precedes any demo. **Config and docs**: "the toolchains named in the config" is the one phrase that can force a new key — and a new key means the golden file *and* `config/schema.rs`'s count. |
-| *Landmines: the egress proxy (HS-037)* | The proxy container today runs *this* binary mounted read-only at its own host path, which is exactly what `holosmith-proxy:<version>` replaces — and the mount is why a `serve` on a tmpfs the daemon cannot see starts no proxy. `--restart` and `--rm` conflict, and the start is bounded by `PROXY_START_TIMEOUT` because a first run can have to pull. |
-| *Landmines: the credential path (HS-040)* | **`hs_key` runs `openssl s_client`**, so the proxy image's "minimal base" must carry openssl; without it every model call is a 502. Also the store is a *directory* a container mounts, and `key set` reads stdin only. |
-| *Landmines: the agent launch (HS-031)* | The image's pi must equal `pins/pi.txt` — `agent::version_check` asserts it at launch and `doctor --full` compares it — and a missing `node` in the image is exit 127, not a test failure. The seeded pi-home writes only `settings.json` and `models.json`. |
-| *Landmines: Docker — mounts, containers, starts (HS-027 – HS-029)* | Any context or scratch directory handed to the daemon must be under `target/` (the daemon resolves paths in the host's namespace), `docker inspect` is the only place a container's real flags and labels are visible, and `--detach` + `--rm` + a command that exits means the container vanishes before it can be inspected. |
-| *Landmines: the deploy, the ports and what `install` does to a key file (HS-047)* | Step 3's slot is `Word::Skipped` today and its line is greped by `case_server_deploy`; the words are `satisfied`/`needs`/`changed`/`skipped`/`failed`, a run stops at its first `failed` step, and the gate's **online half requires an `agent_image` that exists** — which is the by-hand `docker tag` this story is meant to delete. |
-| *Landmines: the doctor, the ports and a read-only open (HS-045)* | `doctor`'s `image` finding reads pi through `docker run --rm --network none <image> pi --version`; the acceptance's "compare the labels" is new work, and on a machine with no daemon the finding must stay `unknown` rather than fail. |
-| *Landmines: the verification run (HS-046)* | The gate withholds an `ok <case>` line for a case that printed `SKIP`, so a build-gated case that skips silently is not allowed to look like a pass. |
+| Cross-cutting: *Build and toolchain*, *Tests*, *Config and docs*, *Demos*, *Reviews* | True of every story. This one's sharpest: **Tests** — every reader here is a *second* process or a stub `serve`, so "a test that cannot fail" is the live risk (a `status` asserting a fixture's zeros); **Config and docs** — no new key is needed, and a `status --json` nobody asked for is a contract, not a feature. |
+| *Landmines: the doctor, the ports and a read-only open (HS-045)* | `doctor`'s three-armed answer (`pass`/`fail`/`unknown` with a sentence) is the shape `status` must copy for the facts it cannot measure — no unit, no journald, no host registry — and `db::recorded_without_migrating` is the read-only opener a report uses. |
+| *Landmines: the deploy, the ports and what `install` does to a key file (HS-047)* | The five words are a **deploy** contract; `uninstall` reusing them would be a second user of a shape nobody documented for it. `install` truncates, `--root` prefixes only installed paths, and every write is one `sudo`-prefixed child. |
+| *Landmines: the service, the keys and the origins (HS-049)* | The unit's name, path, `UNIT_DIR`, `CONTROL_HTTPS`/`PREVIEW_HTTPS` and `Tools` are public now, the gate's `deploy_machine_shims`/`health_responder` are the harness `uninstall` reuses, `perms` reads the *caller's* tree through `Tools`, and a `--root` deploy must be driven with the **musl** artifact (a glibc debug binary in the proxy image is `exec … no such file`). |
+| *Landmines: the egress proxy (HS-037) and the credential path (HS-040)* | `hs_egress`/`hs_key` are the names `uninstall` removes, `--restart unless-stopped` means the unit must stop first or they come back, and the key store is a **directory** a container mounts — the same reason a purge must remove the directory, not a file. |
+| *Landmines: Docker — mounts, containers, starts (HS-027 – HS-029)* | `docker network rm` refuses a network with an endpoint, so the containers go before the networks (the `remove_network` pattern); a context or scratch path handed to the daemon must be under `target/`. |
+| *Landmines: the startup reconcile (HS-044)* | `reconcile`'s sweep helpers (`containers_to_remove`, `networks_to_remove`, the `--format` listings) are the readers an `uninstall` should reuse rather than re-spell. |
+| *Landmines: the expected-stop flag and the exit classifier (HS-030)* | `<data>/sessions/<id>/session.log` is written by `Exits::record` (`exit::session_dir`, `exit::LOG_FILE`); a `logs --session` arm needs a session whose log exists, and a stub create plus an exit is the cheapest fixture. |
+| *Landmines: the verification run (HS-046)* | The gate withholds an `ok <case>` line for a case that printed `SKIP`, so a case that skips on "no systemd" is not allowed to look like a pass. |
 
 Three rules worth repeating here because they are the most expensive to relearn: **a test that cannot fail
 is worse than no test** (mutate the behaviour and watch it go red); **a gate case that SKIPs on the bug it
@@ -974,7 +999,7 @@ three such edits have cost a review finding each.
 
 ## 7. Decisions taken on the operator's behalf (do not silently undo)
 
-Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0057`, one line each in
+Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0058`, one line each in
 `docs/stories/README.md`): read the recent ones before planning, and **amend rather than rewrite** — an ADR
 a later story changes gets a "Superseded by ADR-00xx" note (0012/0013, and 0026 amended 0020).
 
@@ -1004,7 +1029,7 @@ cd /home/adamolsson/projects/holosmith
 git status --short                                  # clean apart from log.txt/orchestrate.sh
 . ~/.pi/toolchains/env.sh                           # ALWAYS before cargo/rustc
 python3 /tmp/lin.py issues | grep -v ' Done ' | head # recreate /tmp/lin.py first (§2)
-python3 /tmp/lin.py issue PER-80                    # scoped, Backlog, the issue §1 names
+python3 /tmp/lin.py issue PER-82                    # scoped, Backlog, the issue §1 names
 docker version                                      # the daemon must answer, or a Docker check cannot be measured
 docker image inspect pi-agent:local                 # the image the Docker stories run
 docker network ls | grep -w egress                  # the proxy test's premise (§2); `grep -x` never matches
@@ -1014,7 +1039,7 @@ scripts/verify.sh                                   # baseline green, ~9–12 mi
 
 If the baseline is red before you touch anything, that is the first thing you fix — and say so in Linear.
 
-Then start §5 on **§1's issue** (`PER-80`, HS-048) and stop after step 11.
+Then start §5 on **§1's issue** (`PER-82`, HS-050) and stop after step 11.
 
 Before you begin, check that the last session left nothing behind — `subagent({action:"list"})` should show
 no run in progress, `docker ps` none of its containers, and `git status --short` should look like the line
@@ -1033,20 +1058,22 @@ from those three; do not carry old sessions' ledgers in this file.
 If you stop before the issue ships, say so explicitly, name the next action, and leave the tree clean and the
 gates green — **a half-finished story is worse than an honest stop**.
 
-**The last shipped story** (`PER-80`, HS-048, ADR-0057; commits `af074f1`, `50d151c`): the two images are
-built from Dockerfiles **embedded in the artifact**, handed to the daemon as a **tar on stdin**, so no path
-crosses into its namespace. `holosmith-proxy:<version>` is the static binary on `alpine:3` **plus openssl and CA
-certificates** (`hs_key` spawns `openssl s_client`) and both proxies now run it instead of mounting the host's
-binary; `agent-image:<version>` is `node:24-bookworm-slim` with pi at the pin, git and the new config key
-`agent_toolchains` (which moved `KNOWN_KEYS` to 33 and the golden file). Both bases are pinned by manifest-list
-digest, the apply refuses a daemon building for another architecture, and a failure names the instruction and
-the layer and says **no new image was tagged**. The skip rule is the images' **five labels** — version, git tag,
-pinned pi, the binary's **SHA-256**, and the agent's toolchain list — read by step 3 and by `doctor`'s `image`
-finding through one seam. The review's P1 was the acceptance itself: three strings are not "the binary", and
-`git describe --dirty` is the same for two builds of one dirty tree, so the digest label is what makes a rebuilt
-artifact a rebuild (its guard in `tests/deploy.rs` fails if that arm is removed). The gate run behind the ship
-note: **71 cases, 896 assertions**, no `SKIP`; `cargo test` 855/48, `web` 52. Its full record is Linear,
-`docs/review/PER-80.md` and `git log`; do not carry it forward.
+**The last shipped story** (`PER-81`, HS-049, ADR-0058; commits `50b22bc`, `2375f37`, `cfb2775`): `server deploy`
+now installs a *machine*. Step 2 creates the `holosmith` service user in the docker group, reads `id`/`stat` and
+chowns the tree to it, and writes the machine's **VAPID pair** to `<data>/secrets/vapid.toml` (0600, two unpadded
+base64url strings, one `openssl ecparam … -outform DER` child parsed by `vapid::from_der`) — the one writer, absent
+is the only state that generates, and a non-pair is a step that fails rather than regenerating. Step 5 renders
+`holosmith.service` from the running binary's path with `Restart=on-failure` and `ExecStartPre=<binary> doctor
+--quick`, and its read is the bytes **plus** `systemctl is-enabled`; step 6 asks `tailscale serve` for 443 and 8444
+and reads `serve status --json`'s `Web[].Handlers["/"].Proxy` back; step 7 waits for `/api/health` and then asks
+`doctor --full` in process. `doctor --quick` gained the check word **`perms`** (the installed paths' modes and
+owners, the data root's owner as the reference, `unknown` when the tree is absent), so a wrong mode stops
+`ExecStartPre`; the *deploy* only remarks on it, because step 2 is the repair. **Nothing is `skipped` any more** —
+the owner table, the `incomplete` line and step 2's old remark are deleted. The review's two P1s: `perms` spelled
+the machine's two paths (fixed by threading the `Target` through `doctor::Tools`), and the `keys.toml` mode-repair
+arm's fixture had become its own subject (fixed; the mutation fails now). The gate: **72 cases, 958 assertions**, no
+`SKIP`; `cargo test` 874/49, `web` 52. Its full record is Linear, `docs/review/PER-81.md` and `git log`; do not
+carry it forward.
 
 **One thing this build does not do, recorded rather than discovered:** a resumed session's pi has **no
 memory** of earlier turns (`--no-session`; the transcript is Holosmith's log). Replaying the log into a new pi
