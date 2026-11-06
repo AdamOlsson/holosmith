@@ -47,9 +47,9 @@ sandbox-specific incantation (§2).
 
 ## 1. The issue this session picks up: `PER-73` — HS-041, preview listener (V7)
 
-**State when this file was written** (`HEAD` = `origin/master` = `f9626f5`; tree clean apart from the
-operator's own `log.txt`/`orchestrate.sh`): **46 of 80 stories Done, 34 Backlog**, all in project
-`Holosmith`. `PER-73` is `Backlog`, it is the next in `HS-###` order, and its only blocker (`HS-038`,
+**State when this file was written** (`HEAD` = `origin/master` = the commit that last edited this section —
+`git log -1 -- RESUME.md`; tree clean apart from the operator's own `log.txt`/`orchestrate.sh`): **46 of 80
+stories Done, 34 Backlog**, all in project `Holosmith`. `PER-73` is `Backlog`, it is the next in `HS-###` order, and its only blocker (`HS-038`,
 `PER-70`) is `Done` — so it is eligible. Nothing in the queue is blocked on the machine: the daemon, the
 agent image and this build's proxies all work here (§2).
 
