@@ -1292,6 +1292,11 @@ it rather than adding a caveat beside it.
   asks the host *directly* first so a failure says which half is wrong. Its WebSocket half is a hand-written
   handshake in `python3` and a hand-written echo in the container's `node -e`: the image has no `ws` package and
   this build has no WebSocket crate, and that is exactly why a byte tunnel is the right shape.
+- **A demo's trap must remove the container, not only the server.** The first run of this story's demo exited
+  through a failed `curl` (a container's address is assigned before node is listening), so the trap killed `serve`
+  and left `s_<id>` and `agents_<id>` behind — and the next gate run failed two pi-launch tests with "pi did not
+  answer within 30 seconds" for a reason that belonged to the *previous* session. `trap` on the container and the
+  network, and check `docker ps` before believing a red launch test.
 - **The container is told the preview port (`HS_PREVIEW_PORT`), and that is the half people forget.** The config
   pins one number (`preview_upstream_port`), the listener dials it, and `container::run_args` passes it in beside
   `HS_SESSION_ID` — a pinned port the container was never told is a preview nobody can open. An agent that picks a
