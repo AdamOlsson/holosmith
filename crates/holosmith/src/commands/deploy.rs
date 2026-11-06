@@ -65,11 +65,13 @@ pub fn run(args: DeployArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// The resume command: this run's own flags, absolute, and never `--dry-run`.
+/// The resume command: this run's own flags, absolute, and `--dry-run` **only when this run was one**.
 ///
 /// **Only the flags the operator gave** — a bare resume means the default config path, and printing a `--config`
 /// nobody typed would suggest the deploy chose one. The paths are made absolute for a reason the operator can act
-/// on: a resume run from another directory must mean the same tree, and a relative `--root` would not.
+/// on: a resume run from another directory must mean the same tree, and a relative `--root` would not. And a dry
+/// run's resume is a dry run: the command that just ran changed nothing, so a resume that installed step 2 for
+/// real would be a different command than the one that failed.
 fn resume(args: &DeployArgs) -> String {
     let mut command = String::from("deploy: resume: holosmith server deploy");
     if let Some(config) = &args.config {
@@ -77,6 +79,9 @@ fn resume(args: &DeployArgs) -> String {
     }
     if let Some(root) = &args.root {
         command.push_str(&format!(" --root {}", absolute(root).display()));
+    }
+    if args.dry_run {
+        command.push_str(" --dry-run");
     }
     command
 }

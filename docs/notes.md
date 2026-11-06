@@ -1511,7 +1511,18 @@ it rather than adding a caveat beside it.
   or from a `serve` boot makes this case's own first run read `satisfied` for step 4, so it `rm -f`s both before it
   starts and after it finishes. `case_doctor_full` deliberately leaves its own running, so the order in
   `serve_cases` matters: `case_server_deploy` runs before it.
-- **`find | stat '%a %s'` is a listing, not a hash.** It catches a changed mode, size or set of names, and it will
-  not catch a rewrite that keeps all three — which is why the case also `cmp`s `config.toml` and `keys.toml`
-  byte-for-byte beside the listing. A second run that rewrote the config with identical bytes would pass the
-  listing and must fail the `cmp` only if the bytes differ, so the pair is what "changed nothing" means.
+- **`find | stat '%a %s'` is a listing, not a hash, and the pair of `cmp`s is not the whole answer either.** The
+  listing catches a changed mode, size or set of names; the `cmp`s catch a rewrite that keeps all three; and a
+  re-install of *identical* bytes passes both — which is why the case also greps `satisfied` on steps 1, 2 and 4.
+  Three detectors for one claim, each blind to what the others see: delete any of them and "the second run changes
+  nothing" becomes a claim nothing measures.
+- **Step 1's `disk` finding is `unknown` on the run that matters.** `preflight::disk` answers `unknown` when the
+  data root does not exist (its own sentence says `serve` creates one at startup), and on a fresh host that is
+  *every* first deploy — so the floor `min_free_gb` guards would be first measured by the second run, after step 2
+  has already created the tree. `deploy::preflight` therefore re-asks the same check against the nearest existing
+  ancestor and puts that path in the sentence. Do not "simplify" it back to the report `doctor` returns, and do
+  not widen `doctor` itself: its `unknown` is right for a machine that has not served yet.
+- **`sudo` needs the deploy's stdin.** `Command::output()` gives the child `/dev/null`, so a `sudo install` on a
+  machine whose credential is not cached fails with `a terminal is required to read the password` — a deploy that
+  can only work as root or with NOPASSWD. The child inherits stdin (and only stdin: its stdout and stderr are
+  captured for the failure's sentence).

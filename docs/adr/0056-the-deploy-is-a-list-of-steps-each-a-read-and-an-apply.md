@@ -26,11 +26,26 @@ the number is the spec's order and the word is the check's outcome. The words ar
 | `skipped` | another story owns this step's body, **and the line names it** |
 | `failed` | the read or the apply failed; the run stops here |
 
-**A `skipped` step is never `satisfied`.** Three of the seven steps have no body in this release — step 3's
-image builds are HS-048's, and steps 5 and 6 are HS-049's — and the wrong answer is a step that prints
+**A `skipped` step is never `satisfied`.** Four of the seven steps have no body in this release — step 3's
+image builds are HS-048's, and steps 5, 6 and 7 are HS-049's — and the wrong answer is a step that prints
 "already satisfied" over a check that read nothing, which is the P1 shape ADR-0055 names. So a skipped step
 carries the owning story in its sentence, in the dry run and in the real run alike, and the report's summary
 says how many steps are still other stories' (`deploy: incomplete: 4 of 7 steps belong to later stories`).
+
+**A step that is only half this release's says which half it did.** Step 2 creates the four paths the tree
+already writes and does **not** create the service user or the VAPID keys, so its line always carries
+`; the service user (in the docker group) and the VAPID keys are HS-049's, and this step does not read them`.
+The same rule as `skipped`, one level down: a line that reports a pass must say what it did *not* read, or
+"all 6 paths are present with their modes" reads as the whole of item 10 step 2 when it is three of its five
+items.
+
+**The exit code is 1 iff a step failed, and 0 otherwise — including when four steps were skipped.** The
+acceptance's failure semantics are about a *failing* step, so a machine that got everything this release can
+install ends 0 and says `deploy: incomplete: 4 of 7 steps belong to later stories` in the same breath. A
+script that reads only the exit code will believe a partial install succeeded; the `incomplete` line is
+printed on every run that reaches the end, not only when something was skipped, so the distinction is never
+carried by the exit code alone. When HS-048 and HS-049 land, the same command stops skipping and the same
+run ends 0 having installed everything — no second entry point, no flag to remove.
 
 **Step 7 is HS-049's entirely** — both its `/api/health` wait and its `doctor --full`. The wait is
 unsatisfiable here because nothing starts `serve` (step 5 is the unit file) and `doctor --full` asserts the
@@ -64,7 +79,10 @@ than left to be inferred.
 Privilege follows the same flag: with no `--root` the paths are the system's, so each file action is one child
 prefixed by `sudo`; with `--root` the tree is the invoking user's, so the same child runs without it. The
 deploy never reads a uid — a `getuid` is not reachable without `libc` anyway, and "may I write this tree" is a
-property of the tree, not of the caller. A missing `sudo` is a step failure with a sentence, not a panic.
+property of the tree, not of the caller. A missing `sudo` is a step failure with a sentence, not a panic, and
+the child **inherits the deploy's stdin** so `sudo` can ask for a password on the operator's terminal: without
+that, `sudo: a terminal is required to read the password` would be every machine whose credential is not
+already cached, which is most of them on a first deploy.
 
 Every file action is one program: `install -d -m` for a directory, `install -m` for a file that is absent or
 whose bytes differ, and `chmod` to repair a mode. **`keys.toml` is never installed over an existing file** —
@@ -76,9 +94,11 @@ makes the second run honestly `satisfied`.
 
 The acceptance says a failure "leaves the machine in a describable state, and prints the resume command". Since
 every step reads state first, the resume is **the command that just ran** — with the same `--root` and
-`--config`, resolved to absolute paths, and never `--dry-run` — because a resume with different syntax would be
-a second entry point, which is the thing ADR-0055 refused. No `--from` flag exists: it would be a way to skip a
-step whose state read is the only thing that makes re-running safe.
+`--config`, resolved to absolute paths, and `--dry-run` only when the run that failed was one — because a resume
+with different syntax would be a second entry point, which is the thing ADR-0055 refused. No `--from` flag
+exists: it would be a way to skip a step whose state read is the only thing that makes re-running safe. A failed
+*dry* run's resume is a dry run, since the command that failed installed nothing and a resume that installed
+step 2 would be a different command than the one the operator asked for.
 
 ## Step 1 runs `doctor --quick` with one recorded divergence
 

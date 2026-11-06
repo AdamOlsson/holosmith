@@ -4854,6 +4854,8 @@ role = "server"
 backend = "stub"
 control_listen = "127.0.0.1:$control"
 preview_listen = "127.0.0.1:$preview"
+control_origin = "http://localhost:$control"
+preview_origin = "http://localhost:$preview"
 docker_host = "$docker_host"
 agent_image = "$image"
 min_free_gb = 1
@@ -5054,13 +5056,16 @@ OWNERS
     grep -q '^deploy: 7 steps: ' "$WORK/$name.dry.out" ||
       fail "$name/dry/summary" "no summary line: $(cat "$WORK/$name.dry.out")"
     assertions=$((assertions + 1))
+    grep -q '^deploy: into ' "$WORK/$name.dry.out" ||
+      fail "$name/dry/into" "the report does not say which tree it describes: $(cat "$WORK/$name.dry.out")"
+    assertions=$((assertions + 1))
     grep -q '^deploy: incomplete: 4 of 7 steps' "$WORK/$name.dry.out" ||
       fail "$name/dry/incomplete" "the summary does not say four steps are still other stories': $(cat "$WORK/$name.dry.out")"
     assertions=$((assertions + 1))
-    grep -q '^deploy: url: http' "$WORK/$name.dry.out" ||
-      fail "$name/dry/url" "no URL in the tail: $(cat "$WORK/$name.dry.out")"
+    grep -qx "deploy: url: http://localhost:$control" "$WORK/$name.dry.out" ||
+      fail "$name/dry/url" "the tail names no URL this machine will serve: $(cat "$WORK/$name.dry.out")"
     assertions=$((assertions + 1))
-    grep -q '^deploy: next: holosmith key set <provider>' "$WORK/$name.dry.out" ||
+    grep -qx 'deploy: next: holosmith key set <provider>' "$WORK/$name.dry.out" ||
       fail "$name/dry/next" "the next steps name no key command: $(cat "$WORK/$name.dry.out")"
     assertions=$((assertions + 1))
 
@@ -5087,6 +5092,24 @@ OWNERS
       *--dry-run*) fail "$name/absent/resume/dry" "the resume command carries --dry-run: $line" ;;
       *) assertions=$((assertions + 1)) ;;
     esac
+
+    # 2b. A failed **dry run** resumes as a dry run. The command that just ran changed nothing, so a resume that
+    #     installed step 2 for real would be a different command than the one the operator asked for.
+    status=0
+    "$artifact" server deploy --dry-run --root "$root/absent-install" \
+      --config "$WORK/config-deploy-absent.toml" >"$WORK/$name.absentdry.out" 2>&1 || status=$?
+    check "$name/absentdry/exit" 1 "$status"
+    line="$(tail -n 1 "$WORK/$name.absentdry.out")"
+    case "$line" in
+      'deploy: resume: holosmith server deploy '*--dry-run) assertions=$((assertions + 1)) ;;
+      *) fail "$name/absentdry/resume" "a failed dry run's resume is not a dry run: $line" ;;
+    esac
+    case "$line" in
+      *config-deploy-absent.toml*absent-install*) assertions=$((assertions + 1)) ;;
+      *) fail "$name/absentdry/paths" "the resume does not name the paths it ran with: $line" ;;
+    esac
+    [ ! -e "$root/absent-install" ] || fail "$name/absentdry/root" "the dry run created $root/absent-install"
+    assertions=$((assertions + 1))
 
     # 3. A run that gets past step 1 and then fails step 4: that same socket answers `_ping` and nothing else,
     #    so step 2's files are on disk when the run stops and the machine is describable.
@@ -5176,8 +5199,11 @@ OWNERS
   assertions=$((assertions + 1))
   docker network ls | grep -qw egress || fail "$name/online/network" "the egress network is not there"
   assertions=$((assertions + 1))
-  grep -q '^deploy: url: http' "$WORK/$name.online.out" ||
-    fail "$name/online/url" "a completed run printed no URL: $(cat "$WORK/$name.online.out")"
+  grep -qx "deploy: url: http://localhost:$control" "$WORK/$name.online.out" ||
+    fail "$name/online/url" "a completed run printed no URL this machine will serve: $(cat "$WORK/$name.online.out")"
+  assertions=$((assertions + 1))
+  grep -qx 'deploy: next: holosmith key set <provider>' "$WORK/$name.online.out" ||
+    fail "$name/online/next" "the tail names no key command: $(cat "$WORK/$name.online.out")"
   assertions=$((assertions + 1))
 
   # The second run: the acceptance's "changes nothing", as a comparison of the tree, the config's bytes and the

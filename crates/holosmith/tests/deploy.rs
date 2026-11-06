@@ -65,11 +65,18 @@ fn shim(dir: &TempDir, name: &str, body: &str) -> PathBuf {
 
 /// The `df -Pk` answer step 1's disk check reads.
 fn df_shim(dir: &TempDir) -> PathBuf {
+    df_shim_with(dir, 480_000_000)
+}
+
+/// A `df -Pk` shim answering `available_kb` free — the knob an exhausted disk needs.
+fn df_shim_with(dir: &TempDir, available_kb: u64) -> PathBuf {
     shim(
         dir,
         "df",
-        "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n\
-         /dev/mapper/root 1000000000 1 480000000 1%% /\\n'",
+        &format!(
+            "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n\
+             /dev/mapper/root 1000000000 1 {available_kb} 1%% /\\n'"
+        ),
     )
 }
 
@@ -87,13 +94,18 @@ fn doctor_tools(dir: &TempDir) -> doctor::Tools {
 }
 
 /// The deploy's tools with the machine's own `install` and `chmod`, and a `sudo` that is never reached because
-/// every test using these passes `--root` (measured present on this machine).
+/// every test using these passes `--root`.
+///
+/// The three are named rather than pathed, exactly as [`deploy::Tools::default`] names them, so this test asks the
+/// same question production asks and follows the host's `PATH` — a repository that hard-coded `/usr/bin/install`
+/// would fail on a machine whose coreutils is elsewhere, with a message about a missing file rather than about the
+/// check.
 fn real_tools(dir: &TempDir) -> deploy::Tools {
     deploy::Tools {
         doctor: doctor_tools(dir),
-        sudo: PathBuf::from("/usr/bin/sudo"),
-        install: PathBuf::from("/usr/bin/install"),
-        chmod: PathBuf::from("/usr/bin/chmod"),
+        sudo: PathBuf::from("sudo"),
+        install: PathBuf::from("install"),
+        chmod: PathBuf::from("chmod"),
     }
 }
 
@@ -438,19 +450,25 @@ fn the_report_prints_the_tally_and_who_owns_what_remains() {
     let text = report.render();
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines[0], "deploy: run");
+    // Which tree the report describes is its own line, before the steps: a `--root` run's paths mean nothing
+    // without the privilege the whole run used.
     assert_eq!(
         lines[1],
+        "deploy: into the system paths, with sudo where each write needs it"
+    );
+    assert_eq!(
+        lines[2],
         "1. preflight: satisfied: 9 findings: 7 pass, 0 fail, 2 unknown (systemd, disk)"
     );
     assert_eq!(
-        lines[6],
+        lines[7],
         "deploy: 5 steps: 1 satisfied, 1 changed, 2 skipped, 1 failed"
     );
     assert_eq!(
-        lines[7],
+        lines[8],
         "deploy: incomplete: 2 of 7 steps belong to later stories — HS-048: images; HS-049: service"
     );
-    assert_eq!(lines.len(), 8);
+    assert_eq!(lines.len(), 9);
     assert!(report.failed());
 
     // A dry run says so, and a report with nothing skipped has no incomplete line to print.
@@ -1050,5 +1068,95 @@ fn a_hub_role_is_refused() {
             ..Config::default()
         }),
         None
+    );
+}
+
+#[test]
+fn a_fresh_install_still_measures_the_disk_floor_the_data_root_will_land_on() {
+    // The floor exists for the **first** deploy, and on a fresh host the data root does not exist yet — the state
+    // `preflight::disk` answers `unknown` for. Without the re-ask this step would say `satisfied` with
+    // `1 unknown (disk)` and install into a full filesystem, so this test fails if the re-ask is removed: the point
+    // is that the run *stops before it writes anything*.
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("deploy-disk");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let config = config(Some(format!("unix://{}", socket.display())));
+    let root = dir.file("root");
+    let target = Target::resolve(Some(root));
+    let deployed = target.config(&config);
+    assert!(
+        !deployed.data_root.exists(),
+        "this test means nothing unless the data root is absent, and the whole story is that a fresh host's is"
+    );
+    let mut tools = real_tools(&dir);
+    // 1 MiB free against the default `min_free_gb` of 20.
+    tools.doctor.preflight.df = df_shim_with(&dir, 1024);
+
+    let report = deploy::run(&deployed, &target, &tools, &Fake::new(), false);
+    let step = line(&report, DeployStep::Preflight);
+    assert_eq!(
+        report.failed,
+        Some(DeployStep::Preflight),
+        "a host with no room reported step 1 as {}:\n{}",
+        step.word,
+        report.render()
+    );
+    assert!(
+        step.sentence.contains("min_free_gb"),
+        "the failure does not name the floor: {}",
+        step.sentence
+    );
+    // The ancestor that exists is what was measured, and the sentence names it — not the data root nobody has
+    // created yet.
+    assert!(
+        step.sentence.contains(&dir.path().display().to_string()),
+        "the failure does not name the path it measured: {}",
+        step.sentence
+    );
+    assert!(
+        !step.sentence.contains("no data root at"),
+        "{}",
+        step.sentence
+    );
+    assert!(
+        !deployed.data_root.exists(),
+        "a run that failed step 1 created the data root:\n{}",
+        report.render()
+    );
+}
+
+#[test]
+fn step_two_says_which_half_of_the_spec_it_did_not_read() {
+    // Item 10 step 2 also asks for the service user and the VAPID keys, which are HS-049's. A step that reports a
+    // pass must say what it did not read, or "all 6 paths are present with their modes" reads as the whole step.
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("deploy-remainder");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let config = config(Some(format!("unix://{}", socket.display())));
+    let target = Target::resolve(Some(dir.file("root")));
+    let deployed = target.config(&config);
+    let tools = real_tools(&dir);
+    let machine = Fake::new();
+
+    let first = deploy::run(&deployed, &target, &tools, &machine, false);
+    assert_eq!(line(&first, DeployStep::Files).word, Word::Changed);
+    let second = deploy::run(&deployed, &target, &tools, &machine, false);
+    assert_eq!(line(&second, DeployStep::Files).word, Word::Satisfied);
+    for report in [&first, &second] {
+        let sentence = &line(report, DeployStep::Files).sentence;
+        assert!(
+            sentence.contains("HS-049") && sentence.contains("VAPID"),
+            "step 2's line does not say which half it did not read: {sentence}"
+        );
+    }
+    // A dry run's plan says it too, so the operator reading a plan is not told the step is complete either.
+    let planned = deploy::run(&deployed, &target, &tools, &machine, true);
+    assert!(
+        line(&planned, DeployStep::Files)
+            .sentence
+            .contains("HS-049"),
+        "the dry run's plan does not say which half step 2 leaves alone"
     );
 }

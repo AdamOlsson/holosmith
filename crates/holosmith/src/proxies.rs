@@ -44,8 +44,9 @@ pub const START_TIMEOUT: Duration = container::PROXY_START_TIMEOUT;
 
 /// The two proxies' container names, in the order [`running`] answers: `[egress, key]`.
 ///
-/// The spec's names, from one table, because three readers ask for them by name: `uninstall`, `doctor`'s two
-/// proxy findings and this module.
+/// The spec's names, spelled once for this module's own reader: the two callers that name the containers
+/// individually (`doctor`'s proxy findings, and a teardown) ask [`crate::container::PROXY_NAME`] and
+/// [`crate::key::KEY_PROXY_NAME`] directly, because they name one at a time.
 pub const NAMES: [&str; 2] = [container::PROXY_NAME, key::KEY_PROXY_NAME];
 
 /// What a successful start did, for the caller's own log line.

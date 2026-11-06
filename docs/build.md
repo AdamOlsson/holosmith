@@ -524,8 +524,10 @@ start, rather than a service that refuses to come back up.
   (ADR-0054, ADR-0056).
 - **`install` and `chmod`** (coreutils), and **`sudo`** on a machine whose paths are the system's, for
   `holosmith server deploy` (HS-047): every file action is one `install`/`chmod` child, and it is prefixed by
-  `sudo` unless `--root` builds the tree as the invoking user (ADR-0056). The gate needs neither: its case
-  installs under `target/` with `--root`, so no step takes the privileged path.
+  `sudo` unless `--root` builds the tree as the invoking user (ADR-0056). The gate's **case** needs neither —
+  it installs under `target/` with `--root`, so no step takes the privileged path — but `cargo test` runs
+  `tests/deploy.rs`, which drives the host's `install` and `chmod` for real (by name, through `PATH`) to assert
+  the modes a real install produces. That is the same coreutils `preflight` already relies on for `df`.
 - **git** for `scripts/build.sh`, and for a Docker run at runtime: the worktree step runs
   `git worktree`, `git rev-list` and `git branch` against the project repository on the host
   (HS-025). Not required by `cargo build` itself, and not required by `--backend stub`.

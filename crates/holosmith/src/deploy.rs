@@ -42,8 +42,8 @@
 //! [`run`] reads `config.data_root` directly instead of asking `Target` to prefix it a second time.
 
 use std::fmt::{self, Write as _};
-use std::io::ErrorKind;
-use std::os::unix::fs::PermissionsExt;
+use std::io::{ErrorKind, Write as _};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -52,7 +52,7 @@ use crate::container;
 use crate::docker;
 use crate::doctor::{self, Depth};
 use crate::key;
-use crate::preflight::{Check, Outcome};
+use crate::preflight::{self, Check, Outcome};
 use crate::proxies;
 
 /// The admin socket's directory (spec item 10 step 2's "admin socket directory", path fixed by HS-051).
@@ -76,6 +76,13 @@ const HEALTH: &str = "HS-049 installs the service whose boot makes the `/api/hea
 /// The remark a held port earns instead of failing the deploy — step 1's one divergence (see [`preflight`]).
 const HELD_PORT: &str =
     "; the control port is held — a re-run on a serving machine is not a failure here";
+
+/// The remark step 2's line always carries: the half of the spec's step 2 that HS-049 still owns.
+///
+/// Without it, "all 6 paths are present with their modes" reads as the whole of item 10 step 2 when it is three
+/// of its five items — the same "a pass over part of a step" shape this list forbids for a skipped step, one
+/// level down.
+const REMAINDER: &str = "; the service user (in the docker group) and the VAPID keys are HS-049's, and this step does not read them";
 
 /// The spec's seven steps, in the spec's order (item 10, "What `server deploy` does").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -220,11 +227,15 @@ impl Report {
         self.failed.is_some()
     }
 
-    /// The whole report as the operator reads it: the header, one line per step, the tally, and — because most of
-    /// this release's steps are other stories' — the list of who owns what remains (ADR-0056).
+    /// The whole report as the operator reads it: the header, where it installed, one line per step, the tally,
+    /// and — because most of this release's steps are other stories' — the list of who owns what remains
+    /// (ADR-0056).
     pub fn render(&self) -> String {
         let count = |word: Word| self.lines.iter().filter(|line| line.word == word).count();
         let mut text = format!("deploy: {}\n", if self.dry_run { "dry run" } else { "run" });
+        // Which tree this report describes, on its own line: the step lines name paths, and an operator reading a
+        // `--root` run needs to see the privilege the whole run used before the paths mean anything.
+        let _ = writeln!(text, "deploy: into {}", self.target);
         for line in &self.lines {
             // A `String` cannot fail to be written to, which is why this is not a `?`.
             let _ = writeln!(text, "{line}");
@@ -238,12 +249,13 @@ impl Report {
             count(Word::Skipped),
             count(Word::Failed)
         );
-        if count(Word::Skipped) > 0 {
+        let skipped = count(Word::Skipped);
+        if skipped > 0 {
             let _ = writeln!(
                 text,
-                "deploy: incomplete: {} of {} steps belong to later stories — {}",
-                count(Word::Skipped),
+                "deploy: incomplete: {skipped} of {} steps {} to later stories — {}",
                 DeployStep::ALL.len(),
+                if skipped == 1 { "belongs" } else { "belong" },
                 self.owners()
             );
         }
@@ -381,6 +393,9 @@ impl Target {
     }
 
     /// `<data root>/secrets`, the 0700 directory the key file lives in.
+    ///
+    /// It answers for an **unprefixed** config, which is what a caller outside [`run`] has; the step itself uses
+    /// `config.data_root.join(key::SECRETS_DIR)` because the config it holds is already prefixed.
     pub fn secrets_dir(&self, config: &Config) -> PathBuf {
         self.data_root(config).join(key::SECRETS_DIR)
     }
@@ -486,8 +501,21 @@ fn skipped(step: DeployStep, sentence: &str) -> Line {
 /// unchanged. Without that, the second deploy on a working server would report a failure that is not one.
 fn preflight(config: &Config, tools: &doctor::Tools, machine: &dyn Machine) -> Line {
     let report = doctor::run(config, Depth::Quick, tools, machine);
-    if let Some(finding) = report
-        .findings
+    let mut findings = report.findings;
+    // `preflight::disk` answers `unknown` for a data root that does not exist yet, which is exactly the **first**
+    // deploy's situation — the run the floor is for. So an unknown disk finding is re-asked against the nearest
+    // existing ancestor: the same check, an honest subject. The line says which path was measured, because a
+    // reader who asked about `/var/lib/holosmith` and was told `/` is a different fact from one who was not told.
+    let mut elsewhere = None;
+    if let Some(index) = findings
+        .iter()
+        .position(|finding| finding.check == Check::Disk && finding.outcome == Outcome::Unknown)
+        && let Some((path, finding)) = disk_of_the_nearest_ancestor(config, tools)
+    {
+        findings[index] = finding;
+        elsewhere = Some(path);
+    }
+    if let Some(finding) = findings
         .iter()
         .find(|finding| finding.is_failure() && finding.check != Check::Ports)
     {
@@ -498,21 +526,19 @@ fn preflight(config: &Config, tools: &doctor::Tools, machine: &dyn Machine) -> L
         };
     }
     let count = |outcome: Outcome| {
-        report
-            .findings
+        findings
             .iter()
             .filter(|finding| finding.outcome == outcome)
             .count()
     };
-    let unknown: Vec<&str> = report
-        .findings
+    let unknown: Vec<&str> = findings
         .iter()
         .filter(|finding| finding.outcome == Outcome::Unknown)
         .map(|finding| finding.check.as_str())
         .collect();
     let mut sentence = format!(
         "{} findings: {} pass, {} fail, {} unknown",
-        report.findings.len(),
+        findings.len(),
         count(Outcome::Pass),
         count(Outcome::Fail),
         count(Outcome::Unknown)
@@ -520,8 +546,13 @@ fn preflight(config: &Config, tools: &doctor::Tools, machine: &dyn Machine) -> L
     if !unknown.is_empty() {
         sentence.push_str(&format!(" ({})", unknown.join(", ")));
     }
-    if report
-        .findings
+    if let Some(path) = &elsewhere {
+        sentence.push_str(&format!(
+            "; there is no data root yet, so the filesystem that will hold it ({}) is what was measured",
+            path.display()
+        ));
+    }
+    if findings
         .iter()
         .any(|finding| finding.is_failure() && finding.check == Check::Ports)
     {
@@ -532,6 +563,29 @@ fn preflight(config: &Config, tools: &doctor::Tools, machine: &dyn Machine) -> L
         word: Word::Satisfied,
         sentence,
     }
+}
+
+/// The disk check asked about the nearest directory that exists, and that path.
+///
+/// One ancestor at a time so the answer is the filesystem the data root will land on rather than "somewhere"; a
+/// path with no existing ancestor at all (`/` always exists, so this is unreachable in practice) answers `None`
+/// and the finding stays `unknown`, which is the honest third verdict rather than a guess.
+fn disk_of_the_nearest_ancestor(
+    config: &Config,
+    tools: &doctor::Tools,
+) -> Option<(PathBuf, preflight::Finding)> {
+    let mut probe = config.data_root.clone();
+    while !probe.exists() {
+        if !probe.pop() {
+            return None;
+        }
+    }
+    let mut asking = config.clone();
+    asking.data_root.clone_from(&probe);
+    preflight::report_with(&asking, &tools.preflight)
+        .into_iter()
+        .find(|finding| finding.check == Check::Disk)
+        .map(|finding| (probe, finding))
 }
 
 /// Step 2: the install tree — four directories and two files, each checked for its bytes and its mode first.
@@ -669,7 +723,7 @@ fn install(config: &Config, target: &Target, tools: &Tools, dry_run: bool, stagi
             step: DeployStep::Files,
             word: Word::Satisfied,
             sentence: format!(
-                "all {} paths are present with their modes: {}",
+                "all {} paths are present with their modes: {}{REMAINDER}",
                 items.len(),
                 present(&items)
             ),
@@ -679,7 +733,7 @@ fn install(config: &Config, target: &Target, tools: &Tools, dry_run: bool, stagi
         return Line {
             step: DeployStep::Files,
             word: Word::Needs,
-            sentence: planned(&pending),
+            sentence: format!("{}{REMAINDER}", planned(&pending)),
         };
     }
     for action in &pending {
@@ -690,7 +744,7 @@ fn install(config: &Config, target: &Target, tools: &Tools, dry_run: bool, stagi
     Line {
         step: DeployStep::Files,
         word: Word::Changed,
-        sentence: planned(&pending),
+        sentence: format!("{}{REMAINDER}", planned(&pending)),
     }
 }
 
@@ -836,12 +890,19 @@ fn apply(action: &Action, target: &Target, tools: &Tools, staging: &Path) -> Res
         false => (program.clone(), arguments),
     };
     let rendered = format!("{} {}", program.display(), arguments.join(" "));
-    let output = Command::new(&program).args(&arguments).output().map_err(|error| {
-        format!(
-            "`{rendered}` could not be run ({error}): the install tree is written by `install` and `chmod`, each \
-             prefixed by `sudo` when the paths are the system's"
-        )
-    })?;
+    // `stdin` is inherited so that `sudo` can ask for a password on the terminal it was run from: a deploy is an
+    // operator's foreground command, and the alternative is `sudo: a terminal is required to read the password` on
+    // every machine whose credential is not already cached (ADR-0056).
+    let output = Command::new(&program)
+        .args(&arguments)
+        .stdin(std::process::Stdio::inherit())
+        .output()
+        .map_err(|error| {
+            format!(
+                "`{rendered}` could not be run ({error}): the install tree is written by `install` and `chmod`, \
+                 each prefixed by `sudo` when the paths are the system's"
+            )
+        })?;
     if output.status.success() {
         return Ok(());
     }
@@ -882,25 +943,39 @@ fn stage(staging: &Path, path: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
         |name| name.to_string_lossy().into_owned(),
     );
     let staged = staging.join(name);
-    std::fs::write(&staged, bytes).map_err(|error| {
+    // `create_new` rather than `write`: the system-path run hands this file to `sudo install`, so an entry a local
+    // user planted in the staging directory (a symlink to a root-owned path, say) must be a refusal rather than a
+    // followed link. The directory is unique per run and emptied first; this is the half that does not trust it.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&staged)
+        .map_err(|error| {
+            format!(
+                "{} could not be created ({error}): the deploy stages what it installs in a private temporary \
+                 directory and refuses to reuse a path already there",
+                staged.display()
+            )
+        })?;
+    file.write_all(bytes).map_err(|error| {
         format!(
             "{} could not be written ({error}): the deploy stages what it installs in a temporary directory",
-            staged.display()
-        )
-    })?;
-    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600)).map_err(|error| {
-        format!(
-            "{} could not be made 0600 ({error}): a staged copy of the key file must not be readable by anybody \
-             else while it exists",
             staged.display()
         )
     })?;
     Ok(staged)
 }
 
-/// The private staging directory's path, emptied first so a previous run's copy cannot be installed by mistake.
+/// The private staging directory's path, named uniquely per run so a previous run's copy — or one a local user
+/// planted before this run started — cannot be installed by mistake.
 fn staging_dir() -> PathBuf {
-    let staging = std::env::temp_dir().join(format!("holosmith-deploy-{}", std::process::id()));
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.subsec_nanos())
+        .unwrap_or_default();
+    let staging =
+        std::env::temp_dir().join(format!("holosmith-deploy-{}-{nanos}", std::process::id()));
     let _ = std::fs::remove_dir_all(&staging);
     staging
 }
