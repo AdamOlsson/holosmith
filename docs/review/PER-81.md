@@ -1,3 +1,10 @@
+# Review — PER-81 (HS-049, service install, secrets, VAPID and Tailscale origins)
+
+Reviewed `7e9616a…50b22bc` on both axes (standards and spec) by a fresh `reviewer` child running
+`~/.agents/skills/code-review/SKILL.md`, read-only, against `/tmp/holosmith/reviews/PER-81-diff.txt`. The brief is
+`/tmp/holosmith/reviews/PER-81-review-brief.md` (ephemeral). The text below is verbatim; the `## Resolution` table
+at the end is the supervisor's, and every fix in it was mutation-checked before it was believed.
+
 ## Review
 
 ### What I checked (evidence first)
