@@ -508,6 +508,14 @@ fn the_container_step_runs_a_limited_container_with_no_way_out() {
         field("{{.Config.Env}}").contains(&format!("HS_SESSION_ID={ID_RUN}")),
         "the session id is not in the container's environment"
     );
+    // HS-041: the port the preview listener forwards to, so a dev server in the container knows where to listen.
+    // Read off the running container rather than out of the vector, because the vector is what a test wrote and the
+    // environment is what Docker gave the process.
+    assert!(
+        field("{{.Config.Env}}").contains("HS_PREVIEW_PORT=3000"),
+        "the preview port is not in the container's environment: {}",
+        field("{{.Config.Env}}")
+    );
     // Spec item 6's run line: `--rm --init`, and the network it joins is its own.
     assert_eq!(field("{{.HostConfig.AutoRemove}}"), "true", "`--rm`");
     assert_eq!(field("{{.HostConfig.Init}}"), "true", "`--init`");
