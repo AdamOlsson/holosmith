@@ -199,9 +199,12 @@ impl Refusal {
             Self::NotAPath { path } => format!(
                 "{path} is not a preview path: this listener serves /{HOST}/<session>/<path> only"
             ),
+            // One sentence for both readers: `/api/health` is `/<host>/<id>` to this listener, so a control API
+            // path lands here too, and claiming `api` is a machine would be a sentence that is wrong about the
+            // thing it names. What is true either way is where previews live and where another machine's do.
             Self::UnknownHost(host) => format!(
-                "this machine serves its own sessions as /{HOST}/<session>/<path>; {host} is another machine's, \
-                 which the hub forwards"
+                "this machine serves its own sessions as /{HOST}/<session>/<path>, so /{host}/ is not a preview \
+                 it serves; another machine's sessions are the hub's, which forwards them"
             ),
             Self::UnknownSession(id) => format!("no session is called {id}"),
             Self::NoContainer { id, detail } => {
