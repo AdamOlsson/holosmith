@@ -526,6 +526,26 @@ pub fn repository(dir: &Path) {
     );
 }
 
+/// A repository in `dir` whose default branch is `branch`, with one commit.
+///
+/// `-b` rather than [`repository`] where the branch *is* the question: `[merge] targets` names `main` and
+/// `master`, so a test about a merge (HS-043) has to say which one this repository has rather than inherit
+/// whatever `init.defaultBranch` the machine was installed with.
+pub fn repository_on(dir: &Path, branch: &str) {
+    std::fs::create_dir_all(dir).expect("the repository directory is creatable");
+    git(dir, &["init", "--quiet", "-b", branch]);
+    git(
+        dir,
+        &[
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "the first commit",
+        ],
+    );
+}
+
 /// Run `git` in `dir` and answer its trimmed stdout; a non-zero exit panics with git's own words.
 ///
 /// `-c user.*` on every call, so a commit needs no repository configuration (see [`repository`]).

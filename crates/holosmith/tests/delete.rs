@@ -14,13 +14,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::Method;
-use holosmith::backend::Call;
+use holosmith::backend::{Backends, Call, Provisioned, SessionBackend, Step};
 use holosmith::config::{Config, Duration as ConfigDuration};
+use holosmith::container::ContainerSettings;
 use holosmith::deleter::DELETED;
 use holosmith::http::error::{BAD_CLIENT, NOT_FOUND, UNSAVED_WORK};
 use holosmith::http::{self, AppState, Guards, RouteKind};
 use holosmith::ladder::Ending;
 use holosmith::provisioner::Provisioner;
+use holosmith::runtime::Backend;
 use holosmith::sessions::state::{Transitioner, Trigger};
 use holosmith::sessions::{NewSession, Session, Status};
 use serde_json::Value;
@@ -103,6 +105,15 @@ fn assert_deleting(response: &Response, id: &str) {
     let body: Value = serde_json::from_str(&response.body).expect("the answer is JSON");
     assert_eq!(body["id"], id, "{}", response.body);
     assert_eq!(body["status"], "deleting", "{}", response.body);
+}
+
+/// The 202's `kept` key (HS-043): the delete's own answer about what the teardown leaves in the
+/// repository. Absent is a bug, so this panics rather than answering `None`.
+fn kept(response: &Response) -> Value {
+    let body: Value = serde_json::from_str(&response.body).expect("the answer is JSON");
+    body.get("kept")
+        .cloned()
+        .unwrap_or_else(|| panic!("the answer carries no `kept`: {}", response.body))
 }
 
 fn row(state: &AppState, id: &str) -> Option<Session> {
@@ -209,6 +220,137 @@ async fn a_delete_answers_the_deleting_row_and_then_removes_it() {
         [Call::Snapshot, Call::Delete],
         "the snapshot must come before the removal"
     );
+
+    // And the answer carries the keep-rule's answer even when there is nothing to keep (HS-043): a stub
+    // session has no repository, so the three keys are explicit nulls rather than absent — a client should
+    // not have to tell "no claim" from "nothing survived".
+    assert_eq!(
+        kept(&accepted),
+        serde_json::json!({"branch": null, "wip": null, "recovery": null}),
+        "the 202 does not carry the delete's own answer: {}",
+        accepted.body
+    );
+}
+
+#[tokio::test]
+async fn the_delete_answer_names_the_work_it_keeps_and_the_command_that_recovers_it() {
+    // The story's fourth bullet at the wire (HS-043): the 202 names the branch and the snapshot ref the
+    // teardown will leave, with the session's own id in the spec's recovery command — and the names are
+    // still in the repository afterwards.
+    //
+    // The backend is the Docker one over a real repository with **no daemon**: the keep-rule and the
+    // worktree teardown are host git, and a container or a network the daemon has forgotten is a fact
+    // rather than a failure (ADR-0023), so this is the whole of the path the rule lives on.
+    let dir = TempDir::new("delete-keeps-the-work");
+    let root = dir.file("projects");
+    let repo = root.join("holosmith");
+    support::repository_on(&repo, "main");
+    let config = Config {
+        projects_root: root.clone(),
+        max_live_sessions: 2,
+        ..Config::default()
+    };
+    let mut state = state_in(&dir, config);
+    state.backend = Backends::for_run(
+        Backend::Docker,
+        ContainerSettings {
+            docker_host: Some("unix:///nonexistent/holosmith-delete.sock".to_string()),
+            ..ContainerSettings::at(&root, dir.file("data"))
+        },
+    );
+    let served = Served::start(http::router(state.clone()), GRACE).await;
+
+    // A row with a worktree, written the way the provisioner writes it (ADR-0029) — no create, because
+    // this test is about the delete's answer rather than about provisioning.
+    let id = {
+        let database = state.database.lock().expect("the lock is not poisoned");
+        database
+            .sessions()
+            .create(
+                &NewSession {
+                    project: "holosmith".to_string(),
+                    model: "claude-sonnet-4.5".to_string(),
+                    thinking: "high".to_string(),
+                    network: false,
+                    client_key: None,
+                    base_commit: None,
+                },
+                holosmith::clock::unix_now(),
+            )
+            .expect("a session is creatable")
+            .id
+    };
+    let session = row(&state, &id).expect("the row is there");
+    let path = match state
+        .backend
+        .provision(&session, Step::Worktree)
+        .await
+        .expect("the worktree step works on a real repository")
+    {
+        Provisioned::Worktree {
+            path, base_commit, ..
+        } => {
+            let database = state.database.lock().expect("the lock is not poisoned");
+            database
+                .sessions()
+                .set_worktree(&id, &path, &base_commit)
+                .expect("the row records the worktree");
+            std::path::PathBuf::from(path)
+        }
+        Provisioned::Nothing => panic!("the worktree step recorded nothing"),
+    };
+
+    // The agent's work: one commit beyond the base, and one change the delete's snapshot is what saves.
+    std::fs::write(path.join("work.txt"), "committed\n").expect("the worktree is writable");
+    support::git(&path, &["add", "work.txt"]);
+    support::git(&path, &["commit", "--quiet", "-m", "the agent's commit"]);
+    std::fs::write(path.join("tracked.txt"), "uncommitted\n").expect("the worktree is writable");
+
+    let accepted = delete(served.addr, &id, "").await;
+    assert_deleting(&accepted, &id);
+    let answer = kept(&accepted);
+    let reference = format!("refs/holosmith/wip/{id}");
+    assert_eq!(
+        answer["branch"],
+        format!("agent/{id}"),
+        "the answer does not name the branch it keeps: {}",
+        accepted.body
+    );
+    assert_eq!(
+        answer["wip"], reference,
+        "the answer does not name the snapshot ref: {}",
+        accepted.body
+    );
+    assert_eq!(
+        answer["recovery"],
+        format!("git branch rescue {reference}"),
+        "the answer does not carry the spec's recovery command: {}",
+        accepted.body
+    );
+
+    wait_gone(&state, &id).await;
+
+    // What the answer promised is what the repository has — and the worktree it was checked out in is
+    // gone, because a kept branch is a name rather than a copy of the files.
+    assert!(
+        support::branch_exists(&repo, &format!("agent/{id}")),
+        "the answer promised the branch and the delete took it"
+    );
+    let recovered = support::git(&repo, &["rev-parse", "--verify", &reference]);
+    assert_eq!(
+        recovered.len(),
+        40,
+        "the snapshot ref was not kept: {recovered}"
+    );
+    assert!(!path.exists(), "the worktree outlived the delete");
+    support::git(&repo, &["branch", "rescue", &reference]);
+    assert_eq!(
+        support::git(&repo, &["show", "rescue:tracked.txt"]),
+        "uncommitted",
+        "the recovery command recovers the wrong work"
+    );
+
+    served.finish().await.expect("a clean shutdown");
 }
 
 #[tokio::test]

@@ -31,6 +31,7 @@ use crate::events::{
     EventWriter, MESSAGE_DELTA, MESSAGE_END, NewEvent, TOOL_END, TOOL_START, TURN_END, TURN_START,
 };
 use crate::sessions::Session;
+use crate::worktree::Retained;
 
 /// The stub's pace: how long one provisioning step, and one frame of a turn, takes under
 /// `serve --backend stub`. Long enough that the four provisioning events and a turn's dozen frames
@@ -450,8 +451,18 @@ impl SessionBackend for StubBackend {
         self.note(Call::Resume, session, "")
     }
 
-    async fn delete(&self, session: &Session) -> Result<(), BackendError> {
+    async fn delete(&self, session: &Session, _retained: &Retained) -> Result<(), BackendError> {
+        // The keep-rule is a repository question and this backend has no repository (ADR-0015), which is
+        // also why `retained` answered `nothing` — a promise the ledger of calls does not need to repeat.
         self.note(Call::Delete, session, "")
+    }
+
+    async fn retained(
+        &self,
+        _session: &Session,
+        _targets: &[String],
+    ) -> Result<Retained, BackendError> {
+        Ok(Retained::nothing())
     }
 
     async fn snapshot(&self, session: &Session) -> Result<(), BackendError> {
@@ -584,7 +595,9 @@ mod tests {
         stub.abort(&session).await.expect("abort");
         stub.stop(&session).await.expect("stop");
         stub.resume(&session).await.expect("resume");
-        stub.delete(&session).await.expect("delete");
+        stub.delete(&session, &Retained::nothing())
+            .await
+            .expect("delete");
         stub.snapshot(&session).await.expect("snapshot");
 
         let recorded = stub.recorded();

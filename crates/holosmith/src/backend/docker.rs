@@ -44,7 +44,7 @@ use crate::rpc::{self, Mapping};
 use crate::sessions::Session;
 use crate::snapshot;
 use crate::tool::Store;
-use crate::worktree::{Refusal, Worktree, refuse, repository_of};
+use crate::worktree::{Refusal, Retained, Worktree, refuse, repository_of};
 
 /// How long pi may take to answer a command that only accepts or queues it.
 ///
@@ -610,9 +610,14 @@ impl DockerBackend {
     /// Shared by [`SessionBackend::undo`] and [`SessionBackend::delete`], because "this step is being
     /// taken back" and "this session is going away" leave the same thing behind. The container and the
     /// network are removed by their own callers, in that order.
-    async fn remove_worktree(&self, session: &Session) -> Result<(), BackendError> {
+    async fn remove_worktree(
+        &self,
+        session: &Session,
+        retained: &Retained,
+    ) -> Result<(), BackendError> {
         let worktree = self.worktree(session);
-        Self::blocking(Step::Worktree, move || worktree.remove()).await
+        let retained = retained.clone();
+        Self::blocking(Step::Worktree, move || worktree.remove(&retained)).await
     }
 
     /// **Remove** the session's container by force, ignoring "no such container" (spec item 6's `--rm` rule,
@@ -774,7 +779,10 @@ impl SessionBackend for DockerBackend {
 
     async fn undo(&self, session: &Session, step: Step) -> Result<(), BackendError> {
         match step {
-            Step::Worktree => self.remove_worktree(session).await,
+            // `Retained::nothing()` on purpose: an undo takes back what *this provision* made (ADR-0029),
+            // which is a worktree with no commits beyond its base — so the keep-rule would keep nothing
+            // either, and the rule's business is the delete's (HS-043).
+            Step::Worktree => self.remove_worktree(session, &Retained::nothing()).await,
             // The container first when it is undone on its own (its network is not a dependency of
             // removing it, but a container holding a network up would make the network's removal fail).
             Step::Container => {
@@ -948,7 +956,7 @@ impl SessionBackend for DockerBackend {
     ///
     /// Answering `Ok` for a session nothing was provisioned for is deliberate: teardown of a session that never
     /// got that far must not leave a `deleting` row behind (ADR-0023).
-    async fn delete(&self, session: &Session) -> Result<(), BackendError> {
+    async fn delete(&self, session: &Session, retained: &Retained) -> Result<(), BackendError> {
         // The container, then its network, then the worktree and the branch. Each is best-effort except
         // the worktree: a container or a network the daemon has already forgotten is a fact, and a
         // remaining row is what ADR-0023 refuses. The order matters — a container still attached to the
@@ -965,9 +973,25 @@ impl SessionBackend for DockerBackend {
         self.forget_agent(&session.id);
         self.remove_container(session).await;
         self.remove_network(session).await;
-        self.remove_worktree(session).await?;
+        self.remove_worktree(session, retained).await?;
         self.remove_session_dir(session);
         Ok(())
+    }
+
+    /// What this teardown must leave in the project's repository (HS-043): the rule is
+    /// [`Worktree::retained`]'s, and this is the off-worker call it needs.
+    async fn retained(
+        &self,
+        session: &Session,
+        targets: &[String],
+    ) -> Result<Retained, BackendError> {
+        let worktree = self.worktree(session);
+        let base = session.base_commit.clone();
+        let targets = targets.to_vec();
+        Self::blocking(Step::Worktree, move || {
+            worktree.retained(base.as_deref(), &targets)
+        })
+        .await
     }
 
     /// Hand the server the exit of the agent this session's container is running (HS-031).
@@ -1316,7 +1340,7 @@ mod tests {
             .await
             .expect("nothing to remove is not a failure");
         backend()
-            .delete(&session())
+            .delete(&session(), &Retained::nothing())
             .await
             .expect("a session whose repository is gone can still be removed");
     }

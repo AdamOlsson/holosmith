@@ -38,7 +38,7 @@ use crate::ladder;
 use crate::sessions::activity;
 use crate::sessions::state::{StateError, Trigger};
 use crate::sessions::{NewSession, RepoError, Session, Status};
-use crate::worktree::Refusal;
+use crate::worktree::{Refusal, Retained};
 
 /// The header a create's idempotency key travels in.
 const KEY_HEADER: &str = "idempotency-key";
@@ -954,8 +954,13 @@ pub async fn delete(state: &AppState, id: &str, query: RawQuery) -> Response {
         // Already asked, not yet removed: answer the row the client can see and give the removal
         // another run. No snapshot and no second event — the point of no return was crossed by the
         // request that moved the row here.
-        state.deleter().spawn(current.clone());
-        return (StatusCode::ACCEPTED, Json(current)).into_response();
+        let retained = retained_for(state, &current).await;
+        state.deleter().spawn(current.clone(), retained.clone());
+        return (
+            StatusCode::ACCEPTED,
+            Json(DeleteAnswer::of(current, &retained)),
+        )
+            .into_response();
     }
     if current.status == Status::Running {
         let ending = state.ladder().end_turn(&current, deleter::DELETED).await;
@@ -984,6 +989,9 @@ pub async fn delete(state: &AppState, id: &str, query: RawQuery) -> Response {
             "deleting a session past a failed snapshot because the request forced it"
         );
     }
+    // HS-043: *after* the snapshot, because the snapshot is what writes or removes the ref this answers
+    // about, and *before* the transition, so a refusal there leaves the row where the operator found it.
+    let retained = retained_for(state, &current).await;
     if let Err(error) = apply_trigger(state, id, Trigger::Delete, NOT_DELETABLE, "delete").await {
         return error.into_response();
     }
@@ -995,8 +1003,85 @@ pub async fn delete(state: &AppState, id: &str, query: RawQuery) -> Response {
     if let Ok(Some(row)) = one_locked(state, id) {
         deleting = row;
     }
-    state.deleter().spawn(deleting.clone());
-    (StatusCode::ACCEPTED, Json(deleting)).into_response()
+    state.deleter().spawn(deleting.clone(), retained.clone());
+    (
+        StatusCode::ACCEPTED,
+        Json(DeleteAnswer::of(deleting, &retained)),
+    )
+        .into_response()
+}
+
+/// The keep-rule's answer for `session`, or [`Retained::Unknown`] with the reason in the log (HS-043).
+///
+/// A repository that cannot answer must not block a delete — the request's job is to remove a session,
+/// and the operator's next `DELETE` is the retry — and it must not turn into a claim either. So the
+/// teardown keeps the branch (`Retained::Unknown`'s own rule) and the 202 carries `kept: null`.
+async fn retained_for(state: &AppState, session: &Session) -> Retained {
+    match state
+        .backend
+        .retained(session, &state.config.merge.targets)
+        .await
+    {
+        Ok(retained) => retained,
+        Err(error) => {
+            tracing::warn!(
+                target: "holosmith::http::sessions",
+                session = %session.id,
+                %error,
+                "the repository could not say what a delete should keep; the branch is kept and the answer claims nothing"
+            );
+            Retained::Unknown
+        }
+    }
+}
+
+/// The 202's body: the row's own keys, flattened, plus what the teardown leaves behind (HS-043).
+///
+/// The row is the API's body everywhere (ADR-0038), so the delete's extra answer is additive rather than
+/// a wrapper: `Session`'s fifteen columns stay exactly where they were and `kept` is one more key. That is
+/// also why `kept` is a field of this struct rather than of `Session` — no other route has anything to say
+/// about it.
+#[derive(Debug, Serialize)]
+struct DeleteAnswer {
+    #[serde(flatten)]
+    session: Session,
+    /// `null` when the repository could not answer: a claim nobody can make is worse than no claim.
+    kept: Option<Kept>,
+}
+
+impl DeleteAnswer {
+    fn of(session: Session, retained: &Retained) -> Self {
+        Self {
+            session,
+            kept: Kept::of(retained),
+        }
+    }
+}
+
+/// What a teardown leaves in the repository, as the 202 and the page spell it.
+///
+/// Three keys and explicit nulls, for the reason `session.status`'s payload states its nulls: a client
+/// should not have to tell "the answer is missing" from "nothing survived". `recovery` is the spec's
+/// command built once (`Retained::recovery`), so the page shows what the answer carried instead of
+/// spelling it a second time.
+#[derive(Debug, Serialize)]
+struct Kept {
+    branch: Option<String>,
+    wip: Option<String>,
+    recovery: Option<String>,
+}
+
+impl Kept {
+    fn of(retained: &Retained) -> Option<Self> {
+        match retained {
+            Retained::Known { branch, wip } => Some(Self {
+                branch: branch.clone(),
+                wip: wip.clone(),
+                recovery: retained.recovery(),
+            }),
+            Retained::Unknown => None,
+        }
+    }
 }
 
 /// Whether the request carried `force=true`.

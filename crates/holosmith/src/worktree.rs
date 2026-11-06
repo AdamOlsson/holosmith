@@ -19,6 +19,13 @@
 //! they run before the first `worktree add`, so a refused create leaves nothing behind. They are not
 //! one of the five commands, and they write nothing.
 //!
+//! Since HS-043 the module also holds the rule that says what a **teardown** leaves in the repository
+//! ([`Retained`], [`Worktree::retained`]): branch `agent/<id>` when it has commits beyond its base and
+//! is not merged into a target branch, and `refs/holosmith/wip/<id>` when its tree differs from the
+//! branch's. It is here rather than in the delete flow for the reason ADR-0029 gives: `remove` is the
+//! function that deletes the branch, so the rule that says "not this one" has to be answered beside it —
+//! and then a real repository in a `TempDir` can prove it with no daemon, no backend and no request.
+//!
 //! Three things this module measured, and each of them is a bug if it is forgotten:
 //!
 //! - **Every path is absolute.** `git worktree add` resolves a relative `<path>` against the
@@ -58,6 +65,11 @@ pub const BRANCH_PREFIX: &str = "agent/";
 /// in exactly one place (`Session`'s own doc spells the same rule).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Worktree {
+    /// 16 lowercase hex characters: what the branch, the directory and the snapshot ref are named for.
+    ///
+    /// Kept as a field since HS-043 as well as the branch, because the snapshot ref
+    /// (`refs/holosmith/wip/<id>`) is the one name this struct does not carry in `branch` or `path`.
+    pub id: String,
     /// `<projects_root>/<project>`: the repository the branch lives in, and where git runs.
     ///
     /// `project` is one path segment — the create validates it with `validate_project` before a row
@@ -79,6 +91,7 @@ impl Worktree {
     /// `Worktree` variant, and `GLOSSARY.md`'s **Worktree** entry.
     pub fn of(projects_root: &Path, project: &str, id: &str) -> Self {
         Self {
+            id: id.to_string(),
             repository: repository_of(projects_root, project),
             path: projects_root.join(WORKTREES).join(id),
             branch: format!("{BRANCH_PREFIX}{id}"),
@@ -157,7 +170,50 @@ impl Worktree {
         })
     }
 
+    /// What a teardown of this session must leave in the repository (HS-043, spec item 9).
+    ///
+    /// Two questions, each answered by the repository itself:
+    ///
+    /// - **the branch**, kept when it has commits beyond `base` and the merge question did not answer
+    ///   *yes* for a target. `base` is the row's `base_commit`; a row without one never finished its
+    ///   worktree step, so the question is unanswerable and the answer is [`Retained::Unknown`] — which
+    ///   keeps.
+    /// - **the snapshot ref**, kept when it exists and its tree differs from the branch's. Nothing here
+    ///   deletes that ref; the answer decides whether the operator is *told* about it (and given the
+    ///   recovery command), which is why a session that settled with nothing uncommitted names nothing
+    ///   (ADR-0049 removes the ref in exactly that case).
+    ///
+    /// A repository that is not there has none of this session's names in it, and that is not an error:
+    /// teardown's job is to leave nothing behind, and [`Retained::nothing`] is the answer (ADR-0023).
+    pub fn retained(&self, base: Option<&str>, targets: &[String]) -> Result<Retained, GitError> {
+        if !self.repository.is_dir() {
+            return Ok(Retained::nothing());
+        }
+        let Some(base) = base else {
+            return Ok(Retained::Unknown);
+        };
+        let head = self.branch_head()?;
+        let branch = match head.as_deref() {
+            // A branch that is not there is nothing to keep, and there is no merge to ask about.
+            None => None,
+            Some(_) if self.ahead(base)? == 0 => None,
+            Some(_) => match self.merged_into(targets)? {
+                Merged::Yes => None,
+                Merged::No | Merged::Unasked => Some(self.branch.clone()),
+            },
+        };
+        Ok(Retained::Known {
+            branch,
+            wip: self.differing_ref(head.as_deref())?,
+        })
+    }
+
     /// Remove the worktree, its branch and its registration: the story's teardown.
+    ///
+    /// `retained` is [`Worktree::retained`]'s answer: the branch it names is **not** deleted, because it
+    /// holds work nothing else has (HS-043). The registration and the directory go either way — a branch
+    /// is a name in the repository, not a copy of the worktree, and the files the agent left are the
+    /// snapshot's subject rather than the branch's.
     ///
     /// **A missing worktree is not an error, and neither is a missing branch or a missing project
     /// repository.** Teardown's job is to leave nothing behind, and a thing that is not there is nothing
@@ -168,14 +224,14 @@ impl Worktree {
     /// A *directory* that exists but is not registered as a worktree is left alone: git will not remove
     /// it, and an orphan from a crashed run is HS-044's to prune. Every path this module drives leaves
     /// the registration clean, which is what that story starts from.
-    pub fn remove(&self) -> Result<(), GitError> {
+    pub fn remove(&self, retained: &Retained) -> Result<(), GitError> {
         if !self.repository.is_dir() {
             return Ok(());
         }
         if self.registered()? {
             self.run(&["worktree", "remove", "--force", &self.path_arg()])?;
         }
-        if self.branch_exists()? {
+        if !retained.keeps_branch() && self.branch_exists()? {
             self.run(&["branch", "-D", &self.branch])?;
         }
         // Last, and always: a registration whose directory a crash left behind is what `prune` is for.
@@ -208,15 +264,78 @@ impl Worktree {
     }
 
     /// Whether the branch exists in the repository.
+    fn branch_exists(&self) -> Result<bool, GitError> {
+        Ok(self.branch_head()?.is_some())
+    }
+
+    /// The commit `agent/<id>` points at, or `None` when there is no such branch.
     ///
     /// `rev-parse --verify --quiet` answers 1 for "no such ref" and prints nothing; any other failure is
     /// a real one and is reported, because a repository that cannot be read is not a missing branch.
-    fn branch_exists(&self) -> Result<bool, GitError> {
+    fn branch_head(&self) -> Result<Option<String>, GitError> {
         let args = ["rev-parse", "--verify", "--quiet", &self.branch_ref()];
         let output = self.output(&args)?;
         match output.status.code() {
-            Some(0) => Ok(true),
-            Some(1) => Ok(false),
+            Some(0) => Ok(Some(
+                String::from_utf8_lossy(&output.stdout).trim().to_string(),
+            )),
+            Some(1) => Ok(None),
+            _ => Err(self.error(&args, &output)),
+        }
+    }
+
+    /// Whether `agent/<id>` is already merged into one of the configured targets (HS-043).
+    ///
+    /// One `merge-base --is-ancestor` per target, and **only per target this repository has**: the
+    /// config's default list names both `main` and `master` because a machine has one of them, so a name
+    /// that is not there is not a merge. A repository with none of them cannot answer at all, and an
+    /// unanswerable question keeps the branch ([`Merged::Unasked`]).
+    fn merged_into(&self, targets: &[String]) -> Result<Merged, GitError> {
+        let mut asked = false;
+        for target in targets {
+            let reference = format!("refs/heads/{target}");
+            let exists = ["rev-parse", "--verify", "--quiet", reference.as_str()];
+            let output = self.output(&exists)?;
+            match output.status.code() {
+                Some(0) => {}
+                Some(1) => continue,
+                _ => return Err(self.error(&exists, &output)),
+            }
+            asked = true;
+            let args = ["merge-base", "--is-ancestor", &self.branch, &reference];
+            let output = self.output(&args)?;
+            match output.status.code() {
+                Some(0) => return Ok(Merged::Yes),
+                Some(1) => {}
+                _ => return Err(self.error(&args, &output)),
+            }
+        }
+        Ok(if asked { Merged::No } else { Merged::Unasked })
+    }
+
+    /// `refs/holosmith/wip/<id>` when it exists and holds work the branch does not (HS-043).
+    ///
+    /// `git diff --quiet <ref> <branch>` is the whole question, and git spells it as one: exit 0 means the
+    /// two revisions have the same tree, exit 1 means they differ. With no branch there is nothing to be
+    /// equal to, so the ref is a difference. Nothing deletes the ref either way — this decides only
+    /// whether the operator is told about it.
+    fn differing_ref(&self, branch_head: Option<&str>) -> Result<Option<String>, GitError> {
+        let reference = crate::snapshot::reference(&self.id);
+        let verify = ["rev-parse", "--verify", "--quiet", reference.as_str()];
+        let output = self.output(&verify)?;
+        match output.status.code() {
+            Some(0) => {}
+            Some(1) => return Ok(None),
+            _ => return Err(self.error(&verify, &output)),
+        }
+        let Some(branch_head) = branch_head else {
+            return Ok(Some(reference));
+        };
+        let args = ["diff", "--quiet", reference.as_str(), branch_head];
+        let output = self.output(&args)?;
+        match output.status.code() {
+            Some(0) => Ok(None),
+            Some(1) => Ok(Some(reference)),
             _ => Err(self.error(&args, &output)),
         }
     }
@@ -253,6 +372,80 @@ impl Worktree {
         git_command(&self.repository, args)
     }
 }
+/// What a teardown leaves in the repository, and — when it can say — what is there (HS-043).
+///
+/// Two answers, because the rule and the report are the same decision:
+///
+/// - [`Retained::Known`] is the repository's answer. Either name may be `None`, and `None` for both is the
+///   ordinary case — a session that committed nothing worth keeping.
+/// - [`Retained::Unknown`] is "this repository could not be read". **It keeps the branch**, because
+///   "cannot tell" must never mean "delete", and the delete's answer claims nothing rather than
+///   claiming something it does not know.
+///
+/// The names are spelled fully (`agent/<id>`, `refs/holosmith/wip/<id>`) because they are what the
+/// operator is told and what the recovery command runs against; a short name would be a second spelling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Retained {
+    /// The repository answered: these names survive.
+    Known {
+        /// `agent/<id>` when it holds work nothing else has.
+        branch: Option<String>,
+        /// `refs/holosmith/wip/<id>` when it holds work the branch does not.
+        wip: Option<String>,
+    },
+    /// The repository could not be read, so the teardown keeps the branch and claims nothing.
+    Unknown,
+}
+
+impl Retained {
+    /// Nothing survives: a repository that is not there, a session that never had a worktree, and a
+    /// backend that keeps no repository at all (the stub, ADR-0015).
+    pub fn nothing() -> Self {
+        Self::Known {
+            branch: None,
+            wip: None,
+        }
+    }
+
+    /// Whether [`Worktree::remove`] must leave `agent/<id>` alone.
+    ///
+    /// [`Retained::Unknown`] answers `true`: a branch deleted because a repository could not be read is
+    /// work lost to a filesystem problem, which is the one thing a delete must not do.
+    pub fn keeps_branch(&self) -> bool {
+        match self {
+            Self::Known { branch, .. } => branch.is_some(),
+            Self::Unknown => true,
+        }
+    }
+
+    /// The spec's recovery command, when a snapshot ref survives the teardown.
+    ///
+    /// One spelling, here, because two — the answer's and the page's — is how a command an operator copies
+    /// stops being the command that works. `?force=true` does not change it.
+    pub fn recovery(&self) -> Option<String> {
+        match self {
+            Self::Known {
+                wip: Some(reference),
+                ..
+            } => Some(format!("git branch rescue {reference}")),
+            _ => None,
+        }
+    }
+}
+
+/// The answer to "is this branch already in a target?" (HS-043), with the third answer the two booleans
+/// cannot carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Merged {
+    /// It is an ancestor of a target this repository has: the work is already where it belongs.
+    Yes,
+    /// It is not an ancestor of any target, and at least one was asked.
+    No,
+    /// The repository has none of the configured targets, so nothing answered — and an unanswerable
+    /// question keeps the branch.
+    Unasked,
+}
+
 /// The project repository `project` lives in, under the machine's projects root: `<projects>/<project>`.
 ///
 /// A function rather than a second `join` at each site, because a create needs the repository *before* a

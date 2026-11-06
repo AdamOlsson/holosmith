@@ -26,6 +26,7 @@ use crate::container::ContainerSettings;
 use crate::events::EventWriter;
 use crate::runtime::Backend;
 use crate::sessions::Session;
+use crate::worktree::Retained;
 
 /// One stage of provisioning, in the order the spec names them (item 7).
 ///
@@ -322,8 +323,26 @@ pub trait SessionBackend {
     /// Bring a stopped session back, with the same id.
     async fn resume(&self, session: &Session) -> Result<(), BackendError>;
 
-    /// Remove everything the session owns.
-    async fn delete(&self, session: &Session) -> Result<(), BackendError>;
+    /// Remove everything the session owns, keeping what `retained` names (HS-043).
+    ///
+    /// `retained` is [`Self::retained`]'s answer, handed rather than recomputed: the request that answered
+    /// 202 is what told the operator what survives, so the teardown must apply *that* decision or the two
+    /// can disagree about a commit that landed between them.
+    async fn delete(&self, session: &Session, retained: &Retained) -> Result<(), BackendError>;
+
+    /// What a teardown of `session` must leave in its repository (HS-043, spec item 9).
+    ///
+    /// `targets` is the config's `[merge] targets` — the branches a merge would land in, and therefore the
+    /// branches that answer "is this already merged?". It travels as an argument because the answer is the
+    /// repository's (a backend question) and the list is the machine's (a config question).
+    ///
+    /// A backend with no repository answers [`Retained::nothing`]: the stub mounts nothing, so it keeps
+    /// nothing, and a machine with no project has nothing of this session's to keep either.
+    async fn retained(
+        &self,
+        session: &Session,
+        targets: &[String],
+    ) -> Result<Retained, BackendError>;
 
     /// Record uncommitted work without touching the branch or the working tree.
     async fn snapshot(&self, session: &Session) -> Result<(), BackendError>;
@@ -447,10 +466,21 @@ impl SessionBackend for Backends {
         }
     }
 
-    async fn delete(&self, session: &Session) -> Result<(), BackendError> {
+    async fn delete(&self, session: &Session, retained: &Retained) -> Result<(), BackendError> {
         match self {
-            Self::Stub(backend) => backend.delete(session).await,
-            Self::Docker(backend) => backend.delete(session).await,
+            Self::Stub(backend) => backend.delete(session, retained).await,
+            Self::Docker(backend) => backend.delete(session, retained).await,
+        }
+    }
+
+    async fn retained(
+        &self,
+        session: &Session,
+        targets: &[String],
+    ) -> Result<Retained, BackendError> {
+        match self {
+            Self::Stub(backend) => backend.retained(session, targets).await,
+            Self::Docker(backend) => backend.retained(session, targets).await,
         }
     }
 

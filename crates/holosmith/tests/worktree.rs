@@ -20,7 +20,7 @@ use holosmith::http::{self, AppState};
 use holosmith::runtime::Backend;
 use holosmith::sessions::state::Trigger;
 use holosmith::sessions::{Session, Status};
-use holosmith::worktree::{Refusal, Worktree, repository_of};
+use holosmith::worktree::{Refusal, Retained, Worktree, repository_of};
 use serde_json::Value;
 
 mod support;
@@ -323,7 +323,10 @@ async fn deleting_a_session_removes_its_worktree_too() {
             .expect("the worktree step works"),
     );
 
-    backend.delete(&session).await.expect("the delete works");
+    backend
+        .delete(&session, &Retained::nothing())
+        .await
+        .expect("the delete works");
 
     assert!(
         !Path::new(&path).exists(),
@@ -347,7 +350,7 @@ async fn tearing_down_a_worktree_that_never_existed_is_not_a_failure() {
         .await
         .expect("a worktree that was never made is nothing to undo");
     backend
-        .delete(&session)
+        .delete(&session, &Retained::nothing())
         .await
         .expect("a session whose worktree was never made can still be removed");
     assert_eq!(
@@ -355,6 +358,339 @@ async fn tearing_down_a_worktree_that_never_existed_is_not_a_failure() {
         vec![repo.display().to_string()],
         "the teardown registered something"
     );
+}
+
+// ---- what a delete keeps (HS-043, spec item 9) -------------------------------------------------
+
+/// The two names `[merge] targets` carries by default: the branches a session's work may land in.
+fn default_targets() -> Vec<String> {
+    targets(&["main", "master"])
+}
+
+fn targets(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| name.to_string()).collect()
+}
+
+/// A projects root whose repository is on `branch`, with one commit — so `main` and `master` are a
+/// decision the test makes rather than this machine's `init.defaultBranch`.
+fn projects_on(dir: &TempDir, branch: &str) -> (PathBuf, PathBuf) {
+    let root = dir.file("projects");
+    let repo = root.join("holosmith");
+    support::repository_on(&repo, branch);
+    (root, repo)
+}
+
+/// The worktree a `Step::Worktree` provision made, with the base commit recorded on `session` the way the
+/// provisioner records it (ADR-0029) — `retained` reads the row's, not the branch's.
+async fn provisioned_worktree(backend: &DockerBackend, session: &mut Session) -> (PathBuf, String) {
+    let (path, base, _) = made(
+        backend
+            .provision(session, Step::Worktree)
+            .await
+            .expect("the worktree step works"),
+    );
+    session.base_commit = Some(base.clone());
+    (PathBuf::from(path), base)
+}
+
+/// One commit in the session's worktree — the agent's own work, simulated.
+fn commit_in(worktree: &Path, name: &str) {
+    std::fs::write(worktree.join(name), "the agent's work\n").expect("the worktree is writable");
+    support::git(worktree, &["add", name]);
+    support::git(worktree, &["commit", "--quiet", "-m", "the agent's commit"]);
+}
+
+#[tokio::test]
+async fn a_branch_ahead_of_its_base_and_not_merged_survives_a_delete() {
+    // The story's first keep-rule: the branch holds work nothing else has, so the delete removes the
+    // worktree and leaves the branch behind (spec item 9).
+    let dir = TempDir::new("worktree-keep-ahead");
+    let (root, repo) = projects_on(&dir, "main");
+    let backend = backend(&root);
+    let mut session = session("0123456789abcdef", None);
+    let (path, _) = provisioned_worktree(&backend, &mut session).await;
+    commit_in(&path, "work.txt");
+
+    let retained = backend
+        .retained(&session, &default_targets())
+        .await
+        .expect("the repository answers");
+    assert_eq!(
+        retained,
+        Retained::Known {
+            branch: Some("agent/0123456789abcdef".to_string()),
+            wip: None,
+        },
+        "a commit ahead of the base and in no target is work to keep"
+    );
+    assert_eq!(
+        retained.recovery(),
+        None,
+        "nothing was snapshotted, so there is nothing to recover"
+    );
+
+    backend
+        .delete(&session, &retained)
+        .await
+        .expect("the delete works");
+
+    assert!(
+        support::branch_exists(&repo, "agent/0123456789abcdef"),
+        "the branch's work was deleted with the worktree"
+    );
+    assert!(!path.exists(), "the worktree is still there");
+}
+
+#[tokio::test]
+async fn a_branch_merged_into_a_target_does_not_survive_a_delete() {
+    // The other half of the first rule: work that is already in a target is not work at risk.
+    let dir = TempDir::new("worktree-keep-merged");
+    let (root, repo) = projects_on(&dir, "main");
+    let backend = backend(&root);
+    let mut session = session("0123456789abcdef", None);
+    let (path, _) = provisioned_worktree(&backend, &mut session).await;
+    commit_in(&path, "work.txt");
+    // The merge that makes the branch's work the target's — a fast-forward, which is what `git merge`
+    // does while the target has not moved.
+    support::git(&repo, &["merge", "--ff-only", "agent/0123456789abcdef"]);
+
+    let retained = backend
+        .retained(&session, &default_targets())
+        .await
+        .expect("the repository answers");
+    assert_eq!(
+        retained,
+        Retained::Known {
+            branch: None,
+            wip: None,
+        },
+        "a merged branch holds nothing the target does not"
+    );
+
+    backend
+        .delete(&session, &retained)
+        .await
+        .expect("the delete works");
+
+    assert!(
+        !support::branch_exists(&repo, "agent/0123456789abcdef"),
+        "the merged branch was kept"
+    );
+}
+
+#[tokio::test]
+async fn a_branch_with_nothing_beyond_its_base_does_not_survive_a_delete() {
+    // A session that was provisioned and never worked: there is no commit the base does not have, so
+    // there is nothing to keep and nothing to say. The repository is on `trunk`, which is **none** of the
+    // targets, so the "no target can answer" rule would keep the branch — this test is what says the
+    // ahead question is asked first and answers on its own.
+    let dir = TempDir::new("worktree-keep-nothing");
+    let (root, repo) = projects_on(&dir, "trunk");
+    let backend = backend(&root);
+    let mut session = session("0123456789abcdef", None);
+    let (path, _) = provisioned_worktree(&backend, &mut session).await;
+
+    let retained = backend
+        .retained(&session, &default_targets())
+        .await
+        .expect("the repository answers");
+    assert_eq!(retained, Retained::nothing());
+
+    backend
+        .delete(&session, &retained)
+        .await
+        .expect("the delete works");
+
+    assert!(!support::branch_exists(&repo, "agent/0123456789abcdef"));
+    assert!(!path.exists(), "the worktree is still there");
+}
+
+#[tokio::test]
+async fn a_repository_with_only_one_of_the_targets_keeps_an_unmerged_branch() {
+    // `[merge] targets` defaults to both `main` and `master` because a machine has one of them, so the
+    // absent name must not answer "merged" — and a repository with none of them must not answer at all.
+    let dir = TempDir::new("worktree-keep-master");
+    let (root, repo) = projects_on(&dir, "master");
+    let backend = backend(&root);
+    let mut session = session("0123456789abcdef", None);
+    let (path, _) = provisioned_worktree(&backend, &mut session).await;
+    commit_in(&path, "work.txt");
+    let kept = Retained::Known {
+        branch: Some("agent/0123456789abcdef".to_string()),
+        wip: None,
+    };
+
+    // `main` does not exist here and `master` does not have the branch.
+    assert_eq!(
+        backend
+            .retained(&session, &default_targets())
+            .await
+            .expect("the repository answers"),
+        kept,
+        "the missing `main` swallowed the branch"
+    );
+    // A list this repository has none of cannot answer, and an unanswerable question keeps.
+    assert_eq!(
+        backend
+            .retained(&session, &targets(&["trunk"]))
+            .await
+            .expect("the repository answers"),
+        kept,
+        "a repository with no target at all guessed the branch away"
+    );
+
+    backend
+        .delete(&session, &kept)
+        .await
+        .expect("the delete works");
+    assert!(
+        support::branch_exists(&repo, "agent/0123456789abcdef"),
+        "the branch was deleted on a repository that only has `master`"
+    );
+}
+
+#[tokio::test]
+async fn a_snapshot_that_differs_from_the_branch_is_kept_and_named() {
+    // The story's second keep-rule: uncommitted work at `refs/holosmith/wip/<id>` survives the delete, the
+    // answer names it, and the spec's recovery command is the one that works.
+    let dir = TempDir::new("worktree-keep-wip");
+    let (root, repo) = projects_on(&dir, "main");
+    let backend = backend(&root);
+    let mut session = session("0123456789abcdef", None);
+    let (path, _) = provisioned_worktree(&backend, &mut session).await;
+    std::fs::write(path.join("tracked.txt"), "uncommitted\n").expect("the worktree is writable");
+    backend
+        .snapshot(&session)
+        .await
+        .expect("the snapshot is taken");
+
+    let reference = format!("refs/holosmith/wip/{}", session.id);
+    let retained = backend
+        .retained(&session, &default_targets())
+        .await
+        .expect("the repository answers");
+    assert_eq!(
+        retained,
+        Retained::Known {
+            branch: None,
+            wip: Some(reference.clone()),
+        }
+    );
+    assert_eq!(
+        retained.recovery(),
+        Some(format!("git branch rescue {reference}")),
+        "the command is not the spec's"
+    );
+
+    backend
+        .delete(&session, &retained)
+        .await
+        .expect("the delete works");
+
+    // The ref is not the teardown's to delete, so it answers afterwards — and the command recovers the
+    // work it names, which is what makes the sentence worth printing.
+    let commit = support::git(&repo, &["rev-parse", "--verify", &reference]);
+    assert_eq!(
+        commit.len(),
+        40,
+        "the snapshot ref did not survive: {commit}"
+    );
+    support::git(&repo, &["branch", "rescue", &reference]);
+    assert_eq!(
+        support::git(&repo, &["show", "rescue:tracked.txt"]),
+        "uncommitted"
+    );
+}
+
+#[tokio::test]
+async fn a_snapshot_the_branch_already_holds_is_not_named() {
+    // A snapshot is a commit of the *working tree*. Once the branch has committed exactly that tree there
+    // is nothing left to recover, and a command that recovers nothing is a sentence that misleads.
+    let dir = TempDir::new("worktree-keep-equal");
+    let (root, _repo) = projects_on(&dir, "main");
+    let backend = backend(&root);
+    let mut session = session("0123456789abcdef", None);
+    let (path, _) = provisioned_worktree(&backend, &mut session).await;
+    std::fs::write(path.join("tracked.txt"), "committed after all\n").expect("writable");
+    backend
+        .snapshot(&session)
+        .await
+        .expect("the snapshot is taken");
+    // The agent then commits exactly what the snapshot captured.
+    support::git(&path, &["add", "tracked.txt"]);
+    support::git(&path, &["commit", "--quiet", "-m", "the agent's commit"]);
+
+    let retained = backend
+        .retained(&session, &default_targets())
+        .await
+        .expect("the repository answers");
+    assert_eq!(
+        retained,
+        Retained::Known {
+            branch: Some("agent/0123456789abcdef".to_string()),
+            wip: None,
+        },
+        "a tree the branch already has was offered as recoverable work"
+    );
+    assert_eq!(retained.recovery(), None);
+}
+
+#[tokio::test]
+async fn a_repository_that_cannot_answer_keeps_the_branch() {
+    // `Retained::Unknown` is what a row with no base commit (and a repository git cannot read) answers.
+    // "Cannot tell" must never mean "delete": the teardown leaves the branch and the answer claims
+    // nothing.
+    let dir = TempDir::new("worktree-keep-unknown");
+    let (root, repo) = projects_on(&dir, "main");
+    let backend = backend(&root);
+    let mut session = session("0123456789abcdef", None);
+    let (path, base) = provisioned_worktree(&backend, &mut session).await;
+    commit_in(&path, "work.txt");
+    // A row an older binary wrote: the branch and its commit are there, the base is not recorded.
+    session.base_commit = None;
+    let reference = base;
+    assert_eq!(reference.len(), 40, "the provision recorded a commit");
+
+    let retained = backend
+        .retained(&session, &default_targets())
+        .await
+        .expect("the repository answers");
+    assert_eq!(retained, Retained::Unknown);
+    assert!(
+        retained.keeps_branch(),
+        "an unanswered question deleted the branch"
+    );
+
+    backend
+        .delete(&session, &retained)
+        .await
+        .expect("the delete works");
+
+    assert!(
+        support::branch_exists(&repo, "agent/0123456789abcdef"),
+        "the branch was deleted because a row had no base commit"
+    );
+    assert!(!path.exists(), "the worktree is still there");
+}
+
+#[tokio::test]
+async fn a_repository_that_is_not_there_keeps_nothing_and_claims_nothing() {
+    // A projects root with no project in it: nothing of this session's is there, and teardown of
+    // something absent is not a failure (ADR-0023).
+    let dir = TempDir::new("worktree-keep-absent");
+    let root = dir.file("projects");
+    let backend = backend(&root);
+    let session = session(
+        "0123456789abcdef",
+        Some("0123456789012345678901234567890123456789"),
+    );
+
+    let retained = backend
+        .retained(&session, &default_targets())
+        .await
+        .expect("a missing repository answers");
+    assert_eq!(retained, Retained::nothing());
+    assert_eq!(retained.recovery(), None);
 }
 
 #[tokio::test]
@@ -598,7 +934,7 @@ async fn a_later_step_failure_does_not_take_an_adopted_worktree_back() {
     // delete cannot remove it".
     state
         .backend
-        .delete(&row(&state, &session.id))
+        .delete(&row(&state, &session.id), &Retained::nothing())
         .await
         .expect("the delete removes what the session owns");
     assert!(!path.exists(), "the delete left the worktree behind");

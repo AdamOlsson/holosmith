@@ -19,6 +19,7 @@
 use holosmith::backend::{BackendError, DockerBackend, Provisioned, SessionBackend, Step};
 use holosmith::container::ContainerSettings;
 use holosmith::sessions::{Session, Status};
+use holosmith::worktree::Retained;
 
 mod support;
 use support::{TempDir, fast_stub};
@@ -72,9 +73,12 @@ async fn conformance<B: SessionBackend>(backend: &B, label: &str, failures: Fail
         }
     }
     for _ in 0..2 {
-        backend.delete(&session()).await.unwrap_or_else(|error| {
-            panic!("{label}: deleting a session that owns nothing failed: {error}")
-        });
+        backend
+            .delete(&session(), &Retained::nothing())
+            .await
+            .unwrap_or_else(|error| {
+                panic!("{label}: deleting a session that owns nothing failed: {error}")
+            });
     }
     // Case 2: a failure names the step or operation it could not do, because the sentence is what the row
     // and the transcript show the operator.

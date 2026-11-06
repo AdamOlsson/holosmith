@@ -11,7 +11,8 @@
 //! 1. **Revoke the session's dummy key.** First, because a key that spends money should stop
 //!    working the moment the operator asked [(`revoke_key`)](revoke_key).
 //! 2. **Remove what the backend owns** — [`SessionBackend::delete`], which is the container, the
-//!    worktree, the session directory and the network in one call. A backend that *cannot* delete
+//!    worktree, the session directory and the network in one call, and which is handed the keep-rule's
+//!    answer so the branch and the snapshot ref it names survive (HS-043). A backend that *cannot* delete
 //!    has created nothing to remove, so the flow carries on; any other failure means resources may
 //!    still be there, so the row stays `deleting` and a repeat request retries this task.
 //! 3. **Remove the row and its event log**, in one transaction: the row is what names the
@@ -35,6 +36,7 @@ use crate::backend::{BackendError, Backends, SessionBackend};
 use crate::db::Database;
 use crate::events::StreamRegistry;
 use crate::sessions::Session;
+use crate::worktree::Retained;
 
 /// The reason the ladder records when a delete had to force-stop a running turn.
 ///
@@ -73,8 +75,10 @@ impl Deleter {
     }
 
     /// Hand `session` to a background task and return immediately.
-    pub fn spawn(self, session: Session) -> JoinHandle<()> {
-        tokio::spawn(async move { self.remove(&session).await })
+    ///
+    /// `retained` is the answer the 202 carried (HS-043), for the reason [`Deleter::remove`] gives.
+    pub fn spawn(self, session: Session, retained: Retained) -> JoinHandle<()> {
+        tokio::spawn(async move { self.remove(&session, &retained).await })
     }
 
     /// Remove `session`, which the caller has already moved to `deleting`.
@@ -82,15 +86,20 @@ impl Deleter {
     /// Public for the reason the other runners' `run` is: a test can await the removal instead of
     /// racing a spawned task.
     ///
+    /// `retained` is the keep-rule's answer, computed by the request that told the operator what survives
+    /// (HS-043). It is handed rather than recomputed for one reason: the answer and the removal must be the
+    /// same decision, and a commit that landed between them would make a recomputation disagree with what
+    /// the operator was just told.
+    ///
     /// Every ending closes the streams, because a session in `deleting` is nobody's to watch any
     /// more. A failure leaves the row as it is, with the message in the log and the operator's next
     /// `DELETE` as the retry.
-    pub async fn remove(&self, session: &Session) {
+    pub async fn remove(&self, session: &Session, retained: &Retained) {
         revoke_key(session, &self.secrets);
         // No expected-stop flag here, deliberately: the *backend* is what makes a delete's exit quiet, by
         // forgetting the launch before it removes the container (HS-031, ADR-0039). The flag would say
         // "the server asked for this stop", which the row is about to stop existing for.
-        match self.backend.delete(session).await {
+        match self.backend.delete(session, retained).await {
             Ok(()) => {}
             // A backend that cannot delete has never built anything for this session: it refuses
             // provisioning too (the one thing `BackendError::Unsupported` is for, ADR-0015). So the

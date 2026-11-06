@@ -20,6 +20,7 @@ use holosmith::backend::{
 };
 use holosmith::container::{ContainerSettings, Limits, SessionContainer};
 use holosmith::sessions::{Session, Status};
+use holosmith::worktree::Retained;
 use serde_json::json;
 
 /// One id per test: a container is `s_<id>` and a network is `agents_<id>`, so two tests that shared one
@@ -326,7 +327,7 @@ fn a_real_container_runs_pi_and_answers_the_ready_handshake() {
         "an exit is reported once"
     );
     runtime
-        .block_on(backend.delete(&session))
+        .block_on(backend.delete(&session, &Retained::nothing()))
         .expect("the teardown works");
     assert!(
         !scratch.path.join("data/sessions").join(ID).exists(),
@@ -372,7 +373,10 @@ fn an_image_whose_pi_cannot_answer_fails_the_session_at_the_container_step() {
             reason.contains("which pi it runs"),
             "the sentence does not say what could not be answered: {reason}"
         );
-        backend.delete(&session).await.expect("the teardown works");
+        backend
+            .delete(&session, &Retained::nothing())
+            .await
+            .expect("the teardown works");
     });
 }
 
@@ -452,7 +456,10 @@ fn the_turns_commands_reach_pi_and_a_refusal_is_pis_sentence() {
             .expect("pi answers `get_state` after a refused prompt");
         assert!(reply.success, "{reply:?}");
 
-        backend.delete(&session).await.expect("the teardown works");
+        backend
+            .delete(&session, &Retained::nothing())
+            .await
+            .expect("the teardown works");
     });
 }
 

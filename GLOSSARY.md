@@ -222,6 +222,15 @@ removal; once the row is gone the answer is 404. Its machine names are `Deleter`
 `Deleter::remove`), `Trigger::Delete` and the state `deleting`.
 _Avoid_: Purge, drop, cleanup, destruction
 
+**Kept work**:
+What a **Delete flow** leaves in the project repository, because deleting a session must not mean losing
+its work: branch `agent/<id>` when its **Ahead** is greater than zero and it is not merged into a **Target
+branch**, and `refs/holosmith/wip/<id>` when its tree differs from the branch's. The delete's answer names
+them (`kept`), and recovery is `git branch rescue refs/holosmith/wip/<id>`. A repository that cannot answer
+keeps the branch — "cannot tell" is never "delete" — and claims nothing. Its machine names are
+`worktree::Retained` and `Worktree::retained`.
+_Avoid_: Preserved work, residue, leftovers, orphan branch
+
 **Unsaved work**:
 A session's uncommitted changes that no **WIP snapshot** could record, which is what makes a delete
 answer 409 `unsaved_work` instead of removing the session. `?force=true` is the operator saying the

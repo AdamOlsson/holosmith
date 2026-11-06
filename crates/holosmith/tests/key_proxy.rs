@@ -20,6 +20,7 @@ use holosmith::key::{KEY_PROXY_ALIAS, KEY_PROXY_PORT, Store};
 use holosmith::keyproxy;
 use holosmith::runtime::Backend;
 use holosmith::sessions::{Session, Status};
+use holosmith::worktree::Retained;
 
 struct TempDir {
     path: PathBuf,
@@ -152,7 +153,7 @@ async fn the_delete_flow_revokes_the_sessions_dummy_key() {
         StreamRegistry::new(),
         store.path().to_path_buf(),
     );
-    deleter.remove(&session).await;
+    deleter.remove(&session, &Retained::nothing()).await;
     let secrets = store.load().expect("the store reads after the delete");
     assert!(
         Store::session_of(&secrets, &dummy).is_none(),
