@@ -198,9 +198,19 @@ pub struct Config {
     pub data_root: PathBuf,
     pub projects_root: PathBuf,
     /// The image a session's container runs (HS-027). Item 10 §3 builds it, so the default names the
-    /// image a deployed machine already has: `agent-image:<this binary's version>`. HS-031 compares the
-    /// image's pi version with the pinned one, and HS-047 builds it for the machine it deploys to.
+    /// image a deployed machine already has: `agent-image:<this binary's version>` — from
+    /// [`crate::images::agent_image`], which is the one place that name is spelled. HS-031 compares the
+    /// image's pi version with the pinned one, and HS-048 builds it for the machine it deploys to.
     pub agent_image: String,
+    /// The Debian packages the agent image installs beyond git, openssl and CA certificates (HS-048).
+    ///
+    /// The spec's "the toolchains named in the config": `docs/build.md`'s table says a machine's image
+    /// carries the toolchains its projects use, so they are a key rather than a constant — and the image's
+    /// `org.holosmith.toolchains` label carries the list it was built with, which is what makes a changed list
+    /// a rebuild rather than a re-tag. An empty list is a legitimate answer (a machine whose projects only need
+    /// git), so it is not refused; a blank name is, because `apt-get install ""` is a build failure whose line
+    /// names nothing.
+    pub agent_toolchains: Vec<String>,
     /// What one session's container may use (HS-028, spec item 6's resource limits): whole CPUs,
     /// mebibytes of memory, and a process count. Three integers because a config value has no decimal
     /// and Docker's `--cpus` accepts the integer form; the defaults are `docs/build.md`'s flag list.
@@ -245,7 +255,8 @@ impl Default for Config {
             owner: None,
             data_root: PathBuf::from("/var/lib/holosmith"),
             projects_root: PathBuf::from("/srv/holosmith/projects"),
-            agent_image: format!("agent-image:{}", env!("CARGO_PKG_VERSION")),
+            agent_image: crate::images::agent_image(),
+            agent_toolchains: vec!["python3".to_string(), "ripgrep".to_string()],
             container_cpus: 2,
             container_memory_mb: 4096,
             container_pids: 512,
@@ -945,6 +956,7 @@ owner = "me@example.com"
 data_root = "/var/lib/holosmith"
 projects_root = "/srv/holosmith/projects"
 agent_image = "pi-agent:local"
+agent_toolchains = ["node", "ripgrep"]
 container_cpus = 3
 container_memory_mb = 2048
 container_pids = 256
@@ -1027,6 +1039,7 @@ allow = ["crates.io"]
         assert_eq!(config.data_root, Path::new("/var/lib/holosmith"));
         assert_eq!(config.projects_root, Path::new("/srv/holosmith/projects"));
         assert_eq!(config.agent_image, "pi-agent:local");
+        assert_eq!(config.agent_toolchains, ["node", "ripgrep"]);
         assert_eq!(config.container_cpus, 3);
         assert_eq!(config.container_memory_mb, 2048);
         assert_eq!(config.container_pids, 256);
@@ -1213,6 +1226,24 @@ allow = ["crates.io"]
             problems_of("agent_image = \"  \"\n"),
             "config.toml:1:1: agent_image: must name an image, not an empty string\n\
              1 problem in config.toml\n"
+        );
+    }
+
+    #[test]
+    fn an_empty_toolchain_name_is_refused_and_an_empty_list_is_not() {
+        // The list is what `apt-get install` is given, so a blank entry becomes an argument that names no
+        // package: a build fails with a line about a package nobody wrote. An empty *list* is a supported
+        // machine (an image with git, openssl and CA certificates and nothing else), which is why it passes.
+        assert_eq!(
+            problems_of("agent_toolchains = [\"python3\", \"  \"]\n"),
+            "config.toml:1:1: agent_toolchains: must name a package, not \"  \"\n\
+             1 problem in config.toml\n"
+        );
+        assert_eq!(
+            parse("agent_toolchains = []\n")
+                .expect("an empty toolchain list is a supported image")
+                .agent_toolchains,
+            Vec::<String>::new()
         );
     }
 

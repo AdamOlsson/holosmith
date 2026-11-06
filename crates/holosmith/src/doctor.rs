@@ -23,6 +23,7 @@
 //! exits 0 for a clean merge and 1 with paths for a conflict" — and it runs on a throwaway repository under
 //! `std::env::temp_dir()`, which is the only way to answer it without owning a project.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -35,6 +36,7 @@ use crate::config::{Config, Role};
 use crate::container::{PROXY_ALIAS, PROXY_NAME};
 use crate::db;
 use crate::docker::Docker;
+use crate::images::{Expectation, Kind};
 use crate::key::{KEY_PROXY_ALIAS, KEY_PROXY_NAME};
 use crate::preflight::{self, Check, Finding, Outcome};
 use crate::schema::{self, Verdict};
@@ -115,6 +117,13 @@ pub trait Machine {
     /// with no network.
     fn image_pi(&self, image: &str) -> Result<String, String>;
 
+    /// The `org.holosmith.*` labels an image carries: `Ok(Some(map))` when it is there, `Ok(None)` when it is not.
+    ///
+    /// The same read `server deploy`'s step 3 makes, reached through [`crate::images::Images`]'s `Docker` impl
+    /// rather than through a second copy of the `docker image inspect` call — one reader, so the label step's
+    /// skip rule and this check cannot disagree about what an image says.
+    fn image_labels(&self, image: &str) -> Result<Option<BTreeMap<String, String>>, String>;
+
     /// The network self-test, whose bare probe is the network-off probe (ADR-0044/ADR-0046).
     fn selftest(&self, image: &str) -> selftest::Outcome;
 }
@@ -126,6 +135,10 @@ impl Machine for Docker {
 
     fn image_pi(&self, image: &str) -> Result<String, String> {
         agent::version_of(self, image)
+    }
+
+    fn image_labels(&self, image: &str) -> Result<Option<BTreeMap<String, String>>, String> {
+        <Docker as crate::images::Images>::labels(self, image)
     }
 
     fn selftest(&self, image: &str) -> selftest::Outcome {
@@ -228,7 +241,7 @@ pub fn run(config: &Config, depth: Depth, tools: &Tools, machine: &dyn Machine) 
             docker_ok,
             because,
         ));
-        findings.push(image_check(machine, image, docker_ok, because));
+        findings.push(image_check(config, machine, image, docker_ok, because));
     }
     Report { depth, findings }
 }
@@ -709,12 +722,25 @@ fn proxy(
     )
 }
 
-/// Whether the configured agent image runs the pi this binary is built for (spec's build-and-release note:
-/// "`doctor` fails if the agent image's pi differs from it").
+/// Whether the configured agent image runs the pi this binary is built for **and carries this binary's labels**
+/// (spec's build-and-release note: "`doctor` fails if the agent image's pi differs from it").
 ///
-/// The same two functions HS-031 asserts with at a launch — [`agent::version_of`] and [`agent::version_check`] —
-/// asked on demand, so the sentence an operator reads here is the one a session would fail with.
-fn image_check(machine: &dyn Machine, image: &str, docker_ok: bool, because: &str) -> Finding {
+/// The pi question is the same two functions HS-031 asserts with at a launch — [`agent::version_of`] and
+/// [`agent::version_check`] — asked on demand, so the sentence an operator reads here is the one a session would
+/// fail with. The labels are the second half the pi version cannot answer: an image can run the pinned pi and
+/// still carry toolchains or a git tag that this binary did not build, which is why `server deploy`'s step 3
+/// compares the same four keys (ADR-0057).
+///
+/// An image with **no** Holosmith labels at all is a pass, on the pi sentence plus a remark saying what could not
+/// be compared: `pi-agent:local` is a supported way to run a session, and a doctor that failed on it would
+/// refuse a machine the spec allows.
+fn image_check(
+    config: &Config,
+    machine: &dyn Machine,
+    image: &str,
+    docker_ok: bool,
+    because: &str,
+) -> Finding {
     if !docker_ok {
         return Finding::unknown(
             Check::Image,
@@ -724,19 +750,75 @@ fn image_check(machine: &dyn Machine, image: &str, docker_ok: bool, because: &st
             ),
         );
     }
-    match machine.image_pi(image) {
-        Ok(found) => match agent::version_check(image, &found) {
-            Ok(found) => Finding::pass(
+    let found = match machine.image_pi(image) {
+        Ok(found) => found,
+        Err(said) => {
+            return Finding::fail(
                 Check::Image,
-                format!("the agent image {image} runs pi {found}, which is the pinned one"),
+                format!(
+                    "the agent image {image} did not run ({said}): build it with `holosmith server deploy`'s \
+                     step 3, or point `agent_image` at an image that has pi"
+                ),
+            );
+        }
+    };
+    let found = match agent::version_check(image, &found) {
+        Ok(found) => found,
+        Err(sentence) => return Finding::fail(Check::Image, sentence),
+    };
+    let expected = Expectation::of(Kind::Agent, config);
+    match machine.image_labels(image) {
+        // The image answered a run and then was not there: the daemon is answering two questions about the same
+        // image inconsistently, which is a machine problem rather than an image's verdict — and it must not read
+        // as "unlabelled", which is a pass, or as "no mismatch", which would hide it.
+        Ok(None) => Finding::fail(
+            Check::Image,
+            format!(
+                "the agent image {image} ran `pi --version` and then was not there when its labels were read: the \
+                 daemon is answering two questions about the same image inconsistently"
             ),
-            Err(sentence) => Finding::fail(Check::Image, sentence),
-        },
+        ),
+        // No Holosmith label at all is the by-hand image, and a pass: `pi-agent:local` is a supported way to run a
+        // session (a machine that tagged its own image), and failing it would refuse a machine the spec allows.
+        // The sentence says what it could not compare, so the pass is not read as a label comparison that agreed.
+        Ok(Some(labels)) if expected.unbuilt(&labels) => Finding::pass(
+            Check::Image,
+            format!(
+                "the agent image {image} runs pi {found}, which is the pinned one, and it carries no Holosmith \
+                 labels: it was not built from this binary's Dockerfile, so there is nothing to compare"
+            ),
+        ),
+        Ok(Some(labels)) => {
+            let mismatches = expected.mismatches(&labels);
+            if mismatches.is_empty() {
+                return Finding::pass(
+                    Check::Image,
+                    format!(
+                        "the agent image {image} runs pi {found} and carries this binary's labels (version {}, \
+                         git tag {}, pi {}, toolchains {})",
+                        expected.version,
+                        expected.git_tag,
+                        expected.pi_version,
+                        expected.toolchains.unwrap_or_default().join(" ")
+                    ),
+                );
+            }
+            Finding::fail(
+                Check::Image,
+                format!(
+                    "the agent image {image} is not this binary's build: {} — `holosmith server deploy`'s step 3 \
+                     rebuilds it, or point `agent_image` at another image",
+                    mismatches.join("; ")
+                ),
+            )
+        }
+        // An image that answers a run and not an inspect is a machine problem rather than an image's verdict, and
+        // it still has to cost a line: a label read that failed silently would make a mismatched image a pass.
         Err(said) => Finding::fail(
             Check::Image,
             format!(
-                "the agent image {image} did not run ({said}): build it with this release's image step (HS-048), or \
-                 point `agent_image` at an image that has pi"
+                "the agent image {image} runs pi {found}, but its labels could not be read ({said}): building it \
+                 with `holosmith server deploy`'s step 3 is the fix a label read that failed points at"
             ),
         ),
     }
@@ -975,6 +1057,7 @@ mod tests {
     #[test]
     fn a_missing_image_names_the_build_and_the_key() {
         let finding = image_check(
+            &Config::default(),
             &NoDaemon,
             "agent-image:test",
             true,
@@ -991,6 +1074,11 @@ mod tests {
             "{}",
             finding.sentence
         );
+        assert!(
+            finding.sentence.contains("server deploy"),
+            "the failure does not name the step that builds one: {}",
+            finding.sentence
+        );
     }
 
     /// A machine whose container questions all answer "nothing there" — the daemon-less half of a machine.
@@ -1003,6 +1091,10 @@ mod tests {
 
         fn image_pi(&self, _image: &str) -> Result<String, String> {
             Err("no such image".to_string())
+        }
+
+        fn image_labels(&self, _image: &str) -> Result<Option<BTreeMap<String, String>>, String> {
+            Ok(None)
         }
 
         fn selftest(&self, _image: &str) -> selftest::Outcome {

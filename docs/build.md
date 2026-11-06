@@ -329,19 +329,33 @@ leaves its own running, so it is last.
 …and since HS-047, **`server deploy`**: `case_server_deploy` has two halves that skip independently, because the
 bugs it exists to catch are of two kinds. The **offline** half needs `python3` and nothing else: a `_ping` socket
 it answers stands in for the daemon, and the case asserts that the dry run lists the seven steps in the spec's
-order with steps 3, 5, 6 and 7 naming the story that still owns them, that an install root under `target/` does
-**not appear** afterwards, that a run whose `docker_host` names a socket that cannot exist stops at step 1 with
-the resume command as its last line, and that a run which gets past step 1 and then fails step 4 (that same
-socket, which answers `_ping` and nothing else) leaves step 2's files on disk, prints the resume command with the
-resolved `--root`/`--config`, and evaluates no later step at all. The **online** half needs the daemon and an
-`agent_image` that exists (today a `docker tag pi-agent:local agent-image:<version>`, because step 3 builds
-nothing until HS-048): it removes any `hs_egress`/`hs_key` an earlier case left behind — those are the machine's
-names, and a leftover would make its own first run read `satisfied` — then runs a real deploy into a root under
-`target/`, asserting step 2's four paths with their modes (0755, 0644, 0700, 0600, 0700), step 4 `changed` with
-both containers running, and then the same command again, where steps 1, 2 and 4 say `satisfied`, the tree's
-listing and `config.toml`'s bytes are byte-identical, and the tail names the URL and `holosmith key set`
-(ADR-0056). A run whose remaining steps are later stories' ends **0** with an `incomplete` line; only a failed
-step exits 1.
+order with step 3 planning the two images (`needs`) and steps 5, 6 and 7 naming the story that still owns them,
+that an install root under `target/` does **not appear** afterwards, that a run whose `docker_host` names a socket
+that cannot exist stops at step 1 with the resume command as its last line, and that a run which gets past step 1
+and then fails step 3 (that same socket answers `_ping` and nothing a build's label read needs) leaves step 2's
+files on disk, prints the resume command with the resolved `--root`/`--config`, and evaluates no later step at
+all. The **online** half needs the daemon and an `agent_image` that exists: it removes any `hs_egress`/`hs_key`
+an earlier case left behind — those are the machine's names, and a leftover would make its own first run read
+`satisfied` — removes both image tags step 3 builds (so its `changed` is a real build, layer-cached), then runs a
+real deploy into a root under `target/`, asserting step 2's four paths with their modes (0755, 0644, 0700, 0600,
+0700), step 3 `changed`, step 4 `changed` with both containers running, and then the same command again, where
+steps 1, 2, 3 and 4 say `satisfied`, the tree's listing and `config.toml`'s bytes are byte-identical, and the
+tail names the URL and `holosmith key set` (ADR-0056). A run whose remaining steps are later stories' ends **0**
+with an `incomplete: 3 of 7` line; only a failed step exits 1.
+
+…and since HS-048, **`case_server_images`** is the one case whose subject is the build itself, and it runs
+**first among the cases that need the daemon**: after this story a `serve` boot cannot start `hs_egress`/`hs_key`
+without the proxy image, so every later Docker case depends on the images it leaves behind. It owns the absent
+state — both tags go before its deploy — and asserts four things: the four `org.holosmith.*` labels on the two
+images (version, git tag and pinned pi on both; the toolchain list on the agent image only); the agent image's
+contents (`pi --version` is `pins/pi.txt`, `git --version`, each configured toolchain, `id -u` 1000, and
+`holosmith container snapshot --help`); the proxy image serving **both** proxies from one entrypoint with no bind
+of the host's binary in `docker inspect` (a `403` for a host off the allow-list, and the key proxy's own refusal
+for a provider path it does not know); and the same deploy again saying `satisfied` with both image ids
+unchanged. It also reads `doctor --full`'s `image` line back, which is the label comparison through its other
+caller. It needs the daemon and `python3` (one `SKIP` line without either, which `tests/images.rs` covers), and
+it **keeps both images** while removing its own containers and scratch root — `case_server_deploy`'s online half
+removes the tags *it* built because that case asserts `changed` (ADR-0057).
 
 One rule for every case above and below: a case that must assert one code keeps every higher guard check correct,
 or it asserts another guard's code under its own name.
@@ -595,13 +609,13 @@ start, rather than a service that refuses to come back up.
   (a hub). The image is `$HOLOSMITH_TEST_IMAGE`, default `pi-agent:local`; it needs `sh`, `git` **and
   `node`** — the network self-test's probe is a node script (HS-036, ADR-0044), and an image without node makes
   that test `Unknown` rather than failed, so a missing node is a `warn` at every boot instead of a red test. Its
-  default user must not be root. A development machine can build one, or tag the image it has:
-  `docker tag pi-agent:local agent-image:<version>`. That image also runs the **egress proxy** (HS-037,
-  ADR-0045), and it needs nothing added for that: the container executes *this* binary, mounted read-only at
-  its own host path, so the artifact (static musl) is the whole requirement — which means the **daemon has to
-  be able to see the binary's path**, exactly as it has to see the data root for the agent directory
-  (ADR-0039). A `serve` whose binary sits on a tmpfs the daemon does not share starts no proxy: one `warn`,
-  and a session that allows internet access reaches nothing through it.
+  default user must not be root. Those cases run it as the config's `agent_image`, which is why a development
+  machine may point that key at an image it tagged by hand instead of at the name `server deploy` builds.
+  **The machine's two proxies no longer run that image** (HS-048, ADR-0057): they run
+  `holosmith-proxy:<version>`, which step 3 builds from the Dockerfile embedded in the binary — the artifact on
+  `alpine` plus `openssl` and CA certificates, because `hs_key` spawns `openssl s_client` (ADR-0048). A `serve`
+  boot on a machine that has never deployed starts no proxy: one `warn` naming `holosmith server deploy`, and a
+  session that allows internet access reaches nothing through it.
 - Optional: **`qemu-aarch64-static`** (or point `HOLOSMITH_QEMU_AARCH64` at one) to run
   the aarch64 artifact on an x86_64 machine. It is a machine-local dev tool installed
   outside this repo; no script here downloads it. Without it the check prints one
@@ -640,7 +654,10 @@ repository's `.git` at its own host path (so the worktree's `.git` file, which h
 a hook or a `core.fsmonitor` cannot be planted. Host paths are kept identical inside the container for
 exactly that reason; `container::Mounts` is the one value that spells them, and V1 — the three refused
 writes and the three working git commands — passed as specified on a real daemon, so the spec's narrower
-fallback is not in use. The image is the config key `agent_image` (default `agent-image:<version>`), and
+fallback is not in use. The image is the config key `agent_image` (default `agent-image:<version>`, the name
+`server deploy`'s step 3 builds), and its contents are the story's other half: pi at the pinned version, git,
+the toolchains the key `agent_toolchains` names (default `["python3", "ripgrep"]`; an empty list is a machine
+whose projects need only git), and this binary for `container snapshot` and the proxies (HS-048, ADR-0057).
 `--user` is deliberately not passed: the image's own user must be non-root, which the V1 checks assert
 rather than a guessed uid that would hand the agent's files to somebody the host does not own.
 

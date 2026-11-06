@@ -31,6 +31,8 @@ image builds are HS-048's, and steps 5, 6 and 7 are HS-049's — and the wrong a
 "already satisfied" over a check that read nothing, which is the P1 shape ADR-0055 names. So a skipped step
 carries the owning story in its sentence, in the dry run and in the real run alike, and the report's summary
 says how many steps are still other stories' (`deploy: incomplete: 4 of 7 steps belong to later stories`).
+**Amended by ADR-0057:** HS-048 fills step 3, so the count is three and the example reads
+`deploy: incomplete: 3 of 7 steps belong to later stories`.
 
 **A step that is only half this release's says which half it did.** Step 2 creates the four paths the tree
 already writes and does **not** create the service user or the VAPID keys, so its line always carries
@@ -53,7 +55,8 @@ image step 3 builds, so on a machine where step 3 is skipped the last step would
 story owns; the first draft of this story's plan proposed waiting against a boot the *gate* had started, which
 is a measurement of the test harness rather than of the machine. The acceptance's "ends by printing the URL
 and the next steps" is therefore the **command's tail**, not a step: it is printed by any run that reaches
-the end, whether or not later stories' steps were skipped.
+the end, whether or not later stories' steps were skipped. **Amended by ADR-0057:** step 3 is no longer
+skipped; this paragraph is the record of why the step could not be satisfied here.
 
 **Step 2 is split, and the split lives here rather than in the story file.** This story creates the data
 directory, `/etc/holosmith/config.toml`, the 0700 secrets directory with its 0600 `keys.toml` and the admin
@@ -134,6 +137,8 @@ Steps 5 and 6 were **not measured**: this machine has no systemd (`/proc/1/comm`
 `/run/systemd/system` is absent) and no `tailscaled` answering, which is the same fact `doctor` renders as
 `unknown` (ADR-0054) and the reason they are HS-049's steps. Step 3 builds nothing, so step 4's proxies run
 whatever `agent_image` names — on this machine `pi-agent:local`, tagged by hand as `docs/build.md` says.
+**Amended by ADR-0057:** step 3 builds both images from the Dockerfiles embedded in the binary, and the proxies
+run `holosmith-proxy:<version>` instead of whatever `agent_image` names.
 
 **"A fresh host ends with a working HTTPS URL" (phase 2's exit criterion) is therefore HS-048's and HS-049's
 demo, not this story's.** What this story proves is the framework and the three steps whose machinery exists:

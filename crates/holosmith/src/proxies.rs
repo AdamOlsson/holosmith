@@ -11,8 +11,12 @@
 //! - **A bound on every daemon call.** These run on the startup path, where a `docker run` can have to pull an
 //!   image first, and a wedged daemon must cost the bound rather than the caller's whole boot ([`START_TIMEOUT`]).
 //! - **The `is_file` checks.** `-v` of a path the daemon cannot see creates an empty root-owned *directory*, so a
-//!   binary or key file that is not a file is a start that cannot work — said in the words of what is actually
+//!   key file that is not a file is a start that cannot work — said in the words of what is actually
 //!   wrong rather than about the container it turned into (ADR-0035's measurement).
+//! - **The image is checked first.** Both containers run `holosmith-proxy:<version>`, built by `server deploy`'s
+//!   step 3 from the Dockerfile embedded in this binary (HS-048), and a machine that has never deployed has no
+//!   such image: `docker run` would then try to *pull* a name that is not in any registry, which fails with a
+//!   sentence about a registry rather than about the step that has not run (ADR-0057).
 //! - **The key file is prepared before the directory holding it is mounted**
 //!   ([`crate::key::Store::ensure_file`]): a mount source that is not there yet becomes a directory, which the
 //!   proxy would then read as TOML.
@@ -73,6 +77,13 @@ pub trait Containers {
     /// Whether a container by this name is running, which is the whole of a proxy's state.
     fn running(&self, name: &str) -> bool;
 
+    /// Whether an image is on this machine, which is what a proxy container has to run.
+    ///
+    /// Asked before either start because the tag is this binary's own (`holosmith-proxy:<version>`) and exists
+    /// only once `server deploy`'s step 3 has built it — the alternative is `docker run` attempting a pull of a
+    /// repository nobody publishes.
+    fn image_exists(&self, image: &str) -> bool;
+
     /// The names on networks matching `filter`, under `bound` — the question step 4's read asks about `egress`.
     ///
     /// A daemon that cannot answer is an `Err` carrying its sentence: on this path that is a failure, because an
@@ -96,6 +107,10 @@ impl Containers for Docker {
         // Explicit paths, not `self.running(…)`: an inherent method and a trait method with one name and
         // signature resolve to the trait inside its own impl, which would be infinite recursion.
         Docker::running(self, name)
+    }
+
+    fn image_exists(&self, image: &str) -> bool {
+        Docker::image_exists(self, image)
     }
 
     fn network_names(&self, filter: &str, bound: Duration) -> Result<Vec<String>, String> {
@@ -132,14 +147,13 @@ impl Containers for Docker {
 /// allow-list is an argument rather than a mount, so a changed `[egress] allow` takes effect without an operator
 /// restarting anything by hand (ADR-0037).
 pub fn start_egress(config: &Config, containers: &dyn Containers) -> Result<Started, String> {
-    let proxy = EgressProxy::of(config)?;
-    if !proxy.binary.is_file() {
-        return Err(format!(
-            "no egress proxy was started: this process's own binary is not a file at its own path ({}), so a \
-             container mounted from it would start from an empty directory",
-            proxy.binary.display()
-        ));
-    }
+    let proxy = EgressProxy::of(config);
+    image_there(
+        containers,
+        &proxy.image,
+        "egress proxy",
+        "a session's container has no route out without it",
+    )?;
     let allow = proxy.allow.len();
     containers.replace(container::PROXY_NAME, &proxy.run_args(), START_TIMEOUT)?;
     Ok(Started {
@@ -162,14 +176,13 @@ pub fn start_key(config: &Config, containers: &dyn Containers) -> Result<Started
             store.path().display()
         ));
     }
-    let proxy = KeyProxy::of(config)?;
-    if !proxy.binary.is_file() {
-        return Err(format!(
-            "no key proxy was started: this process's own binary is not a file at its own path ({}), so a \
-             container mounted from it would start from an empty directory",
-            proxy.binary.display()
-        ));
-    }
+    let proxy = KeyProxy::of(config);
+    image_there(
+        containers,
+        &proxy.image,
+        "key proxy",
+        "no session's dummy key can be swapped for the real one without it",
+    )?;
     if !proxy.keys.is_file() {
         return Err(format!(
             "no key proxy was started: the key file {} is not a file, and mounting it would give the proxy a \
@@ -194,4 +207,138 @@ pub fn start_key(config: &Config, containers: &dyn Containers) -> Result<Started
 /// ([`NAMES`]) — kept so the three functions are called the same way.
 pub fn running(_config: &Config, containers: &dyn Containers) -> [bool; 2] {
     [containers.running(NAMES[0]), containers.running(NAMES[1])]
+}
+
+/// The one check both starters make before asking the daemon to run anything: the image is on this machine.
+///
+/// Both proxies run the same tag, so the sentence is one shape with two subjects — the container that was not
+/// started, and what the machine is without it. The fix is named as the command rather than as a story, because
+/// an operator reading a `serve` boot's warning has a terminal and not a backlog.
+fn image_there(
+    containers: &dyn Containers,
+    image: &str,
+    proxy: &str,
+    without: &str,
+) -> Result<(), String> {
+    if containers.image_exists(image) {
+        return Ok(());
+    }
+    Err(format!(
+        "no {proxy} was started: the image {image} is not on this machine, so the container would have nothing to \
+         run — `holosmith server deploy`'s step 3 builds it from the Dockerfile embedded in this binary, and \
+         {without}"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    /// A daemon that owns one image and records every `docker run` it was asked for.
+    ///
+    /// The two starters ask [`Containers::image_exists`] before they ask for a container, so this is the whole of
+    /// what a start needs to be driven without a daemon: the image's presence, and the argv it would have run.
+    struct Fake {
+        image: bool,
+        ran: RefCell<Vec<Vec<String>>>,
+    }
+
+    impl Fake {
+        fn with_image(image: bool) -> Self {
+            Self {
+                image,
+                ran: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl Containers for Fake {
+        fn running(&self, _name: &str) -> bool {
+            false
+        }
+
+        fn image_exists(&self, _image: &str) -> bool {
+            self.image
+        }
+
+        fn network_names(&self, _filter: &str, _bound: Duration) -> Result<Vec<String>, String> {
+            Ok(Vec::new())
+        }
+
+        fn ensure_network(&self, _name: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn replace(&self, name: &str, args: &[String], _bound: Duration) -> Result<(), String> {
+            let mut ran = self.ran.borrow_mut();
+            ran.push(vec![name.to_string()]);
+            ran.last_mut()
+                .expect("just pushed")
+                .extend(args.iter().cloned());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_start_without_the_image_names_the_image_and_the_step_that_builds_it() {
+        // The tag is this binary's own version, so it exists only once a deploy's step 3 has built it: without
+        // this check `docker run` would try to *pull* a repository nobody publishes, and the caller would report a
+        // registry's sentence rather than the step that has not run (ADR-0057).
+        let dir = std::env::temp_dir().join(format!("holosmith-proxies-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the scratch data root is creatable");
+        let config = Config {
+            data_root: dir.clone(),
+            ..Config::default()
+        };
+
+        let absent = Fake::with_image(false);
+        for (what, started) in [
+            ("egress proxy", start_egress(&config, &absent)),
+            ("key proxy", start_key(&config, &absent)),
+        ] {
+            let sentence = started.expect_err("there is no image for the container to run");
+            for fact in [
+                what,
+                crate::images::proxy_image().as_str(),
+                "holosmith server deploy",
+                "is not on this machine",
+            ] {
+                assert!(
+                    sentence.contains(fact),
+                    "the refusal does not name {fact}: {sentence}"
+                );
+            }
+        }
+        assert!(
+            absent.ran.borrow().is_empty(),
+            "a start with no image asked the daemon for a container"
+        );
+
+        // With the image, each starter runs exactly one container, from that image: the check is a refusal and not
+        // a second recipe.
+        let present = Fake::with_image(true);
+        assert_eq!(
+            start_egress(&config, &present)
+                .expect("the image is there")
+                .container,
+            container::PROXY_NAME
+        );
+        assert_eq!(
+            start_key(&config, &present)
+                .expect("the image is there")
+                .container,
+            key::KEY_PROXY_NAME
+        );
+        let ran = present.ran.borrow();
+        assert_eq!(ran.len(), 2, "a start ran {ran:?}");
+        for args in ran.iter() {
+            assert!(
+                args.iter().any(|a| *a == crate::images::proxy_image()),
+                "a container was started from another image: {args:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

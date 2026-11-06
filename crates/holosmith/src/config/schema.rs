@@ -137,6 +137,12 @@ pub const KNOWN_KEYS: &[KeySpec] = &[
         set: set_agent_image,
     },
     KeySpec {
+        path: "agent_toolchains",
+        section: None,
+        kind: Kind::StringArray,
+        set: set_agent_toolchains,
+    },
+    KeySpec {
         path: "container_cpus",
         section: None,
         kind: Kind::Integer,
@@ -548,6 +554,18 @@ fn set_agent_image(config: &mut Config, value: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// The packages the agent image installs (HS-048). An empty list is a legitimate machine — an image with git,
+/// openssl and CA certificates and no toolchain — so only a blank *name* is refused: `apt-get install ""` is a
+/// build that fails on a line naming nothing, and a build is the wrong place to discover a typo.
+fn set_agent_toolchains(config: &mut Config, value: &Value) -> Result<(), String> {
+    let toolchains = strings(value)?;
+    if let Some(blank) = toolchains.iter().find(|name| name.trim().is_empty()) {
+        return Err(format!("must name a package, not {blank:?}"));
+    }
+    config.agent_toolchains = toolchains;
+    Ok(())
+}
+
 /// A limit of zero is not a limit: Docker reads `--cpus 0` and `--memory 0m` as "unlimited", which is the
 /// opposite of what the key is for, so each of the three refuses it.
 fn positive(value: &Value, what: &str) -> Result<u64, String> {
@@ -786,7 +804,7 @@ mod tests {
 
     #[test]
     fn the_table_holds_the_documented_keys() {
-        assert_eq!(KNOWN_KEYS.len(), 32);
+        assert_eq!(KNOWN_KEYS.len(), 33);
     }
 
     #[test]

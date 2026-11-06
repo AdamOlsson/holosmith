@@ -10,6 +10,7 @@
 //! a genuine `git` over a throwaway repository it creates and removes, and the port check binds real sockets. A
 //! fake for either would prove nothing about V2 or about `ExecStartPre`.
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
@@ -22,6 +23,7 @@ use holosmith::clock;
 use holosmith::config::{Config, Role};
 use holosmith::db::{self, Database, OpenOptions};
 use holosmith::doctor::{self, Depth, Machine, Report, Tools};
+use holosmith::images;
 use holosmith::preflight::{self, Check, Finding, Outcome};
 use holosmith::selftest;
 
@@ -138,19 +140,27 @@ fn fake_daemon(path: &Path) -> Arc<AtomicUsize> {
     answered
 }
 
-/// A machine whose three container questions the test decides.
+/// A machine whose four container questions the test decides.
 struct FakeMachine {
     running: Vec<&'static str>,
     image_pi: Result<String, String>,
+    /// The image's `org.holosmith.*` labels: `Ok(None)` is an image built by another tool (`pi-agent:local`).
+    image_labels: Result<Option<BTreeMap<String, String>>, String>,
     selftest: selftest::Outcome,
 }
 
 impl FakeMachine {
-    /// The machine `--full` passes on: both proxies up, the pinned pi, a measured isolation.
+    /// The machine `--full` passes on: both proxies up, the pinned pi, a measured isolation, and an image with no
+    /// Holosmith labels — the supported by-hand image, whose label half the arms below compare.
+    ///
+    /// An image with no labels answers `null` from `{{json .Config.Labels}}`, which [`images::Images`]'s Docker impl
+    /// turns into an **empty map**, not a `None` (that is "the image is not there"). The fake answers what the real
+    /// reader answers, or the tests would prove an arm production can never reach.
     fn healthy() -> Self {
         Self {
             running: vec!["hs_egress", "hs_key"],
             image_pi: Ok(holosmith::pins::pi_version().to_string()),
+            image_labels: Ok(Some(BTreeMap::new())),
             selftest: selftest::Outcome::Passed,
         }
     }
@@ -163,6 +173,10 @@ impl Machine for FakeMachine {
 
     fn image_pi(&self, _image: &str) -> Result<String, String> {
         self.image_pi.clone()
+    }
+
+    fn image_labels(&self, _image: &str) -> Result<Option<BTreeMap<String, String>>, String> {
+        self.image_labels.clone()
     }
 
     fn selftest(&self, _image: &str) -> selftest::Outcome {
@@ -723,6 +737,7 @@ fn full_adds_the_self_test_the_proxies_and_the_image() {
         running: Vec::new(),
         image_pi: Err("no such image".to_string()),
         selftest: selftest::Outcome::Failed("a container reached 1.1.1.1:443".to_string()),
+        ..FakeMachine::healthy()
     };
     let report = doctor::run(&config, Depth::Full, &tools, &unhealthy);
     assert_eq!(finding(&report, Check::Proxy).outcome, Outcome::Fail);
@@ -748,6 +763,121 @@ fn full_adds_the_self_test_the_proxies_and_the_image() {
         says(image).contains("0.0.0-not-the-pinned-one")
             && says(image).contains("rebuild the agent image"),
         "the sentence is not the one a session fails with: {}",
+        says(image)
+    );
+}
+
+/// The `org.holosmith.*` labels an image built by this binary carries, as `docker image inspect` answers them.
+fn labels(config: &Config) -> BTreeMap<String, String> {
+    let expectation = images::Expectation::of(images::Kind::Agent, config);
+    let mut labels = BTreeMap::from([
+        (images::LABEL_VERSION.to_string(), expectation.version),
+        (images::LABEL_GIT_TAG.to_string(), expectation.git_tag),
+        (images::LABEL_PI.to_string(), expectation.pi_version),
+    ]);
+    labels.insert(
+        images::LABEL_TOOLCHAINS.to_string(),
+        expectation.toolchains.unwrap_or_default().join(" "),
+    );
+    labels
+}
+
+#[test]
+fn full_compares_the_agent_images_labels_with_this_binarys() {
+    // The pi version is half the question: an image can run the pinned pi and still carry another toolchain list,
+    // which is the half `server deploy`'s step 3 compares (ADR-0057).
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("doctor-image-labels");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let mut config = config(&dir, Some(format!("unix://{}", socket.display())));
+    config.role = Role::Server;
+    std::fs::create_dir_all(&config.data_root).expect("the data root is creatable");
+    let tools = tools_with_real_git(&dir);
+
+    // The image this binary builds: the pi agrees and the four labels say so, each by its own value.
+    let built = FakeMachine {
+        image_labels: Ok(Some(labels(&config))),
+        ..FakeMachine::healthy()
+    };
+    let report = doctor::run(&config, Depth::Full, &tools, &built);
+    let image = finding(&report, Check::Image);
+    assert_eq!(image.outcome, Outcome::Pass, "{}", says(image));
+    for fact in [
+        config.agent_image.clone(),
+        env!("CARGO_PKG_VERSION").to_string(),
+        holosmith::pins::pi_version().to_string(),
+        "python3 ripgrep".to_string(),
+    ] {
+        assert!(
+            says(image).contains(&fact),
+            "{fact} is not in the pass: {}",
+            says(image)
+        );
+    }
+
+    // The same image with another toolchain list: the pi check passes and the labels are what fails, naming both
+    // the value the image carries and the one this binary would build.
+    let mut mismatched = labels(&config);
+    mismatched.insert(images::LABEL_TOOLCHAINS.to_string(), "python3".to_string());
+    let stale = FakeMachine {
+        image_labels: Ok(Some(mismatched)),
+        ..FakeMachine::healthy()
+    };
+    let report = doctor::run(&config, Depth::Full, &tools, &stale);
+    let image = finding(&report, Check::Image);
+    assert_eq!(image.outcome, Outcome::Fail, "{}", says(image));
+    for fact in [
+        "toolchains".to_string(),
+        "python3 ripgrep".to_string(),
+        "server deploy".to_string(),
+    ] {
+        assert!(
+            says(image).contains(&fact),
+            "the failure does not name {fact}: {}",
+            says(image)
+        );
+    }
+
+    // An image with no Holosmith labels at all is a pass with a remark: `pi-agent:local` is a supported machine,
+    // and failing it would refuse one the spec allows.
+    let report = doctor::run(&config, Depth::Full, &tools, &FakeMachine::healthy());
+    let image = finding(&report, Check::Image);
+    assert_eq!(image.outcome, Outcome::Pass, "{}", says(image));
+    assert!(
+        says(image).contains(holosmith::pins::pi_version()),
+        "{}",
+        says(image)
+    );
+    assert!(
+        says(image).contains("not built from this binary's Dockerfile"),
+        "the pass does not say what it could not compare: {}",
+        says(image)
+    );
+
+    // An image that answers a run and not an inspect is a machine problem, and it still costs a line: a label read
+    // that failed silently would make a mismatched image a pass.
+    let unreadable = FakeMachine {
+        image_labels: Err("permission denied".to_string()),
+        ..FakeMachine::healthy()
+    };
+    let report = doctor::run(&config, Depth::Full, &tools, &unreadable);
+    let image = finding(&report, Check::Image);
+    assert_eq!(image.outcome, Outcome::Fail, "{}", says(image));
+    assert!(says(image).contains("permission denied"), "{}", says(image));
+
+    // The daemon answering "there" to a run and "not there" to an inspect is a machine problem too, and it is not
+    // the unlabelled pass: nothing about this image was compared.
+    let vanished = FakeMachine {
+        image_labels: Ok(None),
+        ..FakeMachine::healthy()
+    };
+    let report = doctor::run(&config, Depth::Full, &tools, &vanished);
+    let image = finding(&report, Check::Image);
+    assert_eq!(image.outcome, Outcome::Fail, "{}", says(image));
+    assert!(
+        says(image).contains("was not there when its labels were read"),
+        "{}",
         says(image)
     );
 }

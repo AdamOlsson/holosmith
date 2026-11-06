@@ -8,8 +8,8 @@
 //! Every step prints one line, `<n>. <step>: <word>: <sentence>`: [`DeployStep`]'s number is the spec's order and
 //! [`Word`] is the read's answer, one of five. The two that carry the design are:
 //!
-//! - **`skipped` is never `satisfied`.** Four of the seven steps have no body in this release — the image builds
-//!   are HS-048's and the unit file, the origins and the health wait are HS-049's — and a step that prints
+//! - **`skipped` is never `satisfied`.** Three of the seven steps have no body in this release — the unit file, the
+//!   origins and the health wait are HS-049's — and a step that prints
 //!   "already satisfied" over a check that read nothing is a lie of exactly the kind this list exists to prevent.
 //!   So a skipped step names its owning story in its sentence, and [`Report::render`]'s summary says how many
 //!   steps are still other stories' work.
@@ -51,16 +51,13 @@ use crate::config::{self, Config, Role};
 use crate::container;
 use crate::docker;
 use crate::doctor::{self, Depth};
+use crate::images::{self, Expectation, Kind as ImageKind, Status};
 use crate::key;
 use crate::preflight::{self, Check, Outcome};
 use crate::proxies;
 
 /// The admin socket's directory (spec item 10 step 2's "admin socket directory", path fixed by HS-051).
 const ADMIN_DIR: &str = "/run/holosmith";
-
-/// Step 3's sentence: the story that builds the images, and what it fills there.
-const IMAGES: &str = "HS-048 builds `holosmith-proxy:<version>` and `agent-image:<version>` from the Dockerfiles embedded in the \
-     binary, and fills this step";
 
 /// Step 5's sentence: the story that installs the unit file, and the two lines of it this release has decided.
 const SERVICE: &str = "HS-049 installs and starts `holosmith.service` (`Restart=on-failure`, `ExecStartPre=holosmith doctor \
@@ -262,18 +259,15 @@ impl Report {
         text
     }
 
-    /// Who owns the skipped steps, in the spec's order: `HS-048: images; HS-049: service, origins, health`.
+    /// Who owns the skipped steps, in the spec's order: `HS-049: service, origins, health`.
     ///
     /// A table rather than a sentence per step, so that the report and the step's own line cannot disagree about
     /// which story a step belongs to.
     fn owners(&self) -> String {
-        const OWNERS: [(&str, &[DeployStep]); 2] = [
-            ("HS-048", &[DeployStep::Images]),
-            (
-                "HS-049",
-                &[DeployStep::Service, DeployStep::Origins, DeployStep::Health],
-            ),
-        ];
+        const OWNERS: [(&str, &[DeployStep]); 1] = [(
+            "HS-049",
+            &[DeployStep::Service, DeployStep::Origins, DeployStep::Health],
+        )];
         let skipped: Vec<DeployStep> = self
             .lines
             .iter()
@@ -295,15 +289,15 @@ impl Report {
     }
 }
 
-/// The machine questions a deploy asks, as one parameter: the proxies' seam and `doctor`'s, together.
+/// The machine questions a deploy asks, as one parameter: the image builds' seam, the proxies' and `doctor`'s.
 ///
 /// [`crate::docker::Docker`] gets this for free through the blanket impl below, which is the point —
 /// `commands::deploy` builds
-/// one daemon handle and the three seams that need it share it. A test implements the two component traits and
-/// stands in for the whole machine, with no daemon at all (the [`crate::doctor::Machine`] pattern).
-pub trait Machine: proxies::Containers + doctor::Machine {}
+/// one daemon handle and the seams that need it share it. A test implements the component traits and stands in
+/// for the whole machine, with no daemon at all (the [`crate::doctor::Machine`] pattern).
+pub trait Machine: proxies::Containers + doctor::Machine + images::Images {}
 
-impl<T: proxies::Containers + doctor::Machine> Machine for T {}
+impl<T: proxies::Containers + doctor::Machine + images::Images> Machine for T {}
 
 /// The external programs and paths the deploy and its preflight run, as a seam.
 ///
@@ -463,7 +457,7 @@ pub fn run(
         let line = match step {
             DeployStep::Preflight => preflight(config, &tools.doctor, machine),
             DeployStep::Files => files(config, target, tools, dry_run),
-            DeployStep::Images => skipped(step, IMAGES),
+            DeployStep::Images => images_line(config, machine, dry_run),
             DeployStep::Proxies => proxies_line(config, machine, dry_run),
             DeployStep::Service => skipped(step, SERVICE),
             DeployStep::Origins => skipped(step, ORIGINS),
@@ -987,6 +981,93 @@ fn failed(step: DeployStep, sentence: String) -> Line {
         word: Word::Failed,
         sentence,
     }
+}
+
+/// Step 3: the two images, built from the Dockerfiles embedded in this binary (HS-048, ADR-0057).
+///
+/// The read is each image's **labels**, compared with what this binary would build: not the tag, which any
+/// `docker tag` can move, and not a build timestamp, which says nothing about what is inside. That is what makes
+/// a second deploy honestly `satisfied` and a deploy after an upgrade a rebuild.
+///
+/// The build is on the apply path only, and it needs this process's own binary: the context is an archive holding
+/// the Dockerfile and this program, so a deploy that cannot name its own path fails the step rather than shipping
+/// an image with nothing in it.
+fn images_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
+    // Proxy first, which is also the build order: it is the smaller image and the one step 4 needs, so a machine
+    // that runs out of room or of the build bound has what its proxies run before the larger one.
+    let mut pending: Vec<(ImageKind, String)> = Vec::new();
+    for kind in [ImageKind::Proxy, ImageKind::Agent] {
+        let expectation = Expectation::of(kind, config);
+        match images::read(machine, kind, &expectation) {
+            Ok(Status::Current) => {}
+            // The reason is the read's own sentence, so the plan says *why* a build is coming rather than only
+            // that one is.
+            Ok(Status::Missing(reason) | Status::Stale(reason)) => pending.push((kind, reason)),
+            Err(sentence) => return failed(DeployStep::Images, sentence),
+        }
+    }
+    let remark = image_remark(config);
+    if pending.is_empty() {
+        let expected = Expectation::of(ImageKind::Agent, config);
+        return Line {
+            step: DeployStep::Images,
+            word: Word::Satisfied,
+            sentence: format!(
+                "{} and {} carry this binary's labels: version {}, git tag {}, pi {}, toolchains {}{remark}",
+                ImageKind::Proxy.image(),
+                ImageKind::Agent.image(),
+                expected.version,
+                expected.git_tag,
+                expected.pi_version,
+                expected.toolchains.unwrap_or_default().join(" ")
+            ),
+        };
+    }
+    let reasons: Vec<String> = pending.iter().map(|(_, reason)| reason.clone()).collect();
+    if dry_run {
+        return Line {
+            step: DeployStep::Images,
+            word: Word::Needs,
+            sentence: format!("{}{remark}", counted(&reasons)),
+        };
+    }
+    let binary = match std::env::current_exe() {
+        Ok(binary) => binary,
+        Err(error) => {
+            return failed(
+                DeployStep::Images,
+                format!(
+                    "no image was built: this process's own path could not be read ({error}), and the build's \
+                     context is an archive holding the Dockerfile and this binary"
+                ),
+            );
+        }
+    };
+    match images::ensure(machine, &binary, config, &pending) {
+        Ok(sentence) => Line {
+            step: DeployStep::Images,
+            word: Word::Changed,
+            sentence: format!("{sentence}{remark}"),
+        },
+        Err(sentence) => failed(DeployStep::Images, sentence),
+    }
+}
+
+/// What step 3 must say when the config's `agent_image` is not the name it builds.
+///
+/// Never a failure: `agent_image` is what a session's container runs, and an operator may point it at an image
+/// built by hand (`pi-agent:local`). But a deploy that has just built `agent-image:<version>` while the config
+/// names something else has installed an image no session will use, and a line that said nothing would leave
+/// that to be discovered at a launch.
+fn image_remark(config: &Config) -> String {
+    let built = images::agent_image();
+    if config.agent_image == built {
+        return String::new();
+    }
+    format!(
+        "; the config's `agent_image` names {}, which this step does not build",
+        config.agent_image
+    )
 }
 
 /// Step 4: the machine's `egress` network and its two proxies.

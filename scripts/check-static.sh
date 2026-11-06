@@ -245,6 +245,19 @@ for target in "${targets[@]}"; do
     fail "$bin carries the placeholder page: it was built without web/dist (run scripts/build.sh)"
   fi
 
+  # Both Dockerfiles are `include_str!`ed into the binary (HS-048), because a deploy runs on a machine that has
+  # the artifact and nothing else. Each file's marker comment is the evidence: read from the source, for the
+  # placeholder marker's reason — a reworded marker must fail here loudly rather than leave this grep looking for
+  # a string no file carries any more.
+  for dockerfile in proxy agent; do
+    marker="$(sed -n "s/.*# holosmith: embedded \\(.*\\) image (HS-048).*/\\1/p" \
+      "crates/holosmith/images/$dockerfile.Dockerfile")"
+    [ "$marker" = "$dockerfile" ] ||
+      fail "cannot read the $dockerfile marker from crates/holosmith/images/$dockerfile.Dockerfile"
+    grep -q "holosmith: embedded $marker image (HS-048)" "$bin_abs" ||
+      fail "$bin does not carry the $marker Dockerfile: server deploy's step 3 would have no recipe to build"
+  done
+
   # The migrations are compiled in (ADR-0009): a string literal survives strip and LTO, so its
   # absence means the artifact would start with no schema at all. Greped straight out of the
   # file rather than through `strings | grep -q`, which `pipefail` turns into a failure: grep

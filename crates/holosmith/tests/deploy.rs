@@ -15,6 +15,7 @@
 //! ADR-0056 is the design these assert: a step is a read and an apply, `skipped` is never `satisfied`, a failure
 //! stops the run, and the proxies' recipe is the boot's own.
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
@@ -29,6 +30,7 @@ use holosmith::container;
 use holosmith::deploy::{self, DeployStep, Line, Report, Target, Word};
 use holosmith::docker;
 use holosmith::doctor;
+use holosmith::images::{self, Expectation, Kind};
 use holosmith::key;
 use holosmith::preflight;
 use holosmith::proxies;
@@ -177,16 +179,24 @@ fn config(docker_host: Option<String>) -> Config {
     }
 }
 
-/// The machine the deploy is asked about, as a value: the proxies' state that step 4 reads and the argv it would
-/// run, with no daemon anywhere.
+/// The machine the deploy is asked about, as a value: the proxies' state that step 4 reads, the images step 3
+/// reads and builds, and the argv it would run, with no daemon anywhere.
 ///
-/// The three flags are `AtomicBool`s because the seam takes `&self`, exactly as a daemon handle does — and step 4's
-/// second run within one test has to see what its first run did.
+/// The flags are `AtomicBool`s and the rest `Mutex`es because the seam takes `&self`, exactly as a daemon handle
+/// does — and a step's second run within one test has to see what its first run did.
 struct Fake {
     egress: AtomicBool,
     key: AtomicBool,
     network: AtomicBool,
     calls: Mutex<Vec<Vec<String>>>,
+    /// The labels `docker image inspect` would answer for each tag: a tag absent from the map is no such image.
+    labels: Mutex<BTreeMap<String, BTreeMap<String, String>>>,
+    /// The architecture word the daemon answers, which the build guard compares with this binary's target.
+    arch: Mutex<Result<String, String>>,
+    /// Every build asked for, as its tag and its argument vector.
+    builds: Mutex<Vec<(String, Vec<String>)>>,
+    /// The output of a build that fails; `None` is a daemon that builds whatever it is handed.
+    failing_build: Mutex<Option<String>>,
 }
 
 impl Fake {
@@ -196,11 +206,51 @@ impl Fake {
             key: AtomicBool::new(false),
             network: AtomicBool::new(false),
             calls: Mutex::new(Vec::new()),
+            labels: Mutex::new(BTreeMap::new()),
+            // This machine's own word: every arm that is not about the architecture guard has to pass it, and a
+            // fixture that guessed `amd64` would make those arms fail on an arm machine.
+            arch: Mutex::new(Ok(daemon_word())),
+            builds: Mutex::new(Vec::new()),
+            failing_build: Mutex::new(None),
         }
+    }
+
+    /// The same machine with one image already there, carrying `labels` — the state a deploy leaves behind.
+    fn with_labels(self, image: &str, labels: BTreeMap<String, String>) -> Self {
+        self.labels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(image.to_string(), labels);
+        self
+    }
+
+    /// The same machine, with a daemon that builds for another architecture.
+    fn with_arch(self, arch: &str) -> Self {
+        *self
+            .arch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Ok(arch.to_string());
+        self
+    }
+
+    /// The same machine, with a daemon whose every build fails printing `text`.
+    fn with_failing_build(self, text: &str) -> Self {
+        *self
+            .failing_build
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(text.to_string());
+        self
     }
 
     fn calls(&self) -> Vec<Vec<String>> {
         self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn builds(&self) -> Vec<(String, Vec<String>)> {
+        self.builds
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -214,6 +264,52 @@ impl Fake {
     }
 }
 
+/// The architecture word a daemon on this machine answers, from the target this crate was built for.
+fn daemon_word() -> String {
+    match env!("HOLOSMITH_TARGET")
+        .split('-')
+        .next()
+        .unwrap_or_default()
+    {
+        "x86_64" => "amd64".to_string(),
+        "aarch64" => "arm64".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// The labels the Dockerfile's `LABEL` lines write, read back out of a `docker build` argument vector.
+///
+/// Parsed from [`images::build_arguments`]' own output rather than written as a second list, so that the fake's
+/// build and the real one cannot disagree about an argument's spelling.
+fn labels_from_args(args: &[String]) -> BTreeMap<String, String> {
+    let mut labels = BTreeMap::new();
+    let mut arguments = args.iter();
+    while let Some(argument) = arguments.next() {
+        if argument != "--build-arg" {
+            continue;
+        }
+        let Some((key, value)) = arguments.next().and_then(|pair| pair.split_once('=')) else {
+            continue;
+        };
+        let label = match key {
+            "HOLOSMITH_VERSION" => images::LABEL_VERSION,
+            "HOLOSMITH_GIT_TAG" => images::LABEL_GIT_TAG,
+            "HOLOSMITH_PI_VERSION" => images::LABEL_PI,
+            "HOLOSMITH_TOOLCHAINS" => images::LABEL_TOOLCHAINS,
+            _ => continue,
+        };
+        // The label carries what the argument carried: the Dockerfile's `LABEL` line has no way to rewrite it.
+        labels.insert(label.to_string(), value.to_string());
+    }
+    labels
+}
+
+/// The labels an image built by this binary carries, as `docker image inspect` would answer them.
+fn expected_labels(kind: Kind, config: &Config) -> BTreeMap<String, String> {
+    let expectation = Expectation::of(kind, config);
+    labels_from_args(&images::build_arguments(&kind.image(), &expectation))
+}
+
 impl proxies::Containers for Fake {
     fn running(&self, name: &str) -> bool {
         match name {
@@ -221,6 +317,13 @@ impl proxies::Containers for Fake {
             key::KEY_PROXY_NAME => self.key.load(Ordering::SeqCst),
             _ => false,
         }
+    }
+
+    fn image_exists(&self, image: &str) -> bool {
+        self.labels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(image)
     }
 
     fn network_names(&self, _filter: &str, _bound: Duration) -> Result<Vec<String>, String> {
@@ -263,8 +366,59 @@ impl doctor::Machine for Fake {
         Err("not asked".to_string())
     }
 
+    /// The same read step 3 makes, so a test that wanted both would not need two fixtures.
+    fn image_labels(&self, image: &str) -> Result<Option<BTreeMap<String, String>>, String> {
+        Ok(self
+            .labels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(image)
+            .cloned())
+    }
+
     fn selftest(&self, _image: &str) -> selftest::Outcome {
         selftest::Outcome::Unknown("not asked".to_string())
+    }
+}
+
+impl images::Images for Fake {
+    fn daemon_arch(&self) -> Result<String, String> {
+        self.arch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn labels(&self, image: &str) -> Result<Option<BTreeMap<String, String>>, String> {
+        <Fake as doctor::Machine>::image_labels(self, image)
+    }
+
+    fn build(&self, tag: &str, _archive: &[u8], args: &[String]) -> Result<images::Log, String> {
+        self.builds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((tag.to_string(), args.to_vec()));
+        if let Some(text) = self
+            .failing_build
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            return Ok(images::Log {
+                success: false,
+                text,
+            });
+        }
+        // A successful build leaves the image it was asked for, labelled with the arguments it was given: a fake
+        // that answered "built" and then reported no image would make every second run a build.
+        self.labels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(tag.to_string(), labels_from_args(args));
+        Ok(images::Log {
+            success: true,
+            text: String::new(),
+        })
     }
 }
 
@@ -429,8 +583,8 @@ fn the_report_prints_the_tally_and_who_owns_what_remains() {
             },
             Line {
                 step: DeployStep::Images,
-                word: Word::Skipped,
-                sentence: "HS-048 builds the images".to_string(),
+                word: Word::Changed,
+                sentence: "built 2 images: holosmith-proxy:0.1.0, agent-image:0.1.0".to_string(),
             },
             Line {
                 step: DeployStep::Service,
@@ -462,11 +616,11 @@ fn the_report_prints_the_tally_and_who_owns_what_remains() {
     );
     assert_eq!(
         lines[7],
-        "deploy: 5 steps: 1 satisfied, 1 changed, 2 skipped, 1 failed"
+        "deploy: 5 steps: 1 satisfied, 2 changed, 1 skipped, 1 failed"
     );
     assert_eq!(
         lines[8],
-        "deploy: incomplete: 2 of 7 steps belong to later stories — HS-048: images; HS-049: service"
+        "deploy: incomplete: 1 of 7 steps belongs to later stories — HS-049: service"
     );
     assert_eq!(lines.len(), 9);
     assert!(report.failed());
@@ -518,7 +672,8 @@ fn a_dry_run_lists_the_steps_and_creates_nothing() {
         "a dry run did not name all seven steps:\n{}",
         report.render()
     );
-    // Step 1's plan is its read, and the three steps this release cannot fill say so.
+    // Step 1's plan is its read, step 3's is a build of both images, and the three steps this release cannot
+    // fill say so.
     assert_eq!(line(&report, DeployStep::Preflight).word, Word::Satisfied);
     assert_eq!(
         line(&report, DeployStep::Files).word,
@@ -532,12 +687,13 @@ fn a_dry_run_lists_the_steps_and_creates_nothing() {
         "step 2's plan names no action: {}",
         line(&report, DeployStep::Files).sentence
     );
-    for step in [
-        DeployStep::Images,
-        DeployStep::Service,
-        DeployStep::Origins,
-        DeployStep::Health,
-    ] {
+    assert_eq!(
+        line(&report, DeployStep::Images).word,
+        Word::Needs,
+        "a dry run did not print a plan for step 3: {}",
+        line(&report, DeployStep::Images).sentence
+    );
+    for step in [DeployStep::Service, DeployStep::Origins, DeployStep::Health] {
         assert_eq!(
             line(&report, step).word,
             Word::Skipped,
@@ -547,9 +703,10 @@ fn a_dry_run_lists_the_steps_and_creates_nothing() {
     }
     assert!(!root.exists(), "a dry run created {}", root.display());
     assert!(
-        machine.calls().is_empty(),
-        "a dry run started something: {:?}",
-        machine.calls()
+        machine.calls().is_empty() && machine.builds().is_empty(),
+        "a dry run started something: {:?} {:?}",
+        machine.calls(),
+        machine.builds()
     );
 }
 
@@ -955,6 +1112,278 @@ fn a_held_port_does_not_stop_the_deploy_but_another_failure_does() {
         "a real failure was downgraded to a remark: {sentence}"
     );
     assert_eq!(report.lines.len(), 1);
+}
+
+// ---- step 3: the two images --------------------------------------------------------------
+
+/// What a failed `COPY` build printed on this machine, trimmed to the lines the sentence is parsed from: the
+/// instruction inside the Dockerfile, the layer, and the child's own last line.
+const COPY_FAILURE: &str = "#3 [2/3] COPY missing-file /x
+#3 0.044 ERROR: failed to build: failed to solve: failed to compute cache key: failed to calculate checksum of ref \"/missing-file\": not found
+------
+ > [2/3] COPY missing-file /x:
+------
+   1 | FROM alpine:3@sha256:3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a
+   2 | >>> COPY missing-file /x
+   3 |
+------
+ERROR: failed to build: failed to solve: failed to compute cache key: failed to calculate checksum of ref \"/missing-file\": not found";
+
+#[test]
+fn step_three_plans_a_build_for_both_absent_images_and_then_builds_them() {
+    // The first deploy on a machine that has never built either image: the read is two "not on this machine"
+    // reasons, a dry run prints them and builds nothing, and the run builds both — proxy first, because step 4
+    // needs it.
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("deploy-images-absent");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let config = config(Some(format!("unix://{}", socket.display())));
+    let target = Target::resolve(Some(dir.file("root")));
+    let deployed = target.config(&config);
+    let tools = real_tools(&dir);
+    let machine = Fake::new();
+
+    let planned = deploy::run(&deployed, &target, &tools, &machine, true);
+    let step = line(&planned, DeployStep::Images);
+    assert_eq!(step.word, Word::Needs, "{}", step.sentence);
+    for image in [images::proxy_image(), images::agent_image()] {
+        assert!(
+            step.sentence
+                .contains(&format!("{image} is not on this machine")),
+            "the plan does not name {image}'s absence: {}",
+            step.sentence
+        );
+    }
+    assert!(
+        machine.builds().is_empty(),
+        "a dry run built an image: {:?}",
+        machine.builds()
+    );
+
+    let report = deploy::run(&deployed, &target, &tools, &machine, false);
+    assert!(!report.failed(), "the build failed:\n{}", report.render());
+    let step = line(&report, DeployStep::Images);
+    assert_eq!(step.word, Word::Changed, "{}", step.sentence);
+    assert!(
+        step.sentence.contains(&images::proxy_image())
+            && step.sentence.contains(&images::agent_image()),
+        "the change does not name both tags: {}",
+        step.sentence
+    );
+    let builds = machine.builds();
+    assert_eq!(
+        builds.len(),
+        2,
+        "step 3 did not build both images: {builds:?}"
+    );
+    assert_eq!(
+        builds[0].0,
+        images::proxy_image(),
+        "the agent image was built before the proxy image, whose container step 4 starts"
+    );
+    // The argument vector is `build_arguments`' own: the flags, then `-` last, because the context is the archive
+    // on stdin.
+    let (_, args) = &builds[0];
+    assert_eq!(args.first().map(String::as_str), Some("build"));
+    assert_eq!(args.last().map(String::as_str), Some("-"));
+    assert!(
+        args.iter().any(|argument| argument
+            == &format!("HOLOSMITH_VERSION={}", env!("CARGO_PKG_VERSION"))),
+        "the build carries no version argument: {args:?}"
+    );
+    assert!(
+        args.iter().any(|argument| argument
+            == &format!("HOLOSMITH_PI_VERSION={}", holosmith::pins::pi_version())),
+        "the build carries no pinned pi: {args:?}"
+    );
+
+    // The build left the images the read compares with, so a second run is honestly satisfied — the whole point of
+    // the labels.
+    let second = deploy::run(&deployed, &target, &tools, &machine, false);
+    let step = line(&second, DeployStep::Images);
+    assert_eq!(step.word, Word::Satisfied, "{}", step.sentence);
+    assert_eq!(machine.builds().len(), 2, "the second run built again");
+}
+
+#[test]
+fn step_three_is_satisfied_when_both_images_carry_this_binarys_labels() {
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("deploy-images-current");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let config = config(Some(format!("unix://{}", socket.display())));
+    let target = Target::resolve(Some(dir.file("root")));
+    let deployed = target.config(&config);
+    let machine = Fake::new()
+        .with_labels(
+            &images::proxy_image(),
+            expected_labels(Kind::Proxy, &deployed),
+        )
+        .with_labels(
+            &images::agent_image(),
+            expected_labels(Kind::Agent, &deployed),
+        );
+
+    let report = deploy::run(&deployed, &target, &real_tools(&dir), &machine, false);
+
+    let step = line(&report, DeployStep::Images);
+    assert_eq!(step.word, Word::Satisfied, "{}", step.sentence);
+    for fact in [
+        images::proxy_image(),
+        images::agent_image(),
+        env!("CARGO_PKG_VERSION").to_string(),
+        holosmith::pins::pi_version().to_string(),
+        "python3 ripgrep".to_string(),
+    ] {
+        assert!(
+            step.sentence.contains(&fact),
+            "the read does not name {fact}: {}",
+            step.sentence
+        );
+    }
+    assert!(
+        machine.builds().is_empty(),
+        "an image whose labels are this binary's was built again: {:?}",
+        machine.builds()
+    );
+}
+
+#[test]
+fn step_three_names_the_label_that_differs() {
+    // The read is the labels and not the tag: the agent image is there under its right name and says another pi
+    // version, which is exactly the image an upgrade has to rebuild.
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("deploy-images-stale");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let config = config(Some(format!("unix://{}", socket.display())));
+    let target = Target::resolve(Some(dir.file("root")));
+    let deployed = target.config(&config);
+    let mut agent = expected_labels(Kind::Agent, &deployed);
+    agent.insert(
+        images::LABEL_PI.to_string(),
+        "0.0.0-not-the-pinned-one".to_string(),
+    );
+    let machine = Fake::new()
+        .with_labels(
+            &images::proxy_image(),
+            expected_labels(Kind::Proxy, &deployed),
+        )
+        .with_labels(&images::agent_image(), agent);
+
+    let planned = deploy::run(&deployed, &target, &real_tools(&dir), &machine, true);
+    let step = line(&planned, DeployStep::Images);
+    assert_eq!(step.word, Word::Needs, "{}", step.sentence);
+    for fact in [
+        images::agent_image(),
+        "pi-version".to_string(),
+        "0.0.0-not-the-pinned-one".to_string(),
+        holosmith::pins::pi_version().to_string(),
+    ] {
+        assert!(
+            step.sentence.contains(&fact),
+            "the reason does not name {fact}: {}",
+            step.sentence
+        );
+    }
+    // The proxy image is current, so it is not in the plan: one action, not two.
+    assert!(
+        !step.sentence.contains(&images::proxy_image()),
+        "a current image is in the plan for a build: {}",
+        step.sentence
+    );
+    assert!(
+        step.sentence.starts_with("1 action:"),
+        "the plan does not count one build: {}",
+        step.sentence
+    );
+}
+
+#[test]
+fn step_three_refuses_a_daemon_that_builds_for_another_architecture() {
+    // A `docker_host` may point at a socket elsewhere, and an image built there has a base for that machine: the
+    // guard is what turns "the proxy will not start" into a deploy that says why.
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("deploy-images-arch");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let config = config(Some(format!("unix://{}", socket.display())));
+    let target = Target::resolve(Some(dir.file("root")));
+    let deployed = target.config(&config);
+    let elsewhere = if daemon_word() == "amd64" {
+        "arm64"
+    } else {
+        "amd64"
+    };
+    let machine = Fake::new().with_arch(elsewhere);
+
+    let report = deploy::run(&deployed, &target, &real_tools(&dir), &machine, false);
+
+    assert_eq!(
+        report.failed,
+        Some(DeployStep::Images),
+        "{}",
+        report.render()
+    );
+    let sentence = &line(&report, DeployStep::Images).sentence;
+    let binary = env!("HOLOSMITH_TARGET")
+        .split('-')
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        sentence.contains(elsewhere) && sentence.contains(&binary),
+        "the refusal does not name both architectures: {sentence}"
+    );
+    assert!(
+        machine.builds().is_empty(),
+        "a build was attempted for another architecture: {:?}",
+        machine.builds()
+    );
+    assert_eq!(report.lines.len(), 3, "the run did not stop at step 3");
+}
+
+#[test]
+fn a_failed_build_is_step_threes_own_sentence_and_stops_the_run() {
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("deploy-images-failure");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let config = config(Some(format!("unix://{}", socket.display())));
+    let target = Target::resolve(Some(dir.file("root")));
+    let deployed = target.config(&config);
+    let machine = Fake::new().with_failing_build(COPY_FAILURE);
+
+    let report = deploy::run(&deployed, &target, &real_tools(&dir), &machine, false);
+
+    assert_eq!(
+        report.failed,
+        Some(DeployStep::Images),
+        "{}",
+        report.render()
+    );
+    let sentence = &line(&report, DeployStep::Images).sentence;
+    assert!(
+        sentence.contains("COPY missing-file /x"),
+        "the failure does not name the instruction: {sentence}"
+    );
+    assert!(
+        !sentence.contains('\n'),
+        "the failure is the whole build log rather than one sentence: {sentence}"
+    );
+    // The proxy image is built first, so its failure is the only build the run asked for.
+    assert_eq!(machine.builds().len(), 1, "{:?}", machine.builds());
+    assert_eq!(
+        machine.builds()[0].0,
+        images::proxy_image(),
+        "the step did not build the proxy image first"
+    );
+    assert!(
+        !report.render().contains("4. proxies:"),
+        "a failed build did not stop the run:\n{}",
+        report.render()
+    );
 }
 
 // ---- step 4 and the refusal --------------------------------------------------------------

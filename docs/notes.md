@@ -1526,3 +1526,58 @@ it rather than adding a caveat beside it.
   machine whose credential is not cached fails with `a terminal is required to read the password` — a deploy that
   can only work as root or with NOPASSWD. The child inherits stdin (and only stdin: its stdout and stderr are
   captured for the failure's sentence).
+
+### Landmines: the image builds (HS-048)
+
+- **The build context is a tar on stdin, and that is not a style choice.** `docker build -` from an archive
+  holding `Dockerfile` and the running binary is the only way to build without a *path* crossing into the
+  daemon's namespace. A context directory under `target/` would be resolved in the **host's** namespace, so a
+  daemon that cannot see it builds from an empty root-owned directory and the failure arrives later as a
+  `COPY`/`RUN` error inside the image — the same landmine as the data root (ADR-0039) and the proxy's binary
+  mount (ADR-0045), and the reason the sandbox (whose `/tmp` is tmpfs) can measure the honest form but not the
+  other. `images::archive` writes ustar by hand with `uid`, `gid` and `mtime` **zero**, so the same two files
+  always produce the same archive bytes; a `mtime` of "now" would make every build a different context for
+  the daemon's cache.
+- **A build's output must not go to a pipe.** A build prints hundreds of lines; a pipe nobody drains fills at
+  64 KiB and the build deadlocks, and `Command::output()` only helps after the build is over. `build_bounded`
+  sends stdout **and stderr** to a temporary file, writes the archive from a spawned thread (a deadline cannot
+  fire while the call is blocked in `write`), polls `try_wait` to the bound, kills on expiry and reads the
+  file back. `Ok(None)` is "did not finish", not an error with a status.
+- **A failed `docker build -t <tag>` does not create the tag — and does not move it either.** Measured: after
+  a failed build `docker image inspect <tag>` answers "no such image" *when the tag was new*. If the tag
+  already pointed at an older image, that image stays; so an absence check is not a skip rule and a failed
+  rebuild is not "the image is gone". The skip rule is the labels, which is also why the deploy's read never
+  treats "the daemon could not answer" as "not built" in anything but the plan's direction.
+- **The base digests are manifest-list digests, and `docker manifest inspect -v` does not contain them.** The
+  `FROM` line records the index digest (`alpine:3` → `sha256:3f4d6b32…`, `node:24-bookworm-slim` →
+  `sha256:01d566e8…`), which is what makes one Dockerfile resolve to the machine's own architecture. Checking
+  the pin by hand with `docker manifest inspect -v` shows the per-platform digests, not the list's — the
+  values are right and the check is the wrong one.
+- **The proxy image cannot be `FROM scratch`.** `hs_key` runs `openssl s_client` (ADR-0048), so a proxy image
+  without `openssl` (and `ca-certificates`) turns every model call into a 502 — while looking perfectly healthy
+  in `docker ps`. `alpine:3` + `apk add --no-cache openssl ca-certificates` is the narrow answer and is
+  measured serving both `proxy egress` and `proxy key` with no mount.
+- **The agent image's base is node because pi is a node CLI.** Measured: `/usr/local/bin/pi` is a symlink into
+  the npm global tree, so a base without node is exit 127 at launch (HS-036's lesson). `node:24-bookworm-slim`
+  carries node 24 and the `node` user at uid 1000, which the session's container needs to stay the host user's.
+- **After this story a `serve` boot cannot start a proxy without the proxy image.** `proxies::start_*` asks
+  `Containers::image_exists` and warns with a sentence naming `holosmith server deploy` step 3; the boot still
+  succeeds, and a session that allows internet access reaches nothing. That is also why `case_server_images`
+  runs **first** among the daemon cases and keeps both images: every later case whose boot starts the proxies
+  depends on them, and a case that removed them at the end would break the suite in a way that looks like a
+  different bug. `HOLOSMITH_TEST_IMAGE` (`pi-agent:local`) still serves the cases that are not about images,
+  and it is a valid `agent_image` — `doctor`'s `image` finding says once that it carries no Holosmith labels
+  rather than failing, because a hand-built image is a supported machine.
+- **The fourth label is a skip rule, not decoration.** `org.holosmith.toolchains` on the agent image is what
+  makes a changed `agent_toolchains` a rebuild: without it every label would still match, and the deploy would
+  answer `satisfied` for an image whose contents no longer match the config. The same reason `config/schema.rs`
+  counts keys: `agent_toolchains` moved `KNOWN_KEYS.len()` to 33 and the golden file with it.
+- **The architecture guard exists because `docker_host` may be another machine.** `COPY holosmith` puts the
+  *running* artifact into the image, so a daemon building for a different architecture produces an image whose
+  entrypoint cannot start — a failure that would surface as a proxy that will not run, minutes later. The
+  apply compares `{{.Server.Arch}}` (`amd64`/`arm64`) with `HOLOSMITH_TARGET`'s prefix once, before the first
+  build. The **read** does not ask: a dry run must remain a plan on a machine whose daemon cannot answer.
+- **Breaking a Dockerfile to test the failure needs the embedded const, not a copy.** The Dockerfiles are
+  `include_str!`ed, so a gate case could only corrupt a copy on disk and would prove nothing. That arm lives in
+  `tests/images.rs`, drives the production `Images` path into a **test-only** tag and asserts both halves:
+  the sentence names the instruction and the layer, and the tag does not exist afterwards.

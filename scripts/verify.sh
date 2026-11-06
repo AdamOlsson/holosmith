@@ -124,6 +124,13 @@ cleanup() {
   done
   docker_session_id=""
   docker_second_session_id=""
+  # HS-048's image case starts the two proxies from the image it built, under its own names (`hs_images_*`), so a
+  # `fail` in the middle does not leave a container the next run's `--name` would trip over. Its images stay: every
+  # later `serve` boot starts the proxies from them.
+  local image_container
+  for image_container in $(docker ps -aq --filter 'name=hs_images_' 2>/dev/null || true); do
+    docker rm --force "$image_container" >/dev/null 2>&1 || true
+  done
   # shellcheck disable=SC2086 # deliberate word splitting: each id is one word, and an empty list is no words.
   if [ "$status" -ne 0 ] || [ "$keep" -eq 1 ]; then
     printf 'work dir kept: %s\n' "$WORK" >&2
@@ -396,6 +403,7 @@ serve_cases=(
   case_worktree
   case_docker_preflight
   case_doctor_quick
+  case_server_images
   case_server_deploy
   case_worktree_refusal
   case_container_mounts
@@ -4828,17 +4836,19 @@ case_docker_preflight() {
 # two proxies on a real one (ADR-0056).
 #
 # The **offline** half answers `GET /_ping` from a socket it starts, so step 1 passes on a machine with no
-# daemon, and asserts four things: the dry run lists the seven steps in the spec's order with steps 3, 5, 6 and 7
-# naming the story that still owns them, and leaves the install root **absent**; a run whose `docker_host` names a
-# socket that cannot exist stops at step 1 and prints the resume command as its last line; a run that gets past
-# step 1 and then fails step 4 — the same `_ping` socket answers the ping and nothing else — leaves step 2's files
-# on disk, evaluates no later step at all, and prints the same runnable resume command.
+# daemon, and asserts four things: the dry run lists the seven steps in the spec's order, step 3 planning a build
+# of both images while steps 5, 6 and 7 name the story that still owns them, and leaves the install root
+# **absent**; a run whose `docker_host` names a socket that cannot exist stops at step 1 and prints the resume
+# command as its last line; a run that gets past step 1 and then fails step 3 — that same `_ping` socket answers
+# the ping and nothing a build needs — leaves step 2's files on disk, evaluates no later step at all, and prints
+# the same runnable resume command.
 #
 # The **online** half needs the daemon and an image `agent_image` names (today a `docker tag` of the test image,
-# because step 3 builds nothing until HS-048): a real install into a root under `target/` — step 2's four paths
-# with their modes, step 4's two containers — and then the same command again, where steps 1, 2 and 4 say
-# `satisfied`, the tree's listing and `config.toml`'s bytes are identical, and `keys.toml` was not rewritten. That
-# is the acceptance's "the second run changes nothing", as a comparison rather than an absence of output.
+# which this case does not build — step 3 builds `agent-image:<version>`, and the line says the config's
+# `agent_image` names something else): a real install into a root under `target/` — step 2's four paths with their
+# modes, step 3's two images, step 4's two containers — and then the same command again, where steps 1, 2, 3 and 4
+# say `satisfied`, the tree's listing and `config.toml`'s bytes are identical, and `keys.toml` was not rewritten.
+# That is the acceptance's "the second run changes nothing", as a comparison rather than an absence of output.
 #
 # A run whose remaining steps are later stories' exits **0** with an `incomplete` line; only a failed step exits
 # 1. `tests/deploy.rs` is where the words, the order, the modes and the `sudo` seam are driven over shims.
@@ -5004,10 +5014,266 @@ PY
   rm -rf "$root"
 }
 
+# HS-048's step 3: the two images, built from the Dockerfiles embedded in the artifact, and what is inside them.
+#
+# This is the one case whose subject is the *build*: `holosmith-proxy:<version>` and `agent-image:<version>` are what
+# step 4's proxies run and what a session's container runs, so both the labels a later deploy compares and the
+# images' own contents are measured here, against a real daemon. It owns the **absent** state — it removes both
+# tags first — because a build that only ever ran on a machine that already had the images would prove nothing.
+#
+# Four measurements, one per claim:
+#
+#   labels    both tags carry version, git tag and pinned pi; the agent image carries the toolchain list as well.
+#             That is the read step 3's skip rule and `doctor` make (ADR-0057).
+#   agent     inside the image: `pi --version` is the pin, git answers, both toolchains are installed, the uid is
+#             1000 (ADR-0035), and this binary runs `container snapshot --help` — the helper subcommand a session
+#             needs and the one thing a hand-built `pi-agent:local` does not have.
+#   proxy     the proxy image serves *both* proxies: `hs_egress` refuses a host that is not on its allow-list and
+#             `hs_key` refuses a provider path it does not know. Neither question needs TLS or the internet.
+#   again     the same deploy again says `satisfied` and leaves both image ids unchanged — the acceptance's "a
+#             second run changes nothing", for the step that is the most expensive to get wrong.
+#
+# It **leaves both images** and removes only its own containers and its scratch root: every later case's `serve`
+# boot starts the proxies from them, and removing an image a running container came from would leave that container
+# unable to restart. `case_server_deploy`'s online half removes the tags again because *it* asserts `changed`; the
+# order in `serve_cases` is what makes both honest.
+#
+# A machine with no daemon or no python3 prints one SKIP line: `tests/images.rs` builds a test tag and asserts the
+# same three things through the production `Images` path, so a skipped gate is not a silent gap.
+case_server_images() {
+  local name=case_server_images root="$repo_root/target/verify-images-$$"
+  local proxy agent version tag pin plain status labels id_before control preview line answer
+  local egress_ip key_ip binds container package
+  if ! command -v docker >/dev/null 2>&1 || ! docker version >/dev/null 2>&1; then
+    printf 'SKIP %s: no Docker daemon answers (tests/images.rs builds a test tag and reads it back)\n' "$name"
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to speak HTTP to the proxies in the image (tests/images.rs covers the build)\n' "$name"
+    return 0
+  fi
+  plain="$("$artifact" version 2>/dev/null)" || fail "$name/version" "the artifact does not report a version"
+  version="$(sed -n 's/^version //p' <<<"$plain")"
+  tag="$(sed -n 's/^git_tag //p' <<<"$plain")"
+  pin="$(tr -d '[:space:]' <"$repo_root/pins/pi.txt")"
+  [ -n "$version" ] && [ -n "$tag" ] && [ -n "$pin" ] ||
+    fail "$name/version" "the artifact's version report is incomplete: $plain"
+  proxy="holosmith-proxy:$version"
+  agent="agent-image:$version"
+
+  # This case owns the absent state: both tags go before the deploy, so the build that follows is a real one.
+  timeout 120 docker image rm -f "$proxy" "$agent" >/dev/null 2>&1 || true
+  rm -rf "$root"
+  mkdir -p "$root"
+  printf '[providers]\nopencode-go = "sk-opencode-go-verify"\n\n[sessions]\nverify-session = "hs-dummy-verify"\n' \
+    >"$root/keys.toml" || fail "$name/keys" "could not write the key file the key proxy mounts"
+  chmod 600 "$root/keys.toml"
+  control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a second port"
+  # `deploy_config`'s shape with one difference: `agent_image` names the image this step is about to build, so a
+  # session's container would run what the deploy installed. `data_root` and `projects_root` stay at their defaults
+  # because `--root` prefixes them, and this case's `--root` is under `target/` (ADR-0035's mount-source rule).
+  images_config "$WORK/config-images.toml" "$control" "$preview" "$version"
+
+  status=0
+  "$artifact" server deploy --root "$root/install" --config "$WORK/config-images.toml" \
+    >"$WORK/$name.deploy.out" 2>&1 || status=$?
+  [ "$status" -eq 0 ] ||
+    fail "$name/deploy/exit" "the deploy exited $status: $(tail -20 "$WORK/$name.deploy.out")"
+  assertions=$((assertions + 1))
+  grep -q '^3\. images: changed: ' "$WORK/$name.deploy.out" ||
+    fail "$name/deploy/step3" "step 3 did not build the two images: $(cat "$WORK/$name.deploy.out")"
+  assertions=$((assertions + 1))
+
+  # The labels, on both tags: the three facts this binary knows about itself.
+  for label in version git-tag pi-version; do
+    case "$label" in
+      version) wanted="$version" ;;
+      git-tag) wanted="$tag" ;;
+      pi-version) wanted="$pin" ;;
+    esac
+    for image in "$proxy" "$agent"; do
+      labels="$(docker image inspect --format '{{json .Config.Labels}}' "$image" 2>/dev/null)" ||
+        fail "$name/labels" "$image is not on this machine after the build"
+      case "$labels" in
+        *"\"org.holosmith.$label\":\"$wanted\""*) assertions=$((assertions + 1)) ;;
+        *) fail "$name/labels/$label" "$image does not carry org.holosmith.$label=$wanted: $labels" ;;
+      esac
+    done
+  done
+  # The fourth label, and only on the agent image: the toolchain list the config gave it.
+  labels="$(docker image inspect --format '{{json .Config.Labels}}' "$agent" 2>/dev/null)"
+  case "$labels" in
+    *'"org.holosmith.toolchains":"python3 ripgrep"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/labels/toolchains" "the agent image does not carry its toolchain list: $labels" ;;
+  esac
+  labels="$(docker image inspect --format '{{json .Config.Labels}}' "$proxy" 2>/dev/null)"
+  case "$labels" in
+    *'"org.holosmith.toolchains"'*)
+      fail "$name/labels/proxy-toolchains" "the proxy image carries the agent image's toolchain label: $labels"
+      ;;
+  esac
+  assertions=$((assertions + 1))
+
+  # The agent image's contents, each one a fact a session depends on.
+  answer="$(timeout 300 docker run --rm --network none --entrypoint pi "$agent" --version 2>&1)" ||
+    fail "$name/agent/pi" '`pi --version` did not run in the agent image: '"$answer"
+  check "$name/agent/pi/version" "$pin" "$(sed -n '1s/^[^0-9]*//p' <<<"$answer" | tr -d '[:space:]')"
+  timeout 120 docker run --rm --network none --entrypoint git "$agent" --version >/dev/null 2>&1 ||
+    fail "$name/agent/git" "git does not run in the agent image"
+  assertions=$((assertions + 1))
+  for package in python3 ripgrep; do
+    answer="$(timeout 120 docker run --rm --network none --entrypoint dpkg-query "$agent" \
+      -W -f='${Package}' "$package" 2>&1)" ||
+      fail "$name/agent/$package" "$package is not installed in the agent image: $answer"
+    check "$name/agent/$package/name" "$package" "$answer"
+  done
+  check "$name/agent/uid" "1000" \
+    "$(timeout 120 docker run --rm --network none --entrypoint id "$agent" -u 2>&1)"
+  timeout 120 docker run --rm --network none --entrypoint /usr/local/bin/holosmith \
+    "$agent" container snapshot --help >/dev/null 2>&1 ||
+    fail "$name/agent/snapshot" 'this binary: `container snapshot --help` does not run in the agent image'
+  assertions=$((assertions + 1))
+
+  # The proxy image serves both proxies, from the one entrypoint and with nothing of the host's mounted.
+  docker network inspect egress >/dev/null 2>&1 ||
+    fail "$name/network" "the deploy's step 4 did not leave the egress network the proxies attach to"
+  assertions=$((assertions + 1))
+  timeout 60 docker rm -f "hs_images_egress_$$" "hs_images_key_$$" >/dev/null 2>&1 || true
+  timeout 60 docker run -d --name "hs_images_egress_$$" --network egress \
+    --entrypoint /usr/local/bin/holosmith "$proxy" \
+    proxy egress --listen 0.0.0.0:3128 --allow example.com >/dev/null 2>&1 ||
+    fail "$name/egress/run" "the proxy image did not start an egress proxy"
+  assertions=$((assertions + 1))
+  timeout 60 docker run -d --name "hs_images_key_$$" --network egress \
+    -v "$root/keys.toml:$root/keys.toml:ro" \
+    --entrypoint /usr/local/bin/holosmith "$proxy" \
+    proxy key --listen 0.0.0.0:8080 --keys "$root/keys.toml" >/dev/null 2>&1 ||
+    fail "$name/key/run" "the proxy image did not start a key proxy"
+  assertions=$((assertions + 1))
+  egress_ip="$(docker inspect --format '{{(index .NetworkSettings.Networks "egress").IPAddress}}' "hs_images_egress_$$" 2>/dev/null)"
+  key_ip="$(docker inspect --format '{{(index .NetworkSettings.Networks "egress").IPAddress}}' "hs_images_key_$$" 2>/dev/null)"
+  [ -n "$egress_ip" ] && [ -n "$key_ip" ] ||
+    fail "$name/address" "a proxy container has no address on the egress network"
+  assertions=$((assertions + 1))
+  # A host that is not on the allow-list: the refusal spec item 2 names, spoken to the container.
+  check "$name/egress/refusal" "HTTP/1.1 403 Forbidden" \
+    "$(image_proxy_ask "$egress_ip" 3128 "CONNECT not-listed.example:443 HTTP/1.1" \
+      "Proxy-Authorization: Basic $(printf 'abcdef0123456789:pw' | base64)")"
+  # And the key proxy's own refusal for a provider path this build does not forward to. No TLS, no provider.
+  check "$name/key/refusal" "HTTP/1.1 403 Forbidden" \
+    "$(image_proxy_ask "$key_ip" 8080 "POST /not-a-provider/v1/messages HTTP/1.1" "")"
+  # Nothing of the host's binary is mounted into the egress proxy: the binary it runs is the image's own copy.
+  binds="$(docker inspect --format '{{json .HostConfig.Binds}}' "hs_images_egress_$$" 2>/dev/null)"
+  case "$binds" in
+    null | "[]") assertions=$((assertions + 1)) ;;
+    *) fail "$name/egress/binds" "the egress proxy binds the host's paths: $binds" ;;
+  esac
+  for container in "hs_images_egress_$$" "hs_images_key_$$"; do
+    binds="$(docker inspect --format '{{json .HostConfig.Binds}}' "$container" 2>/dev/null)"
+    # The artifact itself, not the word "holosmith": the key proxy's own mount lives under this repository's
+    # `target/`, and a check for a substring would refuse the one mount the design keeps.
+    case "$binds" in
+      *"$artifact"*) fail "$name/binds" "$container mounts the host's binary ($artifact): $binds" ;;
+      *) assertions=$((assertions + 1)) ;;
+    esac
+  done
+
+  # The second deploy: `satisfied`, and neither image was rebuilt.
+  id_before="$(docker image inspect --format '{{.Id}}' "$proxy") $(docker image inspect --format '{{.Id}}' "$agent")"
+  status=0
+  "$artifact" server deploy --root "$root/install" --config "$WORK/config-images.toml" \
+    >"$WORK/$name.again.out" 2>&1 || status=$?
+  [ "$status" -eq 0 ] ||
+    fail "$name/again/exit" "the second deploy exited $status: $(tail -20 "$WORK/$name.again.out")"
+  assertions=$((assertions + 1))
+  grep -q '^3\. images: satisfied: ' "$WORK/$name.again.out" ||
+    fail "$name/again/step3" "the second run's step 3 is not satisfied: $(cat "$WORK/$name.again.out")"
+  assertions=$((assertions + 1))
+  check "$name/again/ids" "$id_before" \
+    "$(docker image inspect --format '{{.Id}}' "$proxy") $(docker image inspect --format '{{.Id}}' "$agent")"
+
+  # `doctor --full` on the machine the deploy just built: the image line names the version and the tag, which is
+  # the label comparison read back through its other caller — and it runs the self-test, which is the measurement
+  # that the agent image can be a session's image at all.
+  status=0
+  "$artifact" doctor --full --config "$root/install/etc/holosmith/config.toml" \
+    >"$WORK/$name.doctor.out" 2>&1 || status=$?
+  [ "$status" -eq 0 ] ||
+    fail "$name/doctor/exit" "doctor --full exited $status: $(tail -20 "$WORK/$name.doctor.out")"
+  assertions=$((assertions + 1))
+  line="$(grep '^image: pass: ' "$WORK/$name.doctor.out" || true)"
+  [ -n "$line" ] || fail "$name/doctor/image" "no image pass: $(cat "$WORK/$name.doctor.out")"
+  case "$line" in
+    *"$version"*"$tag"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/doctor/labels" "the image pass names neither the version nor the git tag: $line" ;;
+  esac
+
+  # Its own containers and its scratch go, and so do the two the deploy's step 4 started: `hs_key` mounts a
+  # directory inside this case's tree, so removing the tree under a running container would leave it crash-looping
+  # on a mount source that is no longer there. **Both images stay** (see this case's comment), which is what a later
+  # `serve` boot needs to start the proxies again.
+  timeout 60 docker rm -f "hs_images_egress_$$" "hs_images_key_$$" hs_egress hs_key >/dev/null 2>&1 || true
+  rm -rf "$root"
+}
+
+# The config `case_server_images` deploys: `deploy_config`'s shape with `agent_image` naming the tag step 3 builds.
+# A second function rather than an argument to `deploy_config`, because that case deliberately names an image built
+# by hand — which is what makes its step 3's remark about `agent_image` a fact of that machine.
+images_config() {
+  local path="$1" control="$2" preview="$3" version="$4"
+  cat >"$path" <<EOF
+owner = "$owner"
+role = "server"
+backend = "stub"
+control_listen = "127.0.0.1:$control"
+preview_listen = "127.0.0.1:$preview"
+control_origin = "http://localhost:$control"
+preview_origin = "http://localhost:$preview"
+docker_host = "unix:///var/run/docker.sock"
+agent_image = "agent-image:$version"
+min_free_gb = 1
+EOF
+}
+
+# image_proxy_ask <address> <port> <request line> [<header line>]: one request to a proxy running in a container,
+# retried until it answers, printing its status line.
+#
+# A retry rather than a sleep, because a container's listener is up a moment after `docker run -d` returns and a
+# first attempt that raced it would fail an assertion about the proxy with a sentence about a socket.
+image_proxy_ask() {
+  python3 - "$@" <<'PYASK'
+import socket, sys, time
+
+host, port, request = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+header = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] else ""
+lines = [request] + ([header] if header else [])
+head = ("\r\n".join(lines) + "\r\n\r\n").encode()
+deadline = time.time() + 30
+while True:
+    try:
+        with socket.create_connection((host, port), timeout=5) as sock:
+            sock.sendall(head)
+            answer = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                answer += chunk
+        print(answer.decode("utf-8", "replace").split("\r\n", 1)[0])
+        break
+    except OSError as error:
+        if time.time() > deadline:
+            print("no answer: %s" % error)
+            break
+        time.sleep(0.1)
+PYASK
+}
+
 case_server_deploy() {
   local name=case_server_deploy root="$repo_root/target/verify-deploy-$$"
   local image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
-  local control preview status line got entry n
+  local control preview status line got entry n version
 
   # ---- the offline half: step 1 against a `_ping` socket, and the two failures ----------------------
   if ! command -v python3 >/dev/null 2>&1; then
@@ -5040,13 +5306,16 @@ case_server_deploy() {
     grep -q '^2\. files: needs: ' "$WORK/$name.dry.out" ||
       fail "$name/dry/plan" "the dry run does not say what step 2 would do: $(cat "$WORK/$name.dry.out")"
     assertions=$((assertions + 1))
+    # Step 3 is this story's, so the dry run plans it: two images to build, and neither is on this machine.
+    grep -q '^3\. images: needs: ' "$WORK/$name.dry.out" ||
+      fail "$name/dry/images" "the dry run does not plan step 3: $(cat "$WORK/$name.dry.out")"
+    assertions=$((assertions + 1))
     # A step another story owns is a skip that names it, never a pass (ADR-0056).
     while read -r n entry line; do
       grep -q "^$n\. $entry: skipped: .*$line" "$WORK/$name.dry.out" ||
         fail "$name/dry/skip$n" "step $n is not a skip naming $line: $(cat "$WORK/$name.dry.out")"
       assertions=$((assertions + 1))
     done <<'OWNERS'
-3 images HS-048
 5 service HS-049
 6 origins HS-049
 7 health HS-049
@@ -5059,8 +5328,8 @@ OWNERS
     grep -q '^deploy: into ' "$WORK/$name.dry.out" ||
       fail "$name/dry/into" "the report does not say which tree it describes: $(cat "$WORK/$name.dry.out")"
     assertions=$((assertions + 1))
-    grep -q '^deploy: incomplete: 4 of 7 steps' "$WORK/$name.dry.out" ||
-      fail "$name/dry/incomplete" "the summary does not say four steps are still other stories': $(cat "$WORK/$name.dry.out")"
+    grep -q '^deploy: incomplete: 3 of 7 steps' "$WORK/$name.dry.out" ||
+      fail "$name/dry/incomplete" "the summary does not say three steps are still other stories': $(cat "$WORK/$name.dry.out")"
     assertions=$((assertions + 1))
     grep -qx "deploy: url: http://localhost:$control" "$WORK/$name.dry.out" ||
       fail "$name/dry/url" "the tail names no URL this machine will serve: $(cat "$WORK/$name.dry.out")"
@@ -5111,8 +5380,10 @@ OWNERS
     [ ! -e "$root/absent-install" ] || fail "$name/absentdry/root" "the dry run created $root/absent-install"
     assertions=$((assertions + 1))
 
-    # 3. A run that gets past step 1 and then fails step 4: that same socket answers `_ping` and nothing else,
-    #    so step 2's files are on disk when the run stops and the machine is describable.
+    # 3. A run that gets past step 1 and then fails step 3: that same socket answers `_ping` and nothing a
+    #    build's read needs, so step 2's files are on disk when the run stops and the machine is describable. The
+    #    sentence is the daemon's own — a socket that cannot answer `docker image inspect` is the reason no image
+    #    could be built — and it names the proxy image, which is the one step 4 would have needed.
     status=0
     "$artifact" server deploy --root "$root/partial" \
       --config "$WORK/config-deploy-offline.toml" >"$WORK/$name.partial.out" 2>&1 || status=$?
@@ -5123,14 +5394,14 @@ OWNERS
     grep -q '^2\. files: changed: ' "$WORK/$name.partial.out" ||
       fail "$name/partial/step2" "step 2 did not create the files: $(cat "$WORK/$name.partial.out")"
     assertions=$((assertions + 1))
-    grep -q '^3\. images: skipped: ' "$WORK/$name.partial.out" ||
-      fail "$name/partial/step3" "step 3 is not a skip: $(cat "$WORK/$name.partial.out")"
+    grep -q '^3\. images: failed: ' "$WORK/$name.partial.out" ||
+      fail "$name/partial/step3" "step 3 did not fail against a `_ping` socket: $(cat "$WORK/$name.partial.out")"
     assertions=$((assertions + 1))
-    grep -q '^4\. proxies: failed: ' "$WORK/$name.partial.out" ||
-      fail "$name/partial/step4" "step 4 did not fail against a `_ping` socket: $(cat "$WORK/$name.partial.out")"
+    grep -q "^3\. images: failed: .*holosmith-proxy:" "$WORK/$name.partial.out" ||
+      fail "$name/partial/step3/image" "the failure does not name the proxy image: $(cat "$WORK/$name.partial.out")"
     assertions=$((assertions + 1))
-    if grep -q '^5\. ' "$WORK/$name.partial.out"; then
-      fail "$name/partial/stop" "a run that failed at step 4 evaluated step 5: $(cat "$WORK/$name.partial.out")"
+    if grep -q '^4\. ' "$WORK/$name.partial.out"; then
+      fail "$name/partial/stop" "a run that failed at step 3 evaluated step 4: $(cat "$WORK/$name.partial.out")"
     fi
     assertions=$((assertions + 1))
     [ -f "$root/partial/etc/holosmith/config.toml" ] ||
@@ -5156,7 +5427,7 @@ OWNERS
   # ---- the online half: a real install, and then the same command again ----------------------------
   if ! command -v docker >/dev/null 2>&1 || ! docker version >/dev/null 2>&1 ||
     ! docker image inspect "$image" >/dev/null 2>&1; then
-    printf 'SKIP %s/online: no docker daemon or no %s image (step 3 builds one in HS-048; tests/deploy.rs covers the rest)\n' \
+    printf 'SKIP %s/online: no docker daemon or no %s image (step 4 starts the proxies from the built proxy image; tests/deploy.rs covers the rest)\n' \
       "$name" "$image"
     rm -rf "$root"
     return 0
@@ -5164,6 +5435,11 @@ OWNERS
   # `hs_egress`/`hs_key` are the machine's names: a leftover from an earlier case would make this case's first
   # run read `satisfied`, so it takes them over and removes its own at the end.
   timeout 60 docker rm -f hs_egress hs_key >/dev/null 2>&1 || true
+  # Step 3 builds `agent-image:<version>` and `holosmith-proxy:<version>`, and this case asserts `changed`: it
+  # removes both tags first, because `case_server_images` deliberately leaves them. The rebuild is layer-cached.
+  version="$("$artifact" version | sed -n 's/^version //p')"
+  [ -n "$version" ] || fail "$name/version" "the artifact does not report a version"
+  timeout 120 docker image rm -f "holosmith-proxy:$version" "agent-image:$version" >/dev/null 2>&1 || true
   rm -rf "$root"
   mkdir -p "$root"
   control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
@@ -5176,6 +5452,9 @@ OWNERS
   check "$name/online/exit" 0 "$status"
   grep -q '^2\. files: changed: ' "$WORK/$name.online.out" ||
     fail "$name/online/step2" "step 2 did not create the files: $(cat "$WORK/$name.online.out")"
+  assertions=$((assertions + 1))
+  grep -q '^3\. images: changed: ' "$WORK/$name.online.out" ||
+    fail "$name/online/step3" "step 3 did not build the two images: $(cat "$WORK/$name.online.out")"
   assertions=$((assertions + 1))
   grep -q '^4\. proxies: changed: ' "$WORK/$name.online.out" ||
     fail "$name/online/step4" "step 4 did not start the proxies: $(cat "$WORK/$name.online.out")"
@@ -5222,6 +5501,7 @@ OWNERS
   done <<'AGAIN'
 1 preflight
 2 files
+3 images
 4 proxies
 AGAIN
   deploy_listing "$root/install" >"$WORK/$name.tree2"
@@ -5234,8 +5514,8 @@ AGAIN
   cmp -s "$WORK/$name.keys1" "$root/install/var/lib/holosmith/secrets/keys.toml" ||
     fail "$name/again/keys" "the second run rewrote keys.toml, which holds every stored provider key"
   assertions=$((assertions + 1))
-  grep -q '^deploy: incomplete: 4 of 7 steps' "$WORK/$name.again.out" ||
-    fail "$name/again/incomplete" "the second run does not say four steps are still other stories': $(cat "$WORK/$name.again.out")"
+  grep -q '^deploy: incomplete: 3 of 7 steps' "$WORK/$name.again.out" ||
+    fail "$name/again/incomplete" "the second run does not say three steps are still other stories': $(cat "$WORK/$name.again.out")"
   assertions=$((assertions + 1))
   timeout 60 docker rm -f hs_egress hs_key >/dev/null 2>&1 || true
   rm -rf "$root"

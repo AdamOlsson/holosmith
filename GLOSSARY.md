@@ -693,6 +693,23 @@ stops the run and makes the resume command the last line). Its machine names are
 `DeployStep::ALL`, and `--root` is the install tree the step's paths are built under. It is not `Step`.
 _Avoid_: Install step, deploy phase, stage, deployment
 
+**Image build**:
+The two images `server deploy`'s step 3 builds on this machine, from the Dockerfiles embedded in the binary:
+`holosmith-proxy:<version>`, the artifact on `alpine` plus openssl, which both proxies run; and
+`agent-image:<version>`, the artifact plus pi at the pinned version, git and the configured toolchains, which a
+session's container runs. It is a **build**, not a pull: nothing in this phase pushes or fetches an image, and
+the context is an archive holding the Dockerfile and the running binary. Its machine names are
+`images::Kind`, `images::ensure` and `images::proxy_image`/`images::agent_image`.
+_Avoid_: Container image, docker image, image pull, base image
+
+**Image label**:
+One of the four `org.holosmith.*` values a built image carries — version, git tag, pinned pi, and (on the agent
+image only) the toolchain list — written by the Dockerfile from build arguments and read back by `server
+deploy`'s step 3 skip rule and by `doctor`'s `image` finding. An image with no Holosmith labels is one another
+tool built (`pi-agent:local`), which is a supported machine rather than a mismatch. Its machine names are
+`images::LABEL_VERSION`, `LABEL_GIT_TAG`, `LABEL_PI` and `LABEL_TOOLCHAINS`.
+_Avoid_: Tag, annotation, metadata, image version
+
 **Doctor**:
 The preflight and self-test command that decides whether a machine may run sessions: `doctor --quick` is the
 list `serve` refuses on and the unit file's `ExecStartPre`, and `doctor --full` adds the network self-test,

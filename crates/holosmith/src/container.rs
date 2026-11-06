@@ -539,51 +539,41 @@ impl SessionContainer {
 /// * **It is detached with a restart policy**, unlike a session's container: it has no stdio to hold and no
 ///   exit to classify, and `unless-stopped` is the spec's own word. `--rm` and `--restart` conflict, so a
 ///   restart policy means a stopped proxy leaves its name behind — the next start's `rm -f` is what clears it.
-/// * **It runs this binary**, mounted read-only at its own host path (item 1's identity rule). The image's
-///   own base is irrelevant because the artifact is static; HS-048 ships `holosmith-proxy:<version>` and this
-///   mount goes away, which is the one thing [`EgressProxy::of`] decides.
+/// * **It runs the proxy image** — `holosmith-proxy:<version>`, built by `server deploy`'s step 3 from the
+///   Dockerfile embedded in this binary ([`crate::images`]). Nothing of the host's is mounted and nothing is
+///   passed as an entrypoint beyond the image's own: the binary inside the image *is* this release's, which is
+///   what item 1's identity rule asks for and what stops a running proxy from being a different build than the
+///   server that started it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EgressProxy {
-    /// The image the container runs, from `agent_image` until HS-048 builds a proxy image.
+    /// The image the container runs, from [`crate::images::proxy_image`].
     pub image: String,
-    /// This build's binary: both what is mounted and what is run.
-    pub binary: PathBuf,
     /// The domains a tunnel may target, from `[egress] allow`.
     pub allow: Vec<String>,
 }
 
 impl EgressProxy {
-    /// The machine's proxy, or the sentence explaining why this build cannot start one.
+    /// The machine's proxy: the image's name and the config's allow-list.
     ///
     /// Built from the **config**, not from [`ContainerSettings`]: the proxy is the machine's container, not a
-    /// session's — it has no session, no mounts and no limits of its own — so the three things it needs (the
-    /// image, the allow-list and this binary's own path) are the machine's settings verbatim.
-    ///
-    /// The only refusal is "this process does not know its own path": every other input has a default, and a
-    /// missing image or a missing daemon is the daemon's answer to `docker run`, which the caller logs.
-    pub fn of(config: &Config) -> Result<Self, String> {
-        let Some(binary) = std::env::current_exe().ok() else {
-            return Err(
-                "the egress proxy runs this binary, and this process could not name its own executable, so \
-                 no proxy container was started"
-                    .to_string(),
-            );
-        };
-        Ok(Self {
-            image: config.agent_image.clone(),
-            binary,
+    /// session's — it has no session, no mounts and no limits of its own. Nothing here can fail: the image name
+    /// is this binary's own version and the allow-list has a default, so a missing image is the daemon's answer
+    /// to `docker run` and an absent one is the daemon's answer to `docker image inspect`.
+    pub fn of(config: &Config) -> Self {
+        Self {
+            image: crate::images::proxy_image(),
             allow: config.egress.allow.clone(),
-        })
+        }
     }
 
     /// The `docker run` arguments, from `run` to the last `--allow`.
     ///
-    /// `--entrypoint` rather than relying on the image's: the image is a session's image (a shell, pi, git),
-    /// and its entrypoint is whatever that base does. `--cap-drop ALL` and `no-new-privileges` are here for the
-    /// same reason they are on a session's container — a proxy that can open a raw socket is a proxy that is
-    /// not a proxy — and it needs no mount of the data root, the projects root or the daemon's socket.
+    /// `--entrypoint` rather than relying on the image's: the image's own entrypoint is the same path, but the
+    /// flag is what makes the command tail below the proxy's subcommand rather than an argument to whatever the
+    /// base's entrypoint is. `--cap-drop ALL` and `no-new-privileges` are here for the same reason they are on a
+    /// session's container — a proxy that can open a raw socket is a proxy that is not a proxy — and it needs no
+    /// mount of the data root, the projects root or the daemon's socket.
     pub fn run_args(&self) -> Vec<String> {
-        let binary = self.binary.display().to_string();
         let mut arguments = vec![
             "run".to_string(),
             // Detached: nothing reads this container's stdio. `--rm` cannot be passed with `--restart`.
@@ -598,11 +588,8 @@ impl EgressProxy {
             "ALL".to_string(),
             "--security-opt".to_string(),
             "no-new-privileges".to_string(),
-            // The binary, at its own host path, read-only: the container runs the artifact the server is.
-            "-v".to_string(),
-            format!("{binary}:{binary}:ro"),
             "--entrypoint".to_string(),
-            binary,
+            crate::images::BINARY_IN_IMAGE.to_string(),
             self.image.clone(),
             "proxy".to_string(),
             "egress".to_string(),
@@ -630,29 +617,23 @@ impl EgressProxy {
 ///   ADR-0048 rather than hidden in a dependency.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyProxy {
-    /// The image the container runs, from `agent_image` until a proxy image is built.
+    /// The image the container runs, from [`crate::images::proxy_image`].
     pub image: String,
-    /// This build's binary: both what is mounted and what is run.
-    pub binary: PathBuf,
     /// `<data>/secrets/keys.toml`, read by the proxy inside the container. What is mounted is its directory
     /// ([`KeyProxy::mount`]); this container is the only one that ever sees a real key.
     pub keys: PathBuf,
 }
 
 impl KeyProxy {
-    /// The machine's key proxy, or the sentence explaining why this build cannot start one.
-    pub fn of(config: &Config) -> Result<Self, String> {
-        let Some(binary) = std::env::current_exe().ok() else {
-            return Err(
-                "the key proxy runs this binary, and this process could not name its own executable, so no proxy container was started"
-                    .to_string(),
-            );
-        };
-        Ok(Self {
-            image: config.agent_image.clone(),
-            binary,
+    /// The machine's key proxy: the proxy image's name and the key file's path.
+    ///
+    /// Nothing here can fail, for [`EgressProxy::of`]'s reason: the image name is this binary's own version and
+    /// the key path is derived from the config.
+    pub fn of(config: &Config) -> Self {
+        Self {
+            image: crate::images::proxy_image(),
             keys: config.secrets_path(),
-        })
+        }
     }
 
     /// The directory the proxy container mounts: `keys`'s parent.
@@ -674,10 +655,9 @@ impl KeyProxy {
 
     /// The `docker run` arguments, from `run` to the last `--keys`.
     pub fn run_args(&self) -> Vec<String> {
-        let binary = self.binary.display().to_string();
         let keys = self.keys.display().to_string();
         let mount = self.mount().display().to_string();
-        vec![
+        let mut arguments = vec![
             "run".to_string(),
             "--detach".to_string(),
             "--name".to_string(),
@@ -692,14 +672,28 @@ impl KeyProxy {
             "ALL".to_string(),
             "--security-opt".to_string(),
             "no-new-privileges".to_string(),
-            "-v".to_string(),
-            format!("{binary}:{binary}:ro"),
+        ];
+        // **Run as the key store's owner.** The store is a 0700 directory and a 0600 file belonging to the user
+        // `serve` (or `server deploy`) runs as, and `--cap-drop ALL` takes `DAC_OVERRIDE` with everything else: a
+        // container running as uid 0 without that capability cannot read a file owned by the machine's user. It
+        // then fails to prepare the store it can see, exits 1, and `--restart unless-stopped` loops it — which is
+        // exactly what HS-048's first gate run measured, because the image the proxies ran *before* this story
+        // happened to carry uid 1000 as its user. Taking the owner from the file makes the identity a fact
+        // rather than an accident of the base image, and it is the same rule a session's container follows
+        // (ADR-0035). No owner (a path that is not there yet) means no flag; `start_key` refuses that case before
+        // it asks for this vector.
+        if let Ok(metadata) = std::fs::metadata(&self.keys) {
+            use std::os::unix::fs::MetadataExt as _;
+            arguments.push("--user".to_string());
+            arguments.push(format!("{}:{}", metadata.uid(), metadata.gid()));
+        }
+        arguments.extend([
             // The only mount of the key store anywhere in this build, and a directory for `mount`'s reason. A
             // session's container never names it.
             "-v".to_string(),
             format!("{mount}:{mount}:ro"),
             "--entrypoint".to_string(),
-            binary,
+            crate::images::BINARY_IN_IMAGE.to_string(),
             self.image.clone(),
             "proxy".to_string(),
             "key".to_string(),
@@ -707,7 +701,8 @@ impl KeyProxy {
             format!("0.0.0.0:{}", crate::key::KEY_PROXY_PORT),
             "--keys".to_string(),
             keys,
-        ]
+        ]);
+        arguments
     }
 }
 
@@ -929,8 +924,7 @@ mod tests {
     #[test]
     fn the_proxy_container_is_detached_restarting_and_lives_on_the_egress_network() {
         let proxy = EgressProxy {
-            image: "agent-image:0.1.0".to_string(),
-            binary: PathBuf::from("/usr/local/bin/holosmith"),
+            image: crate::images::proxy_image(),
             allow: vec!["crates.io".to_string(), "static.crates.io".to_string()],
         };
         let arguments = proxy.run_args();
@@ -955,18 +949,25 @@ mod tests {
         );
         assert_eq!(flag("--cap-drop"), "ALL");
         assert_eq!(flag("--security-opt"), "no-new-privileges");
-        // The binary is mounted read-only at its own host path and is the entrypoint: one artifact, no second
-        // program inside the image (ADR-0045).
-        assert_eq!(
-            flag("-v"),
-            "/usr/local/bin/holosmith:/usr/local/bin/holosmith:ro"
+        // The image is the one step 3 builds, and nothing of the host's is mounted into it: the binary the
+        // container runs is the copy the image was built with, so a running proxy cannot be a different build
+        // than the server that started it (ADR-0045, ADR-0057).
+        assert!(
+            arguments
+                .iter()
+                .any(|argument| *argument == crate::images::proxy_image()),
+            "the run vector does not name the proxy image: {arguments:?}"
         );
-        assert_eq!(flag("--entrypoint"), "/usr/local/bin/holosmith");
+        assert!(
+            !arguments.iter().any(|argument| argument.contains(":ro")),
+            "the proxy binds something of the host's read-only: {arguments:?}"
+        );
+        assert_eq!(flag("--entrypoint"), crate::images::BINARY_IN_IMAGE);
         // The command is the proxy's own subcommand, with the allow-list as arguments rather than as a mount
         // the container would have to read.
         let image = arguments
             .iter()
-            .position(|argument| argument == "agent-image:0.1.0")
+            .position(|argument| *argument == crate::images::proxy_image())
             .expect("the image is in the run vector");
         assert_eq!(
             &arguments[image + 1..],
@@ -981,23 +982,23 @@ mod tests {
                 "static.crates.io",
             ]
         );
-        // No mount of the data root, the projects root or the daemon's socket: the proxy reads nothing and
-        // writes nothing, so there is nothing for it to reach.
+        // No mount at all: not the data root, not the projects root, not the daemon's socket, and not this
+        // binary — the image carries it. The proxy reads nothing and writes nothing, so there is nothing for it
+        // to reach.
         assert_eq!(
             arguments
                 .iter()
                 .filter(|argument| *argument == "-v")
                 .count(),
-            1,
+            0,
             "{arguments:?}"
         );
     }
 
     #[test]
-    fn the_key_proxy_mounts_the_binary_and_the_directory_the_key_file_lives_in() {
+    fn the_key_proxy_mounts_only_the_directory_the_key_file_lives_in() {
         let proxy = KeyProxy {
-            image: "agent-image:0.1.0".to_string(),
-            binary: PathBuf::from("/usr/local/bin/holosmith"),
+            image: crate::images::proxy_image(),
             keys: PathBuf::from("/var/lib/holosmith/secrets/keys.toml"),
         };
         let arguments = proxy.run_args();
@@ -1014,22 +1015,20 @@ mod tests {
         assert_eq!(flag("--security-opt"), "no-new-privileges");
         assert_eq!(
             flag("-v"),
-            "/usr/local/bin/holosmith:/usr/local/bin/holosmith:ro"
+            "/var/lib/holosmith/secrets:/var/lib/holosmith/secrets:ro"
         );
-        // Very deliberately two: the binary and the key file. A third would be a data root or a project, and
-        // this container has no business reading either.
-        let mounts: Vec<&String> = arguments
-            .iter()
-            .enumerate()
-            .filter(|(index, argument)| {
-                *argument == "-v"
-                    || arguments
-                        .get(index + 1)
-                        .is_some_and(|next| next == *argument)
-            })
-            .map(|(_, argument)| argument)
+        // Very deliberately one: the directory the key file lives in, and nothing else. The binary is inside the
+        // image (ADR-0057), and a data root or a project would be a mount this container has no business having.
+        let mounted: Vec<&String> = arguments
+            .windows(2)
+            .filter(|pair| pair[0] == "-v")
+            .map(|pair| &pair[1])
             .collect();
-        assert_eq!(mounts.len(), 2, "{arguments:?}");
+        assert_eq!(
+            mounted,
+            ["/var/lib/holosmith/secrets:/var/lib/holosmith/secrets:ro"],
+            "{arguments:?}"
+        );
         assert!(
             arguments
                 .iter()
@@ -1052,7 +1051,7 @@ mod tests {
         );
         let image = arguments
             .iter()
-            .position(|argument| argument == "agent-image:0.1.0")
+            .position(|argument| *argument == crate::images::proxy_image())
             .expect("the image is in the run vector");
         assert_eq!(
             &arguments[image + 1..],
@@ -1068,10 +1067,48 @@ mod tests {
     }
 
     #[test]
-    fn the_proxy_takes_the_machines_image_and_allow_list_and_this_binarys_own_path() {
+    fn the_key_proxy_runs_as_the_key_stores_owner() {
+        // The store is a 0700 directory and a 0600 file belonging to the user `serve` runs as, and the container
+        // is `--cap-drop ALL`, which takes root's `DAC_OVERRIDE` with it. A container running as uid 0 therefore
+        // cannot read the machine's own key file: it fails to prepare a store it can see, exits 1, and
+        // `--restart unless-stopped` loops it — measured at HS-048's first gate run, where the old proxy image
+        // only worked because its base's user happened to be uid 1000. Taking the owner from the file makes the
+        // identity explicit, and this is the test that keeps it from decaying back into "whatever the base says".
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = std::env::temp_dir().join(format!("holosmith-key-owner-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp directory");
+        let keys = dir.join("keys.toml");
+        std::fs::write(&keys, "").expect("a key file the proxy may be told about");
+        let metadata = std::fs::metadata(&keys).expect("the file this test just wrote");
+        let proxy = KeyProxy {
+            image: crate::images::proxy_image(),
+            keys: keys.clone(),
+        };
+        let arguments = proxy.run_args();
+        let position = arguments
+            .iter()
+            .position(|argument| argument == "--user")
+            .unwrap_or_else(|| panic!("the key proxy runs as nobody in particular: {arguments:?}"));
+        assert_eq!(
+            arguments[position + 1],
+            format!("{}:{}", metadata.uid(), metadata.gid()),
+            "the container's user is not the key store's owner: {arguments:?}"
+        );
+        assert_eq!(
+            metadata.uid(),
+            std::fs::metadata(std::env::current_exe().expect("this test's own path"))
+                .expect("the test binary")
+                .uid(),
+            "this machine's test binary is not owned by the user running it, so the assertion above proves \
+             nothing about the real case"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_proxy_takes_the_machines_image_and_allow_list() {
         // Built from the config rather than from `ContainerSettings`: the proxy has no session, so it has no
-        // mounts and no limits, and the binary it runs is *this* one (ADR-0045). `current_exe` answers for the
-        // test binary here, which is all this needs — the path is what is mounted, not what is executed here.
+        // mounts and no limits, and the image it runs is named from this binary's own version (ADR-0045).
         let config = Config {
             agent_image: "agent-image:0.1.0".to_string(),
             egress: crate::config::Egress {
@@ -1079,14 +1116,13 @@ mod tests {
             },
             ..Config::default()
         };
-        let proxy = EgressProxy::of(&config).expect("this process knows its own path");
-        assert_eq!(proxy.image, "agent-image:0.1.0");
-        assert_eq!(proxy.allow, ["crates.io"]);
+        let proxy = EgressProxy::of(&config);
         assert_eq!(
-            Some(proxy.binary.clone()),
-            std::env::current_exe().ok(),
-            "the binary is this process's, not a guess at an install path"
+            proxy.image,
+            format!("holosmith-proxy:{}", env!("CARGO_PKG_VERSION")),
+            "the proxy image is this binary's own version, not the configured agent image"
         );
+        assert_eq!(proxy.allow, ["crates.io"]);
     }
 
     #[test]
