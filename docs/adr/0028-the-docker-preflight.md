@@ -103,3 +103,11 @@ would be a test of nothing.
 - The gate adds `case_docker_preflight`: the shipped artifact with `docker_host` at a socket that cannot
   exist exits 1, prints the daemon sentence with its fix, and prints no banner. It is deterministic on a
   machine that *has* a daemon, which a case that waited for "no docker here" would not be.
+
+## Amended by ADR-0054 (HS-045)
+
+The preflight grew the arm this ADR's sentence rule implied and `serve` did not need: `preflight::Finding` is a
+check, an `Outcome` (`pass`/`fail`/`unknown`) and the sentence, `Complaint` is **its failing projection** (the
+same `String`, not a second spelling), and `preflight::check_with` is `report_with` filtered to failures. `serve`
+prints what it printed before; `doctor` prints every finding. The three checks, their sentences and the `Tools`
+seam are unchanged, and the `Check` word table was extended rather than duplicated.

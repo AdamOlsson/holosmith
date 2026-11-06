@@ -86,3 +86,11 @@ future refusal cannot drift apart.
   versions and the word `doctor`, plus a 200 from `/api/health` — the "continues" half, measured.
 - `scripts/schema-snapshot.sh` needs `python3` for its `sqlite3` module; the `sqlite3` CLI is not installed here and
   nothing in the gate may depend on it. It is a release-time tool, not a gate step.
+
+## Kept by ADR-0054 (HS-045)
+
+"`doctor` refuses on a newer database" is now built: `doctor --quick`'s `database` check reads the file through
+`db::recorded_without_migrating` (SQLite's `SQLITE_OPEN_READ_ONLY`, not `Database::open`, so nothing is migrated)
+and answers `fail` with `schema::Verdict::sentence` — the same string `serve` warns with, whose "not built yet"
+clause was amended in the same commit. `case_schema_newer` asserts both halves against one database: `serve`
+answers `200` and warns, `doctor` exits 1 and refuses.

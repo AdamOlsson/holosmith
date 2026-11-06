@@ -75,6 +75,7 @@ WORK="$(mktemp -d)"
 mkdir -p "$WORK/responses"
 serve_pid=""
 socket_pid=""
+holder_pid=""
 serve_err="$WORK/serve.err"
 created_id=""
 # The preview listener's bound port, read from the banner (HS-041): the config asks for port 0.
@@ -101,6 +102,12 @@ cleanup() {
   if [ -n "$socket_pid" ] && kill -0 "$socket_pid" 2>/dev/null; then
     kill "$socket_pid" 2>/dev/null || true
     wait "$socket_pid" 2>/dev/null || true
+  fi
+  # A case that holds a port on purpose (HS-045's `doctor`, whose `ports` check is the one thing it can break
+  # without touching the machine) leaves its holder here, so a `fail` in the middle does not strand a listener.
+  if [ -n "$holder_pid" ] && kill -0 "$holder_pid" 2>/dev/null; then
+    kill "$holder_pid" 2>/dev/null || true
+    wait "$holder_pid" 2>/dev/null || true
   fi
   local id
   for id in ${docker_session_id:-} ${docker_second_session_id:-}; do
@@ -383,6 +390,7 @@ serve_cases=(
   case_backup
   case_worktree
   case_docker_preflight
+  case_doctor_quick
   case_worktree_refusal
   case_container_mounts
   case_agent_launch
@@ -399,6 +407,7 @@ serve_cases=(
   case_internet_toggle
   case_preview
   case_schema_newer
+  case_doctor_full
 )
 
 # V1 (HS-027): the hardened `.git` mounts, measured on a real daemon. Three writes must fail, three git
@@ -2986,7 +2995,7 @@ PYWS
 
 case_schema_newer() {
   local name=case_schema_newer root="$repo_root/target/verify-schema-newer-$$"
-  local line
+  local line status
   if ! command -v python3 >/dev/null 2>&1; then
     printf 'SKIP %s: no python3 to write a newer schema_version (tests/schema_previous.rs covers the verdict)\n' "$name"
     return 0
@@ -2994,7 +3003,13 @@ case_schema_newer() {
   stop_serve
   rm -rf "$root"
   mkdir -p "$root"
-  printf 'owner = "%s"\nbackend = "stub"\n' "$owner" >"$WORK/config-schema-newer.toml"
+  # `data_root` is in the *file* as well as in `start_serve`'s `--data-dir`, because the `doctor` run below reads
+  # the config and nothing else: a `--data-dir` is a `serve` override, and the doctor must be pointed at the same
+  # database rather than at the machine's `/var/lib/holosmith`.
+  # A `hub` on purpose: its `doctor` list has no Docker or git check (item 10 §6), so the doctor run below is the
+  # same on a machine with a daemon and on one without — the database is the only thing this case breaks.
+  printf 'owner = "%s"\nrole = "hub"\nbackend = "stub"\ndata_root = "%s"\ncontrol_listen = "127.0.0.1:0"\npreview_listen = "127.0.0.1:0"\nmin_free_gb = 1\n' \
+    "$owner" "$root/data" >"$WORK/config-schema-newer.toml"
   # One boot to create and migrate the database, then the row is rewritten to a version from the future.
   start_serve "$WORK/config-schema-newer.toml" "$root/data" >/dev/null
   stop_serve
@@ -3020,6 +3035,23 @@ SQL
   printf '%s\n' "$line" | grep -q 'doctor' ||
     fail "$name/doctor" "the warning does not name the command that refuses: $line"
   assertions=$((assertions + 1))
+  # …and the command keeps the promise the warning made (HS-045): `doctor --quick` refuses the same database,
+  # read **without** migrating it, with `schema::verdict`'s one sentence. `serve` continues (the 200 below),
+  # `doctor` does not — that split is ADR-0047's whole decision.
+  status=0
+  "$artifact" doctor --quick --config "$WORK/config-schema-newer.toml" \
+    >"$WORK/$name.doctor.out" 2>&1 || status=$?
+  check "$name/doctor/exit" 1 "$status"
+  grep -q '^database: fail: ' "$WORK/$name.doctor.out" ||
+    fail "$name/doctor/database" "doctor did not refuse the newer database: $(cat "$WORK/$name.doctor.out")"
+  assertions=$((assertions + 1))
+  grep -q 'newer release wrote' "$WORK/$name.doctor.out" ||
+    fail "$name/doctor/sentence" "the refusal is not the warning's sentence: $(cat "$WORK/$name.doctor.out")"
+  assertions=$((assertions + 1))
+  # One failure and no more: the schema is the case's subject, and a case whose exit code came from a full disk or
+  # somebody else's port would pass for the wrong reason.
+  line="$(grep -c '^[a-z][a-z]*: fail: ' "$WORK/$name.doctor.out" || true)"
+  check "$name/doctor/one_failure" 1 "$line"
   # And it is really serving: a refused boot would have exited, so a 200 here is the "continues" half of the claim.
   fetch "$name" GET /api/health "Host: 127.0.0.1" ||
     fail "$name/no_answer" "GET /api/health did not answer over a newer database"
@@ -4451,6 +4483,19 @@ PY
   echo $!
 }
 
+# free_port: a TCP port the kernel just gave us on loopback, printed and released — the same bet `--port 0`
+# makes. Something could take it in between, which is why a case that uses one *asserts* the port's answer
+# (a `pass` naming it free) rather than assuming it.
+free_port() {
+  python3 - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+}
+
 # HS-025's proof from the artifact: the worktree step is host git, so a create makes `.worktrees/<id>` on
 # branch `agent/<id>` from the repository's HEAD, records both on the row, and — because the *next* step is
 # the session's network, which from HS-028 runs `docker network create` against the socket this case answers
@@ -4671,6 +4716,255 @@ case_docker_preflight() {
       fail "$name/fix" "the sentence names no fix: $line"
       ;;
   esac
+}
+
+# HS-045's `--quick`, from the shipped artifact, on a machine that needs no daemon: six checks that are the
+# preflight's own (`docker`, `git`, `disk` — and `merge`, V2's trial), and four doctor adds (`systemd`,
+# `tailscale`, the two `ports`, `database`). The daemon is a `_ping` socket this case answers, so the docker
+# line is deterministic on every machine — including one with a real daemon — which is `case_docker_preflight`'s
+# determinism applied to a passing run. Three runs, each one a different fact:
+#
+#   1. a machine that passes: exit 0, one line per check, and the two `unknown` lines this machine must have
+#      (no systemd, no `tailscaled`) — ADR-0054's rule that "not measured" is not "broken";
+#   2. a held control port, bound by a python listener this case starts after the first run: `ports` fails
+#      with the sentence that names what to stop, and the exit code is 1 — `ExecStartPre`'s whole point;
+#   3. `docker_host` at a socket that cannot exist: the `docker` line carries **the same sentence** `serve`
+#      refuses with (`case_docker_preflight` asserts that half) and the other checks still print, because a
+#      machine missing one thing must be fixable in one round trip.
+#
+# `tests/doctor.rs` is where every check's arms are driven over shims, including the ones no gate machine can
+# produce (a logged-out Tailscale, a git 2.37, an image running another pi).
+case_doctor_quick() {
+  local name=case_doctor_quick root="$repo_root/target/verify-doctor-$$"
+  local control preview status word line
+  # The guard is first, and before anything else that could fail: python3 is optional on a hub-class machine.
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to pick ports and answer `_ping` (tests/doctor.rs covers every check)\n' "$name"
+    return 0
+  fi
+  rm -rf "$root"
+  mkdir -p "$root/data"
+  control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a second port"
+  socket_pid="$(fake_docker_ping "$root/docker.sock")"
+  for _ in $(seq 1 100); do
+    [ -S "$root/docker.sock" ] && break
+    sleep 0.05
+  done
+  [ -S "$root/docker.sock" ] || fail "$name/socket" "the fake daemon socket never appeared"
+
+  # `role = "server"` because that is who runs the Docker and git checks (item 10 §6 omits them for a hub),
+  # and `backend = "stub"` so nothing in this case can start a container.
+  printf 'owner = "%s"\nrole = "server"\nbackend = "stub"\ncontrol_listen = "127.0.0.1:%s"\npreview_listen = "127.0.0.1:%s"\ndata_root = "%s"\ndocker_host = "unix://%s/docker.sock"\nmin_free_gb = 1\n' \
+    "$owner" "$control" "$preview" "$root/data" "$root" >"$WORK/config-doctor-quick.toml"
+
+  status=0
+  "$artifact" doctor --quick --config "$WORK/config-doctor-quick.toml" \
+    >"$WORK/$name.out" 2>"$WORK/$name.err" || status=$?
+  [ "$status" -eq 0 ] ||
+    fail "$name/exit" "doctor --quick exited $status on a machine that passes: $(cat "$WORK/$name.out" "$WORK/$name.err")"
+  assertions=$((assertions + 1))
+  grep -qx 'doctor: quick' "$WORK/$name.out" ||
+    fail "$name/header" "the report does not name its depth: $(cat "$WORK/$name.out")"
+  assertions=$((assertions + 1))
+  # One line per check, in the spec's list. The `pass`/`unknown` split is asserted per check below where it is a
+  # fact of this machine, and left to `tests/doctor.rs` where it is not (a systemd machine's `systemd: pass`).
+  for word in systemd docker git merge disk tailscale ports database; do
+    grep -q "^$word: \(pass\|unknown\): " "$WORK/$name.out" ||
+      fail "$name/$word" "no $word line in the report: $(cat "$WORK/$name.out")"
+    assertions=$((assertions + 1))
+  done
+  for word in docker git merge disk database; do
+    grep -q "^$word: pass: " "$WORK/$name.out" ||
+      fail "$name/$word/pass" "$word did not pass on this machine: $(cat "$WORK/$name.out")"
+    assertions=$((assertions + 1))
+  done
+  # The two ports are the ones this case picked, so the sentence is asserted rather than the word alone.
+  grep -q "^ports: pass: control 127.0.0.1:$control is free" "$WORK/$name.out" ||
+    fail "$name/control" "the control port is not reported free: $(cat "$WORK/$name.out")"
+  assertions=$((assertions + 1))
+  grep -q "^ports: pass: preview 127.0.0.1:$preview is free" "$WORK/$name.out" ||
+    fail "$name/preview" "the preview port is not reported free: $(cat "$WORK/$name.out")"
+  assertions=$((assertions + 1))
+  # A machine that has never served has no database, which is a pass and not a finding.
+  grep -q '^database: pass: .*no database' "$WORK/$name.out" ||
+    fail "$name/database" "a fresh data root is not a pass: $(cat "$WORK/$name.out")"
+  assertions=$((assertions + 1))
+  # No failure anywhere: the tally is one line, and `unknown` is not a failure (ADR-0044/ADR-0054).
+  grep -q '^doctor: [0-9]* findings: [0-9]* pass, 0 fail, ' "$WORK/$name.out" ||
+    fail "$name/tally" "the tally is not zero failures: $(cat "$WORK/$name.out")"
+  assertions=$((assertions + 1))
+  # The honest lines: `serve` by hand is supported without either, so neither may be a failure here.
+  line="$(grep '^systemd: ' "$WORK/$name.out" || true)"
+  case "$line" in
+    'systemd: pass: '* | 'systemd: unknown: '*"serve"*"server deploy"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/systemd" "the systemd line is neither a pass nor an honest unknown: $line" ;;
+  esac
+  line="$(grep '^tailscale: ' "$WORK/$name.out" || true)"
+  case "$line" in
+    'tailscale: pass: '* | 'tailscale: unknown: '* | 'tailscale: fail: '*'tailscale up'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/tailscale" "the tailscale line names no outcome: $line" ;;
+  esac
+
+  # 2. A held control port, before a start: the failure `ExecStartPre` exists for.
+  python3 - "$control" <<'PY' >/dev/null 2>&1 &
+import socket, sys
+server = socket.socket()
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("127.0.0.1", int(sys.argv[1])))
+server.listen(4)
+while True:
+    connection, _ = server.accept()
+    connection.recv(512)
+    connection.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
+    connection.close()
+PY
+  holder_pid=$!
+  for _ in $(seq 1 100); do
+    if (exec 3<>/dev/tcp/127.0.0.1/"$control") 2>/dev/null; then break; fi
+    sleep 0.05
+  done
+  status=0
+  "$artifact" doctor --quick --config "$WORK/config-doctor-quick.toml" \
+    >"$WORK/$name.held.out" 2>&1 || status=$?
+  check "$name/held/exit" 1 "$status"
+  line="$(grep '^ports: fail: control ' "$WORK/$name.held.out" || true)"
+  [ -n "$line" ] || fail "$name/held/line" "the held port is not a failure: $(cat "$WORK/$name.held.out")"
+  case "$line" in
+    *"in use"*"ss -ltnp"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/held/sentence" "the failure names no way to find the holder: $line" ;;
+  esac
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  holder_pid=""
+
+  # 3. A daemon that is not there: one failure, its sentence, and the rest of the list still printed.
+  printf 'owner = "%s"\nrole = "server"\nbackend = "docker"\ndocker_host = "unix://%s/absent.sock"\ndata_root = "%s"\nmin_free_gb = 1\n' \
+    "$owner" "$root" "$root/data" >"$WORK/config-doctor-absent.toml"
+  status=0
+  "$artifact" doctor --quick --config "$WORK/config-doctor-absent.toml" \
+    >"$WORK/$name.absent.out" 2>&1 || status=$?
+  check "$name/absent/exit" 1 "$status"
+  line="$(grep '^docker: fail: ' "$WORK/$name.absent.out" || true)"
+  [ -n "$line" ] || fail "$name/absent/line" "a daemon that cannot answer is not a failure: $(cat "$WORK/$name.absent.out")"
+  case "$line" in
+    *"start it with"*"docker_host"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/absent/sentence" "the docker failure names no fix: $line" ;;
+  esac
+  for line in git merge disk ports database; do
+    grep -q "^$line: " "$WORK/$name.absent.out" ||
+      fail "$name/absent/$line" "one failure hid the $line line: $(cat "$WORK/$name.absent.out")"
+    assertions=$((assertions + 1))
+  done
+
+  kill "$socket_pid" 2>/dev/null || true
+  wait "$socket_pid" 2>/dev/null || true
+  socket_pid=""
+  rm -rf "$root"
+}
+
+# HS-045's `--full` from the shipped artifact, at **item 10 §7's moment**: the machine is already serving, which
+# is what makes the four additions meaningful — the self-test has a daemon to run in, both proxies exist because
+# `serve`'s boot started them, the ports are held by this machine's own server (the pass `--quick` fails on), and
+# the image's pi version is a fact about the image the config names.
+#
+# It stops the shared boot and leaves its own running, which is the shape `case_reconcile_orphans` and
+# `case_preview` established: the phase's final `stop_serve` is what ends the last server. The proxies outlive it,
+# as they outlive every server (`serve` starts them; nothing stops them), so they are read here and not removed —
+# `tests/container.rs` is the one test that minds, and it skips rather than replacing a live proxy.
+#
+# A machine without the daemon or the image prints one SKIP line, and `tests/doctor.rs` is where the decision is
+# proven for the machines this one cannot be: the arms its fake `Machine` produces are the ones a skipped run
+# would otherwise hide.
+case_doctor_full() {
+  local name=case_doctor_full image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
+  # Two `local`s, not one: `set -u` expands `$root` before `local` assigns it (HS-038's landmine, hit again).
+  local root="$repo_root/target/verify-doctor-full-$$"
+  local data="$root/data" control preview status=0 line pinned networks
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    printf 'SKIP %s: no Docker daemon answers (tests/doctor.rs drives the same checks over a fake machine)\n' "$name"
+    return 0
+  fi
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    printf 'SKIP %s: no image %s (HOLOSMITH_TEST_IMAGE names another)\n' "$name" "$image"
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to pick the two ports doctor must find held (tests/doctor.rs covers the arms)\n' "$name"
+    return 0
+  fi
+  stop_serve
+  rm -rf "$root"
+  mkdir -p "$data" "$root/projects"
+  control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a second port"
+  # The scratch lives under `target/` for ADR-0035's reason: the daemon resolves a mount's source in the host's
+  # namespace, and the proxies mount this binary at its own path. **`data_root` and the two listeners are in the
+  # file**, because `doctor` reads the config and nothing else — `--data-dir` and `--port` are `serve` overrides
+  # (a `doctor` run given only the file would otherwise check `/var/lib/holosmith` and port 8080).
+  printf 'owner = "%s"\nrole = "server"\nbackend = "docker"\nmax_live_sessions = 1\nprojects_root = "%s"\nagent_image = "%s"\ndata_root = "%s"\ncontrol_listen = "127.0.0.1:%s"\npreview_listen = "127.0.0.1:%s"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
+    "$owner" "$root/projects" "$image" "$data" "$control" "$preview" >"$WORK/config-doctor-full.toml"
+  # Its own boot, **on the config's own ports**: `start_serve` always passes `--port 0`, which would leave the
+  # config naming a port nothing listens on and `doctor`'s port check asking about the wrong address. The banner
+  # is what says serve is up (the proxies and the boot's self-test run before it), and the loop gives the
+  # self-test's container the half minute it can take.
+  serve_err="$WORK/$name.serve.err"
+  "$artifact" serve --config "$WORK/config-doctor-full.toml" --data-dir "$data" \
+    >"$WORK/$name.serve.out" 2>"$serve_err" &
+  serve_pid=$!
+  for _ in $(seq 1 600); do
+    grep -q '^control_listen ' "$serve_err" 2>/dev/null && break
+    kill -0 "$serve_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  grep -q "^control_listen 127.0.0.1:$control\$" "$serve_err" ||
+    fail "$name/serve" "serve did not bind the config's control port: $(cat "$serve_err")"
+  assertions=$((assertions + 1))
+
+  "$artifact" doctor --full --config "$WORK/config-doctor-full.toml" \
+    >"$WORK/$name.out" 2>"$WORK/$name.err" || status=$?
+  [ "$status" -eq 0 ] ||
+    fail "$name/exit" "doctor --full exited $status on a serving machine: $(cat "$WORK/$name.out" "$WORK/$name.err")"
+  assertions=$((assertions + 1))
+  grep -qx 'doctor: full' "$WORK/$name.out" ||
+    fail "$name/header" "the report does not name its depth: $(cat "$WORK/$name.out")"
+  assertions=$((assertions + 1))
+  # The four additions, each one line. `network` is the self-test's outcome, and its bare probe *is* the
+  # network-off probe (ADR-0044/ADR-0046); `proxy` is two lines because `hs_egress` and `hs_key` are two facts.
+  for check in network image; do
+    grep -q "^$check: pass: " "$WORK/$name.out" ||
+      fail "$name/$check" "$check did not pass while the machine serves: $(cat "$WORK/$name.out")"
+    assertions=$((assertions + 1))
+  done
+  grep -q '^proxy: pass: hs_egress is running' "$WORK/$name.out" ||
+    fail "$name/egress" "hs_egress is not reported up: $(cat "$WORK/$name.out")"
+  assertions=$((assertions + 1))
+  grep -q '^proxy: pass: hs_key is running' "$WORK/$name.out" ||
+    fail "$name/key" "hs_key is not reported up: $(cat "$WORK/$name.out")"
+  assertions=$((assertions + 1))
+  # The image's pi against `pins/pi.txt`, the one copy of that version: the line names it, and the case reads the
+  # pin rather than repeating it.
+  pinned="$(cat "$repo_root/pins/pi.txt")"
+  grep -q "^image: pass: .*pi $pinned" "$WORK/$name.out" ||
+    fail "$name/image" "the image pass does not name the pinned pi: $(cat "$WORK/$name.out")"
+  assertions=$((assertions + 1))
+  # Item 10 §7's moment for the ports: they are held, and that is the machine serving rather than a failure.
+  grep -q '^ports: pass: control 127.0.0.1:[0-9]* is held by this machine' "$WORK/$name.out" ||
+    fail "$name/control" "the serving control port is not a pass: $(cat "$WORK/$name.out")"
+  assertions=$((assertions + 1))
+  grep -q '^ports: pass: preview 127.0.0.1:[0-9]* is held by this machine' "$WORK/$name.out" ||
+    fail "$name/preview" "the serving preview port is not a pass: $(cat "$WORK/$name.out")"
+  assertions=$((assertions + 1))
+  grep -q '^doctor: [0-9]* findings: [0-9]* pass, 0 fail, ' "$WORK/$name.out" ||
+    fail "$name/tally" "the tally is not zero failures: $(cat "$WORK/$name.out")"
+  assertions=$((assertions + 1))
+  # A `doctor` leaves nothing behind: the self-test's network and probe container are its own (ADR-0044), and a
+  # network left over is the name the next boot has to work around.
+  networks="$(docker network ls --format '{{.Name}}' 2>/dev/null || true)"
+  if printf '%s\n' "$networks" | grep -qx 'holosmith-selftest'; then
+    fail "$name/network_left" "the self-test's network outlived doctor"
+  fi
+  assertions=$((assertions + 1))
 }
 
 # Box 4, over every answer the cases above saved: none of them carries a CORS header, and none

@@ -300,6 +300,21 @@ image and prints one `SKIP` line without them — the bug it exists to catch fai
 daemon" is not that bug. It boots a `stub` backend of its own, because a create on a Docker boot refuses a project
 the machine does not hold and which boot is running when it starts is not its business).
 
+…and — since HS-045 — **`doctor` itself**: `case_doctor_quick` runs the artifact's quick list three times over a
+machine it builds (a `_ping` socket it answers, two ports the kernel gives it, a data root under `target/`): once
+on a machine that passes, where it asserts the report's header, one line per check with its outcome, the two
+honest `unknown` lines this machine has (no systemd, no `tailscaled`), the free-port sentences and a tally with no
+failure; once with a `python3` listener **holding** the control port, where `ports` must fail with the sentence
+that names the holder and the exit code must be 1 (`ExecStartPre`'s whole point); and once with `docker_host` at a
+socket that cannot exist, where the `docker` line carries the sentence `serve` refuses with and every other check
+still prints. It needs `python3` and nothing else, and prints one `SKIP` line without it (ADR-0054).
+`case_doctor_full` runs it at item 10 §7's moment — its **own** Docker `serve`, so the ports are held by this
+machine's server, both proxies exist and the self-test has a daemon — and asserts `network`, both `proxy` lines,
+`image` against `pins/pi.txt`, the two `ports` lines as the serving pass, exit 0, and that the self-test's network
+is gone afterwards; it needs the daemon **and** the image, and prints one `SKIP` line without them, which is not
+the bug it exists to catch (a missing `network` line fails while the machine serves). It stops the shared boot and
+leaves its own running, so it is last.
+
 One rule for every case above and below: a case that must assert one code keeps every higher guard check correct,
 or it asserts another guard's code under its own name.
 
@@ -316,11 +331,11 @@ rest of the run must not carry gets a boot of its own (see `case_token_budget`, 
 Internet-access checkbox (`case_internet_toggle`, described above), and a database from a newer release
 (`case_schema_newer`, which needs no daemon: it boots the artifact twice over one data root, rewrites the
 recorded `schema_version` to 99 in between with `python3`'s `sqlite3`, and asserts that the second boot's
-banner prints `schema 99`, that its one `warn` names both versions and the command that will refuse
-(`doctor`, HS-045), and that `GET /api/health` still answers `200` — the "serve continues so a rollback
-needs no restore" half of ADR-0047), and takes a place at the end of the array: nothing after it may
-assume the first boot's state, and a case that stops the server leaves the run with whatever boot it
-started.
+banner prints `schema 99`, that its one `warn` names both versions and the command that refuses
+(`doctor`), and that `GET /api/health` still answers `200` — the "serve continues so a rollback needs no
+restore" half of ADR-0047 — and then that `doctor --quick` **exits 1 with the same sentence**, the refusing
+half HS-045 built), and takes a place at the end of the array: nothing after it may assume the first boot's
+state, and a case that stops the server leaves the run with whatever boot it started.
 
 **The idle stop runs for the whole `serve` phase.** `idle_stop_min = 1` is the process's setting, so
 every case from `start_serve` on has a sweeper behind it and **no case may leave a session `idle` for a
@@ -471,6 +486,9 @@ start, rather than a service that refuses to come back up.
   `openssl s_client` to terminate the session's plaintext request and speak TLS to the provider (the artifact is
   static and has no TLS stack, ADR-0048). The image this repository tests with carries it; a missing binary is a
   502 from the proxy, not a silent fallback.
+- **`tailscale`** and **systemd** only for what needs them: `doctor` reports a machine without either as
+  `unknown` rather than failing (a LAN-only machine and a hand-run `serve` are supported), and `server deploy`
+  (HS-049) is where they become prerequisites (ADR-0054).
 - **git** for `scripts/build.sh`, and for a Docker run at runtime: the worktree step runs
   `git worktree`, `git rev-list` and `git branch` against the project repository on the host
   (HS-025). Not required by `cargo build` itself, and not required by `--backend stub`.
@@ -479,8 +497,10 @@ start, rather than a service that refuses to come back up.
   on a machine with no daemon), `case_compaction` (ages a session's event log with stdlib `sqlite3`, because
   the compaction window is the spec's fixed 24 hours rather than a config key — ADR-0032),
   `case_exit_classification` and `case_usage_survives_resume` (read a column the API does not carry), the
-  history case, and `case_schema_newer` (writes a `schema_version` from the future). Without it each case
-  prints one `SKIP` line and the run passes; `cargo test` covers the behaviour either way.
+  history case, `case_schema_newer` (writes a `schema_version` from the future), and `case_doctor_quick`
+  (answers `_ping` on a socket, picks the two free ports it asserts and holds one of them to fail the port
+  check). Without it each case prints one `SKIP` line and the run passes; `cargo test` covers the behaviour
+  either way.
 - Optional: **`python3`** for `scripts/schema-snapshot.sh`, the release step that refreshes
   `docs/schema/previous.sql`: the `sqlite3` CLI is not installed and nothing in the gate may depend on it.
   That script is not part of `verify.sh` — it is run by hand when a release is cut (ADR-0047).

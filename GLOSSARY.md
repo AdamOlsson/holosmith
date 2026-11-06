@@ -12,12 +12,14 @@ _Avoid_: Node, box, instance
 
 **Preflight**:
 The checks a machine must pass before it can run a **session**: the Docker daemon answering `_ping` on
-`docker_host`, git 2.38 or newer, and `min_free_gb` free on the data root. Its failures are sentences that
-name the fix, printed by `serve` at startup (which then refuses) and, from HS-045, by `doctor`. A check that
-cannot run — an `ssh://` daemon, a missing `git` — is a complaint rather than a pass. **Amended by
+`docker_host`, git 2.38 or newer, and `min_free_gb` free on the data root. Each answers a **finding**, and its
+failures are sentences that name the fix, printed by `serve` at startup (which then refuses) and by `doctor`.
+A check that cannot run — an `ssh://` daemon, a missing `git` — is a complaint rather than a pass. **Amended by
 ADR-0044:** the network **self-test** is a fourth check with a different rule — "could not run" is one `warn`
-and the boot continues, because it needs a container rather than a command. Its machine names are
-`preflight::check`, `Complaint` and `Check`.
+and the boot continues, because it needs a container rather than a command. **Amended by ADR-0054:** a finding
+is one value with two arms, so the preflight reports passes as well as failures and `serve` prints the failing
+projection of it. Its machine names are `preflight::{check, report, check_with, report_with}`, `Finding`,
+`Outcome`, `Complaint` and `Check`.
 _Avoid_: Sanity check, health check, smoke test (a **preflight** is not `doctor`, which is the command that
 prints one)
 
@@ -682,8 +684,16 @@ Pointing `current` back at the previous release.
 _Avoid_: Revert, downgrade
 
 **Doctor**:
-The preflight and self-test command that decides whether a machine may run sessions.
+The preflight and self-test command that decides whether a machine may run sessions: `doctor --quick` is the
+list `serve` refuses on and the unit file's `ExecStartPre`, and `doctor --full` adds the network self-test,
+the two proxies and the agent image's pi version. Its exit code is non-zero iff a **finding** failed.
 _Avoid_: Healthcheck, verify
+
+**Finding**:
+One check's answer: the check's word, whether it **passed**, **failed** or is **unknown**, and the sentence the
+operator reads. Only a failure changes `doctor`'s exit code; an unknown is "this check produced no verdict about
+whether `serve` may run here", and its sentence says what was missing and what does need it.
+_Avoid_: Result, verdict (`Verdict` is the schema's word), status
 
 **Admin socket**:
 The local unix socket used for commands that must never be reachable over HTTP.

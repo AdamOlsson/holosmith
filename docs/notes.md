@@ -1406,3 +1406,35 @@ it rather than adding a caveat beside it.
   and a real provision (four 200 ms steps); `case_reconcile_orphans` needs the daemon and the image and sets
   `docker_second_session_id` to the fake id, so a `fail` in the middle leaves neither the orphan container nor
   its network behind.
+
+### Landmines: the doctor, the ports and a read-only open (HS-045)
+
+- **A test's fixture must be written *after* the base value it overrides, and the evaluator is not your friend.**
+  `Tools { tailscale: shim(&dir, body), ..base(&dir) }` — where `base` writes the *same* shim path with its own
+  body — passed the Tailscale arms while asserting the other arm's answer. Struct-update syntax's evaluation
+  order is a detail no test's subject should depend on: build the base, then assign the field. The same shape
+  bit a test that reused one `git` shim for two different versions.
+- **A fake daemon socket that answers once is right for one check and wrong for one command.** `tests/preflight.rs`
+  answers a single `_ping` on purpose (a listener that accepted twice would hide a retry); `doctor` asks once *per
+  run*, and the tests drive several runs over one machine, so its fixture loops. The gate's `fake_docker_ping`
+  already loops, which is why `case_doctor_quick`'s three runs share one socket.
+- **A listener that drops after one accept makes a held port free.** The `--full` arm asserts that a port in use
+  plus a `200` from `/api/health` is a *pass*; a health server that answered one request and left had released
+  the port by the time the port check bound it, so the assertion read `is free` and looked like the pass it
+  wanted. A whole-run server is a thread with a stop flag, and it is the only fixture that measures both halves.
+- **`--data-dir` is a `serve` override, not a config key.** A case that runs `doctor --config <file>` must put
+  `data_root` *in the file*, or the doctor reads `/var/lib/holosmith` — on this machine a real directory. That is
+  how `case_schema_newer`'s new doctor half was written (and `plan`'s first draft had it wrong).
+- **A read-only SQLite open of a WAL database needs the `-shm` file, i.e. write access to the data root's
+  directory.** `db::recorded_without_migrating` opens with `SQLITE_OPEN_READ_ONLY` and works because `doctor` runs
+  as the user that owns the data root; that is also why it is a second opener rather than `Database::open`, which
+  migrates before it answers.
+- **`git merge-tree --write-tree` answers in two shapes**: the clean merge is exit 0 and exactly one line (the
+  tree's id); the conflict is exit 1 and, after the tree's id, `<mode> <oid> <stage>\t<path>` lines. Measured on
+  2.43. The trial asserts both — a shim that exits 0 for both is what a first draft's "kind of works" git did, and
+  the check has to fail on it.
+- **`doctor --full`'s proxy lines pass only at item 10 §7's moment.** `serve` starts `hs_egress`/`hs_key` on every
+  Docker boot and nothing stops them, so a `--full` run against a machine that is not serving reports both as
+  failures — correctly. The gate's own case therefore boots its own Docker `serve` first, and a demo has to do the
+  same or paste a failure it did not mean. Leave the proxies of *someone else's* server alone; remove the ones
+  your own demo started by name.
