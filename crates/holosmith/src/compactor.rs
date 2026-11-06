@@ -202,10 +202,19 @@ impl Compactor {
 
 /// The states in which no turn is running for the session and no removal is in flight.
 ///
-/// `starting` has no log yet, `running` is the state the story forbids, and `deleting` is a row on its way
-/// out whose log is about to go with it. What is left is every state in which the log is final for now.
+/// `running` is the state the story forbids, and `deleting` is a row on its way out whose log is about to go
+/// with it. What is left is every state in which the log is final for now — **including `starting`**, since
+/// HS-044: a row being provisioned has no turn running (a prompt needs `idle`) and no removal in flight, and
+/// the startup reconcile makes every live row `starting` for as long as its re-provision takes. Excluding it
+/// would mean a restarted machine with a day-old log folded nothing until the next tick — the gate's own
+/// `case_compaction` caught exactly that. The safety argument is ADR-0032's either way: the pass holds the
+/// database mutex the transitioner takes, so a session either was `starting` when the pass read it or became
+/// so after the pass committed.
 fn foldable(status: Status) -> bool {
-    matches!(status, Status::Idle | Status::Stopped | Status::Error)
+    matches!(
+        status,
+        Status::Starting | Status::Idle | Status::Stopped | Status::Error
+    )
 }
 
 /// The oldest `created_at` a message may carry and still be folded.
@@ -247,11 +256,12 @@ mod tests {
 
     #[test]
     fn a_turn_in_flight_is_never_folded() {
-        // The three states the story names, plus `deleting`, which is a log on its way out.
+        // The states the story names, `starting` (HS-044: no turn runs there, and a restart parks every live
+        // row in it), and `deleting`, which is a log on its way out.
+        assert!(foldable(Status::Starting));
         assert!(foldable(Status::Idle));
         assert!(foldable(Status::Stopped));
         assert!(foldable(Status::Error));
-        assert!(!foldable(Status::Starting));
         assert!(!foldable(Status::Running));
         assert!(!foldable(Status::Deleting));
     }

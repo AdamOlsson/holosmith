@@ -227,8 +227,7 @@ impl Docker {
     /// Remove a container by force under a bound, answering whether it happened — the startup path's spelling of
     /// [`Docker::remove_container`], and the same question (spec item 6's "ignore not-found").
     pub fn remove_container_bounded(&self, name: &str, bound: std::time::Duration) -> bool {
-        self.bounded(&["rm", "--force", name], bound)
-            .is_ok_and(|output| output.is_some_and(|output| output.status.success()))
+        self.removed_bounded(&["rm", "--force", name], bound)
     }
 
     /// Run `docker <arguments>` under a bound and answer the self-test's report: the probe's exit code and what it
@@ -273,7 +272,13 @@ impl Docker {
     /// [`Docker::remove_network`] (HS-044), for [`Docker::remove_container_bounded`]'s reason: it runs before
     /// the listener has an answer for anybody, so a wedged daemon may cost the bound and not the boot.
     pub fn remove_network_bounded(&self, name: &str, bound: std::time::Duration) -> bool {
-        self.bounded(&["network", "rm", name], bound)
+        self.removed_bounded(&["network", "rm", name], bound)
+    }
+
+    /// One bounded removal: `Ok` and a zero exit is the only `true`, and a bound that expired is not a removal
+    /// either. The primitive the two above are, so "did it happen" is one expression rather than two.
+    fn removed_bounded(&self, arguments: &[&str], bound: std::time::Duration) -> bool {
+        self.bounded(arguments, bound)
             .is_ok_and(|output| output.is_some_and(|output| output.status.success()))
     }
 

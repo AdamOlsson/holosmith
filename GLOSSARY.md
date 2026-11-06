@@ -210,6 +210,18 @@ starts it — and a process has one, spawned by `serve` unless the key is `0`. I
 `Sweeper` and `Sweeper::sweep` (one pass, which a test awaits).
 _Avoid_: Reaper, janitor, cron, garbage collector
 
+**Startup reconcile**:
+The pass `serve` makes before the listener answers anything, putting right what a `kill -9` left behind: every
+row that was live when the process died (`starting`, `idle`, `running`) is moved to `starting` through the
+table's `crash_recovery` row and provisioned again — a row whose turn was in flight carries the reason
+**`interrupted`**, so it comes back `idle · interrupted` — and every name no row owns is removed (a leftover
+container unless its row is a delete in progress, an `agents_*` network and a `.worktrees/<id>` directory only
+when no row has the id). It never deletes a branch or a ref, and it never finishes a `deleting` row's teardown.
+A second pass leaves the same names and the same rows; it restarts the live sessions again, which is what a
+reconcile is. Its machine names are `Reconciler`, `Reconciler::run`, the reason `INTERRUPTED` and the trigger
+`Trigger::CrashRecovery`.
+_Avoid_: Recovery job, crash handler, cleanup, janitor
+
 **Delete flow**:
 The one way a session is removed, and the only thing here that destroys work. `DELETE
 /api/sessions/:id` ends a running turn first, takes a **WIP snapshot**, moves the row to `deleting` and

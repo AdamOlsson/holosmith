@@ -256,7 +256,18 @@ the ref; see ADR-0049), what a delete keeps against a real repository (`case_del
 and the command, that the branch tip and the ref are still in the repository, that the worktree and
 the session directory are gone, and that `git branch rescue refs/holosmith/wip/<id>` recovers the
 change; the rule needs no daemon at all, so `tests/worktree.rs` proves it on a `TempDir` repository
-too — see ADR-0052), and the egress proxy's refusals (`case_egress_proxy`, which needs no server, no daemon and no internet: it starts the shipped
+too — see ADR-0052), the startup reconcile in two halves (`case_reconcile`, which needs neither a daemon nor an
+image and kills the artifact with `kill -9` mid-turn — the 202 puts the row in `running` before the stub's first
+200 ms frame, and a second session is killed mid-provision — then restarts it on the same data root and asserts
+the row comes back `idle · interrupted`, the transition is in the committed log, no row is `running`, and
+`sessions.last_seq` is the log's highest with the seqs unique and gap-free; it needs `python3` for the two
+database reads, and the counter rule needs no daemon so `tests/reconcile.rs` proves it too. And
+`case_reconcile_orphans`, which needs the daemon **and** the image and prints one `SKIP` line without them: it
+plants a container, a network and a registered worktree that no row owns, kills -9 a live Docker session, and
+asserts the restart removed the orphans, replaced the session's container under the same name with a new id,
+and left the branch and the snapshot ref alone — the container half cannot be proven on a machine that has no
+daemon, which is the same `SKIP` shape every Docker case here has, while `tests/reconcile.rs` proves the
+containment rule daemon-free; see ADR-0053), and the egress proxy's refusals (`case_egress_proxy`, which needs no server, no daemon and no internet: it starts the shipped
 artifact as `proxy egress` on a loopback port with two allow-listed names and asks it four questions over a
 plain socket — `GET` gets `405`, `CONNECT` to port 80 gets `403`, an unlisted host gets `403`, and
 `localhost`, **on** the list, gets `403` because its address is inside the machine — then asserts the log's
@@ -519,8 +530,8 @@ start, rather than a service that refuses to come back up.
   type comes from the request. The cap is 5 MiB of **decoded** bytes, and a body over it is refused from its
   encoded length before the decode allocates. The transcript draws one link per picture rather than the picture
   itself (ADR-0043).
-- Optional: a **Docker daemon and one image** for `scripts/verify.sh`'s `case_container_mounts` and for
-  `tests/container.rs`. Both check V1 — the hardened `.git` mounts — against a real container, and both
+- Optional: a **Docker daemon and one image** for `scripts/verify.sh`'s `case_container_mounts`,
+  `case_reconcile_orphans` and for `tests/container.rs`. Both check V1 — the hardened `.git` mounts — against a real container, and both
   print one `SKIP` line and pass without a daemon, because a machine without one is a supported machine
   (a hub). The image is `$HOLOSMITH_TEST_IMAGE`, default `pi-agent:local`; it needs `sh`, `git` **and
   `node`** — the network self-test's probe is a node script (HS-036, ADR-0044), and an image without node makes

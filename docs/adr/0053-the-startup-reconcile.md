@@ -36,6 +36,12 @@ worktree cannot be mounted: … is not there". Waiting instead costs two bounded
 per project, and the listener has already bound, so a client waits rather than being told the wrong thing. The
 *restarts* the pass starts are `Provisioner::spawn` tasks, so provisioning still happens off the serving path.
 
+It is also awaited **before either policy is spawned**, and that second reason is the review's: the idle-stop
+sweeper's first pass is immediate and its candidates are `idle` rows, so it could stop a row the pass is about to
+bring back — the crash transition would then be refused as illegal and the row would end `stopped`, which is not
+"restart sessions that were live". With the pass first, every live row is `starting` before the sweeper has a
+candidate.
+
 The order inside the pass is item 6's and item 7's, and each step is load-bearing:
 
 1. **The crash transition**, for every row that was live (`starting`, `idle`, `running`), before anything else.
@@ -95,6 +101,16 @@ which goes unless its row is a delete in progress.**
 calls are **bounded** (`Docker::bounded`), and a listing that does not finish is one `warn`, not a refused boot:
 the reconcile is on the startup path, and a daemon that answers the preflight and then wedges must cost a bound,
 not the control UI. A network removal gained the same bound (`remove_network_bounded`).
+
+## One consequence on HS-060's rule: compaction may fold a `starting` row
+
+A crash recovery parks every live row in `starting` for as long as its re-provision takes, so the compaction
+task's first pass (which is immediate at startup, ADR-0032) now meets rows in a state it used to exclude
+(`foldable` was `idle`, `stopped`, `error`). The gate's own `case_compaction` caught it: a restarted machine with
+a day-old log folded nothing until the next 60-second tick. `foldable` now includes `starting`, which is ADR-0032's
+argument applied to one more state — a provisioned row has no turn running (a prompt needs `idle`) and no removal
+in flight, the pass holds the database mutex the transitioner takes, and the fold only touches message rows older
+than the window. The alternative — waiting a tick — would make a restart slower to fold than a fresh boot.
 
 ## What this deliberately does not do
 

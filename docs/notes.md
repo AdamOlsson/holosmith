@@ -1366,7 +1366,17 @@ it rather than adding a caveat beside it.
   there` (this story's own demo, first run). The pass is therefore **awaited before the listener answers**
   (ADR-0053), not spawned like the sweeper; its restarts are still `Provisioner::spawn` tasks. A future
   background caller (a `doctor`, a periodic sweep) has to re-read the rows *and* the names under one lock-free
-  ordering of its own, which is why the pure `plan` takes both lists as arguments.
+  ordering of its own, which is why the row and name questions are separate pure functions.
+- **The pass must also run before the two startup policies, or the sweeper takes a row it is about to bring
+  back.** The idle-stop sweeper's first pass is immediate and its candidates are `idle` rows (ADR-0025), so a
+  boot whose live row is past `idle_stop_min` would have it `stopped` *before* the crash transition — which is
+  then refused as illegal, and the restart never happens. `serve` therefore awaits the reconcile right after the
+  state exists and only then spawns the sweeper and the compactor.
+- **A recovery parks every live row in `starting`, so compaction's eligible set had to learn `starting`.**
+  `foldable` was `idle|stopped|error`, and the compactor's first pass is immediate at startup (ADR-0032), so a
+  restarted machine with a day-old log folded nothing until the 60-second tick — `case_compaction` failed with
+  "no message.snapshot row appeared". A `starting` row has no turn running (a prompt needs `idle`) and no removal
+  in flight, and the fold takes the same mutex, so the state is folded now; the rule is ADR-0032's.
 - **The crash's reason has to be written twice or the row loses it.** The transition into `starting` records the
   crash, but the re-provision's own `starting → idle` clears `status_reason` (`set_status` writes the reason it
   was given, and the provisioner gave `None`), so the row would come back plain `idle` and the page would show
@@ -1376,7 +1386,8 @@ it rather than adding a caveat beside it.
   reading the log (`wait_for_payload`), because "the row says idle" is one writer tick earlier than the event.
   The same applies to `sessions.last_seq`: read the counter only after the settle's event landed.
 - **The counter had no reader.** `sessions::repository::bump_last_seq` is `pub(crate)` (exactly one writer), so
-  a test could not read `last_seq` at all; `last_seq(id)` was added for this story's claim and for HS-046. It is
+  a test could not read `last_seq` at all; `last_seq(id)` was added for this story's claim and for HS-046. The
+  gate reads it with `python3`'s `sqlite3`, like `case_exit_classification` reads `expected_stop`. It is
   the sessions repository's because it is a `sessions` statement, and `MAX(seq)` is *not* the same number once
   compaction has removed rows (ADR-0032).
 - **`sessions::is_id` is the one answer to "what is an id".** The sweep decides "the build's name or not" with it

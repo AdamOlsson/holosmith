@@ -1156,6 +1156,29 @@ case_reconcile() {
   kill -9 "$serve_pid" || fail "${name}/kill" "could not kill the server (pid $serve_pid)"
   wait "$serve_pid" 2>/dev/null || true
   serve_pid=""
+  # What the kill left, read out of the dead process's own database — the same read the restart's assertions
+  # rest on. A turn that had already settled would make `_back/reason` fail for the machine's speed rather
+  # than the product's, so the race is named here instead (the window is the stub's 800 ms turn against one
+  # HTTP round trip, and a timeout on this would be worth knowing about).
+  if [ "$seqs_checked" -eq 1 ]; then
+    if ! python3 - "$data/app.db" "$id" "$other" >"$WORK/responses/$name.crash" 2>&1 <<'PYCRASH'
+import sqlite3, sys
+path, turn, provisioning = sys.argv[1:]
+rows = dict(sqlite3.connect(path).execute("SELECT id, status FROM sessions").fetchall())
+if rows.get(turn) != "running":
+    print(f"the turn had settled before the kill landed: {turn} was {rows.get(turn)}, so this run did not")
+    print("test a crash mid-turn (the machine was too slow); tests/reconcile.rs plants the same row")
+    sys.exit(1)
+if rows.get(provisioning) != "starting":
+    print(f"the provision had finished before the kill landed: {provisioning} was {rows.get(provisioning)}")
+    sys.exit(1)
+print("ok")
+PYCRASH
+    then
+      fail "$name/crash" "$(cat "$WORK/responses/$name.crash")"
+    fi
+    assertions=$((assertions + 1))
+  fi
 
   # The restart: the shipped artifact again, on the same data root.
   start_serve "$WORK/config-reconcile.toml" "$data"
@@ -1217,12 +1240,9 @@ for session in ids:
         print(f"{session}: no row")
         sys.exit(1)
     last = row[0]
-    seqs = [
-        seq
-        for seq in db.execute(
-            "SELECT seq FROM events WHERE session_id = ? ORDER BY seq", (session,)
-        )
-    ]
+    seqs = [seq for (seq,) in db.execute(
+        "SELECT seq FROM events WHERE session_id = ? ORDER BY seq", (session,)
+    )]
     if not seqs:
         print(f"{session}: no committed events")
         sys.exit(1)
@@ -1820,6 +1840,13 @@ case_tool_image() {
 # with no row go, and a worktree directory no row owns goes **while its branch and its snapshot ref stay**
 # (HS-043, ADR-0052). The machine's own `hs_egress`/`hs_key` are not the build's session names and are left.
 #
+# What the SKIP line costs, said out loud: on a machine with no daemon (a hub, which is supported) the container
+# and network halves of acceptance bullets 1 and 3 cannot be measured at all — there is nothing to measure — so
+# the case prints its one SKIP and passes, exactly as `case_container_mounts`, `case_docker_resume` and
+# `case_internet_toggle` do. The *rule* is not skipped with it: `tests/reconcile.rs`'s name tests prove which
+# names are the build's and which rows own them, and the worktree half of the sweep is proven there against a
+# real repository with no daemon.
+#
 # It boots its own server because it kills one: `kill -9` takes the attached `docker run` with it, which is the
 # leftover spec item 6 names. Its scratch lives under `target/` because the daemon must be able to see the
 # projects root a mount comes from (ADR-0035's measurement).
@@ -1897,7 +1924,8 @@ case_reconcile_orphans() {
   serve_pid=""
   start_serve "$WORK/config-reconcile-orphans.toml" "$data"
 
-  # The sweep is a task, so it is waited for: the container and the network both have to go.
+  # The sweep runs after the banner and before the first request is answered, so it is waited for: the
+  # container and the network both have to go.
   for _ in $(seq 1 240); do
     if ! docker inspect "s_$fake" >/dev/null 2>&1 &&
       ! docker network ls --format '{{.Name}}' | grep -qx "agents_$fake"; then

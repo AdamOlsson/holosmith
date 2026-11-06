@@ -26,12 +26,14 @@
 //!    its registration go, the branch and `refs/holosmith/wip/<id>` stay.
 //! 3. **The restarts.** After the sweep, so no new container races a stale one.
 //!
-//! The pass is awaited **before the listener answers anything** (`serve` calls it after the state exists and
-//! before `serve::run`), and the restarts it starts are tasks: a sweep that ran concurrently with a create
-//! would see a row it did not know about and take the worktree that row's provision had just made. The row
-//! half runs for every backend and the name half only for Docker: a `running` row is a lie about the
-//! process whichever backend wrote it, while containers, networks and worktrees exist only in a Docker run
-//! (ADR-0015) — and a stub boot must not touch `projects_root`.
+//! The pass is awaited **before the listener answers anything and before either policy starts** (`serve`
+//! calls it right after the state exists): a sweep that ran concurrently with a create would see a row it did
+//! not know about and take the worktree that row's provision had just made, and the idle-stop sweeper's
+//! first pass would otherwise be free to stop a row this pass is about to bring back. The restarts it starts
+//! are provisioner tasks, so provisioning stays off the serving path. The row half runs for every backend and
+//! the name half only for Docker: a `running` row is a lie about the process whichever backend wrote it, while
+//! containers, networks and worktrees exist only in a Docker run (ADR-0015) — and a stub boot must not touch
+//! `projects_root`.
 //!
 //! **Idempotent in [`crate::worktree`]'s sense, not in the sense of doing nothing:** a second pass leaves the
 //! same names and the same idle rows, but it restarts the live sessions again. That is what a reconcile is,
@@ -61,8 +63,8 @@ pub const INTERRUPTED: &str = "interrupted";
 
 /// How long one daemon question may take on the startup path.
 ///
-/// The reconcile is a task rather than a step before the banner, so a wedged daemon costs this bound per
-/// listing and then a `warn` — never the boot.
+/// The pass is awaited before the listener answers, so it *is* the startup path: a daemon that answered the
+/// preflight and then wedged costs this bound per listing and then a `warn` — a slow boot, never a refused one.
 pub const BOUND: Duration = Duration::from_secs(10);
 
 /// One row the reconcile brings back, and the state it held when the process died.
@@ -77,27 +79,6 @@ impl Recovery {
     /// Whether a turn was in flight when the process died.
     pub fn interrupted(&self) -> bool {
         self.from == Status::Running
-    }
-}
-
-/// What one pass decided, before anything was touched: the pure half, so the rules are testable without a
-/// daemon, a database or a filesystem.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct Plan {
-    /// Container names to remove, in the order the daemon listed them.
-    pub containers: Vec<String>,
-    /// Network names to remove.
-    pub networks: Vec<String>,
-    /// The rows to bring back, by id.
-    pub recover: Vec<Recovery>,
-}
-
-/// The whole decision: who comes back, and what no row owns.
-pub fn plan(rows: &[Session], containers: &[String], networks: &[String]) -> Plan {
-    Plan {
-        containers: containers_to_remove(rows, containers),
-        networks: networks_to_remove(rows, networks),
-        recover: recoveries(rows),
     }
 }
 
@@ -591,19 +572,24 @@ mod tests {
     }
 
     #[test]
-    fn a_second_pass_over_what_the_first_removed_removes_nothing() {
+    fn a_second_pass_over_the_names_the_first_removed_has_nothing_left_to_take() {
         let rows = vec![row(LIVE, Status::Idle)];
-        let containers = vec![format!("{NAME_PREFIX}9999999999999999")];
-        let networks = vec![format!("{NETWORK_PREFIX}9999999999999999")];
-        let first = plan(&rows, &containers, &networks);
-        assert_eq!(first.containers, containers);
-        assert_eq!(first.networks, networks);
-        // The pass that follows the removals decides the same rows and no names — which is what "safe to run
-        // twice" means here: it is not a no-op (it restarts live sessions again), but it leaves no new work.
-        let second = plan(&rows, &[], &[]);
-        assert!(second.containers.is_empty());
-        assert!(second.networks.is_empty());
-        assert_eq!(second.recover, first.recover);
+        let container = format!("{NAME_PREFIX}9999999999999999");
+        let network = format!("{NETWORK_PREFIX}9999999999999999");
+        assert_eq!(
+            containers_to_remove(&rows, std::slice::from_ref(&container)),
+            vec![container.clone()]
+        );
+        assert_eq!(
+            networks_to_remove(&rows, std::slice::from_ref(&network)),
+            vec![network.clone()]
+        );
+        // The pass that follows the removals sees only what it kept — no name to take, and the same rows to
+        // bring back. That is what "safe to run twice" means here: not a no-op (live sessions are restarted
+        // again), but nothing new to remove.
+        assert!(containers_to_remove(&rows, &[]).is_empty());
+        assert!(networks_to_remove(&rows, &[]).is_empty());
+        assert_eq!(recoveries(&rows).len(), 1);
     }
 
     #[test]

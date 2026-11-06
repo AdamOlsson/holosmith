@@ -21,7 +21,7 @@ use holosmith::http::AppState;
 use holosmith::reconcile::{self, INTERRUPTED};
 use holosmith::runtime::{Backend, Runtime};
 use holosmith::sessions::{NewSession, Session, Status};
-use holosmith::worktree::{Retained, Worktree};
+use holosmith::worktree::Worktree;
 
 mod support;
 use support::{PATIENCE, TempDir, fast_stub, git, repository, state_in, with_stub};
@@ -459,6 +459,4 @@ async fn a_worktree_a_row_owns_is_not_an_orphan() {
         );
     }
     assert!(owned.exists());
-    // And the keep-rule the sweep hands `Worktree::remove`: "there is no row to ask" never means "delete".
-    assert!(Retained::Unknown.keeps_branch());
 }

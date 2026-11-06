@@ -591,9 +591,9 @@ pub fn branch_exists(dir: &Path, branch: &str) -> bool {
 /// Every worktree git has registered in `dir`, as paths — the repository's own first, then one per
 /// session.
 pub fn worktrees(dir: &Path) -> Vec<String> {
-    git(dir, &["worktree", "list", "--porcelain"])
-        .lines()
-        .filter_map(|line| line.strip_prefix("worktree "))
-        .map(str::to_string)
+    holosmith::worktree::registrations(dir)
+        .expect("git runs")
+        .into_iter()
+        .map(|path| path.display().to_string())
         .collect()
 }
