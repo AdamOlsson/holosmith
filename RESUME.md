@@ -1,4 +1,4 @@
-# RESUME — orchestrator handoff (cold start, after forty-five stories, with a real Docker daemon)
+# RESUME — orchestrator handoff (cold start, after forty-six stories, with a real Docker daemon)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating
 procedure and still governs; this file is the state of the world — what exists, what the environment
@@ -43,21 +43,19 @@ created, prompted, aborted, steered, stopped, resumed and deleted, and it is dri
 
 Branch **`master`** (this repo has **no `main`**; do not rename it). The tree is clean apart from the
 operator's own `log.txt`/`orchestrate.sh`, and every commit is **pushed** (see the note on pushing below).
-`HEAD` is `5a5bcd8`; any commit after it is bookkeeping — this file's own refresh. Confirmed on
-`origin/master`: `5a5bcd8`.
+`HEAD` is `ceab154`; any commit after it is bookkeeping — this file's own refresh. Confirmed on
+`origin/master`: `ceab154`.
 
-**Linear: 45 Done, 35 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-039` (`PER-33` …
-`PER-71`), `HS-042` (`PER-74`), `HS-059` (`PER-91`), `HS-060` (`PER-92`), `HS-061` (`PER-93`), `HS-065`
-(`PER-97`) and `HS-075` (`PER-107`). **Not done: `HS-040` (`PER-72`) and `HS-041` (`PER-73`)** — they sit
-before HS-042 in story order and were skipped: HS-040 is a real-key verification run and HS-041 is the
-preview listener.
+**Linear: 46 Done, 34 Backlog, all in project `Holosmith`.** Done is `HS-001` … `HS-040` (`PER-33` …
+`PER-72`), `HS-042` (`PER-74`), `HS-059` (`PER-91`), `HS-060` (`PER-92`), `HS-061` (`PER-93`), `HS-065`
+(`PER-97`) and `HS-075` (`PER-107`).
 
 **The Docker block is gone.** A real daemon answers on this machine (§2), so `HS-027` … `HS-058` are unblocked
-and the queue has 35 Backlog issues. Ten stories have now been built against a real `docker run` — the mounts
+and the queue has 34 Backlog issues. Eleven stories have now been built against a real `docker run` — the mounts
 and V1 (`HS-027`), the container with its limits (`HS-028`), the start lock with `stop`/`resume` (`HS-029`),
 the expected-stop flag with the exit classifier (`HS-030`), the **agent** (`HS-031`), the **turn** (`HS-032`),
-the machine's **egress proxy** (`HS-037`), the **checkbox's topology** (`HS-038`) and the **key proxy**
-(`HS-039`) — and each is proven by a test that runs a container, not by a document. `HS-042` is the WIP
+the machine's **egress proxy** (`HS-037`), the **checkbox's topology** (`HS-038`), the **key proxy**
+(`HS-039`) and the **credential path it verifies** (`HS-040`) — and each is proven by a test that runs a container, not by a document. `HS-042` is the WIP
 snapshot (host git, no container) and is proven by `tests/snapshot.rs` and the gate. A Docker create
 provisions the worktree, the network, the attached container running pi in RPC mode
 and pi's ready handshake, and ends **`idle`**; a prompt reaches pi, every record it prints becomes a frame on
@@ -68,26 +66,26 @@ probe container, creates the machine's own `egress` network, starts the machine'
 HS-037) and refuses to boot only on a *proven* leak. So a container's only route out is now something this build
 controls: an exact allow-list, `CONNECT` to 443 only, and no address that resolves into the machine.
 
-Every story from `HS-001` to `HS-039` is Done, plus `HS-042`, `HS-059`–`HS-061`, `HS-065` and `HS-075` — 45 of 80. The
+Every story from `HS-001` to `HS-040` is Done, plus `HS-042`, `HS-059`–`HS-061`, `HS-065` and `HS-075` — 46 of 80. The
 durable record of each is **Linear** (the plan comment, the verbatim demo output, the ship note), the
 review file (`docs/review/PER-<n>.md`, the review verbatim plus its `## Resolution` table) and **`git log`**
 (a commit names its issue; the last one ends `Closes PER-<n>`). Decisions are ADRs `0001` … `0049`, indexed
 one line each in `docs/stories/README.md`. Nothing about them belongs in this file.
 
-**Next in story order: `PER-72` (HS-040 — Key proxy verification, V3/V4/V5).** It is a **verification** story:
-a real turn, `get_available_models` with only a dummy key and `PI_OFFLINE=1`, and a precedence test, all through
-HS-039's proxy, with the results written into the spec's table. This run did **not** find a key for the provider
-the default session model uses (`anthropic`); the machine does have an `opencode`/`opencode-go` credential in
-`~/.pi/agent/auth.json` (and `OPENCODE_API_KEY` in the environment), so a future session can either add that
-provider row and use a model it serves, or use an operator-supplied Anthropic key. Do not fake V3. `PER-73`
-(HS-041 — Preview listener, V7) is the next implementable story if the key is still unavailable; `PER-75`
-(HS-043 — delete hardening) follows HS-042, and `PER-76`/`PER-77` (HS-044/045) follow it. `HS-046` (`PER-78`)
-is the phase-1 verification run and the gate for phase 2; phase 2's deploy/hub stories are behind it.
+**Next in story order: `PER-73` (HS-041 — Preview listener, V7).** A second listener on the host, serving only
+`/<host>/<id>/*` (HTTP and WebSocket, with the upgrade's `Origin` checked against the preview origin), the host
+name `local` for this machine's sessions, a link on the session screen, and the V7 measurement: the host fetching
+from a stub HTTP server inside a container on an **internal** session network — with the documented fallback (run
+the preview proxy as a container on the session network) if it cannot. It is the last *implementable* story in
+phase 1b: `PER-75` (HS-043 — delete hardening) follows HS-042, `PER-76`/`PER-77` (HS-044/045) follow it, and
+`PER-78` (HS-046) is the phase-1 verification run, which is the gate for phase 2. Phase 2's deploy/hub stories
+are behind it. **The credential path is verified now** (HS-040: V3, V4 and V5 pass against a real `opencode-go`
+key, ADR-0050), so nothing in the queue waits on a key any more.
 
 Ranking, per `PROMPT.md`: Linear priority (all are `No priority`) → `HS-###` order in `docs/stories/` →
 anything already `In Progress` first → skip an issue whose `Blocked by` stories are not `Done`.
 
-### Twenty-nine facts a cold start must know
+### Thirty facts a cold start must know
 
 1. **A running turn can now be stopped, in two rungs, with or without the way back.** `src/ladder.rs`
    is the shared routine: `clear_queue` then `abort`, wait up to `abort_grace` (the grace *bounds rung
@@ -466,6 +464,22 @@ about one run in two). **A delete forgets the launch *before* it removes the con
     (`Turn::finished`), before every stop (`Stopper::stop`) and before delete (the existing 409 path). The host
     runs it; `holosmith container snapshot` is the `/work`/`HS_SESSION_ID` equivalent. A failure is logged on a
     settle/stop and is a refusal at delete.
+30. **The credential path is verified, and the run that verified it found two defects** (HS-040, ADR-0050). V3,
+    V4 and V5 pass against a real `opencode-go` key, and the spec's vertical-slice table now has a **Result**
+    column (V3/V4/V5 filled; the rest say which story fills them, V11 deferred to phase 3). Two things changed in
+    the code, both P1-class and both invisible to the gate as it was: **`keyproxy::upstream` returned a head with no
+    body** (so every model call was `502 the provider closed the connection before answering`), and **`hs_key`
+    mounted `keys.toml` as a file** — a bind mount pins the inode, and the store is written by temp-file-and-rename,
+    so the proxy kept reading the store from before the first create and answered `session=- … status=bad-key` for
+    dummies it had minted itself. `KeyProxy::mount` is `keys`'s parent now, and `--keys` still names the file. The
+    provider table gained an **`opencode-go`** row (`opencode.ai`, `/inference/go/anthropic`, `x-api-key`): a row is
+    one (host, path, auth) triple, therefore **one API shape** — the openai-completions shape would be a second row.
+    Measured precedence is `auth.json` > `models.json` `apiKey` > the provider env var, which is why the seeded
+    pi-home has no `auth.json` and the container environment no provider key; that is V5's documented fallback, and
+    it is a rule about what the build keeps out rather than a repair. The gate's half is `case_key_proxy_request`:
+    a stand-in `openssl` on `PATH` captures the bytes the proxy really sends (one `Content-Length`, the body after
+    the blank line, the stored key swapped in) — no key, no internet, no daemon. `docs/build.md` carries the
+    by-hand procedure; the checked-in demo is `/tmp`-only, and its recorded output is in Linear.
 
 Three things HS-014 and HS-015 settled that later stories inherit:
 
@@ -699,8 +713,8 @@ scripts/verify.sh              # THE one-command gate since HS-006
 (`cargo test --test schema_previous` — the expand/contract rule, HS-075), `build`
 (`scripts/build.sh`, which itself runs `build-web.sh` — `npm test` then Vite — and `check-static.sh`
 last), `embed` (`scripts/check-embed.sh`), then `serve` — the **shipped musl artifact** booted on
-`--port 0` with a temp data dir, running **60 cases plus a CORS sweep (609 assertions)**, then torn down
-with `SIGTERM` and an asserted exit 0. Thirteen cases bring their own boot (`case_token_budget`,
+`--port 0` with a temp data dir, running **61 cases plus a CORS sweep (615 assertions)**, then torn down
+with `SIGTERM` and an asserted exit 0. Fourteen cases bring their own boot (`case_token_budget`,
 `case_usage_survives_resume`, `case_compaction`, `case_history`, `case_backup`, `case_worktree`,
 `case_worktree_refusal`, `case_agent_launch`, `case_docker_resume`, `case_docker_turn`, plus
 `case_docker_preflight`, which needs no server at all, `case_container_mounts`, which needs no server *and* no
@@ -710,7 +724,8 @@ line, when there is neither a daemon nor an image — and `case_exit_classificat
 `case_egress_proxy`, which needs **no server, no daemon and no internet**: it starts the artifact as
 `proxy egress` on a loopback port and asks it four questions over a socket, `case_internet_toggle`, which needs
 the daemon and the image and creates two real sessions, and `case_schema_newer`, which needs no daemon and boots
-the artifact over a database from schema 99). It takes ~9 min (both musl
+the artifact over a database from schema 99, and `case_key_proxy_request`, which puts a stand-in `openssl` on
+`PATH` and asserts the bytes the key proxy really sends). It takes ~9 min (both musl
 targets, the Docker cases and `case_idle_stop`'s real minute). `--no-build` skips `build` and `embed`;
 `--keep` keeps the work dir.
 
@@ -803,7 +818,9 @@ crates/holosmith/
                             `home`/`ensure_home`/`seed`/`launch_line`, `version_of`/`version_check`
                             /`version_sentence`
   templates/pi-home/settings.json  the seed's template, embedded with `include_str!` (no secrets)
-  src/container.rs          the session's container (HS-027/028/029, ADR-0035/0036/0037): `Mounts`
+  src/container.rs          the session's container (HS-027/028/029, ADR-0035/0036/0037): `KeyProxy::mount` is
+                            the **directory** `<data>/secrets` since HS-040 (a file mount pins the inode the store
+                            renames away); `Mounts`
                             (spec item 1's four, host path == container path except `/work`),
                             `Mount::argument`/`Mounts::check` (refuses a missing or wrong-kind source
                             *before* `docker run`), `Limits`, `ContainerSettings` (`of(config)`, `at(root)`,
@@ -816,14 +833,18 @@ crates/holosmith/
                             `PROXY_START_TIMEOUT` (90 s); and since HS-039 the key proxy:
                             `KeyProxy` (`of(&Config)`, `run_args`), which mounts the key file read-only
                             and runs `proxy key` on `hs_key`
-  src/key.rs                the provider/store half of HS-039 (ADR-0048): `Provider`, `PROVIDERS`,
+  src/key.rs                the provider/store half of HS-039 (ADR-0048), whose table gains `opencode-go` for
+                            HS-040 (host `opencode.ai`, `/inference/go/anthropic`, `x-api-key`; ADR-0050):
+                            `Provider`, `PROVIDERS`,
                             `provider`, `Store` (`from_data_root`, `ensure_file`, `load`, `save`,
                             `set_provider`, `remove_provider`, `providers`, `dummy_for`, `revoke`,
                             `session_of`), `Secrets`, `models`, `KEY_PROXY_ALIAS`, `KEY_PROXY_PORT`,
                             `KEY_PROXY_NAME`, `contains_real_key`
   src/keyproxy.rs           the key proxy itself (HS-039, ADR-0048): `Route::parse`, `Head`/`parse`,
-                            `upstream` (header swap), `serve`/`handle`, `forward` (openssl s_client,
-                            counted streaming), `Record`, `MAX_BODY`, `MAX_CONNECTIONS`, `CA_FILE`
+                            `upstream` (header swap **and the body**: it returns head+body as one value since
+                            HS-040, whose V3 run measured a `Content-Length` with no bytes behind it),
+                            `serve`/`handle`, `forward` (openssl s_client, counted streaming), `Record`,
+                            `MAX_BODY`, `MAX_CONNECTIONS`, `CA_FILE`
   src/snapshot.rs           the WIP snapshot (HS-042, ADR-0049): `take` (temporary index, read-tree,
                             add -A, write-tree, commit-tree, update-ref), `Taken::{Written, Removed}`,
                             `SnapshotError`, `REF_PREFIX`, `MESSAGE`, `IDENTITY`, `reference`
@@ -950,9 +971,9 @@ scripts/check-static.sh     file/readelf, empty-root serve + cmp against web/dis
 scripts/check-embed.sh      the three embed cases (present / absent warns / required fails)
 scripts/verify.sh           the one-command gate (see §3)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0049          read the recent ones before planning anything
+docs/adr/0001…0050          read the recent ones before planning anything
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-70, PER-91…PER-93, PER-97, PER-107  each a verbatim review + a `## Resolution` table
+docs/review/PER-33…PER-72, PER-74, PER-91…PER-93, PER-97, PER-107  each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -976,8 +997,9 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   records become the transcript's frames, a tool call's output is filed, and the session's spend is counted —
   with one gap a real container still shows: pi refuses a `prompt` before a stream exists, because a session's
   network is `--internal`, its pi-home has only a dummy key, and the gate's machine stores no provider key, so
-  `case_docker_turn` asserts pi's own refusal sentence and the streaming evidence is the committed fixtures.
-  HS-039's key proxy is real but HS-040's real-key turn is not done.
+  `case_docker_turn` asserts pi's own refusal sentence and the streaming evidence is the committed fixtures —
+  while HS-040's recorded run is the evidence that a real turn works end to end through the key proxy (text and
+  thinking deltas, a tool round trip, usage), because the gate may not hold a provider key.
 - **The egress proxy exists and is the only route out (HS-037).** `holosmith proxy egress` is a mode of the
   artifact; a Docker boot starts `hs_egress` on `egress` (bounded, `warn` on failure) and the network step
   joins it to a session's network under the alias `egress-proxy` **only when the row's `network` flag is set**,
@@ -990,11 +1012,12 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   that snapshot is a **release step** (`scripts/schema-snapshot.sh`), not a story's, and a contract migration
   changes it in the same commit. `schema::verdict` is the sentence `serve` warns with on a newer database and
   `doctor` will refuse with (ADR-0047).
-- **What is left of the network half:** the key proxy's **verification** (HS-040), the preview listener
-  (HS-041), the delete's keep-rules (HS-043), startup reconcile (HS-044), `doctor` (HS-045), the phase-1
-  verification run (HS-046), merge, publish, the hub, releases, the stopped-session expiry (HS-064), and any
-  **delete affordance in `web/`** (the API has the endpoint; the page has no button). The key proxy itself
-  (HS-039) and the WIP snapshot (HS-042) are done.
+- **What is left of the network half:** the preview listener (HS-041), the delete's keep-rules (HS-043),
+  startup reconcile (HS-044), `doctor` (HS-045), the phase-1 verification run (HS-046), merge, publish, the hub,
+  releases, the stopped-session expiry (HS-064), and any **delete affordance in `web/`** (the API has the
+  endpoint; the page has no button). The key proxy (HS-039) and its **verification** (HS-040 — V3, V4 and V5 all
+  pass, and the run found and fixed two defects) and the WIP snapshot (HS-042) are done, and the spec's
+  verification table has a **Result** column that HS-046 finishes filling.
 - **The log is now read in two shapes and written by two producers of two kinds.** The stream replays a
   *window* (`history_window`, default 50) and says so with `history.truncated`; `GET …/events/history`
   answers the frames below that cursor. `events/stream.rs`'s `REPLAY_LIMIT` is still `u32::MAX` — it is
@@ -1312,11 +1335,11 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 - **`docs/build.md` is a story deliverable, not orchestrator-only.** If a story changes prerequisites or
   gates, the doc is in scope, and its prose must be reflowed (~100 columns), not just appended to.
 - **Every story adds at least one `case_*` to `scripts/verify.sh`.** The rule is in bold in
-  `docs/build.md`, and the reviewer enforces it. The current gate is 60 cases / 609 assertions, and a
+  `docs/build.md`, and the reviewer enforces it. The current gate is 61 cases / 615 assertions, and a
   case that makes its own session must run before the shared one exists or delete it at the end (the
   gate's cap is one live session).
 - **Adding an ADR means updating `docs/stories/README.md`**: the "Decisions taken while slicing" count
-  (now **forty-nine**) and the bullet list. A reviewer will check the links resolve — three did not,
+  (now **fifty**) and the bullet list. A reviewer will check the links resolve — three did not,
   once.
 - **An ADR that a later story changes gets a one-line "Superseded by ADR-00xx" note**, not a rewrite
   (ADR-0012 and ADR-0013 do this; HS-015 added two to ADR-0018).
@@ -1882,9 +1905,34 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
   be shell variables; `$CONNECTING` from a heredoc is an unbound variable, and an *accepted-anything* pattern
   (`"direct "*)`) is how a case passes over a probe that changed its words.
 
+### Landmines: the credential path (HS-040)
+
+- **A request that declares a length must carry the bytes in the same value.** `keyproxy::upstream` wrote
+  `Content-Length: body.len()` and returned a head; every model call was a request the provider waited out and
+  dropped (`502 the provider closed the connection before answering`, ~16 s later). The tests passed because they
+  asserted the header. Assert the **tail**, and that the length appears exactly once.
+- **A file bind mount cannot see a rename, and this build writes its important files by rename.** `keys.toml`
+  (temp + rename, ADR-0048), the bundles (`.tmp` + rename, ADR-0034) and the schema snapshot are all written that
+  way; a container that must read one mounts the **directory**. The measurement is one log line:
+  `session=- … status=bad-key` for a dummy the proxy minted itself means it is reading a stale inode.
+- **A gate that needs a key is not a gate, but a gate that proves nothing is worse.** `case_key_proxy_request`
+  puts a stand-in `openssl` on `PATH` (the TLS client is a process, `Command::new("openssl")`) and captures the
+  bytes the proxy really sends — the seam `preflight::Tools` established, used on the *shell's* side where setting
+  `PATH` is safe. Give the shim one bounded `dd` read, not a read-until-EOF: the proxy keeps its child's stdin open
+  on purpose.
+- **Credential precedence is a measurement, not a reading.** `auth.json` > `models.json` `apiKey` > the provider
+  environment variable (measured against the proxy's own log). The docs' order for the last two is right and the
+  *first* is the one that matters: a seeded pi-home with an `auth.json` would bypass the proxy with a real key —
+  which is why the seed writes only `settings.json` and `models.json`.
+- **`opencode-go` is a provider with two API shapes and needs an `x-opencode-session` header pi mints itself.**
+  A row is one (host, path, auth) triple so it serves one shape; `claude-haiku-5-5` under
+  `/inference/go/anthropic` is the anthropic-messages one, and it only emits thinking deltas at `--thinking max`
+  (at `xhigh` it answered without thinking, and an easy prompt produces none at any level — ask it something that
+  needs reasoning or the check measures the prompt rather than the wire).
+
 ## 7. Decisions taken on the operator's behalf (do not silently undo)
 
-Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0049`, one line each in
+Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0050`, one line each in
 `docs/stories/README.md`); read the recent ones before planning, and **amend rather than rewrite** — an ADR
 a later story changes gets a "Superseded by ADR-00xx" note (0012/0013, and 0020 was amended by 0026).
 
@@ -1908,33 +1956,36 @@ cd /home/adamolsson/projects/holosmith
 git status --short                          # must be clean
 . ~/.pi/toolchains/env.sh
 python3 /tmp/lin.py issues | grep -v ' Done ' | head   # next unfinished (recreate /tmp/lin.py, §2)
-python3 /tmp/lin.py issue PER-72            # sanity-check Linear is reachable and scoped
+python3 /tmp/lin.py issue PER-73            # sanity-check Linear is reachable and scoped
 docker version                              # the daemon must answer, or every Docker story is a lie
 docker image inspect pi-agent:local         # the image the Docker stories run; its pi == pins/pi.txt
-scripts/verify.sh                           # baseline green (~9-12 min, 60 cases, 609 assertions)
+scripts/verify.sh                           # baseline green (~9-12 min, 61 cases, 615 assertions)
 ```
 
-Then start the cycle at **`PER-72` (HS-040 — Key proxy verification, V3/V4/V5)**. It is a **verification**
-story, not a code story: a real turn through HS-039's proxy with a dummy key, `get_available_models` with only
-that dummy and `PI_OFFLINE=1`, and the precedence check, with the results written into the spec's table. The key
-proxy and its refusal path are done (ADR-0048), but this run did not have a key for `anthropic`, the provider
-the default session model uses. The machine has an `opencode`/`opencode-go` credential in
-`~/.pi/agent/auth.json` and `OPENCODE_API_KEY` in the environment; a future session may add that provider row
-and use a model it serves, or use an operator-supplied Anthropic key. Do not fake V3. If no real key is
-available, take **`PER-73` (HS-041 — Preview listener, V7)** as the next implementable story, then `PER-75`
-(HS-043) after HS-042. `HS-046` (`PER-78`) is the phase-1 verification run and the gate for phase 2.
+Then start the cycle at **`PER-73` (HS-041 — Preview listener, V7)**. It is an **M** story with real new
+surface: a second listener on the host serving only `/<host>/<id>/*` (HTTP *and* WebSocket, the upgrade's
+`Origin` checked against the preview origin), the host name `local` for this machine's sessions, the route shaped
+for the hub's forwarding (HS-069), a link on the session screen, and the V7 measurement — the host fetching from
+a stub HTTP server inside a container on an **internal** session network, with the documented fallback (run the
+preview proxy as a container on the session network) if it cannot. The config keys `preview_listen` and
+`preview_origin` already exist and are printed in the banner; nothing serves them yet.
 
-What is already there for HS-040: `holosmith key set <provider>` and `hs_key` (ADR-0048), the committed turn
-fixtures (`docs/build.md`), `tests/rpc.rs` and `tests/key_proxy.rs`, and the gate's key case. What is missing is
-the real key and the checklist, not the mechanism.
+After it: `PER-75` (HS-043 — delete hardening and what is kept), `PER-76` (HS-044 — startup reconcile), `PER-77`
+(HS-045 — `doctor`), then `PER-78` (HS-046 — the phase-1 verification run, which is the gate for phase 2 and
+fills the rest of the spec's new Result column). Phase 2's deploy and hub stories sit behind HS-046.
 
-Read §1's twenty-nine facts first: eight of them are the Docker half (mounts and V1, the container and its
+What is already there for HS-041: `preview_listen`/`preview_origin` in `config`, the control listener's shape
+(`serve`) to copy, `web/src/main.ts`'s session screen for the link, and `case_internet_toggle`'s node probe
+(a container on an internal network, reachable only through what this build joins to it) as the model for the
+V7 measurement.
+
+Read §1's thirty facts first: eight of them are the Docker half (mounts and V1, the container and its
 limits, the start lock and `resume`, the expected-stop flag with its classifier, the agent launch and its stdio,
 the exit seam with its generations, the agent directory with the data root it forces, and the mapping with its
-record seam), one is a tool's output as a file, one is the checkbox's boot-time **pair** (26) and one is
-expand/contract's two halves (27), and the rest are the writer's coalescing, the runner's two turn policies, the
-worktree step, the create's project refusals, compaction, truncated replay, the daily bundle, the rendered page
-and the egress proxy.
+record seam), one is a tool's output as a file, one is the checkbox's boot-time **pair** (26), one is
+expand/contract's two halves (27) and one is the credential path (30), and the rest are the writer's coalescing,
+the runner's two turn policies, the worktree step, the create's project refusals, compaction, truncated replay,
+the daily bundle, the rendered page and the egress proxy.
 
 **One thing this build does not do, recorded rather than discovered:** a resumed session's pi has **no memory**
 of the earlier turns (`--no-session`; the transcript is Holosmith's log). Replaying the log into a new pi is a
@@ -1956,12 +2007,13 @@ re-read.
 If you stop before the backlog is empty, say so explicitly, say which issue is next, and leave the tree
 clean and the gates green — **a half-finished story is worse than an honest stop**.
 
-This session (`f8ca638` → `5a5bcd8`) shipped two stories:
+This session (`5a5bcd8` → `ceab154`) shipped one story:
 
 | Issue | Story | Commits | Outcome |
 | --- | --- | --- | --- |
+| PER-72 | HS-040 Key proxy verification | `4d0340f`, `5334b7f`, `ceab154` | Done — **V3, V4 and V5 pass against a real `opencode-go` key, and the run found two defects in HS-039's proxy, both fixed**: `upstream` returned a `Content-Length` with no body behind it (every model call was `502 the provider closed the connection before answering`), and `hs_key` mounted `keys.toml` as a *file*, which a temp-file-and-rename store cannot reach — the proxy read the store from before the first create and answered `session=- … status=bad-key` for dummies it had minted itself. `KeyProxy::mount` is the store's directory now. The provider table gained an `opencode-go` row (one host/path/auth triple, therefore one API shape), the spec's vertical-slice table gained a **Result** column with V3/V4/V5 filled, and the measured precedence (`auth.json` > `models.json` > the provider env var) turned V5's documented fallback into a rule the build keeps. ADR-0050. Review **OK with notes**, no P1: seven standards findings (the gate half became its own `case_key_proxy_request`, documentation that still described a file mount, an assertion double count, a dead fallback) and four spec findings (the V5 Pass cell was a condition the run had falsified — rewritten; V3's thinking count; V4's unnamed provider; V10's boot claim), all fixed. Demo: 15/15 claims against the shipped artifact on a real daemon — 433 characters of thinking deltas, a `bash` round trip, usage per message, `get_available_models` from inside the session's own container (29 models, `PI_OFFLINE=1`, dummy key only), the precedence measurements read off `docker logs hs_key`, and the delete revoking the dummy. |
 | PER-71 | HS-039 Key proxy | `efe1fad`, `134d0e8` | Done — the real key lives only in `<data>/secrets/keys.toml` (0600); each session gets a dummy and a `models.json` pointing at `http://key-proxy:8080/<provider>`; `hs_key` validates the dummy, swaps in the real key and forwards over TLS (`openssl s_client`, because the artifact is static), joined to every session network under `key-proxy`. `key set` reads stdin only; `key list` never prints values; delete revokes the dummy. The provider is a fixed table, so a request cannot name a host. The self-test asks the key-proxy alias to answer (the inverse of HS-038's egress pair), and `case_internet_toggle` stores a sentinel real key and greps the session directory, environment and mounts for it. ADR-0048. Review **BLOCK** on a body-loss P1 (head+body in one segment) and the missing bullet-7 assertion; both fixed, plus the P2s. Demo: a real `api.anthropic.com` request returned the provider's 401 through the proxy, the session's `models.json` held only the dummy, and the delete removed the `[sessions]` row. |
 | PER-74 | HS-042 WIP snapshot | `fcd37dc`, `5a5bcd8` | Done — `src/snapshot.rs` is spec item 9's temporary-index script; the ref is `refs/holosmith/wip/<id>`, the identity is `holosmith <holosmith@localhost>`, and a tree equal to `HEAD` removes the ref. It runs on every `agent_settled`, before every stop and before delete; the host runs it, `holosmith container snapshot` is the `/work`/`HS_SESSION_ID` equivalent. ADR-0049. Review **OK with notes**, two P1 test gaps (the settle site and the deletion case) fixed and the P2s cleaned. Demo: a real worktree kept its modified and new files in the ref while HEAD, the index and the working tree stayed put; a clean tree removed the ref. |
 
-The final `scripts/verify.sh` on the committed tree was **60 cases, 609 assertions, ok**; both stories are pushed
-to `origin/master` at `5a5bcd8`.
+The final `scripts/verify.sh` on the committed tree was **61 cases, 615 assertions, ok**; the story is pushed to
+`origin/master` at `ceab154`.
