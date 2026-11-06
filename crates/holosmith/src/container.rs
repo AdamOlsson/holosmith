@@ -615,7 +615,8 @@ pub struct KeyProxy {
     pub image: String,
     /// This build's binary: both what is mounted and what is run.
     pub binary: PathBuf,
-    /// `<data>/secrets/keys.toml`, mounted read-only. The only container that ever sees a real key.
+    /// `<data>/secrets/keys.toml`, read by the proxy inside the container. What is mounted is its directory
+    /// ([`KeyProxy::mount`]); this container is the only one that ever sees a real key.
     pub keys: PathBuf,
 }
 
@@ -645,8 +646,10 @@ impl KeyProxy {
     /// (`session=- … status=bad-key`); a directory mount resolves `keys.toml` at read time, so a rename inside
     /// it is visible.
     pub fn mount(&self) -> PathBuf {
+        // `parent` answers `Some("")` for a bare filename, so the empty case is the one that needs the fallback.
         self.keys
             .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
             .map_or_else(|| self.keys.clone(), Path::to_path_buf)
     }
 

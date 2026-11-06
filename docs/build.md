@@ -232,7 +232,10 @@ ADR-0040 records; see ADR-0040), and the key store and key proxy's refusal path 
 and no internet: it writes a key with `key set` through stdin, asserts `keys.toml` is 0600 and `key list` prints
 the provider and never the value, starts the shipped artifact as `proxy key` on a loopback port, and asserts a
 request with no dummy key is `401` and an unknown provider is `403` before any provider is contacted; the
-forwarding half is HS-040's because a gate that needs a real provider key is not a gate; see ADR-0048), the
+**real** forward is HS-040's recorded demo, because a gate that needs a real provider key is not a gate, while
+the **bytes** the proxy hands its TLS client are `case_key_proxy_request`'s — a stand-in `openssl` on `PATH`
+captures them, so one `Content-Length`, the body after the blank line and the swapped-in key are all gate facts;
+see ADR-0048 and ADR-0050), the
 WIP snapshot (`case_snapshot`, which needs no daemon: it builds a real repository and linked worktree under
 `target/`, runs the artifact's `container snapshot` with `HS_SESSION_ID`, and asserts the ref has the changed
 and new files while HEAD, the index and the working tree are untouched, then that a tree equal to HEAD removes

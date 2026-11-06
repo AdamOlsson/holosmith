@@ -66,7 +66,8 @@ _Avoid_: Project root, workspace, repos dir
 **Secrets file**:
 The file at `<data>/secrets/keys.toml`, mode 0600, holding the provider API keys that the key proxy uses
 (`[providers]`) and the per-session dummy keys it validates (`[sessions]`). The config loader never reads it;
-`hs_key` is the only container that mounts it.
+`hs_key` is the only container that mounts anything of it, and what it mounts is the **directory**, because the
+file is written by rename and a file mount would pin the old inode (ADR-0050).
 _Avoid_: Keys config, credentials file
 
 ### Sessions and turns

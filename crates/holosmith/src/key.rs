@@ -3,8 +3,9 @@
 //! The story's promise is a negative one: a real provider key never enters a session container. Two files
 //! make that true and this module owns both:
 //!
-//! * `<data>/secrets/keys.toml`, mode **0600**, is the only place a real key is written. `hs_key` mounts it
-//!   read-only; no session container mounts it at all.
+//! * `<data>/secrets/keys.toml`, mode **0600**, is the only place a real key is written. `hs_key` mounts the
+//!   **directory** it lives in, read-only (`container::KeyProxy::mount`, ADR-0050); no session container mounts
+//!   either the file or the directory.
 //! * `<data>/sessions/<id>/pi-home/models.json` carries the session's **dummy** key and the key proxy's URL.
 //!   That file is inside a session mount, which is exactly why it may hold nothing else.
 //!

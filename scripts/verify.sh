@@ -359,6 +359,7 @@ serve_cases=(
   case_docker_turn
   case_network_selftest
   case_key_proxy
+  case_key_proxy_request
   case_snapshot
   case_egress_proxy
   case_internet_toggle
@@ -1713,46 +1714,61 @@ PY
   kill -TERM "$keyproxy_pid" 2>/dev/null || true
   wait "$keyproxy_pid" 2>/dev/null || true
 
-  # HS-040: the provider request reaches the TLS client **whole** — head and body. The TLS client is a
-  # process, so a shim stands in for it: it reads exactly as many bytes as the client sent, writes them to a
-  # file and answers a canned 200. No internet, no real key and no daemon, and the assertion is about the bytes
-  # the proxy produces rather than about a header it promises. Without the body the provider waits the request
-  # out and closes, which is what every model call did until this story measured it (`upstream` wrote
-  # `Content-Length` from `body.len()` and never appended the body).
-  local fake="$WORK/$name-openssl" body='{"model":"claude-haiku-5-5","max_tokens":8}' answered
-  local capture="$WORK/$name-request.bin" port2
-  mkdir -p "$fake"
+  "$artifact" --config "$config" key remove anthropic >/dev/null 2>&1 ||
+    fail "$name/remove" "key remove failed"
+  [ -z "$("$artifact" --config "$config" key list)" ] ||
+    fail "$name/removed" "key list is not empty after remove"
+  assertions=$((assertions + 1))
+  rm -rf "$root"
+}
+
+# HS-040 (V3's bytes): the request the key proxy hands its TLS client — head **and** body. The TLS client is a
+# process (`openssl`), so a shim on `PATH` stands in for it: it takes one bounded read of exactly what the proxy
+# writes, saves it, and answers a canned 200. What the case can then assert is the thing that was wrong: the
+# request carries the body, names its length once, and has the stored key swapped in. No internet, no real key
+# and no daemon — a gate cannot have those, and the real forward is HS-040's recorded demo.
+case_key_proxy_request() {
+  local name=case_key_proxy_request root="$WORK/key-proxy-request-$$"
+  local fake="$root/openssl" capture="$root/request.bin" port keyproxy_pid answered
+  local body='{"model":"claude-haiku-5-5","max_tokens":8}'
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to speak HTTP to the key proxy (tests/key_proxy.rs covers the wire)\n' "$name"
+    return 0
+  fi
+  rm -rf "$root"
+  mkdir -p "$root/data/secrets" "$fake" || fail "$name/mkdir" "could not create $root"
+  printf '[providers]\nopencode-go = "sk-opencode-go-verify"\n\n[sessions]\nverify-session = "hs-dummy-verify"\n' \
+    >"$root/data/secrets/keys.toml"
+  chmod 600 "$root/data/secrets/keys.toml"
   cat >"$fake/openssl" <<'SH'
 #!/bin/sh
 # Stand in for "openssl s_client": capture what the proxy writes, then answer one complete HTTP response. One
-# bounded read rather than a read-until-EOF, because the proxy deliberately keeps our stdin open — and one read
-# is enough, since the proxy writes a whole request in a single write.
+# bounded read rather than a read-until-EOF, because the proxy deliberately keeps our stdin open; the request is
+# far below PIPE_BUF and the proxy writes it in one `write_all`, so one read returns all of it — if that ever stops
+# being true, `body` fails and names this assumption rather than blaming the proxy.
 dd bs=8192 count=1 of="$CAPTURE" 2>/dev/null
 printf 'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok'
 SH
   chmod +x "$fake/openssl"
-  printf '[providers]\nopencode-go = "sk-opencode-go-verify"\n\n[sessions]\nverify-session = "hs-dummy-verify"\n' \
-    >"$root/data/secrets/keys.toml"
-  chmod 600 "$root/data/secrets/keys.toml"
-  port2="$(python3 - <<'PY'
+  port="$(python3 - <<'PYFREEPORT'
 import socket
 s = socket.socket()
 s.bind(("127.0.0.1", 0))
 print(s.getsockname()[1])
 s.close()
-PY
+PYFREEPORT
 )"
   rm -f "$capture"
   PATH="$fake:$PATH" CAPTURE="$capture" \
-    "$artifact" proxy key --listen "127.0.0.1:$port2" --keys "$root/data/secrets/keys.toml" \
-    >"$WORK/responses/$name-provider.log" 2>&1 &
+    "$artifact" proxy key --listen "127.0.0.1:$port" --keys "$root/data/secrets/keys.toml" \
+    >"$WORK/responses/$name-proxy.log" 2>&1 &
   keyproxy_pid=$!
   for _ in $(seq 1 100); do
-    grep -q 'the key proxy is listening' "$WORK/responses/$name-provider.log" 2>/dev/null && break
+    grep -q 'the key proxy is listening' "$WORK/responses/$name-proxy.log" 2>/dev/null && break
     kill -0 "$keyproxy_pid" 2>/dev/null || break
     sleep 0.05
   done
-  answered="$(python3 - "$port2" "$body" <<'PY'
+  answered="$(python3 - "$port" "$body" <<'PYASK'
 import socket, sys
 
 port, body = int(sys.argv[1]), sys.argv[2].encode()
@@ -1768,38 +1784,27 @@ with socket.create_connection(("127.0.0.1", port), timeout=20) as sock:
             break
         answer += chunk
 print(answer.decode("utf-8", "replace").replace("\r\n", " ").strip()[:120])
-PY
-)" || fail "$name/provider-driver" "the python3 driver failed"
+PYASK
+)" || fail "$name/driver" "the python3 driver failed"
   case "$answered" in
     "HTTP/1.1 200 OK"*" ok") assertions=$((assertions + 1)) ;;
-    *) fail "$name/provider-answer" "the proxy did not forward the canned answer: $answered" ;;
+    *) fail "$name/answer" "the proxy did not forward the canned answer: $answered" ;;
   esac
   kill -TERM "$keyproxy_pid" 2>/dev/null || true
   wait "$keyproxy_pid" 2>/dev/null || true
   # Exactly one Content-Length, from the body's real length, and the body after the blank line.
-  check "$name/provider-content-length" "1" "$(grep -c '^Content-Length:' "$capture" 2>/dev/null || true)"
-  check "$name/provider-content-length-value" "Content-Length: ${#body}" \
+  check "$name/content-length" "1" "$(grep -c '^Content-Length:' "$capture" 2>/dev/null || true)"
+  check "$name/content-length-value" "Content-Length: ${#body}" \
     "$(grep '^Content-Length:' "$capture" 2>/dev/null | tr -d '\r' || true)"
   grep -q "^x-api-key: sk-opencode-go-verify" "$capture" 2>/dev/null ||
-    fail "$name/provider-key" "the forwarded request does not carry the stored key: $(head -c 400 "$capture")"
+    fail "$name/key" "the forwarded request does not carry the stored key: $(head -c 400 "$capture")"
   if grep -q 'hs-dummy-verify' "$capture" 2>/dev/null; then
-    fail "$name/provider-dummy" "the forwarded request still carries the session's dummy key"
+    fail "$name/dummy" "the forwarded request still carries the session's dummy key"
   fi
   assertions=$((assertions + 1))
   if [ "$(tail -c ${#body} "$capture" 2>/dev/null)" != "$body" ]; then
-    fail "$name/provider-body" "the forwarded request ends without the body: $(tail -c 200 "$capture" | tr -d '\r')"
+    fail "$name/body" "the forwarded request ends without the body: $(tail -c 200 "$capture" | tr -d '\r')"
   fi
-  assertions=$((assertions + 1))
-
-  # The store this half wrote by hand is not what the rest of the case asserts on: put the anthropic key back and
-  # drop the provider this check added, so `key remove anthropic` last assertion still means what it says.
-  printf '%s\n' "$key" | "$artifact" --config "$config" key set anthropic >/dev/null 2>&1 ||
-    fail "$name/restore" "could not restore the anthropic key after the provider check"
-  "$artifact" --config "$config" key remove opencode-go >/dev/null 2>&1 || true
-  "$artifact" --config "$config" key remove anthropic >/dev/null 2>&1 ||
-    fail "$name/remove" "key remove failed"
-  [ -z "$("$artifact" --config "$config" key list)" ] ||
-    fail "$name/removed" "key list is not empty after remove"
   assertions=$((assertions + 1))
   rm -rf "$root"
 }
@@ -1919,7 +1924,7 @@ case_internet_toggle() {
   # lesson).
   local projects="$root/projects"
   local data="$root/data"
-  local off_id="" on_id="" body label id verdicts env_off env_on got count want running why pair
+  local off_id="" on_id="" body label id verdicts env_off env_on got count want running why pair key_mounts
   # The probe's verdict words, spelled the way the `case` patterns below need them: a shell `$CONNECTING` would be
   # an unbound variable, because the node constants live inside the heredoc where the shell cannot see them.
   local not_listed="HTTP/1.1 403 Forbidden"
