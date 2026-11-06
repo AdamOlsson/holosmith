@@ -1,4 +1,4 @@
-# RESUME — one issue per session (next: PER-76 / HS-044, startup reconcile and crash safety)
+# RESUME — one issue per session (next: PER-77 / HS-045, `doctor --quick` and `doctor --full`)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating procedure and
 still governs the cycle; this file is the state of the world, and it adds one rule of its own:
@@ -45,202 +45,216 @@ sandbox-specific incantation (§2).
 
 ---
 
-## 1. The issue this session picks up: `PER-76` — HS-044, startup reconcile and crash safety (V9)
+## 1. The issue this session picks up: `PER-77` — HS-045, `doctor --quick` and `doctor --full`
 
-**State when this file was written** (the story's last commit, `7686706`, is `origin/master`; the handoff
-commit that carries this file is one further; tree clean apart from the
-operator's own `log.txt`/`orchestrate.sh`): **48 of 80 stories Done, 32 Backlog**, all in project `Holosmith`.
-`PER-76` is `Backlog`, it is the next in `HS-###` order, and its only blocker (`HS-043`, `PER-75`) is `Done` —
-so it is eligible. Nothing in the queue is blocked on the machine: the daemon, the agent image and this
-build's proxies all work here (§2).
+**State when this file was written** (the story's last commit, `63892f9`, is `origin/master`; the handoff
+commit that carries this file is one further; tree clean apart from the operator's own
+`log.txt`/`orchestrate.sh`): **49 of 80 stories Done, 31 Backlog**, all in project `Holosmith`. `PER-77` is
+`Backlog`, it is the next in `HS-###` order, and its only blocker (`HS-044`, `PER-76`) is `Done` — so it is
+eligible. Nothing in the queue is blocked on the machine: the daemon, the agent image and this build's proxies
+all work here (§2).
 
-The last shipped story was `PER-75` (HS-043, the delete's keep-rules — V9's predecessor; ADR-0052). The last
-gate run was green: **64 cases, 678 assertions**; `cargo test` is **783 tests across 45 binaries**, and
-`web/`'s runner is **51**.
+The last shipped story was `PER-76` (HS-044, the startup reconcile and V9; ADR-0053). The last gate run was
+green: **66 cases, 722 assertions**; `cargo test` is **798 tests across 46 binaries**, and `web/`'s runner is
+**52**.
 
 ### 1.1 The slice (verbatim from `docs/stories/phase-1b-docker-backend.md`; Linear's body is the same text)
 
-> ### HS-044 — Startup reconcile and crash safety (V9)
+> ### HS-045 — `doctor --quick` and `doctor --full`
 >
-> **As** the operator **I want** a crash to leave nothing orphaned **so that** restarting is always safe.
+> **As** the operator **I want** one command that tells me whether this machine is fit **so that** I diagnose
+> once instead of five times.
 >
-> - **Size:** M · **Blocked by:** HS-043 · **Spec:** item 6, item 7, item 8, V9
-> - **Demo:** `kill -9` mid-turn, restart, and the session is `idle` with the turn marked `interrupted`, no
->   duplicate seq, no name conflict, no orphan network.
+> - **Size:** M · **Blocked by:** HS-044 · **Spec:** CLI, item 10 (step 1 and 7), V2
+> - **Demo:** `doctor --quick` lists each check with pass/fail; `doctor --full` additionally runs the egress
+>   self-test and the network-off probe.
 >
 > **Acceptance**
-> - [ ] `docker ps -a --filter name=s_` → remove any leftover container, then restart sessions that were live.
-> - [ ] Rows stuck in `starting` are either resumed or set to `error`; never left dangling.
-> - [ ] Orphaned `agents_*` networks and `.worktrees/*` directories are removed.
-> - [ ] A turn that was running is recorded as `interrupted` (a reason, not a state).
-> - [ ] **V9 gate:** the kill -9 scenario passes with no duplicate or missing seq and no name conflict.
+> - [ ] `--quick`: Linux with systemd where applicable, Docker reachable, git ≥ 2.38, Tailscale logged in,
+>   free disk ≥ `min_free_gb`, required ports free.
+> - [ ] `--full` adds: egress self-test, network-off probe, `hs_egress`/`hs_key` up, agent image pi version
+>   equals the pinned pi version.
+> - [ ] **V2 gate:** `git merge-tree --write-tree` exits 0 for a clean merge and 1 with paths for a conflict; if
+>   the git version lacks it, the trial-merge fallback is implemented.
+> - [ ] Exit non-zero on any failure, with one actionable line per failure.
+> - [ ] `ExecStartPre` uses `--quick`, so a broken machine does not start serving sessions.
 
 `docs/stories/**` is **not edited** (§7).
 
 ### 1.2 The spec it proves
 
-`HolosmithSpec.md` item 6 (the third bullet: "Startup reconcile uses `docker ps -a --filter name=s_`, removes
-any leftover container, then restarts sessions that were live"), item 7's step 5 ("At startup, any row still
-in `starting` is either resumed or set to `error`, and orphaned networks, worktrees and containers are
-removed"), item 8's last table row ("server crash → recovery on startup → `starting`, then `idle`; a running
-turn is recorded as `interrupted`") and V9 ("`kill -9` of the server mid-turn, then restart: the session
-returns to idle with no duplicate or missing seq and no container name conflict"). V9's **Result** cell is
-empty and this story fills it — HS-046 closes the run.
+`HolosmithSpec.md` item 10 §1's preflight list ("Linux with systemd, Docker reachable, git 2.38 or newer,
+Tailscale logged in, free disk above `min_free_gb`, ports free") — the *same* list `server deploy` runs as step
+1 and the unit file runs as `ExecStartPre`; item 10 §7 ("Wait for `/api/health`, run `doctor --full` … then
+print the URL"); the CLI table's `holosmith doctor [--quick or --full]` row; and V2 ("`doctor` finds git 2.38
+or newer, and `git merge-tree --write-tree` exits 0 for a clean merge and 1 with paths for a conflict"). V2's
+**Result** cell is empty and this story fills it — HS-046 closes the run.
 
 ### 1.3 What already exists
 
-- **Every durable piece the crash has to survive.** `sessions.last_seq` is the seq counter, bumped in the
-  same transaction as the event insert (never `MAX(seq)`, ADR-0009/HS-060); `EventWriter` batches on a 25 ms
-  tick and commits strictly before broadcasting; `sessions::repository` has `list(Option<Status>)`,
-  `get`, `live_count`, `set_worktree`, `take_expected_stop` and the rest, all behind the crate's
-  one-statement-per-table rule.
-- **The state machine's crash row is written down but nothing drives it**: `Trigger` has no crash trigger,
-  `interrupted` appears in `src/` only in comments and in `state.rs`'s "`ended` and `interrupted` are not
-  states" test. So "a running turn is recorded as `interrupted`" has a word and no producer.
-- **`Exits::record(session, code, stderr)`** (HS-030/HS-031, ADR-0038/0039) turns an observed exit into
-  `stopped` / `stopped · pi_exit` / `error` + the last stderr lines; its caller is the task the provisioner
-  spawns after the pi step, fed by the backend's attached-stdio `ExitWatcher`. A `kill -9` of the *server*
-  kills that attached `docker run` with it, so **nothing observes the container's exit** — the container
-  itself keeps running (`--rm` removes it only when it exits), which is exactly the leftover atomic step 1
-  names.
-- **`Provisioner::{spawn, run}`** re-runs the four steps for a row (a resume is just that: `ensure` is
-  create-or-adopt, ADR-0029), and `POST /resume` is the API that starts it. `Backends::for_run` decides
-  whether any of this is real: a stub boot has no container, no network and no worktree.
-- **`Docker`'s bounded family** (HS-037/HS-041): `inspect`, `container_exists`, `remove_container`,
-  `remove_container_bounded`, `running`, `stop_container`, `create_internal_network`, `remove_network`,
-  `join_network`/`leave_network`, `run_detached(args, bound)`. **There is no listing call** — nothing in
-  `src/docker.rs` runs `ps` — so the reconcile's `docker ps -a --filter name=s_` is new.
-- **The naming rules**: a container is `s_<id>`, a network `agents_<id>`, a worktree
-  `<projects>/.worktrees/<id>` (`worktree::Worktree::of`, `container::network_name`). A reconcile that reads
-  names must use these functions rather than re-spelling them.
-- **The startup sequence** (`commands/serve.rs`): preflight → (Docker) `egress` network + self-test →
-  `Database::open` (migrations) → writer → the tasks. A reconcile is a *task* off that path (§1.5).
-- **What `deleting` rows and the delete flow already promise**: a `deleting` row is re-runnable by repeating
-  the request (ADR-0023), and its teardown treats a missing worktree, branch, container or repository as
-  success. A reconcile must not "finish" someone's delete by removing the row — that is the operator's
-  request to retry.
-- **The gate's own crash-shaped facts**: `case_exit_classification` reads a row's `expected_stop` out of
-  `app.db` with `python3`, and `tests/exit.rs` + `tests/agent.rs` cover the classifier and the watcher. No
-  case kills a server.
+- **`src/preflight.rs`** is the three checks `serve` already refuses on (HS-024, ADR-0028): Docker answers
+  `GET /_ping` on `docker_host` (`unix://` and `tcp://`; an `ssh://` endpoint is a *complaint*, because a check
+  that cannot run must not report success), `git --version` ≥ `MIN_GIT` (2.38), and `df -Pk` on the data root's
+  filesystem against `min_free_gb`. `Tools { git, df }` is the test's shim seam, `Complaint { check, sentence }`
+  is one actionable line, `Check::{Docker, Git, Disk, Network}` the word before it. **It answers failures
+  only**, and `serve` calls it only when `backend == Docker` and `role != Hub`.
+- **`src/selftest.rs`** is the network self-test (HS-036/038/039, ADR-0044/0046/0048): `run`/`run_with`,
+  `Outcome::{Passed, Failed, Unknown}`, `complaint()`, `Report`, `leaked`, `pair`, `key_pair`, `NETWORK`,
+  `PUBLIC`, `PROXY_TARGET` (`egress-proxy:3128`), `KEY_PROXY_TARGET` (`key-proxy:8080`), `HOST_PORT`, `REACHED`
+  (9), `PROBE_TIMEOUT`, and `PROBE` (`include_str!` of `templates/selftest-probe.js`, so the image needs **node**).
+  It needs the daemon **and** `agent_image`, makes its own temporary network, and always removes it. `serve`
+  calls it once per Docker boot; `Unknown` is a `warn`, `Failed` refuses.
+- **`schema::verdict` / `Verdict::sentence`** (HS-075, ADR-0047): "`serve` continues on a newer database and
+  `doctor` refuses" is written down and has **no caller** — `serve` warns with the sentence.
+- **`db.rs` has one opener and it migrates** (`Database::open` → `apply_pending`). There is no read-only open;
+  `scripts/schema-snapshot.sh` gets one from python3's `mode=ro`, which the crate cannot use.
+- **`src/cli.rs`** is clap: `version`, `config {validate,show,edit}`, `serve [--port|--data-dir|--backend]`,
+  `proxy {egress, key}`, `key {set,list,remove}`, `container snapshot`. **`doctor` does not exist.** Config is 31
+  keys, including `role`, `docker_host`, `agent_image`, `min_free_gb`, `data_root`, `control_listen`,
+  `preview_listen`; `config show` is where a key is checked before adding one.
+- **`agent::version_of` / `version_check` / `version_sentence`** (HS-031): the image's pi version against
+  `pins/pi.txt`, asserted once per process at a container launch. `doctor --full`'s "agent image pi version
+  equals the pinned pi version" is that same question, asked on demand.
+- **`Docker`'s bounded family** (HS-037/041/044): `inspect`, `running`, `container_names`, `network_names`,
+  `remove_container_bounded`, `run_detached`, `attempt` — enough for "are the two proxies up" without a new
+  primitive.
+- **Environment facts on this machine** (measured at this handoff): `git --version` = **2.43.0**, so
+  `merge-tree --write-tree` exists and V2's fallback is not needed *here*; Docker 29.9.2 answers; the image is
+  `pi-agent:local`; the `egress` network is there. **There is no systemd** (`/proc/1/comm` is `bwrap`, and
+  `/run/systemd/system` does not exist), and the `tailscale` CLI **exists** but no daemon answers
+  (`failed to connect to local tailscaled`). Both are facts this story has to render honestly, not fail on by
+  accident — see §1.5.
 
 ### 1.4 What does not exist
 
-No `reconcile` module, no startup pass over rows or Docker names, no `Trigger` for a crash (so no way to
-record `interrupted`), no `docker ps` listing in `src/docker.rs`, no orphan-network or orphan-worktree sweep,
-no `case_*` that kills a server, and no V9 measurement of any kind. `docs/notes.md` has no landmine section
-for crash recovery either — the closest is the expected-stop/exit one.
+No `doctor` command, no `src/doctor.rs`, no report type (a pass *and* a fail, with the check's own words), no
+systemd check, no Tailscale check, no port check, no "are `hs_egress`/`hs_key` running" check, no on-demand
+image pi-version check, no read-only way to reach `schema::verdict`, and no `case_` that runs a diagnostic
+command at all.
 
 ### 1.5 The decisions that shape the design
 
-1. **What "live" means at startup, and what happens to each row.** Suggested: `running` → `interrupted`
-   (a reason on the `idle` transition, or `running → idle` with reason `interrupted`), then re-provision if
-   the spec's table says the session comes back (`idle` after provisioning); `starting` → resume it if its
-   worktree can still be adopted, `error` if not (item 7's own words are "either resumed or set to `error`");
-   `idle`/`stopped`/`error` → untouched; `deleting` → left alone (the operator's retry). Write down which of
-   these is a *transition* (the table has no crash row, so a new trigger or a new row is needed — and
-   `apply` is the only writer) and which is a task.
-2. **Order: names first or rows first?** The acceptance's own order is containers → "restart sessions that
-   were live". Removing a container whose row says `idle` is safe (host directories hold the data); restarting
-   a session before its stale container is gone races the name. Recommend: sweep names (containers for
-   `s_<id>` with no live row or no `running` row, the `agents_*` networks and `.worktrees/*` directories that
-   belong to no row), then act on rows.
-3. **What must NOT be swept.** A kept branch and `refs/holosmith/wip/<id>` survive a delete on purpose
-   (HS-043, ADR-0052) — the reconcile must never delete a branch or a ref, and an orphan `.worktrees/<id>`
-   directory with no row is HS-043's "a crash left it" case. And a `deleting` row's container/network is the
-   delete's to remove, not the reconcile's. Say where the line is.
-4. **The stub backend.** `scripts/verify.sh` boots `backend = "stub"` and has no daemon on a hub machine, so
-   the reconcile must be a no-op (or a `debug` line) with no container names to read — and the gate's cases
-   must still be meaningful without a daemon. The pattern is `Backends`' own: the backend answers the question
-   (`refuse_project`, `retained`), or `runtime::Backend` gates the task.
-5. **`interrupted` on the wire and in the transcript.** A reason, not a state (item 8's sentence, ADR-0016) —
-   so it is `session.status`'s `reason` and the page's badge shows it (`stateText` already renders
-   `idle · interrupted`). Decide whether the page owes a sentence; `stoppedNotice` is for `stopped` states
-   only and HS-043's own landmine says a new word needs a new sentence *and* a test that it is not another's.
-6. **V9's measurement.** "No duplicate or missing seq" is a claim about `last_seq` and the log; "no name
-   conflict" is a claim about `docker run` after a crash left `s_<id>` behind. A gate case can `kill -9` the
-   served artifact mid-turn and restart it — but `case_*` must leave the machine clean, and the stub cannot
-   produce a mid-turn container. Decide what the case proves on a daemon-less machine (the row's
-   `interrupted` reason and the seq arithmetic, which need no daemon) and what needs the daemon and
-   `agent_image` (the leftover container and the name conflict).
+1. **Where the command lives, and what it reuses.** A new `src/doctor.rs` (the check list and its sentences) plus
+   `commands/doctor.rs` (clap + printing), following `preflight`/`selftest`'s split. The spec's own words make
+   `doctor --quick` *the same list* `server deploy` step 1 runs and `serve` refuses on (ADR-0028: "the sentence
+   the operator reads must be the same one either way"), so `preflight::check` must be **reused**, not
+   re-implemented — which means the preflight has to grow from "failures only" (`Complaint`) to something that
+   also reports a pass, or `doctor` wraps `check_with` and adds the checks `preflight` does not do. Pick one and
+   write it down; `preflight`'s existing callers (`serve`, `tests/preflight.rs`, `case_docker_preflight`,
+   `case_worktree`'s fake socket) are the constraint.
+2. **`--quick` and `--full` are one list with a depth flag**, not two commands: item 10's split is exactly
+   "quick = no container", "full = includes the self-test and the proxies". `--full` adds the self-test (daemon +
+   `agent_image`, ADR-0044), the network-off probe (already inside the self-test's `pair`), the
+   `hs_egress`/`hs_key` running question (`Docker::running`) and the image's pi version (`agent::version_of`).
+3. **"Linux with systemd where applicable" is the *role*, and this machine has no systemd.** `serve` by hand is
+   a supported way to run on a machine without systemd (`docs/build.md` says so), so a check that refuses here
+   would make `doctor` unrunnable on the machine the gate runs on. The precedents are ADR-0044's `Unknown` ("we
+   could not measure is not we measured a leak") and `preflight`'s `ssh://` complaint. Recommendation: three
+   outcomes — `pass`, `fail`, `unknown`/`warn` — printed with the check's own sentence, and the exit code is
+   non-zero only for a *failure*; a `server` deploy (HS-049) is where systemd becomes a prerequisite. Tailscale
+   is the same shape: present but not logged in is a line, not a crash, and a `hub` needs it while a `server`
+   behind a proxy may not. **Do not invent a `--skip` flag**; the role decides.
+4. **Ports free is the check most likely to be wrong on a live machine.** `doctor --quick` runs as
+   `ExecStartPre` (before `serve`, ports free) while item 10 §7 runs `doctor --full` **after** deploy, when
+   `serve` holds the control port and the preview port. So "port in use" is a failure in the quick list and a
+   different fact in the full one (the machine is serving — the port answering `/api/health` is the pass). Say
+   which in the sentence, and test both.
+5. **A newer database is `schema::verdict`'s, and reaching it without migrating is new work.** `Database::open`
+   applies pending migrations, so `doctor` needs either a read-only open (`rusqlite`'s
+   `OpenFlags::SQLITE_OPEN_READ_ONLY`, a `db.rs` addition) or to read `schema_version` without a `Database`.
+   ADR-0047 already promises `doctor` refuses; this is the story that keeps the promise, and the gate's
+   `case_schema_newer` already builds the database to point at.
+6. **V2 is a measurement on a real repository, and the fallback is conditional.** `git merge-tree --write-tree`
+   (git ≥ 2.38, `preflight::MIN_GIT`) exits 0 for a clean merge and 1 with paths for a conflict; the fallback
+   (a trial merge in a temporary worktree) is implemented **only** if the version lacks it. This machine has
+   2.43, so the branch that runs here is the `merge-tree` one — prove the *version* branch with a shim `git`
+   that reports an old version (the `preflight::Tools` pattern: a shim, never a `PATH` edit, which is `unsafe`
+   in edition 2024 and shared state).
+7. **`ExecStartPre` has no file to change yet.** There is no unit file (HS-049 owns `service install`), so the
+   contract this story can make is the **command's exit code** and one actionable line per failure. Record that
+   the unit will call `doctor --quick`, and leave the file to HS-049 — do not invent a unit file here.
+8. **One line per failure, and the exit code is "any failure".** The acceptance says both; a check's own
+   sentence is `preflight`'s rule (it names the fix). A `--json` mode is not asked for and has no consumer;
+   `version --json` is the precedent *if* a gate needs one.
+9. **What the gate case needs.** The machine has the daemon and the image, so a `case_doctor_full` can be real;
+   a `case_doctor_quick` must also be meaningful **without** Tailscale/systemd (see §1.5.3) and must assert the
+   exit code and the line for a deliberately broken check (a shim, a temp `data_root`, a bad `docker_host`, an
+   occupied port — pick one that cannot touch the machine's own state). Two cases at most; `docs/build.md`
+   needs both (a review finding from PER-76: a story's case list is part of the doc).
 
-### 1.6 The questions the plan must answer
+### 1.6 The questions the plan must answer (before code)
 
-Answer each with a precedent, and record the answers in the Linear plan comment before any code exists.
-
-1. **Where the reconcile lives.** A new `src/reconcile.rs` task with a seam like `preflight`'s `Tools`, or
-   methods on `Provisioner`/`Deleter`? The precedent is ADR-0023/ADR-0029: the module that owns the names owns
-   the questions about them — and `Docker` is the only thing that can read `ps`.
-2. **Which transition records the crash, and where the reason comes from.** `Transitioner::apply` is the only
-   writer; the crash is not the operator's request, so either a new `Trigger` (name it after the spec's word)
-   or an `apply_logged` with a reason. Say which and why, and what the table row is.
-3. **What a `starting` row's "resume" means when its worktree step never ran.** `ensure` is create-or-adopt,
-   so a re-provision works from nothing; the risk is a row that crashed *between* its ledger writes and its
-   worktree step. The `base_commit` question HS-043 answered (`ahead`'s, the row's wins) is the precedent.
-4. **What `docker ps -a --filter name=s_` is allowed to parse.** Docker's own English is never parsed
-   (ADR-0035's rule): `--format '{{.Names}}'` and the naming convention, then `inspect` for anything else.
-5. **How the sweep tells "an orphan" from "not mine".** `agents_<id>` where `<id>` is not a live row; a
-   `.worktrees/<id>` with no row and no registration. A name that is not the convention (`hs_egress`,
-   `hs_key`, the operator's own) is not the build's to remove.
-6. **Whether the reconcile can be run twice safely.** Startup is one call, but HS-046's verification run and
-   a `doctor` (HS-045) may want it again; "idempotent" is the same rule `Worktree::ensure` already follows.
+1. **Does `preflight` grow a report, or does `doctor` wrap it?** The spec says the sentences are the same, so
+   whatever is chosen must keep `serve`'s refusal and `doctor`'s lines byte-identical. Where does a *pass* line
+   come from without inventing a second sentence per check?
+2. **What is the outcome vocabulary?** `pass`/`fail` plus `unknown` (ADR-0044's word) — and does an `unknown`
+   fail `--quick` on a `server` role? (It must not on this machine, or the gate cannot run it.)
+3. **Ports: one check or two moments?** `ExecStartPre` versus item 10 step 7 on a live server (see §1.5.4).
+4. **The read-only database question** (§1.5.5): a `db.rs` open, or a direct version read, and what a missing or
+   unmigrated database reports.
+5. **V2's fallback**: implemented now (dead code on this machine, and a test can only reach it through a shim), or
+   recorded as "not needed, the version is ≥ 2.38" like ADR-0035's V1 fallback? The acceptance's conditional is
+   the spec's, so the decision is what "if the git version lacks it" means at *implementation* time.
+6. **What `doctor` may start.** `--full`'s self-test makes a container and a network; it must remove them, and a
+   `doctor` must never leave a container behind (the gate's trap and §2's Docker cleanup).
+7. **Does `doctor` need the config at all, and which role?** `config` load is a refusal before the command runs
+   (`serve`'s order); `doctor --quick` as `ExecStartPre` runs with the machine's config file, and `--config` is
+   the flag the others have.
 
 ### 1.7 Acceptance, restated as checks
 
 Every bullet needs something that can fail, and at least one of them is a new `case_*` in `scripts/verify.sh`.
 
-- *"`docker ps -a --filter name=s_` → remove any leftover container, then restart sessions that were live"* —
-  a unit test over a `Docker` seam (the `preflight::Tools` pattern: a shim, not a real daemon) plus a
-  daemon case that kills `serve` with `-9` mid-turn, restarts it, and asserts no `s_<id>` survives with a
-  stale row and that the row is back to `idle`.
-- *"Rows stuck in `starting` are either resumed or set to `error`; never left dangling"* — a stub-boot test
-  that plants a `starting` row and asserts it does not stay there, plus the same for a row whose project is
-  gone (which must be `error` with a reason, not `starting`).
-- *"Orphaned `agents_*` networks and `.worktrees/*` directories are removed"* — with a daemon: a network and a
-  directory with no row go, one with a row stays; and **a kept branch and ref are never touched** (HS-043's
-  rule — that is the test that must not regress).
-- *"A turn that was running is recorded as `interrupted` (a reason, not a state)"* — the row is `idle` (or
-  `stopped`) with reason `interrupted` in the row **and** in the committed event log, and no row is ever in a
-  state called `interrupted`.
-- *"V9: no duplicate or missing seq, no name conflict"* — after `kill -9` and restart: `sessions.last_seq`
-  equals the highest committed seq, every event's seq is unique and gap-free *within the window the log
-  keeps* (compaction deletes rows, so state the claim carefully), and the restarted session's container is the
-  same name.
+- *"`--quick`: Linux with systemd where applicable, Docker reachable, git ≥ 2.38, Tailscale logged in, free
+  disk ≥ `min_free_gb`, required ports free"* — one unit test per check over a shim/seam (the `preflight::Tools`
+  pattern: a shim `git`/`df`, a fake daemon socket, a bound port), and a `case_doctor_quick` from the artifact
+  that asserts one printed line per check, the exit code, and a deliberately broken check's sentence.
+- *"`--full` adds: egress self-test, network-off probe, `hs_egress`/`hs_key` up, agent image pi version equals
+  the pinned pi version"* — a gate case with the daemon **and** the image (the self-test's own temporary
+  network and container must be gone afterwards; the two proxies' state read with `Docker::running`), and the
+  pi-version check against `pins/pi.txt` (a wrong image name via `agent_image` is the failing arm, provable
+  without building an image: point it at a name that does not exist and read the sentence).
+- *V2* — a test over a `TempDir` repository (`support::repository`): a clean branch merge → 0, a conflicting one
+  → 1 with the path; and the old-git arm through a shim reporting 2.37 (or the decision that the fallback is not
+  implemented, recorded like ADR-0035's V1).
+- *"Exit non-zero on any failure, with one actionable line per failure"* — the gate case's exit code and the
+  line count; a warning/unknown must not change the code.
+- *"`ExecStartPre` uses `--quick`"* — no unit file exists; the contract is the exit code, and HS-049 owns the
+  file. Record it (an ADR note, not a claim that a file was written).
 
 Then `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `cd web && npm test &&
-npx tsc --noEmit`, and `scripts/verify.sh` — all green on a clean tree (§3), plus the story's own demo
-against the **shipped artifact** (§1.9).
+npx tsc --noEmit`, and `scripts/verify.sh` — all green on a clean tree (§3), plus the story's own demo against
+the **shipped artifact** (§1.9).
 
 ### 1.8 Non-goals
 
-- **`doctor`** (HS-045) and the **phase-1 verification run** (HS-046, which closes V9's row in the spec).
-- **Drain** (HS-051) and **service install** (HS-049): a graceful restart is not a crash.
-- **Session expiry** (HS-064), the **disk floor** (HS-062) and per-session caps (HS-063).
-- **A `docker events` watcher**: the attached process is the observation (ADR-0039) — a crash is the one case
-  it cannot observe, and that is what reconcile is for, not a second watcher.
-- **No change to how a delete, a resume or a create is requested.**
+- **The phase-1 verification run** (HS-046, which fills V1–V10's Result cells and closes the table).
+- **`server deploy` and the unit file** (HS-049): `ExecStartPre=holosmith doctor --quick` is its line to write.
+- **The image builds** (HS-048): `doctor --full` asks the configured `agent_image`; it does not build one.
+- **`status`, `logs`, `uninstall`** (HS-050) and **drain** (HS-051).
+- **A new config key**, a `--json` report with no consumer, and a `--skip` flag.
 
 ### 1.9 The demo
 
-`kill -9` the served artifact mid-turn, then start it again, from the **shipped binary** on this machine's real
-daemon: create a session against a plain checkout (ADR-0030), let it reach `idle`, prompt it (pi's own refusal
-ends the turn in this build because the gate holds no provider key — say so, and use HS-032's fixtures'
-shape, or hold the turn with the stub if the intended subject is the turn's *end*), `kill -9` the serve pid,
-show the leftover `s_<id>` container and the `running` row, restart, and show: the session `idle` with reason
-`interrupted`, the log's seqs still unique and the row's `last_seq` equal to the last one, no `s_<id>`
-container left behind, and no `agents_<id>` network of a row that no longer exists. Bound every background
-process, kill it by its own pid, **and remove every container, network and proxy the demo made in the script's
-trap** (§6's landmine: `serve` starts `hs_egress`/`hs_key` and they outlive it — remove them by name).
+From the **shipped binary** on this machine's real daemon: `doctor --quick` printing one line per check with
+pass/fail/unknown (including the honest lines for a machine with no systemd and no Tailscale daemon) and its
+exit code; then `doctor --full`, which runs the network self-test (its own temporary network and container) and
+reads the two proxies' state and the image's pi version. Then break one thing deliberately and show the sentence
+and the non-zero exit — the cheapest honest break is a config whose `docker_host` points at an absent socket
+(the `case_docker_preflight` and `case_worktree` pattern) or a `min_free_gb` no disk can meet. Bound every
+process, and remove every container/network/proxy the demo started in its trap (§2's landmine: `serve` starts
+`hs_egress`/`hs_key` and they outlive it; `doctor --full` must remove its own).
 
 ### 1.10 What the next agent needs back
 
 When you write the state back (§5, step 10): §1 becomes the **next** issue — by `PROMPT.md`'s ranking, that is
-`PER-77` (HS-045 — `doctor --quick` and `doctor --full`), then `PER-78` (HS-046, the phase-1 verification run
-that is the gate for phase 2) — with the same shape: slice, spec, what exists, what does not, the decisions
-that shape the design, the acceptance as checks, non-goals, the demo. Refresh the counts, the ADR number you
-took (**ADR-0053** is next) and the last gate run's own numbers, and replace §9's row with this story's
-(short — one paragraph). Anything you learned that is **not** state and **not** an ADR goes into
-`docs/notes.md` under a new `### Landmines: …` heading, never into §1. Then kill what you started (§5,
-step 11) — a session that leaves a child or a container behind blocks the next one.
+`PER-78` (HS-046 — the phase-1 verification run that fills the table and is the gate for phase 2) — with the
+same shape: slice, spec, what exists, what does not, the decisions that shape the design, the acceptance as
+checks, non-goals, the demo. Refresh the counts, the ADR number you took (**ADR-0054** is next) and the last
+gate run's own numbers, and replace §9's row with this story's (short — one paragraph). Anything you learned
+that is **not** state and **not** an ADR goes into `docs/notes.md` under a new `### Landmines: …` heading, never
+into §1. Then kill what you started (§5, step 11) — a session that leaves a child or a container behind blocks
+the next one.
 
 ## 2. Environment (already repaired — do not redo)
 
@@ -299,7 +313,10 @@ is the launch `agent::COMMAND` builds. `pi --help` in the sandbox is the same ve
 is free; nothing in the repo may hard-code the path to those documents.
 
 **Not available, and not to be invented:** no `sudo`, no `apt`, no `gh`, no ssh key (the agent has one,
-§pushing), no Tailscale. There is a **browser** (`docs/notes.md`, fact 3), but no *gate* may need one.
+§pushing), **no systemd** (`/proc/1/comm` is `bwrap`; `/run/systemd/system` does not exist) and **no Tailscale
+daemon** — the `tailscale` CLI *is* at `/usr/bin/tailscale`, but `tailscale status` answers
+`failed to connect to local tailscaled`, which is the fact HS-045 has to render rather than fail on. There is a
+**browser** (`docs/notes.md`, fact 3), but no *gate* may need one.
 **No `awk`** and **no `shellcheck`** on this machine — do not write a script or a gate that needs
 either.
 
@@ -514,7 +531,15 @@ crates/holosmith/
                             `network` flag is set, and `remove_network` leaves it before the `rm`)
   src/provisioner.rs        the four-step background task and its five session.status events; stops at
                             a step boundary when the row leaves `starting`; after the pi step it spawns the
-                            task that awaits the backend's `ExitWatcher` and calls `Exits::record` (HS-031)
+                            task that awaits the backend's `ExitWatcher` and calls `Exits::record` (HS-031);
+                            `with_settle_reason` so a startup recovery's `starting -> idle` carries
+                            `interrupted` (HS-044)
+  src/reconcile.rs          the startup pass (HS-044, ADR-0053): `recoveries` (the live rows), the pure
+                            `containers_to_remove`/`networks_to_remove`/`orphan_worktrees`, `sweep_worktrees`
+                            (git's `worktree remove` for a registered orphan, `remove_dir_all` for an
+                            unregistered one, never a branch or a ref), `Reconciler::{new, run}` and
+                            `INTERRUPTED`; awaited by `serve` before the first request and before either
+                            policy starts
   src/turn.rs               the turn runner (HS-015) and the turn timeout (HS-022): touch → the
                             backend's turn → agent_settled + touch, abort_completed (or a `debug` line if
                             the ladder got there first), or unexpected_exit with the reason. Under a
@@ -594,9 +619,12 @@ crates/holosmith/
                             `create_internal_network`/`remove_network`, `remove_container`/`stop_container`
                             (`STOP_SECONDS` = 10), `inspect`, `DockerError`; and since HS-037 the bounded
                             family for the startup path — `bounded` (the primitive), `attempt` (the probe),
-                            `run_detached(args, bound)`, `remove_container_bounded`, `running`,
-                            `join_network`/`leave_network` (alias, disconnect-first, force)
-  src/compactor.rs          compaction's task (HS-060, ADR-0032): `SNAPSHOT_AFTER` (24 h, a constant),
+                            `run_detached(args, bound)`, `removed_bounded`, `remove_container_bounded`,
+                            `remove_network_bounded`, `running`, `join_network`/`leave_network` (alias,
+                            disconnect-first, force), and since HS-044 the two `--format` listings
+                            `container_names`/`network_names`
+  src/compactor.rs          compaction's task (HS-060, ADR-0032; `foldable` learns `starting` in HS-044,
+                            because a recovery parks every live row there): `SNAPSHOT_AFTER` (24 h, a constant),
                             `TICK` (60 s), `MESSAGES_PER_PASS` (500), `Compactor::{new, with_window,
                             spawn, run, sweep, fold}`. A pass at startup, then a tick; the per-session
                             step holds the database mutex, so a running turn is skipped by the re-read
@@ -629,9 +657,10 @@ crates/holosmith/
                             `Slot` + `slot_for` + `evict_one`, `apply_trigger`, and the project's
                             refusals: `refuse_project` + `refusal_error`), streams.rs (the SSE
                             handler)
-  src/sessions/             mod.rs (Status, Session, NewSession, RepoError), repository.rs (every
+  src/sessions/             mod.rs (Status, Session, NewSession, RepoError, `is_id`), repository.rs (every
                             `sessions` statement + its SQL-location guard; includes touch,
-                            `oldest_idle`, and `remove` — the row and its log in one transaction),
+                            `oldest_idle`, `last_seq` (HS-044's reader), and `remove` — the row and its log in
+                            one transaction),
                             state.rs (the transition table, Transitioner::apply / apply_logged, the
                             set_status guard), activity.rs (the one `touch`: lock, warn, carry on)
   src/events/               mod.rs (Event, NewEvent, EventWriter, EventStream, and since HS-059
@@ -644,7 +673,9 @@ crates/holosmith/
                             — the three payload shapes it parses, ADR-0032), stream.rs (replay→live,
                             lag, `Item::Truncated`/`HISTORY_TRUNCATED`, the cut in the read step),
                             registry.rs (open-stream counts)
-  src/worktree.rs           the session's worktree (HS-025, ADR-0029): `Worktree::of` (the naming rule; it
+  src/worktree.rs           the session's worktree (HS-025, ADR-0029), and since HS-044 `registrations`
+                            reads git's own `worktree list --porcelain` for the startup sweep:
+                            `Worktree::of` (the naming rule; it
                             carries `id` since HS-043), `ensure` (create or adopt, `Ensured { base_commit,
                             created }`), `ahead` (`rev-list --count`), `remove(&Retained)` (registered? →
                             remove → branch −D **only when not kept** → prune), and `GitError`; since
@@ -689,7 +720,8 @@ crates/holosmith/
                             sessions_api, events,
                             streams, provisioning, state_machine, session_list, session_screen,
                             turns, abort, steer, resume, delete, eviction, idle_stop, turn_timeout,
-                            token_budget, preflight, backend_contract, worktree, compaction,
+                            token_budget, preflight, backend_contract, worktree, reconcile (the row half and
+                            the worktree sweep, no daemon), compaction,
                             history, backup, schema_previous (the subset test + the comparison function +
                             the verdict's sentences), container (V1 + the container's flags + stop/remove/resume +
                             eight concurrent starts; **needs a daemon and `$HOLOSMITH_TEST_IMAGE`,
@@ -705,7 +737,7 @@ web/                        Vite 7 + TypeScript, two screens (`/` and `/sessions
                             HS-043 `deletedNotice`/`Kept`, `UNSAVED_WORK_NOTICE`, `FORCED_DELETE_LABEL`;
                             `main.ts`'s `deleteSection` is the delete affordance, and `StreamTarget` carries
                             one `showState` that patches badge, preview, composer and the affordance)
-web/test/transcript.test.ts 51 tests over synthetic frames, node's own runner (`npm test`)
+web/test/transcript.test.ts 52 tests over synthetic frames, node's own runner (`npm test`)
 scripts/build-web.sh        npm ci + npm test + npm run build, asserts web/dist/index.html
 scripts/build.sh            web first, HOLOSMITH_REQUIRE_WEB=1, both musl targets → dist/<triple>/,
                             atomic copy, then check-static.sh. Uses `cargo build --locked`.
@@ -714,9 +746,9 @@ scripts/check-static.sh     file/readelf, empty-root serve + cmp against web/dis
 scripts/check-embed.sh      the three embed cases (present / absent warns / required fails)
 scripts/verify.sh           the one-command gate (see §3)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0052          read the recent ones before planning anything
+docs/adr/0001…0053          read the recent ones before planning anything
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-75, PER-91…PER-93, PER-97, PER-107  each a verbatim review + a `## Resolution` table
+docs/review/PER-33…PER-76, PER-91…PER-93, PER-97, PER-107  each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -756,15 +788,20 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   that snapshot is a **release step** (`scripts/schema-snapshot.sh`), not a story's, and a contract migration
   changes it in the same commit. `schema::verdict` is the sentence `serve` warns with on a newer database and
   `doctor` will refuse with (ADR-0047).
-- **What is left of the network half:** startup reconcile (HS-044), `doctor` (HS-045) and the phase-1
+- **The startup reconcile landed (HS-044).** `serve` awaits `Reconciler::run` right after the state exists and
+  before the sweeper and the compactor are spawned: every live row goes to `starting` (with `interrupted` when a
+  turn was in flight), the names no row owns are swept (a container unless its row is a `deleting` delete in
+  progress; a network and a worktree directory only when no row has the id; never a branch or a ref), and the
+  sessions are provisioned again. **What is left of the network half:** `doctor` (HS-045) and the phase-1
   verification run (HS-046). The delete's keep-rules (HS-043) are done and ADR-0052: `agent/<id>` survives a
   delete when it is ahead of its base and in no target, `refs/holosmith/wip/<id>` survives when its tree
   differs from the branch, the 202 carries `kept` (one additive key on the flattened row) and is the same
   decision the spawned removal applies, and the session screen has the **delete affordance it did not have**
-  — a Delete button, a confirm step and the forced retry a `409 unsaved_work` earns. **V9 is HS-044's**;
-  nothing else in the spec's table is unrun except V2 (HS-045/046), V6 (HS-046's run of HS-037's parts), V8,
-  V9 and V10. The preview listener (HS-041) is done: the binary's third byte tunnel, `/‹host›/‹id›/*` with the
-  prefix stripped and an upgrade's `Origin` checked, and **V7 passes** (the host reaches a container on an
+  — a Delete button, a confirm step and the forced retry a `409 unsaved_work` earns. **V9 passes** (HS-044);
+  nothing in the spec's table is unrun now except V2 (HS-045/046), V6 (HS-046's run of HS-037's parts), V8 and
+  V10 — and `doctor --full` (HS-045) is what makes the first three repeatable. The preview listener (HS-041) is
+  done: the binary's third byte tunnel, `/‹host›/‹id›/*` with the prefix stripped and an upgrade's `Origin`
+  checked, and **V7 passes** (the host reaches a container on an
   `--internal` network, measured directly and through the artifact). The key proxy (HS-039) and its
   **verification** (HS-040 — V3, V4 and V5 pass) and the WIP snapshot (HS-042) are done, and the spec's
   verification table has a **Result** column that HS-046 finishes filling.
@@ -794,10 +831,10 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   checkout is refused earlier, with a 422; the demo trick HS-019 used still works for a project that *is*
   one — which is also how HS-019 provoked a real failed snapshot from the shipped artifact.)
 - **`AppState`** is `{ config, runtime, database: Arc<std::sync::Mutex<Database>>, events: EventWriter,
-  streams: StreamRegistry, backend: Backends }`, with **seven** wiring helpers — `provisioner()`,
+  streams: StreamRegistry, backend: Backends }`, with **eight** wiring helpers — `provisioner()`,
   `turner()`, `transitioner()`, `ladder()`, `deleter()`, `sweeper()` (an `Option`, `None` when
-  `idle_stop_min` is 0) and `compactor()` (always `Some`). The mutex is an explicit stopgap
-  (ADR-0012/0013; `docs/notes.md`'s *Data and state* landmines).
+  `idle_stop_min` is 0), `compactor()` (always `Some`) and `reconciler()` (HS-044). The mutex is an explicit
+  stopgap (ADR-0012/0013; `docs/notes.md`'s *Data and state* landmines).
 - **`sessions::state::Transitioner::apply`** is the only way a session's state changes; `apply_logged`
   is the runners' wrapper (log, never return). A provisioning step report is `from == to` with `step`
   set and is *not* a table row.
@@ -907,15 +944,16 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 The catalogue lives in **`docs/notes.md`** — read the **cross-cutting** sections before you start anything,
 then the sections below. It is a reference: everything there is a measurement or a review finding.
 
-| Read | Why it bears on startup reconcile and crash safety |
+| Read | Why it bears on `doctor` |
 | --- | --- |
-| Cross-cutting: *Build and toolchain*, *Tests*, *HTTP and the envelope*, *Data and state*, *Web*, *Config and docs*, *Reviews*, *Demos* | True of every story. The **Tests** and **Demos** sections are where this one is most likely to go wrong: a case that `kill -9`s a server has to bound, re-boot and clean up after itself, and a leftover `s_<id>` container is what HS-041's newest bullet paid for. |
-| *Landmines: the expected-stop flag and the exit classifier* | A crash is the one exit nothing observes: the attached `docker run` dies with the server, so the container survives and `Exits::record` never runs. The classifier's three answers and the launch generation (`ProcessEnd::NotCurrent`) are what a restart must not contradict. |
-| *Landmines: Docker — mounts, containers, starts* | `s_<id>` and `agents_<id>` are the names the sweep reads; every start is `rm -f` then `run` under a per-session lock, and a teardown detaches the proxies before `network rm`. A reconcile that races a start is the case the lock exists for. |
-| *Landmines: worktrees (HS-025)* | `<projects>/.worktrees/<id>`, a `.git` **file** pointing into the project, `ensure` is create-or-adopt, and a *directory* that exists but is not registered is explicitly **left alone for this story** — that is the orphan the reconcile now owns. |
-| *Landmines: what a delete keeps (HS-043)* | The reconcile must never sweep a kept branch or `refs/holosmith/wip/<id>`: a deleted session's work lives in those two names on purpose, an orphan `.worktrees/<id>` directory is where a crash left it, and a `deleting` row is the operator's retry rather than the reconcile's work. |
-| *Landmines: the agent launch* | The launch line, the generation and the exit's one report are what "a turn that was running is recorded as `interrupted`" has to agree with — a second watcher is not the answer (ADR-0039). |
-| *Landmines: project refusals and coalescing* | Rows and their events are one transaction each, `last_seq` is the durable counter, and the writer drops an event whose session has gone — so "no duplicate or missing seq" is a claim about a counter, not about `MAX(seq)`. |
+| Cross-cutting: *Build and toolchain*, *Tests*, *HTTP and the envelope*, *Data and state*, *Web*, *Config and docs*, *Reviews*, *Demos* | True of every story. The **Tests** and **Demos** sections are where this one is most likely to go wrong: every check needs a shim rather than the machine (a `PATH` edit is `unsafe` in edition 2024), and `--full` starts a container and a network it must remove. |
+| *Landmines: startup checks, refusals and the writer's tick (HS-023, HS-024)* | `preflight` **is** the list this story publishes: its `Tools { git, df }` seam is how a check is tested without the machine, its `ssh://` rule is "a check that cannot run must not report success", and its "a startup check must run before the thing it protects" is why `serve`'s order is the contract. The eight-line banner rule is why a new startup fact is `debug!`. |
+| *Landmines: Docker — mounts, containers, starts (HS-027 – HS-029)* | `docker`'s flags, the bounded family, `inspect` as the only place a running container's truth is visible, and the gate's SKIP shape for a machine without a daemon — all four are what `--full`'s proxy and image questions have to live with. |
+| *Landmines: the network self-test (HS-036)* | `--full` runs `selftest::run`: `Passed`/`Unknown`/`Failed` and why only `Failed` refuses, the node probe and the image's `node`, `REACHED` and "a refused connection counts as reached", and the temporary network it must always remove. |
+| *Landmines: the egress proxy (HS-037)* | `hs_egress`'s name, its `egress` network, and the fact that a `serve` boot leaves both proxies running — so `--full` reports *their* state and a demo must clean them by name. |
+| *Landmines: the credential path (HS-040)* | `hs_key`, `keys.toml`'s 0600 mode, and the store being a **directory** (`<data>/secrets`): `doctor` asks whether the proxy is running, never reads a key. |
+| *Landmines: the agent launch (HS-031)* | `agent::version_of`/`version_check`/`version_sentence` are the "image's pi equals `pins/pi.txt`" question, and the image's own default user and `node` are what the self-test needs. |
+| *Landmines: the checkbox's pair, and expand/contract (HS-038, HS-075)* | ADR-0047's split is exactly this story's: `serve` warns on a newer database and **`doctor` refuses**, with `schema::verdict`/`Verdict::sentence` as the one sentence both use. Reaching it must not migrate the database. |
 
 Three rules worth repeating here because they are the most expensive to relearn: **a test that cannot fail
 is worse than no test** (mutate the behaviour and watch it go red); **a gate case that SKIPs on the bug it
@@ -926,7 +964,7 @@ three such edits have cost a review finding each.
 
 ## 7. Decisions taken on the operator's behalf (do not silently undo)
 
-Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0052`, one line each in
+Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0053`, one line each in
 `docs/stories/README.md`): read the recent ones before planning, and **amend rather than rewrite** — an ADR
 a later story changes gets a "Superseded by ADR-00xx" note (0012/0013, and 0026 amended 0020).
 
@@ -956,8 +994,8 @@ cd /home/adamolsson/projects/holosmith
 git status --short                                  # clean apart from log.txt/orchestrate.sh
 . ~/.pi/toolchains/env.sh                           # ALWAYS before cargo/rustc
 python3 /tmp/lin.py issues | grep -v ' Done ' | head # recreate /tmp/lin.py first (§2)
-python3 /tmp/lin.py issue PER-76                    # scoped, Backlog, the issue §1 names
-docker version                                      # the daemon must answer, or V9 cannot be measured
+python3 /tmp/lin.py issue PER-77                    # scoped, Backlog, the issue §1 names
+docker version                                      # the daemon must answer, or a Docker check cannot be measured
 docker image inspect pi-agent:local                 # the image the Docker stories run
 docker network ls | grep -x egress                  # the proxy test's premise (§2)
 docker rm -f hs_egress hs_key 2>/dev/null           # so tests/container.rs runs its real path
@@ -966,7 +1004,7 @@ scripts/verify.sh                                   # baseline green, ~9–12 mi
 
 If the baseline is red before you touch anything, that is the first thing you fix — and say so in Linear.
 
-Then start §5 on **§1's issue** (`PER-76`, HS-044) and stop after step 11.
+Then start §5 on **§1's issue** (`PER-77`, HS-045) and stop after step 11.
 
 Before you begin, check that the last session left nothing behind — `subagent({action:"list"})` should show
 no run in progress, `docker ps` none of its containers, and `git status --short` should look like the line
@@ -985,21 +1023,26 @@ from those three; do not carry old sessions' ledgers in this file.
 If you stop before the issue ships, say so explicitly, name the next action, and leave the tree clean and the
 gates green — **a half-finished story is worse than an honest stop**.
 
-**The last shipped story** (`PER-75`, HS-043, ADR-0052; commits `d7e0feb`, `ef804b1`, `7686706`): a delete now
-keeps what is worth keeping. `Worktree::retained(base_commit, targets)` answers
-`Retained::{Known { branch, wip }, Unknown}` — the branch when it is ahead of its base and in no *existing*
-target (`merge-base --is-ancestor` per target; a missing target is not a merge, a repository with none keeps
-it), the snapshot ref when its tree differs from the branch's (`git diff --quiet`) — and `remove(&retained)` is
-told what not to delete. `Retained::Unknown` (an unreadable repository, a row with no `base_commit`) keeps the
-branch and claims nothing. The 202 is the row **flattened plus one key**, `kept` (`branch`, `wip`, `recovery`,
-three explicit nulls when nothing survived), computed *after* the snapshot and handed to the spawned removal so
-the answer and the teardown are one decision; the command `git branch rescue refs/holosmith/wip/<id>` is built
-once. The session screen gained the delete affordance it never had — a Delete button, a confirm step, the
-forced retry a `409 unsaved_work` earns, and the kept notice read from the answer. Review *OK with notes*: two
-P2 (a `kept: null` shape nothing tested, and the egress stand-in's name turning a failure into a silent skip)
-and four P3; five fixed, one dismissed with the ADR amended. Note: **V9 is still unrun** — that is HS-044's. Pre-existing at this story's baseline and fixed here: `tests/container.rs`'s egress-proxy test could
-never pass its real path (its stand-in was not the name a teardown detaches), and the machine's `egress`
-network was missing. Its full record is Linear, `docs/review/PER-75.md` and `git log`; do not carry it forward.
+**The last shipped story** (`PER-76`, HS-044, ADR-0053; commits `7c97dbb`, `07b5bb8`, `63892f9`): a crash now
+leaves nothing orphaned. `serve` awaits one pass (`src/reconcile.rs`) after the state exists and before the
+sweeper and the compactor start: every row that was live at the crash (`starting`, `idle`, `running`) is moved to
+`starting` through the table's `crash_recovery` row — with reason `interrupted` when a turn was in flight, and the
+re-provision's settle carries it too so the row rests at `idle · interrupted` — then the names no row owns are
+removed, and then the sessions are provisioned again. A container `s_<id>` goes unless its row is a `deleting`
+delete in progress; an `agents_<id>` network and a `.worktrees/<id>` directory go only when no row has the id;
+**never a branch and never a ref** (`git worktree remove --force` plus `remove_dir_all` for an unregistered
+directory, `Retained::Unknown` keeps the branch). Docker is read through `--format` and a 16-lowercase-hex check
+(`sessions::is_id`) rather than its English or its substring filter, every call is bounded, and the counter the
+seq claim rests on got its first reader (`sessions::repository::last_seq`). The pass is awaited rather than
+spawned because the demo measured what a task costs (a sweep beside a create takes the create's worktree), and the
+sweeper's ordering is the review's P1: a first pass beside the reconcile could stop the row it was bringing back.
+V9 passes: a real `kill -9` mid-turn and mid-provision, a restart, `idle · interrupted`, seqs unique and
+`last_seq` the log's highest, the container replaced under the same name with a new id, orphans gone. Review *OK
+with notes*: two P1s (the sweeper ordering, `docs/build.md`) fixed, one (a Docker-only case SKIPs without a daemon)
+dismissed with the run's precedent, three mutations run. The gate also found, not the review: a recovery parks
+rows in `starting`, so HS-060's `foldable` had to learn that state or a restarted machine with a day-old log
+folded nothing for a tick. Its full record is Linear, `docs/review/PER-76.md` and `git log`; do not carry it
+forward.
 
 **One thing this build does not do, recorded rather than discovered:** a resumed session's pi has **no
 memory** of earlier turns (`--no-session`; the transcript is Holosmith's log). Replaying the log into a new pi
