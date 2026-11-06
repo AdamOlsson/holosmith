@@ -47,6 +47,16 @@ pub enum Cmd {
         #[command(subcommand)]
         which: ProxyAction,
     },
+    /// Whether this machine is fit to run sessions (spec item 10 §1 and §7).
+    Doctor {
+        /// The list `serve` refuses on, with no container: what the unit file runs as `ExecStartPre`.
+        /// This is the default when neither flag is given.
+        #[arg(long, conflicts_with = "full")]
+        quick: bool,
+        /// Everything `--quick` has, plus the network self-test, the proxies and the agent image's pi version.
+        #[arg(long)]
+        full: bool,
+    },
     /// Store, list or remove the provider keys the key proxy uses.
     Key {
         #[command(subcommand)]

@@ -40,6 +40,14 @@ fn main() -> ExitCode {
             }
         },
         Cmd::Key { action } => commands::key::run(action, cli.config),
+        Cmd::Doctor { full, .. } => commands::doctor::run(commands::doctor::DoctorArgs {
+            config: cli.config,
+            depth: if full {
+                holosmith::doctor::Depth::Full
+            } else {
+                holosmith::doctor::Depth::Quick
+            },
+        }),
         Cmd::Container { action } => match action {
             ContainerAction::Snapshot => commands::container::run_snapshot(),
         },

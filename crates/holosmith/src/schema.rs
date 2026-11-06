@@ -152,7 +152,8 @@ pub enum Verdict {
     Older,
     /// A **newer** release wrote this database. Item 10's rollback is the reason it is not fatal to `serve`:
     /// switching `current` back to an older binary must not need a restore, and expand/contract is what makes
-    /// continuing safe. `doctor` is where it refuses, because that is the guard that runs before a start.
+    /// continuing safe. `doctor` is where it refuses, because that is the guard that runs before a start —
+    /// [`crate::doctor`] reads it through [`crate::db::recorded_without_migrating`], which does not migrate.
     Newer,
 }
 
@@ -179,9 +180,9 @@ impl Verdict {
             ),
             Self::Newer => format!(
                 "the database is at schema {recorded}, which a newer release wrote, and this binary understands \
-                 {binary}: `doctor` (HS-045, not built yet) is what will refuse to start on it, and `serve` \
-                 continues only because rolling `current` back must not need a database restore — that is what \
-                 expand/contract buys (spec item 10, ADR-0047)"
+                 {binary}: `doctor` refuses to start on it, and `serve` continues only because rolling `current` \
+                 back must not need a database restore — that is what expand/contract buys (spec item 10, \
+                 ADR-0047)"
             ),
         }
     }

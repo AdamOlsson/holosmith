@@ -12,6 +12,7 @@ pub mod container;
 pub mod db;
 pub mod deleter;
 pub mod docker;
+pub mod doctor;
 pub mod egress;
 pub mod events;
 pub mod exit;

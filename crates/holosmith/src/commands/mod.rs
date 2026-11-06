@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod container;
+pub mod doctor;
 pub mod key;
 pub mod proxy;
 pub mod serve;

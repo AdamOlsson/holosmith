@@ -1,0 +1,732 @@
+//! `doctor`: the machine's fitness, check by check (HS-045, spec item 10 §1 and §7, V2).
+//!
+//! These tests drive `doctor::run` over a machine they build: `git`, `df` and `tailscale` are scripts the test
+//! wrote (the `Tools` seam), systemd is a directory this test makes or leaves out, and the daemon questions are a
+//! [`Machine`] literal. That is the same discipline `tests/preflight.rs` established — a check about the host
+//! cannot be tested against the host — and it is why these tests do not care which git version, Tailscale state
+//! or free space the machine running them has.
+//!
+//! Two of the checks are *measurements* rather than questions, and they are driven for real: the merge trial runs
+//! a genuine `git` over a throwaway repository it creates and removes, and the port check binds real sockets. A
+//! fake for either would prove nothing about V2 or about `ExecStartPre`.
+
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixListener;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+use holosmith::clock;
+use holosmith::config::{Config, Role};
+use holosmith::db::{self, Database, OpenOptions};
+use holosmith::doctor::{self, Depth, Machine, Report, Tools};
+use holosmith::preflight::{self, Check, Finding, Outcome};
+use holosmith::selftest;
+
+mod support;
+use support::TempDir;
+
+/// Hold this for the whole body of a test here: one test at a time.
+///
+/// The same trap `tests/preflight.rs` documents: `exec` of a file any process holds open for writing fails with
+/// `ETXTBSY`, and a forked child inherits the write descriptor of a shim written a moment earlier. Every test in
+/// this file writes shims and then runs them, and nothing else in this binary forks, so serialising each whole
+/// body is the whole fix.
+fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// An executable shim for `name` answering `body`, in `dir`'s own `bin`.
+fn shim(dir: &TempDir, name: &str, body: &str) -> PathBuf {
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).expect("the shim directory is creatable");
+    let path = bin.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("a shim is writable");
+    let mut permissions = std::fs::metadata(&path)
+        .expect("the shim exists")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&path, permissions).expect("a shim is executable");
+    path
+}
+
+/// A `git` shim answering `version` — and, because the merge trial asks a git more than its version, anything
+/// else with exit 0 and one line, which is the *wrong* answer V2 exists to catch.
+fn git_shim(dir: &TempDir, version: &str) -> PathBuf {
+    shim(
+        dir,
+        "git",
+        &format!(
+            "case \"$1\" in\n  --version) echo 'git version {version}' ;;\n  *) echo 0000000000000000000000000000000000000000 ;;\nesac"
+        ),
+    )
+}
+
+/// A `df -Pk` shim answering `available_kb` free.
+fn df_shim(dir: &TempDir, available_kb: u64) -> PathBuf {
+    shim(
+        dir,
+        "df",
+        &format!(
+            "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n\
+             /dev/mapper/root 1000000000 1 {available_kb} 1%% /\\n'"
+        ),
+    )
+}
+
+/// A `tailscale` shim answering `body` — one arm of `tailscale status --json`.
+fn tailscale_shim(dir: &TempDir, body: &str) -> PathBuf {
+    shim(dir, "tailscale", body)
+}
+
+/// The tools a test built: git 2.43 (or `version`), 480 GB free, a logged-in Tailscale and no systemd.
+fn tools(dir: &TempDir, version: &str) -> Tools {
+    Tools {
+        preflight: preflight::Tools {
+            git: git_shim(dir, version),
+            df: df_shim(dir, 480_000_000),
+        },
+        tailscale: tailscale_shim(dir, "echo '{\"BackendState\":\"Running\"}'"),
+        systemd: dir.file("no-systemd-here"),
+    }
+}
+
+/// The same tools, but with the machine's own `git` — for the arms whose subject *is* a real trial.
+fn tools_with_real_git(dir: &TempDir) -> Tools {
+    Tools {
+        preflight: preflight::Tools {
+            git: PathBuf::from("git"),
+            df: df_shim(dir, 480_000_000),
+        },
+        ..tools(dir, "2.43.0")
+    }
+}
+
+/// A config whose data root is inside `dir`, whose daemon is `docker_host`, and whose listeners are the kernel's.
+fn config(dir: &TempDir, docker_host: Option<String>) -> Config {
+    Config {
+        data_root: dir.path().join("data"),
+        docker_host,
+        control_listen: "127.0.0.1:0".parse().expect("a listener address"),
+        preview_listen: "127.0.0.1:0".parse().expect("a listener address"),
+        ..Config::default()
+    }
+}
+
+/// A daemon that answers every `GET /_ping` the way a real one does, and how many it answered.
+///
+/// Unlike `tests/preflight.rs`'s one-shot socket, this one keeps listening: a `doctor` run asks once, and these
+/// tests drive more than one run over the same machine (a quick run and a full one, three Tailscale arms), so a
+/// socket that answered once would make every run after the first fail on the daemon rather than on its subject.
+fn fake_daemon(path: &Path) -> Arc<AtomicUsize> {
+    let listener = UnixListener::bind(path).expect("the test socket is bindable");
+    let answered = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&answered);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut request = [0_u8; 512];
+            let _ = stream.read(&mut request);
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nApi-Version: 1.51\r\n\r\nOK");
+            seen.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    answered
+}
+
+/// A machine whose three container questions the test decides.
+struct FakeMachine {
+    running: Vec<&'static str>,
+    image_pi: Result<String, String>,
+    selftest: selftest::Outcome,
+}
+
+impl FakeMachine {
+    /// The machine `--full` passes on: both proxies up, the pinned pi, a measured isolation.
+    fn healthy() -> Self {
+        Self {
+            running: vec!["hs_egress", "hs_key"],
+            image_pi: Ok(holosmith::pins::pi_version().to_string()),
+            selftest: selftest::Outcome::Passed,
+        }
+    }
+}
+
+impl Machine for FakeMachine {
+    fn running(&self, name: &str) -> bool {
+        self.running.contains(&name)
+    }
+
+    fn image_pi(&self, _image: &str) -> Result<String, String> {
+        self.image_pi.clone()
+    }
+
+    fn selftest(&self, _image: &str) -> selftest::Outcome {
+        self.selftest.clone()
+    }
+}
+
+/// The finding whose check is `check`.
+fn finding(report: &Report, check: Check) -> &Finding {
+    report
+        .findings
+        .iter()
+        .find(|finding| finding.check == check)
+        .unwrap_or_else(|| panic!("no {check} finding in:\n{}", report.render()))
+}
+
+/// The `nth` finding whose check is `check` — the two ports, the two proxies.
+fn nth(report: &Report, check: Check, index: usize) -> &Finding {
+    let matches: Vec<&Finding> = report
+        .findings
+        .iter()
+        .filter(|finding| finding.check == check)
+        .collect();
+    matches
+        .get(index)
+        .copied()
+        .unwrap_or_else(|| panic!("no {index}th {check} finding in:\n{}", report.render()))
+}
+
+/// What a finding says, for a failure message.
+fn says(finding: &Finding) -> &str {
+    finding.sentence.as_str()
+}
+
+#[test]
+fn a_clean_machine_passes_quick_with_its_whole_list_in_order() {
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("doctor-clean");
+    let socket = dir.file("docker.sock");
+    let answered = fake_daemon(&socket);
+    let mut config = config(&dir, Some(format!("unix://{}", socket.display())));
+    // A data root that exists is what `df` and the schema check are about; the checks create nothing.
+    std::fs::create_dir_all(&config.data_root).expect("the data root is creatable");
+    config.role = Role::Server;
+    let report = doctor::run(
+        &config,
+        Depth::Quick,
+        &tools_with_real_git(&dir),
+        &FakeMachine::healthy(),
+    );
+
+    assert!(
+        answered.load(Ordering::SeqCst) > 0,
+        "the daemon was never asked"
+    );
+    assert!(
+        !report.failed(),
+        "a clean machine failed:\n{}",
+        report.render()
+    );
+    let words: Vec<&str> = report
+        .findings
+        .iter()
+        .map(|finding| finding.check.as_str())
+        .collect();
+    assert_eq!(
+        words,
+        [
+            "systemd",
+            "docker",
+            "git",
+            "merge",
+            "disk",
+            "tailscale",
+            "ports",
+            "ports",
+            "database"
+        ],
+        "the quick list is not the spec's list, in the spec's order:\n{}",
+        report.render()
+    );
+    for check in [
+        Check::Docker,
+        Check::Git,
+        Check::Merge,
+        Check::Disk,
+        Check::Tailscale,
+        Check::Database,
+    ] {
+        assert_eq!(
+            finding(&report, check).outcome,
+            Outcome::Pass,
+            "{} did not pass: {}",
+            check,
+            says(finding(&report, check))
+        );
+    }
+    // The one honest line on a machine that has no systemd: not a failure (`serve` by hand is supported), and
+    // not a pass either (a deploy needs it) — ADR-0054.
+    assert_eq!(finding(&report, Check::Systemd).outcome, Outcome::Unknown);
+    // Port 0 is the kernel's, so both port checks are the "nothing to hold" arm rather than a pass to be proud
+    // of; the held-port arm is `a_held_port_is_a_failure_before_a_start_and_the_machine_serving_after_one`.
+    assert_eq!(nth(&report, Check::Ports, 0).outcome, Outcome::Pass);
+    assert_eq!(
+        report.render().lines().last(),
+        Some("doctor: 9 findings: 8 pass, 0 fail, 1 unknown"),
+        "the tally is not one line of the report"
+    );
+}
+
+#[test]
+fn a_held_port_is_a_failure_before_a_start_and_the_machine_serving_after_one() {
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("doctor-ports");
+    let socket = dir.file("docker.sock");
+    // Both runs need the daemon; whether it answered is `a_clean_machine...`'s assertion.
+    let _answered = fake_daemon(&socket);
+    let mut config = config(&dir, Some(format!("unix://{}", socket.display())));
+    config.role = Role::Server;
+    std::fs::create_dir_all(&config.data_root).expect("the data root is creatable");
+    let tools = Tools {
+        preflight: preflight::Tools {
+            git: PathBuf::from("git"),
+            df: df_shim(&dir, 480_000_000),
+        },
+        ..tools(&dir, "2.43.0")
+    };
+
+    // `ExecStartPre`'s moment: something holds the control port and this machine is not serving, so a start
+    // would fail to bind.
+    let held = TcpListener::bind("127.0.0.1:0").expect("a port is bindable");
+    let listen = held.local_addr().expect("the bound address is known");
+    config.control_listen = listen;
+    let report = doctor::run(&config, Depth::Quick, &tools, &FakeMachine::healthy());
+    let port = nth(&report, Check::Ports, 0);
+    assert_eq!(port.outcome, Outcome::Fail, "{}", says(port));
+    assert!(says(port).contains("in use"), "{}", says(port));
+    assert!(report.failed(), "a held port before a start is a failure");
+    drop(held);
+
+    // Item 10 §7's moment: the same port held by a listener whose `/api/health` answers 200 is the machine
+    // serving, which is a pass — otherwise a healthy server could never run `doctor --full`.
+    let serving = TcpListener::bind(listen).expect("the port is bindable again");
+    serving
+        .set_nonblocking(true)
+        .expect("the listener can stop blocking");
+    let answered_health = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(AtomicBool::new(false));
+    let seen = Arc::clone(&answered_health);
+    let seen_stop = Arc::clone(&stop);
+    let thread = std::thread::spawn(move || {
+        // The listener stays up for the whole run: `--full` asks it, and then binds the port itself to find it
+        // held. A server that answered once and left would make the port free, which is the other arm.
+        while !seen_stop.load(Ordering::SeqCst) {
+            match serving.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let mut request = [0_u8; 512];
+                    let _ = stream.read(&mut request);
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}");
+                    seen.store(true, Ordering::SeqCst);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    let report = doctor::run(&config, Depth::Full, &tools, &FakeMachine::healthy());
+    stop.store(true, Ordering::SeqCst);
+    thread.join().expect("the answering thread finishes");
+    assert!(
+        answered_health.load(Ordering::SeqCst),
+        "the health endpoint was never asked"
+    );
+    assert!(
+        !report.failed(),
+        "a serving machine failed:\n{}",
+        report.render()
+    );
+    let port = nth(&report, Check::Ports, 0);
+    assert_eq!(port.outcome, Outcome::Pass, "{}", says(port));
+    assert!(
+        says(port).contains("/api/health"),
+        "the pass does not say how it knew: {}",
+        says(port)
+    );
+}
+
+#[test]
+fn a_docker_that_does_not_answer_is_one_failure_and_the_rest_still_prints() {
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("doctor-no-daemon");
+    let mut config = config(
+        &dir,
+        Some(format!("unix://{}", dir.file("absent.sock").display())),
+    );
+    config.role = Role::Server;
+    std::fs::create_dir_all(&config.data_root).expect("the data root is creatable");
+    let report = doctor::run(
+        &config,
+        Depth::Quick,
+        &tools_with_real_git(&dir),
+        &FakeMachine::healthy(),
+    );
+
+    let docker = finding(&report, Check::Docker);
+    assert_eq!(docker.outcome, Outcome::Fail);
+    // The same sentence `serve` refuses with: both numbers, and both fixes.
+    assert!(says(docker).contains("start it with"), "{}", says(docker));
+    assert!(says(docker).contains("docker_host"), "{}", says(docker));
+    assert!(report.failed());
+    assert_eq!(
+        report.failures().count(),
+        1,
+        "one failure was reported twice"
+    );
+    // A machine missing one thing must still be diagnosable for the rest (ADR-0006's rule for config).
+    for check in [Check::Git, Check::Disk, Check::Ports, Check::Database] {
+        finding(&report, check);
+    }
+
+    // And `--full` does not turn one failure into four: its container checks are "not measured".
+    let report = doctor::run(
+        &config,
+        Depth::Full,
+        &tools_with_real_git(&dir),
+        &FakeMachine::healthy(),
+    );
+    for check in [Check::Network, Check::Proxy, Check::Image] {
+        let finding = finding(&report, check);
+        assert_eq!(
+            finding.outcome,
+            Outcome::Unknown,
+            "{} claimed a verdict without a daemon: {}",
+            check,
+            says(finding)
+        );
+        assert!(
+            says(finding).contains("docker check"),
+            "{} does not say why it was not measured: {}",
+            check,
+            says(finding)
+        );
+    }
+}
+
+#[test]
+fn the_merge_trial_measures_a_real_repository_and_refuses_a_git_that_answers_wrong() {
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("doctor-merge");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let mut config = config(&dir, Some(format!("unix://{}", socket.display())));
+    config.role = Role::Server;
+    std::fs::create_dir_all(&config.data_root).expect("the data root is creatable");
+    if std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("SKIP: this machine has no git");
+        return;
+    }
+
+    // A real git: V2's two answers, measured on a repository the check creates and removes.
+    let report = doctor::run(
+        &config,
+        Depth::Quick,
+        &tools_with_real_git(&dir),
+        &FakeMachine::healthy(),
+    );
+    let merge = finding(&report, Check::Merge);
+    assert_eq!(merge.outcome, Outcome::Pass, "{}", says(merge));
+    assert!(says(merge).contains("merge-tree"), "{}", says(merge));
+
+    // A git that reports a new version and answers `merge-tree` with one exit code for both trials is exactly
+    // the build V2 forbids, and the check must see it.
+    let wrong = TempDir::new("doctor-merge-wrong");
+    let tools = tools(&wrong, "2.43.0");
+    let report = doctor::run(&config, Depth::Quick, &tools, &FakeMachine::healthy());
+    assert_eq!(finding(&report, Check::Git).outcome, Outcome::Pass);
+    let merge = finding(&report, Check::Merge);
+    assert_eq!(merge.outcome, Outcome::Fail, "{}", says(merge));
+    assert!(says(merge).contains("does not behave"), "{}", says(merge));
+}
+
+#[test]
+fn an_old_git_fails_the_version_and_leaves_the_merge_trial_unmeasured() {
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("doctor-old-git");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let mut config = config(&dir, Some(format!("unix://{}", socket.display())));
+    config.role = Role::Server;
+    std::fs::create_dir_all(&config.data_root).expect("the data root is creatable");
+    // The shim's other answers are a *new* git's exit code, so a merge check that ran would pass: the only
+    // reason it is not measured is the version, which is what this asserts.
+    let report = doctor::run(
+        &config,
+        Depth::Quick,
+        &tools(&dir, "2.37.4"),
+        &FakeMachine::healthy(),
+    );
+    let git = finding(&report, Check::Git);
+    assert_eq!(git.outcome, Outcome::Fail);
+    assert!(says(git).contains("2.38"), "{}", says(git));
+    let merge = finding(&report, Check::Merge);
+    assert_eq!(merge.outcome, Outcome::Unknown, "{}", says(merge));
+    assert!(says(merge).contains("not measured"), "{}", says(merge));
+    // The decision the acceptance asks for, in the sentence an operator reads.
+    assert!(
+        says(merge).contains("fallback is not implemented"),
+        "{}",
+        says(merge)
+    );
+    assert!(report.failed(), "an old git must fail `doctor`");
+    assert_eq!(report.failures().count(), 1, "one failure for one cause");
+}
+
+#[test]
+fn tailscales_three_arms_are_measured() {
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("doctor-tailscale");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let mut config = config(&dir, Some(format!("unix://{}", socket.display())));
+    config.role = Role::Server;
+    std::fs::create_dir_all(&config.data_root).expect("the data root is creatable");
+
+    let arms = [
+        ("echo '{\"BackendState\":\"Running\"}'", Outcome::Pass),
+        ("echo '{\"BackendState\":\"NeedsLogin\"}'", Outcome::Fail),
+        (
+            "echo 'failed to connect to local tailscaled' >&2; exit 1",
+            Outcome::Unknown,
+        ),
+    ];
+    for (index, (body, expected)) in arms.iter().enumerate() {
+        // The base tools are built first and the shim written after: a struct update expression's evaluation
+        // order is not something a test's subject should depend on.
+        let mut tools = tools(&dir, "2.43.0");
+        tools.tailscale = tailscale_shim(&dir, body);
+        let report = doctor::run(&config, Depth::Quick, &tools, &FakeMachine::healthy());
+        let finding = finding(&report, Check::Tailscale);
+        assert_eq!(
+            finding.outcome,
+            *expected,
+            "arm {index} was not {expected}: {}",
+            says(finding)
+        );
+        match expected {
+            Outcome::Fail => assert!(
+                says(finding).contains("tailscale up"),
+                "the logged-out arm names no fix: {}",
+                says(finding)
+            ),
+            Outcome::Unknown => assert!(
+                says(finding).contains("daemon did not answer"),
+                "the unmeasured arm does not say what was missing: {}",
+                says(finding)
+            ),
+            Outcome::Pass => {}
+        }
+    }
+}
+
+#[test]
+fn systemd_is_a_pass_where_it_is_there_and_unknown_where_it_is_not() {
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("doctor-systemd");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let mut config = config(&dir, Some(format!("unix://{}", socket.display())));
+    config.role = Role::Server;
+    std::fs::create_dir_all(&config.data_root).expect("the data root is creatable");
+    let present = dir.file("run-systemd-system");
+    std::fs::create_dir_all(&present).expect("the scratch directory is creatable");
+    let mut tools = tools_with_real_git(&dir);
+    tools.systemd = present;
+    let report = doctor::run(&config, Depth::Quick, &tools, &FakeMachine::healthy());
+    assert_eq!(finding(&report, Check::Systemd).outcome, Outcome::Pass);
+    assert!(!report.failed(), "systemd alone must not fail a machine");
+}
+
+#[test]
+fn a_newer_database_is_the_one_failure_that_keeps_adr_0047s_promise() {
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("doctor-database");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let mut config = config(&dir, Some(format!("unix://{}", socket.display())));
+    config.role = Role::Server;
+    config.data_root = dir.file("data");
+    std::fs::create_dir_all(&config.data_root).expect("the data root is creatable");
+    let tools = tools(&dir, "2.43.0");
+
+    // No file: a machine that never served, which is not a finding.
+    let report = doctor::run(&config, Depth::Quick, &tools, &FakeMachine::healthy());
+    let database = finding(&report, Check::Database);
+    assert_eq!(database.outcome, Outcome::Pass, "{}", says(database));
+    assert!(says(database).contains("no database"), "{}", says(database));
+
+    // This release's schema: the state a serving machine is in.
+    let path = config.data_root.join(db::DATABASE_FILE);
+    {
+        let database = Database::open(&path, OpenOptions::default(), clock::unix_now())
+            .expect("the scratch database opens");
+        assert_eq!(database.schema_version(), holosmith::schema::SCHEMA_VERSION);
+    }
+    let report = doctor::run(&config, Depth::Quick, &tools, &FakeMachine::healthy());
+    assert_eq!(finding(&report, Check::Database).outcome, Outcome::Pass);
+
+    // A release from the future: `serve` warns and carries on, `doctor` refuses — and reading it must not have
+    // migrated anything (the row is still 99 afterwards).
+    let connection = rusqlite::Connection::open(&path).expect("the scratch database reopens");
+    connection
+        .execute(
+            "INSERT INTO schema_version (version, name, applied_at) VALUES (99, 'from-the-future', 0)",
+            [],
+        )
+        .expect("the future row is writable");
+    drop(connection);
+    let report = doctor::run(&config, Depth::Quick, &tools, &FakeMachine::healthy());
+    let database = finding(&report, Check::Database);
+    assert_eq!(database.outcome, Outcome::Fail);
+    assert!(
+        says(database).contains("doctor") && says(database).contains("restore"),
+        "the sentence is not the one `serve` warns with: {}",
+        says(database)
+    );
+    assert_eq!(
+        db::recorded_without_migrating(&path).expect("the file is readable"),
+        Some(99),
+        "the doctor migrated the database it was asked to refuse"
+    );
+}
+
+#[test]
+fn a_hub_reports_no_docker_git_or_merge_finding() {
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("doctor-hub");
+    let mut config = config(&dir, Some("ssh://adam@host".to_string()));
+    config.role = Role::Hub;
+    let report = doctor::run(
+        &config,
+        Depth::Quick,
+        &tools(&dir, "2.37.4"),
+        &FakeMachine::healthy(),
+    );
+    // Item 10 §6: `hub deploy` runs step 1 "without the Docker and git checks", and an `ssh://` daemon — which is
+    // a complaint for a server — is not even asked about here.
+    for check in [Check::Docker, Check::Git, Check::Merge] {
+        assert!(
+            !report.findings.iter().any(|finding| finding.check == check),
+            "a hub was asked the {} question:\n{}",
+            check,
+            report.render()
+        );
+    }
+    for check in [Check::Disk, Check::Tailscale, Check::Ports, Check::Database] {
+        finding(&report, check);
+    }
+    assert!(
+        !report.failed(),
+        "a hub's list failed on a check it does not have:\n{}",
+        report.render()
+    );
+}
+
+#[test]
+fn full_adds_the_self_test_the_proxies_and_the_image() {
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("doctor-full");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let mut config = config(&dir, Some(format!("unix://{}", socket.display())));
+    config.role = Role::Server;
+    std::fs::create_dir_all(&config.data_root).expect("the data root is creatable");
+    let tools = tools_with_real_git(&dir);
+
+    let report = doctor::run(&config, Depth::Full, &tools, &FakeMachine::healthy());
+    assert!(
+        !report.failed(),
+        "a healthy full run failed:\n{}",
+        report.render()
+    );
+    for check in [Check::Network, Check::Proxy, Check::Image] {
+        assert_eq!(
+            finding(&report, check).outcome,
+            Outcome::Pass,
+            "{} did not pass: {}",
+            check,
+            says(finding(&report, check))
+        );
+    }
+    assert!(
+        says(finding(&report, Check::Image)).contains(holosmith::pins::pi_version()),
+        "the image pass does not name the pinned version: {}",
+        says(finding(&report, Check::Image))
+    );
+    // Both proxies, by name — one line each, because `hs_egress` and `hs_key` are two different machines' facts.
+    assert!(says(nth(&report, Check::Proxy, 0)).contains("hs_egress"));
+    assert!(says(nth(&report, Check::Proxy, 1)).contains("hs_key"));
+    assert_eq!(report.render().matches("proxy: pass:").count(), 2);
+
+    // And the failing arms: a proxy that is not running, an image that runs another pi, and a self-test that
+    // measured a leak. Each is one line, and the run fails.
+    let unhealthy = FakeMachine {
+        running: Vec::new(),
+        image_pi: Err("no such image".to_string()),
+        selftest: selftest::Outcome::Failed("a container reached 1.1.1.1:443".to_string()),
+    };
+    let report = doctor::run(&config, Depth::Full, &tools, &unhealthy);
+    assert_eq!(finding(&report, Check::Proxy).outcome, Outcome::Fail);
+    assert!(says(finding(&report, Check::Proxy)).contains("not running"));
+    let image = finding(&report, Check::Image);
+    assert_eq!(image.outcome, Outcome::Fail);
+    assert!(says(image).contains("did not run"), "{}", says(image));
+    let network = finding(&report, Check::Network);
+    assert_eq!(network.outcome, Outcome::Fail);
+    assert_eq!(says(network), "a container reached 1.1.1.1:443");
+    assert!(report.failed());
+
+    // A wrong pi is the other image arm: the sentence is the one HS-031 fails a session with, naming both
+    // versions.
+    let wrong_pi = FakeMachine {
+        image_pi: Ok("0.0.0-not-the-pinned-one".to_string()),
+        ..FakeMachine::healthy()
+    };
+    let report = doctor::run(&config, Depth::Full, &tools, &wrong_pi);
+    let image = finding(&report, Check::Image);
+    assert_eq!(image.outcome, Outcome::Fail);
+    assert!(
+        says(image).contains("0.0.0-not-the-pinned-one")
+            && says(image).contains("rebuild the agent image"),
+        "the sentence is not the one a session fails with: {}",
+        says(image)
+    );
+}
+
+#[test]
+fn the_report_is_the_preflights_sentences_and_not_a_second_copy() {
+    let _serial = one_at_a_time();
+    // The rule ADR-0028 and ADR-0054 share: what `serve` refuses with is the failing projection of what `doctor`
+    // prints, so the two cannot drift.
+    let dir = TempDir::new("doctor-projection");
+    let mut config = config(&dir, Some("unix://absent.sock".to_string()));
+    config.role = Role::Server;
+    let tools = tools(&dir, "2.37.4");
+    let report = preflight::report_with(&config, &tools.preflight);
+    let complaints = preflight::check_with(&config, &tools.preflight);
+    let failures: Vec<&Finding> = report
+        .iter()
+        .filter(|finding| finding.is_failure())
+        .collect();
+    assert_eq!(
+        failures.len(),
+        complaints.len(),
+        "the complaints are not the report's failures"
+    );
+    for (finding, complaint) in failures.iter().zip(&complaints) {
+        assert_eq!(complaint.check, finding.check);
+        assert_eq!(complaint.sentence, finding.sentence);
+    }
+}

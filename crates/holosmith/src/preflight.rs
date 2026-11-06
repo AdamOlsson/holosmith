@@ -6,10 +6,17 @@
 //! module is the list and the sentences; HS-045's `doctor` is the command that prints them on demand, and
 //! `serve` is the one that refuses.
 //!
-//! Three checks are answered here, and only these three, because they are what this build can answer without
-//! Docker and without the systemd, Tailscale and port questions HS-045 owns. A fourth, the network self-test,
-//! needs a container and lives in [`crate::selftest`]; it reports through the same [`Complaint`] and refuses
-//! the same way, so a reader of one has read both (ADR-0044).
+//! Three checks are answered here, because they are the three `serve` refuses on. Everything else HS-045's
+//! `doctor` asks — systemd, the merge trial, Tailscale, the ports, the database's schema, the proxies and the
+//! image's pi version — lives in [`crate::doctor`], which assembles those three and the rest into one report.
+//! The network self-test needs a container and lives in [`crate::selftest`]; it reports through the same
+//! [`Complaint`] and refuses the same way, so a reader of one has read both (ADR-0044).
+//!
+//! **One check, one function, two arms.** A check answers a [`Finding`] — the check's word, whether it passed,
+//! failed or could not be measured, and the sentence the operator reads — and [`Complaint`] is that finding's
+//! *failing projection*. That is how `serve`'s refusal and `doctor`'s line keep **the same sentence string**:
+//! there is one place per check that writes it, and no second table of pass-words that could drift (ADR-0028,
+//! amended by ADR-0054).
 //!
 //! - **Docker** — the daemon answers `GET /_ping` on the socket `docker_host` names. `unix://` (the
 //!   default `/var/run/docker.sock`) and `tcp://host:port` are checked; `ssh://` is reported as *not
@@ -51,6 +58,12 @@ pub const MIN_GIT: (u64, u64) = (2, 38);
 
 /// Which check spoke. It is the word before the sentence in every report, so an operator with two
 /// complaints can tell which machine part each one is about.
+///
+/// **One table of words, for every check the build has** — not one here and another in `doctor`. A word is a
+/// fact an operator greps (`docker`, `git`, …), so a second spelling of one would be a second way to be wrong;
+/// the same reasoning `Check::Network` already carried. [`check`] answers [`Docker`](Self::Docker),
+/// [`Git`](Self::Git) and [`Disk`](Self::Disk); [`crate::selftest`] answers [`Network`](Self::Network);
+/// [`crate::doctor`] answers the rest and prints all of them beside these.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Check {
     Docker,
@@ -62,6 +75,22 @@ pub enum Check {
     /// `doctor` has to print it beside the other three. [`check`] never answers it: it needs a container, so it
     /// lives in its own module and `serve` adds its complaint to this list.
     Network,
+    /// Whether this machine has systemd (`/run/systemd/system`), which `server deploy` needs and `serve` by
+    /// hand does not.
+    Systemd,
+    /// Whether git's `merge-tree --write-tree` behaves — V2's measurement, run by [`crate::doctor`].
+    Merge,
+    /// Whether Tailscale is installed and logged in, which a hub needs and a LAN-only machine does not.
+    Tailscale,
+    /// Whether the control and preview ports are free (before a start) or held by this machine's own `serve`
+    /// (after one).
+    Ports,
+    /// The database's schema against this binary's, read without migrating it (ADR-0047).
+    Database,
+    /// Whether the machine's `hs_egress`/`hs_key` proxies are up.
+    Proxy,
+    /// Whether the configured agent image runs the pinned pi.
+    Image,
 }
 
 impl Check {
@@ -72,6 +101,13 @@ impl Check {
             Self::Git => "git",
             Self::Disk => "disk",
             Self::Network => "network",
+            Self::Systemd => "systemd",
+            Self::Merge => "merge",
+            Self::Tailscale => "tailscale",
+            Self::Ports => "ports",
+            Self::Database => "database",
+            Self::Proxy => "proxy",
+            Self::Image => "image",
         }
     }
 }
@@ -95,25 +131,15 @@ pub struct Complaint {
 }
 
 impl Complaint {
-    fn docker(sentence: impl Into<String>) -> Self {
-        Self {
-            check: Check::Docker,
-            sentence: sentence.into(),
-        }
-    }
-
-    fn git(sentence: impl Into<String>) -> Self {
-        Self {
-            check: Check::Git,
-            sentence: sentence.into(),
-        }
-    }
-
-    fn disk(sentence: impl Into<String>) -> Self {
-        Self {
-            check: Check::Disk,
-            sentence: sentence.into(),
-        }
+    /// The failing projection of a finding, which is the only outcome `serve` refuses on.
+    ///
+    /// It is a projection rather than a second constructor table: a check writes its sentence **once**, and
+    /// `doctor`'s line and this complaint carry the same string (ADR-0028, ADR-0054).
+    pub fn of(finding: &Finding) -> Option<Self> {
+        finding.is_failure().then(|| Self {
+            check: finding.check,
+            sentence: finding.sentence.clone(),
+        })
     }
 }
 
@@ -121,6 +147,89 @@ impl fmt::Display for Complaint {
     /// `docker: start it with …` — the check, then the sentence.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: {}", self.check, self.sentence)
+    }
+}
+
+/// What a check found, from the operator's side: the two verdicts and the one honest third.
+///
+/// Only [`Outcome::Fail`] is a reason not to run: an `unknown` is *"this check did not produce a verdict about
+/// whether `serve` may run here"*, and its sentence says what was missing and what does need it. That is
+/// ADR-0044's rule one level up — "we could not measure" is not "we measured a leak" — and it is what keeps
+/// `doctor --quick` runnable on a machine that has no systemd and no Tailscale daemon, where `serve` by hand is
+/// still supported (ADR-0054).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    Pass,
+    Fail,
+    Unknown,
+}
+
+impl Outcome {
+    /// The word the report prints after the check.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl fmt::Display for Outcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One check's answer: the check, its outcome, and the sentence the operator reads.
+///
+/// `serve` prints only the failing ones (as a [`Complaint`]); `doctor` prints all of them, which is what the
+/// acceptance's "lists each check with pass/fail" is. The sentence is the same value in both, so the two
+/// commands cannot disagree about a machine (ADR-0028).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finding {
+    pub check: Check,
+    pub outcome: Outcome,
+    pub sentence: String,
+}
+
+impl Finding {
+    pub fn pass(check: Check, sentence: impl Into<String>) -> Self {
+        Self {
+            check,
+            outcome: Outcome::Pass,
+            sentence: sentence.into(),
+        }
+    }
+
+    pub fn fail(check: Check, sentence: impl Into<String>) -> Self {
+        Self {
+            check,
+            outcome: Outcome::Fail,
+            sentence: sentence.into(),
+        }
+    }
+
+    pub fn unknown(check: Check, sentence: impl Into<String>) -> Self {
+        Self {
+            check,
+            outcome: Outcome::Unknown,
+            sentence: sentence.into(),
+        }
+    }
+
+    pub fn is_failure(&self) -> bool {
+        self.outcome == Outcome::Fail
+    }
+}
+
+impl fmt::Display for Finding {
+    /// `docker: pass: the daemon at … answers /_ping` — the check, the outcome, the sentence.
+    ///
+    /// Three colon-separated fields rather than padding, because a gate greps `^git: pass: ` and an operator
+    /// reads the check first.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}: {}", self.check, self.outcome, self.sentence)
     }
 }
 
@@ -162,43 +271,68 @@ pub fn check(config: &Config) -> Vec<Complaint> {
 /// The tests point these at scripts they wrote; nothing else does. It is public because the crate's tests
 /// live outside it, the same reason `Deleter::remove` and `Turn::run` are.
 pub fn check_with(config: &Config, tools: &Tools) -> Vec<Complaint> {
-    let mut complaints = Vec::new();
-    if let Some(complaint) = docker(config.docker_host.as_deref()) {
-        complaints.push(complaint);
-    }
-    if let Some(complaint) = git(&tools.git) {
-        complaints.push(complaint);
-    }
-    if let Some(complaint) = disk(config, &tools.df) {
-        complaints.push(complaint);
-    }
-    complaints
+    report_with(config, tools)
+        .iter()
+        .filter_map(Complaint::of)
+        .collect()
+}
+
+/// Every check this module answers, passed or failed, in the order they are printed.
+///
+/// [`check`] is its ".failures()": one list, one spelling of each sentence, so `serve`'s refusal and
+/// `doctor`'s report cannot say different things about one machine (ADR-0028, ADR-0054).
+pub fn report(config: &Config) -> Vec<Finding> {
+    report_with(config, &Tools::default())
+}
+
+/// [`report`], with the two external programs named.
+pub fn report_with(config: &Config, tools: &Tools) -> Vec<Finding> {
+    vec![
+        docker(config.docker_host.as_deref()),
+        git(&tools.git),
+        disk(config, &tools.df),
+    ]
 }
 
 /// `GET /_ping` against the daemon, over the socket `docker_host` names.
-fn docker(docker_host: Option<&str>) -> Option<Complaint> {
+fn docker(docker_host: Option<&str>) -> Finding {
     let host = docker_host.unwrap_or(DEFAULT_DOCKER_HOST);
     match host.split_once("://") {
         Some(("unix", path)) => match ping_unix(path) {
-            Ok(()) => None,
-            Err(reason) => Some(Complaint::docker(socket_sentence(host, path, &reason))),
+            Ok(()) => Finding::pass(
+                Check::Docker,
+                format!("the daemon at {host} answers `GET /_ping`"),
+            ),
+            Err(reason) => Finding::fail(Check::Docker, socket_sentence(host, path, &reason)),
         },
         Some(("tcp", authority)) => match ping_tcp(authority) {
-            Ok(()) => None,
-            Err(reason) => Some(Complaint::docker(format!(
-                "the docker daemon at {host} did not answer ({}): start it on that host, or set \
-                 docker_host to a socket this machine can reach",
-                reason.message
-            ))),
+            Ok(()) => Finding::pass(
+                Check::Docker,
+                format!("the daemon at {host} answers `GET /_ping`"),
+            ),
+            Err(reason) => Finding::fail(
+                Check::Docker,
+                format!(
+                    "the docker daemon at {host} did not answer ({}): start it on that host, or set \
+                     docker_host to a socket this machine can reach",
+                    reason.message
+                ),
+            ),
         },
-        Some(("ssh", _)) => Some(Complaint::docker(format!(
-            "{host} is an ssh host, which this build cannot check: run the daemon on this machine and set \
-             docker_host to a socket it can reach"
-        ))),
-        _ => Some(Complaint::docker(format!(
-            "docker_host {host:?} is not a socket this build can use: write it as \
-             `unix:///var/run/docker.sock` or `tcp://host:port`"
-        ))),
+        Some(("ssh", _)) => Finding::fail(
+            Check::Docker,
+            format!(
+                "{host} is an ssh host, which this build cannot check: run the daemon on this machine and set \
+                 docker_host to a socket it can reach"
+            ),
+        ),
+        _ => Finding::fail(
+            Check::Docker,
+            format!(
+                "docker_host {host:?} is not a socket this build can use: write it as \
+                 `unix:///var/run/docker.sock` or `tcp://host:port`"
+            ),
+        ),
     }
 }
 
@@ -317,33 +451,49 @@ fn ping(stream: &mut (impl std::io::Read + std::io::Write)) -> Result<(), Unreac
 }
 
 /// `git --version` at 2.38 or newer.
-fn git(git: &Path) -> Option<Complaint> {
+fn git(git: &Path) -> Finding {
     let output = match Command::new(git).arg("--version").output() {
         Ok(output) if output.status.success() => output,
         Ok(_) => {
-            return Some(Complaint::git(
+            return Finding::fail(
+                Check::Git,
                 "git answered `git --version` with a failure: reinstall git 2.38 or newer",
-            ));
+            );
         }
         Err(error) => {
-            return Some(Complaint::git(format!(
-                "git is not runnable ({error}): install git 2.38 or newer, which is what \
-                 `merge-tree --write-tree` needs"
-            )));
+            return Finding::fail(
+                Check::Git,
+                format!(
+                    "git is not runnable ({error}): install git 2.38 or newer, which is what \
+                     `merge-tree --write-tree` needs"
+                ),
+            );
         }
     };
     let text = String::from_utf8_lossy(&output.stdout);
     match parse_git_version(&text) {
-        Some(version) if version >= MIN_GIT => None,
-        Some((major, minor)) => Some(Complaint::git(format!(
-            "git is {major}.{minor} and holosmith needs {}.{} or newer for `merge-tree --write-tree`: \
-             upgrade git",
-            MIN_GIT.0, MIN_GIT.1
-        ))),
-        None => Some(Complaint::git(format!(
-            "`git --version` printed {text:?}, which is not a git version: reinstall git {}.{} or newer",
-            MIN_GIT.0, MIN_GIT.1
-        ))),
+        Some(version) if version >= MIN_GIT => Finding::pass(
+            Check::Git,
+            format!(
+                "git {}.{} is {}.{} or newer, which is where `merge-tree --write-tree` arrived",
+                version.0, version.1, MIN_GIT.0, MIN_GIT.1
+            ),
+        ),
+        Some((major, minor)) => Finding::fail(
+            Check::Git,
+            format!(
+                "git is {major}.{minor} and holosmith needs {}.{} or newer for `merge-tree --write-tree`: \
+                 upgrade git",
+                MIN_GIT.0, MIN_GIT.1
+            ),
+        ),
+        None => Finding::fail(
+            Check::Git,
+            format!(
+                "`git --version` printed {text:?}, which is not a git version: reinstall git {}.{} or newer",
+                MIN_GIT.0, MIN_GIT.1
+            ),
+        ),
     }
 }
 
@@ -357,7 +507,7 @@ fn parse_git_version(text: &str) -> Option<(u64, u64)> {
 }
 
 /// `min_free_gb` free on the data root's filesystem.
-fn disk(config: &Config, df: &Path) -> Option<Complaint> {
+fn disk(config: &Config, df: &Path) -> Finding {
     let output = match Command::new(df).arg("-Pk").arg(&config.data_root).output() {
         Ok(output) if output.status.success() => output,
         Ok(output) => {
@@ -366,36 +516,55 @@ fn disk(config: &Config, df: &Path) -> Option<Complaint> {
             // coreutils" would be advice about a program that just answered.
             let said = String::from_utf8_lossy(&output.stderr);
             let said = said.trim();
-            return Some(Complaint::disk(format!(
-                "`df -Pk {}` failed ({said}), so the free space `min_free_gb` guards could not be \
-                 measured: check that the data root exists and that this user can reach it",
-                config.data_root.display()
-            )));
+            return Finding::fail(
+                Check::Disk,
+                format!(
+                    "`df -Pk {}` failed ({said}), so the free space `min_free_gb` guards could not be \
+                     measured: check that the data root exists and that this user can reach it",
+                    config.data_root.display()
+                ),
+            );
         }
         Err(error) => {
-            return Some(Complaint::disk(format!(
-                "df is not runnable ({error}), so the free space `min_free_gb` guards could not be \
-                 measured: install coreutils"
-            )));
+            return Finding::fail(
+                Check::Disk,
+                format!(
+                    "df is not runnable ({error}), so the free space `min_free_gb` guards could not be \
+                     measured: install coreutils"
+                ),
+            );
         }
     };
     let text = String::from_utf8_lossy(&output.stdout);
     let Some(available_kb) = parse_df_available(&text) else {
-        return Some(Complaint::disk(format!(
-            "`df -Pk {}` printed {text:?}, which is not a POSIX df answer: install coreutils",
-            config.data_root.display()
-        )));
+        return Finding::fail(
+            Check::Disk,
+            format!(
+                "`df -Pk {}` printed {text:?}, which is not a POSIX df answer: install coreutils",
+                config.data_root.display()
+            ),
+        );
     };
     let available_gb = available_kb / (1024 * 1024);
     if available_gb >= config.min_free_gb {
-        return None;
+        return Finding::pass(
+            Check::Disk,
+            format!(
+                "{} has {available_gb} GB free and min_free_gb is {}",
+                config.data_root.display(),
+                config.min_free_gb
+            ),
+        );
     }
-    Some(Complaint::disk(format!(
-        "{} has {available_gb} GB free and min_free_gb is {}: free some space, or lower min_free_gb \
-         if this machine really has room for fewer sessions",
-        config.data_root.display(),
-        config.min_free_gb
-    )))
+    Finding::fail(
+        Check::Disk,
+        format!(
+            "{} has {available_gb} GB free and min_free_gb is {}: free some space, or lower min_free_gb \
+             if this machine really has room for fewer sessions",
+            config.data_root.display(),
+            config.min_free_gb
+        ),
+    )
 }
 
 /// The available-kilobytes column of a POSIX `df -Pk` answer: the fourth field of the second line.
@@ -412,11 +581,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_complaint_prints_its_check_and_its_sentence() {
-        let complaint = Complaint::git("git is old: upgrade git");
-        assert_eq!(complaint.to_string(), "git: git is old: upgrade git");
+    fn a_finding_prints_its_check_its_outcome_and_its_sentence() {
+        let finding = Finding::fail(Check::Git, "git is old: upgrade git");
+        assert_eq!(finding.to_string(), "git: fail: git is old: upgrade git");
+        let passed = Finding::pass(Check::Docker, "the daemon answers");
+        assert_eq!(passed.to_string(), "docker: pass: the daemon answers");
         assert_eq!(Check::Docker.as_str(), "docker");
         assert_eq!(Check::Disk.to_string(), "disk");
+    }
+
+    #[test]
+    fn only_a_failure_becomes_the_complaint_serve_refuses_with() {
+        // The rule ADR-0028 and ADR-0054 share: `serve` prints the same sentence `doctor` does, and an
+        // `unknown` is not a reason to refuse a boot (ADR-0044).
+        let failed = Finding::fail(Check::Git, "git is old: upgrade git");
+        assert_eq!(
+            Complaint::of(&failed),
+            Some(Complaint {
+                check: Check::Git,
+                sentence: "git is old: upgrade git".to_string()
+            })
+        );
+        assert_eq!(
+            Complaint::of(&Finding::pass(Check::Git, "git is fine")),
+            None
+        );
+        assert_eq!(
+            Complaint::of(&Finding::unknown(Check::Tailscale, "no daemon")),
+            None
+        );
     }
 
     #[test]
@@ -461,9 +654,9 @@ mod tests {
     #[test]
     fn an_ssh_host_is_reported_as_unchecked_rather_than_passed() {
         // The rule this test exists for: a check that cannot run must not report success.
-        let complaint =
-            docker(Some("ssh://adam@host")).expect("ssh is not checked, so it is a complaint");
+        let complaint = docker(Some("ssh://adam@host"));
         assert_eq!(complaint.check, Check::Docker);
+        assert_eq!(complaint.outcome, Outcome::Fail);
         assert!(complaint.sentence.contains("ssh"), "{}", complaint.sentence);
         assert!(
             complaint.sentence.contains("cannot check"),
@@ -497,9 +690,9 @@ mod tests {
 
     #[test]
     fn a_socket_that_is_not_there_is_one_sentence_naming_the_fix() {
-        let complaint = docker(Some("unix:///nonexistent-holosmith-test.sock"))
-            .expect("a socket that does not exist is not reachable");
+        let complaint = docker(Some("unix:///nonexistent-holosmith-test.sock"));
         assert_eq!(complaint.check, Check::Docker);
+        assert_eq!(complaint.outcome, Outcome::Fail);
         assert!(
             complaint.sentence.contains("start it with"),
             "the sentence names no fix: {}",
@@ -514,7 +707,8 @@ mod tests {
 
     #[test]
     fn a_docker_host_that_is_not_a_scheme_is_refused_with_the_two_spellings() {
-        let complaint = docker(Some("/var/run/docker.sock")).expect("a bare path is not a scheme");
+        let complaint = docker(Some("/var/run/docker.sock"));
+        assert_eq!(complaint.outcome, Outcome::Fail);
         assert!(
             complaint.sentence.contains("unix://"),
             "{}",

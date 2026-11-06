@@ -10,7 +10,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rusqlite::{Connection, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 
 use crate::events::repository::EventRepository;
 use crate::schema::{self, EmbedError, Migration};
@@ -370,6 +370,27 @@ fn recorded_version(conn: &Connection, path: &Path) -> Result<u32, DbError> {
         .map_err(sqlite_error_about(path))
 }
 
+/// The schema version recorded in the database at `path`, read **without** migrating it (HS-045).
+///
+/// [`Database::open`] applies every pending migration, which is what a *start* wants and what `doctor` must not
+/// do: ADR-0047's "a newer database" question has to be answered before anything writes to the file, and
+/// `doctor --quick` runs as the unit file's `ExecStartPre`. So this opens it **read-only** — SQLite's own flag,
+/// not a second reader of the migration directory — and runs the same two statements [`apply_pending`] decides
+/// on. `None` is "there is no file yet", which is not a finding: a machine that has never served has no
+/// database, and `serve` creates and migrates one at startup.
+///
+/// A read-only open of a WAL database needs to be able to create or map its `-shm` file, which is the data
+/// root's own directory: `doctor` runs as the user that owns it, and a file it cannot read is the caller's
+/// finding to make, not a silent `None`.
+pub fn recorded_without_migrating(path: &Path) -> Result<Option<u32>, DbError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(sqlite_error_about(path))?;
+    recorded_version(&connection, path).map(Some)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,6 +464,41 @@ mod tests {
             .pragma_query_value(None, "busy_timeout", |row| row.get(0))
             .expect("busy_timeout answers");
         assert_eq!(busy_timeout, 250);
+    }
+
+    #[test]
+    fn a_database_can_be_read_without_being_migrated() {
+        // `doctor`'s reader (HS-045): the file is opened read-only and never written, so a start on a database
+        // from a newer release can be refused instead of migrated (ADR-0047).
+        let file = TempPath::new("recorded-without-migrating");
+        assert_eq!(
+            recorded_without_migrating(file.path()).expect("a missing file is not an error"),
+            None,
+            "a machine that never served has no database, which is not a finding"
+        );
+        let database = Database::open(file.path(), OpenOptions::default(), 1_760_000_000)
+            .expect("the scratch database opens");
+        assert_eq!(database.schema_version(), schema::SCHEMA_VERSION);
+        drop(database);
+        assert_eq!(
+            recorded_without_migrating(file.path()).expect("the file is readable"),
+            Some(schema::SCHEMA_VERSION)
+        );
+
+        // A version from the future is what `doctor` refuses on — and reading it must not rewrite the file,
+        // which is the whole reason this is a second opener rather than `Database::open`.
+        let conn = Connection::open(file.path()).expect("the scratch database reopens");
+        conn.execute(RECORD_APPLIED, params![99, "from-the-future", 0])
+            .expect("the future row is writable");
+        drop(conn);
+        assert_eq!(
+            recorded_without_migrating(file.path()).expect("the file is readable"),
+            Some(99)
+        );
+        assert_eq!(
+            schema::verdict(99, schema::SCHEMA_VERSION),
+            crate::schema::Verdict::Newer
+        );
     }
 
     #[test]
