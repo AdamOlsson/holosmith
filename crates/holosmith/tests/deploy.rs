@@ -147,6 +147,7 @@ fn doctor_tools(dir: &TempDir) -> doctor::Tools {
             &dir.file("tailscale-serve"),
         ),
         systemd: dir.file("no-systemd-here"),
+        ..doctor::Tools::default()
     }
 }
 
@@ -262,8 +263,9 @@ fn health_responder() -> std::net::SocketAddr {
 ///
 /// The fixture a **system-path** arm needs, because the two things a recorder cannot do are the things `doctor`'s
 /// `perms` finding and step 4 read: the deploy's `install` creates the tree (a recorder creates nothing), and step 4
-/// makes the key store itself through `key::Store::ensure_file`, whose `create_dir_all` would leave a 0775 data root
-/// behind. A test whose subject is a write, not a tree, starts from the tree a previous deploy left.
+/// makes the key store itself through `key::Store::ensure_file`. A test whose subject is a write, not a tree, starts
+/// from the tree a previous deploy left — and the store's own choice of the data root's mode is `key.rs`'s unit
+/// test (`the_data_root_the_key_store_makes_is_the_mode_the_deploy_writes`), not this fixture's.
 fn deployed_data_root(path: &Path) {
     std::fs::create_dir_all(path).expect("the data root is creatable");
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
@@ -1009,36 +1011,62 @@ fn an_existing_key_file_is_never_rewritten() {
     let root = dir.file("root");
     let target = Target::resolve(Some(root.clone()));
     let deployed = target.config(&config);
-    // The tree a previous deploy left, with a real key in the store: the two things a deploy must handle
-    // differently. `install` would truncate the bytes, so this step never names that path; a mode it does own is
-    // repaired with `chmod`, which touches nothing.
+    // The tree a previous deploy left, with a real key in the store **and modes a looser umask left behind**: the
+    // two things a deploy must handle differently. `install` would truncate the bytes, so a mode it does own is
+    // repaired with `chmod`, which touches nothing — and the fixture starts wrong on purpose, because a mode that is
+    // already right makes the repair's only assertion a comparison of the fixture with itself (HS-049's review,
+    // STD-1: with the fixture at 0600, deleting `Kind::Kept`'s `Action::Mode` arm left the whole suite green).
     deployed_data_root(&deployed.data_root);
     let secrets = deployed.data_root.join(key::SECRETS_DIR);
     std::fs::create_dir_all(&secrets).expect("the secrets directory is creatable");
-    std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o700))
+    std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o755))
         .expect("the secrets directory's mode is settable");
     let keys = secrets.join(key::KEYS_FILE);
     let stored = "[providers]\nanthropic = \"sk-ant-not-a-real-key\"\n[sessions]\n";
     std::fs::write(&keys, stored).expect("the key file is writable");
-    std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o600))
+    std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o644))
         .expect("the key file's mode is settable");
 
+    // Step 1 reads the same wrong modes — and only *remarks* on them, because repairing them is this step's job
+    // (ADR-0058). A failure here would be the dead end the review called SPEC-2.
     let report = deploy::run(&deployed, &target, &real_tools(&dir), &Fake::new(), false);
     assert!(!report.failed(), "the install failed:\n{}", report.render());
+    assert!(
+        line(&report, DeployStep::Preflight)
+            .sentence
+            .contains("step 2 repairs"),
+        "step 1 did not remark on the wrong modes it read: {}",
+        line(&report, DeployStep::Preflight).sentence
+    );
 
     assert_eq!(
         std::fs::read_to_string(&keys).expect("the key file is readable"),
         stored,
         "the deploy rewrote the file that holds every stored provider key"
     );
-    assert_eq!(mode(&keys), 0o600);
-    assert_eq!(mode(&secrets), 0o700);
-    // The store is never in the plan: an `install` of that path would truncate the bytes above, and the words say
-    // which write the step chose instead.
+    assert_eq!(mode(&keys), 0o600, "the key file's mode was not repaired");
+    assert_eq!(
+        mode(&secrets),
+        0o700,
+        "the secrets directory's mode was not repaired"
+    );
+    // The store is repaired with `chmod` and never with `install`: an `install` of that path would truncate the
+    // bytes above, and the words say which write the step chose instead.
     let changed = line(&report, DeployStep::Files).sentence.clone();
+    // A directory is repaired by re-running `install -d` (which truncates nothing), a file by `chmod` — the two
+    // spellings `Action` has, and both are asserted here so neither arm can lose its detector.
+    for expected in [
+        format!("chmod 0600 {}", keys.display()),
+        format!("install -d -m 0700 {}", secrets.display()),
+    ] {
+        assert!(
+            changed.contains(&expected),
+            "the mode repair is not the action step 2 reported ({expected}): {changed}"
+        );
+    }
     assert!(
-        !changed.contains(&keys.display().to_string()),
-        "the deploy planned a write of the key file it must never touch: {changed}"
+        !changed.contains(&format!("<staged> {}", keys.display())),
+        "the deploy planned an `install` over the key file it must never truncate: {changed}"
     );
 
     // A mode that is wrong is repaired, and repaired with `chmod` rather than with the truncating `install`: the

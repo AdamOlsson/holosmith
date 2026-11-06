@@ -217,8 +217,7 @@ impl Store {
             .path
             .parent()
             .ok_or_else(|| KeyError::new("the key file has no parent directory"))?;
-        fs::create_dir_all(directory)?;
-        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
+        create_directories(directory)?;
         if !self.path.exists() {
             write_file(&self.path, &empty_text())?;
         } else {
@@ -245,8 +244,7 @@ impl Store {
 
     fn save_unlocked(&self, secrets: &Secrets) -> Result<(), KeyError> {
         if let Some(directory) = self.path.parent() {
-            fs::create_dir_all(directory)?;
-            fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
+            create_directories(directory)?;
         }
         write_file(&self.path, &render(secrets))
     }
@@ -326,6 +324,26 @@ impl Store {
             .find(|(_, candidate)| candidate.as_str() == dummy)
             .map(|(session, _)| session.as_str())
     }
+}
+
+/// The secrets directory at 0700, and — when this call is the one that makes it — the data root above it at 0755.
+///
+/// Two creators make the data root (`serve`'s boot and this store, which `key set` calls before any deploy), and the
+/// deploy's step 2 writes it with a third: they have to agree, or a machine that ran the documented next step
+/// (`holosmith key set <provider>`) would leave a data root at the umask's 0775 and `doctor`'s `perms` finding would
+/// report a mode nothing in the product chose (HS-049). `create_dir_all` is what reaches the data root here — the
+/// store lives one level below it — so the mode is set only when the parent did not exist, and an operator's own
+/// mode is left alone.
+fn create_directories(directory: &Path) -> io::Result<()> {
+    let data_root = directory.parent();
+    let created = data_root.is_some_and(|root| !root.exists());
+    fs::create_dir_all(directory)?;
+    if let Some(root) = data_root
+        && created
+    {
+        fs::set_permissions(root, fs::Permissions::from_mode(0o755))?;
+    }
+    fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
 }
 
 /// The process-wide write lock. Two creates can mint dummies at once; a read-modify-write without it drops one.
@@ -548,4 +566,73 @@ pub const KEY_PROXY_NAME: &str = "hs_key";
 /// whole session directory for it without re-spelling the rule.
 pub fn contains_real_key(secrets: &Secrets, text: &str) -> bool {
     secrets.providers.values().any(|key| text.contains(key))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A temporary directory that removes itself, so the tests leave nothing in `/tmp`.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(label: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("holosmith-key-{label}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).expect("the scratch directory is creatable");
+            Self(path)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// `key set` is the documented step after a deploy, and it can be the *first* thing that makes the data root.
+    ///
+    /// Three creators write that directory's mode — `serve`'s boot, this store, and `server deploy`'s step 2 — and
+    /// `doctor`'s `perms` finding compares it with the deploy's 0755. `create_dir_all` would give the umask's 0775,
+    /// which is the mode this machine's umask produces, so a permissive-umask machine is the one this test bites on
+    /// (HS-049).
+    #[test]
+    fn the_data_root_the_key_store_makes_is_the_mode_the_deploy_writes() {
+        let scratch = Scratch::new("root-mode");
+        let data_root = scratch.0.join("data");
+        Store::from_data_root(&data_root)
+            .ensure_file()
+            .expect("the store is creatable");
+        let mode = fs::metadata(&data_root)
+            .expect("the store made the data root")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "the key store made the data root {mode:04o}, which the deploy and `serve` do not write"
+        );
+        let secrets = data_root.join(SECRETS_DIR);
+        let secrets_mode = fs::metadata(&secrets)
+            .expect("the store made the secrets directory")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(secrets_mode, 0o700, "the secrets directory is not 0700");
+
+        // An operator's own mode is theirs: a data root that already exists is not reset.
+        fs::set_permissions(&data_root, fs::Permissions::from_mode(0o700))
+            .expect("the data root's mode is settable");
+        Store::from_data_root(&data_root)
+            .ensure_file()
+            .expect("the store is readable");
+        let kept = fs::metadata(&data_root)
+            .expect("the data root is there")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(kept, 0o700, "the store reset a mode it did not choose");
+    }
 }

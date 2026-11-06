@@ -88,8 +88,11 @@ than left to be inferred.
 
 Privilege follows the same flag: with no `--root` the paths are the system's, so each file action is one child
 prefixed by `sudo`; with `--root` the tree is the invoking user's, so the same child runs without it. The
-deploy never reads a uid — a `getuid` is not reachable without `libc` anyway, and "may I write this tree" is a
-property of the tree, not of the caller. A missing `sudo` is a step failure with a sentence, not a panic, and
+deploy never reads *its own* uid — a `getuid` is not reachable without `libc` anyway, and "may I write this tree" is a
+property of the tree, not of the caller. **Amended by ADR-0058:** privilege is still the flag's, but HS-049's step 2
+does read a uid — the *service user's*, from `id -u`, and `stat`'s answer for each installed root — because the tree
+`serve` runs as is the thing the unit's `User=` names, and a tree written by `sudo install` is not that user's until
+it is chowned. The distinction the sentence was drawing survives: nothing here asks this process who it is. A missing `sudo` is a step failure with a sentence, not a panic, and
 the child **inherits the deploy's stdin** so `sudo` can ask for a password on the operator's terminal: without
 that, `sudo: a terminal is required to read the password` would be every machine whose credential is not
 already cached, which is most of them on a first deploy.

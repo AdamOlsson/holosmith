@@ -143,7 +143,10 @@ exactly one failure.
 - They are **not measured** (`unknown`) when the `docker` check failed: one failure, one line, and no cascade of
   four sentences blaming a daemon for the thing that is wrong with the daemon.
 
-`ExecStartPre=holosmith doctor --quick` is HS-049's line to write, and there is no unit file to change here.
+`ExecStartPre=holosmith doctor --quick` was HS-049's line to write, and there was no unit file to change here.
+**Amended by ADR-0058:** the line is written (as `ExecStartPre=<the binary> doctor --quick`; the *path* is the
+decision ADR-0058 records), and `doctor --quick` gained a sixth kind of machine fact, `perms` — which is therefore
+also what `ExecStartPre` refuses on.
 What this story makes is the **contract that line relies on**: exit 0 iff no check failed, and one actionable
 line per failure. That is recorded rather than claimed as a file written.
 

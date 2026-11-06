@@ -1502,11 +1502,16 @@ it rather than adding a caveat beside it.
 - **Step 7 cannot be `doctor --full`, and not because it is slow.** `--full` asserts the image and the proxies step 3
   builds, so on a machine where step 3 is skipped the last step would fail for a reason another story owns. The
   first draft of the plan waited for `/api/health` against a server the *gate* had booted — a measurement of the
-  harness. Steps 5–7 are HS-049's, and the URL and next steps are the command's tail.
+  harness. Steps 5–7 are HS-049's, and the URL and next steps are the command's tail. **Amended by ADR-0058:** HS-049
+  wrote step 7 as exactly that — the `/api/health` wait and `doctor --full`, in process — and the objection does not
+  survive, because step 3 is no longer skipped: the image and the proxies the last step asserts are the ones the same
+  run just built and started.
 - **A run whose remaining steps belong to later stories exits 0.** The exit code is 1 iff a step *failed*; the
   summary's `deploy: incomplete: 4 of 7 steps …` is what says the install is not finished. A script that reads only
   the exit code will believe a partial install succeeded — that is deliberate (the acceptance's failure semantics
   are about a failing step) and it is why the line is always printed, not only when steps were skipped.
+  **Amended by ADR-0058:** nothing is skipped any more, so the `incomplete` line is deleted (not hidden) and the
+  tally prints `skipped` as zero. The exit code is still 1 iff a step failed.
 - **The gate's case takes over the machine's `hs_egress`/`hs_key` names.** A leftover proxy from `case_doctor_full`
   or from a `serve` boot makes this case's own first run read `satisfied` for step 4, so it `rm -f`s both before it
   starts and after it finishes. `case_doctor_full` deliberately leaves its own running, so the order in
@@ -1651,6 +1656,29 @@ it rather than adding a caveat beside it.
   than hidden: a plan that read nothing is not a plan (ADR-0056), and the self-test removes the network it makes
   (ADR-0044), so a dry run leaves no state — it spends seconds, and the alternative is a plan describing a machine
   nobody measured.
+- **`perms` is a `doctor --quick` finding, so `server deploy`'s step 1 must *downgrade* it.** Without that the deploy
+  refuses on a mode it repairs two steps later: step 2's `chmod`/`chown` actions become unreachable and the operator
+  is told to run a `chmod` the deploy knows how to run. `serve` still refuses, because `ExecStartPre` is what a wrong
+  mode must stop. There are now **two** recorded divergences in step 1 (`ports`, `perms`), each with its own remark,
+  and `tests/deploy.rs::an_existing_key_file_is_never_rewritten` fails if the second one is dropped.
+- **The tree `perms` reads is the *caller's*, so it comes through `doctor::Tools`.** `config_path` and `admin_dir`
+  are fields, defaulting to the machine's `/etc/holosmith/config.toml` and `/run/holosmith`; `deploy::run` overwrites
+  them from the `Target`. Spelling them inside the check made a `--root` deploy's step 7 compare the *host's* real
+  install against the target's data root — a false failure naming a `chown` on a file the run never wrote, on every
+  host that has deployed for real (HS-049's review, SPEC-1; the arm that catches it is
+  `tests/doctor.rs::the_installed_paths_modes_and_owners_are_one_finding`'s admin-directory case).
+- **Three creators write the data root's mode, so all three write 0755.** `serve`'s boot, `key::Store` (which
+  `holosmith key set` calls, the documented next step after a deploy) and `server deploy`'s step 2.
+  `create_dir_all` gives the umask's 0775, which on this machine (umask 0002) is what a store created before any
+  deploy used to leave behind — a mode no part of the product chose, reported by `perms`. Each creator sets 0755 only
+  on a directory *it* created; an operator's own mode is theirs.
+- **`grep -qF "--https=…"` is not a search, it is a broken invocation.** The argument starts with `--`, so grep reads
+  it as its own long option and exits 2 with `unrecognized option` — the assertion fails while the behaviour is right
+  (it cost this story one full gate run). `grep -qF -- "$target" "$log"` is the form, and the trap applies to any
+  pattern built from an argv.
+- **A case's offline half can be green while its online half's greps are wrong.** The extracted-run trick that keeps
+  the gate's ten-minute loop out of a working session only exercises what needs no daemon; an argv grep in the online
+  half is therefore untested until the real run, so read those lines twice.
 - **`scripts/verify.sh` is bash, not sh.** `sh -n` fails on it at `HEAD` (line 207's `local -a sent=("$@")`), so
   `bash -n scripts/verify.sh` is the cheap check after every edit to it — cheaper than the minutes a full run
   costs, and it catches the quoting mistake a heredoc full of shims invites.

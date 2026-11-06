@@ -20,9 +20,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use holosmith::clock;
-use holosmith::config::{Config, DEFAULT_CONFIG_PATH, Role};
+use holosmith::config::{Config, Role};
 use holosmith::db::{self, Database, OpenOptions};
-use holosmith::deploy;
 use holosmith::doctor::{self, Depth, Machine, Report, Tools};
 use holosmith::images;
 use holosmith::key;
@@ -97,6 +96,7 @@ fn tools(dir: &TempDir, version: &str) -> Tools {
         },
         tailscale: tailscale_shim(dir, "echo '{\"BackendState\":\"Running\"}'"),
         systemd: dir.file("no-systemd-here"),
+        ..Tools::default()
     }
 }
 
@@ -942,9 +942,12 @@ fn the_installed_paths_modes_and_owners_are_one_finding() {
     let _answered = fake_daemon(&socket);
     let mut config = config(&dir, Some(format!("unix://{}", socket.display())));
     config.role = Role::Server;
-    let tools = tools_with_real_git(&dir);
-    // The data root's own three paths, which is as much of the tree as a test can make: the admin directory and the
-    // config path are absolute machine paths, so this machine's are only read.
+    let mut tools = tools_with_real_git(&dir);
+    // The whole tree is this test's: the config file and the admin directory are `Tools`' paths, which is what a
+    // `--root` deploy hands `doctor` (SPEC-1's prolongation) — so this arm never reads `/etc/holosmith` or
+    // `/run/holosmith`, which a host that has deployed for real would otherwise contribute to the verdict.
+    tools.config_path = dir.file("etc/holosmith/config.toml");
+    tools.admin_dir = dir.file("run/holosmith");
     let secrets = config.data_root.join(key::SECRETS_DIR);
     std::fs::create_dir_all(&secrets).expect("the secrets directory is creatable");
     std::fs::set_permissions(&config.data_root, std::fs::Permissions::from_mode(0o755))
@@ -963,16 +966,47 @@ fn the_installed_paths_modes_and_owners_are_one_finding() {
     assert_eq!(perms.outcome, Outcome::Pass, "{}", says(perms));
     // A path the deploy has not written yet is not a wrong mode, and the pass says which ones it did not find.
     assert!(says(perms).contains("not there yet"), "{}", says(perms));
-    for absent in [deploy::ADMIN_DIR, DEFAULT_CONFIG_PATH] {
-        if Path::new(absent).exists() {
-            continue;
-        }
+    for absent in [&tools.admin_dir, &tools.config_path] {
         assert!(
-            says(perms).contains(absent),
-            "the pass does not say {absent} is not there yet: {}",
+            says(perms).contains(&absent.display().to_string()),
+            "the pass does not say {} is not there yet: {}",
+            absent.display(),
             says(perms)
         );
     }
+
+    // The two machine-wide paths exist and are right: the pass names no absence, which is what makes the arm above
+    // an absence arm rather than a sentence that always says it.
+    std::fs::create_dir_all(
+        tools
+            .admin_dir
+            .parent()
+            .expect("the admin directory has a parent"),
+    )
+    .expect("the admin tree is creatable");
+    std::fs::create_dir_all(
+        tools
+            .config_path
+            .parent()
+            .expect("the config file has a parent"),
+    )
+    .expect("the etc tree is creatable");
+    for (path, mode) in [
+        (tools.admin_dir.clone(), 0o700),
+        (tools.config_path.clone(), 0o644),
+    ] {
+        std::fs::write(&path, "").expect("the installed path is writable");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
+            .expect("the installed path's mode is settable");
+    }
+    let report = doctor::run(&config, Depth::Quick, &tools, &FakeMachine::healthy());
+    let perms = finding(&report, Check::Perms);
+    assert_eq!(perms.outcome, Outcome::Pass, "{}", says(perms));
+    assert!(
+        !says(perms).contains("not there yet"),
+        "a complete tree still names an absence: {}",
+        says(perms)
+    );
 
     // One wrong mode: a failure naming the path, both modes and the fix — and the only failure on this machine.
     std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o755))
@@ -997,6 +1031,23 @@ fn the_installed_paths_modes_and_owners_are_one_finding() {
         "one wrong mode was reported as more than one failure:\n{}",
         report.render()
     );
+
+    // The same finding on a path *outside* the data root: without `Tools`' two fields this arm would read the
+    // machine's own `/run/holosmith` and pass over a tree it never looked at.
+    std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o700))
+        .expect("the secrets directory's mode is settable");
+    std::fs::set_permissions(&tools.admin_dir, std::fs::Permissions::from_mode(0o755))
+        .expect("the admin directory's mode is settable");
+    let report = doctor::run(&config, Depth::Quick, &tools, &FakeMachine::healthy());
+    let perms = finding(&report, Check::Perms);
+    assert_eq!(perms.outcome, Outcome::Fail, "{}", says(perms));
+    assert!(
+        says(perms).contains(&tools.admin_dir.display().to_string()),
+        "the failure does not name the admin directory: {}",
+        says(perms)
+    );
+    std::fs::set_permissions(&tools.admin_dir, std::fs::Permissions::from_mode(0o700))
+        .expect("the admin directory's mode is settable");
 
     // A machine that has not deployed: no tree, so not a verdict about modes — the third answer, not a failure.
     let mut missing = config.clone();

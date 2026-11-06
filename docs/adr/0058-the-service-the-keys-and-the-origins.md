@@ -36,7 +36,9 @@ file is never rewritten. `vapid::parse` is strict in both directions — a line 
 nor one of the two assignments is a refusal, and a value that is not 65 bytes starting `0x04` and 32 bytes is not a
 pair — because a file somebody edited into something else must not be read as a key.
 
-Generation is **one child**: `openssl ecparam -name prime256v1 -genkey -noout -outform DER`. The DER is parsed in
+Generation is **one child whose stdout is the answer**: `openssl ecparam -name prime256v1 -genkey -noout -outform
+DER`, followed by the same `install -m 0600` every other file action ends in (the plan's line names both children, so
+the count it leads with is the number of processes the run will start). The DER is parsed in
 this crate by `vapid::from_der` rather than by a dependency: the crate has no encoder dependency and no `unsafe` to
 reach one with, the SEC1 walk is about forty lines (`from_der` and `Reader::element`), and it is unit-tested against
 a DER built by hand from the shape the plan measured — `30 77`, version 1, the scalar as an OCTET STRING,
@@ -128,7 +130,8 @@ this?", which is why it is the comparison rather than a parse of some other comm
 -m 0644` for the file, then `systemctl daemon-reload` and `systemctl enable --now holosmith.service`; `daemon-reload`
 comes first because `enable --now` on a unit systemd has not re-read would start the previous rendering, which is
 exactly the version an upgrade is replacing. Under `--root` the machine half is not attempted — a unit under an
-install tree is not one systemd can read — and the line carries `ROOT_UNIT_REMARK` to say so.
+install tree is not one systemd can read — and **all three arms** of the line (`satisfied`, `needs` and `changed`)
+carry `ROOT_UNIT_REMARK` to say so, because a plan is exactly where an operator learns what a run will not do.
 
 ## D4 — `tailscale serve`: two children and one JSON read
 
@@ -180,7 +183,27 @@ now **stops the unit from starting** without teaching `serve` a refusal it did n
 creates the data root itself, `commands/serve.rs` now sets that directory to 0755 — but only when it created it.
 `create_dir_all` gives the process's umask (0775 under umask 0002), and a root this process made would fail the
 *next* boot's `ExecStartPre` over a mode nothing had changed; an operator's own mode on a directory that was already
-there is theirs.
+there is theirs. Three programs create that directory — `serve`, `key::Store` (`holosmith key set`, the documented
+next step after a deploy) and the deploy's own step 2 — so all three apply the same rule, each only to a directory
+it created.
+
+Two consequences came out of the review of this story rather than out of its plan, and both are decisions now.
+
+**The tree the finding reads is the *caller's*.** The last two paths are not derived from the data root — the config
+file and the admin directory are machine-wide — so they are `doctor::Tools` fields (`config_path`, `admin_dir`)
+whose defaults are `/etc/holosmith/config.toml` and `/run/holosmith`, and `deploy::run` overwrites them from the
+`Target`. Spelling them inside the check made a `--root` deploy's step 7 compare the *host's* real install with the
+*target's* data root: a false verdict about a tree the run never wrote, and an instruction to `chown` a file it did
+not install, on every host that has deployed for real. A check that reads a tree has to be told which tree.
+
+**Step 1 downgrades the finding, because the deploy is what repairs it.** `perms` in `--quick` is what makes a wrong
+mode stop `ExecStartPre`; but the repair for it is step 2's `chmod` and `chown`, so a deploy that *failed* at step 1
+would make its own next two steps unreachable and leave the operator to run one `chmod` it knows how to run. So
+`perms` joins `ports` as the second finding step 1 turns into a remark, with its own sentence, and `doctor`'s own exit
+code is unchanged. That is a widening of ADR-0056's "exactly one divergence", recorded here rather than done quietly:
+the rule that survives is "a finding the deploy is *about to fix* is a remark; a finding it cannot fix stops the run",
+and `tests/deploy.rs` has an arm for each half of it (the wrong-mode fixture is repaired, and a failing `docker` still
+stops at step 1).
 
 ## D6 — step 7: the health wait, then `doctor --full`
 

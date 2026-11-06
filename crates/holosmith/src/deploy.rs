@@ -94,6 +94,15 @@ pub const HEALTH_POLL: Duration = Duration::from_millis(250);
 const HELD_PORT: &str =
     "; the control port is held — a re-run on a serving machine is not a failure here";
 
+/// The remark a wrong mode or owner earns instead of failing the deploy — step 1's **second** divergence, and this
+/// one is ADR-0058's.
+///
+/// `doctor --quick` fails it on purpose: the unit runs `doctor --quick` as `ExecStartPre`, and a secrets directory
+/// the service user cannot read is a reason for systemd not to start the service. But `deploy` is the caller that
+/// **repairs** it — step 2's `Action::Mode` and the `chown`s are exactly this finding's fix — so failing here would
+/// make the repair unreachable and leave the operator to run one `chmod` the deploy knows how to run.
+const WRONG_MODE: &str = "; a wrong mode or owner in the install tree is what step 2 repairs, so it is a remark here and not a failure";
+
 /// The remark a `--root` install carries where a system one names its service user: the half of step 2 no
 /// unprivileged tree can have.
 ///
@@ -469,6 +478,13 @@ pub fn run(
     machine: &dyn Machine,
     dry_run: bool,
 ) -> Report {
+    // The two machine-wide paths of the install tree are the *target's*, not the machine's: `doctor`'s `perms`
+    // finding compares the tree this run writes, so a `--root` deploy must not read `/etc/holosmith` or
+    // `/run/holosmith` (HS-049's review, SPEC-1). Everything else about the tools — the programs, the systemd
+    // directory, the tailscale binary — is a fact about the host and stays as it is.
+    let mut doctor_tools = tools.doctor.clone();
+    doctor_tools.config_path = target.etc_config();
+    doctor_tools.admin_dir = target.admin_dir();
     let mut report = Report {
         lines: Vec::new(),
         failed: None,
@@ -477,13 +493,13 @@ pub fn run(
     };
     for step in DeployStep::ALL {
         let line = match step {
-            DeployStep::Preflight => preflight(config, &tools.doctor, machine),
+            DeployStep::Preflight => preflight(config, &doctor_tools, machine),
             DeployStep::Files => files(config, target, tools, dry_run),
             DeployStep::Images => images_line(config, machine, dry_run),
             DeployStep::Proxies => proxies_line(config, machine, dry_run),
             DeployStep::Service => service(target, tools, dry_run),
             DeployStep::Origins => origins(config, tools, dry_run),
-            DeployStep::Health => health(config, tools, machine, dry_run),
+            DeployStep::Health => health(config, &doctor_tools, tools, machine, dry_run),
         };
         if line.word == Word::Failed {
             report.failed = Some(step);
@@ -501,11 +517,14 @@ pub fn run(
 /// Every non-`ports` failure stops the deploy **with that finding's own sentence, verbatim**, so `serve`'s refusal,
 /// `doctor`'s line and this step's failure cannot say different things about a machine (ADR-0028, ADR-0054).
 ///
-/// **`ports` is the one divergence, and it is recorded rather than discovered.** `doctor --quick` fails a held
-/// port on purpose: its two moments are *before a start* and, through `--full`, *after one*. `deploy` is the one
-/// caller that legitimately runs on a machine that is already serving, because the spec promises that re-running
-/// is safe — so a held port becomes a remark on this line and the run continues, while `doctor`'s own exit code is
-/// unchanged. Without that, the second deploy on a working server would report a failure that is not one.
+/// **`ports` and `perms` are the two divergences, and both are recorded rather than discovered.** `doctor
+/// --quick` fails a held port on purpose: its two moments are *before a start* and, through `--full`, *after one*.
+/// `deploy` is the one caller that legitimately runs on a machine that is already serving, because the spec
+/// promises that re-running is safe — so a held port becomes a remark on this line and the run continues, while
+/// `doctor`'s own exit code is unchanged. Without that, the second deploy on a working server would report a
+/// failure that is not one. `perms` is the same shape one finding later: `serve` refuses on a wrong mode through
+/// `ExecStartPre`, but the deploy *repairs* one, so refusing here would make step 2's chmod and chown actions
+/// unreachable (ADR-0058).
 fn preflight(config: &Config, tools: &doctor::Tools, machine: &dyn Machine) -> Line {
     let report = doctor::run(config, Depth::Quick, tools, machine);
     let mut findings = report.findings;
@@ -522,10 +541,9 @@ fn preflight(config: &Config, tools: &doctor::Tools, machine: &dyn Machine) -> L
         findings[index] = finding;
         elsewhere = Some(path);
     }
-    if let Some(finding) = findings
-        .iter()
-        .find(|finding| finding.is_failure() && finding.check != Check::Ports)
-    {
+    if let Some(finding) = findings.iter().find(|finding| {
+        finding.is_failure() && !matches!(finding.check, Check::Ports | Check::Perms)
+    }) {
         return Line {
             step: DeployStep::Preflight,
             word: Word::Failed,
@@ -564,6 +582,12 @@ fn preflight(config: &Config, tools: &doctor::Tools, machine: &dyn Machine) -> L
         .any(|finding| finding.is_failure() && finding.check == Check::Ports)
     {
         sentence.push_str(HELD_PORT);
+    }
+    if findings
+        .iter()
+        .any(|finding| finding.is_failure() && finding.check == Check::Perms)
+    {
+        sentence.push_str(WRONG_MODE);
     }
     Line {
         step: DeployStep::Preflight,
@@ -680,7 +704,8 @@ impl Action {
             // The child that writes the pair, as the program name rather than its output: the DER goes to a
             // staging file on its way to `install`, and the destination is what an operator needs to see.
             Self::Vapid { path } => format!(
-                "openssl ecparam -name prime256v1 -genkey -noout -outform DER > {}",
+                "openssl ecparam -name prime256v1 -genkey -noout -outform DER > <staged>; install -m 0600 \
+                 <staged> {}",
                 path.display()
             ),
             Self::UserAdd { name, groups, home } => format!(
@@ -1638,11 +1663,18 @@ fn service_line(target: &Target, tools: &Tools, dry_run: bool, staging: &Path) -
         plan.push("systemctl daemon-reload".to_string());
         plan.push(format!("systemctl enable --now {UNIT_NAME}"));
     }
+    // The `--root` remark belongs on all three arms, like step 2's: a plan is where an operator learns what the run
+    // will *not* do, and a `changed` line that dropped it would be the one line saying less than the read did.
+    let remark = if target.privileged() {
+        String::new()
+    } else {
+        ROOT_UNIT_REMARK.to_string()
+    };
     if dry_run {
         return Line {
             step: DeployStep::Service,
             word: Word::Needs,
-            sentence: counted(&plan),
+            sentence: format!("{}{remark}", counted(&plan)),
         };
     }
     for action in &files {
@@ -1677,7 +1709,7 @@ fn service_line(target: &Target, tools: &Tools, dry_run: bool, staging: &Path) -
     Line {
         step: DeployStep::Service,
         word: Word::Changed,
-        sentence: counted(&plan),
+        sentence: format!("{}{remark}", counted(&plan)),
     }
 }
 
@@ -1827,9 +1859,15 @@ fn served(json: &str) -> Result<Vec<(u16, String)>, String> {
 ///
 /// The apply's failure is `doctor`'s own sentence, verbatim: step 1's rule, one level later — a deploy, `serve`'s
 /// refusal and `doctor`'s line cannot say different things about one machine.
-fn health(config: &Config, tools: &Tools, machine: &dyn Machine, dry_run: bool) -> Line {
+fn health(
+    config: &Config,
+    doctor_tools: &doctor::Tools,
+    tools: &Tools,
+    machine: &dyn Machine,
+    dry_run: bool,
+) -> Line {
     let answering = doctor::health_answers(config.control_listen);
-    let measured = doctor::run(config, Depth::Full, &tools.doctor, machine);
+    let measured = doctor::run(config, Depth::Full, doctor_tools, machine);
     if answering && !measured.failed() {
         return Line {
             step: DeployStep::Health,
@@ -1868,7 +1906,7 @@ fn health(config: &Config, tools: &Tools, machine: &dyn Machine, dry_run: bool) 
             ),
         );
     }
-    let measured = doctor::run(config, Depth::Full, &tools.doctor, machine);
+    let measured = doctor::run(config, Depth::Full, doctor_tools, machine);
     if let Some(finding) = measured.failures().next() {
         return failed(DeployStep::Health, finding.sentence.clone());
     }

@@ -706,7 +706,9 @@ One of the seven parts of `holosmith server deploy`, in the spec's order: `prefl
 `proxies`, `service`, `origins`, `health`. A deploy step is a **state read** and an **apply**: the read says
 whether the step is already satisfied and what is missing, the apply does the missing part, and `--dry-run`
 prints the read alone. Each one reports one of five words — **satisfied**, **needs** (a dry run's plan),
-**changed**, **skipped** (carrying the story that still owns the body, and never a pass) and **failed** (which
+**changed**, **skipped** (carrying the story that still owns the body, and never a pass; since HS-049 the deploy
+has no step another story owns, so nothing produces the word — it stays in the table because the table is the
+contract, and a `skipped` step may never read as a pass) and **failed** (which
 stops the run and makes the resume command the last line). Its machine names are `deploy::DeployStep` and
 `DeployStep::ALL`, and `--root` is the install tree the step's paths are built under. It is not `Step`.
 _Avoid_: Install step, deploy phase, stage, deployment

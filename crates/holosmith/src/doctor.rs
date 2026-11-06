@@ -36,7 +36,6 @@ use crate::agent;
 use crate::config::{Config, Role};
 use crate::container::{PROXY_ALIAS, PROXY_NAME};
 use crate::db;
-use crate::deploy;
 use crate::docker::Docker;
 use crate::images::{Expectation, Kind};
 use crate::key::{KEY_PROXY_ALIAS, KEY_PROXY_NAME};
@@ -89,11 +88,20 @@ impl std::fmt::Display for Depth {
 /// `serve` runs: one list of shims, one behaviour. The two additions are doctor's own question — `tailscale`
 /// is a program, and systemd is a directory — and both are a `PathBuf` for `preflight::Tools`'s reason: a test
 /// points them at what it wrote, because this crate denies `unsafe` and so cannot set `PATH`.
+///
+/// The last two are the install tree's two machine-wide paths, and they are a seam for a different reason: the
+/// tree `perms` reads is the tree the *caller* installed. `server deploy --root DIR` writes `<DIR>/etc/…` and
+/// `<DIR>/run/…`, so a check that spelled the system paths itself would compare the host's real install against a
+/// target's data root and hand the operator a `chown` on a file the run never wrote (HS-049's review, SPEC-1).
 #[derive(Debug, Clone)]
 pub struct Tools {
     pub preflight: preflight::Tools,
     pub tailscale: PathBuf,
     pub systemd: PathBuf,
+    /// The config file the install wrote: [`crate::config::DEFAULT_CONFIG_PATH`] on a machine.
+    pub config_path: PathBuf,
+    /// The admin socket's directory: [`crate::deploy::ADMIN_DIR`] on a machine.
+    pub admin_dir: PathBuf,
 }
 
 impl Default for Tools {
@@ -102,6 +110,8 @@ impl Default for Tools {
             preflight: preflight::Tools::default(),
             tailscale: PathBuf::from("tailscale"),
             systemd: PathBuf::from(SYSTEMD_DIR),
+            config_path: PathBuf::from(crate::config::DEFAULT_CONFIG_PATH),
+            admin_dir: PathBuf::from(crate::deploy::ADMIN_DIR),
         }
     }
 }
@@ -224,7 +234,7 @@ pub fn run(config: &Config, depth: Depth, tools: &Tools, machine: &dyn Machine) 
     let serving = (depth == Depth::Full).then(|| health_answers(config.control_listen));
     findings.extend(ports(config, serving));
     findings.push(database(config));
-    findings.push(perms(config));
+    findings.push(perms(config, tools));
     if depth == Depth::Full {
         let image = config.agent_image.as_str();
         // Why the container questions have no verdict, in the words the report can stand behind: a `hub` is not
@@ -477,9 +487,12 @@ fn database(config: &Config) -> Finding {
 /// chowns it, so "every installed path belongs to the same user as the data root" is the invariant that holds on
 /// every machine, `--root` included, without this module knowing what a service user is.
 ///
+/// The tree is the caller's, not the machine's: the config file and the admin directory come from [`Tools`], so a
+/// `--root` deploy's `doctor --full` reads the tree it just wrote rather than the host's real install.
+///
 /// The limit is recorded rather than hidden: this asserts consistency and the modes the deploy writes, not "the
 /// right user owns it" — the latter is what the deploy's `chown` writes and what the unit's `User=` names.
-fn perms(config: &Config) -> Finding {
+fn perms(config: &Config, tools: &Tools) -> Finding {
     let data = &config.data_root;
     let owner = match std::fs::metadata(data) {
         Ok(metadata) => metadata.uid(),
@@ -511,8 +524,8 @@ fn perms(config: &Config) -> Finding {
         (secrets.clone(), 0o700),
         (secrets.join(crate::key::KEYS_FILE), 0o600),
         (crate::vapid::store(data), 0o600),
-        (PathBuf::from(deploy::ADMIN_DIR), 0o700),
-        (PathBuf::from(crate::config::DEFAULT_CONFIG_PATH), 0o644),
+        (tools.admin_dir.clone(), 0o700),
+        (tools.config_path.clone(), 0o644),
     ];
     let mut offenders = Vec::new();
     let mut absent = Vec::new();

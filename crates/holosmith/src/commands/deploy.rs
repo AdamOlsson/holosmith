@@ -7,8 +7,9 @@
 //! Two things belong to the command rather than to the steps:
 //!
 //! - **The tail**, which the acceptance asks for: the URL this machine will serve, `holosmith key set <provider>`,
-//!   and how a hub registers it. It prints after any run that reached the end — including one whose later steps
-//!   were skipped — because it is the command's answer, not a step's (ADR-0056).
+//!   and how a hub registers it. It prints after any run that reached the end, because it is the command's answer
+//!   rather than a step's (ADR-0056); a failed run prints the resume command instead. Since HS-049 no step belongs
+//!   to another story, so a run that reaches the end installed all seven.
 //! - **The resume command**, which a failed run prints as its last line: the command that just ran, with the same
 //!   `--config` and `--root` made absolute and never `--dry-run`. Every step reads state first, so re-running is
 //!   the whole recovery procedure, and a second syntax would be a second entry point (ADR-0055/ADR-0056).
