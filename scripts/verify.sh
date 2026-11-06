@@ -1712,6 +1712,83 @@ PY
 
   kill -TERM "$keyproxy_pid" 2>/dev/null || true
   wait "$keyproxy_pid" 2>/dev/null || true
+
+  # HS-040: the provider request reaches the TLS client **whole** — head and body. The TLS client is a
+  # process, so a shim stands in for it: it reads exactly as many bytes as the client sent, writes them to a
+  # file and answers a canned 200. No internet, no real key and no daemon, and the assertion is about the bytes
+  # the proxy produces rather than about a header it promises. Without the body the provider waits the request
+  # out and closes, which is what every model call did until this story measured it (`upstream` wrote
+  # `Content-Length` from `body.len()` and never appended the body).
+  local fake="$WORK/$name-openssl" body='{"model":"claude-haiku-5-5","max_tokens":8}' answered
+  local capture="$WORK/$name-request.bin" port2
+  mkdir -p "$fake"
+  cat >"$fake/openssl" <<'SH'
+#!/bin/sh
+# Stand in for "openssl s_client": capture what the proxy writes, then answer one complete HTTP response.
+# `count` rather than a read-until-EOF, because the proxy deliberately keeps our stdin open.
+dd bs=1 count="$CAPTURE_BYTES" of="$CAPTURE" 2>/dev/null
+printf 'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok'
+SH
+  chmod +x "$fake/openssl"
+  printf '[providers]\nopencode-go = "sk-opencode-go-verify"\n\n[sessions]\nverify-session = "hs-dummy-verify"\n' \
+    >"$root/data/secrets/keys.toml"
+  chmod 600 "$root/data/secrets/keys.toml"
+  port2="$(python3 - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+)"
+  rm -f "$capture"
+  PATH="$fake:$PATH" CAPTURE="$capture" CAPTURE_BYTES=$((${#body} + 400)) \
+    "$artifact" proxy key --listen "127.0.0.1:$port2" --keys "$root/data/secrets/keys.toml" \
+    >"$WORK/responses/$name-provider.log" 2>&1 &
+  keyproxy_pid=$!
+  for _ in $(seq 1 100); do
+    grep -q 'the key proxy is listening' "$WORK/responses/$name-provider.log" 2>/dev/null && break
+    kill -0 "$keyproxy_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  answered="$(python3 - "$port2" "$body" <<'PY'
+import socket, sys
+
+port, body = int(sys.argv[1]), sys.argv[2].encode()
+head = (b"POST /opencode-go/v1/messages HTTP/1.1\r\nHost: key-proxy:8080\r\n"
+        b"Content-Type: application/json\r\nx-api-key: hs-dummy-verify\r\n"
+        + b"Content-Length: %d\r\n\r\n" % len(body))
+with socket.create_connection(("127.0.0.1", port), timeout=20) as sock:
+    sock.sendall(head + body)
+    answer = b""
+    while True:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        answer += chunk
+print(answer.decode("utf-8", "replace").replace("\r\n", " ").strip()[:120])
+PY
+)" || fail "$name/provider-driver" "the python3 driver failed"
+  case "$answered" in
+    "HTTP/1.1 200 OK"*" ok") assertions=$((assertions + 1)) ;;
+    *) fail "$name/provider-answer" "the proxy did not forward the canned answer: $answered" ;;
+  esac
+  kill -TERM "$keyproxy_pid" 2>/dev/null || true
+  wait "$keyproxy_pid" 2>/dev/null || true
+  # Exactly one Content-Length, from the body's real length, and the body after the blank line.
+  check "$name/provider-content-length" "1" "$(grep -c '^Content-Length:' "$capture" 2>/dev/null || true)"
+  check "$name/provider-content-length-value" "Content-Length: ${#body}" \
+    "$(grep '^Content-Length:' "$capture" 2>/dev/null | tr -d '\r' || true)"
+  grep -q "^x-api-key: sk-opencode-go-verify" "$capture" 2>/dev/null ||
+    fail "$name/provider-key" "the forwarded request does not carry the stored key: $(head -c 400 "$capture")"
+  if grep -q 'hs-dummy-verify' "$capture" 2>/dev/null; then
+    fail "$name/provider-dummy" "the forwarded request still carries the session's dummy key"
+  fi
+  assertions=$((assertions + 1))
+  if [ "$(tail -c ${#body} "$capture" 2>/dev/null)" != "$body" ]; then
+    fail "$name/provider-body" "the forwarded request ends without the body: $(tail -c 200 "$capture" | tr -d '\r')"
+  fi
+  assertions=$((assertions + 1))
   "$artifact" --config "$config" key remove anthropic >/dev/null 2>&1 ||
     fail "$name/remove" "key remove failed"
   [ -z "$("$artifact" --config "$config" key list)" ] ||
@@ -2040,8 +2117,22 @@ PROBE
     fi
     assertions=$((assertions + 1))
   done
-  docker inspect hs_key --format '{{range .Mounts}}{{.Source}} {{end}}' 2>/dev/null | grep -q 'secrets/keys.toml' ||
-    fail "$name/key_mount" "hs_key does not mount the key file, so the key proxy cannot read it"
+  # The key proxy mounts the **directory** the key file lives in, not the file: `Store` writes `keys.toml` by
+  # temp-file-and-rename, and a file bind mount pins the inode, so a proxy started before the first create would
+  # keep reading the store as it was at mount time and answer `bad-key` for every session (HS-040 measured it).
+  # The assertion names the directory, and that the file is not a source of its own.
+  key_mounts="$(docker inspect hs_key --format '{{range .Mounts}}{{.Source}} {{end}}' 2>/dev/null)"
+  case "$key_mounts" in
+    *secrets/keys.toml*)
+      fail "$name/key_mount" "hs_key mounts the key file itself, which a rename cannot reach: $key_mounts"
+      ;;
+    *"/secrets "*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "$name/key_mount" "hs_key does not mount the key file's directory, so the key proxy cannot read it: $key_mounts"
+      ;;
+  esac
   assertions=$((assertions + 1))
 
   # The environment: identical in both cases once each session's own id is normalised — the acceptance's "the

@@ -245,15 +245,20 @@ pub fn parse(head: &str) -> Result<Head, RouteError> {
     })
 }
 
-/// Build the request that goes over TLS: the provider's path, the real key in the header it uses, and only
-/// headers that mean the same thing upstream.
+/// Build the request that goes over TLS: the provider's path, the real key in the header it uses, the body
+/// the client sent, and only headers that mean the same thing upstream.
+///
+/// **The body is part of the request, not an argument to its length.** A head with a `Content-Length` and no
+/// bytes is a request the provider waits out and then drops, which is the shape HS-039 shipped and HS-040's
+/// V3 run measured: every model call failed with `the provider closed the connection before answering`, and
+/// the unit tests passed because they asserted the header.
 ///
 /// **Hop-by-hop headers are dropped** (`Connection`, `Proxy-Connection`, `Keep-Alive`, `TE`, `Trailer`,
 /// `Transfer-Encoding`, `Content-Length`, `Expect`) because each one describes the connection to *this* proxy.
 /// `Host` is replaced by the provider's host, and the provider's auth header is replaced by the real key.
 /// Everything else is passed through — an Anthropic `anthropic-beta` or an OpenAI `OpenAI-Beta` is part of the
 /// request's meaning, not of the transport.
-pub fn upstream(head: &Head, real_key: &str, body: &[u8]) -> String {
+pub fn upstream(head: &Head, real_key: &str, body: &[u8]) -> Vec<u8> {
     let mut out = format!("{} {} HTTP/1.1\r\n", head.method, head.route.path);
     out.push_str(&format!("Host: {}\r\n", head.route.provider.host));
     out.push_str("Connection: close\r\n");
@@ -285,7 +290,9 @@ pub fn upstream(head: &Head, real_key: &str, body: &[u8]) -> String {
         out.push_str(&format!("Content-Length: {}\r\n", body.len()));
     }
     out.push_str("\r\n");
-    out
+    let mut request = out.into_bytes();
+    request.extend_from_slice(body);
+    request
 }
 
 /// What one answered request logs.
@@ -451,7 +458,7 @@ pub async fn handle(mut stream: TcpStream, store: &Store) {
         }
     };
     let request = upstream(&head, real, &body);
-    forward(stream, &head, session, request.into_bytes(), body.len()).await;
+    forward(stream, &head, session, request, body.len()).await;
 }
 
 /// Forward `request` to `head.route.provider` over TLS and stream the answer back, logging one record.
@@ -816,7 +823,7 @@ mod tests {
     #[test]
     fn the_upstream_head_swaps_the_dummy_for_the_real_key_and_drops_hop_by_hop_headers() {
         let parsed = parse(&head("/anthropic/v1/messages")).expect("a head");
-        let text = upstream(&parsed, "sk-real", b"{}");
+        let text = String::from_utf8(upstream(&parsed, "sk-real", b"{}")).expect("utf-8");
         assert!(text.starts_with("POST /v1/messages HTTP/1.1\r\n"));
         assert!(text.contains("Host: api.anthropic.com\r\n"), "{text}");
         assert!(text.contains("x-api-key: sk-real\r\n"), "{text}");
@@ -827,9 +834,28 @@ mod tests {
     }
 
     #[test]
+    fn the_upstream_request_is_the_head_and_then_the_body() {
+        // The defect HS-040's V3 run measured: `upstream` wrote a `Content-Length` from `body.len()` and
+        // never appended the body, so every model call was a request the provider waited out and dropped.
+        // The assertions are `ends_with` and "exactly one Content-Length", because a head-only request that
+        // names the right length is what the old tests pinned.
+        let parsed = parse(&head("/anthropic/v1/messages")).expect("a head");
+        let body = b"{\"model\":\"x\"}";
+        let request = upstream(&parsed, "sk-real", body);
+        let text = String::from_utf8(request.clone()).expect("utf-8");
+        assert_eq!(text.matches("Content-Length: ").count(), 1, "{text}");
+        assert!(text.contains("Content-Length: 13\r\n"), "{text}");
+        assert_eq!(
+            request.len(),
+            text.find("\r\n\r\n").expect("a blank line") + 4 + body.len()
+        );
+        assert!(request.ends_with(b"{\"model\":\"x\"}"), "{text}");
+    }
+
+    #[test]
     fn an_openai_route_uses_a_bearer_token_and_keeps_the_v1_prefix() {
         let parsed = parse(&head("/openai/chat/completions")).expect("a head");
-        let text = upstream(&parsed, "sk-real", b"{}");
+        let text = String::from_utf8(upstream(&parsed, "sk-real", b"{}")).expect("utf-8");
         assert!(text.contains("Authorization: Bearer sk-real\r\n"), "{text}");
         assert!(text.starts_with("POST /v1/chat/completions HTTP/1.1\r\n"));
     }

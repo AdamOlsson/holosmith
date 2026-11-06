@@ -128,6 +128,17 @@ pub const PROVIDERS: &[Provider] = &[
         base_path: "/v1",
         auth: Auth::Bearer,
     },
+    // opencode.ai's Go gateway serves two API shapes under one host, and a row is one (host, path, auth)
+    // triple — so this row is the anthropic-messages shape, which is what pi's `claude-haiku-5-5` (the model
+    // HS-040 verified V3 with) speaks. The openai-completions shape would be a second row,
+    // `opencode-go-openai`, with `/inference/go/openai/v1` and `Bearer`; ADR-0050 says why that is a row rather
+    // than a per-request choice.
+    Provider {
+        id: "opencode-go",
+        host: "opencode.ai",
+        base_path: "/inference/go/anthropic",
+        auth: Auth::XApiKey,
+    },
 ];
 
 /// The provider row `id` names, if this build has one.

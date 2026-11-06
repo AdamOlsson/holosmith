@@ -603,8 +603,9 @@ impl EgressProxy {
 ///
 /// It is the same shape as [`EgressProxy`] with two differences that are the story:
 ///
-/// * **It mounts the key file**, read-only, at its own host path. A session's container mounts neither the file
-///   nor the directory: its `models.json` has a dummy key and no real one.
+/// * **It mounts the key store's directory**, read-only, at its own host path: the file inside is written by
+///   rename, so only a directory mount sees a new `keys.toml` ([`KeyProxy::mount`]). A session's container
+///   mounts neither the directory nor the file: its `models.json` has a dummy key and no real one.
 /// * **It accepts a plaintext request from pi and speaks TLS to the provider.** The TLS client is `openssl`
 ///   from the agent image; the artifact is static and has no TLS stack of its own. That is recorded in
 ///   ADR-0048 rather than hidden in a dependency.
@@ -634,10 +635,26 @@ impl KeyProxy {
         })
     }
 
+    /// The directory the proxy container mounts: `keys`'s parent.
+    ///
+    /// **The directory, not the file.** [`crate::key::Store`] writes `keys.toml` by temp-file-and-rename,
+    /// because the file must never be observable half-written; a *file* bind mount pins the inode, so a
+    /// container started before the first create would go on reading the file as it was at mount time. Every
+    /// session's dummy is written by that rename, so a file mount makes the proxy answer `bad-key` for every
+    /// session that was created after it started — which is all of them. HS-040's V3 run measured exactly that
+    /// (`session=- … status=bad-key`); a directory mount resolves `keys.toml` at read time, so a rename inside
+    /// it is visible.
+    pub fn mount(&self) -> PathBuf {
+        self.keys
+            .parent()
+            .map_or_else(|| self.keys.clone(), Path::to_path_buf)
+    }
+
     /// The `docker run` arguments, from `run` to the last `--keys`.
     pub fn run_args(&self) -> Vec<String> {
         let binary = self.binary.display().to_string();
         let keys = self.keys.display().to_string();
+        let mount = self.mount().display().to_string();
         vec![
             "run".to_string(),
             "--detach".to_string(),
@@ -655,9 +672,10 @@ impl KeyProxy {
             "no-new-privileges".to_string(),
             "-v".to_string(),
             format!("{binary}:{binary}:ro"),
-            // The only mount of the key file anywhere in this build. A session's container never names it.
+            // The only mount of the key store anywhere in this build, and a directory for `mount`'s reason. A
+            // session's container never names it.
             "-v".to_string(),
-            format!("{keys}:{keys}:ro"),
+            format!("{mount}:{mount}:ro"),
             "--entrypoint".to_string(),
             binary,
             self.image.clone(),
@@ -951,7 +969,7 @@ mod tests {
     }
 
     #[test]
-    fn the_key_proxy_mounts_only_the_binary_and_the_key_file() {
+    fn the_key_proxy_mounts_the_binary_and_the_directory_the_key_file_lives_in() {
         let proxy = KeyProxy {
             image: "agent-image:0.1.0".to_string(),
             binary: PathBuf::from("/usr/local/bin/holosmith"),
@@ -988,9 +1006,24 @@ mod tests {
             .collect();
         assert_eq!(mounts.len(), 2, "{arguments:?}");
         assert!(
-            arguments.iter().any(|argument| argument
+            arguments
+                .iter()
+                .any(|argument| argument
+                    == "/var/lib/holosmith/secrets:/var/lib/holosmith/secrets:ro"),
+            "the directory the key file lives in is mounted read-only at its own path: {arguments:?}"
+        );
+        // The file itself must not be a mount source: `Store` writes it by rename, and a file bind mount pins
+        // the inode, so the proxy would keep reading the store as it was when the container started — every
+        // session's dummy would be unknown (HS-040's V3 run measured `session=- … status=bad-key`).
+        assert!(
+            !arguments.iter().any(|argument| argument
                 == "/var/lib/holosmith/secrets/keys.toml:/var/lib/holosmith/secrets/keys.toml:ro"),
-            "the key file is mounted read-only at its own path: {arguments:?}"
+            "the key file is mounted as a file, which a rename cannot reach: {arguments:?}"
+        );
+        assert_eq!(
+            flag("--keys"),
+            "/var/lib/holosmith/secrets/keys.toml",
+            "the proxy still names the file inside the mounted directory"
         );
         let image = arguments
             .iter()

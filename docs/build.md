@@ -623,6 +623,57 @@ Three things bite on a real machine:
   the host's own process, why the preview listener (HS-041) is on the host too, and why
   `docker_host` on a development machine is a socket rather than a TCP endpoint.
 
+## Verifying the credential path by hand (V3, V4, V5)
+
+These three checks need something no gate may require: **a real provider key**. So they are run by hand, their
+results are written into `HolosmithSpec.md`'s vertical-slice table, and the gate keeps only the half that needs
+no key (`case_key_proxy` sends a request through the proxy with a stand-in `openssl` on `PATH`, and asserts the
+bytes the proxy produces: one `Content-Length`, the body after the blank line, and the stored key swapped in).
+
+What a run needs:
+
+- a Docker daemon and `agent_image` (the same image the Docker stories use), because V3 and V4 are facts about a
+  container and its mounts;
+- a **real key for a provider in `key::PROVIDERS`**. Which provider is the operator's; the run that produced the
+  table's V3/V4/V5 cells used `opencode-go` (opencode.ai's Go gateway), whose anthropic-shaped models are
+  addressed under `/inference/go/anthropic`, and the model `opencode-go/claude-haiku-5-5` at `thinking = "max"`
+  because it streams thinking deltas at that level;
+- a git repository under `projects_root`, and a data root under `target/` — a data root the daemon cannot see
+  mounts an empty pi-home (ADR-0039);
+- `min_free_gb` low enough for the machine, exactly as the gate's Docker cases set it to 1.
+
+The run itself:
+
+```bash
+. ~/.pi/toolchains/env.sh
+scripts/build.sh                       # the demo runs the shipped artifact, not a debug build
+printf '%s\n' "$YOUR_KEY" | dist/x86_64-unknown-linux-musl/holosmith --config target/v3/config.toml \
+  key set opencode-go                  # stdin only: never an argv
+```
+
+Then, with `serve` running on that config:
+
+1. **V3** — create a session with `model = "opencode-go/claude-haiku-5-5"` and `thinking = "max"`, wait for it to
+   reach `idle`, and prompt it twice: once with a prompt that makes it call a tool (``Use the bash tool to run
+   exactly: echo holosmith-v3``) and once with a question that makes it think. Read the transcript back from
+   `GET /api/sessions/<id>/events/history?before=<big>&limit=1000` and assert `message.delta` frames of both
+   kinds, one `tool.start`/`tool.end` pair, and `usage` on `message.end`. `docker inspect s_<id>` must show no
+   provider key in the environment, and the pi-home must carry the dummy.
+2. **V4** — in the same container, `printf '{"type":"get_available_models","id":"m1"}\n' | docker exec -i
+   s_<id> pi --mode rpc --no-session` answers the bundled catalog with `PI_OFFLINE=1` and only the dummy key.
+3. **V5** — read `docker logs hs_key`. The line for a real turn names the session (`session=<id> … status=forwarded`),
+   which is the `models.json` dummy in use. Then put a competing value where the precedence order says it wins
+   (`<data>/sessions/<id>/pi-home/auth.json`, `{"<provider>":{"type":"api_key","key":"…"}}`) and run one turn;
+   the proxy now logs `status=bad-key` with `session=-`. Remove it and the turn works again. The provider's
+   environment variable is the weakest source: `docker exec -e OPENCODE_API_KEY=…` does *not* displace the
+   `models.json` key. **That is why the seeded pi-home carries no `auth.json` and the container environment no
+   provider key** — the fallback in the table's last column is a rule about what the build must keep out.
+
+Two defects this procedure found, both fixed in HS-040 (ADR-0050), are worth checking first when a model call
+fails: a `502 the provider closed the connection before answering` means the forwarded request declared a
+`Content-Length` it did not carry, and `401 … session=- … status=bad-key` for a session that exists means the
+proxy is reading a `keys.toml` from before the create — a file mount rather than the directory.
+
 ## Where the target settings live
 
 `.cargo/config.toml` names the two linkers and sets
