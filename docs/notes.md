@@ -822,6 +822,17 @@ it rather than adding a caveat beside it.
   That pace is also what makes a real 409 `unsaved_work` demonstrable from the shipped artifact: serve
   with the default `docker` backend, create (the session lands in `error`), and the delete's snapshot is
   refused.
+- **Nothing a session starts outlives it — and the reason is the next agent, not tidiness.** A `worker` or
+  `reviewer` child still running keeps editing the tree the next session has to trust, which is why the
+  cycle's last step stops every run (`subagent({action:"list"})`, then `stop`); a stranded demo `serve`
+  holds its port and its data root, so the next `serve` fails on the bind; and a `s_<id>` container or
+  `agents_<id>` network left behind makes a later `case_*` answer about the wrong machine. Score the pids
+  when you start them (a `pgrep` pattern matches unrelated processes, above), and check with `docker ps`
+  rather than assuming.
+- **An async child cannot be killed by stopping to talk to it.** `stop` ends the run and is not resumable,
+  so at the end of a session it is always safe; what is *not* safe is assuming a child that stopped
+  reporting has stopped working. `subagent({action:"list"})` is the measurement, and an empty list is the
+  only evidence that nothing of yours is still running.
 
 ---
 

@@ -4,10 +4,10 @@ You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the stan
 still governs the cycle; this file is the state of the world, and it adds one rule of its own:
 
 **This session picks up exactly one issue — the one named in §1.** Take it through the whole cycle (§5):
-plan, Linear, implement, gates, demo, review, fix, ship. Then **write the state back** into this file for the
-next agent (§5, step 10), with the next issue named in §1, and stop. Do not start a second issue however much
-budget is left: a fresh session with a fresh file is how this run continues, and one honest stop beats two
-half-finished stories.
+plan, Linear, implement, gates, demo, review, fix, ship, **write the state back** into this file for the next
+agent (§5, step 10), then **kill every child you started** and stop (§5, step 11). Do not start a second issue
+however much budget is left: a fresh session with a fresh file is how this run continues, and one honest stop
+beats two half-finished stories.
 
 The operator is not present. **Never ask a question.** Decide canonically — `HolosmithSpec.md` →
 `GLOSSARY.md` → `docs/adr/` → `docs/stories/` → the existing code — record the decision in the Linear issue
@@ -245,9 +245,10 @@ When you write the state back (§5, step 10): §1 becomes the **next** issue —
 `PER-75` (HS-043 — delete hardening and what is kept), then `PER-76` (HS-044), `PER-77` (HS-045) and
 `PER-78` (HS-046, the phase-1 verification run that is the gate for phase 2) — with the same shape: slice,
 spec, what exists, what does not, the decision that shapes the design, the acceptance as checks, non-goals,
-the demo. Update `HEAD`/`origin/master`, the counts, the ADR number you took, the last gate run's own numbers,
-and §9's row for this story (short — one paragraph). Anything you learned that is **not** state and **not**
-an ADR goes into `docs/notes.md` under a new `### Landmines: …` heading, never into §1.
+the demo. Refresh the counts, the ADR number you took and the last gate run's own numbers, and replace §9's
+row with this story's (short — one paragraph). Anything you learned that is **not** state and **not** an ADR
+goes into `docs/notes.md` under a new `### Landmines: …` heading, never into §1. Then kill what you started
+(§5, step 11) — a session that leaves a child or a container behind blocks the next one.
 
 ---
 
@@ -853,11 +854,29 @@ read-only and may run in parallel.
    for tone. Rebuild after committing (§3). Then `save_comment` with what shipped, the gates, the verbatim
    demo output, the acceptance item by item and the follow-ups; set the issue `Done`; re-read it to confirm.
 9. **Push**, with the sandbox's single-key loop (§2). If the push fails, report it — never fake one.
-10. **Write the state back and stop.** Rewrite §1 of this file for the next issue (§1.10's shape), refresh
-    `HEAD`/`origin/master`, the counts, the ADR number, the last gate run's numbers and §9's row, then commit
-    that with the message `Refresh the handoff after <IDENT>`. Then stop — do not pick up the next issue, even
-    if it is small and eligible. Set §1's replacement by `PROMPT.md`'s ranking (Linear priority → `HS-###`
-    order → anything already `In Progress` → skip an issue whose `Blocked by` stories are not `Done`).
+10. **Write the state back.** Rewrite §1 of this file for the next issue (§1.10's shape), refresh
+    the counts, the ADR number, the last gate run's numbers and §9's row, then commit that with the message
+    `Refresh the handoff after <IDENT>`. Set §1's replacement by `PROMPT.md`'s ranking (Linear priority →
+    `HS-###` order → anything already `In Progress` → skip an issue whose `Blocked by` stories are not `Done`).
+11. **Kill every child you started, then stop.** This is the last thing a session does, and it is not
+    optional: a child still running holds the working tree, a port, a data root or a Docker network, and the
+    next agent then finds a tree that moves under it, a port that is taken, or a `case_*` that fails for a
+    reason that belongs to *your* session. Nothing may outlive the session that started it.
+    - **Subagent children:** `subagent({action:"list"})` and `subagent({action:"stop", id})` on every run
+      that is still live — the planner, every `worker`, every `reviewer`, and one you left `interrupted`. A
+      run that already answered needs nothing; a run that is *listed as running* is the one that matters.
+      `stop` is not resumable, which is exactly right at the end of a session: a half-finished brief is
+      recoverable from Linear and `docs/review/`, a child that keeps editing the tree is not.
+    - **Processes:** every demo's `serve`, every backgrounded `timeout` wrapper, `scripts/verify.sh` if you
+      interrupted it, and any `node`/`python3` client you left running. **Score the pids when you start them
+      and kill those pids** — `pgrep -f 'holosmith serve'` matches unrelated processes (a landmine, in
+      `docs/notes.md`), so a pattern-based kill is both too broad and unreliable.
+    - **Docker:** `docker rm -f` every container a demo or a test made (`s_*`, `hs_*` names of yours) and
+      `docker network rm` the `agents_*` network it made; leave the machine's own `hs_egress`/`hs_key`
+      alone if `serve` is not yours to stop, and never remove a container you did not create.
+    - **Check it, do not assume it:** `subagent({action:"list"})` shows nothing running, the pids you scored
+      are gone, `docker ps` shows none of your containers, and `git status --short` is clean apart from the
+      operator's own `log.txt`/`orchestrate.sh`. Then say in one line what you killed, and stop.
 
 Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/review/` + `git log`):
 
@@ -914,7 +933,10 @@ The handful that are **not** in an ADR, and that a fresh session is most likely 
 - **S/M stories are implemented in-session; M/L ones go to a worker child with a written brief** (§5);
 - the **Linear issue number is not derivable from the story number** — read the title before writing
   `Closes <IDENT>`;
-- **one issue per session, then write the state back and stop** (this file's own rule, §5 step 10).
+- **one issue per session, then write the state back and stop** (this file's own rule, §5 steps 10–11);
+- **nothing a session starts outlives it** — every subagent run, every demo server and every container it
+  made is stopped before it stops (§5, step 11). A leftover child is not harmless: it keeps editing a tree
+  the next agent has to trust.
 
 ---
 
@@ -933,7 +955,12 @@ scripts/verify.sh                                   # baseline green, ~9–12 mi
 
 If the baseline is red before you touch anything, that is the first thing you fix — and say so in Linear.
 
-Then start §5 on **§1's issue** (`PER-73`, HS-041) and stop after step 10.
+Then start §5 on **§1's issue** (`PER-73`, HS-041) and stop after step 11.
+
+Before you begin, check that the last session left nothing behind — `subagent({action:"list"})` should show
+no run in progress, `docker ps` none of its containers, and `git status --short` should look like the line
+above. If it does not, that is the first thing you fix, and say so in Linear: a tree another session is still
+editing is a stop-the-line error, not an inconvenience.
 
 ---
 
