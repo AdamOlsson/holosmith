@@ -1073,7 +1073,10 @@ function deleteSection(
         Partial<ErrorEnvelope> & { kept?: Kept | null };
       if (!response.ok) {
         if (body.code === "unsaved_work") {
+          // The question is answered: the same request without force will only earn this 409 again, so the
+          // confirm step goes and the one button that can go ahead takes its place.
           say(UNSAVED_WORK_NOTICE);
+          confirm.hidden = true;
           forced.hidden = false;
           return;
         }

@@ -91,7 +91,20 @@ async fn conformance<B: SessionBackend>(backend: &B, label: &str, failures: Fail
         "{label}: the refusal does not name {:?}: {error}",
         failures.named
     );
-    // Case 3: a worktree step that fails says so in its own sentence. Both backends can answer this — the
+    // Case 3: a backend with no repository keeps nothing and claims nothing (HS-043). Both answer it — the
+    // stub mounts no repository at all (ADR-0015), and this suite's Docker backend has a projects root with
+    // none in it — so the delete's answer is three nulls rather than a promise about names that do not exist.
+    assert_eq!(
+        backend
+            .retained(&session(), &[])
+            .await
+            .unwrap_or_else(|error| panic!(
+                "{label}: the keep-rule could not answer for a session with no repository: {error}"
+            )),
+        Retained::nothing(),
+        "{label}: a repository that is not there keeps nothing"
+    );
+    // Case 4: a worktree step that fails says so in its own sentence. Both backends can answer this — the
     // stub by being told to fail there, the Docker backend by having no repository — and the sentence is
     // what the row keeps.
     let error = match failures.worktree {

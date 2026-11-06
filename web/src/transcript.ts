@@ -555,8 +555,9 @@ export function createFailure(code: string, message: string): string {
 
 // What a delete's 202 carries about the work it keeps (HS-043, spec item 9).
 //
-// Three keys, and every one may be `null`. `kept` itself is `null` when the repository could not answer —
-// which is *not* the same as answering "nothing survived", and the two sentences below keep them apart.
+// Three keys, and every one may be `null`. `kept` itself is `null` when the keep-rule had no answer — an
+// unreadable repository, or a row with no base commit — which is *not* the same as answering "nothing
+// survived", and the two sentences below keep them apart.
 export type Kept = {
   branch: string | null;
   wip: string | null;

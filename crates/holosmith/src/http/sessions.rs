@@ -1013,9 +1013,10 @@ pub async fn delete(state: &AppState, id: &str, query: RawQuery) -> Response {
 
 /// The keep-rule's answer for `session`, or [`Retained::Unknown`] with the reason in the log (HS-043).
 ///
-/// A repository that cannot answer must not block a delete — the request's job is to remove a session,
-/// and the operator's next `DELETE` is the retry — and it must not turn into a claim either. So the
-/// teardown keeps the branch (`Retained::Unknown`'s own rule) and the 202 carries `kept: null`.
+/// A keep-rule that cannot answer — a repository git cannot read, or a row with no `base_commit` — must not
+/// block a delete: the request's job is to remove a session, and the operator's next `DELETE` is the retry.
+/// It must not turn into a claim either, so the teardown keeps the branch (`Retained::Unknown`'s own rule)
+/// and the 202 carries `kept: null`.
 async fn retained_for(state: &AppState, session: &Session) -> Retained {
     match state
         .backend
@@ -1045,7 +1046,8 @@ async fn retained_for(state: &AppState, session: &Session) -> Retained {
 struct DeleteAnswer {
     #[serde(flatten)]
     session: Session,
-    /// `null` when the repository could not answer: a claim nobody can make is worse than no claim.
+    /// `null` when the keep-rule had no answer (an unreadable repository, a row with no base commit): a claim
+    /// nobody can make is worse than no claim.
     kept: Option<Kept>,
 }
 
@@ -1475,5 +1477,71 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} is missing or out of order in {json}"));
             at += found + needle.len();
         }
+    }
+
+    /// A row for the delete's answer, spelled once: the shape `DeleteAnswer` flattens.
+    fn a_row() -> Session {
+        Session {
+            id: "0123456789abcdef".to_string(),
+            project: "holosmith".to_string(),
+            model: "claude-sonnet-4.5".to_string(),
+            thinking: "high".to_string(),
+            worktree: String::new(),
+            base_commit: None,
+            status: Status::Deleting,
+            status_reason: None,
+            client_key: None,
+            network: false,
+            created_at: 1_760_000_000,
+            last_active_at: 1_760_000_000,
+            stopped_at: None,
+            usage_in: 0,
+            usage_out: 0,
+        }
+    }
+
+    #[test]
+    fn the_delete_answer_is_the_row_plus_what_the_teardown_keeps() {
+        // HS-043's 202: the fifteen keys a client already reads, plus one. The three shapes are all pinned
+        // here because the difference between them is the point — three nulls is "nothing survived", and
+        // `kept: null` is "the repository could not answer", which is not the same thing to say.
+        let nothing = serde_json::to_value(DeleteAnswer::of(a_row(), &Retained::nothing()))
+            .expect("the delete's answer serialises");
+        let object = nothing.as_object().expect("the answer is an object");
+        assert_eq!(
+            object.len(),
+            16,
+            "the answer is the row's fifteen columns plus `kept`: {nothing}"
+        );
+        assert_eq!(
+            object["kept"],
+            serde_json::json!({"branch": null, "wip": null, "recovery": null}),
+            "nothing kept is three explicit nulls: {nothing}"
+        );
+        // The row's own keys are siblings of `kept`, not children of it: the body is not a wrapper.
+        assert_eq!(object["id"].as_str(), Some("0123456789abcdef"));
+        assert_eq!(object["status"].as_str(), Some("deleting"));
+
+        let unknown = serde_json::to_value(DeleteAnswer::of(a_row(), &Retained::Unknown))
+            .expect("the delete's answer serialises");
+        assert_eq!(
+            unknown["kept"],
+            Value::Null,
+            "a repository that could not answer claims nothing: {unknown}"
+        );
+
+        let reference = crate::snapshot::reference("0123456789abcdef");
+        let kept = Retained::Known {
+            branch: Some("agent/0123456789abcdef".to_string()),
+            wip: Some(reference.clone()),
+        };
+        let both = serde_json::to_value(DeleteAnswer::of(a_row(), &kept)).expect("it serialises");
+        assert_eq!(both["kept"]["branch"], "agent/0123456789abcdef", "{both}");
+        assert_eq!(both["kept"]["wip"], reference, "{both}");
+        assert_eq!(
+            both["kept"]["recovery"],
+            format!("git branch rescue {reference}"),
+            "the command is the spec's, with this session's id: {both}"
+        );
     }
 }

@@ -33,8 +33,11 @@ pub enum Retained {
 
 `Known` rather than two booleans because the answer *is* the report: the 202 says which names survive and
 the recovery command names the ref, and deriving the names twice would be two spellings of one decision.
-`Unknown` exists because "cannot tell" must never mean "delete": a repository git cannot read keeps the
-branch, and the operator is told nothing rather than told something false.
+`Unknown` exists because "cannot tell" must never mean "delete". It has two causes and one rule: a
+repository git cannot read, and a row with no `base_commit` to measure ahead from (a worktree step whose row
+write failed — `Provisioner::record` logs and carries on — leaves a session that can reach `idle` and later be
+deleted with nothing to measure against). Both keep the branch, and the delete's answer is `kept: null` rather
+than a claim about names the rule could not confirm.
 
 ## "Commits beyond the base" is `ahead`'s, with the row's base commit
 
@@ -79,9 +82,15 @@ arbitrary ref — so "kept" is already true of it, and what was missing is the *
 
 - the ref **exists** and its **tree** differs from the branch's tree (or there is no branch) → `Known {
   wip: Some("refs/holosmith/wip/<id>") }`, and the 202 carries the spec's recovery command;
-- the ref does not exist → `wip: None`, and no command is printed. A snapshot whose tree equals `HEAD`'s
-  removes the ref (ADR-0049), so a session that settled with nothing uncommitted has nothing to recover
-  and must not be told a command that would fail.
+- the ref does not exist, or its tree equals the branch's → `wip: None`, and no command is printed. A snapshot
+  whose tree equals `HEAD`'s removes the ref (ADR-0049), so a session that settled with nothing uncommitted
+  has nothing to recover and must not be told a command that would fail.
+
+One residue is worth naming: because nothing deletes the ref, a delete can leave one the answer did not
+name. It takes a forced delete past a *failed* snapshot to reach — the pre-existing ref is then never
+re-taken, so it can hold exactly what the branch already committed — and the ref survives as one more name
+for the branch's own tree. Deleting it would be a teardown deciding, on a comparison, to destroy a ref; the
+story names two refs to *keep*, and a residue nobody is pointed at is the smaller cost.
 
 The tree, not the commit: a branch is a name for the work in a commit, and an agent that commits exactly
 what the snapshot captured has not left anything behind. Comparing commits would print a recovery command

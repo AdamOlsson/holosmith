@@ -378,9 +378,9 @@ impl Worktree {
 ///
 /// - [`Retained::Known`] is the repository's answer. Either name may be `None`, and `None` for both is the
 ///   ordinary case — a session that committed nothing worth keeping.
-/// - [`Retained::Unknown`] is "this repository could not be read". **It keeps the branch**, because
-///   "cannot tell" must never mean "delete", and the delete's answer claims nothing rather than
-///   claiming something it does not know.
+/// - [`Retained::Unknown`] is "this question has no answer here": a repository git cannot read, or a row
+///   with no `base_commit` to measure ahead from. **It keeps the branch**, because "cannot tell" must never
+///   mean "delete", and the delete's answer claims nothing rather than claiming something it does not know.
 ///
 /// The names are spelled fully (`agent/<id>`, `refs/holosmith/wip/<id>`) because they are what the
 /// operator is told and what the recovery command runs against; a short name would be a second spelling.
@@ -393,7 +393,10 @@ pub enum Retained {
         /// `refs/holosmith/wip/<id>` when it holds work the branch does not.
         wip: Option<String>,
     },
-    /// The repository could not be read, so the teardown keeps the branch and claims nothing.
+    /// The question has no answer: the repository could not be read, or the row has no base commit.
+    ///
+    /// Both keep the branch and make the delete's answer `kept: null`, because neither is evidence that there
+    /// is nothing to keep.
     Unknown,
 }
 

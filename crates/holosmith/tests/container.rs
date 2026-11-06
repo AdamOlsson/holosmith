@@ -956,21 +956,20 @@ async fn two_starts_of_one_session_do_not_race() {
 ///
 /// What this measures is **this build's join and leave**, not the proxy's own behaviour (`src/egress.rs`
 /// proves the rules and the bytes without a daemon, and the gate's `case_egress_proxy` proves the wire).
-/// The stand-in is `sleep infinity` in the same image under a name of its own — a test that ran under
-/// `hs_egress` would replace a live machine's proxy and leave it absent until the next boot, so it skips
-/// instead when a proxy is already running.
+///
+/// The stand-in is `sleep infinity` in the same image, under the name the teardown **detaches**: the two
+/// detaches `remove_network` makes are by container name (`hs_key`, `hs_egress`), so a proxy under any other
+/// name cannot be taken off and `docker network rm` then refuses the network — which is exactly the assertion
+/// below, and a stand-in called something else made it unprovable (HS-043 measured that: the test skipped
+/// whenever a proxy *was* running and failed whenever one was not, so its real path never ran). The name is
+/// only safe because of the SKIP: with a live proxy on the machine this test does not run at all — and
+/// because the stand-in holds itself away in a guard, so a failing assertion cannot leave `hs_egress` behind
+/// and turn every later run's SKIP into a pass.
 ///
 /// The last assertion is the load-bearing one: `docker network rm` **refuses** a network that still has an
 /// endpoint on it, so a teardown that forgot the detach would leave the network behind with a `warn` — and a
 /// `deleting` row is what ADR-0023 says a delete must never leave. It drives `SessionBackend::undo`, not
 /// `Docker`, so the assertion is about the backend's order and not about the helper it calls.
-/// The stand-in is `sleep infinity` in the same image, under the name the teardown **detaches**: the two
-/// detaches `remove_network` makes are by container name (`hs_key`, `hs_egress`), so a proxy under any other
-/// name cannot be taken off and `docker network rm` then refuses the network — which is exactly the
-/// assertion below, and a stand-in called something else made it unprovable (HS-043 measured that: the test
-/// skipped whenever a proxy *was* running, and failed whenever one was not). The name is only safe because of
-/// the SKIP above: with a live proxy on the machine this test does not run at all, and the stand-in is
-/// removed at the end.
 #[test]
 fn the_egress_proxy_joins_a_session_network_under_its_alias_and_leaves_it() {
     if !ready() {
@@ -985,6 +984,12 @@ fn the_egress_proxy_joins_a_session_network_under_its_alias_and_leaves_it() {
         return;
     }
     let stand_in = PROXY_NAME;
+    // Held **before** the first assertion, so a panic anywhere below cannot leave a container whose name the
+    // SKIP above reads.
+    let _stand_in = StandIn {
+        docker: &docker,
+        name: stand_in,
+    };
     let network = network_name(ID_PROXY);
     docker.remove_container(stand_in);
     let _ = docker.remove_network(&network);
@@ -1049,6 +1054,21 @@ fn the_egress_proxy_joins_a_session_network_under_its_alias_and_leaves_it() {
         !docker.succeeds(&["network", "inspect", &network]),
         "the network is gone after the backend's own teardown"
     );
+}
 
-    docker.remove_container(stand_in);
+/// A container that takes itself away when the test ends — including when an assertion between its start and
+/// the end panics.
+///
+/// The stand-in wears the machine's own proxy name, so a panic that left it running would make the next run's
+/// `running(PROXY_NAME)` SKIP answer *pass* on the very test that failed: the failure mode HS-043's baseline
+/// found, reached by the other door.
+struct StandIn<'a> {
+    docker: &'a Docker,
+    name: &'a str,
+}
+
+impl Drop for StandIn<'_> {
+    fn drop(&mut self) {
+        self.docker.remove_container(self.name);
+    }
 }
