@@ -74,6 +74,9 @@ serve_pid=""
 socket_pid=""
 serve_err="$WORK/serve.err"
 created_id=""
+# The preview listener's bound port, read from the banner (HS-041): the config asks for port 0.
+preview_listen=""
+preview_port=""
 assertions=0
 
 # The only cleanup path: the work dir is removed on success, kept on failure (and with --keep),
@@ -211,6 +214,30 @@ fetch_body() {
   request+="Content-Length: $(printf '%s' "$body" | wc -c)"$'\r\n'$'Connection: close\r\n\r\n'
   request+="$body"
   exec {fd}<>"/dev/tcp/127.0.0.1/$port" || return 1
+  printf '%s' "$request" >&"$fd"
+  if ! timeout 10 cat <&"$fd" >"$WORK/responses/$label.http"; then
+    exec {fd}<&-
+    return 1
+  fi
+  exec {fd}<&-
+  sed '1,/^\r$/d' "$WORK/responses/$label.http" >"$WORK/responses/$label.body"
+}
+
+# The same `/dev/tcp` fetch as `fetch`, against the **preview** listener rather than the control one (HS-041).
+#
+# A second function rather than a port parameter, for the reason the script already has three fetch shapes: every
+# other case quotes its answers under a control label, and a preview answer saved under one of those would make
+# the CORS sweep and the assertion names lie about which listener said what.
+preview_fetch() {
+  local label="$1" method="$2" path="$3"
+  shift 3
+  local -a sent=("$@")
+  local request="$method $path HTTP/1.1"$'\r\n' fd header
+  for header in "${sent[@]}"; do
+    request+="$header"$'\r\n'
+  done
+  request+=$'Connection: close\r\n\r\n'
+  exec {fd}<>"/dev/tcp/127.0.0.1/${preview_port}" || return 1
   printf '%s' "$request" >&"$fd"
   if ! timeout 10 cat <&"$fd" >"$WORK/responses/$label.http"; then
     exec {fd}<&-
@@ -363,6 +390,7 @@ serve_cases=(
   case_snapshot
   case_egress_proxy
   case_internet_toggle
+  case_preview
   case_schema_newer
 )
 
@@ -2236,6 +2264,258 @@ PROBE
 # `schema <n>` is the *recorded* number rather than the binary's, and one `warn` names both versions and the command
 # that refuses (`doctor`, HS-045). This is the observable half of the acceptance's third bullet; the pure verdict
 # and its sentence are `tests/schema_previous.rs`'s.
+# HS-041 (spec item 3, V7): the preview listener. Two halves.
+#
+# The first needs nothing but the booted artifact: a **second listener** that serves only `/<host>/<id>/*`,
+# refuses every control API path (with a sentence, not the envelope), refuses another machine's host name,
+# refuses a session id no row holds, and refuses an upgrade whose `Origin` is not the preview origin.
+#
+# The second is V7 itself: a real container on an `--internal` network, fetched **from the host** through the
+# shipped artifact, plus a WebSocket round trip over the same path. It needs the daemon and the agent image and
+# prints one SKIP line without them. The bug this case exists to catch — a preview listener that does not
+# proxy — fails the first half, so a SKIP for "no daemon" is not that bug (the rule in docs/build.md).
+#
+# The container is the case's own `docker run` under the name and network the convention gives a session's
+# container (`s_<id>` on `agents_<id>`), because the shared boot's backend is the *stub*: the question here is
+# what the preview listener does with that address, not what the backend would have built there.
+case_preview() {
+  local name=case_preview response body id path label image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
+  local upstream_port asset ws
+  [ -n "${preview_port:-}" ] ||
+    fail "$name/banner" "the banner named no preview listener: $(cat "$serve_err")"
+
+  # ---- the first half: what this listener is not -------------------------------------------------
+  preview_fetch "$name-api-health" GET /api/health ||
+    fail "$name/api_health" "GET /api/health did not answer on the preview port"
+  response="$(answer "$name-api-health")"
+  expect_status "$name/api_health" "$response" 404
+  body="$(cat "$WORK/responses/$name-api-health.body")"
+  case "$body" in
+    *'"code"'*) fail "$name/api_health" "the preview listener answered the control API's envelope: $body" ;;
+    *'/local/'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/api_health" "the refusal names no preview path: $body" ;;
+  esac
+  label="$name-api-sessions"
+  preview_fetch "$label" GET /api/sessions || fail "$label" "GET /api/sessions did not answer"
+  expect_status "$name/api_sessions" "$(answer "$label")" 404
+  label="$name-app-shell"
+  preview_fetch "$label" GET / || fail "$label" "GET / did not answer"
+  response="$(answer "$label")"
+  expect_status "$name/app_shell" "$response" 404
+  if cmp -s "$WORK/responses/$label.body" web/dist/index.html; then
+    fail "$name/app_shell" "the preview listener served the control UI's app shell"
+  fi
+  assertions=$((assertions + 1))
+
+  # Another machine's host name, a segment that is not a session id, and an id no row holds.
+  label="$name-other-host"
+  preview_fetch "$label" GET "/studio/0123456789abcdef/" || fail "$label" "did not answer"
+  expect_status "$name/other_host" "$(answer "$label")" 404
+  label="$name-bad-id"
+  preview_fetch "$label" GET "/local/notahexid/" || fail "$label" "did not answer"
+  expect_status "$name/bad_id" "$(answer "$label")" 404
+  label="$name-unknown-session"
+  preview_fetch "$label" GET "/local/0123456789abcdef/" || fail "$label" "did not answer"
+  expect_status "$name/unknown_session" "$(answer "$label")" 404
+
+  # Item 3's one rule: an upgrade's Origin must be the preview origin.
+  label="$name-foreign-origin"
+  preview_fetch "$label" GET "/local/0123456789abcdef/socket" \
+    "Origin: http://evil.example" "Upgrade: websocket" "Connection: Upgrade" ||
+    fail "$label" "did not answer"
+  response="$(answer "$label")"
+  expect_status "$name/foreign_origin" "$response" 403
+  body="$(cat "$WORK/responses/$label.body")"
+  case "$body" in
+    *"evil.example"*"http://localhost:8081"*) assertions=$((assertions + 1)) ;;
+    *)
+      case "$body" in
+        *"http://localhost:8081"*"evil.example"*) assertions=$((assertions + 1)) ;;
+        *) fail "$name/foreign_origin" "the refusal names neither origin: $body" ;;
+      esac
+      ;;
+  esac
+  label="$name-no-origin"
+  preview_fetch "$label" GET "/local/0123456789abcdef/socket" \
+    "Upgrade: websocket" "Connection: Upgrade" || fail "$label" "did not answer"
+  expect_status "$name/no_origin" "$(answer "$label")" 403
+
+  # The session screen's link: the shipped page's own script carries the path it builds and the origin key it
+  # reads. The link is drawn by the page, so the bytes to assert are the asset's, not the shell's.
+  fetch "$name-shell" GET / "Host: 127.0.0.1" || fail "$name/shell" "GET / did not answer"
+  asset="$(sed -n 's/.*<script[^>]*src="\([^"]*\.js\)".*/\1/p' "$WORK/responses/$name-shell.body" |
+    sed -n '1p')"
+  [ -n "$asset" ] || fail "$name/asset" "the app shell names no script: $(cat "$WORK/responses/$name-shell.body")"
+  fetch "$name-asset" GET "$asset" "Host: 127.0.0.1" || fail "$name/asset" "GET $asset did not answer"
+  expect_status "$name/asset" "$(answer "$name-asset")" 200
+  for ws in "/local/" "preview_origin"; do
+    if ! grep -q -- "$ws" "$WORK/responses/$name-asset.body"; then
+      fail "$name/link" "the shipped page carries no $ws: the session screen's preview link is not in it"
+    fi
+    assertions=$((assertions + 1))
+  done
+
+  # ---- the second half: V7 itself ----------------------------------------------------------------
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    printf 'SKIP %s: no Docker daemon, so V7 is not measured here (the first half ran)\n' "$name"
+    return 0
+  fi
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    printf 'SKIP %s: no image %s, so V7 is not measured here (the first half ran)\n' "$name" "$image"
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 for the WebSocket round trip (the first half ran)\n' "$name"
+    return 0
+  fi
+  upstream_port="$("$artifact" config show --config "$WORK/config.toml" |
+    sed -n 's/^preview_upstream_port = \([0-9][0-9]*\)$/\1/p')"
+  [ -n "$upstream_port" ] ||
+    fail "$name/upstream_port" "config show names no preview_upstream_port"
+
+  # A session row, through the API: the id the preview path names, and the reason a refusal is not a 404.
+  fetch_body "$name-create" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-preview-1" ||
+    fail "$name/create" "POST /api/sessions did not answer"
+  expect_status "$name/create" "$(answer "$name-create")" 202
+  id="$(sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p' "$WORK/responses/$name-create.body" | sed -n '1p')"
+  [ -n "$id" ] || fail "$name/create" "the create names no id: $(cat "$WORK/responses/$name-create.body")"
+  # Scored for the trap, in the order a failure can happen: the container and the network are both ours.
+  docker_session_id="$id"
+
+  docker network create --internal "agents_$id" >/dev/null 2>&1 ||
+    fail "$name/network" "docker network create agents_$id did not work"
+  docker run --detach --rm --name "s_$id" --network "agents_$id" \
+    --env "HS_PREVIEW_TEST_PORT=$upstream_port" "$image" node -e '
+const http = require("http");
+const crypto = require("crypto");
+const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+const server = http.createServer((request, response) => {
+  response.writeHead(200, { "content-type": "text/plain" });
+  response.end("hello from a container at " + request.url + "\n");
+});
+server.on("upgrade", (request, socket) => {
+  const key = request.headers["sec-websocket-key"] || "";
+  const accept = crypto.createHash("sha1").update(key + GUID).digest("base64");
+  socket.write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
+    "Sec-WebSocket-Accept: " + accept + "\r\n\r\n");
+  socket.on("data", (buffer) => {
+    const opcode = buffer[0] & 0x0f;
+    const masked = (buffer[1] & 0x80) !== 0;
+    const length = buffer[1] & 0x7f;
+    if (!masked || length === 0) return;
+    const mask = buffer.subarray(2, 6);
+    const payload = Buffer.from(buffer.subarray(6, 6 + length));
+    for (let index = 0; index < payload.length; index += 1) payload[index] ^= mask[index % 4];
+    if (opcode === 0x8) { socket.end(); return; }
+    socket.write(Buffer.concat([Buffer.from([0x81, payload.length]), payload]));
+  });
+});
+server.listen(Number(process.env.HS_PREVIEW_TEST_PORT), "0.0.0.0");
+' >/dev/null 2>&1 || fail "$name/container" "docker run for s_$id did not work"
+  # The container's own address on its network is the only way to know it is up: `docker inspect` is where the
+  # real flags and addresses are visible (the landmine), and the container appears seconds after `run` returns.
+  local address="" waited=0
+  while [ "$waited" -lt 100 ]; do
+    address="$(docker inspect "s_$id" \
+      --format "{{with index .NetworkSettings.Networks \"agents_$id\"}}{{.IPAddress}}{{end}}" 2>/dev/null || true)"
+    [ -z "$address" ] || break
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  [ -n "$address" ] || fail "$name/address" "s_$id has no address on agents_$id"
+  # The same question the listener asks, answered by the host directly: V7's measurement, once more, before the
+  # listener's answer is read — so a failure says which half is wrong.
+  if ! timeout 5 python3 -c "
+import http.client, sys
+connection = http.client.HTTPConnection(sys.argv[1], int(sys.argv[2]), timeout=4)
+connection.request('GET', '/')
+print(connection.getresponse().status)
+" "$address" "$upstream_port" >"$WORK/preview-direct.txt" 2>&1; then
+    fail "$name/host_reach" "the host could not reach $address:$upstream_port: $(cat "$WORK/preview-direct.txt")"
+  fi
+  check "$name/host_reach" 200 "$(cat "$WORK/preview-direct.txt")"
+
+  label="$name-through"
+  preview_fetch "$label" GET "/local/$id/" || fail "$label" "did not answer"
+  response="$(answer "$label")"
+  expect_status "$name/through" "$response" 200
+  body="$(cat "$WORK/responses/$label.body")"
+  case "$body" in
+    "hello from a container at /"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/through" "the container's answer did not arrive through the preview listener: $body" ;;
+  esac
+
+  # The WebSocket half: a hand-written handshake (the image has no `ws` package and this build has no WebSocket
+  # crate), one masked frame each way, and the preview origin as the `Origin`.
+  timeout 20 python3 - "$preview_port" "$id" "http://localhost:8081" >"$WORK/preview-websocket.txt" 2>&1 <<'PYWS' ||
+import base64
+import os
+import socket
+import sys
+
+port, session, origin = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+key = base64.b64encode(os.urandom(16)).decode()
+connection = socket.create_connection(("127.0.0.1", port), timeout=10)
+connection.sendall(
+    (
+        f"GET /local/{session}/socket HTTP/1.1\r\n"
+        f"Host: localhost:{port}\r\n"
+        f"Origin: {origin}\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        "Sec-WebSocket-Version: 13\r\n"
+        f"Sec-WebSocket-Key: {key}\r\n\r\n"
+    ).encode()
+)
+received = b""
+while b"\r\n\r\n" not in received:
+    received += connection.recv(4096)
+head, rest = received.split(b"\r\n\r\n", 1)
+status = head.split(b"\r\n")[0].decode()
+print(status)
+if "101" not in status:
+    print(head.decode(errors="replace"))
+    raise SystemExit(1)
+payload = b"ping-through-the-preview"
+mask = os.urandom(4)
+masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+connection.sendall(bytes([0x81, 0x80 | len(payload)]) + mask + masked)
+while len(rest) < 2:
+    rest += connection.recv(4096)
+length = rest[1] & 0x7F
+while len(rest) < 2 + length:
+    rest += connection.recv(4096)
+print("echo " + rest[2 : 2 + length].decode())
+PYWS
+    fail "$name/websocket" "the WebSocket round trip failed: $(cat "$WORK/preview-websocket.txt")"
+  case "$(sed -n '1p' "$WORK/preview-websocket.txt")" in
+    "HTTP/1.1 101 Switching Protocols"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/websocket" "the handshake was not answered 101: $(cat "$WORK/preview-websocket.txt")" ;;
+  esac
+  if ! grep -qx 'echo ping-through-the-preview' "$WORK/preview-websocket.txt"; then
+    fail "$name/websocket" "no frame came back through the preview listener: $(cat "$WORK/preview-websocket.txt")"
+  fi
+  assertions=$((assertions + 1))
+
+  # What this case made, this case takes back: a live session is the next case's problem otherwise.
+  fetch "$name-delete" DELETE "/api/sessions/$id?force=true" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" "X-Holosmith-Client: 1" ||
+    fail "$name/delete" "DELETE /api/sessions/$id did not answer"
+  expect_status "$name/delete" "$(answer "$name-delete")" 202
+  local waited_delete=0
+  while [ "$waited_delete" -lt 100 ]; do
+    docker inspect "s_$id" >/dev/null 2>&1 || break
+    sleep 0.1
+    waited_delete=$((waited_delete + 1))
+  done
+  docker rm --force "s_$id" >/dev/null 2>&1 || true
+  docker network rm "agents_$id" >/dev/null 2>&1 || true
+  docker_session_id=""
+}
+
 case_schema_newer() {
   local name=case_schema_newer root="$repo_root/target/verify-schema-newer-$$"
   local line
@@ -3887,7 +4167,7 @@ case_no_cors_header() {
   done
 }
 
-# start_serve [config] [data dir]: boot the artifact and read the two values the cases need from its
+# start_serve [config] [data dir]: boot the artifact and read the values the cases need from its
 # banner. `case_token_budget` boots a second time with a config of its own, so both files are
 # parameters, and so is the banner it reads: a case that ran against the first boot must not read the
 # second's.
@@ -3916,7 +4196,17 @@ start_serve() {
   control_origin="$(sed -n 's/^control_origin //p' "$serve_err" | sed -n '1p')"
   [ -n "$control_origin" ] ||
     fail "serve/banner" "serve printed no control_origin line: $(cat "$serve_err")"
-  printf 'ok serve/banner: listening on %s, control origin %s\n' "$control_listen" "$control_origin"
+  # The preview listener's port too (HS-041): the config asks for `127.0.0.1:0`, so this is the only place it can
+  # be read — and a boot whose preview could not bind is a fact this run has to know, not guess.
+  preview_listen="$(sed -n 's/^preview_listen //p' "$serve_err" | sed -n '1p')"
+  case "$preview_listen" in
+    127.0.0.1:[0-9]*) preview_port="${preview_listen##*:}" ;;
+    *)
+      fail "serve/banner" "the preview listener is not bound, and this run's cases need it: $preview_listen"
+      ;;
+  esac
+  printf 'ok serve/banner: listening on %s, control origin %s, preview %s\n' \
+    "$control_listen" "$control_origin" "$preview_listen"
 }
 
 # SIGTERM is the stop signal systemd sends, and the artifact exits 0 on it (ADR-0007). No
@@ -3960,7 +4250,10 @@ phase_serve() {
   # `tests/serve_cli.rs` covers the flag). And the idle stop at its shortest bound, which is one
   # minute: `idle_stop_min` is whole minutes on purpose, so `case_idle_stop` costs that minute rather
   # than a knob that would be a second spelling of the policy (ADR-0025).
-  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "stub"\nidle_stop_min = 1\nturn_timeout_min = 1\n' "$owner"   \
+  # `preview_listen` is asked for the kernel's port, like `--port 0` for the control listener: the case that
+  # exercises the preview listener reads the real port from the banner, and two boots on this machine (a case's own
+  # and this one) then cannot collide over 8081.
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "stub"\nidle_stop_min = 1\nturn_timeout_min = 1\npreview_listen = "127.0.0.1:0"\n' "$owner"   \
     >"$WORK/config.toml"
 
   start_serve

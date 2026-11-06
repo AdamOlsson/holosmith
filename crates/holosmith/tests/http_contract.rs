@@ -13,7 +13,7 @@ mod support;
 use support::{Served, fetch, fetch_head, state, version};
 
 #[tokio::test]
-async fn the_health_endpoint_answers_the_four_keys() {
+async fn the_health_endpoint_answers_the_five_keys() {
     let served = Served::start(http::router(state()), Duration::from_secs(10)).await;
     let response = fetch(served.addr, "/api/health").await;
     assert_eq!(response.status, 200);
@@ -27,7 +27,13 @@ async fn the_health_endpoint_answers_the_four_keys() {
         "{}",
         response.body
     );
-    assert!(response.body.ends_with('}'), "{}", response.body);
+    assert!(
+        response
+            .body
+            .ends_with(r#","preview_origin":"http://localhost:8081"}"#),
+        "the fifth key is the preview origin, and it is last: {}",
+        response.body
+    );
     served.finish().await.expect("a clean shutdown");
 }
 

@@ -30,7 +30,7 @@ fn config(dir: &TempDir) -> PathBuf {
     dir.write(
         "config.toml",
         &format!(
-            "backend = \"stub\"\ncontrol_listen = \"127.0.0.1:0\"\npreview_listen = \"127.0.0.1:8081\"\n\
+            "backend = \"stub\"\ncontrol_listen = \"127.0.0.1:0\"\npreview_listen = \"127.0.0.1:0\"\n\
              data_root = \"{}\"\n",
             dir.file("data").display()
         ),
@@ -157,6 +157,68 @@ impl Drop for Server {
     }
 }
 
+/// A preview port another process holds is one `warn` and a banner line, not a refusal (HS-041, ADR-0051).
+///
+/// The control UI is the screen an operator needs when something else on the machine is holding a port, so a
+/// preview that cannot bind must not take it down — and the banner must say what happened rather than claim a
+/// listener this run does not have.
+#[test]
+fn a_preview_port_that_is_taken_is_a_warning_and_the_control_listener_still_serves() {
+    let dir = TempDir::new("preview-taken");
+    let held = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port is bindable");
+    let taken = held.local_addr().expect("a bound address").port();
+    let config = dir.write(
+        "config.toml",
+        &format!(
+            "backend = \"stub\"\ncontrol_listen = \"127.0.0.1:0\"\n\
+             preview_listen = \"127.0.0.1:{taken}\"\ndata_root = \"{}\"\n",
+            dir.file("data").display()
+        ),
+    );
+    let data = dir.file("data");
+    let mut server = Server::start(
+        dir,
+        &build(&[
+            "serve",
+            "--config",
+            config.to_str().expect("the temp path is UTF-8"),
+            "--port",
+            "0",
+            "--data-dir",
+            data.to_str().expect("the temp path is UTF-8"),
+            "--backend",
+            "stub",
+        ]),
+    )
+    .wait_until_listening();
+    let said = server.said();
+    // The `warn` this case is about is a tracing line, not a banner line: the eight startup lines are still
+    // eight, which is the pin `the_startup_lines_are_exact_and_name_the_bound_port` holds.
+    let banner: Vec<&str> = said
+        .lines()
+        .filter(|line| !line.contains(" WARN "))
+        .collect();
+    assert_eq!(
+        banner.len(),
+        8,
+        "a failed preview bind must not add a banner line: {said}"
+    );
+    assert!(
+        said.contains("WARN holosmith::serve: the preview listener could not be bound"),
+        "the failure must be said in words: {said}"
+    );
+    let line = said
+        .lines()
+        .find(|line| line.starts_with("preview_listen "))
+        .expect("the banner always has a preview line");
+    assert!(line.contains("unavailable"), "{line}");
+    assert!(line.contains(&taken.to_string()), "{line}");
+    // The control listener is unaffected, and the process still stops the way systemd expects.
+    assert_eq!(server.get("/api/health").0, 200);
+    assert_eq!(server.signal("TERM"), 0);
+    drop(held);
+}
+
 /// The value on one `key value` startup line.
 fn startup(said: &str, key: &str) -> Option<String> {
     said.lines()
@@ -219,9 +281,20 @@ fn the_startup_lines_are_exact_and_name_the_bound_port() {
         lines[5],
         format!("control_origin http://localhost:{}", server.port)
     );
-    assert_eq!(
-        lines[6],
-        "preview_listen 127.0.0.1:8081 (configured, not bound until HS-041)"
+    // HS-041 binds the preview listener, so its line is the address the kernel gave — like the control
+    // line above, and for the same reason: `127.0.0.1:0` is what the config may say, and the banner is where
+    // the real port is readable. Two listeners, two addresses, one line each, and still exactly eight.
+    let preview = lines[6]
+        .strip_prefix("preview_listen 127.0.0.1:")
+        .expect("the preview line names a loopback address");
+    let preview_port: u16 = preview.parse().expect("the preview port is a number");
+    assert_ne!(
+        preview_port, 0,
+        "the banner printed the port that was asked for, not the one bound"
+    );
+    assert!(
+        TcpStream::connect(("127.0.0.1", preview_port)).is_ok(),
+        "the preview listener is not accepting on {preview_port}"
     );
     // The eighth line, appended after `preview_listen` (ADR-0009): the file the process
     // opened and the schema it recorded.

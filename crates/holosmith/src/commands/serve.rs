@@ -20,6 +20,7 @@ use crate::docker::{Docker, EGRESS_NETWORK};
 use crate::events::{self, StreamRegistry, WriterOptions};
 use crate::http::{self, App, AppState, Guards};
 use crate::logging;
+use crate::preview;
 use crate::runtime::{Backend, Runtime};
 use crate::serve::{self, ServeOptions};
 use crate::version::VersionInfo;
@@ -209,7 +210,38 @@ pub fn run(args: ServeArgs) -> ExitCode {
         if ephemeral_origin {
             loaded.config.control_origin = loaded.config.control_origin.with_port(bound.port());
         }
-        banner(&filter, &loaded, &runtime, &version, bound, &database);
+        // The **preview listener** (HS-041, spec item 3): the second listener, on its own origin, which serves
+        // only `/<host>/<id>/*` and no API. It binds here — before the banner, so the banner can print the
+        // address the kernel gave, exactly as the control line does — and a bind that fails is one `warn`
+        // rather than a refusal: the control UI is the screen an operator needs when something else on the
+        // machine already holds the preview port, and `config` already refuses `preview_listen ==
+        // control_listen`, which is the collision that is a mistake rather than an accident (ADR-0051).
+        let mut preview_listener = None;
+        let preview_line = match TcpListener::bind(loaded.config.preview_listen).await {
+            Ok(listener) => match listener.local_addr() {
+                Ok(address) => {
+                    preview_listener = Some(listener);
+                    address.to_string()
+                }
+                Err(error) => {
+                    unavailable(&loaded.config, &error);
+                    format!("unavailable ({}: {error})", loaded.config.preview_listen)
+                }
+            },
+            Err(error) => {
+                unavailable(&loaded.config, &error);
+                format!("unavailable ({}: {error})", loaded.config.preview_listen)
+            }
+        };
+        banner(
+            &filter,
+            &loaded,
+            &runtime,
+            &version,
+            bound,
+            &preview_line,
+            &database,
+        );
         let guards = Guards::from_config(&loaded.config);
         let database = Arc::new(Mutex::new(database));
         // The writer thread outlives this scope, so its handle is what the app carries. The
@@ -262,8 +294,55 @@ pub fn run(args: ServeArgs) -> ExitCode {
             "the compaction task is running"
         );
         let compactor = state.compactor().spawn();
+        // The preview listener's own context: the origin an upgrade must come from, the rows, and the one
+        // question it cannot answer itself — where a session's container is on its own network (HS-041).
+        let preview_context = preview::Context::of(
+            &loaded.config,
+            Arc::clone(&state.database),
+            Arc::new(preview::Containers {
+                docker: Docker::new(loaded.config.docker_host.clone()),
+                port: loaded.config.preview_upstream_port,
+            }),
+        );
+        // **One signal handler, two listeners.** `serve::run` and `preview::serve` both take a shutdown future
+        // and both get theirs from this watch, so the process still has exactly one `StopSignal` and the two
+        // drains start together. The task that forwards it is what lets the control listener stay armed on the
+        // signal itself, which is the shape `tests/serve_cli.rs` pins.
+        let (stopped, stop_watch) = tokio::sync::watch::channel(false);
+        let signal = stopped.clone();
+        let watcher = tokio::spawn(async move {
+            stop.recv().await;
+            let _ = signal.send(true);
+        });
+        let mut preview_stop = stop_watch.clone();
+        let preview_task = preview_listener.map(|listener| {
+            tokio::spawn(preview::serve(
+                listener,
+                Arc::new(preview_context),
+                async move {
+                    let _ = preview_stop.changed().await;
+                },
+            ))
+        });
+        let mut control_stop = stop_watch.clone();
         let app = App::new(http::router(state), guards);
-        let served = serve::run(listener, app, ServeOptions::default(), stop.recv()).await;
+        let served = serve::run(listener, app, ServeOptions::default(), async move {
+            let _ = control_stop.changed().await;
+        })
+        .await;
+        // A listener that ended on its own — a bind that never answered, a control listener that failed — still
+        // stops the other: nothing a session start left behind may outlive the process that serves it.
+        let _ = stopped.send(true);
+        watcher.abort();
+        if let Some(task) = preview_task
+            && let Err(error) = task.await
+        {
+            tracing::warn!(
+                target: "holosmith::serve",
+                %error,
+                "the preview listener stopped unexpectedly"
+            );
+        }
         // The sweeper is a policy over rows, not part of serving: when the listener's drain is over,
         // the process has no more questions to ask, so its next tick must not hold anything up. The
         // runtime drops the task anyway; aborting says so, and makes the handle's purpose its comment.
@@ -293,6 +372,17 @@ pub fn run(args: ServeArgs) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The one `warn` a preview listener that could not bind prints: what it means for this run.
+fn unavailable(config: &Config, error: &std::io::Error) {
+    tracing::warn!(
+        target: "holosmith::serve",
+        listen = %config.preview_listen,
+        %error,
+        "the preview listener could not be bound: this run serves its sessions but no previews, and the control \
+         UI is unaffected"
+    );
 }
 
 /// Start the machine's egress proxy container, replacing one an earlier run left behind (HS-037).
@@ -435,6 +525,7 @@ fn banner(
     runtime: &Runtime,
     version: &VersionInfo,
     bound: SocketAddr,
+    preview: &str,
     database: &Database,
 ) {
     eprintln!("log {filter}");
@@ -446,10 +537,9 @@ fn banner(
     eprintln!("data_root {}", loaded.config.data_root.display());
     eprintln!("control_listen {bound}");
     eprintln!("control_origin {}", loaded.config.control_origin.as_str());
-    eprintln!(
-        "preview_listen {} (configured, not bound until HS-041)",
-        loaded.config.preview_listen
-    );
+    // HS-041 binds it, so this line reports the address the kernel gave (a `127.0.0.1:0` preview is how a
+    // test asks for one) or, in as many words, that this run has no preview listener and why.
+    eprintln!("preview_listen {preview}");
     eprintln!(
         "database {} schema {}",
         database.path().display(),

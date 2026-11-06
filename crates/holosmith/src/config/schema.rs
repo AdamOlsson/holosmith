@@ -101,6 +101,12 @@ pub const KNOWN_KEYS: &[KeySpec] = &[
         set: set_preview_origin,
     },
     KeySpec {
+        path: "preview_upstream_port",
+        section: None,
+        kind: Kind::Integer,
+        set: set_preview_upstream_port,
+    },
+    KeySpec {
         path: "allowed_hosts",
         section: None,
         kind: Kind::StringArray,
@@ -554,6 +560,13 @@ fn positive(value: &Value, what: &str) -> Result<u64, String> {
     Ok(number as u64)
 }
 
+fn set_preview_upstream_port(config: &mut Config, value: &Value) -> Result<(), String> {
+    let port = positive(value, "port")?;
+    config.preview_upstream_port = u16::try_from(port)
+        .map_err(|_| format!("must be a TCP port between 1 and 65535, not {port}"))?;
+    Ok(())
+}
+
 fn set_container_cpus(config: &mut Config, value: &Value) -> Result<(), String> {
     config.container_cpus = u32::try_from(positive(value, "cpu")?)
         .map_err(|_| "must fit in a 32-bit count of CPUs".to_string())?;
@@ -773,7 +786,7 @@ mod tests {
 
     #[test]
     fn the_table_holds_the_documented_keys() {
-        assert_eq!(KNOWN_KEYS.len(), 31);
+        assert_eq!(KNOWN_KEYS.len(), 32);
     }
 
     #[test]

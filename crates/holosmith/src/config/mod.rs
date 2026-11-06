@@ -185,6 +185,14 @@ pub struct Config {
     pub preview_listen: SocketAddr,
     pub control_origin: Origin,
     pub preview_origin: Origin,
+    /// The TCP port a session's own dev server listens on **inside its container** (HS-041, spec item 3).
+    ///
+    /// The preview listener forwards `/<host>/<id>/…` here, on the address the container has on its own
+    /// private network. One key for every session because each container has its own network namespace, so
+    /// two sessions may both listen on it — and a key rather than a per-session column because nothing in
+    /// the row knows a port, and nothing else on the machine does either: the agent image declares no
+    /// `EXPOSE`, so `docker inspect` has no exposed port to read (measured, ADR-0051).
+    pub preview_upstream_port: u16,
     pub allowed_hosts: Vec<String>,
     pub owner: Option<String>,
     pub data_root: PathBuf,
@@ -232,6 +240,7 @@ impl Default for Config {
             preview_listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 8081)),
             control_origin: Origin("http://localhost:8080".to_string()),
             preview_origin: Origin("http://localhost:8081".to_string()),
+            preview_upstream_port: 3000,
             allowed_hosts: Vec::new(),
             owner: None,
             data_root: PathBuf::from("/var/lib/holosmith"),
@@ -713,8 +722,13 @@ fn semantic_problems(
 /// port. One implementation, called by the config pass and by the `--port` override, so the
 /// two cannot word the same collision differently. `note` says when one of the values being
 /// compared is a built-in default.
+///
+/// A port of `0` is the kernel's to choose, so two of them are not a collision: `127.0.0.1:0` is how a test
+/// (and `--port 0`) asks for a free port, and the two listeners would be given different ones. The rule is
+/// about sharing a port, not about sharing a spelling of "any" (HS-041).
 fn preview_listen_problem(config: &Config, note: &str) -> Option<String> {
-    (config.control_listen == config.preview_listen).then(|| {
+    let one_is_ephemeral = config.control_listen.port() == 0 || config.preview_listen.port() == 0;
+    (!one_is_ephemeral && config.control_listen == config.preview_listen).then(|| {
         format!(
             "must differ from control_listen{note}, both are {}",
             config.control_listen

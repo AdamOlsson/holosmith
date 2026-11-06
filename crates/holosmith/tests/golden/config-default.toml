@@ -4,6 +4,7 @@ control_listen = "127.0.0.1:8080"
 preview_listen = "127.0.0.1:8081"
 control_origin = "http://localhost:8080"
 preview_origin = "http://localhost:8081"
+preview_upstream_port = 3000
 allowed_hosts = []
 # owner unset
 data_root = "/var/lib/holosmith"

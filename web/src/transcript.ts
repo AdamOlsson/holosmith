@@ -565,6 +565,34 @@ export function networkText(network: boolean): string {
   return network ? "internet on" : "internet off";
 }
 
+// The host name this machine uses for its own sessions (spec item 3, GLOSSARY's **Local**).
+//
+// The preview listener serves `/<host>/<id>/…` and refuses every other host name, so a link out of the session
+// screen has to spell the segment the way the listener parses it. That is why the name and the shape are
+// rules in this file rather than two strings in `main.ts`: a link and a listener that disagree are a 404 a
+// browser shows and nothing explains (HS-041).
+export const LOCAL_HOST = "local";
+
+// The path a session's preview is served at, on the preview origin.
+export function previewPath(id: string): string {
+  return `/${LOCAL_HOST}/${encodeURIComponent(id)}/`;
+}
+
+// The whole URL the session screen links to: the preview origin — which only the server knows, and which it
+// publishes as `GET /api/health`'s fifth key — and then the path. A trailing slash on the origin is folded so a
+// configured `https://host/` and `https://host` cannot make two different links.
+export function previewUrl(origin: string, id: string): string {
+  return `${origin.replace(/\/+$/, "")}${previewPath(id)}`;
+}
+
+// Whether the session screen offers a preview: a session that has (or is getting) a container may have a dev
+// server in it, and one that has none cannot. Offering a link to a session with no container would be a dead
+// page an operator has to diagnose; hiding it from a `starting` session would hide the one link they came for,
+// because the agent's build usually appears before the session settles.
+export function previewOffered(state: SessionState): boolean {
+  return state === "starting" || state === "running" || state === "idle";
+}
+
 // Where the stream is. One spelling, so the list and the screen cannot ask for different paths,
 // and no `since=` parameter is invented: the browser resends the last SSE `id` (a seq) as
 // `Last-Event-ID` and the server replays after it (ADR-0014).

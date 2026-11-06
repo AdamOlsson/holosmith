@@ -21,8 +21,12 @@ import {
   PROJECT_REFUSALS,
   createFailure,
   historyPath,
+  LOCAL_HOST,
   networkText,
   parseFrame,
+  previewOffered,
+  previewPath,
+  previewUrl,
   parseTruncated,
   sessionIdFromPath,
   stateText,
@@ -894,5 +898,39 @@ test("the Internet-access phrase is two words, and neither promises a route", ()
     // Nor a configuration: the environment is identical in both cases (ADR-0045), so naming one would be a lie
     // about the difference and would send an operator looking for something to change.
     assert.doesNotMatch(phrase, /HTTPS_PROXY|http_proxy|environment variable/i, phrase);
+  }
+});
+
+// ---- the preview link (HS-041) --------------------------------------------------------------
+
+// The session screen's link to what the agent built is the preview listener's own origin plus the path the
+// listener parses. Two rules, because either half can be wrong on its own: the host segment (that is the
+// listener's, not the page's) and which states offer a link at all.
+test("a preview path spells the host segment the listener parses", () => {
+  assert.equal(previewPath("0123456789abcdef"), "/local/0123456789abcdef/");
+  assert.equal(LOCAL_HOST, "local");
+  assert.equal(previewPath("0123456789abcdef").startsWith(`/${LOCAL_HOST}/`), true);
+});
+
+test("a preview URL is the origin and the path, with one slash between them", () => {
+  const id = "0123456789abcdef";
+  for (const origin of ["https://machine.tailnet.ts.net:8444", "https://machine.tailnet.ts.net:8444/"]) {
+    assert.equal(
+      previewUrl(origin, id),
+      `https://machine.tailnet.ts.net:8444/local/${id}/`,
+      origin,
+    );
+  }
+  assert.equal(previewUrl("http://localhost:8081", id), `http://localhost:8081/local/${id}/`);
+});
+
+test("a preview is offered exactly by the states that have a container", () => {
+  const offered: SessionState[] = ["starting", "running", "idle"];
+  const hidden: SessionState[] = ["stopped", "error", "deleting"];
+  for (const state of offered) {
+    assert.equal(previewOffered(state), true, state);
+  }
+  for (const state of hidden) {
+    assert.equal(previewOffered(state), false, state);
   }
 });

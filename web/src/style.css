@@ -87,6 +87,13 @@ section {
   font-family: ui-monospace, monospace;
 }
 
+/* The session screen's link to what the agent built, on the preview listener's own origin (HS-041). It sits in
+   the meta row with the other facts about the session and is hidden when there is no container to preview. */
+.preview {
+  opacity: 1;
+  text-decoration: underline;
+}
+
 .step,
 .retention {
   font-size: 0.875rem;

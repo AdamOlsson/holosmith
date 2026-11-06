@@ -33,7 +33,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 
 /// The port the proxy listens on, and the port `HTTPS_PROXY` names (spec item 2).
@@ -494,7 +494,7 @@ pub async fn serve(listener: TcpListener, rules: Arc<Rules>) {
 /// The refusal is written to the caller and logged; nothing is retried, because a proxy that retried a refusal
 /// would be a proxy whose log line does not mean what it says.
 pub async fn handle(mut stream: TcpStream, rules: &Rules) {
-    let head = match read_head(&mut stream).await {
+    let head = match crate::tunnel::read_head(&mut stream, MAX_HEAD, HEAD_TIMEOUT).await {
         Some(head) => head,
         None => {
             let _ = respond(&mut stream, 400, NOT_A_HEAD).await;
@@ -620,7 +620,8 @@ impl Record {
                 down: 0,
             };
         }
-        let (up, down) = pump_both(stream, upstream).await;
+        let (up, down) =
+            crate::tunnel::pump_both(stream, upstream, crate::tunnel::Tunnel::Egress).await;
         Self {
             session,
             host: host.to_string(),
@@ -628,91 +629,6 @@ impl Record {
             up,
             down,
         }
-    }
-}
-
-/// Copy in both directions until both are done, counting bytes **as they move**.
-///
-/// `tokio::io::copy_bidirectional` is the tidier call and it is what this used to be, but it answers `(0, 0)`
-/// when either direction fails, which is the one case an operator reads the line for. Two `copy`-shaped loops
-/// over a split connection count each chunk before the next read, so an error costs the chunk that failed and
-/// nothing else. A `shutdown` on the far side is how the other half learns the stream ended.
-async fn pump_both(stream: TcpStream, upstream: TcpStream) -> (u64, u64) {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    let (mut client_read, mut client_write) = tokio::io::split(stream);
-    let (mut upstream_read, mut upstream_write) = tokio::io::split(upstream);
-    let up = AtomicU64::new(0);
-    let down = AtomicU64::new(0);
-    let (sent, received) = tokio::join!(
-        pump(&mut client_read, &mut upstream_write, &up),
-        pump(&mut upstream_read, &mut client_write, &down),
-    );
-    if let Err(error) = sent {
-        tracing::debug!(target: "holosmith::egress", %error, "the tunnel's upload stopped");
-    }
-    if let Err(error) = received {
-        tracing::debug!(target: "holosmith::egress", %error, "the tunnel's download stopped");
-    }
-    (up.load(Ordering::Relaxed), down.load(Ordering::Relaxed))
-}
-
-/// One direction of a tunnel, counting every byte that reached the other side.
-async fn pump<R, W>(
-    from: &mut R,
-    to: &mut W,
-    counted: &std::sync::atomic::AtomicU64,
-) -> std::io::Result<()>
-where
-    R: tokio::io::AsyncRead + Unpin,
-    W: tokio::io::AsyncWrite + Unpin,
-{
-    use std::sync::atomic::Ordering;
-
-    let mut buffer = vec![0u8; 16 * 1024];
-    loop {
-        let read = match from.read(&mut buffer).await {
-            Ok(0) => {
-                let _ = to.shutdown().await;
-                return Ok(());
-            }
-            Ok(read) => read,
-            Err(error) => return Err(error),
-        };
-        to.write_all(&buffer[..read]).await?;
-        counted.fetch_add(read as u64, Ordering::Relaxed);
-    }
-}
-
-/// Read up to the blank line, bounded by [`MAX_HEAD`] and [`HEAD_TIMEOUT`].
-///
-/// Returns what was read as text — including the blank line, which is where [`Request::parse`] stops — or
-/// `None` for a head that never arrived, arrived too long, or was not UTF-8. A head is ASCII in practice; a
-/// body that is not is not this proxy's business.
-async fn read_head(stream: &mut TcpStream) -> Option<String> {
-    let mut buffer = Vec::with_capacity(512);
-    let read = tokio::time::timeout(HEAD_TIMEOUT, async {
-        loop {
-            let mut chunk = [0u8; 512];
-            let read = stream.read(&mut chunk).await.ok()?;
-            if read == 0 {
-                return None;
-            }
-            buffer.extend_from_slice(&chunk[..read]);
-            if buffer.windows(4).any(|window| window == b"\r\n\r\n")
-                || buffer.windows(2).any(|window| window == b"\n\n")
-            {
-                return Some(());
-            }
-            if buffer.len() >= MAX_HEAD {
-                return None;
-            }
-        }
-    })
-    .await;
-    match read {
-        Ok(Some(())) => String::from_utf8(buffer).ok(),
-        _ => None,
     }
 }
 
@@ -794,6 +710,7 @@ async fn respond(stream: &mut TcpStream, status: u16, sentence: &str) -> std::io
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncReadExt;
 
     fn connect_request(target: &str) -> Request {
         Request {

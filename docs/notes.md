@@ -1264,3 +1264,35 @@ it rather than adding a caveat beside it.
   `/inference/go/anthropic` is the anthropic-messages one, and it only emits thinking deltas at `--thinking max`
   (at `xhigh` it answered without thinking, and an easy prompt produces none at any level — ask it something that
   needs reasoning or the check measures the prompt rather than the wire).
+
+### Landmines: the preview listener (HS-041)
+
+- **The host *can* reach a container on an `--internal` network — measured, once, both ways.** `docker inspect`
+  gave `172.18.0.2` on `hs_v7probe`, the host fetched `http://172.18.0.2:8099/` and got `200`, and the same
+  container's own connection to its gateway `172.18.0.1:8099` was `ECONNREFUSED`. ADR-0044's "a refused connection
+  counts as reached" is why the second line matters: an internal network's gateway answers *from inside it*, so
+  "cannot reach out" was never evidence about "reachable from in". V7 is the second fact only, and it passes.
+- **The preview listener is not an `axum` app, and adding a route to it is not a thing you can do.** It is a raw
+  TCP tunnel (`src/preview.rs`) like `egress` and `keyproxy`, with no route table at all; the only paths that exist
+  are the ones `Route::strip` accepts. Its refusals are **plain text**, not ADR-0008's envelope — the envelope is
+  the control listener's contract, and a preview is a page an operator opens on a phone.
+- **A body can arrive in the same read as the head.** `tunnel::read_head` returns everything it read, so anything
+  relayed from that buffer must be split at the blank line (`preview::split_head`) or a `POST`'s body is parsed as
+  header lines and mangled. `a_body_that_arrived_with_the_head_still_reaches_the_dev_server` is the test.
+- **`docker inspect` with a network index is brace soup; use a placeholder.** The format for a container's address
+  on *one* network is `{{with index .NetworkSettings.Networks "agents_<id>"}}{{.IPAddress}}{{end}}`, and writing
+  that through `format!` needs four escaped braces per call. `preview::Containers` keeps the literal and replaces
+  a `NETWORK` token instead.
+- **A preview port of `0` is not a collision with a control port of `0`.** `preview_listen_problem` compares the
+  two `SocketAddr`s, so it now exempts either port being `0` — the kernel picks different ones. Without that,
+  every test and every case would need a fixed preview port and would race whatever else on the machine held it.
+  `scripts/verify.sh` writes `preview_listen = "127.0.0.1:0"` and reads the real port from the banner.
+- **`case_preview` makes its own container, because the shared boot's backend is the stub.** The container is
+  `s_<id>` on `--internal` `agents_<id>`, named the way the convention names a session's container, and the case
+  asks the host *directly* first so a failure says which half is wrong. Its WebSocket half is a hand-written
+  handshake in `python3` and a hand-written echo in the container's `node -e`: the image has no `ws` package and
+  this build has no WebSocket crate, and that is exactly why a byte tunnel is the right shape.
+- **`preview_origin` is the published origin, never the bound port.** `--port 0` re-derives `control_origin` because
+  the flag asked the kernel for a port; nothing does that for the preview, because the origin is the name a phone
+  browses (`tailscale serve --https=8444` maps to it). A case that binds `127.0.0.1:0` and sends `Origin:
+  http://localhost:8081` is therefore correct behaviour, not a mismatch.

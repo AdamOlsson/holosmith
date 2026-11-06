@@ -20,6 +20,8 @@ import {
   historyPath,
   networkText,
   parseFrame,
+  previewOffered,
+  previewUrl,
   parseTruncated,
   sessionIdFromPath,
   stateText,
@@ -37,6 +39,8 @@ type Health = {
   version: string;
   role: string;
   uptime_s: number;
+  // The origin a session's preview is served on (HS-041): the listener's own origin, never the control one.
+  preview_origin: string;
 };
 
 type ErrorEnvelope = {
@@ -1032,6 +1036,16 @@ function sessionScreen(health: Health, session: SessionDetail): void {
     budget.hidden = notice === null;
   };
 
+  // The link to what the agent built, on the preview listener's own origin (HS-041, spec item 3). It is drawn
+  // from the state, so a session whose container is gone does not offer a page nobody is serving — and it is
+  // patched by the same callback that patches the badge, so a session that stops stops offering it.
+  const preview = document.createElement("a");
+  preview.className = "preview";
+  preview.href = previewUrl(health.preview_origin, session.id);
+  preview.textContent = "preview ↗";
+  preview.rel = "noreferrer";
+  preview.target = "_blank";
+
   const meta = make("div", "session-meta");
   meta.append(
     make("span", "id", session.id),
@@ -1040,7 +1054,9 @@ function sessionScreen(health: Health, session: SessionDetail): void {
     make("span", "network", networkText(session.network)),
     make("span", "activity", `active ${relativeTime(session.last_active_at, secondsNow())}`),
     budget,
+    preview,
   );
+  preview.hidden = !previewOffered(session.status);
   showSpend({ settled: 0, usage: false });
 
   const transcript = make("div", "transcript");
@@ -1060,6 +1076,7 @@ function sessionScreen(health: Health, session: SessionDetail): void {
 
   const composer = composerSection(session.id, (state, reason) => {
     badge.textContent = stateText(state, reason);
+    preview.hidden = !previewOffered(state);
   });
   composer.update(session.status);
 
