@@ -20,6 +20,9 @@ import {
   budgetNotice,
   PROJECT_REFUSALS,
   createFailure,
+  deletedNotice,
+  FORCED_DELETE_LABEL,
+  UNSAVED_WORK_NOTICE,
   historyPath,
   LOCAL_HOST,
   networkText,
@@ -32,6 +35,7 @@ import {
   stateText,
   stoppedDetail,
   stoppedNotice,
+  type Kept,
   streamPath,
   type Change,
   type Frame,
@@ -933,4 +937,70 @@ test("a preview is offered exactly by the states that have a container", () => {
   for (const state of hidden) {
     assert.equal(previewOffered(state), false, state);
   }
+});
+
+// ---- what a delete keeps (HS-043, spec item 9) ------------------------------------------------
+
+// The session screen's sentence after a delete was accepted. The command comes from the answer, so these
+// cases are about the three shapes the server can send and never about the command's spelling: a second
+// spelling in the page is how the copy an operator taps stops being the command that works.
+function kept(branch: string | null, wip: string | null): Kept {
+  return {
+    branch,
+    wip,
+    recovery: wip === null ? null : `git branch rescue ${wip}`,
+  };
+}
+
+test("a delete that kept nothing says so", () => {
+  assert.equal(deletedNotice(kept(null, null)), "deleted — nothing was kept");
+});
+
+test("a delete says an answer it could not get is not an empty one", () => {
+  // `null` is the repository refusing to answer (a base commit a row does not have, a repository git cannot
+  // read), and the page may not turn that into "nothing was kept" — a claim the server declined to make.
+  const answer = deletedNotice(null);
+  assert.equal(answer, "deleted");
+  assert.doesNotMatch(answer, /nothing was kept/i, answer);
+});
+
+test("a kept branch is named, and a kept ref brings the command that recovers it", () => {
+  const branch = "agent/0123456789abcdef";
+  const wip = "refs/holosmith/wip/0123456789abcdef";
+  const both = deletedNotice(kept(branch, wip));
+  assert.match(both, /deleted/, both);
+  assert.match(both, new RegExp(branch), both);
+  assert.match(both, new RegExp(wip), both);
+  assert.match(both, new RegExp(`git branch rescue ${wip}`), both);
+  // The command is the answer's, character for character: the page adds no prefix and no punctuation.
+  assert.equal(both.includes(kept(branch, wip).recovery as string), true, both);
+});
+
+test("a delete that kept only the ref still names the command, and one that kept only a branch does not", () => {
+  const wip = "refs/holosmith/wip/0123456789abcdef";
+  const refOnly = deletedNotice(kept(null, wip));
+  assert.match(refOnly, new RegExp(`git branch rescue ${wip}`), refOnly);
+
+  const branchOnly = deletedNotice(kept("agent/0123456789abcdef", null));
+  assert.equal(branchOnly.includes("git branch rescue"), false, branchOnly);
+  assert.equal(branchOnly.includes("nothing was kept"), false, branchOnly);
+});
+
+test("a delete's sentence is not a stop's", () => {
+  // `stoppedNotice` promises "nothing was deleted", which a stop may and a delete may not. The two families
+  // share no sentence, so a delete that kept something can never read like a reassurance.
+  const deleteSentence = deletedNotice(kept("agent/0123456789abcdef", null));
+  for (const reason of ["evicted", "idle_stop"]) {
+    const stopSentence = stoppedNotice(reason) as string;
+    assert.notEqual(deleteSentence, stopSentence, reason);
+    assert.equal(deleteSentence.includes(stopSentence), false, reason);
+  }
+});
+
+test("the refused-snapshot sentence offers a decision, not a query string", () => {
+  // The envelope's own message names `?force=true`; on a phone the screen shows a button instead, so the
+  // sentence the page puts beside it must not send the operator looking for a URL to edit.
+  assert.match(UNSAVED_WORK_NOTICE, /could not be saved/, UNSAVED_WORK_NOTICE);
+  assert.doesNotMatch(UNSAVED_WORK_NOTICE, /force|\?/, UNSAVED_WORK_NOTICE);
+  assert.equal(FORCED_DELETE_LABEL, "Delete anyway");
 });

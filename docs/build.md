@@ -171,7 +171,13 @@ only `stopped` row of this run, and it is created last), and the delete (`case_d
 list no longer holds it — the removal is a background task's, so the row is the proof;
 `case_delete_unknown_session` and `case_delete_without_the_client_header`, which assert the `404
 not_found` and `403 bad_client` envelopes, the latter because this is the crate's first `DELETE`
-route and the guards must be shown to apply to it as they do to a `POST`), the idle stop
+route and the guards must be shown to apply to it as they do to a `POST`), what the delete keeps
+(`case_delete_keeps`, which makes its own session, deletes it, and asserts the 202 carries `kept` as
+three explicit nulls — a stub session has no repository, and `kept: null` is a different answer,
+"the repository could not answer", which the page renders differently — then greps the shipped
+page's own script asset for the affordance, the forced-delete button, the sentence that renders the
+answer's command and the notice for a delete that kept nothing; the keep-rule itself is
+`case_delete_keeps_the_work` and `tests/worktree.rs`), the idle stop
 (`case_idle_stop`, which leaves a session alone for the config's one-minute `idle_stop_min` and
 asserts the row is `stopped` with reason `idle_stop`, the transition in its replayed transcript, the
 sweeper's one log line in `serve.err`, and that the next create at the cap is accepted without
@@ -243,7 +249,14 @@ see ADR-0048 and ADR-0050), the
 WIP snapshot (`case_snapshot`, which needs no daemon: it builds a real repository and linked worktree under
 `target/`, runs the artifact's `container snapshot` with `HS_SESSION_ID`, and asserts the ref has the changed
 and new files while HEAD, the index and the working tree are untouched, then that a tree equal to HEAD removes
-the ref; see ADR-0049), and the egress proxy's refusals (`case_egress_proxy`, which needs no server, no daemon and no internet: it starts the shipped
+the ref; see ADR-0049), what a delete keeps against a real repository (`case_delete_keeps_the_work`, which needs the daemon
+**and** the image and prints one `SKIP` line without them: it creates a real session on its own
+`backend = "docker"` boot, waits for `idle`, simulates the agent's work with one commit on
+`agent/<id>` and one uncommitted file, deletes the session, and asserts the answer named both names
+and the command, that the branch tip and the ref are still in the repository, that the worktree and
+the session directory are gone, and that `git branch rescue refs/holosmith/wip/<id>` recovers the
+change; the rule needs no daemon at all, so `tests/worktree.rs` proves it on a `TempDir` repository
+too — see ADR-0052), and the egress proxy's refusals (`case_egress_proxy`, which needs no server, no daemon and no internet: it starts the shipped
 artifact as `proxy egress` on a loopback port with two allow-listed names and asks it four questions over a
 plain socket — `GET` gets `405`, `CONNECT` to port 80 gets `403`, an unlisted host gets `403`, and
 `localhost`, **on** the list, gets `403` because its address is inside the machine — then asserts the log's

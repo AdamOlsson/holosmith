@@ -367,6 +367,7 @@ serve_cases=(
   case_resume_unknown_session
   case_delete_without_the_client_header
   case_delete_session
+  case_delete_keeps
   case_idle_stop
   case_delete_unknown_session
   case_create_at_cap_evicts
@@ -384,6 +385,7 @@ serve_cases=(
   case_agent_launch
   case_docker_resume
   case_docker_turn
+  case_delete_keeps_the_work
   case_network_selftest
   case_key_proxy
   case_key_proxy_request
@@ -970,6 +972,116 @@ case_docker_turn() {
   docker_session_id=""
   # Its server is left running: `phase_serve` stops whatever is up after the last case.
   rm -rf "$root"
+}
+
+# HS-043's real half: a session with a commit on `agent/<id>` and an uncommitted change, deleted from the
+# shipped artifact against a real repository. The branch and the snapshot ref survive, the worktree and the
+# session directory do not, and the command the 202 carried recovers the work — the story's demo, as a gate.
+#
+# It needs the daemon and `agent_image` for the session to reach `idle` (a create provisions a real
+# container), so a machine without them prints one SKIP line; the keep-rule is still proven there by
+# `tests/worktree.rs`, which needs no daemon at all. The cleanup is explicit rather than a trap because a
+# gate case that fails should still not leave the next run a container to trip over (HS-041's landmine).
+case_delete_keeps_the_work() {
+  local name=case_delete_keeps_the_work body id response head show
+  local image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
+  local root="$repo_root/target/verify-keeps-$$" projects="$repo_root/target/verify-keeps-$$/projects"
+  local repo="$repo_root/target/verify-keeps-$$/projects/holosmith"
+  local data="$repo_root/target/verify-keeps-$$/data"
+  local worktree branch ref
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    printf 'SKIP %s: no Docker daemon answers (tests/worktree.rs proves the rule without one)\n' "$name"
+    return 0
+  fi
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    printf 'SKIP %s: no image %s (HOLOSMITH_TEST_IMAGE names another)\n' "$name" "$image"
+    return 0
+  fi
+  stop_serve
+  rm -rf "$root"
+  mkdir -p "$repo" || fail "$name/mkdir" "could not create $repo"
+  git -C "$repo" init --quiet -b main . || fail "$name/git" "git init did not work in $repo"
+  git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet \
+    --allow-empty -m "the first commit" || fail "$name/git" "git commit did not work"
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\nagent_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
+    "$owner" "$projects" "$image" >"$WORK/config-keeps.toml"
+  start_serve "$WORK/config-keeps.toml" "$data"
+
+  fetch_body "${name}_create" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-keeps-work-1" ||
+    fail "${name}_create/no_answer" "POST /api/sessions did not answer"
+  expect_status "${name}_create" "$(answer "${name}_create")" 202
+  body="$(cat "$WORK/responses/${name}_create.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id" ] || fail "${name}_create/id" "the response names no id: $body"
+  docker_session_id="$id"
+  worktree="$projects/.worktrees/$id"
+  branch="agent/$id"
+  ref="refs/holosmith/wip/$id"
+
+  body=""
+  for _ in $(seq 1 900); do
+    fetch "${name}_row" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "${name}_row/no_answer" "GET /api/sessions/$id did not answer"
+    body="$(cat "$WORK/responses/${name}_row.body")"
+    case "$body" in
+      *'"status":"starting"'*) sleep 0.1 ;;
+      *) break ;;
+    esac
+  done
+  printf '%s\n' "$body" | grep -qF '"status":"idle"' ||
+    fail "${name}_row/status" "the session did not become idle: $body"
+  assertions=$((assertions + 1))
+
+  # The agent's work, simulated — this case is about what a delete keeps, not about what an agent writes:
+  # one commit on the branch, and one change the delete's own snapshot is what saves.
+  printf 'committed\n' >"$worktree/work.txt" || fail "${name}/commit" "could not write in the worktree"
+  git -C "$worktree" -c user.name=verify -c user.email=verify@example add work.txt ||
+    fail "${name}/commit" "git add did not work in the worktree"
+  git -C "$worktree" -c user.name=verify -c user.email=verify@example commit --quiet \
+    -m "the agent's commit" || fail "${name}/commit" "git commit did not work in the worktree"
+  printf 'uncommitted\n' >"$worktree/tracked.txt"
+  head="$(git -C "$worktree" rev-parse HEAD)"
+
+  fetch "${name}_deleted" DELETE "/api/sessions/$id" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_deleted/no_answer" "DELETE /api/sessions/$id did not answer"
+  response="$(answer "${name}_deleted")"
+  expect_status "${name}_deleted" "$response" 202
+  body="$(cat "$WORK/responses/${name}_deleted.body")"
+  case "$body" in
+    *"\"kept\":{\"branch\":\"$branch\",\"wip\":\"$ref\",\"recovery\":\"git branch rescue $ref\"}"*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "${name}/kept" "the 202 does not name the branch, the ref and the command: $body"
+      ;;
+  esac
+  wait_for_gone "${name}_gone" "$id"
+
+  check "${name}/branch" "$head" "$(git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch")"
+  git -C "$repo" rev-parse --verify --quiet "$ref" >"$WORK/responses/$name.ref"
+  [ -s "$WORK/responses/$name.ref" ] ||
+    fail "${name}/ref" "the snapshot ref did not survive the delete"
+  assertions=$((assertions + 1))
+  [ ! -e "$worktree" ] || fail "${name}/worktree" "the worktree is still there: $worktree"
+  assertions=$((assertions + 1))
+  [ ! -e "$data/sessions/$id" ] || fail "${name}/session_dir" "the session directory is still there"
+  assertions=$((assertions + 1))
+
+  # The command the answer printed is the command that works.
+  git -C "$repo" branch rescue "$ref" || fail "${name}/rescue" "the recovery command failed"
+  show="$(git -C "$repo" show "rescue:tracked.txt")"
+  check "${name}/rescue-content" "uncommitted" "$show"
+
+  docker_session_id=""
+  docker network rm "agents_$id" >/dev/null 2>&1 || true
+  docker rm --force "s_$id" >/dev/null 2>&1 || true
+  rm -rf "$root"
+  # Its server is left running: `phase_serve` stops whatever is up after the last case.
 }
 
 # The health payload: exactly five keys, and the uptime is not predictable, so the assertion is
@@ -3133,6 +3245,59 @@ case_delete_session() {
       fail "$name/listed" "the list is not the empty collection: $body"
       ;;
   esac
+}
+
+# HS-043: the delete's own answer, and the page that shows it. Two facts are worth asserting on every
+# machine and neither needs a repository: the 202 carries `kept` — three explicit nulls when nothing
+# survived, because a stub session has no repository at all (ADR-0015) and a client must be able to tell
+# "nothing was kept" from `kept: null`, which is "the repository could not answer" — and the page the
+# artifact embeds carries the affordance, the forced-delete button and the sentence that puts the answer's
+# own command on screen. The keep-rule itself, against a real repository, is `case_delete_keeps_the_work`
+# (daemon and image) and `tests/worktree.rs` (no daemon at all).
+#
+# It makes its own session, because `case_delete_session` removed the shared one, and it removes it again:
+# `case_idle_stop` (next) assumes an empty table and the cap is one.
+case_delete_keeps() {
+  local name=case_delete_keeps body id response needle
+  fetch_body "${name}_created" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-keeps-1" ||
+    fail "${name}_created/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "${name}_created")"
+  expect_status "${name}_created" "$response" 202
+  body="$(cat "$WORK/responses/${name}_created.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id" ] || fail "${name}_created/id" "the response names no id: $body"
+  wait_for_idle_id "${name}_created" "$id"
+
+  fetch "${name}_deleted" DELETE "/api/sessions/$id" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_deleted/no_answer" "DELETE /api/sessions/$id did not answer"
+  response="$(answer "${name}_deleted")"
+  expect_status "${name}_deleted" "$response" 202
+  expect_header "${name}_deleted" "$response" content-type "application/json"
+  body="$(cat "$WORK/responses/${name}_deleted.body")"
+  case "$body" in
+    *'"kept":{"branch":null,"wip":null,"recovery":null}'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "${name}/kept" "the 202 does not carry the keep-rule's answer: $body"
+      ;;
+  esac
+  wait_for_gone "${name}_gone" "$id"
+
+  # The page in bytes. `case_app_shell` proves the served page is `web/dist`; these are the story's own
+  # strings: the affordance, the second request a refused snapshot earns, the sentence that renders the
+  # answer's command, and the notice for a delete that kept nothing. A page without them is the gap this
+  # story closes, whatever the API answers.
+  for needle in "Delete session" "Delete anyway" "recover it with" "nothing was kept"; do
+    grep -qF -- "$needle" web/dist/assets/*.js ||
+      fail "${name}/page" "the shipped page does not carry \"$needle\" in web/dist/assets/*.js"
+    assertions=$((assertions + 1))
+  done
 }
 
 # HS-021: the idle stop. A session left alone stops costing money, and it is the artifact's *own*

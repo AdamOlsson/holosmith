@@ -9,14 +9,17 @@
 // nodes, which is why every delta is one appended text node and nothing is ever re-rendered.
 
 import {
+  FORCED_DELETE_LABEL,
   HISTORY_PAGE_LIMIT,
   HISTORY_TRUNCATED,
   NO_DETAIL,
   TRANSCRIPT_EVENTS,
   Transcript,
+  UNSAVED_WORK_NOTICE,
   affordances,
   budgetNotice,
   createFailure,
+  deletedNotice,
   historyPath,
   networkText,
   parseFrame,
@@ -30,6 +33,7 @@ import {
   type Change,
   type DeltaKind,
   type HistoryPage,
+  type Kept,
   type SessionState,
   type Spend,
 } from "./transcript";
@@ -908,14 +912,16 @@ function composerSection(id: string, showState: (state: SessionState, reason: st
 type StreamTarget = {
   transcript: HTMLElement;
   placeholder: HTMLElement;
-  badge: HTMLElement;
   earlier: HTMLButtonElement;
-  updateComposer: (state: SessionState) => void;
+  // The one way a `session.status` frame patches the screen: the badge, the preview link, the composer's
+  // actions and the delete affordance (HS-043 put a fourth reader on it, and a fifth copy of "where a state
+  // is written" is what HS-020's blocker was).
+  showState: (state: SessionState, reason: string | null) => void;
   showSpend: (spend: Spend) => void;
 };
 
 function openSessionStream(id: string, target: StreamTarget): void {
-  const { transcript, placeholder, badge, earlier, updateComposer, showSpend } = target;
+  const { transcript, placeholder, earlier, showState, showSpend } = target;
   const model = new Transcript();
   const blocks = new Map<string, MessageBlock>();
   const tools = new Map<string, ToolBlock>();
@@ -1003,10 +1009,119 @@ function openSessionStream(id: string, target: StreamTarget): void {
       return;
     }
     if (frame.from !== frame.to) {
-      badge.textContent = stateText(frame.to, frame.reason);
-      updateComposer(frame.to);
+      showState(frame.to, frame.reason);
     }
   });
+}
+
+// The session screen's destructive affordance (HS-043, spec item 9).
+//
+// ADR-0023 deferred it because a destructive request needs a confirmation step and a way past a refused
+// snapshot; the story's fourth bullet asks the UI to show the recovery command, so the screen owns both.
+// The notice after the 202 is the *answer's* `kept` read through `deletedNotice`, so the page shows the
+// command the server carried rather than spelling a second one.
+
+type DeleteSection = { element: HTMLElement; update: (state: SessionState) => void };
+
+function deleteSection(
+  id: string,
+  showState: (state: SessionState, reason: string | null) => void,
+): DeleteSection {
+  const section = make("section", "danger-zone");
+  const start = make("button", "danger", "Delete session");
+  start.type = "button";
+
+  const confirm = make("div", "confirm");
+  confirm.hidden = true;
+  const question = make(
+    "p",
+    "question",
+    "Delete this session? Its container and its worktree are removed; uncommitted work is snapshotted first.",
+  );
+  const yes = make("button", "danger", "Delete");
+  yes.type = "button";
+  const cancel = make("button", "secondary", "Cancel");
+  cancel.type = "button";
+  confirm.append(question, yes, cancel);
+
+  const notice = make("p", "notice");
+  notice.hidden = true;
+  // The second request a `409 unsaved_work` earns: the envelope's message names `?force=true`, which is a
+  // query string rather than a button, so the screen offers the button and this sentence says what it does.
+  const forced = make("button", "danger", FORCED_DELETE_LABEL);
+  forced.type = "button";
+  forced.hidden = true;
+  section.append(start, confirm, notice, forced);
+
+  const say = (message: string): void => {
+    notice.textContent = message;
+    notice.hidden = false;
+  };
+
+  // One DELETE, with the two headers every mutating request carries (the guard reads the content type as
+  // well) and the spec's one spelling of force. The 202's body is the row plus `kept`; a refusal is
+  // ADR-0008's envelope.
+  const send = async (force: boolean): Promise<void> => {
+    yes.disabled = true;
+    forced.disabled = true;
+    try {
+      const response = await fetch(`${sessionPath(id)}${force ? "?force=true" : ""}`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json", "x-holosmith-client": "1" },
+      });
+      const body = (await response.json()) as Partial<Session> &
+        Partial<ErrorEnvelope> & { kept?: Kept | null };
+      if (!response.ok) {
+        if (body.code === "unsaved_work") {
+          say(UNSAVED_WORK_NOTICE);
+          forced.hidden = false;
+          return;
+        }
+        say(`${body.code ?? response.status}: ${body.message ?? "the delete did not answer"}`);
+        return;
+      }
+      // Accepted: the row is `deleting`, the affordance has nothing left to ask, and the answer is what the
+      // teardown will leave in the repository.
+      confirm.hidden = true;
+      start.hidden = true;
+      forced.hidden = true;
+      showState("deleting", null);
+      say(deletedNotice(body.kept ?? null));
+    } catch (failure) {
+      say(`unreachable: ${String(failure)}`);
+    } finally {
+      yes.disabled = false;
+      forced.disabled = false;
+    }
+  };
+
+  start.addEventListener("click", () => {
+    confirm.hidden = false;
+    start.hidden = true;
+    notice.hidden = true;
+    forced.hidden = true;
+  });
+  cancel.addEventListener("click", () => {
+    confirm.hidden = true;
+    start.hidden = false;
+  });
+  yes.addEventListener("click", () => {
+    void send(false);
+  });
+  forced.addEventListener("click", () => {
+    void send(true);
+  });
+
+  // A session whose delete was already accepted has nothing left to ask about, so the affordance follows
+  // the state the badge does rather than a flag of its own.
+  const update = (state: SessionState): void => {
+    if (state === "deleting") {
+      start.hidden = true;
+      confirm.hidden = true;
+    }
+  };
+
+  return { element: section, update };
 }
 
 // The session screen: one row's worth of the list, the transcript, and the composer. The state badge
@@ -1074,23 +1189,31 @@ function sessionScreen(health: Health, session: SessionDetail): void {
   earlier.type = "button";
   earlier.hidden = true;
 
-  const composer = composerSection(session.id, (state, reason) => {
+  const composer = composerSection(session.id, (state, reason) => showState(state, reason));
+  const deleted = deleteSection(session.id, (state, reason) => showState(state, reason));
+
+  // The one place a state change patches the screen: the badge, the preview link, the composer's actions
+  // and the delete affordance. Two writers of one state is the blocker HS-020's review found, and HS-043's
+  // affordance is the fourth reader — so it is one function, and `session.status` goes through it too.
+  function showState(state: SessionState, reason: string | null): void {
     badge.textContent = stateText(state, reason);
     preview.hidden = !previewOffered(state);
-  });
+    composer.update(state);
+    deleted.update(state);
+  }
   composer.update(session.status);
+  deleted.update(session.status);
 
   const section = make("section", "session-screen");
   section.id = "session";
   section.dataset.session = session.id;
-  section.append(back, head, meta, earlier, transcript, composer.element);
+  section.append(back, head, meta, earlier, transcript, composer.element, deleted.element);
   app.replaceChildren(header(health), section);
   openSessionStream(session.id, {
     transcript,
     placeholder,
-    badge,
     earlier,
-    updateComposer: composer.update,
+    showState,
     showSpend,
   });
 }

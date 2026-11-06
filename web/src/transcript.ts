@@ -553,6 +553,52 @@ export function createFailure(code: string, message: string): string {
   return PROJECT_REFUSALS.includes(code) ? message : `${code}: ${message}`;
 }
 
+// What a delete's 202 carries about the work it keeps (HS-043, spec item 9).
+//
+// Three keys, and every one may be `null`. `kept` itself is `null` when the repository could not answer —
+// which is *not* the same as answering "nothing survived", and the two sentences below keep them apart.
+export type Kept = {
+  branch: string | null;
+  wip: string | null;
+  recovery: string | null;
+};
+
+// What the session screen says after a delete was accepted.
+//
+// The story's fourth bullet is that the delete response **and the UI** show the recovery command, so this
+// function takes the command from the answer (`kept.recovery`) and never spells it: two spellings of one
+// command is how the copy an operator taps stops being the command that works. Three shapes, and none of
+// them is `stoppedNotice`'s "nothing was deleted" — that promise belongs to a stop, not to a delete.
+export function deletedNotice(kept: Kept | null): string {
+  if (kept === null) {
+    // The repository did not answer, so the page says the one thing it knows. Claiming "nothing was kept"
+    // here would be a claim the server refused to make.
+    return "deleted";
+  }
+  const names: string[] = [];
+  if (kept.branch !== null) {
+    names.push(`branch ${kept.branch}`);
+  }
+  if (kept.wip !== null) {
+    names.push(`uncommitted work at ${kept.wip}`);
+  }
+  if (names.length === 0) {
+    return "deleted — nothing was kept";
+  }
+  const sentence = `deleted — ${names.join(" and ")} kept`;
+  return kept.recovery === null ? sentence : `${sentence}; recover it with ${kept.recovery}`;
+}
+
+// What a delete refused with `409 unsaved_work` says, and the word the button that goes ahead carries.
+//
+// The envelope's own message names `?force=true`, which is a query string rather than a button: on a phone
+// the screen offers the second request instead of telling the operator how to type one, so the sentence
+// here says what is being decided.
+export const UNSAVED_WORK_NOTICE =
+  "the uncommitted work could not be saved, so nothing was deleted";
+
+export const FORCED_DELETE_LABEL = "Delete anyway";
+
 // What a session's Internet access says on its screen.
 //
 // Spec item 2's checkbox is **topology, not configuration** (ADR-0045, ADR-0046): the container carries the same

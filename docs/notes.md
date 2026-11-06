@@ -1305,3 +1305,54 @@ it rather than adding a caveat beside it.
   the flag asked the kernel for a port; nothing does that for the preview, because the origin is the name a phone
   browses (`tailscale serve --https=8444` maps to it). A case that binds `127.0.0.1:0` and sends `Origin:
   http://localhost:8081` is therefore correct behaviour, not a mismatch.
+
+### Landmines: what a delete keeps (HS-043)
+
+- **The keep-rule lives where the branch is deleted.** `Worktree::retained(base, targets)` answers
+  `Retained::{Known { branch, wip }, Unknown}` and `remove(&retained)` is told what **not** to delete, so
+  `tests/worktree.rs` proves the rule on a `TempDir` repository with no daemon, no backend and no request
+  (ADR-0029's reason, ADR-0052's shape). A `Deleter` that ran git itself would need the repository path
+  (the backend's), the targets (the config's) and a `spawn_blocking` of its own.
+- **A test that only asserts "nothing was kept" can pass for the wrong reason.** Two rules agree on the
+  common case: a branch with no commits beyond its base *and* an ancestor of its target answers `None`
+  either way, so deleting the `ahead == 0` arm left the test green (found by mutation). The case that
+  isolates it is a repository whose branch is *not an ancestor of any target* — a repo on `trunk` with
+  `[merge] targets = [main, master]`, where the "no target can answer" rule would keep the branch.
+- **Three git commands in this module exit non-zero as an answer**, and each must be read rather than
+  treated as a failure: `rev-parse --verify --quiet` (1 = no such ref), `merge-base --is-ancestor`
+  (1 = not an ancestor) and `diff --quiet <ref> <branch>` (1 = the trees differ). `support::git` panics on
+  a non-zero exit, so a test that wants "not there" asserts a helper's `false`, never a `git` call.
+- **`[merge] targets` names both `main` and `master` because a machine has one of them.** A target the
+  repository does not have is **not** a merge, and a repository with none of them cannot answer at all —
+  which keeps the branch. Treating a missing target as "merged" deletes every unmerged branch on half the
+  machines, so the absent-name case has its own test.
+- **The keep-rule is computed after the snapshot and handed to the spawned task.** The snapshot is what
+  writes or removes `refs/holosmith/wip/<id>`, so computing the answer before it makes `wip` null every
+  time (proved by mutation: moving the one line to before the snapshot fails
+  `the_delete_answer_names_the_work_it_keeps_and_the_command_that_recovers_it`), and a task that recomputed
+  it could disagree with what the operator was just told.
+- **The 202's `kept` is an additive key on a flattened row**, in `http/sessions.rs`'s `DeleteAnswer`.
+  `Session`'s own serialisation is pinned to fifteen columns in column order by three tests, so the key must
+  not go on `Session` — and `kept: null` (the repository could not answer) is a *different* answer from
+  three nulls (nothing survived), which the page renders differently.
+- **The shipped page's script asset is a minified bundle.** It keeps string literals and mangles
+  identifiers, so a gate case may grep it for copy (`Delete session`, `recover it with`) and never for a
+  function or variable name. Vite may also split assets, so the grep is over `web/dist/assets/*.js` rather
+  than one file.
+- **`[hidden]` is the last rule in `style.css` on purpose, and it has the same specificity as a class
+  selector.** A new block that sets `display: flex` must be written **above** it (as `.confirm` is), or the
+  confirm step stays on screen when `hidden` is set.
+- **A test that stands in for a named container must *be* that name, or its assertions cannot hold.**
+  `tests/container.rs`'s egress-proxy test skipped whenever a proxy was running (so it never replaced the
+  machine's own), and its stand-in was called `hs_egress_test` — while the detach `remove_network` performs
+  is `docker network disconnect … hs_egress`, by name. So on a machine with **no** proxy running the network
+  could not come off and the assertion failed, and on one **with** a proxy it skipped: the real path never
+  ran. Found at HS-043's baseline. The stand-in is `PROXY_NAME` now (safe only because of the SKIP), and the
+  lesson generalises: an assertion about a teardown that names something is an assertion about that name.
+- **The machine's `egress` network is part of the baseline, and it can be missing.** `serve` creates it at a
+  Docker boot (ADR-0044) and a cleanup that removed it makes `tests/container.rs`'s proxy test fail on setup
+  ("network egress not found") before any assertion. `docker network create egress` is the same call the
+  boot makes; a gate run's own Docker boots recreate it, but `cargo test` runs *before* them.
+- **`StreamTarget` carries one `showState` now, not `badge` + `updateComposer`.** The delete affordance was
+  the fourth reader of "a state changed", and the split is what HS-020's blocker was about; a fifth copy
+  would be the same bug with a new name.
