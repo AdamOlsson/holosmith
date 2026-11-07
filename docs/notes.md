@@ -1716,3 +1716,17 @@ it rather than adding a caveat beside it.
 - **A followed session log is a poll loop, and the test appends on the closure's second call.** That is what makes
   "a line appended after the first read is printed" a measurement with no clock and no `tail`; a loop that read once
   and returned prints the first line and returns, which is exactly the mutation the test catches.
+- **A data root under `/tmp` makes the key proxy fail, and the reason is two layers away.** The daemon resolves a
+  mount source in the *host's* namespace, so a `-v` of a tmpfs path it cannot see silently creates an empty
+  **directory** at the destination — ADR-0035's landmine, hit by HS-050's first demo. `hs_key` then finds
+  `<data>/secrets/keys.toml` is not a file, runs `key::Store::ensure_file`, and that `chmod`s a **read-only** mount
+  (`docker logs hs_key`: `the key store could not be prepared: Read-only file system`), so the container exits 1 and
+  `--restart unless-stopped` loops it — while `status` honestly prints `proxy hs_key not running`. Every demo and
+  gate fixture with a data root therefore lives where the daemon can see it (`target/`, `~/.pi/`, the repo), and a
+  key proxy that is not up is worth a `docker logs hs_key` before anything else. Not fixed here: the key proxy is
+  HS-039/HS-040's, and this story's job was to report it.
+- **`--port`/`--data-dir` are `serve` overrides, and `status`/`logs`/`uninstall` read the config.** A demo config
+  that names only `control_listen` in the file and passes `--data-dir` to `serve` gets a `logs --session` that reads
+  the machine's real `/var/lib/holosmith` — which is how HS-050's first demo printed "no log for session <id>" over
+  a session that had one. Two configs is the shape that works: one for the run (`data_root` in the file) and one for
+  a `--root` teardown (`data_root` omitted, because `--root` prefixes what the file spells).
