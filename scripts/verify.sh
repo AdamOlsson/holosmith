@@ -425,6 +425,7 @@ serve_cases=(
   case_worktree
   case_changes
   case_changes_diff
+  case_merge
   case_docker_preflight
   case_doctor_quick
   case_server_images
@@ -5432,6 +5433,217 @@ case_changes_diff() {
   printf '%s\n' "$body" | grep -qF 'resume' ||
     fail "${name}_gone/sentence" "the sentence names no next step: $body"
   assertions=$((assertions + 1))
+
+  kill "$socket_pid" 2>/dev/null || true
+  wait "$socket_pid" 2>/dev/null || true
+  socket_pid=""
+}
+
+# HS-054's proof from the artifact: spec item 12's rules 2 and 4, and the first route in this build whose work
+# **writes to the project repository**. One real repository under a temp projects root and a `_ping`-only socket
+# (no daemon, which is item 12's own shape — "all git work for review and merge runs on the host"), a session
+# whose worktree the provisioner took back and this case re-makes with the step's own command.
+#
+# The two update paths rule 4 names are measured **separately**, because they differ in what moves: a detached
+# checkout makes the target unchecked-out (`git rev-parse main` moves, the checkout's file does not appear), and
+# the ordinary checkout is then restored so the fast-forward moves the operator's working tree too. Every ref this
+# case accepts is compared with `git rev-parse` run by the case, so the artifact cannot pass by agreeing with its
+# own arithmetic, and the four refusals are asserted as status **and** code with the target unmoved across them.
+case_merge() {
+  local name=case_merge response body id base tip tip2 tip3 main wt
+  # Two statements, not one, for the reason `case_changes` gives: in a single `local` every right-hand side
+  # expands before either assignment, so `repo="$projects/holosmith"` would read an unset `projects` under
+  # `set -u`.
+  local projects="$WORK/projects-merge"
+  local repo="$projects/holosmith"
+  # The guard comes first, before `stop_serve`, for the reason `case_worktree` gives: a skipped case that
+  # stopped the server leaves the phase's own teardown with no pid to signal.
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to answer the docker preflight (tests/merge.rs covers this)\n' "$name"
+    return 0
+  fi
+  stop_serve
+  mkdir -p "$repo"
+  git -C "$repo" init --quiet -b main || fail "$name/git" "git init did not work in $repo"
+  git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet --allow-empty \
+    -m "the first commit" || fail "$name/git" "git commit did not work in $repo"
+  base="$(git -C "$repo" rev-parse HEAD)" || fail "$name/git" "git rev-parse did not work in $repo"
+
+  socket_pid="$(fake_docker_ping "$WORK/docker-merge.sock")"
+  for _ in $(seq 1 100); do
+    [ -S "$WORK/docker-merge.sock" ] && break
+    sleep 0.05
+  done
+  # `trunk` is in the list and not in the repository: the second `bad_target` fact and the ordinary shape of the
+  # default `["main", "master"]` list, which names a branch half the machines do not have.
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\ndocker_host = "unix://%s/docker-merge.sock"\nmin_free_gb = 1\nidle_stop_min = 0\n[merge]\ntargets = ["main", "trunk"]\n' \
+    "$owner" "$projects" "$WORK" >"$WORK/config-merge.toml"
+  start_serve "$WORK/config-merge.toml" "$WORK/data-merge"
+
+  fetch_body "${name}_create" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-merge-1" ||
+    fail "${name}_create/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "${name}_create")"
+  expect_status "${name}_create" "$response" 202
+  body="$(cat "$WORK/responses/${name}_create.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id" ] || fail "${name}_create/id" "the response names no id: $body"
+  body=""
+  for _ in $(seq 1 100); do
+    fetch "${name}_row" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "${name}_row/no_answer" "GET /api/sessions/$id did not answer"
+    body="$(cat "$WORK/responses/${name}_row.body")"
+    case "$body" in
+      *'"status":"starting"'*) sleep 0.1 ;;
+      *) break ;;
+    esac
+  done
+  printf '%s\n' "$body" | grep -qF "\"base_commit\":\"$base\"" ||
+    fail "${name}_row/base" "the row does not record the branch's base commit: $body"
+
+  wt="$projects/.worktrees/$id"
+  # The step's own command, absolute paths, because `worktree add` resolves a relative one against the
+  # repository (HS-025's measurement) — a fixture, not a re-implementation of the step.
+  git -C "$repo" worktree add --quiet -b "agent/$id" "$wt" "$base" ||
+    fail "${name}/worktree" "git worktree add did not work for $wt"
+  printf 'one\n' >"$wt/a.txt" || fail "${name}/write" "the session's file is not writable"
+  git -C "$wt" add a.txt || fail "${name}/add" "git add did not work in $wt"
+  git -C "$wt" -c user.name=verify -c user.email=verify@example commit --quiet -m "the session's change" ||
+    fail "${name}/commit" "git commit did not work in $wt"
+  tip="$(git -C "$wt" rev-parse HEAD)" || fail "${name}/head" "git rev-parse did not work in $wt"
+
+  # 1. **The unchecked-out path**: rule 4's first arm. Detaching the project's checkout is what makes `main` a
+  # ref no working tree holds, so the merge must move the ref and *nothing else* — an implementation that always
+  # ran `git merge --ff-only` somewhere would move a working tree here.
+  git -C "$repo" checkout --quiet --detach "$base" || fail "${name}/detach" "git checkout --detach did not work"
+  fetch_body "${name}_unchecked" POST "/api/sessions/$id/merge" '{"target":"main"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_unchecked/no_answer" "POST /api/sessions/$id/merge did not answer"
+  response="$(answer "${name}_unchecked")"
+  expect_status "${name}_unchecked" "$response" 200
+  expect_header "${name}_unchecked" "$response" "Content-Type" "application/json"
+  body="$(cat "$WORK/responses/${name}_unchecked.body")"
+  printf '%s\n' "$body" | grep -qF "\"merged_commit\":\"$tip\"" ||
+    fail "${name}_unchecked/commit" "the answer does not name the branch's tip: $body"
+  assertions=$((assertions + 1))
+  # A body with no `strategy` is `ff-only`, which is item 12's default rather than an echo of the request.
+  printf '%s\n' "$body" | grep -qF '"strategy":"ff-only"' ||
+    fail "${name}_unchecked/strategy" "the default strategy is not ff-only: $body"
+  assertions=$((assertions + 1))
+  printf '%s\n' "$body" | grep -qF '"target":"main"' ||
+    fail "${name}_unchecked/target" "the answer names no target: $body"
+  assertions=$((assertions + 1))
+  check "${name}_unchecked/ref" "$tip" "$(git -C "$repo" rev-parse refs/heads/main)"
+  # ... and the checkout did not move: it is still detached at the base and the agent's file is not in it.
+  check "${name}_unchecked/checkout" "$base" "$(git -C "$repo" rev-parse HEAD)"
+  if [ -e "$repo/a.txt" ]; then
+    fail "${name}_unchecked/untouched" "the unchecked-out merge wrote into the detached checkout"
+  fi
+  assertions=$((assertions + 1))
+
+  # 2. **The four refusals that move nothing**, with the target compared across all of them.
+  main="$(git -C "$repo" rev-parse refs/heads/main)"
+  for pair in '{"target":"nope"}|bad_target' '{"target":"trunk"}|bad_target' \
+    '{"target":"main","strategy":"squash"}|unsupported' \
+    '{"target":"main","delete_session":true}|unsupported'; do
+    fixture_body="${pair%|*}"
+    fixture_code="${pair##*|}"
+    label="${name}_refused_$fixture_code"
+    label="$label$(printf '%s' "$fixture_body" | tr -c 'a-z0-9' '_')"
+    fetch_body "$label" POST "/api/sessions/$id/merge" "$fixture_body" \
+      "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+      "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+      fail "$label/no_answer" "a refused merge did not answer"
+    response="$(answer "$label")"
+    expect_status "$label" "$response" 422
+    expect_code "$label" "$response" "$fixture_code"
+    expect_header "$label" "$response" "Content-Type" "application/json"
+  done
+  check "${name}_refused/unmoved" "$main" "$(git -C "$repo" rev-parse refs/heads/main)"
+
+  # 3. **The ordinary path**: rule 4's second arm. `main` is checked out in the project's own checkout again, so
+  # the fast-forward runs there and the operator's working tree moves with the ref.
+  git -C "$repo" checkout --quiet main || fail "${name}/checkout" "git checkout main did not work"
+  printf 'two\n' >"$wt/c.txt" || fail "${name}/write" "the session's second file is not writable"
+  git -C "$wt" add c.txt || fail "${name}/add" "git add did not work in $wt"
+  git -C "$wt" -c user.name=verify -c user.email=verify@example commit --quiet -m "the session's second change" ||
+    fail "${name}/commit" "git commit did not work in $wt"
+  tip2="$(git -C "$wt" rev-parse HEAD)" || fail "${name}/head" "git rev-parse did not work in $wt"
+  fetch_body "${name}_checked" POST "/api/sessions/$id/merge" '{"target":"main","strategy":"ff-only"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_checked/no_answer" "the checked-out merge did not answer"
+  response="$(answer "${name}_checked")"
+  expect_status "${name}_checked" "$response" 200
+  body="$(cat "$WORK/responses/${name}_checked.body")"
+  printf '%s\n' "$body" | grep -qF "\"merged_commit\":\"$tip2\"" ||
+    fail "${name}_checked/commit" "the answer does not name the second tip: $body"
+  assertions=$((assertions + 1))
+  check "${name}_checked/ref" "$tip2" "$(git -C "$repo" rev-parse refs/heads/main)"
+  # The difference between the two update paths, measured: *this* time the file is on disk in the checkout.
+  if [ ! -e "$repo/c.txt" ]; then
+    fail "${name}_checked/working_tree" "the fast-forward did not move the checkout's working tree"
+  fi
+  assertions=$((assertions + 1))
+  check "${name}_checked/clean" "" "$(git -C "$repo" status --porcelain)"
+
+  # 4. **`target_dirty`**: the branch adds a file the checkout already holds untracked, so git refuses to
+  # overwrite the operator's work. Nothing moves and the operator's file is untouched.
+  printf 'three\n' >"$wt/d.txt" || fail "${name}/write" "the session's third file is not writable"
+  git -C "$wt" add d.txt || fail "${name}/add" "git add did not work in $wt"
+  git -C "$wt" -c user.name=verify -c user.email=verify@example commit --quiet -m "the session's third change" ||
+    fail "${name}/commit" "git commit did not work in $wt"
+  tip3="$(git -C "$wt" rev-parse HEAD)" || fail "${name}/head" "git rev-parse did not work in $wt"
+  printf 'the operator\x27s work in progress\n' >"$repo/d.txt" ||
+    fail "${name}/write" "the operator's file is not writable"
+  fetch_body "${name}_dirty" POST "/api/sessions/$id/merge" '{"target":"main"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_dirty/no_answer" "the dirty merge did not answer"
+  response="$(answer "${name}_dirty")"
+  expect_status "${name}_dirty" "$response" 409
+  expect_code "${name}_dirty" "$response" target_dirty
+  body="$(cat "$WORK/responses/${name}_dirty.body")"
+  printf '%s\n' "$body" | grep -qF 'nothing was merged' ||
+    fail "${name}_dirty/sentence" "the sentence does not say nothing happened: $body"
+  assertions=$((assertions + 1))
+  check "${name}_dirty/ref" "$tip2" "$(git -C "$repo" rev-parse refs/heads/main)"
+  check "${name}_dirty/operator_file" "the operator's work in progress" "$(cat "$repo/d.txt")"
+
+  # ... and the same merge with the file out of the way lands, which is what makes the refusal the file's fault.
+  rm -f "$repo/d.txt" || fail "${name}/rm" "the operator's file is not removable"
+  fetch_body "${name}_retry" POST "/api/sessions/$id/merge" '{"target":"main"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_retry/no_answer" "the retried merge did not answer"
+  response="$(answer "${name}_retry")"
+  expect_status "${name}_retry" "$response" 200
+  check "${name}_retry/ref" "$tip3" "$(git -C "$repo" rev-parse refs/heads/main)"
+
+  # 5. **`not_fast_forward`**: the target moves on, so there is nothing to fast-forward to. Both refs and the
+  # checkout are unchanged — "nothing was merged" measured rather than asserted from a sentence.
+  printf 'the target\n' >"$repo/t.txt" || fail "${name}/write" "the target's file is not writable"
+  git -C "$repo" add t.txt || fail "${name}/add" "git add did not work in $repo"
+  git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet -m "the target moves on" ||
+    fail "${name}/commit" "git commit did not work in $repo"
+  main="$(git -C "$repo" rev-parse refs/heads/main)"
+  fetch_body "${name}_behind" POST "/api/sessions/$id/merge" '{"target":"main"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_behind/no_answer" "the refused merge did not answer"
+  response="$(answer "${name}_behind")"
+  expect_status "${name}_behind" "$response" 409
+  expect_code "${name}_behind" "$response" not_fast_forward
+  body="$(cat "$WORK/responses/${name}_behind.body")"
+  printf '%s\n' "$body" | grep -qF 'nothing was merged' ||
+    fail "${name}_behind/sentence" "the sentence does not say nothing happened: $body"
+  assertions=$((assertions + 1))
+  check "${name}_behind/ref" "$main" "$(git -C "$repo" rev-parse refs/heads/main)"
+  check "${name}_behind/branch" "$tip3" "$(git -C "$repo" rev-parse "agent/$id")"
+  check "${name}_behind/checkout" "" "$(git -C "$repo" status --porcelain)"
 
   kill "$socket_pid" 2>/dev/null || true
   wait "$socket_pid" 2>/dev/null || true

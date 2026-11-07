@@ -231,7 +231,18 @@ NUL-bearing binary and a `seq`-generated file whose patch is past 256 KB, and th
 whole-branch answer naming its files and capped with a marker, the binary file as git's own summary with no
 NUL byte in the answer, the large file at most 262144 bytes with a marker naming git's own byte count, and
 `..%2Fetc%2Fpasswd`, `%2Fetc%2Fpasswd` and an unchanged path each a `404 not_found` that leaks nothing,
-then the worktree gone for the summary's `409 no_worktree`; see ADR-0062), and the hardened mounts
+then the worktree gone for the summary's `409 no_worktree`; see ADR-0062), and the merge (`case_merge`,
+which boots its own Docker run over a real repository and the same `_ping`-only socket, re-makes the
+worktree, and walks **one** repository through both of rule 4's update paths: `git checkout --detach` makes
+`main` unchecked-out, so a `POST …/merge {"target":"main"}` moves the ref and *not* the checkout (the agent's
+file never appears there), and `git checkout main` then makes the same merge move the working tree as well —
+with `git rev-parse` run by the case on both sides. In between it asserts the four refused requests
+(`bad_target` twice, `unsupported` for `strategy:"squash"` and for `delete_session:true`) as status **and**
+code with the target unmoved across them, and it ends with `target_dirty` (an untracked file the branch adds,
+untouched by the refusal and merged once it is out of the way) and `not_fast_forward` (a commit on the target,
+with both refs and the checkout unchanged); the default `strategy` is asserted to be `ff-only` on a body that
+names none. No daemon is used — "all git work for review and merge runs on the host", which is the story's own
+sentence; see ADR-0063), and the hardened mounts
 (`case_container_mounts`,
 which needs no server at all: it builds a real repository and worktree under `target/`, runs one real
 container with the spec's four mounts and `--cap-drop ALL`, and asserts the three writes fail on the host
@@ -439,8 +450,8 @@ prove the shipped binary does it, and since HS-046 every case prints one `ok <ca
 that printed `SKIP` withholds it, so a skip can never read as a pass — which is what makes a green run name what
 it proved instead of only counting it. A case that needs a setting the rest of the run must not carry gets a
 boot of its own (see `case_token_budget`, `case_usage_survives_resume`,
-`case_compaction`, `case_history`, `case_backup`, `case_worktree`, `case_worktree_refusal` and
-`case_changes`), the
+`case_compaction`, `case_history`, `case_backup`, `case_worktree`, `case_worktree_refusal`,
+`case_changes` and `case_merge`), the
 Internet-access checkbox (`case_internet_toggle`, described above), and a database from a newer release
 (`case_schema_newer`, which needs no daemon: it boots the artifact twice over one data root, rewrites the
 recorded `schema_version` to 99 in between with `python3`'s `sqlite3`, and asserts that the second boot's
