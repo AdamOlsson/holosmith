@@ -531,7 +531,7 @@ was there, and the transcript draws **one link per picture** rather than the pic
 _Avoid_: Attachment, picture, screenshot, image blob
 
 **Changes view**:
-The answer to `GET /api/sessions/{id}/changes`: what a session's branch changed against its **base commit** and whether it would merge into its **target branch**. Eleven keys — `branch`, `base_commit`, `head`, `target`, `ahead`, `behind`, `dirty`, `mergeable`, `files[]` (`path`, `status`, `additions`, `deletions`), `touches_ci` — plus the additive `mergeable_reason`. It is a **host** read (never a container), it writes nothing, and `dirty` uses the same definition of work as the **WIP snapshot**. Its machine names are `changes::Changes::read` and `http::changes`.
+The answer to `GET /api/sessions/{id}/changes`: what a session's branch changed against its **base commit** and whether it would merge into its **target branch**. Eleven keys — `branch`, `base_commit`, `head`, `target`, `ahead`, `behind`, `dirty`, `mergeable`, `files[]` (`path`, `status`, `additions`, `deletions`), `touches_ci` — plus the additive `mergeable_reason`. It is a **host** read (never a container), it writes no ref and no working tree (`merge-tree --write-tree` writes an unreferenced tree object, which is its documented cost), and `dirty` uses the same definition of work as the **WIP snapshot**. Its machine names are `changes::Changes::read` and `http::changes`.
 _Avoid_: Diff viewer, explorer, file tree
 
 **Mergeability**:

@@ -22,6 +22,12 @@ against its base, and would it merge" is a question about a review. `worktree.rs
 (`registered` and `branch_head` become `pub`, the four git-runner functions `pub(crate)`) and no behaviour. The one
 place `Command::new("git")` appears in `src/` stays there.
 
+The handler builds the worktree from the **naming rule** (`Worktree::of(projects_root, project, id)`) rather than
+from the row's recorded `sessions.worktree`. The row and the rule are written from the same three facts, so they
+agree; when they would not, one spelling of a worktree is better than two, and `Changes::read` refuses a directory
+git does not register instead of trusting either. The row's `base_commit` **is** used, because that is a fact only
+the row holds (which commit this session branched from).
+
 ## D2 — The diff's basis is two-dot, `<base_commit>..<head>`, and the field's name says so
 
 `files[]` is the diff between the two commits the answer names, not "since the merge base". The recorded base is by
@@ -95,6 +101,12 @@ sentences because the *operator's* next step differs. `409` rather than `404`: t
 exist; the thing the view would read is not there. The split with `500` is the project refusals' own rule — a state
 of the session is a refusal, a machine problem is not (ADR-0030's reasoning, applied to a read).
 
+The project's repository being gone is the one arm that reads like a machine problem, and it is a `409` for the
+create's own reason: a create or a resume over a project that is not a plain checkout is already a `422` project
+refusal (`git_not_directory`, `submodules_present`, `worktree_config_enabled`), so a read that inherits the same
+checkout's state answers in the same 4xx family with a sentence naming the fix. A repository git *cannot read*
+remains the `500`, because there the checkout is there and the machine is what failed.
+
 The 409 is checked **before** any interpretation of git's answers, in the order cheapest-and-most-fundamental
 first: repository, directory, registration, branch. A pruned worktree whose directory is back is the case that
 proves the order: every read inside it would otherwise fail with git's "not a git repository" and become a 500.
@@ -106,6 +118,14 @@ proves the order: every read inside it would otherwise fail with git's "not a gi
 `.travis.yml`, `.drone.yml`, `.cirrus.yml`, `azure-pipelines.yml`, `bitbucket-pipelines.yml`, `appveyor.yml`,
 `codecov.yml`, `Jenkinsfile`). `changes::touches_ci(&[FileChange])` is the predicate. Publish (HS-058) reads both
 rather than spelling the warning a second time.
+
+The two spellings are **exclusive**, and that is a correction rather than a detail: an entry ending in `/` is
+compared as a prefix of the whole path, every other entry against the last segment. Applying both arms to every
+entry (this story's first version) made `Jenkinsfile.old`, `.gitlab-ci.yml.bak` and `codecov.yml.orig` answer
+`true` through `path.starts_with`, so a backup copy of a CI file looked like a change to it. The over-match was in
+the safe direction — a spurious warning, never a missed one — but it made three documents' "matched against the
+last segment" false, and the test that was supposed to catch look-alikes used `src/Jenkinsfile.rs`, whose *path*
+does not start at the entry and so passed over the root-level case.
 
 Two details: an **added** CI file counts like a modified one (a new workflow is exactly the danger the warning is
 for), and `.git/hooks` is *not* in the set — a diff can never contain a path under `.git/`, so the spec's "hook

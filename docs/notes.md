@@ -1818,6 +1818,13 @@ it rather than adding a caveat beside it.
   branch, the repository and the directory from the same three facts, so a row whose path is stale and a rule that
   disagrees cannot produce two spellings of one worktree; `Changes::read` then refuses a directory git does not
   register rather than trusting either.
+- **A predicate with two arms must apply each arm to its own kind of entry.** `changes::touches_ci` compares
+  `CI_PATHS` entries that are directory prefixes (ending `/`) against the whole path and entries that are file
+  names against the last segment; the first version applied *both* tests to *every* entry, so a root-level
+  `Jenkinsfile.old` or `.gitlab-ci.yml.bak` answered `true` through `path.starts_with`. The test that was meant to
+  catch look-alikes used `src/Jenkinsfile.rs` — whose path does not start at the entry, so it passed over the
+  root-level case — which is the same lesson as the symmetric-count fixture: a test that picks the one input where
+  the bug is invisible is worse than no test. The review found it; the fix is to branch on `entry.ends_with('/')`.
 - **A prior session left this tree dirty with the implementation half done and no docs.** What made it adoptable was
   that the Linear plan comment matched the code field-for-field and the code compiled; what it cost was a re-read of
   every line (and the mutation pass above, which found the `behind` gap). A dirty tree from a killed session is not

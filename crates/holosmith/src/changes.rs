@@ -451,26 +451,34 @@ fn behind(repository: &Path, branch: &str, target: &str) -> Result<u64, GitError
     })
 }
 
+/// The `merge-tree` argument vector: `--write-tree`, then the target, then the branch, both fully qualified.
+///
+/// Split out so the order can be asserted without running git (see the doc on [`merge_trial`]).
+fn merge_arguments(target: &str, branch: &str) -> [String; 4] {
+    [
+        "merge-tree".to_string(),
+        "--write-tree".to_string(),
+        format!("refs/heads/{target}"),
+        format!("refs/heads/{branch}"),
+    ]
+}
+
 /// Ask `merge-tree --write-tree` whether `branch` would merge into `target`, touching no working tree.
 ///
 /// The refs are fully qualified so that a tag named `main` cannot be merged instead of the branch, and the
 /// order is the merge's: `merge-tree <target> <branch>` is "merge the session branch into the target", which
-/// is what HS-054 will run.
+/// is what HS-054 will run. The order is pinned by [`tests::the_merge_trial_asks_for_the_target_first`],
+/// because a conflict is symmetric — `merge-tree A B` and `merge-tree B A` find the same paths — so no
+/// fixture can tell the two apart even though the sentence a conflict produces would name the wrong side.
 ///
 /// Exit 0 is a clean merge and exactly one line (the tree's id); exit 1 is a conflict, and its stdout carries
 /// the tree's id followed by `<mode> <oid> <stage>\t<path>` lines, then a blank line and git's prose —
 /// measured on 2.43, and the same two shapes `doctor`'s V2 trial asserts. Anything else is a question that
 /// could not be asked, which is `None` in the JSON rather than `false`.
 fn merge_trial(repository: &Path, target: &str, branch: &str) -> Result<Merge, GitError> {
-    let target_ref = format!("refs/heads/{target}");
-    let branch_ref = format!("refs/heads/{branch}");
-    let args = [
-        "merge-tree",
-        "--write-tree",
-        target_ref.as_str(),
-        branch_ref.as_str(),
-    ];
-    let output = git_output(repository, &args)?;
+    let args = merge_arguments(target, branch);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = git_output(repository, &refs)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     match output.status.code() {
         Some(0) => Ok(Merge::Clean),
@@ -536,16 +544,22 @@ fn no_target_sentence(targets: &[String]) -> String {
 /// Whether the diff changes CI configuration or a hook directory ([`CI_PATHS`]).
 ///
 /// An **added** path counts like a modified one: a new workflow is exactly the thing the warning exists for.
-/// The rule is [`CI_PATHS`]'s two spellings — a directory prefix, or a file name — and both are applied to
-/// the same changed path, so a `.github/workflows/ci.yml` addition and a `Jenkinsfile` at the repository's
-/// root are one predicate.
+/// The two spellings are **exclusive** — an entry that ends in `/` is a directory prefix compared against the
+/// whole path, and every other entry is a file name compared against the last segment — so a root-level
+/// `Jenkinsfile` counts and a `Jenkinsfile.old` beside it does not. Applying both arms to both kinds (the first
+/// version of this function) made every *backup copy* of a CI file answer yes, which is a spurious warning
+/// rather than a missed one but still a lie about the diff.
 pub fn touches_ci(files: &[FileChange]) -> bool {
     files.iter().any(|file| {
         let path = file.path.as_str();
         let name = path.rsplit('/').next().unwrap_or(path);
-        CI_PATHS
-            .iter()
-            .any(|entry| path.starts_with(entry) || name == *entry)
+        CI_PATHS.iter().any(|entry| {
+            if entry.ends_with('/') {
+                path.starts_with(entry)
+            } else {
+                name == *entry
+            }
+        })
     })
 }
 
@@ -589,6 +603,37 @@ mod tests {
         // comparison could get wrong by using `contains`.
         assert!(!touches_ci(&[file(".githubx/ci.yml")]));
         assert!(!touches_ci(&[file("src/Jenkinsfile.rs")]));
+    }
+
+    #[test]
+    fn a_backup_of_a_ci_file_is_not_ci() {
+        // The two arms are exclusive: a file-name entry is compared against the last segment, not used as a
+        // prefix of the whole path. Before that fix a root-level `Jenkinsfile.old` answered `true` through
+        // `path.starts_with("Jenkinsfile")`, and `src/Jenkinsfile.rs` was the only look-alike a test tried —
+        // which passed because its *path* does not start at the entry. This is the arm that `src/` misses.
+        assert!(!touches_ci(&[file("Jenkinsfile.old")]));
+        assert!(!touches_ci(&[file("Jenkinsfile.rs")]));
+        assert!(!touches_ci(&[file(".gitlab-ci.yml.bak")]));
+        assert!(!touches_ci(&[file("codecov.yml.orig")]));
+        // ... and the real ones still count, at the root and in a directory.
+        assert!(touches_ci(&[file("Jenkinsfile")]));
+        assert!(touches_ci(&[file("ci/Jenkinsfile")]));
+    }
+
+    #[test]
+    fn the_merge_trial_asks_for_the_target_first() {
+        // A conflict is symmetric — `merge-tree A B` and `merge-tree B A` name the same paths — so no fixture
+        // can distinguish the order. The vector is pinned instead, because the order is what makes the sentence
+        // "the merge conflicts in …" about merging the branch *into the target* (HS-054's own direction).
+        assert_eq!(
+            merge_arguments("main", "agent/0123456789abcdef"),
+            [
+                "merge-tree".to_string(),
+                "--write-tree".to_string(),
+                "refs/heads/main".to_string(),
+                "refs/heads/agent/0123456789abcdef".to_string(),
+            ]
+        );
     }
 
     #[test]

@@ -621,8 +621,10 @@ async fn an_unknown_session_is_a_404() {
 #[tokio::test]
 async fn a_session_with_no_worktree_is_the_storys_409() {
     // The stub backend provisions no repository at all, so the row has no `base_commit`. The answer is a
-    // `409 no_worktree` with a sentence, never a 500 and never a subprocess — which is also the measurement
-    // for "no container is involved": this handler never asks the backend anything.
+    // `409 no_worktree` with a sentence, never a 500 and never a subprocess. That the read involves no
+    // container is **structural** rather than measured here: `Changes::read` takes a worktree, a commit and a
+    // target list and has no backend to name, so this test would not notice a container if some other route
+    // asked one. The measurement is the gate's `case_changes`, which runs the artifact with no daemon at all.
     let fixture = Fixture::new("changes-no-worktree");
     let fresh = {
         let database = fixture
@@ -691,6 +693,116 @@ async fn a_repository_git_cannot_read_is_a_500() {
     assert_eq!(response.status, 500, "{}", response.body);
     let body: Value = serde_json::from_str(&response.body).expect("the envelope is JSON");
     assert_eq!(body["code"], "internal");
+    served.finish().await.expect("the server stops");
+}
+
+/// The 409 the handler gives a `ChangesError` arm, asserted at the wire — one shape for the three arms whose
+/// module-level variant a test already proves. Mutating `refusal()` to fold any of them into `internal` used to
+/// leave every test green (only the gate's pruned case caught one), which is the gap these close.
+async fn the_wire_409_for(fixture: &Fixture, id: &str) -> String {
+    let served = fixture.served().await;
+    let response = get_changes(served.addr, id).await;
+    assert_eq!(response.status, 409, "{} {}", fixture.id, response.body);
+    assert_eq!(response.header("content-type"), Some("application/json"));
+    served.finish().await.expect("the server stops");
+    response.body
+}
+
+#[tokio::test]
+async fn a_pruned_worktree_is_a_409_at_the_wire() {
+    let fixture = Fixture::new("changes-wire-pruned");
+    git(
+        &fixture.repo,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            fixture.worktree.to_str().expect("a UTF-8 temp path"),
+        ],
+    );
+    std::fs::create_dir_all(&fixture.worktree).expect("the directory is made again");
+    let body = the_wire_409_for(&fixture, &fixture.id).await;
+    let body: Value = serde_json::from_str(&body).expect("the envelope is JSON");
+    assert_eq!(body["code"], "no_worktree");
+    assert!(
+        body["message"]
+            .as_str()
+            .is_some_and(|sentence| sentence.contains("registers")),
+        "the sentence does not name the registration: {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_missing_branch_is_a_409_at_the_wire() {
+    let fixture = Fixture::new("changes-wire-no-branch");
+    git(
+        &fixture.repo,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            fixture.worktree.to_str().expect("a UTF-8 temp path"),
+        ],
+    );
+    git(&fixture.repo, &["branch", "-D", &fixture.branch()]);
+    git(
+        &fixture.repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            fixture.worktree.to_str().expect("a UTF-8 temp path"),
+        ],
+    );
+    let body = the_wire_409_for(&fixture, &fixture.id).await;
+    let body: Value = serde_json::from_str(&body).expect("the envelope is JSON");
+    assert_eq!(body["code"], "no_worktree");
+    assert!(
+        body["message"]
+            .as_str()
+            .is_some_and(|sentence| sentence.contains("branch")),
+        "the sentence does not name the branch: {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_missing_project_repository_is_a_409_at_the_wire() {
+    let fixture = Fixture::new("changes-wire-no-repository");
+    std::fs::remove_dir_all(&fixture.repo).expect("the repository is removed");
+    let body = the_wire_409_for(&fixture, &fixture.id).await;
+    let body: Value = serde_json::from_str(&body).expect("the envelope is JSON");
+    assert_eq!(body["code"], "no_worktree");
+    assert!(
+        body["message"]
+            .as_str()
+            .is_some_and(|sentence| sentence.contains("restore")),
+        "the sentence names no next step: {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_repository_without_a_target_answers_json_null_not_a_missing_key() {
+    // The acceptance's `target` is one key that can be null, and a client has to tell "there is no target" from
+    // "the server did not send it". A `skip_serializing_if` on the `Option`s — or a `false` for an unasked
+    // merge — would keep every module test green and break exactly this: `null` is an answer, absence is not.
+    let fixture = Fixture::new("changes-wire-no-target");
+    git(&fixture.repo, &["branch", "-m", "main", "trunk"]);
+    let served = fixture.served().await;
+    let response = get_changes(served.addr, &fixture.id).await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    let body: Value = serde_json::from_str(&response.body).expect("the answer is JSON");
+    for key in ["target", "behind", "mergeable"] {
+        assert!(
+            body.get(key).is_some(),
+            "{key} is absent rather than null: {body}"
+        );
+        assert_eq!(body[key], Value::Null, "{key} is not null: {body}");
+    }
+    assert!(
+        body["mergeable_reason"].is_string(),
+        "an unasked merge says why: {body}"
+    );
     served.finish().await.expect("the server stops");
 }
 
