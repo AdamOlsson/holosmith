@@ -1,4 +1,4 @@
-# RESUME — one issue per session (next: PER-83 / HS-051, `drain` over the admin socket)
+# RESUME — one issue per session (next: PER-84 / HS-052, the changes view's summary)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating procedure and
 still governs the cycle; this file is the state of the world, and it adds one rule of its own:
@@ -45,189 +45,173 @@ sandbox-specific incantation (§2).
 
 ---
 
-## 1. The issue this session picks up: `PER-83` — HS-051, `drain` over the admin socket
+## 1. The issue this session picks up: `PER-84` — HS-052, the changes view's summary
 
 **State when this file was written** (the story's last commit is `origin/master` and the tree is clean apart from the
-operator's own `log.txt`/`orchestrate.sh`): **55 of 80 stories Done, 25 Backlog**, all in project `Holosmith`.
-`PER-83` is `Backlog`, it is the next in `HS-###` order, and its one blocker (`HS-049`, `PER-81`) is `Done` — so it is
-eligible. Nothing in the queue is blocked on the machine (§2).
+operator's own `log.txt`/`orchestrate.sh`): **56 of 80 stories Done, 24 Backlog**, all in project `Holosmith`.
+`PER-84` is `Backlog`, it is the next in `HS-###` order, and its one blocker (`HS-046`, the verification run) is
+`Done` — so it is eligible. Nothing in the queue is blocked on the machine (§2).
 
-The last shipped story was `PER-82` (HS-050, `status`, `logs`, `uninstall`, **ADR-0059**) — the fifth of phase 2's
-twenty-one. Its gate run was green: **75 cases, 1034 assertions**, no `SKIP` line; `cargo test` is **899 tests across
-49 targets** in the gate's phase, and `web/`'s runner is **52**. Its §1 material is now Linear, `docs/review/PER-82.md`,
-`git log` and §9 below.
+The last shipped story was `PER-83` (HS-051, `drain` over the admin socket, **ADR-0060**) — the sixth of phase 2's
+twenty-one. Its gate run was green: **77 cases, 1101 assertions**, no `SKIP` line; `cargo test` is **919 tests across
+51 targets**, and `web/`'s runner is **52**. Its §1 material is now Linear, `docs/review/PER-83.md`, `git log` and §9.
 
 ### 1.1 The slice (verbatim from `docs/stories/phase-2-deployable-mvp.md`; Linear's body is the same text)
 
-> ### HS-051 — Drain over the admin socket
+> ### HS-052 — Changes view: summary
 >
-> **As** the operator **I want** to drain before restarting **so that** an upgrade does not kill a turn I am watching.
+> **As** the operator **I want** to see what a session changed and whether it can merge **so that** I can decide
+> without opening a terminal.
 >
-> - **Size:** M · **Blocked by:** HS-049 · **Spec:** item 10 (step 3), item 8, API table
-> - **Demo:** start a turn, run `holosmith drain --wait 1m`, and see creates refused with 503 `draining` until the turn
->   finishes.
+> - **Size:** M · **Blocked by:** HS-046 · **Spec:** item 12
+> - **Demo:** `GET /api/sessions/:id/changes` shows branch, ahead/behind, dirty, mergeable, per-file line counts and
+>   `touches_ci`.
 >
 > **Acceptance**
-> - [ ] `holosmith drain [--wait 10m]` talks to a local unix socket, not HTTP; the command is unreachable over the
->       network.
-> - [ ] While draining, creates and prompts return 503 `draining`; reads still work.
-> - [ ] It waits for running turns, then stops idle sessions with reason `server_restart`.
-> - [ ] `--wait` expiry returns non-zero and leaves the drain state active rather than silently succeeding.
-> - [ ] Sessions live at drain time return to `idle` on the next startup.
+> - [ ] Returns `{branch, base_commit, head, target, ahead, behind, dirty, mergeable, files[], touches_ci}`.
+> - [ ] `behind` counts commits on the target the branch lacks.
+> - [ ] `mergeable` comes from `git merge-tree --write-tree`, which touches no working tree.
+> - [ ] `dirty` reflects uncommitted work in the session's worktree.
+> - [ ] All git work runs on the host in the project repository; no container is involved.
+> - [ ] A missing or pruned worktree degrades to a clear 409 rather than a 500.
 
-`docs/stories/**` is **not edited** (§7). This is an **M** story with new surface (a second listener, a new state, a new
-error code, a new reason word, a new command), so §5's worker route is available — but most of it is one flag read by
-handlers that already exist, so read the code before deciding.
+`docs/stories/**` is **not edited** (§7). An **M** story with one new endpoint and one new module: the git reads are
+mostly neighbours of things `worktree.rs` already does, so read the code before deciding how much is new.
 
 ### 1.2 The spec it closes
 
-- **Item 10 step 3**: "Drain: `holosmith admin drain --wait 10m` over a local unix socket. It refuses new creates and
-  prompts (503 `draining`), waits for running turns, then stops idle sessions with reason `server_restart`."
-  **Note the two spellings**: the Commands table's row and the story's acceptance both say `holosmith drain [--wait
-  10m]`, while item 10's prose says `holosmith admin drain`. Decide (the Commands table + the acceptance are the
-  contract, and HS-050's precedent is that the table wins), record it in the ADR and in the line's help text.
-- **Item 8's transition table**, the `idle` row: "`evict`, idle stop, **`drain`** → `stopped`" — the trigger and its row
-  already exist (`sessions/state.rs`'s `Trigger::Drain`).
-- **Item 10 step 6**: "Sessions that were live before the drain return to idle on startup" — which the startup reconcile
-  already does for a live row (ADR-0053); what a drain adds is that the sessions it stopped are `stopped` with
-  `server_restart`, and the ones it could not stop (a running turn) are `live` and come back through the reconcile.
-- **The API table's `Admin unix socket` row**: "`drain` command, not reachable over HTTP". The socket is *outside*
-  `App` — no guard, no route, no CORS layer — which is the whole of "unreachable over the network".
+**Item 12's first bullet**, in full:
+
+> `GET /api/sessions/:id/changes` returns `{branch, base_commit, head, target, ahead, behind, dirty, mergeable,
+> files:[{path, status, additions, deletions}], touches_ci}`. `behind` counts commits on the target that the branch
+> lacks. `mergeable` comes from `git merge-tree --write-tree` (git 2.38 or newer), which touches no working tree.
+> `dirty` means uncommitted work in the session's worktree.
+
+The rest of item 12 is **not** this story: the diff endpoint is HS-053, `POST /merge` and its five rules are
+HS-054–HS-057, `publish` is HS-058, and the Session screen's Changes sheet is the UI story after them. Item 12's
+"all git work for review and merge runs on the host in the project repository; containers never merge" is the one
+sentence that governs this story as well as the merge — the answer is read in the **project** repository on the host,
+never asked of the container.
 
 ### 1.3 What already exists
 
-- **`Trigger::Drain` and its row.** `sessions/state.rs` has `Trigger::Drain` (in `Trigger::ALL`, 15 triggers) and one
-  transition row `Idle → Stopped` on it, and a second copy of the same row in the table's own test. Nothing produces it
-  yet. `Transitioner::apply` (and `apply_logged`) is the only way a state changes.
-- **The reason words are per-module constants**, one per producer: `deleter::DELETED` ("deleted"), `ladder::FORCED_ABORT`,
-  `sweeper::IDLE_STOP`, `turn::TURN_TIMEOUT`, `turn::BUDGET_EXCEEDED`, `reconcile::INTERRUPTED`,
-  `http::sessions::EVICTED`, `exit::PI_EXIT`. `server_restart` does not exist yet; its home is whatever module owns the
-  drain, by that precedent.
-- **`deploy::ADMIN_DIR`** (`/run/holosmith`) is public and `deploy::Target::admin_dir()` prefixes it under `--root`
-  (`<root>/run/holosmith`). `server deploy`'s step 2 creates it at mode **0700** and chowns it to the service user
-  (`items`/`read_owner` in `deploy.rs`), and `doctor`'s `perms` finding reads it — so it is a directory the unit's
-  `User=` can already write, which is what a socket needs. HS-049's notes record that `/run/holosmith` is a tmpfs
-  recreated **root-owned** after every boot, which is why step 2 chowns it non-recursively on every run; a drain
-  socket therefore has to cope with a directory that is the service user's rather than assume `/run` is writable.
-- **`serve.rs` is process shutdown, not the drain**, and its module doc says so in one sentence: `SIGTERM`/`SIGINT` →
-  stop accepting → a bounded grace (`DEFAULT_SHUTDOWN_GRACE`, 10 s) → cut → exit 0. `commands/serve.rs` assembles the
-  app, installs the signal handler *before* binding, prints the eight-line banner, awaits the reconcile, then serves.
-- **`AppState`** (`http/app.rs`) is `{ config, runtime, database, events, streams, backend }` with **eight** wiring
-  helpers (`provisioner`, `turner`, `transitioner`, `ladder`, `deleter`, `sweeper`, `compactor`, `reconciler`). A
-  `draining` flag would be a new field — and it must be shared with tasks that already hold `AppState` clones.
-- **The refusal family** is `http/error.rs`'s `ApiError` (`not_in_state`, `bad_prompt`, `cap_reached`, …), every one the
-  ADR-0008 envelope `{"code","message"}`. There is no `503` code at all today; `draining` is the first.
-- **The create and the prompt/steer/resume/abort handlers** are `http/sessions.rs`'s; the create's order is fixed (the
-  idempotency check first, then the cap), and `refuse_project`, `evict_one`/`slot_for`, and the `202` with `events` are
-  all in there. "Refuses new creates and prompts" is therefore a guard in front of two handlers, and **which** of
-  resume/delete/abort keep working is a decision (the spec says "creates and prompts"; a drain that refused a delete
-  would trap a session the operator wants gone).
-- **Waiting for running turns** has two candidate readers: the row count (`sessions().counts_by_status()`, HS-050's
-  reader) or the in-process turn tasks. The row is the honest one, and a turn ends through `turn.rs`/`ladder.rs`.
-- **Stopping idle sessions** goes through `Stopper` (HS-030) — the one routine that writes `expected_stop` before the
-  `docker stop` — exactly as the sweeper and the eviction do. The drain is a **fourth** policy that stops something:
-  `evicted`, `idle_stop`, `turn_timeout`/`budget_exceeded` and now `drain` must not be confused.
-- **The startup reconcile** (ADR-0053) moves every live row to `starting` with reason `interrupted` when a turn was in
-  flight, then re-provisions; a second pass leaves the same rows and restarts live sessions again. That is already
-  acceptance bullet 5's mechanism.
-- **`db::Reader`** (HS-050) is the read-only opener a drain's report may use, and `counts_by_status` its query.
+- **`worktree.rs` owns the paths and two of the five git questions.** `Worktree::of(projects_root, project, id)` is the
+  naming rule, `BRANCH_PREFIX` is `agent/`, `WORKTREES` is `.worktrees`; `ahead(base_commit)` is already
+  `rev-list --count` on the branch against its base (HS-025/043), `registrations` reads `git worktree list --porcelain`
+  (HS-044), and `repository_of(projects_root, project)` is the host repository's path. `GitError` is the error type and
+  `refuse`/`Refusal` are the project refusals (ADR-0030) — the *create*'s, not a read's.
+- **The row carries what a changes reader needs.** `sessions.worktree` and `sessions.base_commit` are written by the
+  provisioner's worktree step (`set_worktree`), and `Session` carries them, so a handler has the path and the base
+  without recomputing either.
+- **`config.merge.targets` already exists** (the `Merge` struct, validated in `config/schema.rs`): default `main` and
+  `master`, whichever exist. That is where `target` comes from, and the spec's "the UI preselects the first" is the
+  ordering that key already has.
+- **The git version gate is already there**: `preflight::MIN_GIT` is 2.38 and `preflight`'s `git` check refuses an
+  older one, which is `merge-tree --write-tree`'s own precondition. This machine has git **2.43.0**.
+- **The envelope and its codes** (`http/error.rs`, ADR-0008), the `Routes`/`App` seam and `is_guard_exempt`
+  (`http/app.rs`), and `refuse_project`/`refusal_error` (`http/sessions.rs`) — the shape every handler and every
+  refusal already has.
+- **The blocker's trick for a real worktree without a daemon**: `case_worktree` boots `backend = "docker"` against a
+  fake `_ping` socket, so the create provisions the **worktree** step (which writes the row) and then fails at the
+  container step. That is what a `case_changes` can use to get a worktree on a real repo with no daemon — and
+  `tests/worktree.rs` already drives `Worktree` directly with a real git repo in a `TempDir`.
+- **`tool.rs`'s 404 family** (`unknown session`, "an id that cannot be a filename", "a missing file") is the pattern
+  for a read that says what it could not find rather than 500ing.
 
 ### 1.4 What does not exist
 
-No admin socket (no `UnixListener` in production code — the crate's only one is `status.rs`'s test fixture for a fake `_ping` daemon), no `draining` state or flag, no `503` error code, no
-`server_restart` reason, no `drain` command or `admin` subcommand group, no `--wait` deadline with a non-zero exit, no
-`case_drain`, and no decision about what the socket answers (a line of text? JSON? what a second `drain` while one is
-active says).
+No `/changes` route (the `App` has thirteen and none is `changes`), no `behind`, no `dirty` (`status --porcelain`), no
+`mergeable` (`merge-tree --write-tree`), no `files[]`/numstat read, no `touches_ci`, no module for any of it, no code
+for a missing-or-pruned worktree, no `case_changes`, and no UI (the Changes sheet is not this story's).
 
 ### 1.5 The decisions that shape the design
 
-1. **The command's name and its two spellings** (§1.2): `holosmith drain [--wait 10m]` per the Commands table and the
-   acceptance, with item 10's `holosmith admin drain` recorded as the prose's older spelling. Does the socket path come
-   from `--root`/the config, or always from `ADMIN_DIR`? (`doctor`'s `perms` already reads the *caller's* tree through
-   `Tools`, so a `--root` run's socket is a different path — and a `drain` against a `--root` install is what a gate
-   case can actually measure.)
-2. **The protocol.** One request, one answer, over `UnixStream`: a verb (`drain <seconds>`/`status`) and a line that a
-   human and a test can both read. What does a *second* drain do (join the active one? answer `already draining`?)? What
-   does `holosmith drain` print on success, and what does it print while it waits?
-3. **Where `draining` lives.** An `Arc<AtomicBool>` field on `AppState` (cloned into every handler and task), a
-   `tokio::sync::watch` (a task can await the flip), or the database (a row is wrong — the state is the process's). The
-   handlers that must see it are the create, the prompt and the steer; the ones that must not are the reads, the abort,
-   the delete and the resume (decide, and say why in the ADR).
-4. **The 503's shape.** A new `ApiError` variant with `code: "draining"`, `503`, and a sentence naming the drain and the
-   `--wait` — the first non-4xx code in the family, so `http/error.rs`'s tests (status/code/content-type, ADR-0008) grow
-   one arm.
-5. **"Waits for running turns."** A poll over the rows (`counts_by_status`) with a deadline, or an await on the turn
-   tasks. The row is the honest reader and the one a crash also leaves in place; the deadline must be the `--wait` value
-   and its expiry must be a **non-zero exit with the drain still active** (bullet 4) — not a silent success and not a
-   cancelled drain.
-6. **"Then stops idle sessions with reason `server_restart`."** Through `Stopper` (the flag before the `docker stop`) and
-   `Transitioner::apply` with `Trigger::Drain` and the new reason. Does a drain also stop `starting` rows (a provisioner
-   mid-flight)? The table has only `idle → stopped` on `Drain`, so a `starting` row is *not* stoppable by it — decide
-   whether that is a refusal, a wait, or a wait-then-timeout.
-7. **What the drain does to the listener.** Item 10 step 3's drain precedes a restart: does the server keep serving
-   (reads yes, writes refused) until `SIGTERM`, or does a successful drain end the process? The acceptance says reads
-   still work while draining, so the process stays up; the sentence in the ADR should say what ends it.
-8. **The socket's permissions and the `--root` arm.** `/run/holosmith` is root-owned on a system install and the unit
-   runs as `holosmith`; a socket in a directory the service user cannot write is a drain nobody can connect to. Under
-   `--root` the path is `<root>/run/holosmith`, which is what a gate case can measure with no systemd.
-9. **The gate.** A `case_drain` needs a turn that lasts: the shared boot's stub turn is fast, so the case needs either
-   the slow stub (`SLOW_STUB_STEP` is a *test* constant, not a gate one) or its own boot with a Docker session holding a
-   turn. What is measurable without a turn: the socket refusing non-HTTP use (no listener on the control port answers
-   it), a create answered `503 draining` after a drain, the `--wait` expiry's non-zero exit with the drain still active,
-   and a second `drain` answering honestly.
-10. **The reason word's home** (`server_restart`) and whether `reconcile::INTERRUPTED` is the reason a *drain-stopped*
-    session gets on the next boot (it is `stopped`, so the reconcile does not touch it — bullet 5 is about the rows that
-    were `running`).
+1. **Where the module lives.** A new `src/changes.rs` (a `Changes::of(...)` that composes the five reads and a type
+   with the eleven fields) beside `worktree.rs`, rather than five methods on `Worktree`: the diff basis and the JSON
+   are the changes view's, not the worktree's, and `worktree.rs` is already the biggest git module. Say so in the ADR.
+2. **The diff's basis: `base...head` or `base..head`?** Item 12 says "what a session changed", and `behind` counts
+   commits on the *target* the branch lacks — so this story's basis is the worktree's branch against its recorded
+   `base_commit`. Whether the file list is `base_commit..head` (two-dot) or `base_commit...head` (three-dot, i.e.
+   since the merge base) is a real decision that HS-053's diff and HS-054's mergeability both inherit: pick one,
+   record it, and make the field's name say it.
+3. **What `head` is.** The branch's tip (`agent/<id>`) or the worktree's `HEAD`? They differ exactly when a turn is
+   mid-flight or the worktree is detached, and the answer decides whether `ahead`/`behind` are about the branch or the
+   checkout. `ahead` already means the branch.
+4. **`target` is one branch, and there may be two.** `merge.targets` defaults to `main` **and** `master`, whichever
+   exist: what does `target` say when both exist, or neither? (The spec's "the UI preselects the first" implies the
+   first *existing* one; "neither" is a machine this endpoint must still describe.)
+5. **`dirty` and untracked files.** `git status --porcelain` counts an untracked file; the WIP snapshot (HS-042) and
+   the delete's keep-rules (HS-043) already have an opinion about what counts as work. Decide whether an untracked
+   file makes the worktree dirty, and whether an ignored one does.
+6. **`mergeable` is the sharpest one: a `bool` over a fallible question.** `merge-tree --write-tree` fails when the
+   target does not exist, when the merge conflicts (exit 1 with the conflicted paths), or when git is too old — and a
+   `false` for "I could not look" is exactly the P1 HS-050's review found (`Docker::running` folding every error into
+   `false`, `docs/notes.md`). The field is a `bool` in the spec's shape, so the honest form is `null` (JSON) with a
+   sibling sentence, or `bool` plus the reason — decide, and make `doctor`'s three arms the precedent.
+7. **The 409's word.** A missing worktree, a pruned one, a row with no branch and a repo that has gone away are four
+   sentences; the acceptance asks for "a clear 409 rather than a 500", so name the code (the family has one per
+   refusal) and decide whether they are one code or several.
+8. **Where the git runs.** Host, project repository, `spawn_blocking` (the backend's own pattern for `Worktree`), and
+   `--no-ext-diff --no-textconv` is HS-053's sentence but this story runs `git diff --numstat`, which can already be
+   affected by repository config (`diff.external`, `diff.noprefix`, `.gitattributes` textconv) — decide whether this
+   story passes those flags too, because the numbers a client sees come from *this* command.
+9. **`touches_ci`'s list.** Item 12's publish rule names `.github/`, "other CI files" and "hook directories". The
+   changes view is where that predicate first exists; HS-058 will read it. Decide the set once (a constant), and
+   whether an **added** file counts the same as a modified one.
+10. **Concurrency.** Nothing here writes, but `merge-tree --write-tree` writes objects, and a session's own worktree
+    may be committing at the same moment (`snapshot.rs`, the agent's own git). Is one read per request enough, and
+    does it need the per-project start lock the worktree step takes?
 
 ### 1.6 The questions the plan must answer (before code)
 
-1. **The exact bytes on the socket**, both directions, and what a second `drain` and a `status` verb answer.
-2. **Where the flag lives**, and which handlers consult it (a list, in the ADR).
-3. **What `--wait` measures** (rows in `running`? `starting` too?) and what the expiry prints and exits.
-4. **What a drained machine looks like**: which rows are `stopped · server_restart`, which are left live, and what the
-   next boot does with each.
-5. **The socket's path and mode** on a system install and under `--root`, and who may connect.
-6. **Which `case_*` proves each acceptance bullet**, and which half can `SKIP` without skipping on its own subject.
+1. **The exact JSON**, field by field, including the nulls (no target, no worktree, unmergeable-because-unreadable).
+2. **Which git command produces each field**, with its flags, and what each returns for a binary file, a rename, an
+   empty branch and a branch at its base.
+3. **The refusal table**: which condition maps to which code and sentence, and which of them are 409 versus 404.
+4. **Where `touches_ci`'s set lives** and how HS-058 will read the same predicate.
+5. **Which `case_*` proves each acceptance bullet**, and which half can `SKIP` without skipping on its own subject.
 
 ### 1.7 Acceptance, restated as checks
 
-- *"`holosmith drain [--wait 10m]` talks to a local unix socket, not HTTP"* — the socket exists at the configured admin
-  path, the command connects to it, and a request on the **control origin** cannot reach it (no route, and the guards
-  layer does not see it at all).
-- *"While draining, creates and prompts return 503 `draining`; reads still work"* — one 503 with the envelope and the new
-  code from the create and the prompt, and a 200 from `GET /api/sessions` and `GET /api/sessions/{id}` **in the same
-  window**.
-- *"It waits for running turns, then stops idle sessions with reason `server_restart`"* — a running row makes the drain
-  wait; when the turn ends, the idle rows are `stopped` with that reason and `expected_stop` set (the `Stopper`
-  contract), and the report says how many.
-- *"`--wait` expiry returns non-zero and leaves the drain state active"* — a turn longer than `--wait` makes the command
-  exit non-zero, and a create **still** answers `503 draining` afterwards.
-- *"Sessions live at drain time return to `idle` on the next startup"* — a `kill -9` after a drain leaves the rows that
-  were `running`, and the next boot's reconcile brings them to `idle · interrupted` (ADR-0053), which the case asserts.
-- Plus the usual gates, one new `case_*`, and `docs/build.md`/`docs/notes.md`/`GLOSSARY.md`/an ADR (**0060**).
+- *Returns the eleven fields* — one `GET /api/sessions/{id}/changes` on a session with a real worktree answers `200`
+  with every key the spec names, `files[]` entries carrying `path`, `status`, `additions`, `deletions`.
+- *`behind` counts the target's commits the branch lacks* — a target that has moved ahead of the base makes `behind`
+  non-zero and `ahead` unchanged; the numbers are asserted against `git rev-list --count` run by the case itself.
+- *`mergeable` is `merge-tree --write-tree`* — a conflict planted in the target makes it `false` (with the reason),
+  and the case asserts **no working tree moved** (the repo's `git status` and files are unchanged afterwards).
+- *`dirty` reflects uncommitted work* — a file written into the worktree flips `dirty` and no other field.
+- *All git on the host, in the project repository* — no container is asked: the case runs with **no daemon** (the
+  fake `_ping` socket `case_worktree` uses), which is the measurement.
+- *A missing or pruned worktree is a 409 with a sentence* — remove the worktree directory (or `git worktree prune`
+  it) and assert `409`, a code, and a sentence naming the fix, never a `500`.
+- Plus the usual gates, one new `case_*`, and `docs/build.md`/`docs/notes.md`/`GLOSSARY.md`/an ADR (**0061**).
 
 ### 1.8 Non-goals
 
-`upgrade`/`rollback` (HS-078/079 — the drain's *caller*), `hub deploy`/`hub host` (HS-072), the host registry
-(HS-068), any UI affordance for draining (none is asked for), a drain that survives a restart as a *stored* state (the
-flag is the process's), and any admin verb other than the drain.
+The unified diff (`GET …/changes/diff`, HS-053), `POST …/merge` and its five rules (HS-054–HS-057), `publish`
+(HS-058), the Changes sheet (the UI story), any write of any kind, the hub, and any change to `worktree.rs`'s create
+refusals.
 
 ### 1.9 The demo
 
-On this machine: boot a Docker `serve` with a real session, start a prompt that takes a while (or hold a turn with the
-slow stub in `cargo test`), run `holosmith drain --wait 1m` **over the socket**, and show a create answered `503
-draining` while a `GET` still answers 200; then the turn ends, the idle rows go `stopped · server_restart`, and a
-`--wait` expiry against a still-running turn exits non-zero with the drain still active. **Say plainly what was not
-measured**: no systemd (so the socket's real directory is `/run/holosmith` only on a deployed machine — the demo and the
-gate use `--root`), and no upgrade/rollback consuming the drain (HS-078/079).
+On this machine: a project repo under a temp root (a first commit, a branch), a `serve` whose projects root is that
+repo, a session created with the fake-`_ping` Docker boot `case_worktree` uses so the **worktree step** runs and the
+row gets its path — then commit something on `agent/<id>`, move `main` ahead, write an uncommitted file, and
+`GET /api/sessions/{id}/changes` showing `branch`, `base_commit`, `head`, `target`, `ahead`, `behind`, `dirty`,
+`mergeable`, `files[]` and `touches_ci`; then a planted conflict for `mergeable: false`, and a pruned worktree for the
+`409`. **Say plainly what was not measured**: no real container (the worktree is on the host, which is the story's own
+claim), no merge (HS-054), and no UI.
+
 ### 1.10 What the next agent needs back
 
-When you write the state back (§5, step 10): §1 becomes the **next** issue — by `PROMPT.md`'s ranking that is
-`PER-84` (HS-052, the changes view) *if* HS-051 ships, and `PER-83` again if it does not — with the same shape. Refresh
-the counts, the ADR number you took (**ADR-0060** is next unless HS-051 takes none), the last gate run's own numbers,
-and replace §9's row with this story's (short — one paragraph). Anything you learned that is **not** state and **not**
-an ADR goes into `docs/notes.md` under a new `### Landmines: …` heading, never into §1. Then kill what you started
+When you write the state back (§5, step 10): §1 becomes the **next** issue — by `PROMPT.md`'s ranking that is `PER-85`
+(HS-053, the unified diff) *if* HS-052 ships, and `PER-84` again if it does not — with the same shape. Refresh the
+counts, the ADR number you took (**ADR-0061** is next unless HS-052 takes none), the last gate run's own numbers, and
+replace §9's row with this story's (short — one paragraph). Anything you learned that is **not** state and **not** an
+ADR goes into `docs/notes.md` under a new `### Landmines: …` heading, never into §1. Then kill what you started
 (§5, step 11).
+
+---
 
 ## 2. Environment (already repaired — do not redo)
 
@@ -500,7 +484,9 @@ crates/holosmith/
   src/cli.rs                clap: version, config {validate,show,edit}, serve [--port|--data-dir|--backend],
                             proxy {egress --listen --allow}
   src/commands/             version.rs, config.rs, serve.rs, proxy.rs, doctor.rs, key.rs, container.rs,
-                            deploy.rs (the seven steps' command: the config, the tail, the resume command)
+                            deploy.rs (the seven steps' command: the config, the tail, the resume command),
+                            drain.rs (`holosmith drain [--wait]`: a std UnixStream client, and the exit code
+                            is the server's terminal word — 0 only for `drained`)
   src/config/               mod.rs (typed Config, KeySpec walk, 32 keys), schema.rs, problem.rs,
                             render.rs, duration.rs, editor.rs
   src/backend/              mod.rs (Step, SessionBackend, `ProcessEnd`/`ExitWatcher`/`supervise`,
@@ -550,6 +536,14 @@ crates/holosmith/
                             stderr)` which takes the flag, applies `PiExit` or `UnexpectedExit`, and appends
                             the stderr to `<data>/sessions/<id>/session.log`. Its caller is the task the
                             provisioner spawns after the pi step (ADR-0039)
+  src/drain.rs              the drain (HS-051, ADR-0060): `Control` (the process's `Arc<AtomicBool>` — never a
+                            row), `Request` (`drain <millis>`, one line), `Drain` (set the flag, poll
+                            `counts_by_status` for `running` every 100 ms, then `Trigger::Drain` +
+                            `Stopper` per idle row), `Ending` (`drained`/`expired`/`refused`, and the exit
+                            code), `LineSink`, `listen`/`prepare`/`spawn`/`answer` (the unix socket: 0600 in a
+                            0700 directory, a stale socket replaced, a live one refused, a regular file named
+                            and left alone), `SERVER_RESTART` ("server_restart"), `SOCKET_NAME`, `POLL`,
+                            `REQUEST_TIMEOUT`, `MAX_REQUEST`
   src/deleter.rs            the delete flow's task (HS-019): revoke_key (HS-039's dummy) →
                             `backend.delete` → remove the row *and its event log* in one
                             transaction → close the session's streams. `DELETED` is the rung-2 word
@@ -729,7 +723,8 @@ crates/holosmith/
                             rpc (the fixture replays and the pump), tool_output (the endpoint and the store's
                             rules at the wire), key_cli, key_proxy, snapshot, fixtures/pi-turn-{text,thinking,
                             tool,image,extension-ui}.jsonl, pin_single_source, guards, session_repository,
-                            sessions_api, events,
+                            sessions_api, drain (the socket, the wait, the stop and the refusals), drain_cli
+                            (the printed lines and the exit code against a hand-written socket), events,
                             streams, provisioning, state_machine, session_list, session_screen,
                             turns, abort, steer, resume, delete, eviction, idle_stop, turn_timeout,
                             deploy (the seven steps over shims), images (the embedded consts, the ustar, the
@@ -765,9 +760,9 @@ scripts/verify.sh           the one-command gate (see §3), including the two st
                             --json` from the pairs it was asked for) and `health_responder` (a `python3` that
                             answers `/api/health` for a whole case)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0058          read the recent ones before planning anything
+docs/adr/0001…0060          read the recent ones before planning anything
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-81, PER-91…PER-93, PER-97, PER-107  each a verbatim review + a `## Resolution` table
+docs/review/PER-33…PER-83, PER-91…PER-93, PER-97, PER-107  each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -852,10 +847,11 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   caller is the task the provisioner spawns after a successful pi step, fed by the backend's `ExitWatcher`
   (ADR-0039). Do not "fix" anything by adding a `docker events` watcher: the attached process *is* the
   observation.
-- **Four policies can now stop something and they must not be confused:** the cap evicts (`evicted`,
+- **Five policies can now stop something and they must not be confused:** the cap evicts (`evicted`,
   inside a create), the sweeper stops a quiet one (`idle_stop`, on its own tick), the turn timeout ends a
-  *turn* (`turn_timeout`, from the runner) and the token budget ends a *turn* (`budget_exceeded`, also from
-  the runner, on one `fired` shared with the timeout so only one climb happens). All of them go through
+  *turn* (`turn_timeout`, from the runner), the token budget ends a *turn* (`budget_exceeded`, also from
+  the runner, on one `fired` shared with the timeout so only one climb happens) and the drain stops every
+  `idle` row an operator asked for (`server_restart`, over the admin socket). All of them go through
   `Transitioner::apply`, and the row moves before the container in every one of them.
 - **`runtime::Backend`** has `Stub` and `Docker`; `serve --backend` and the config key `backend` select
   it. `DockerBackend::new(ContainerSettings)` provisions all four steps, runs a turn's five operations and
@@ -980,17 +976,15 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 The catalogue lives in **`docs/notes.md`** — read the **cross-cutting** sections before you start anything,
 then the sections below. It is a reference: everything there is a measurement or a review finding.
 
-| Read | Why it bears on HS-051's drain |
+| Read | Why it bears on HS-052's changes view |
 | --- | --- |
-| Cross-cutting: *Build and toolchain*, *Tests*, *Config and docs*, *Demos*, *Reviews* | True of every story. This one's sharpest: **Tests** — a drain is mostly *waiting*, so every arm is a race, and a test that "waits for the turn" will pass by finishing at once; the gate has no unix-socket client in bash (`fetch` is `/dev/tcp`, network only), so `case_drain` needs `python3` like `case_doctor_quick` and `case_exit_classification` do; **HTTP and the envelope** — `503 draining` is the family's first non-4xx code. |
-| *Landmines: the doctor, the ports and a read-only open (HS-045)* | The three-armed fact (`pass`/`fail`/`unknown` with a sentence) is what the drain's *report* and its refusals must copy, and `preflight::daemon` is the one reader for "did the daemon answer" — a `bool` from `Docker::running` is not. |
-| *Landmines: `status`, `logs` and `uninstall` (HS-050)* | The newest section, and the closest code: `db::Reader` (a read-only opener for the rows a drain counts), `preflight::daemon`, and the **P1 lesson** — a read that folds "could not look" into a value is the one thing these reports refuse to do (T1/T2 in it). `uninstall` is also what a drain precedes. |
-| *Landmines: the expected-stop flag and the exit classifier (HS-030)* | "Stops idle sessions with reason `server_restart`" must go through `Stopper` — the flag written **before** the `docker stop` — and the drain is a **fourth** policy that stops something (after eviction, the idle stop and the turn's two endings). A row the drain stopped is `stopped`, so the reconcile leaves it alone. |
-| *Landmines: the startup reconcile (HS-044)* | Acceptance bullet 5 ("sessions live at drain time return to `idle` on the next startup") is mostly **this** story's mechanism: a live row becomes `starting` with reason `interrupted` and is re-provisioned. What the drain adds is which rows it leaves live and which it stops. |
-| *Landmines: the turn runner, the ladder and the two turn endings (HS-015, HS-016, HS-022)* | "Waits for running turns" needs the one honest reader of "is a turn in flight" — the row, not the tasks — and the turn's own endings are what make the wait finish. |
-| *Landmines: the service, the keys and the origins (HS-049)* | `/run/holosmith` is the admin directory (`deploy::ADMIN_DIR`, `Target::admin_dir()` prefixed under `--root`), created by step 2 and read by `doctor`'s `perms`; on a real host it is a tmpfs the unit's `User=` must be able to write, and `uninstall` deliberately keeps it. |
-| *Landmines: the deploy, the ports and what `install` does to a key file (HS-047)* | `--root` prefixes what a command *installs* and nothing it reads about the machine — so a socket under `--root` is `<root>/run/holosmith`, which is what a gate case can actually connect to. |
-| *Landmines: the verification run (HS-046)* | The gate withholds an `ok <case>` line for a case that printed `SKIP`, so a case that skips on "no systemd" or "no turn" must find another way to measure its subject. |
+| Cross-cutting: *Build and toolchain*, *Tests*, *Config and docs*, *Demos*, *Reviews* | True of every story. This one's sharpest: **Tests** — every acceptance bullet is a *git* fact, so the case has to own a real repository and move refs between two assertions, which is `case_worktree`'s shape (a `backend = "docker"` boot against a fake `_ping` socket runs the **worktree** step and then fails at the container step — a real worktree on a real repo with no daemon); **HTTP and the envelope** — a new refusal code, and a `409` whose sentence must name the fix. |
+| *Landmines: worktrees (HS-025)* | The naming rule (`agent/<id>`, `.worktrees/<id>`), `Worktree::ensure` and its adopt-vs-create decision, `ahead` (`rev-list --count`), and the rule that a worktree is the *host's* — which is the sentence "all git work runs on the host in the project repository; no container is involved" made of. |
+| *Landmines: project refusals and coalescing (HS-026, HS-059)* | `worktree::refuse`/`Refusal`/`CONFIG_READ` is how this build asks git a question whose answer a repository's own config could subvert — the same fear that makes `--no-ext-diff --no-textconv` (HS-053) and `-c core.hooksPath=/dev/null` (HS-055) necessary. `repository_of` is the host repo's path. |
+| *Landmines: what a delete keeps (HS-043)* | The build already answers "is this branch merged?" — `Retained::merges_into` and `differing_ref` compare trees and refs rather than trusting a name. Read it before inventing a second definition of mergeability for `mergeable`, and note that `merge-tree --write-tree` is the *spec's* answer, so the ADR should say why the two are different questions (a delete asks "can I lose this?", the view asks "would a merge conflict?"). |
+| *Landmines: the doctor, the ports and a read-only open (HS-045)* + *Landmines: `status`, `logs` and `uninstall` (HS-050)* | The three-armed fact (`pass`/`fail`/`unknown` with a sentence) and the **P1 lesson** behind it: `mergeable` is a `bool` in the spec's shape over a fallible question, and folding "could not look" into `false` is the exact mistake `Docker::running` made. Also the read-only opener and "a stat's failure is not 'not there'". |
+| *Landmines: tool output, usage and the gate's shell (HS-033, HS-034)* | What a `case_*` may assume about this machine's shell: no `awk`, `python3` when a fact is easier to read than to parse, `sqlite3` for a row fact the API does not carry, and a fixture that is the case's own. |
+| *Landmines: the drain and its socket (HS-051)* | The newest section, and the previous story: it is the precedent for a module whose every line is a *refusal* or a *measurement*, and its `Wait` enum is the shape "three answers, not two" takes in code. Also the landmine that matters here: a boot in a test or a gate passes `--admin-dir`, and the same discipline applies to `projects_root` in any case that owns a repo. |
 
 Three rules worth repeating here because they are the most expensive to relearn: **a test that cannot fail
 is worse than no test** (mutate the behaviour and watch it go red); **a gate case that SKIPs on the bug it
@@ -1001,7 +995,7 @@ three such edits have cost a review finding each.
 
 ## 7. Decisions taken on the operator's behalf (do not silently undo)
 
-Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0058`, one line each in
+Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0060`, one line each in
 `docs/stories/README.md`): read the recent ones before planning, and **amend rather than rewrite** — an ADR
 a later story changes gets a "Superseded by ADR-00xx" note (0012/0013, and 0026 amended 0020).
 
@@ -1031,7 +1025,7 @@ cd /home/adamolsson/projects/holosmith
 git status --short                                  # clean apart from log.txt/orchestrate.sh
 . ~/.pi/toolchains/env.sh                           # ALWAYS before cargo/rustc
 python3 /tmp/lin.py issues | grep -v ' Done ' | head # recreate /tmp/lin.py first (§2)
-python3 /tmp/lin.py issue PER-83                    # scoped, Backlog, the issue §1 names
+python3 /tmp/lin.py issue PER-84                    # scoped, Backlog, the issue §1 names
 docker version                                      # the daemon must answer, or a Docker check cannot be measured
 docker image inspect pi-agent:local                 # the image the Docker stories run
 docker network ls | grep -w egress                  # the proxy test's premise (§2); `grep -x` never matches
@@ -1041,7 +1035,7 @@ scripts/verify.sh                                   # baseline green, ~9–12 mi
 
 If the baseline is red before you touch anything, that is the first thing you fix — and say so in Linear.
 
-Then start §5 on **§1's issue** (`PER-83`, HS-051) and stop after step 11.
+Then start §5 on **§1's issue** (`PER-84`, HS-052) and stop after step 11.
 
 Before you begin, check that the last session left nothing behind — `subagent({action:"list"})` should show
 no run in progress, `docker ps` none of its containers, and `git status --short` should look like the line
@@ -1060,21 +1054,23 @@ from those three; do not carry old sessions' ledgers in this file.
 If you stop before the issue ships, say so explicitly, name the next action, and leave the tree clean and the
 gates green — **a half-finished story is worse than an honest stop**.
 
-**The last shipped story** (`PER-82`, HS-050, ADR-0059; commits `deccc7c`, `b0b513e`, `4a7cc40`, `5dc08df`,
-`887de9e`, `11b020f`): three commands, each mostly a reader of state earlier stories own. `status` prints one
-`key value` line per fact with `doctor`'s three arms — `role`, `version`, `uptime` (asked of `GET /api/health`, because
-`Runtime::uptime_s` is the only owner and the `unknown:` sentence is where "not serving" is said), six
-`sessions <status>` lines from one `GROUP BY` through a new read-only `db::Reader`, both `proxy` lines (with
-`preflight::daemon` asked **first**, so "could not look" is `unknown:` not `not running` — its review's P1), and a
-`machines` line naming HS-068. `logs` is one `journalctl -u holosmith.service [-f]` child with no `-n` and inherited
-stdio, or a session's `session.log` read in-process with `-f` a 200 ms poll loop. `uninstall` prints
-`uninstall: <what>: <word>: <sentence>` with four words of its own (`removed`/`kept`/`nothing`/`failed`), removes the
-unit then both proxies then the `egress` network, keeps the data root, `secrets/`, the projects and the sessions' own
-containers and networks, and `--purge` sweeps the rows' `s_<id>`/`agents_<id>` names before deleting the tree — with a
-refusal over `live_count` **before any child runs** unless `--force`. The review raised one P1 and eight P2s, all
-fixed; three spec findings were dismissed with citations (the registry clause → HS-068, six counts → ADR-0059 D3, a
-session's network surviving → ADR-0059 D6). The gate: **75 cases, 1034 assertions**, no `SKIP`; `cargo test` 899/49,
-`web` 52. Its full record is Linear, `docs/review/PER-82.md` and `git log`; do not carry it forward.
+**The last shipped story** (`PER-83`, HS-051, ADR-0060; commits `39845a6`, `e566481`, `1892705`, `f652e2d`): the
+drain, which is a **socket and a process flag and not a shutdown**. `holosmith drain [--wait 10m]` (the Commands
+table's spelling; item 10's `holosmith admin drain` is the prose's older one, and there is no `admin` group for one
+verb) speaks one request line `drain <millis>` to `<admin dir>/drain.sock` and prints the server's lines as they
+arrive, and **the terminal word is the exit code** — `drained` is 0, and `expired` (a turn outlasted the wait, the
+flag stays on, nothing is stopped) and `refused` are 1. `draining` is `AppState.drain`, an `Arc<AtomicBool>`, never a
+row; the create, the prompt **and the resume** answer `503 draining` (the envelope's first non-4xx) while reads,
+`abort`, `steer` and `delete` keep working. The wait is a 100 ms poll over `counts_by_status` for `running` only
+(`starting` is reported once and left to the reconcile), and the stop is `Trigger::Drain` + `Stopper` with the reason
+`server_restart` — the fifth policy that stops something, and the only one an operator asks for. The review raised one
+P1 — the client's 5 s read timeout treated the server's *designed* silence between progress lines as a dead socket, so
+`drain --wait 1m` failed after five seconds against any turn longer than that (the story's own demo) — and six
+Standards findings, all fixed, none dismissed; the P1 was reproduced with a fake socket that stays silent for six
+seconds and re-measured after the fix. On the way it also found and fixed a real defect: eight spawns in the tests
+and gates were binding the machine's **real** `/run/holosmith/drain.sock`, and the leftover turned into an unrelated
+`tests/deploy.rs` `perms` failure. The gate: **77 cases, 1101 assertions**, no `SKIP`; `cargo test` 919/51, `web` 52.
+Its full record is Linear, `docs/review/PER-83.md` and `git log`; do not carry it forward.
 
 **One thing this build does not do, recorded rather than discovered:** a resumed session's pi has **no
 memory** of earlier turns (`--no-session`; the transcript is Holosmith's log). Replaying the log into a new pi
