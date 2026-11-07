@@ -107,6 +107,45 @@ pub const DRAINING: &str = "draining";
 /// `internal`, the project refusals' own split between a state and a machine problem.
 pub const NO_WORKTREE: &str = "no_worktree";
 
+/// A merge named a target that is not one this machine will merge into (HS-054, spec item 12's rule 6).
+///
+/// Two facts share it — a name the `merge.targets` config does not list, and a listed name the repository has no
+/// branch for — for the reason `cap_reached` has two sentences: the client's move is one (send a target this
+/// whole machine and project agree on) while the operator's next step is the sentence's.
+pub const BAD_TARGET: &str = "bad_target";
+
+/// A merge named a `strategy` that is not one of spec item 12's three words (HS-054).
+///
+/// The sibling of `bad_thinking` and `bad_model`: a field whose value is not in the contract's vocabulary is a
+/// malformed request, not a state and not a machine problem.
+pub const BAD_STRATEGY: &str = "bad_strategy";
+
+/// A merge asked for a field this build does not implement yet (HS-054).
+///
+/// `merge` and `squash` (HS-055) and `delete_session` (HS-056) are in the contract and not in this build, so a
+/// request that names one is refused with a sentence saying so rather than accepted and quietly not done — the
+/// one thing an endpoint must never do to a request that says "delete the session".
+pub const UNSUPPORTED: &str = "unsupported";
+
+/// A merge could not fast-forward because the target has moved (HS-054, spec item 12's rule 2).
+///
+/// The spec's own word. One fact covers both shapes rule 2 and rule 4 describe: a target that is ahead of the
+/// branch, and a target that advanced between the merge's read and its compare-and-swap.
+pub const NOT_FAST_FORWARD: &str = "not_fast_forward";
+
+/// A merge could not fast-forward because the checkout that holds the target has local work (HS-054, rule 4).
+///
+/// The spec's own word. It is not the session's `dirty` (rule 1's `dirty_worktree`, HS-056): this is the
+/// operator's own working tree in the project checkout, and the next step is to commit or stash there.
+pub const TARGET_DIRTY: &str = "target_dirty";
+
+/// A merge found the target checked out somewhere that is not the project's own checkout (HS-054).
+///
+/// The third answer to rule 4's two-arm question. In practice it is a session's worktree, where a container is
+/// working: writing that working tree from the host would move files under a running agent, so the merge refuses
+/// and says what to change.
+pub const TARGET_CHECKED_OUT: &str = "target_checked_out";
+
 /// The body of every error response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ErrorBody {
@@ -342,6 +381,57 @@ impl ApiError {
     /// route exists — the thing the view would read is not there.
     pub fn no_worktree(message: &'static str) -> Self {
         Self::new(StatusCode::CONFLICT, NO_WORKTREE, message)
+    }
+
+    /// What a merge whose body is not `{target, strategy?, message?, delete_session?}` answers (HS-054).
+    ///
+    /// The same code as [`Self::bad_body`] with this request's own fields, for the reason
+    /// [`Self::bad_prompt`] has the prompt's: a client told about a create's fields would be describing the
+    /// wrong request (ADR-0008).
+    pub fn bad_merge_body() -> Self {
+        Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            BAD_BODY,
+            "the body must be a JSON object with a `target` string, and optionally `strategy`, `message` and \
+             `delete_session`",
+        )
+    }
+
+    /// What a merge naming a target this machine will not merge into answers (HS-054, rule 6).
+    ///
+    /// The **message** is the caller's, like [`Self::no_worktree`]'s: a name the config does not list and a
+    /// listed name the repository has no branch for are one code and two next steps.
+    pub fn bad_target(message: &'static str) -> Self {
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, BAD_TARGET, message)
+    }
+
+    /// What a merge naming a `strategy` that is not one of the spec's three words answers (HS-054).
+    pub fn bad_strategy(message: &'static str) -> Self {
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, BAD_STRATEGY, message)
+    }
+
+    /// What a merge naming a field this build does not implement answers (HS-054).
+    ///
+    /// The **message** is the caller's for [`Self::not_in_state`]'s reason: `strategy: "squash"` and
+    /// `delete_session: true` are two requests whose next steps differ, and a sentence about one read on the
+    /// other would be a guess.
+    pub fn unsupported(message: &'static str) -> Self {
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, UNSUPPORTED, message)
+    }
+
+    /// What a merge that cannot fast-forward answers (HS-054, rule 2).
+    pub fn not_fast_forward(message: &'static str) -> Self {
+        Self::new(StatusCode::CONFLICT, NOT_FAST_FORWARD, message)
+    }
+
+    /// What a merge whose target checkout holds local work answers (HS-054, rule 4).
+    pub fn target_dirty(message: &'static str) -> Self {
+        Self::new(StatusCode::CONFLICT, TARGET_DIRTY, message)
+    }
+
+    /// What a merge whose target is checked out outside the project's own checkout answers (HS-054).
+    pub fn target_checked_out(message: &'static str) -> Self {
+        Self::new(StatusCode::CONFLICT, TARGET_CHECKED_OUT, message)
     }
 
     /// What a resume at the cap answers (HS-018, spec item 8's "or returns 409").

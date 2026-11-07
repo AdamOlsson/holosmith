@@ -32,11 +32,13 @@ use crate::http::error::ApiError;
 use crate::http::guard::{self, Guards};
 use crate::http::health::{self, Health};
 use crate::http::history;
+use crate::http::merge;
 use crate::http::sessions;
 use crate::http::streams;
 use crate::http::tool_image;
 use crate::http::tool_output;
 use crate::ladder::Ladder;
+use crate::merge::Merges;
 use crate::provisioner::Provisioner;
 use crate::reconcile::Reconciler;
 use crate::runtime::Runtime;
@@ -71,6 +73,10 @@ pub struct AppState {
     /// clone of this state carries the same bit, which is what lets a handler read it on the request path
     /// while the socket's own task sets it.
     pub drain: Control,
+    /// One merge per project at a time (HS-054, spec item 12's rule 2). Here rather than in a handler for the
+    /// reason the state's other handles are: two requests must share the lock, so it must be the state's, and a
+    /// clone of the state clones the `Arc` rather than the map.
+    pub merges: Merges,
 }
 
 impl AppState {
@@ -461,6 +467,7 @@ pub fn router(state: AppState) -> Routes {
     let tool_image_state = Arc::clone(&state);
     let changes_state = Arc::clone(&state);
     let changes_diff_state = Arc::clone(&state);
+    let merge_state = Arc::clone(&state);
     let prompt_state = Arc::clone(&state);
     let abort_state = Arc::clone(&state);
     let steer_state = Arc::clone(&state);
@@ -582,6 +589,19 @@ pub fn router(state: AppState) -> Routes {
                 let state = Arc::clone(&changes_diff_state);
                 let id = id.map(|Path(id)| id).unwrap_or_default();
                 async move { changes::respond_diff(&state, &id, query).await }
+            },
+        )
+        // The merge (HS-054): spec item 12's rules 2 and 4, and the first route in this build whose work writes
+        // to the project repository. Mutating, so every guard applies and the manifest records it; `routes.post`
+        // is what makes a `ReadOnly` kind unexpressible. Host git like the changes view beside it — no container
+        // is asked anything — and the one route here that takes a lock the state owns, because two merges into
+        // one project must not interleave. The path and the body are `Result`s for the reason the prompt's are.
+        .post(
+            "/api/sessions/{id}/merge",
+            move |id: Result<Path<String>, PathRejection>, body: Result<Bytes, BytesRejection>| {
+                let state = Arc::clone(&merge_state);
+                let id = id.map(|Path(id)| id).unwrap_or_default();
+                async move { merge::respond(&state, &id, body).await }
             },
         )
         // The prompt: a mutating route, so every guard applies and the manifest records it (HS-015).

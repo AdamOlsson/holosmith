@@ -26,6 +26,7 @@ pub mod keyproxy;
 pub mod ladder;
 pub mod logging;
 pub mod logs;
+pub mod merge;
 pub mod pins;
 pub mod preflight;
 pub mod preview;

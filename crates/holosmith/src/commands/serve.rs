@@ -287,6 +287,9 @@ pub fn run(args: ServeArgs) -> ExitCode {
             // One flag per process, shared by every clone of this state: the socket's task sets it and the
             // handlers read it (HS-051). Never persisted — a restart is exactly what it exists to precede.
             drain: crate::drain::Control::new(),
+            // Rule 2's "one merge per project at a time": one map per process, shared by every clone, so two
+            // requests cannot merge into one project at once (HS-054).
+            merges: crate::merge::Merges::new(),
         };
         // The **startup reconcile** (HS-044, V9): what a `kill -9` left behind, put right **before any
         // policy or request can read a row**. It is awaited rather than spawned, and both reasons are

@@ -8,6 +8,7 @@ pub mod error;
 pub mod guard;
 pub mod health;
 mod history;
+mod merge;
 mod sessions;
 mod streams;
 mod tool_image;

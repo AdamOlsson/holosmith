@@ -245,17 +245,21 @@ impl Changes {
 }
 
 /// The four refusals both answers share, then the branch's tip: what a patch and a summary are both measured
-/// from.
+/// from, and — since HS-054 — what a **merge** is measured from too.
 ///
 /// Extracted rather than copied, because "what is this session's diff base" must have one answer: the diff
 /// endpoint's refusals are the summary's, byte for byte (ADR-0062), and the order is the reason a pruned
 /// worktree whose directory is back answers `409` rather than a `500` from a read inside it.
 ///
+/// `pub(crate)` since HS-054: `merge.rs` is a *writer* and therefore a module of its own, but "there is no
+/// worktree to merge" is the same four facts and the same four sentences the changes view already answers, so
+/// it is imported rather than spelled again.
+///
 /// 1. the repository is there (a project checkout that has gone away);
 /// 2. the worktree directory is there (a `rm -rf`, or a teardown's leftovers);
 /// 3. git registers it as a worktree of the repository (a `git worktree prune`);
 /// 4. the branch is there, and its tip is what the patch is measured to.
-fn basis(worktree: &Worktree) -> Result<String, ChangesError> {
+pub(crate) fn basis(worktree: &Worktree) -> Result<String, ChangesError> {
     if !worktree.repository.is_dir() {
         return Err(ChangesError::NoRepository {
             repository: worktree.repository.clone(),
@@ -721,7 +725,10 @@ fn args<'a>(command: [&'a str; 3], base: &'a str, head: &'a str) -> Vec<&'a str>
 ///
 /// Ignored files do not count: `status` does not list them without `--ignored`, and they are not work — the
 /// WIP snapshot's `add -A` would not store them either.
-fn dirty(worktree: &Path) -> Result<bool, GitError> {
+///
+/// `pub(crate)` since HS-054, whose `409 target_dirty` asks the same question of the **checkout** that holds the
+/// target rather than of the session's worktree: one definition of work, two directories.
+pub(crate) fn dirty(worktree: &Path) -> Result<bool, GitError> {
     let args = [
         "--no-optional-locks",
         "status",

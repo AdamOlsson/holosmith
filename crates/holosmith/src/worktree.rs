@@ -548,13 +548,55 @@ pub fn refuse(repository: &Path) -> Result<(), Refusal> {
 ///
 /// A path is printed raw and unquoted by `--porcelain` (HS-025's measurement), which is why the caller
 /// compares canonicalised parents rather than trusting one spelling of the projects root.
+///
+/// Since HS-054 this is [`checkouts`] with the branches dropped: one parser of one command, because a second
+/// one would be a second answer to "what does git's listing say".
 pub fn registrations(repository: &Path) -> Result<Vec<PathBuf>, GitError> {
-    let listing = git_run(repository, &["worktree", "list", "--porcelain"])?;
-    Ok(listing
-        .lines()
-        .filter_map(|line| line.strip_prefix("worktree "))
-        .map(PathBuf::from)
+    Ok(checkouts(repository)?
+        .into_iter()
+        .map(|checkout| checkout.path)
         .collect())
+}
+
+/// One checkout git has registered for a repository, and the branch it has checked out (HS-054).
+///
+/// `branch` is the **short** name (`main`, not `refs/heads/main`), because that is the word the rest of the
+/// build uses — the config's `[merge] targets` and the request's `target` — and `None` means the checkout holds
+/// a detached HEAD, which is not a branch and therefore cannot be "the target checked out somewhere".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checkout {
+    /// The path git printed, which `--porcelain` prints resolved and unquoted (HS-025's measurement).
+    pub path: PathBuf,
+    /// The branch this checkout has checked out, or `None` when its HEAD is detached.
+    pub branch: Option<String>,
+}
+
+/// Every checkout `repository` registers, with the branch each one holds (HS-054).
+///
+/// `git worktree list --porcelain` prints one block per checkout — `worktree <path>`, `HEAD <sha>`, then
+/// either `branch refs/heads/<name>` or `detached` — separated by a blank line. The merge needs the *branch*,
+/// which [`registrations`] throws away: "is the target checked out anywhere" and, if so, "where" are one
+/// question, and the answer decides whether the target is updated in a working tree or through the ref.
+///
+/// A block only carries a branch when it has one, so the walk keeps the latest `worktree` line and fills the
+/// branch from a later line in the same block. Nothing else in the format matters here, and `locked`/`prunable`
+/// are ignored rather than interpreted.
+pub fn checkouts(repository: &Path) -> Result<Vec<Checkout>, GitError> {
+    let listing = git_run(repository, &["worktree", "list", "--porcelain"])?;
+    let mut found: Vec<Checkout> = Vec::new();
+    for line in listing.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            found.push(Checkout {
+                path: PathBuf::from(path),
+                branch: None,
+            });
+        } else if let Some(reference) = line.strip_prefix("branch ")
+            && let Some(checkout) = found.last_mut()
+        {
+            checkout.branch = reference.strip_prefix("refs/heads/").map(str::to_string);
+        }
+    }
+    Ok(found)
 }
 
 // The four functions below are the crate's one way to spawn git: `Command::new("git")` appears here and
