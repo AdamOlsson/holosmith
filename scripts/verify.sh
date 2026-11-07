@@ -31,7 +31,12 @@
 # argvs and `doctor`'s `perms` arms), the three service commands of HS-050 (`case_status`: one line per fact, with
 # the uptime read from the endpoint the boot answers; `case_logs`: the journald child's argv through a stand-in and a
 # session's log printed byte for byte; `case_uninstall`: the unit and the two proxies gone, the data kept, a second
-# run saying `nothing`, and a purge refused over a live row until `--force`), and a Docker preflight that
+# run saying `nothing`, and a purge refused over a live row until `--force`), the drain of HS-051 in two cases
+# (`case_drain`: the admin socket exists and is not an HTTP route, a wait shorter than a turn exits 1 and leaves
+# the drain on, the create and the prompt answer 503 `draining` while the reads answer 200, and the drain that
+# does finish stops the idle sessions with reason `server_restart`; `case_drain_restart`: the row an expired drain
+# and a `kill -9` left `running` comes back `idle · interrupted`, and the new process is not draining), and a
+# Docker preflight that
 # refuses to start with one sentence naming the fix, with no CORS header
 # on any answer, and stopping on SIGTERM with exit 0. Each case prints `ok <case>` once it passes — a
 # case that printed SKIP withholds that line, so the log can never call a check that measured nothing a
@@ -397,6 +402,8 @@ serve_cases=(
   case_delete_session
   case_delete_keeps
   case_idle_stop
+  case_drain
+  case_drain_restart
   case_delete_unknown_session
   case_create_at_cap_evicts
   case_exit_classification
@@ -3879,6 +3886,346 @@ case_idle_stop() {
   remove_session "${name}_removed_fresh" "$fresh"
 }
 
+# run_drain <label> <admin dir> [flags...]: the artifact's own `drain`, its output under $WORK, and its exit
+# status on stdout so a caller can `check` it.
+#
+# The command is the client under test — HS-051's acceptance is about what an operator types, not about the
+# protocol — so the gate never hand-writes a drain line to the socket. The socket's own protocol is
+# `tests/drain.rs`'s, where a malformed line can be sent without a shell.
+run_drain() {
+  local label="$1" admin="$2"
+  shift 2
+  local status=0
+  "$artifact" drain --admin-dir "$admin" "$@" >"$WORK/$label.out" 2>"$WORK/$label.err" || status=$?
+  printf '%s\n' "$status"
+}
+
+# drain_row <database> <id>: `<status> <reason> <expected_stop>` for one row, which is the two facts no client
+# is sent. `mode=ro` like `usage_of`, and `none` for a row that is gone.
+drain_row() {
+  python3 - "$1" "$2" <<'PY'
+import sqlite3, sys
+connection = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+row = connection.execute(
+    "select status, status_reason, expected_stop from sessions where id = ?", (sys.argv[2],)
+).fetchone()
+print("none" if row is None else " ".join(str(field) for field in row))
+PY
+}
+
+# HS-051: the drain, over the machine's admin socket and only there.
+#
+# It owns its boot, for two reasons: the drain stops **every** idle session, which would take `$created_id` with
+# it, and the shared config's cap of one live session cannot hold the two this case needs (one to turn, one to
+# leave idle). It needs `python3` for the row facts the API does not carry — `status_reason` is on the row and
+# `expected_stop` is a column no client is sent (ADR-0038) — and prints one SKIP line without it.
+#
+# What it can measure on a machine with a stub turn of ~2 s (ten 200 ms frames):
+#
+# 1. the socket exists at `<admin dir>/drain.sock` and the admin directory is the run's (`--admin-dir`);
+# 2. `POST /api/drain` is the fallback's 404 — the API table's "not reachable over HTTP" — and a raw drain line
+#    written to the **control port** is answered as a malformed HTTP request, not as a drain;
+# 3. a `--wait` shorter than the turn exits 1 and says the drain was left on;
+# 4. in that window the create and the prompt answer `503 draining` while both reads answer 200;
+# 5. a `--wait` longer than the turn waits for it and then stops the idle sessions with `server_restart`, as a
+#    transition in the log, a row fact and one log line;
+# 6. a second drain says `already draining` and finds nothing left to stop;
+# 7. a resume is refused while draining and a delete still works.
+case_drain() {
+  local name=case_drain response body first second status stopped_line admin
+  local create_body='{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}'
+  admin="$WORK/run/holosmith"
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to read the rows back (tests/drain.rs covers the rows)\n' "$name"
+    return 0
+  fi
+  if [ -n "$serve_pid" ] && kill -0 "$serve_pid" 2>/dev/null; then
+    stop_serve
+  fi
+  # Three live slots and no `idle_stop_min`: this case watches two sessions of its own and no second policy may
+  # take one of them. The preview listener asks the kernel for a port like every other boot (start_serve reads
+  # it, and a boot without it fails this case for a reason that is not its subject).
+  printf 'owner = "%s"\nmax_live_sessions = 3\nbackend = "stub"\npreview_listen = "127.0.0.1:0"\n' "$owner" \
+    >"$WORK/config-drain.toml"
+  start_serve "$WORK/config-drain.toml" "$WORK/data-drain"
+
+  # 1. The socket. `-S` is the kernel's own answer to "is this a socket", which is the fact step 2's directory
+  #    exists for.
+  if [ -S "$admin/drain.sock" ]; then
+    assertions=$((assertions + 1))
+  else
+    fail "$name/socket" "no admin socket at $admin/drain.sock: $(find "$WORK" -name 'drain.sock' 2>/dev/null)"
+  fi
+
+  # 2a. Not a route. The guards pass, so the answer is the fallback's own envelope rather than a refusal.
+  fetch_body "${name}_route" POST /api/drain '' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_route/no_answer" "POST /api/drain did not answer"
+  response="$(answer "${name}_route")"
+  expect_status "${name}_route" "$response" 404
+  expect_code "${name}_route" "$response" not_found
+
+  # 2b. A drain line written to the **control** port is not a drain: the listener speaks HTTP and answers this
+  #     as a malformed request. The answer's status is the measurement — a 400 is a refusal by the HTTP parser,
+  #     and nothing about the drain happened.
+  if printf 'drain 600000\r\n' | timeout 10 python3 -c '
+import socket, sys
+connection = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=10)
+connection.sendall(sys.stdin.buffer.read())
+answer = b""
+while b"\r\n" not in answer:
+    chunk = connection.recv(4096)
+    if not chunk:
+        break
+    answer += chunk
+print(answer.split(b"\r\n")[0].decode(errors="replace"))
+' "$port" >"$WORK/responses/$name.control" 2>&1; then
+    case "$(cat "$WORK/responses/$name.control")" in
+      *" 400 "*) assertions=$((assertions + 1)) ;;
+      *)
+        fail "$name/control_port" \
+          "the control listener did not refuse a drain line as a malformed request: $(cat "$WORK/responses/$name.control")"
+        ;;
+    esac
+  else
+    fail "$name/control_port" "the raw drain line on the control port could not be asked"
+  fi
+
+  # 3. Two sessions: `first` is left idle, `second` is turned so the drain has something to wait for.
+  fetch_body "${name}_create" POST /api/sessions "$create_body" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-drain-1" ||
+    fail "${name}_create/no_answer" "POST /api/sessions did not answer"
+  expect_status "${name}_create" "$(answer "${name}_create")" 202
+  body="$(cat "$WORK/responses/${name}_create.body")"
+  first="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$first" ] || fail "${name}_create/id" "the response names no id: $body"
+  wait_for_idle_id "${name}_idle" "$first"
+
+  fetch_body "${name}_create2" POST /api/sessions "$create_body" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-drain-2" ||
+    fail "${name}_create2/no_answer" "POST /api/sessions did not answer"
+  expect_status "${name}_create2" "$(answer "${name}_create2")" 202
+  body="$(cat "$WORK/responses/${name}_create2.body")"
+  second="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$second" ] || fail "${name}_create2/id" "the response names no id: $body"
+  wait_for_idle_id "${name}_create2_idle" "$second"
+
+  fetch_body "${name}_prompt" POST "/api/sessions/$second/prompt" '{"prompt":"read the app shell"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_prompt/no_answer" "POST /api/sessions/$second/prompt did not answer"
+  expect_status "${name}_prompt" "$(answer "${name}_prompt")" 202
+
+  # 4. A wait shorter than the stub's turn: the command must be honest about it. `--wait 200ms` is under one
+  #    frame of the turn, so the deadline cannot be met by luck on any machine that runs this case at all.
+  status="$(run_drain "${name}_expired" "$admin" --wait 200ms)"
+  check "${name}_expired/exit" 1 "$status"
+  grep -qx 'drain: state: draining' "$WORK/${name}_expired.out" ||
+    fail "${name}_expired/state" "the drain did not report its state: $(cat "$WORK/${name}_expired.out")"
+  grep -q '^drain: waiting: 1 turn still running$' "$WORK/${name}_expired.out" ||
+    fail "${name}_expired/waiting" "the drain did not report what it was waiting for: $(cat "$WORK/${name}_expired.out")"
+  grep -qx 'drain: result: expired' "$WORK/${name}_expired.out" ||
+    fail "${name}_expired/result" "the wait's expiry is not the result: $(cat "$WORK/${name}_expired.out")"
+  grep -q 'still draining' "$WORK/${name}_expired.out" ||
+    fail "${name}_expired/left_on" "the report does not say the drain was left on: $(cat "$WORK/${name}_expired.out")"
+
+  # 5. In that window: the two requests the spec names are refused, with the envelope and the new code, and the
+  #    reads still answer. This is the acceptance's second bullet, measured in one moment rather than hoped for.
+  fetch_body "${name}_refused_create" POST /api/sessions "$create_body" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-drain-3" ||
+    fail "${name}_refused_create/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "${name}_refused_create")"
+  expect_status "${name}_refused_create" "$response" 503
+  expect_code "${name}_refused_create" "$response" draining
+  expect_header "${name}_refused_create" "$response" content-type "application/json"
+  grep -q 'holosmith drain --wait' "$WORK/responses/${name}_refused_create.body" ||
+    fail "${name}_refused_create/sentence" \
+      "the refusal does not name the drain and its wait: $(cat "$WORK/responses/${name}_refused_create.body")"
+
+  fetch_body "${name}_refused_prompt" POST "/api/sessions/$first/prompt" '{"prompt":"hello"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_refused_prompt/no_answer" "POST /api/sessions/$first/prompt did not answer"
+  response="$(answer "${name}_refused_prompt")"
+  expect_status "${name}_refused_prompt" "$response" 503
+  expect_code "${name}_refused_prompt" "$response" draining
+
+  fetch "${name}_read_list" GET /api/sessions "Host: 127.0.0.1" ||
+    fail "${name}_read_list/no_answer" "GET /api/sessions did not answer"
+  expect_status "${name}_read_list" "$(answer "${name}_read_list")" 200
+  fetch "${name}_read_one" GET "/api/sessions/$second" "Host: 127.0.0.1" ||
+    fail "${name}_read_one/no_answer" "GET /api/sessions/$second did not answer"
+  response="$(answer "${name}_read_one")"
+  expect_status "${name}_read_one" "$response" 200
+  case "$(cat "$WORK/responses/${name}_read_one.body")" in
+    *'"status":"running"'*) assertions=$((assertions + 1)) ;;
+    *)
+      fail "${name}_read_one/running" \
+        "the read did not answer the live row while draining: $(cat "$WORK/responses/${name}_read_one.body")"
+      ;;
+  esac
+
+  # 6. A drain that waits: the turn finishes (the stub settles `running -> idle`), and the idle sessions are
+  #    stopped after it — the acceptance's third bullet, which is a sequence and not two independent facts.
+  status="$(run_drain "${name}_drained" "$admin" --wait 30s)"
+  check "${name}_drained/exit" 0 "$status"
+  grep -qx 'drain: result: drained' "$WORK/${name}_drained.out" ||
+    fail "${name}_drained/result" "the drain did not finish: $(cat "$WORK/${name}_drained.out")"
+  stopped_line="$(sed -n 's/^drain: stopped: \(.*\)$/\1/p' "$WORK/${name}_drained.out")"
+  check "${name}_drained/stopped" "2 sessions with reason server_restart" "$stopped_line"
+
+  #    The rows. The container's stop is a task of its own (ADR-0024's shape, HS-030's flag), so `expected_stop`
+  #    is polled rather than read once: a `stopped` row is not a promise that the spawned stop has run.
+  local session row
+  for session in "$first" "$second"; do
+    row="none"
+    for _ in $(seq 1 50); do
+      row="$(drain_row "$WORK/data-drain/app.db" "$session")"
+      [ "$row" = "stopped server_restart 1" ] && break
+      sleep 0.1
+    done
+    check "${name}_row_${session}" "stopped server_restart 1" "$row"
+  done
+
+  #    And the transition reached the transcript, which is the client's copy of why a row stopped.
+  fetch_sse_until "${name}_stream" "/api/sessions/$first/events" '"reason":"server_restart"' \
+    "Host: 127.0.0.1" ||
+    fail "${name}_stream/no_answer" "GET /api/sessions/$first/events did not answer"
+  expect_status "${name}_stream" "$(answer "${name}_stream")" 200
+  grep -q '"from":"idle","to":"stopped","step":null,"reason":"server_restart"' \
+    "$WORK/responses/${name}_stream.body" ||
+    fail "${name}_stream/transition" \
+      "the drain's transition is not in the session's transcript: $(cat "$WORK/responses/${name}_stream.body")"
+
+  #    One line per stop, for an operator reading journald.
+  grep -q "holosmith::drain: the session was stopped for a restart session=$first" "$serve_err" ||
+    fail "${name}/log" \
+      "the drain wrote no line for $first: $(grep 'holosmith::drain' "$serve_err" | sed -n '1,5p')"
+
+  # 7. A second drain joins rather than starting again, and finds nothing left to stop.
+  status="$(run_drain "${name}_again" "$admin" --wait 5s)"
+  check "${name}_again/exit" 0 "$status"
+  grep -qx 'drain: state: already draining' "$WORK/${name}_again.out" ||
+    fail "${name}_again/state" "a second drain did not say the machine was already draining: $(cat "$WORK/${name}_again.out")"
+  grep -qx 'drain: stopped: 0 sessions with reason server_restart' "$WORK/${name}_again.out" ||
+    fail "${name}_again/stopped" "the second drain claims to have stopped something: $(cat "$WORK/${name}_again.out")"
+  grep -qx 'drain: result: drained' "$WORK/${name}_again.out" ||
+    fail "${name}_again/result" "the second drain did not finish: $(cat "$WORK/${name}_again.out")"
+
+  # 8. What stays open while draining: a resume provisions a container and is refused, a delete removes a
+  #    session and is not.
+  fetch_body "${name}_resume" POST "/api/sessions/$first/resume" '' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_resume/no_answer" "POST /api/sessions/$first/resume did not answer"
+  response="$(answer "${name}_resume")"
+  expect_status "${name}_resume" "$response" 503
+  expect_code "${name}_resume" "$response" draining
+
+  fetch_body "${name}_delete" DELETE "/api/sessions/$second" '' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_delete/no_answer" "DELETE /api/sessions/$second did not answer"
+  expect_status "${name}_delete" "$(answer "${name}_delete")" 202
+
+  # The shared boot comes back: the cases after this one talk to `$port` and to `$created_id`.
+  stop_serve
+  start_serve
+}
+
+# HS-051's fifth acceptance bullet: a session that was **live** at drain time is `idle` again on the next
+# startup.
+#
+# A completed drain leaves nothing live — it waits for the turns and stops the idle sessions — so the only state
+# that exercises this bullet is the drain that could not finish: an expired wait leaves the row `running`, and the
+# `kill -9` then leaves it to the startup reconcile (ADR-0053), which is the mechanism item 10 step 6 names. The
+# other half is that the new process is **not** draining: the flag is the process's, and a restart is exactly what
+# it exists to precede.
+case_drain_restart() {
+  local name=case_drain_restart response body first status admin
+  local create_body='{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}'
+  admin="$WORK/run/holosmith"
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to read the crashed row back (tests/drain.rs covers the sequence)\n' "$name"
+    return 0
+  fi
+  if [ -n "$serve_pid" ] && kill -0 "$serve_pid" 2>/dev/null; then
+    stop_serve
+  fi
+  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "stub"\npreview_listen = "127.0.0.1:0"\n' "$owner" \
+    >"$WORK/config-drain-restart.toml"
+  start_serve "$WORK/config-drain-restart.toml" "$WORK/data-drain-restart"
+
+  fetch_body "${name}_create" POST /api/sessions "$create_body" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-drain-restart-1" ||
+    fail "${name}_create/no_answer" "POST /api/sessions did not answer"
+  expect_status "${name}_create" "$(answer "${name}_create")" 202
+  body="$(cat "$WORK/responses/${name}_create.body")"
+  first="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$first" ] || fail "${name}_create/id" "the response names no id: $body"
+  wait_for_idle_id "${name}_idle" "$first"
+
+  fetch_body "${name}_prompt" POST "/api/sessions/$first/prompt" '{"prompt":"read the app shell"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_prompt/no_answer" "POST /api/sessions/$first/prompt did not answer"
+  expect_status "${name}_prompt" "$(answer "${name}_prompt")" 202
+
+  # The drain that cannot finish, and the bullet's other half: it exits 1, and the state it was asked for is on.
+  status="$(run_drain "${name}_expired" "$admin" --wait 200ms)"
+  check "${name}_expired/exit" 1 "$status"
+  grep -qx 'drain: result: expired' "$WORK/${name}_expired.out" ||
+    fail "${name}_expired/result" "the wait's expiry is not the result: $(cat "$WORK/${name}_expired.out")"
+  fetch_body "${name}_still" POST /api/sessions "$create_body" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-drain-restart-2" ||
+    fail "${name}_still/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "${name}_still")"
+  expect_status "${name}_still" "$response" 503
+  expect_code "${name}_still" "$response" draining
+
+  # **The crash**, while the row is `running` and the drain is on: `kill -9`, the story's own word, so nothing
+  # shuts anything down gracefully and the reconcile is the only thing left that can bring the row back.
+  kill -9 "$serve_pid" || fail "${name}/kill" "could not kill the server (pid $serve_pid)"
+  wait "$serve_pid" 2>/dev/null || true
+  serve_pid=""
+  start_serve "$WORK/config-drain-restart.toml" "$WORK/data-drain-restart"
+
+  # Bullet 5: the row the crash left `running` is `idle` again, with the reconcile's own reason.
+  wait_for_idle_id "${name}_recovered" "$first"
+  case "$(cat "$WORK/responses/${name}_recovered.body")" in
+    *'"status":"idle"'*'"status_reason":"interrupted"'*) assertions=$((assertions + 1)) ;;
+    *)
+      fail "${name}_recovered/reason" \
+        "the row came back without the reconcile's reason: $(cat "$WORK/responses/${name}_recovered.body")"
+      ;;
+  esac
+
+  # And the new process is not draining: the flag belonged to the process that had it. A create is accepted,
+  # which is the only way a client can ask.
+  fetch_body "${name}_accepted" POST /api/sessions "$create_body" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-drain-restart-3" ||
+    fail "${name}_accepted/no_answer" "POST /api/sessions did not answer"
+  expect_status "${name}_accepted" "$(answer "${name}_accepted")" 202
+  body="$(cat "$WORK/responses/${name}_accepted.body")"
+  local second
+  second="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$second" ] || fail "${name}_accepted/id" "the response names no id: $body"
+
+  remove_session "${name}_removed_first" "$first"
+  remove_session "${name}_removed_second" "$second"
+  stop_serve
+  start_serve
+}
+
 # HS-019: a delete for a session the table does not hold is ADR-0008's 404 `not_found` — the
 # deterministic half of "a second call returns 202/404": while the row exists a repeat is a 202, and
 # once it is gone it is this.
@@ -4796,7 +5143,10 @@ case_docker_preflight() {
   local name=case_docker_preflight status=0
   printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\ndocker_host = "unix://%s/absent.sock"\n' \
     "$owner" "$WORK" >"$WORK/config-docker.toml"
+  # `--admin-dir` like every other boot in this run (HS-051): a case must never bind the machine's own
+  # `/run/holosmith/drain.sock`, and the refusal this case measures happens before any socket is bound.
   "$artifact" serve --config "$WORK/config-docker.toml" --port 0 --data-dir "$WORK/data-docker" \
+    --admin-dir "$WORK/run/holosmith" \
     >"$WORK/$name.out" 2>"$WORK/$name.err" || status=$?
   check "$name/exit" 1 "$status"
   if grep -q '^control_listen ' "$WORK/$name.err"; then
@@ -6101,6 +6451,7 @@ case_doctor_full() {
   # self-test's container the half minute it can take.
   serve_err="$WORK/$name.serve.err"
   "$artifact" serve --config "$WORK/config-doctor-full.toml" --data-dir "$data" \
+    --admin-dir "$WORK/run/holosmith" \
     >"$WORK/$name.serve.out" 2>"$serve_err" &
   serve_pid=$!
   for _ in $(seq 1 600); do
@@ -6207,6 +6558,7 @@ case_status() {
     "$owner" "$root/data" "$control" "$control" "$preview" >"$WORK/config-status.toml"
   serve_err="$WORK/serve-status.err"
   "$artifact" serve --config "$WORK/config-status.toml" --data-dir "$root/data" \
+    --admin-dir "$WORK/run/holosmith" \
     >"$WORK/$name.serve.out" 2>"$serve_err" &
   serve_pid=$!
   for _ in $(seq 1 400); do
@@ -6628,7 +6980,11 @@ start_serve() {
   # --port 0 asks the kernel for the port, and it is also what makes serve re-derive
   # control_origin from the bound address (ADR-0007): the passing case can then send exactly
   # the origin the guard compares. --data-dir keeps the run out of /var/lib/holosmith.
-  "$artifact" serve --config "$config" --port 0 --data-dir "$data" \
+  # --admin-dir keeps the drain socket out of /run/holosmith, for the reason --data-dir keeps the database out of
+  # /var/lib/holosmith: this sandbox lets an unprivileged user write the machine's paths, and a boot here must not
+  # bind a real machine's admin socket (HS-051). Every boot in this run shares the one directory under $WORK,
+  # which is safe because only one serve is up at a time and a stale socket is replaced on bind.
+  "$artifact" serve --config "$config" --port 0 --data-dir "$data" --admin-dir "$WORK/run/holosmith" \
     >"$WORK/$tag.out" 2>"$serve_err" &
   serve_pid=$!
   for _ in $(seq 1 200); do
