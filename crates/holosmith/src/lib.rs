@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod backend;
 pub mod backup;
+pub mod changes;
 pub mod cli;
 pub mod clock;
 pub mod commands;

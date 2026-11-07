@@ -99,6 +99,14 @@ pub const UNSAVED_WORK: &str = "unsaved_work";
 /// that request", while this one says "this *machine* cannot take it right now, and the operator is the reason".
 pub const DRAINING: &str = "draining";
 
+/// A changes view was refused because there is no worktree to read (HS-052, spec item 12).
+///
+/// One code for four facts — the row never recorded a worktree, the directory is gone, git no longer registers
+/// it, the branch or the project's repository is gone — because the client's move is one (show the sentence)
+/// while the operator's next step is the sentence's. A repository git *cannot read* is not this code: that is
+/// `internal`, the project refusals' own split between a state and a machine problem.
+pub const NO_WORKTREE: &str = "no_worktree";
+
 /// The body of every error response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ErrorBody {
@@ -324,6 +332,16 @@ impl ApiError {
             "the session's uncommitted work could not be snapshotted, so the session was not \
              deleted; repeat the delete with `?force=true` to discard it",
         )
+    }
+
+    /// What a request that names a session with no worktree to read answers (HS-052).
+    ///
+    /// The **message** is the caller's for [`Self::not_in_state`]'s reason: the four sentences describe four
+    /// different next steps (resume the session, restore the project's checkout), and a caller reading one
+    /// about another would have to guess which fact it hit. `409` rather than `404`: the session exists and the
+    /// route exists — the thing the view would read is not there.
+    pub fn no_worktree(message: &'static str) -> Self {
+        Self::new(StatusCode::CONFLICT, NO_WORKTREE, message)
     }
 
     /// What a resume at the cap answers (HS-018, spec item 8's "or returns 409").

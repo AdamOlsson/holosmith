@@ -243,7 +243,11 @@ impl Worktree {
     ///
     /// The path is compared after `canonicalize`, because `git worktree list --porcelain` prints the
     /// resolved path and a projects root may be reached through a symlink.
-    fn registered(&self) -> Result<bool, GitError> {
+    ///
+    /// Public since HS-052, which asks the same question of the same repository from the changes view: a
+    /// pruned worktree's directory can still be there, and every read inside it would then fail with "not a
+    /// git repository". One question, one function — [`crate::changes`] does not spell it again.
+    pub fn registered(&self) -> Result<bool, GitError> {
         let listing = self.run(&["worktree", "list", "--porcelain"])?;
         let ours = std::fs::canonicalize(&self.path).ok();
         for entry in listing
@@ -272,7 +276,10 @@ impl Worktree {
     ///
     /// `rev-parse --verify --quiet` answers 1 for "no such ref" and prints nothing; any other failure is
     /// a real one and is reported, because a repository that cannot be read is not a missing branch.
-    fn branch_head(&self) -> Result<Option<String>, GitError> {
+    ///
+    /// Public since HS-052: the changes view's `head` is this commit, not the worktree's checkout, because
+    /// `ahead`, `behind` and the file list are all about the branch.
+    pub fn branch_head(&self) -> Result<Option<String>, GitError> {
         let args = ["rev-parse", "--verify", "--quiet", &self.branch_ref()];
         let output = self.output(&args)?;
         match output.status.code() {
@@ -550,8 +557,13 @@ pub fn registrations(repository: &Path) -> Result<Vec<PathBuf>, GitError> {
         .collect())
 }
 
+// The four functions below are the crate's one way to spawn git: `Command::new("git")` appears here and
+// nowhere else in `src/` (HS-025), which is why HS-052's changes view calls them into this module rather
+// than writing a fifth `-C` and a fifth error sentence. They are `pub(crate)` and not `pub` because the
+// `GitError` sentence they build is an operator's, not an API's.
+
 /// Run one git command in `repository` and answer its trimmed stdout; a non-zero exit is a failure.
-fn git_run(repository: &Path, args: &[&str]) -> Result<String, GitError> {
+pub(crate) fn git_run(repository: &Path, args: &[&str]) -> Result<String, GitError> {
     let output = git_output(repository, args)?;
     if !output.status.success() {
         return Err(git_error(repository, args, &output));
@@ -561,7 +573,10 @@ fn git_run(repository: &Path, args: &[&str]) -> Result<String, GitError> {
 
 /// Spawn git in `repository`. Only an inability to start it is checked here; the exit status is the
 /// caller's question, because "no such branch" is an answer and not a failure.
-fn git_output(repository: &Path, args: &[&str]) -> Result<std::process::Output, GitError> {
+pub(crate) fn git_output(
+    repository: &Path,
+    args: &[&str],
+) -> Result<std::process::Output, GitError> {
     Command::new("git")
         .arg("-C")
         .arg(repository)
@@ -574,7 +589,11 @@ fn git_output(repository: &Path, args: &[&str]) -> Result<std::process::Output, 
 }
 
 /// What git said about `args`, as the operator reads it: the command, then git's own last words.
-fn git_error(repository: &Path, args: &[&str], output: &std::process::Output) -> GitError {
+pub(crate) fn git_error(
+    repository: &Path,
+    args: &[&str],
+    output: &std::process::Output,
+) -> GitError {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let detail = stderr.trim();
     GitError {
@@ -588,7 +607,7 @@ fn git_error(repository: &Path, args: &[&str], output: &std::process::Output) ->
 }
 
 /// The command as an operator would type it, for a failure's sentence.
-fn git_command(repository: &Path, args: &[&str]) -> String {
+pub(crate) fn git_command(repository: &Path, args: &[&str]) -> String {
     format!("git -C {} {}", repository.display(), args.join(" "))
 }
 

@@ -27,6 +27,7 @@ use crate::db::Database;
 use crate::deleter::Deleter;
 use crate::drain::{Control, Drain};
 use crate::events::{EventWriter, StreamRegistry};
+use crate::http::changes;
 use crate::http::error::ApiError;
 use crate::http::guard::{self, Guards};
 use crate::http::health::{self, Health};
@@ -458,6 +459,7 @@ pub fn router(state: AppState) -> Routes {
     let history_state = Arc::clone(&state);
     let tool_output_state = Arc::clone(&state);
     let tool_image_state = Arc::clone(&state);
+    let changes_state = Arc::clone(&state);
     let prompt_state = Arc::clone(&state);
     let abort_state = Arc::clone(&state);
     let steer_state = Arc::clone(&state);
@@ -552,6 +554,19 @@ pub fn router(state: AppState) -> Routes {
                 let (id, tool_id, index) =
                     captured.map(|Path(captured)| captured).unwrap_or_default();
                 async move { tool_image::respond(&state, &id, &tool_id, &index).await }
+            },
+        )
+        // The changes view's summary (HS-052): what a session changed and whether it can merge. Read-only on the
+        // same terms as its neighbours — the manifest records it `ReadOnly` and every guard applies — and it is
+        // the one session route whose work is host git in the project repository rather than the database or the
+        // backend. The path is a `Result` for the same reason as its siblings: a `%FF` segment is a session the
+        // table does not hold.
+        .get(
+            "/api/sessions/{id}/changes",
+            move |id: Result<Path<String>, PathRejection>| {
+                let state = Arc::clone(&changes_state);
+                let id = id.map(|Path(id)| id).unwrap_or_default();
+                async move { changes::respond(&state, &id).await }
             },
         )
         // The prompt: a mutating route, so every guard applies and the manifest records it (HS-015).

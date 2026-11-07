@@ -3,6 +3,7 @@
 //! ADR-0008).
 
 pub mod app;
+mod changes;
 pub mod error;
 pub mod guard;
 pub mod health;

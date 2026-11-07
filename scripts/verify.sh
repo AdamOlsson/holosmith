@@ -414,6 +414,7 @@ serve_cases=(
   case_history
   case_backup
   case_worktree
+  case_changes
   case_docker_preflight
   case_doctor_quick
   case_server_images
@@ -5043,6 +5044,188 @@ case_worktree() {
     fail "${name}_delete/no_answer" "DELETE /api/sessions/$id did not answer"
   expect_status "${name}_delete" "$(answer "${name}_delete")" 202
   wait_for_gone "${name}_gone" "$id"
+
+  kill "$socket_pid" 2>/dev/null || true
+  wait "$socket_pid" 2>/dev/null || true
+  socket_pid=""
+}
+
+# HS-052's proof from the artifact: the changes view's summary, over a real repository, with **no daemon**.
+#
+# Every acceptance bullet is a git fact, so the case owns the repository and moves it between two readings: a
+# commit on `agent/<id>`, a commit on `main` (the target moving on), an uncommitted file (the worktree's
+# `dirty`), then a planted conflict for `mergeable: false`, then a removed and a pruned worktree for the 409.
+# The numbers are compared with `git rev-list --count` run here rather than with the code's own arithmetic.
+#
+# The boot is `case_worktree`'s: `backend = "docker"` against a socket that answers the preflight's `_ping`
+# and nothing else, so the create's worktree step runs on the host and the network step then fails — which is
+# the measurement for "no container is involved". The provisioner undoes what it made, so the case puts the
+# worktree back with the step's own command; that is a fixture, and it is the command the step runs.
+case_changes() {
+  local name=case_changes response body id base tip wt ahead behind before
+  # Two statements, not one: in a single `local` the right-hand sides expand before either assignment, so
+  # `repo="$projects/holosmith"` on the same line reads an unset `projects` and `set -u` stops the run.
+  local projects="$WORK/projects-changes"
+  local repo="$projects/holosmith"
+  # The guard comes first, before `stop_serve`, for the reason `case_worktree` gives: a skipped case that
+  # stopped the server leaves the phase's own teardown with no pid to signal.
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to answer the docker preflight (tests/changes.rs covers this)\n' "$name"
+    return 0
+  fi
+  stop_serve
+  mkdir -p "$repo"
+  git -C "$repo" init --quiet -b main || fail "$name/git" "git init did not work in $repo"
+  git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet --allow-empty \
+    -m "the first commit" || fail "$name/git" "git commit did not work in $repo"
+  base="$(git -C "$repo" rev-parse HEAD)" || fail "$name/git" "git rev-parse did not work in $repo"
+
+  socket_pid="$(fake_docker_ping "$WORK/docker-changes.sock")"
+  for _ in $(seq 1 100); do
+    [ -S "$WORK/docker-changes.sock" ] && break
+    sleep 0.05
+  done
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\ndocker_host = "unix://%s/docker-changes.sock"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
+    "$owner" "$projects" "$WORK" >"$WORK/config-changes.toml"
+  start_serve "$WORK/config-changes.toml" "$WORK/data-changes"
+
+  fetch_body "${name}_create" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-changes-1" ||
+    fail "${name}_create/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "${name}_create")"
+  expect_status "${name}_create" "$response" 202
+  body="$(cat "$WORK/responses/${name}_create.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id" ] || fail "${name}_create/id" "the response names no id: $body"
+
+  # The row is what the wait is on: the worktree step is a background task's, and the network step's failure
+  # is what ends it — with the worktree and the branch taken back.
+  body=""
+  for _ in $(seq 1 100); do
+    fetch "${name}_row" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "${name}_row/no_answer" "GET /api/sessions/$id did not answer"
+    body="$(cat "$WORK/responses/${name}_row.body")"
+    case "$body" in
+      *'"status":"starting"'*) sleep 0.1 ;;
+      *) break ;;
+    esac
+  done
+  expect_status "${name}_row" "$(answer "${name}_row")" 200
+  printf '%s\n' "$body" | grep -qF "\"base_commit\":\"$base\"" ||
+    fail "${name}_row/base" "the row does not record the branch's base commit: $body"
+  assertions=$((assertions + 1))
+
+  wt="$projects/.worktrees/$id"
+  # The provisioner removed what its worktree step made (ADR-0029), so the case makes it again with the
+  # step's own command — absolute paths, because `worktree add` resolves a relative one against the
+  # repository (HS-025's measurement).
+  git -C "$repo" worktree add --quiet -b "agent/$id" "$wt" "$base" ||
+    fail "${name}/worktree" "git worktree add did not work for $wt"
+  printf 'one\n' >"$wt/a.txt" || fail "${name}/write" "the session's file is not writable"
+  git -C "$wt" add a.txt || fail "${name}/add" "git add did not work in $wt"
+  git -C "$wt" -c user.name=verify -c user.email=verify@example commit --quiet -m "the session's change" ||
+    fail "${name}/commit" "git commit did not work in $wt"
+  # A second commit on the branch, so the two counts below **differ** (2 and 1). With one commit each way a
+  # swapped `behind` range would pass, and this case exists to measure which side of the range is which.
+  printf 'two\n' >"$wt/c.txt" || fail "${name}/write" "the session's second file is not writable"
+  git -C "$wt" add c.txt || fail "${name}/add" "git add did not work in $wt"
+  git -C "$wt" -c user.name=verify -c user.email=verify@example commit --quiet -m "the session's second change" ||
+    fail "${name}/commit" "git commit did not work in $wt"
+  tip="$(git -C "$wt" rev-parse HEAD)" || fail "${name}/head" "git rev-parse did not work in $wt"
+
+  # The target moves on: one commit that is not on the branch, which is what `behind` counts.
+  printf 'the target\n' >"$repo/t.txt" || fail "${name}/write" "the target's file is not writable"
+  git -C "$repo" add t.txt || fail "${name}/add" "git add did not work in $repo"
+  git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet -m "the target moves on" ||
+    fail "${name}/commit" "git commit did not work in $repo"
+  # An uncommitted file: the worktree holds work, which is `dirty` and nothing else.
+  printf 'wip\n' >"$wt/untracked.txt" || fail "${name}/write" "the untracked file is not writable"
+
+  fetch "${name}_summary" GET "/api/sessions/$id/changes" "Host: 127.0.0.1" ||
+    fail "${name}_summary/no_answer" "GET /api/sessions/$id/changes did not answer"
+  response="$(answer "${name}_summary")"
+  expect_status "${name}_summary" "$response" 200
+  expect_header "${name}_summary" "$response" "Content-Type" "application/json"
+  body="$(cat "$WORK/responses/${name}_summary.body")"
+  printf '%s\n' "$body" | grep -qF "\"branch\":\"agent/$id\"" ||
+    fail "${name}_summary/branch" "the answer names no session branch: $body"
+  assertions=$((assertions + 1))
+  printf '%s\n' "$body" | grep -qF "\"base_commit\":\"$base\"" ||
+    fail "${name}_summary/base" "the answer's base commit is not the row's: $body"
+  assertions=$((assertions + 1))
+  printf '%s\n' "$body" | grep -qF "\"head\":\"$tip\"" ||
+    fail "${name}_summary/head" "the answer's head is not the branch's tip: $body"
+  assertions=$((assertions + 1))
+  printf '%s\n' "$body" | grep -qF '"target":"main"' ||
+    fail "${name}_summary/target" "the repository's own branch is not the target: $body"
+  assertions=$((assertions + 1))
+  # Both counts against git's own arithmetic: two commits on the branch, one on the target. The two must
+  # differ, or the assertions below cannot tell `behind` from `ahead`.
+  ahead="$(git -C "$repo" rev-list --count "$base..agent/$id")" ||
+    fail "${name}/ahead" "git rev-list did not work"
+  behind="$(git -C "$repo" rev-list --count "agent/$id..main")" ||
+    fail "${name}/behind" "git rev-list did not work"
+  check "${name}/counts_differ" "2 1" "$ahead $behind"
+  check "${name}_summary/ahead" "\"ahead\":$ahead" \
+    "$(printf '%s\n' "$body" | sed -n 's/.*\("ahead":[0-9]*\).*/\1/p')"
+  check "${name}_summary/behind" "\"behind\":$behind" \
+    "$(printf '%s\n' "$body" | sed -n 's/.*\("behind":[0-9]*\).*/\1/p')"
+  printf '%s\n' "$body" | grep -qF '"dirty":true' ||
+    fail "${name}_summary/dirty" "an uncommitted file did not make the worktree dirty: $body"
+  assertions=$((assertions + 1))
+  printf '%s\n' "$body" | grep -qF '"mergeable":true' ||
+    fail "${name}_summary/mergeable" "a clean merge is not mergeable: $body"
+  assertions=$((assertions + 1))
+  printf '%s\n' "$body" | grep -qF '"path":"a.txt","status":"A","additions":1,"deletions":0' ||
+    fail "${name}_summary/files" "the file list does not carry a.txt's line counts: $body"
+  assertions=$((assertions + 1))
+  printf '%s\n' "$body" | grep -qF '"touches_ci":false' ||
+    fail "${name}_summary/touches_ci" "a plain file touched CI: $body"
+  assertions=$((assertions + 1))
+
+  # A planted conflict on the same path, and the two measurements the acceptance asks for: the merge is not
+  # possible, and nothing on disk moved — no working tree was touched by `merge-tree --write-tree`.
+  printf 'the target\x27s version\n' >"$repo/a.txt" || fail "${name}/write" "the conflicting file is not writable"
+  git -C "$repo" add a.txt || fail "${name}/add" "git add did not work in $repo"
+  git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet -m "the conflict" ||
+    fail "${name}/commit" "git commit did not work in $repo"
+  before="$(git -C "$repo" rev-parse HEAD) $(git -C "$repo" status --porcelain) | $(git -C "$wt" status --porcelain)" ||
+    fail "${name}/status" "git status did not work"
+  fetch "${name}_conflict" GET "/api/sessions/$id/changes" "Host: 127.0.0.1" ||
+    fail "${name}_conflict/no_answer" "GET /api/sessions/$id/changes did not answer"
+  expect_status "${name}_conflict" "$(answer "${name}_conflict")" 200
+  body="$(cat "$WORK/responses/${name}_conflict.body")"
+  printf '%s\n' "$body" | grep -qF '"mergeable":false' ||
+    fail "${name}_conflict/mergeable" "a conflict is reported as mergeable: $body"
+  assertions=$((assertions + 1))
+  printf '%s\n' "$body" | grep -qF 'a.txt' ||
+    fail "${name}_conflict/reason" "the conflict names no path: $body"
+  assertions=$((assertions + 1))
+  check "${name}_conflict/unmoved" "$before" \
+    "$(git -C "$repo" rev-parse HEAD) $(git -C "$repo" status --porcelain) | $(git -C "$wt" status --porcelain)"
+
+  # A missing worktree is the story's 409 with a sentence, never a 500.
+  rm -rf "$wt"
+  fetch "${name}_missing" GET "/api/sessions/$id/changes" "Host: 127.0.0.1" ||
+    fail "${name}_missing/no_answer" "GET /api/sessions/$id/changes did not answer"
+  response="$(answer "${name}_missing")"
+  expect_status "${name}_missing" "$response" 409
+  expect_code "${name}_missing" "$response" no_worktree
+  expect_header "${name}_missing" "$response" "Content-Type" "application/json"
+  # ... and a pruned one: git forgets the registration, and a directory that is there anyway is not a worktree.
+  git -C "$repo" worktree prune || fail "${name}/prune" "git worktree prune did not work"
+  mkdir -p "$wt"
+  fetch "${name}_pruned" GET "/api/sessions/$id/changes" "Host: 127.0.0.1" ||
+    fail "${name}_pruned/no_answer" "GET /api/sessions/$id/changes did not answer"
+  response="$(answer "${name}_pruned")"
+  expect_status "${name}_pruned" "$response" 409
+  expect_code "${name}_pruned" "$response" no_worktree
+  body="$(cat "$WORK/responses/${name}_pruned.body")"
+  printf '%s\n' "$body" | grep -qF 'resume' ||
+    fail "${name}_pruned/sentence" "the sentence names no next step: $body"
+  assertions=$((assertions + 1))
 
   kill "$socket_pid" 2>/dev/null || true
   wait "$socket_pid" 2>/dev/null || true
