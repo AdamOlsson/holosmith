@@ -25,6 +25,7 @@ use crate::compactor::Compactor;
 use crate::config::Config;
 use crate::db::Database;
 use crate::deleter::Deleter;
+use crate::drain::{Control, Drain};
 use crate::events::{EventWriter, StreamRegistry};
 use crate::http::error::ApiError;
 use crate::http::guard::{self, Guards};
@@ -64,6 +65,11 @@ pub struct AppState {
     /// Which sessions have an SSE stream open: HS-019 closes them, HS-066 reads the count.
     pub streams: StreamRegistry,
     pub backend: Backends,
+    /// Whether this process is draining for a restart (HS-051). Not the database's: the state is the
+    /// process's, and a row would outlive the restart the drain exists to precede and lie about it. Every
+    /// clone of this state carries the same bit, which is what lets a handler read it on the request path
+    /// while the socket's own task sets it.
+    pub drain: Control,
 }
 
 impl AppState {
@@ -194,6 +200,20 @@ impl AppState {
             self.backend.clone(),
             &self.config,
             self.runtime.backend,
+        )
+    }
+
+    /// The drain's sequence, wired to this state's flag, rows, stopper and event writer (HS-051).
+    ///
+    /// Here for the same reason as the seven above, and with one extra job: the flag is *this* state's, so a
+    /// drain built anywhere else would set a bit no handler reads. `None` of the four handles could be wired
+    /// wrong without the type saying so, which is the whole argument for the helpers.
+    pub fn drainer(&self) -> Drain {
+        Drain::new(
+            self.drain.clone(),
+            Arc::clone(&self.database),
+            self.stopper(),
+            self.events.clone(),
         )
     }
 }

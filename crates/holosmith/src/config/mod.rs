@@ -1292,8 +1292,7 @@ allow = ["crates.io"]
         );
         assert_eq!(
             problems_of("abort_grace = \"0s\"\n"),
-            "config.toml:1:1: abort_grace: \"0s\" must be greater than zero: the abort ladder needs \
-             a grace period\n1 problem in config.toml\n"
+            "config.toml:1:1: abort_grace: \"0s\" must be greater than zero\n1 problem in config.toml\n"
         );
     }
 

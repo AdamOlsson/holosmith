@@ -18,9 +18,9 @@
 //!   [`Transitioner::apply`](crate::sessions::state::Transitioner::apply). A refused application means
 //!   the session left `idle` between the read and the move — an ordinary race with a prompt — which is
 //!   an `info` line and not a bug.
-//! - **It is one policy among siblings, not the only stop.** The cap evicts (HS-020), the drain stops
-//!   everything (HS-044) and the turn timeout ends a turn (HS-022); all four use the table, and only the
-//!   reason word differs ([`IDLE_STOP`] here).
+//! - **It is one policy among siblings, not the only stop.** The cap evicts (HS-020), the drain stops the
+//!   idle sessions an operator asked it to (HS-051) and the turn timeout ends a turn (HS-022); all four use the
+//!   table, and only the reason word differs ([`IDLE_STOP`] here, [`crate::drain::SERVER_RESTART`] there).
 //!
 //! The tick is a constant rather than a config key, for the reason the stub's pacing is a constructor
 //! argument (ADR-0015): the spec's config list is exhaustive, and how often a running process looks at a

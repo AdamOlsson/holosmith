@@ -12,6 +12,7 @@ fn main() -> ExitCode {
         Cmd::Serve {
             port,
             data_dir,
+            admin_dir,
             backend,
         } => commands::serve::run(commands::serve::ServeArgs {
             config: cli.config,
@@ -19,6 +20,7 @@ fn main() -> ExitCode {
                 port,
                 data_root: data_dir,
             },
+            admin_dir,
             backend,
         }),
         Cmd::Version { json } => commands::version::run(json),
@@ -64,6 +66,9 @@ fn main() -> ExitCode {
                 purge,
                 force,
             })
+        }
+        Cmd::Drain { wait, admin_dir } => {
+            commands::drain::run(commands::drain::DrainArgs { wait, admin_dir })
         }
         Cmd::Server { action } => match action {
             ServerAction::Deploy { dry_run, root } => {

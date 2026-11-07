@@ -14,6 +14,7 @@ use holosmith::backend::{Backends, StubBackend};
 use holosmith::clock;
 use holosmith::config::Config;
 use holosmith::db::{self, Database, OpenOptions};
+use holosmith::drain::Control;
 use holosmith::events::{self, EventWriter, StreamRegistry, WriterOptions};
 use holosmith::http::{App, AppState, Guards, RequestCounter, Routes};
 use holosmith::runtime::{Backend, Runtime};
@@ -97,6 +98,7 @@ pub fn state() -> AppState {
         events: events.clone(),
         streams: StreamRegistry::default(),
         backend: Backends::Stub(slow_stub()),
+        drain: Control::new(),
     }
 }
 
@@ -143,6 +145,7 @@ pub fn state_with_writer(dir: &TempDir, config: Config, options: WriterOptions) 
         database,
         streams: StreamRegistry::default(),
         backend: Backends::Stub(slow_stub()),
+        drain: Control::new(),
     }
 }
 

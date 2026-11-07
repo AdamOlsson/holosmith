@@ -268,7 +268,16 @@ pub async fn create(
     // The project's refusals are read here, on the request path, and *answered* only where the create
     // would write a row (HS-026): a retry of an idempotency key creates nothing and is answered from the
     // row it already has, and a refused create must not evict an idle session on its way to saying no.
-    let refusal = refuse_project(state, &parsed.project).await;
+    //
+    // The drain's refusal rides the same road and for the same two reasons (HS-051), and it is decided
+    // *instead of* the project's read: a draining machine starts nothing whatever the project looks like, so
+    // the git questions are not worth asking. `create_locked` raises it after the key's lookup, so a retry
+    // still answers its own row.
+    let refusal = if state.drain.is_draining() {
+        Some(ApiError::draining())
+    } else {
+        refuse_project(state, &parsed.project).await
+    };
     match slot_for(state, &parsed, key, refusal).await {
         Ok((session, inserted)) => {
             // The handoff, and the only place this story spawns anything. The answer is built
@@ -688,6 +697,12 @@ pub async fn prompt(state: &AppState, id: &str, body: Result<Bytes, BytesRejecti
         Ok(prompt) => prompt,
         Err(error) => return error.into_response(),
     };
+    // A draining machine starts no turn whatever this session's state is, and the refusal comes before the row
+    // is read so it is one sentence rather than a state's (HS-051). `503` and not `409` is the operator's answer:
+    // the page must not offer to resume-and-retry a session the drain itself just stopped.
+    if state.drain.is_draining() {
+        return ApiError::draining().into_response();
+    }
     let current = match one_locked(state, id) {
         Ok(Some(session)) => session,
         Ok(None) => return ApiError::unknown_session().into_response(),
@@ -832,6 +847,13 @@ async fn record_steer(state: &AppState, id: &str, guidance: &str) {
 /// the pi session"). Nothing else about the session is touched — the events, the history and the
 /// worktree path are what a stop left alone (spec item 15).
 pub async fn resume(state: &AppState, id: &str) -> Response {
+    // A resume provisions a container and starts a session, which is the thing a drain exists to prevent — so it
+    // is refused first, before the row is read (HS-051). The abort ladder's own way back is untouched: it resumes
+    // through the provisioner rather than through this handler, so a turn the drain is waiting for can still be
+    // ended and brought back.
+    if state.drain.is_draining() {
+        return ApiError::draining().into_response();
+    }
     let current = match one_locked(state, id) {
         Ok(Some(session)) => session,
         Ok(None) => return ApiError::unknown_session().into_response(),

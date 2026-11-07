@@ -73,9 +73,7 @@ impl FromStr for Duration {
             .checked_mul(scale)
             .ok_or_else(|| format!("{text:?} is too large to be a duration"))?;
         if millis == 0 {
-            return Err(format!(
-                "{text:?} must be greater than zero: the abort ladder needs a grace period"
-            ));
+            return Err(format!("{text:?} must be greater than zero"));
         }
         Ok(Self { millis })
     }

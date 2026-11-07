@@ -4,6 +4,7 @@ pub mod config;
 pub mod container;
 pub mod deploy;
 pub mod doctor;
+pub mod drain;
 pub mod key;
 pub mod logs;
 pub mod proxy;

@@ -1,13 +1,13 @@
 //! The one way a session's container is stopped (HS-030, spec item 6).
 //!
-//! Three policies stop a container — the create's eviction (HS-020), the idle stop (HS-021) and the
-//! abort ladder's second rung (HS-016) — and every one of them must record the same fact first: **this
+//! Four policies stop a container — the create's eviction (HS-020), the idle stop (HS-021), the abort ladder's
+//! second rung (HS-016) and the drain (HS-051) — and every one of them must record the same fact first: **this
 //! stop was ours**. Spec item 6 makes that flag the whole of the exit classification's first case
 //! ("Exit with the flag set means `stopped`"), and a classification that read a flag nobody wrote would
 //! call every policy stop a crash.
 //!
 //! So the write and the call live together, in one routine, for the same reason the abort ladder lives in
-//! one routine: three copies of "set the flag, then stop" is two copies a test cannot see, and the one
+//! one routine: four copies of "set the flag, then stop" is three copies a test cannot see, and the one
 //! that is forgotten is the one that turns an eviction into an `error` row.
 //!
 //! **Why the flag is the server's and not the backend's.** A backend may emit frames but may not write a

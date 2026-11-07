@@ -27,6 +27,9 @@ pub enum Cmd {
         /// Data root for this run, instead of the one in the config file.
         #[arg(long, value_name = "PATH")]
         data_dir: Option<PathBuf>,
+        /// Directory the admin socket (`holosmith drain`) lives in, instead of `/run/holosmith`.
+        #[arg(long, value_name = "PATH")]
+        admin_dir: Option<PathBuf>,
         /// Which backend runs sessions.
         #[arg(long, value_enum, value_name = "BACKEND")]
         backend: Option<Backend>,
@@ -90,6 +93,20 @@ pub enum Cmd {
         /// Tear down this install tree instead of the system paths, as the invoking user (no sudo).
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
+    },
+    /// Refuse new work and wait for running turns, over the local admin socket (spec item 10 step 3).
+    ///
+    /// One connection, one local unix socket, never the network: the machine answers this from
+    /// `/run/holosmith/drain.sock` and nowhere else, and a request that reaches the control origin cannot make it
+    /// happen. The exit code is 0 when the machine is quiet and 1 when the wait ran out with a turn still
+    /// running — in which case the drain stays on rather than pretending it finished.
+    Drain {
+        /// How long to wait for the turns that are running (`10m`, `500ms`).
+        #[arg(long, value_name = "DURATION", default_value = "10m", value_parser = parse_wait)]
+        wait: std::time::Duration,
+        /// Directory the admin socket lives in, instead of `/run/holosmith`.
+        #[arg(long, value_name = "PATH")]
+        admin_dir: Option<PathBuf>,
     },
     /// Install and start a server on this machine (spec item 10's seven steps).
     Server {
@@ -169,4 +186,15 @@ pub enum ConfigAction {
     Show,
     /// Open the config file in $VISUAL or $EDITOR, then validate what was saved.
     Edit,
+}
+
+/// `--wait 10m`: a span of time in the config file's own grammar (`10s`, `1500ms`, `2m`).
+///
+/// One parser for one idea. The config's [`crate::config::Duration`] already refuses a bare number (its unit
+/// would be a guess) and a zero (a wait that waits for nothing is a mistake, not a value), and a second grammar
+/// on the command line would be a second set of the same mistakes. `clap` turns the `Err` into a usage error
+/// before anything is loaded, which is where a typo in a flag belongs.
+fn parse_wait(text: &str) -> Result<std::time::Duration, String> {
+    text.parse::<crate::config::Duration>()
+        .map(std::time::Duration::from)
 }

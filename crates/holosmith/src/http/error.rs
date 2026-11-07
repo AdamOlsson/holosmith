@@ -92,6 +92,13 @@ pub const SESSION_IDLE: &str = "session_idle";
 /// it would lose work no client asked to lose (HS-019, spec item 9).
 pub const UNSAVED_WORK: &str = "unsaved_work";
 
+/// The machine is draining for a restart, so it starts no new session and no new turn (HS-051, spec item 10
+/// step 3).
+///
+/// The family's first non-4xx code, and deliberately not a `409`: a state refusal says "this session cannot take
+/// that request", while this one says "this *machine* cannot take it right now, and the operator is the reason".
+pub const DRAINING: &str = "draining";
+
 /// The body of every error response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ErrorBody {
@@ -357,6 +364,22 @@ impl ApiError {
             StatusCode::INTERNAL_SERVER_ERROR,
             INTERNAL,
             "the server could not complete the request",
+        )
+    }
+
+    /// What a create, a prompt or a resume answers while the machine drains for a restart (HS-051).
+    ///
+    /// `503` because the machine is temporarily unable to do what the request asks and the operator is the one
+    /// who decides when it can again — not a `409`, which would say the *session* is in the wrong state, and not a
+    /// `5xx` from the `internal` family, which would say nothing can be done about it. The sentence names the
+    /// drain and the wait it is running, because those are the two things the operator needs to know: what is
+    /// happening, and where to read when it is over.
+    pub fn draining() -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            DRAINING,
+            "this machine is draining for a restart, so it starts no new session and no new turn until the \
+             drain finishes; `holosmith drain --wait` says when it has",
         )
     }
 

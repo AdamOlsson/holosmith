@@ -30,6 +30,8 @@ use crate::version::VersionInfo;
 pub struct ServeArgs {
     pub config: Option<PathBuf>,
     pub overrides: Overrides,
+    /// The directory the admin socket (`holosmith drain`) lives in; `None` means the machine's own.
+    pub admin_dir: Option<PathBuf>,
     /// The backend for this run; `None` means the config file's `backend` decides.
     pub backend: Option<Backend>,
 }
@@ -200,6 +202,11 @@ pub fn run(args: ServeArgs) -> ExitCode {
     let runtime = Runtime::started(backend);
     let version = VersionInfo::current();
     let listen = loaded.config.control_listen;
+    // Read before the async body takes the rest: the admin directory is the run's (`--admin-dir`) or the
+    // machine's, and the socket's path is that one value plus `drain::SOCKET_NAME` (HS-051).
+    let admin_dir = args
+        .admin_dir
+        .unwrap_or_else(|| PathBuf::from(crate::deploy::ADMIN_DIR));
 
     let body = async move {
         // Installed before the listener binds, so a handler that cannot be installed is a
@@ -277,6 +284,9 @@ pub fn run(args: ServeArgs) -> ExitCode {
                 backend,
                 crate::container::ContainerSettings::of(&loaded.config),
             ),
+            // One flag per process, shared by every clone of this state: the socket's task sets it and the
+            // handlers read it (HS-051). Never persisted — a restart is exactly what it exists to precede.
+            drain: crate::drain::Control::new(),
         };
         // The **startup reconcile** (HS-044, V9): what a `kill -9` left behind, put right **before any
         // policy or request can read a row**. It is awaited rather than spawned, and both reasons are
@@ -334,6 +344,28 @@ pub fn run(args: ServeArgs) -> ExitCode {
             "the compaction task is running"
         );
         let compactor = state.compactor().spawn();
+        // The **admin socket** (HS-051, spec item 10 step 3): the one way to drain this machine, and the one thing
+        // in the build that is deliberately *not* an HTTP route — the API table says "not reachable over HTTP",
+        // and a second listener outside `App` is what that sentence means. It is bound here, beside the two
+        // policies and after the reconcile, so a drain that arrives during boot sees the rows the pass left
+        // rather than a half-reconciled machine. A bind that fails is one `warn` and not a refusal, for the
+        // preview listener's reason: the control UI is what an operator needs when something else on the machine
+        // is wrong. The path is the run's `--admin-dir`, or the machine's `/run/holosmith` (step 2's directory).
+        let drain_socket = match crate::drain::listen(&admin_dir) {
+            Ok(listener) => Some(crate::drain::spawn(listener, state.drainer())),
+            // The reason is a `warn` when the directory is not usable and a `debug` when another server owns the
+            // socket: the first is a machine this run cannot drain, the second is a second server nobody meant to
+            // start (and the line says which, so an operator can tell them apart).
+            Err(sentence) => {
+                tracing::warn!(
+                    target: "holosmith::serve",
+                    admin_dir = %admin_dir.display(),
+                    sentence = %sentence,
+                    "this run has no admin socket: `holosmith drain` will not find it, and nothing else is affected"
+                );
+                None
+            }
+        };
         // The preview listener's own context: the origin an upgrade must come from, the rows, and the one
         // question it cannot answer itself — where a session's container is on its own network (HS-041).
         let preview_context = preview::Context::of(
@@ -393,6 +425,13 @@ pub fn run(args: ServeArgs) -> ExitCode {
         // leave a half-written transaction behind. `abort` drops the task at its next await point, and the
         // transaction it was in rolls back on drop — which is also why the fold itself holds no await.
         compactor.abort();
+        // And the admin socket (HS-051): a drain that started is finished or abandoned with the process, so its
+        // accept loop must not hold the runtime open a moment longer than the listeners do. The socket *file* is
+        // not removed here — a `serve` that is killed leaves one behind on purpose, and the next boot probes it
+        // and unlinks it if it is dead (`drain::listen`), which is the only rule that also covers a `kill -9`.
+        if let Some(socket) = drain_socket {
+            socket.abort();
+        }
         match served {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {

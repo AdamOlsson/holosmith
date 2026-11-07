@@ -69,8 +69,15 @@ struct Server {
 impl Server {
     fn start(dir: TempDir, arguments: &[OsString]) -> Self {
         let stderr = dir.file("serve.err");
+        // The admin socket goes under this test's own directory, for the reason `--data-dir` does: this sandbox
+        // lets an unprivileged user write the machine's paths, and a boot that bound `/run/holosmith/drain.sock`
+        // would be writing this machine's real admin socket (HS-051). Two tests booting at once would then also
+        // be racing for one socket.
+        let admin = dir.file("run/holosmith");
         let child = Command::new(env!("CARGO_BIN_EXE_holosmith"))
             .args(arguments)
+            .arg("--admin-dir")
+            .arg(&admin)
             .env_remove("HOLOSMITH_LOG")
             .stdout(Stdio::null())
             .stderr(fs::File::create(&stderr).expect("the log file is creatable"))
@@ -642,12 +649,16 @@ fn the_data_root_serve_creates_is_the_mode_the_deploy_writes_whatever_the_umask(
     let config = config(&dir);
     let data = dir.file("data");
     let stderr = dir.file("serve.err");
+    // `--admin-dir` for the reason `--data-dir` is here: a boot in a test must not bind the machine's own
+    // `/run/holosmith/drain.sock` (HS-051), and this one spawns `serve` without `Server::start`'s helper.
+    let admin = dir.file("run/holosmith");
     let mut child = Command::new("sh")
         .arg("-c")
         .arg(format!(
-            "umask 0002; exec '{}' serve --config '{}' --port 0",
+            "umask 0002; exec '{}' serve --config '{}' --port 0 --admin-dir '{}'",
             env!("CARGO_BIN_EXE_holosmith"),
-            config.display()
+            config.display(),
+            admin.display()
         ))
         .env_remove("HOLOSMITH_LOG")
         .stdout(Stdio::null())
@@ -690,11 +701,16 @@ fn the_binary_serves_the_app_from_a_directory_that_holds_only_the_binary() {
         "backend = \"stub\"\ncontrol_listen = \"127.0.0.1:0\"\n",
     );
     let stderr = elsewhere.file("serve.err");
+    // The admin socket stays under this test's own directory, because a `serve` in a test must never bind the
+    // machine's `/run/holosmith/drain.sock` (HS-051), and this spawn does not go through `Server::start`.
+    let admin = elsewhere.file("run/holosmith");
     let mut child = Command::new(&binary)
         .args([
             "serve",
             "--config",
             config.to_str().expect("UTF-8"),
+            "--admin-dir",
+            admin.to_str().expect("UTF-8"),
             "--data-dir",
             elsewhere
                 .file("data")

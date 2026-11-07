@@ -14,6 +14,7 @@ pub mod deleter;
 pub mod deploy;
 pub mod docker;
 pub mod doctor;
+pub mod drain;
 pub mod egress;
 pub mod events;
 pub mod exit;
