@@ -6531,11 +6531,6 @@ case_uninstall() {
     done
     timeout 60 docker rm -f hs_egress hs_key >/dev/null 2>&1 || true
   fi
-  # The machine's network, back as this case found it, because the rest of the gate runs after this.
-  if [ "$egress_before" -eq 1 ]; then
-    docker network create egress >/dev/null 2>&1 || true
-  fi
-
   # ---- 3. --purge: refused over a live row, and it removes nothing --------------------------------
   tree="$root/purge"
   install -d -m 0755 "$tree/etc/systemd/system" ||
@@ -6588,6 +6583,13 @@ case_uninstall() {
   assertions=$((assertions + 1))
   stop_serve
   start_serve
+  # The machine's network, back as this case found it — and **last**, because every `uninstall` above removed it
+  # again (it is the machine's, not the tree's) and `tests/container.rs`'s egress test needs it. A case that left
+  # the machine worse than it found it is the orphan HS-044 owns.
+  if [ "$egress_before" -eq 1 ]; then
+    docker network create egress >/dev/null 2>&1 ||
+      fail "$name/restore" "could not put the machine's egress network back"
+  fi
   rm -rf "$root"
 }
 
