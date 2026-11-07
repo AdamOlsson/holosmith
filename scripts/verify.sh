@@ -5344,9 +5344,8 @@ case_changes_diff() {
   cmp -s "$WORK/responses/${name}_file.body" "$WORK/responses/$name.git-a.txt" ||
     fail "${name}_file/bytes" "the answer is not git's own diff of a.txt"
   assertions=$((assertions + 1))
-  body="$(cat "$WORK/responses/${name}_file.body")"
-  printf '%s\n' "$body" | grep -qF '+two' ||
-    fail "${name}_file/hunk" "the answer carries no hunk of the change: $body"
+  grep -qF '+two' "$WORK/responses/${name}_file.body" ||
+    fail "${name}_file/hunk" "the answer carries no hunk of the change (${name}_file.body)"
   assertions=$((assertions + 1))
 
   # 2. The whole branch, with no `path`: capped like any other answer, and it names the first file alphabetically.
@@ -5355,9 +5354,11 @@ case_changes_diff() {
   response="$(answer "${name}_branch")"
   expect_status "${name}_branch" "$response" 200
   expect_header "${name}_branch" "$response" "Content-Type" "text/plain; charset=utf-8"
-  body="$(cat "$WORK/responses/${name}_branch.body")"
-  printf '%s\n' "$body" | grep -qF 'diff --git a/a.txt b/a.txt' ||
-    fail "${name}_branch/names" "the branch patch names no file: $body"
+  # Read from the file, not through `printf | grep -q` (see `expect_header`): a matched `grep -q` closes the
+  # pipe under a `printf` that is still writing 256 KB, and `pipefail` turns that SIGPIPE into a 141 — a
+  # passing assertion reported as a failure (measured, this case's first run).
+  grep -qF 'diff --git a/a.txt b/a.txt' "$WORK/responses/${name}_branch.body" ||
+    fail "${name}_branch/names" "the branch patch names no file (the answer is in ${name}_branch.body)"
   assertions=$((assertions + 1))
   size="$(wc -c <"$WORK/responses/${name}_branch.body")"
   [ "$size" -le 262144 ] || fail "${name}_branch/cap" "the whole-branch answer is $size bytes, past the cap"
