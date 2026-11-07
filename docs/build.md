@@ -387,6 +387,28 @@ build** (pi and the toolchains come from two package managers), and prints one `
 containers and scratch root — `case_server_deploy`'s online half removes the tags *it* built because that case
 asserts `changed` (ADR-0057).
 
+…and since HS-051, **the drain** is two cases, because the drain has two subjects: a machine that becomes quiet and
+one that does not. `case_drain` owns its boot (three live slots, no `idle_stop_min`, one session left `idle` and one
+prompted so there is a turn to wait for) and measures the acceptance bullet by bullet: the socket exists at
+`<admin dir>/drain.sock` as the kernel's own `-S`; `POST /api/drain` is the fallback's `404 not_found` and a raw
+`drain 600000` written to the **control port** is answered by the HTTP parser as a malformed request, which is the
+API table's "not reachable over HTTP" measured from both sides; a `--wait 200ms` against the stub's ~2 s turn exits
+**1** with `state: draining`, `waiting: 1 turn still running`, `result: expired` and the sentence saying the machine
+is still draining; in that same window the create and the prompt answer `503` `draining` with
+`content-type: application/json` while `GET /api/sessions` and `GET /api/sessions/{id}` answer `200` (the row still
+`running`); a `--wait 30s` then waits the turn out, prints `stopped: 2 sessions with reason server_restart`, and
+both rows are `stopped server_restart 1` in the database — `expected_stop` is polled, because the container's stop
+is a task of its own — with `idle → stopped · server_restart` in the session's transcript and one `holosmith::drain`
+log line per stop; a second drain says `already draining`, stops `0 sessions` and still exits 0; and a resume is
+refused `503` while a delete is answered `202`. It needs `python3` for the two row facts no client is sent
+(`status_reason` and `expected_stop`) and it stops and restores the shared boot, because stopping every `idle` row
+would take the run's own `$created_id` with it. `case_drain_restart` is the fifth acceptance bullet, which only the
+drain that *could not* finish exercises: it expires against a live turn, asserts a create is still `503` **after**
+the expiry, `kill -9`s the server, boots again and asserts the row comes back `idle · interrupted` (ADR-0053) and
+that the new process is not draining, because a create is accepted. Neither case needs the daemon (the stub's turn
+is what they wait for) and both `SKIP` only on a missing `python3`, with `tests/drain.rs` covering the sequence
+without one.
+
 One rule for every case above and below: a case that must assert one code keeps every higher guard check correct,
 or it asserts another guard's code under its own name.
 
@@ -942,6 +964,63 @@ systemd here, so no unit is loaded and `disable --now`/`daemon-reload` are `test
 privileged run's unit *file* lives in `/etc/systemd/system`, which an unprivileged test cannot write); `journalctl`
 exists here but nothing runs under the unit, so the server arm is measured against a stand-in; and there is no host
 registry, which is why `status`'s `machines` line names HS-068.
+
+## Draining a machine before a restart
+
+Spec item 10 step 3: an upgrade must not kill a turn somebody is watching. The drain is the command that makes that
+possible, and it is deliberately **not** a shutdown — it refuses new work, waits for the turns that are running,
+stops the sessions that are merely idle, and then says so while `serve` keeps answering reads (HS-051, ADR-0060).
+
+```bash
+holosmith drain                 # drain, waiting up to the default 10m
+holosmith drain --wait 1m       # a shorter wait
+holosmith drain --admin-dir /tmp/hs/run/holosmith   # a run that is not the machine's
+```
+
+One request line goes to a **unix socket** — `/run/holosmith/drain.sock` on a deployed host, `<admin dir>/drain.sock`
+otherwise — and the answer is printed as it arrives:
+
+```text
+drain: state: draining
+drain: waiting: 1 turn still running
+drain: stopped: 2 sessions with reason server_restart
+drain: result: drained
+```
+
+**The exit code is the answer**: 0 only for `result: drained`. `expired` means the `--wait` ran out with a turn
+still running, and it exits 1 *and changes nothing* — the machine stays draining, no session is stopped, and the
+line says so, because a drain that quietly cancelled itself is the one outcome a promotion must never mistake for
+success. `refused` covers a socket that is not there, a line that is not a drain, and a machine that went away
+mid-drain.
+
+What keeps working while it drains: every `GET` (the UI must be able to watch the turn being protected),
+`abort`, `steer` (it refuses unless the row is `running`, so it cannot start work) and `DELETE`. What is refused,
+with ADR-0008's envelope and `503` `code: "draining"`: `POST /api/sessions`, `POST …/prompt` and `POST …/resume`.
+What ends the process is still `SIGTERM`, not the drain; the restart the drain precedes is HS-078's `upgrade`.
+
+The socket's protection is the directory's: `/run/holosmith` is created **0700** by `server deploy`'s step 2 and
+chowned to the service user, and the socket is 0600, so being able to open it is the authorisation and no route
+exists for anything else. A `serve` that finds a **dead** socket (a killed process's) unlinks it and binds — a
+`kill -9` must not wedge the next boot — while a **live** one is another server's and this run warns and serves
+without an admin socket rather than stealing its clients.
+
+On a host with systemd, by hand, with a turn running:
+
+```bash
+holosmith drain --wait 2m && echo quiet || echo not-quiet   # 0 and `quiet` only when the turn finished
+curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8080/api/sessions   # 503 while draining
+curl -s localhost:8080/api/sessions | head -c 200                             # 200: reads still answer
+journalctl -u holosmith.service | grep 'holosmith::drain'                     # one line per stopped session
+systemctl restart holosmith.service                                          # the operator's move, not the drain's
+```
+
+**What this repository's environment could not measure**: there is no systemd here, so `/run/holosmith` is only the
+deployed path and every demo and gate case uses `--admin-dir` under a scratch tree; and nothing consumes the drain
+yet, because `upgrade`/`rollback` is HS-078/HS-079. The socket, the four report lines, the three refusal handlers,
+the rows' `server_restart`/`expected_stop` facts and the restart's `idle · interrupted` are measured — by
+`case_drain`, `case_drain_restart`, `tests/drain.rs` (the sequence, the bind rules, the request grammar and the
+refusals over the real `App`) and `tests/drain_cli.rs` (the printed lines and the exit code against a hand-written
+socket).
 
 ## Where the target settings live
 

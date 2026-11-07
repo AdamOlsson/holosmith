@@ -270,8 +270,13 @@ work may go anyway; it forgives the failure, it does not skip the attempt.
 _Avoid_: Dirty worktree, lost changes, uncommitted state
 
 **Drain**:
-Refusing new work and waiting for running turns to finish, so the machine can restart.
-_Avoid_: Shutdown, quiesce
+Refusing new work and waiting for running turns to finish, so the machine can restart. `holosmith drain [--wait 10m]`
+asks for one over the **admin socket** and is answered with one word — `drained`, `expired` or `refused` — which is
+the exit code (0 only for `drained`). It is the process's, not the database's: `draining` is a bit the restart
+clears, so there is nothing to un-drain. Its wait is the `running` rows, its stop is every `idle` row with reason
+`server_restart` through **expected stop**, and it is **not** a shutdown — `serve` keeps answering reads, and
+`SIGTERM` is still what ends the process.
+_Avoid_: Shutdown, quiesce, pause
 
 **Provisioner**:
 The background work that turns an accepted session into a running one, reporting progress by step.
@@ -771,7 +776,8 @@ whether `serve` may run here", and its sentence says what was missing and what d
 _Avoid_: Result, verdict (`Verdict` is the schema's word), status
 
 **Admin socket**:
-The local unix socket used for commands that must never be reachable over HTTP.
+The local unix socket used for commands that must never be reachable over HTTP: `<admin dir>/drain.sock`, 0600 in a
+0700 directory whose own protection is the whole authorisation. Its one verb is the **drain**.
 _Avoid_: Control socket, IPC
 
 **Verification table**:

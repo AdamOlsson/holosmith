@@ -1741,3 +1741,35 @@ it rather than adding a caveat beside it.
   file" over a permission error turns an unreadable data root into "this machine has never served" — and one caller
   decides whether to *delete* the tree over that answer. `db::Reader::open` matches `ErrorKind::NotFound` and returns
   the error for anything else (HS-050's review, T2).
+
+### Landmines: the drain and its socket (HS-051)
+
+- **`serve`'s default admin directory is the machine's real `/run/holosmith`, and in this sandbox an unprivileged
+  user can write it — so a test that forgets `--admin-dir` binds a real socket silently.** This story's first
+  handoff had six such spawns (`tests/db_migrations.rs`'s three, two direct ones in `tests/serve_cli.rs`, three of
+  `verify.sh`'s own boots) and the first `cargo test` after them left `/run/holosmith/drain.sock` behind, which then
+  failed `tests/deploy.rs`'s `perms` check with `/run/holosmith is 0775 where server deploy writes 0700` — a
+  leftover from an *earlier* session's by-hand `mkdir -p /run/holosmith` (eight of them are in the operator's log)
+  and a failure with no relationship to the code under test. Two rules came out of it: every boot in a test or a
+  gate passes `--admin-dir` (the shim is `Server::start` and the gate's `start_serve`, both under `$WORK`), and a
+  red `tests/deploy.rs` `perms` failure is worth a `ls -ld /run/holosmith` before anything else.
+- **`UnixListener::bind` answers `AddrInUse` for a socket file whether a server is behind it or not, and `connect`
+  answers `ECONNREFUSED` for a *regular file* too (measured).** So "unlink the stale socket" cannot be a `connect`
+  test alone: the file's type is checked first (`symlink_metadata` + `FileTypeExt::is_socket`), a socket is probed
+  (refused → dead → unlink and bind; connected → another server owns it → `warn` and serve without one), and
+  anything that is not a socket is an operator's file that is named and left alone.
+- **A drain test that "waits for the turn" passes by finishing at once unless the deadline is under one frame.** The
+  stub's turn is ten 200 ms frames, so `--wait 200ms` is what makes the expiry arm a measurement rather than a race;
+  the same shape applies to `case_drain_restart`, which needs the turn still `running` when the `kill -9` lands.
+- **`steer` refuses unless the row is `running`** (`NOT_RUNNING_STEER`), which is the whole reason a draining machine
+  can keep answering it: it cannot start work, only shape a turn that is already ending. Any future handler that
+  *can* start work belongs in the refused list beside create/prompt/resume, not beside steer.
+- **A resumed session is refused a prompt while draining, so the UI must not answer a drain with an
+  "resume and retry" affordance.** The `503 draining` sentence names the drain and the `--wait` for exactly that
+  reason: the operator's move is to wait or to restart, not to provision.
+- **The prior session left this tree dirty and unformatted, with no commit and no Linear progress past the plan.**
+  What made it adoptable was that the recorded plan comment matched the code (module shape, wire protocol, refusal
+  list, the four reason words) and that everything was already compiling — but `cargo fmt --check` was red and an
+  unrelated `Uninstall` help-text line had been shortened to `Uninstall.` on the way past. A handoff brief says "stop
+  green"; a killed session cannot, so the *next* session checks `git status`, the Linear plan and `cargo fmt` before
+  believing a dirty tree.
