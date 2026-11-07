@@ -130,6 +130,45 @@ impl fmt::Debug for Database {
     }
 }
 
+/// An open, **read-only** connection: what a report reads a database with, so that reading a machine cannot
+/// migrate it (HS-045's rule, HS-050's second reader).
+///
+/// [`Database::open`] applies every pending migration before it answers, which is what a *start* wants and what a
+/// command that only describes a machine must not do: `doctor` refuses a database from a newer release rather than
+/// touching it (ADR-0047), and `status` counts rows on a machine it was not asked to change. One opener for the
+/// claim, so the two readers cannot disagree about what "read-only" means — SQLite's own flag, not a second
+/// reading of the migration directory.
+///
+/// A read-only open of a WAL database needs to be able to create or map its `-shm` file, which is the data root's
+/// own directory: both callers run as the user that owns it, and a file it cannot read is the caller's finding to
+/// make, not a silent absence.
+pub struct Reader {
+    connection: Connection,
+}
+
+impl Reader {
+    /// Open `path` read-only, or `None` when there is no file yet — a machine that has never served, which is not
+    /// a finding (its own command says so in its own words).
+    pub fn open(path: &Path) -> Result<Option<Self>, DbError> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(sqlite_error_about(path))?;
+        Ok(Some(Self { connection }))
+    }
+
+    /// Every read of a `sessions` row, borrowed from this connection.
+    pub fn sessions(&self) -> SessionRepository<'_> {
+        SessionRepository::new(&self.connection)
+    }
+
+    /// The schema version the file records, for a caller that wants the same answer `doctor` makes a verdict of.
+    pub fn schema_version(&self, path: &Path) -> Result<u32, DbError> {
+        recorded_version(&self.connection, path)
+    }
+}
+
 /// Why the database could not be opened, or could not be migrated.
 #[derive(Debug)]
 pub enum DbError {
@@ -383,12 +422,10 @@ fn recorded_version(conn: &Connection, path: &Path) -> Result<u32, DbError> {
 /// root's own directory: `doctor` runs as the user that owns it, and a file it cannot read is the caller's
 /// finding to make, not a silent `None`.
 pub fn recorded_without_migrating(path: &Path) -> Result<Option<u32>, DbError> {
-    if !path.exists() {
-        return Ok(None);
+    match Reader::open(path)? {
+        Some(reader) => reader.schema_version(path).map(Some),
+        None => Ok(None),
     }
-    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(sqlite_error_about(path))?;
-    recorded_version(&connection, path).map(Some)
 }
 
 #[cfg(test)]

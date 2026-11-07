@@ -25,12 +25,10 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::io::{Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
 
 use crate::agent;
 use crate::config::{Config, Role};
@@ -46,12 +44,6 @@ use crate::selftest;
 /// Where systemd says it is running: a directory, not a process table, because that is the fact a script can
 /// read without a subprocess (and `/proc/1/comm` can be `bwrap` or `tini` for reasons that are not "no systemd").
 pub const SYSTEMD_DIR: &str = "/run/systemd/system";
-
-/// How long one connection to a listener gets before it is "not answering".
-///
-/// The same bound [`crate::preflight`] gives the daemon, for the same reason: a listener that accepts and says
-/// nothing must cost a check's deadline, not the command.
-pub const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The three files the merge trial writes, so the cleanup is a directory and not a list.
 const MERGE_FILE: &str = "base.txt";
@@ -409,35 +401,11 @@ fn port(listen: SocketAddr, label: &str, serving: Option<bool>) -> Finding {
 /// deploy`'s step 7, which waits on it before it calls a unit's start successful (HS-049). A second copy of the
 /// request would be a second meaning of "serving".
 ///
-/// Hand-written like [`crate::preflight`]'s `_ping`, and for the same reason: one request, four lines, no client
-/// library. `/api/health` is guard-exempt, so no header but a `Host` is needed.
+/// **A wrapper, not a request.** Since HS-050 the request itself is [`crate::http::health::ask`], because
+/// `holosmith status` reads the same payload for the same reason and two hand-written probes would be two
+/// meanings of "this machine is answering".
 pub fn health_answers(listen: SocketAddr) -> bool {
-    if listen.port() == 0 {
-        return false;
-    }
-    let host = if listen.ip().is_unspecified() {
-        IpAddr::V4(Ipv4Addr::LOCALHOST)
-    } else {
-        listen.ip()
-    };
-    let target = SocketAddr::new(host, listen.port());
-    let Ok(mut stream) = TcpStream::connect_timeout(&target, PROBE_TIMEOUT) else {
-        return false;
-    };
-    let _ = stream.set_read_timeout(Some(PROBE_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(PROBE_TIMEOUT));
-    let request = b"GET /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
-    if stream.write_all(request).is_err() {
-        return false;
-    }
-    let mut buffer = [0_u8; 1024];
-    let Ok(read) = stream.read(&mut buffer) else {
-        return false;
-    };
-    let head = String::from_utf8_lossy(&buffer[..read]);
-    head.lines()
-        .next()
-        .is_some_and(|status| status.contains(" 200"))
+    crate::http::health::ask(listen).is_ok()
 }
 
 /// The database's schema against this binary's, read **without** migrating it (ADR-0047).
@@ -956,6 +924,8 @@ fn not_measured(what: &str, because: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+
     use super::*;
 
     #[test]
@@ -1039,7 +1009,7 @@ mod tests {
         let listen = held.local_addr().expect("the bound address is known");
         let config = Config {
             control_listen: listen,
-            preview_listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            preview_listen: SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)),
             ..Config::default()
         };
         let findings = ports(&config, None);
@@ -1129,19 +1099,42 @@ mod tests {
 
     #[test]
     fn health_is_measured_and_not_assumed() {
-        // A listener that answers `/api/health` with a 200 and one that answers nothing: the two answers the
-        // `--full` moment turns on.
+        // A listener that answers `/api/health` with the payload, one that answers 200 with something else, and one
+        // that answers nothing: the three answers the `--full` moment turns on.
         use std::net::TcpListener as Listener;
+        // The payload's own shape (`Health`'s five keys); the reader takes the three it needs.
+        let body = r#"{"name":"holosmith","version":"0.0.0","role":"server","uptime_s":0,"preview_origin":"http://localhost:1"}"#;
+        let answer = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
         let good = Listener::bind("127.0.0.1:0").expect("a port is bindable");
         let good_address = good.local_addr().expect("the address is known");
         let thread = std::thread::spawn(move || {
             if let Ok((mut stream, _)) = good.accept() {
                 let mut buffer = [0_u8; 512];
                 let _ = stream.read(&mut buffer);
-                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}");
+                let _ = stream.write_all(answer.as_bytes());
             }
         });
         assert!(health_answers(good_address));
+        thread.join().expect("the answering thread finishes");
+
+        // A 200 is not enough: a port another program holds must not read as this machine serving, or the deploy's
+        // step 7 would call a unit's start successful over somebody else's server.
+        let impostor = Listener::bind("127.0.0.1:0").expect("a port is bindable");
+        let impostor_address = impostor.local_addr().expect("the address is known");
+        let thread = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = impostor.accept() {
+                let mut buffer = [0_u8; 512];
+                let _ = stream.read(&mut buffer);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}");
+            }
+        });
+        assert!(
+            !health_answers(impostor_address),
+            "a 200 with no health payload is not this machine serving"
+        );
         thread.join().expect("the answering thread finishes");
 
         let silent = Listener::bind("127.0.0.1:0").expect("a port is bindable");

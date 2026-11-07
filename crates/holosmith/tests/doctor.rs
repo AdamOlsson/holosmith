@@ -353,7 +353,14 @@ fn a_held_port_is_a_failure_before_a_start_and_the_machine_serving_after_one() {
                     let _ = stream.set_nonblocking(false);
                     let mut request = [0_u8; 512];
                     let _ = stream.read(&mut request);
-                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}");
+                    // The payload, not a bare 200: the reader parses it (HS-050), so `{}` would be "a port
+                    // somebody else holds" rather than this machine serving.
+                    let body = r#"{"name":"holosmith","version":"verify","role":"server","uptime_s":0,"preview_origin":"http://localhost:8081"}"#;
+                    let answer = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(answer.as_bytes());
                     seen.store(true, Ordering::SeqCst);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {

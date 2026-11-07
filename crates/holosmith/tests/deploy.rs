@@ -240,7 +240,11 @@ fn recording_tools(dir: &TempDir, calls: &Path, sudo_calls: &Path) -> deploy::To
     }
 }
 
-/// A control listener that answers `GET /api/health` 200 for the rest of the test's life, and its address.
+/// The body a stand-in for `/api/health` answers: `Health`'s five keys, because the reader parses them (HS-050) —
+/// a `200` with anything else is "a port somebody else holds", which is a different fact from "this machine serves".
+pub const HEALTH_PAYLOAD: &str = r#"{"name":"holosmith","version":"verify","role":"server","uptime_s":0,"preview_origin":"http://localhost:8081"}"#;
+
+/// A control listener that answers `GET /api/health` for the rest of the test's life, and its address.
 ///
 /// Step 7's apply waits on this, and `doctor --full`'s port check reads it as "the machine is serving", so every run
 /// meant to reach the end needs one — bound on the kernel's port and handed back, because the config's
@@ -249,11 +253,15 @@ fn health_responder() -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a port is bindable");
     let listen = listener.local_addr().expect("the bound address is known");
     std::thread::spawn(move || {
+        let answer = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{HEALTH_PAYLOAD}",
+            HEALTH_PAYLOAD.len()
+        );
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { break };
             let mut request = [0_u8; 512];
             let _ = stream.read(&mut request);
-            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{{}}");
+            let _ = stream.write_all(answer.as_bytes());
         }
     });
     listen

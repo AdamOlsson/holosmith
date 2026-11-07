@@ -85,6 +85,13 @@ const ORDER: &str = "ORDER BY last_active_at DESC, id ASC";
 /// the enum, over the `sessions_status` index (ADR-0012).
 const LIVE_COUNT: &str = "SELECT count(*) FROM sessions WHERE status IN (?1, ?2, ?3)";
 
+/// Every status the table holds, with how many rows have it (HS-050's `status` command).
+///
+/// `GROUP BY` rather than six counts, and rather than `list(None)`: a status with no rows is absent
+/// from the answer, so the caller fills it out from [`Status::ALL`] — the enum is the list of
+/// statuses, and a statement that enumerated them would be a second copy of it.
+const COUNTS_BY_STATUS: &str = "SELECT status, count(*) FROM sessions GROUP BY status";
+
 /// The order both `idle` readers use: quietest first, and the id after it so two rows touched in the
 /// same second still have one answer. One constant, because `oldest_idle`'s doc says its order *is* the
 /// sweep's and a re-typed clause would make that claim false the day one of them changed.
@@ -215,6 +222,29 @@ impl<'a> SessionRepository<'a> {
                 |row| row.get(0),
             )
             .map_err(|error| RepoError::sqlite("live_count", error))
+    }
+
+    pub fn counts_by_status(&self) -> Result<Vec<(Status, u64)>, RepoError> {
+        let mut statement = self
+            .connection
+            .prepare(COUNTS_BY_STATUS)
+            .map_err(|error| RepoError::sqlite("counts_by_status", error))?;
+        let rows = statement
+            .query_map([], |row| {
+                let status: String = row.get(0)?;
+                let count: u64 = row.get(1)?;
+                Ok((status, count))
+            })
+            .map_err(|error| RepoError::sqlite("counts_by_status", error))?;
+        let mut counts = Vec::new();
+        for row in rows {
+            let (status, count) =
+                row.map_err(|error| RepoError::sqlite("counts_by_status", error))?;
+            // A status this binary does not know is refused rather than passed through: the column is
+            // the enum's own text, and `FromStr` is what says so (ADR-0011).
+            counts.push((status.parse::<Status>()?, count));
+        }
+        Ok(counts)
     }
 
     /// The least recently active `idle` session: the cap's victim (HS-020), or `None` when nothing is
