@@ -42,16 +42,13 @@ use serde_json::Value;
 use crate::changes::ChangesError;
 use crate::http::app::AppState;
 use crate::http::error::{ApiError, internal};
-use crate::merge::{FF_ONLY, MergeError, listed, merge};
+use crate::merge::{MergeError, Request, Strategy, listed, merge};
 use crate::worktree::Worktree;
 
 /// The body's fields, exactly: any other key is `unknown_field`, the create's own rule.
 ///
-/// `message` is named here and read by nothing. Spec item 12's body is `{target, strategy, message?,
-/// delete_session?}`, and a `merge` or `squash` strategy is what a message would name — a fast-forward creates
-/// no commit, so there is nothing for it to say. It is admitted rather than refused because a client that sends
-/// the contract's body must not be told it sent a field this endpoint does not accept; HS-055, which builds the
-/// two strategies that make a merge commit, is what will read it.
+/// All four are read: `message` names a commit for the two strategies that make one, and `delete_session` is
+/// the one field this build still refuses (HS-056 builds it).
 const FIELDS: [&str; 4] = ["target", "strategy", "message", "delete_session"];
 
 /// `target` is not one of the configured `[merge] targets`: the config, not the repository, is what refused.
@@ -62,20 +59,14 @@ const UNLISTED_TARGET: &str = "`target` must be a branch listed in the `merge.ta
 const MISSING_TARGET: &str = "`target` must be a branch this repository has: that name is configured, but the repository has no such \
      branch";
 
-/// `strategy` named one of spec item 12's two strategies this build does not have yet.
-///
-/// The sentence says what *did* not happen, because the request asked for something that would have changed the
-/// repository: an endpoint that silently fast-forwarded what was asked to squash would be lying about the work.
-const UNBUILT_STRATEGY: &str = "`strategy` must be `ff-only` in this build: the `merge` and `squash` strategies are not built yet, so \
-     nothing was merged";
-
 /// `strategy` is not one of the spec's three words at all — a malformed request rather than a missing feature.
 const BAD_STRATEGY: &str = "`strategy` must be `ff-only`, `merge` or `squash`";
 
 /// `delete_session` was true and the delete flow is HS-056's.
 ///
 /// The refusal comes *before* the merge, so the sentence has to say that nothing was merged either: a client
-/// that read "the session was not deleted" might reasonably think its work had landed.
+/// that read "the session was not deleted" might reasonably think its work had landed. It is the last
+/// `unsupported` this route answers — the two strategy words this sentence used to name are built.
 const UNBUILT_DELETE: &str = "`delete_session` is not built yet, so nothing was merged and the session was not deleted; merge with \
      `delete_session` absent, then delete the session";
 
@@ -124,14 +115,14 @@ pub(crate) async fn respond(
         Err(_) => return ApiError::bad_merge_body().into_response(),
     };
     let target = match parse_body(&body) {
-        Ok(target) => target,
+        Ok(request) => request,
         Err(error) => return error.into_response(),
     };
     // The target's first fact is asked here and not later, because it is the **request's**: a body naming a
     // branch this machine will not merge into is malformed whatever the session's state is, so it must not be
     // answered differently for a session with no worktree than for one with (ADR-0012's order). `merge` asks
     // the same predicate again as its own precondition.
-    if !listed(&target, &state.config.merge.targets) {
+    if !listed(&target.target, &state.config.merge.targets) {
         return ApiError::bad_target(UNLISTED_TARGET).into_response();
     }
     let session = {
@@ -154,8 +145,11 @@ pub(crate) async fn respond(
     let worktree = Worktree::of(&state.config.projects_root, &session.project, &session.id);
     let targets = state.config.merge.targets.clone();
     let merges = state.merges.clone();
-    let merged =
-        tokio::task::spawn_blocking(move || merge(&worktree, &target, &targets, &merges)).await;
+    let data_root = state.config.data_root.clone();
+    let merged = tokio::task::spawn_blocking(move || {
+        merge(&worktree, &target, &targets, &merges, &data_root)
+    })
+    .await;
     match merged {
         Ok(Ok(merged)) => (StatusCode::OK, Json(merged)).into_response(),
         Ok(Err(error)) => refusal_of(error).into_response(),
@@ -165,16 +159,18 @@ pub(crate) async fn respond(
     }
 }
 
-/// Read the body as JSON, refuse an unknown field, then the two fields this build cannot honour.
+/// Read the body as JSON, refuse an unknown field, then the field this build cannot honour.
 ///
-/// The order is the request's: shape, then unknown key, then `strategy`, then `delete_session`. A strategy this
-/// build does not have comes before a delete it does not have because the strategy is the field that would
-/// change the *repository*; a request that mentions both has already asked for something that cannot run.
+/// The order is the request's: shape, then unknown key, then `strategy`, then `message`'s type, then
+/// `delete_session`. A strategy this build does not know comes before a delete it does not have because the
+/// strategy is the field that would change the *repository*; a request that mentions both has already asked for
+/// something that cannot run.
 ///
 /// `target` is not validated here beyond being a string: `merge.targets` is where a branch name is checked
 /// (`config`'s `is_ref_name`), so membership in that list *is* the validation, and a second alphabet would be a
-/// second answer to "what is a branch name".
-fn parse_body(bytes: &[u8]) -> Result<String, ApiError> {
+/// second answer to "what is a branch name". `message` has no length of its own — the create's `prompt` has
+/// none either — and it reaches git as one argument of a `std::process::Command`, never through a shell.
+fn parse_body(bytes: &[u8]) -> Result<Request, ApiError> {
     let value: Value = serde_json::from_slice(bytes).map_err(|_| ApiError::bad_merge_body())?;
     let object = value.as_object().ok_or_else(ApiError::bad_merge_body)?;
     if object.keys().any(|field| !FIELDS.contains(&field.as_str())) {
@@ -185,22 +181,33 @@ fn parse_body(bytes: &[u8]) -> Result<String, ApiError> {
         .and_then(Value::as_str)
         .ok_or_else(ApiError::bad_merge_body)?
         .to_string();
-    match object.get("strategy") {
-        // Absent means ff-only, which is item 12's default and the only strategy this build has.
-        None | Some(Value::Null) => {}
-        Some(Value::String(named)) if named == FF_ONLY => {}
-        Some(Value::String(named)) if named == "merge" || named == "squash" => {
-            return Err(ApiError::unsupported(UNBUILT_STRATEGY));
+    let strategy = match object.get("strategy") {
+        // Absent means ff-only, which is item 12's default.
+        None | Some(Value::Null) => Strategy::FastForward,
+        Some(Value::String(named)) => {
+            Strategy::parse(named).ok_or_else(|| ApiError::bad_strategy(BAD_STRATEGY))?
         }
-        Some(_) => return Err(ApiError::bad_strategy(BAD_STRATEGY)),
-    }
+        Some(_) => return Err(ApiError::bad_merge_body()),
+    };
+    let message = match object.get("message") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(message)) if !message.trim().is_empty() => Some(message.clone()),
+        // An empty message is `bad_body` and not "the default": a client that sent `"message": ""` asked for a
+        // commit whose message is nothing, which is not the same request as one that named no message.
+        Some(Value::String(_)) => return Err(ApiError::bad_merge_body()),
+        Some(_) => return Err(ApiError::bad_merge_body()),
+    };
     match object.get("delete_session") {
         None | Some(Value::Null) => {}
         Some(Value::Bool(false)) => {}
         Some(Value::Bool(true)) => return Err(ApiError::unsupported(UNBUILT_DELETE)),
         Some(_) => return Err(ApiError::bad_merge_body()),
     }
-    Ok(target)
+    Ok(Request {
+        target,
+        strategy,
+        message,
+    })
 }
 
 /// The envelope a [`MergeError`] is answered with.
@@ -221,6 +228,16 @@ fn refusal_of(error: MergeError) -> ApiError {
         MergeError::NotFastForward { .. } => ApiError::not_fast_forward(NOT_FAST_FORWARD),
         MergeError::TargetDirty { .. } => ApiError::target_dirty(TARGET_DIRTY),
         MergeError::CheckedOutElsewhere { .. } => ApiError::target_checked_out(TARGET_CHECKED_OUT),
+        // The one refusal that carries a payload: rule 3's paths, in the envelope's additive `conflicts` key,
+        // because the message a `409` carries is a fixed sentence (ADR-0008) and a phone needs the list.
+        MergeError::Conflict { paths } => ApiError::conflict(paths),
+        MergeError::Temporary { path, detail } => internal(
+            "merge",
+            format!(
+                "the temporary merge worktree {} could not be used: {detail}",
+                path.display()
+            ),
+        ),
     }
 }
 
@@ -246,53 +263,99 @@ mod tests {
         BAD_BODY, BAD_STRATEGY as BAD_STRATEGY_CODE, BAD_TARGET, UNKNOWN_FIELD,
     };
 
-    fn parse(text: &str) -> Result<String, ApiError> {
+    fn parse(text: &str) -> Result<Request, ApiError> {
         parse_body(text.as_bytes())
+    }
+
+    /// The target of a body that is accepted, for the tests that are about `target` and not about the rest.
+    fn target(text: &str) -> Option<String> {
+        parse(text).ok().map(|request| request.target)
     }
 
     #[test]
     fn the_body_is_the_contract_s_three_spellings_of_a_target() {
         // Only a `target` is required; `strategy` absent is item 12's default, and an explicit `ff-only` is the
-        // same request. `message` is admitted and unread (a fast-forward has no commit to name), so a body that
-        // carries one is the contract's body and not an unknown field.
-        assert_eq!(parse(r#"{"target":"main"}"#).ok().as_deref(), Some("main"));
+        // same request. `message` is now **read** by the two strategies that make a commit and ignored by the one
+        // that does not, so a body that carries one is the contract's body and not an unknown field.
+        assert_eq!(target(r#"{"target":"main"}"#).as_deref(), Some("main"));
         assert_eq!(
-            parse(r#"{"target":"main","strategy":"ff-only"}"#)
-                .ok()
-                .as_deref(),
+            target(r#"{"target":"main","strategy":"ff-only"}"#).as_deref(),
             Some("main")
         );
         assert_eq!(
-            parse(r#"{"target":"main","message":"a story","delete_session":false}"#)
-                .ok()
-                .as_deref(),
+            target(r#"{"target":"main","message":"a story","delete_session":false}"#).as_deref(),
             Some("main")
         );
     }
 
     #[test]
-    fn the_two_fields_this_build_cannot_honour_are_refused_before_anything_runs() {
-        // The decision ADR-0063 records: refusing loudly beats ignoring a request that says "delete the
-        // session". Both are `422` and both are `unsupported`, with a sentence each, because their next steps
-        // differ — and neither is `bad_body`, because the body is the contract's.
-        for (text, code) in [
-            (r#"{"target":"main","strategy":"squash"}"#, "unsupported"),
-            (r#"{"target":"main","strategy":"merge"}"#, "unsupported"),
-            (r#"{"target":"main","delete_session":true}"#, "unsupported"),
+    fn all_three_of_the_spec_s_strategies_are_accepted_and_the_absent_one_is_ff_only() {
+        // HS-054 refused two of these with `422 unsupported`; HS-055 builds them, so the request that names one
+        // is the contract's request. What `parse_body` must get right is the **word to variant** mapping — the
+        // rest of the story is what `merge::merge` does with it.
+        assert_eq!(
+            parse(r#"{"target":"main"}"#).expect("a body").strategy,
+            Strategy::FastForward
+        );
+        for (text, expected) in [
+            (
+                r#"{"target":"main","strategy":"ff-only"}"#,
+                Strategy::FastForward,
+            ),
+            (r#"{"target":"main","strategy":"merge"}"#, Strategy::Merge),
+            (r#"{"target":"main","strategy":"squash"}"#, Strategy::Squash),
         ] {
-            let error = parse(text).expect_err(text);
-            assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY, "{text}");
-            assert_eq!(error.body.code, code, "{text}");
+            assert_eq!(parse(text).expect(text).strategy, expected, "{text}");
         }
     }
 
     #[test]
+    fn a_message_is_passed_through_and_an_empty_one_is_not_the_default() {
+        // A message is the operator's words and reaches git verbatim. `""` is refused rather than read as "the
+        // default": a client that sent it asked for a commit whose message is nothing, and answering that with
+        // `Merge branch 'agent/x'` would be naming the commit something nobody asked for.
+        assert_eq!(
+            parse(r#"{"target":"main","strategy":"merge","message":"a story"}"#)
+                .expect("a body")
+                .message
+                .as_deref(),
+            Some("a story")
+        );
+        assert_eq!(
+            parse(r#"{"target":"main","strategy":"squash","message":null}"#)
+                .expect("a body")
+                .message,
+            None
+        );
+        for text in [
+            r#"{"target":"main","message":""}"#,
+            r#"{"target":"main","message":3}"#,
+        ] {
+            let error = parse(text).expect_err(text);
+            assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY, "{text}");
+            assert_eq!(error.body.code, BAD_BODY, "{text}");
+        }
+    }
+
+    #[test]
+    fn the_one_field_this_build_cannot_honour_is_refused_before_anything_runs() {
+        // The decision ADR-0063 records, reduced to its last standing arm: refusing loudly beats ignoring a
+        // request that says "delete the session". It is `422 unsupported` with its own sentence, and not
+        // `bad_body`, because the body is the contract's.
+        let error = parse(r#"{"target":"main","delete_session":true}"#).expect_err("a delete");
+        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(error.body.code, "unsupported");
+    }
+
+    #[test]
     fn a_strategy_outside_the_spec_s_three_words_is_a_malformed_request() {
-        // A missing *feature* and a wrong *value* are two different refusals: `rebase` is not one of item 12's
-        // words, so it is `bad_strategy` rather than `unsupported`, which would promise that HS-055 adds it.
+        // A wrong *value* is `bad_strategy`, and it is now the only strategy refusal there is: `rebase` is not one
+        // of item 12's words, and the three that are all run.
         let error = parse(r#"{"target":"main","strategy":"rebase"}"#).expect_err("a fourth word");
         assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(error.body.code, BAD_STRATEGY_CODE);
+        let error = parse(r#"{"target":"main","strategy":3}"#).expect_err("a number");
+        assert_eq!(error.body.code, BAD_BODY);
     }
 
     #[test]
@@ -323,11 +386,9 @@ mod tests {
     fn a_null_is_the_same_answer_as_an_absent_field() {
         // `{"strategy":null}` is how a client that renders its form sparsely spells "not chosen", and the
         // contract's optional fields are optional. A null for `delete_session` is likewise "no".
-        assert_eq!(
-            parse(r#"{"target":"main","strategy":null,"delete_session":null}"#)
-                .ok()
-                .as_deref(),
-            Some("main")
-        );
+        let request =
+            parse(r#"{"target":"main","strategy":null,"delete_session":null}"#).expect("a body");
+        assert_eq!(request.target, "main");
+        assert_eq!(request.strategy, Strategy::FastForward);
     }
 }

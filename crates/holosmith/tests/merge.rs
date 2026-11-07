@@ -24,7 +24,7 @@ use holosmith::changes::ChangesError;
 use holosmith::clock;
 use holosmith::config::Config;
 use holosmith::http::{self, AppState};
-use holosmith::merge::{FF_ONLY, MergeError, Merged, merge};
+use holosmith::merge::{FF_ONLY, MergeError, Merged, Request, Strategy, merge};
 use holosmith::sessions::NewSession;
 use holosmith::worktree::Worktree;
 use serde_json::Value;
@@ -125,22 +125,62 @@ impl Fixture {
         Worktree::of(&self.projects, "holosmith", &self.id)
     }
 
-    /// The answer `POST …/merge` would give, with the machine's default targets.
+    /// The answer `POST …/merge` would give, with the machine's default targets and the default strategy.
     fn run(&self, target: &str) -> Result<Merged, MergeError> {
         self.run_with(target, &["main".to_string(), "master".to_string()])
     }
 
     fn run_with(&self, target: &str, targets: &[String]) -> Result<Merged, MergeError> {
+        self.land(
+            &Request {
+                target: target.to_string(),
+                strategy: Strategy::FastForward,
+                message: None,
+            },
+            targets,
+        )
+    }
+
+    /// One request, with the strategy under test.
+    fn land(&self, request: &Request, targets: &[String]) -> Result<Merged, MergeError> {
         merge(
             &self.worktree(),
-            target,
+            request,
             targets,
             &self.state.merges.clone(),
+            &self.state.config.data_root,
+        )
+    }
+
+    /// A `merge` or a `squash` request into `main`, with an optional commit message.
+    fn land_by(&self, strategy: Strategy, message: Option<&str>) -> Result<Merged, MergeError> {
+        self.land(
+            &Request {
+                target: "main".to_string(),
+                strategy,
+                message: message.map(str::to_string),
+            },
+            &["main".to_string(), "master".to_string()],
         )
     }
 
     fn refused(&self, target: &str) -> MergeError {
         self.run(target).expect_err("the merge is refused")
+    }
+
+    /// The paths under `<data>/merge`, as the operator would see them: the measure of "a temporary worktree
+    /// was removed", which is a fact about the filesystem and not about what the code says it did.
+    fn temporary(&self) -> Vec<String> {
+        let directory = self.state.config.data_root.join("merge");
+        let mut found: Vec<String> = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        found.sort();
+        found
     }
 
     /// Write `path` in the worktree and commit it on the session branch.
@@ -164,6 +204,62 @@ impl Fixture {
 
     fn status(&self, dir: &Path) -> String {
         git(dir, &["status", "--porcelain"])
+    }
+
+    /// The commits a ref names as its parents, from `git rev-list --parents -n 1`.
+    fn parents(&self, reference: &str) -> Vec<String> {
+        let line = git(&self.repo, &["rev-list", "--parents", "-n", "1", reference]);
+        line.split_whitespace()
+            .skip(1)
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The tree a commit holds, which is the assertion a `git log --oneline` cannot make: a squash's history
+    /// is one commit long whatever its content, so the content is what has to be compared.
+    fn tree(&self, reference: &str) -> String {
+        git(&self.repo, &["rev-parse", &format!("{reference}^{{tree}}")])
+    }
+
+    /// A second session's worktree on the **same** repository, for the concurrency test: rule 2's "one merge
+    /// per project" is about one repository, so two sessions of one project are the pair that has to serialise.
+    fn other_session(&self, label: &str) -> (String, PathBuf) {
+        let id = {
+            let database = self
+                .state
+                .database
+                .lock()
+                .expect("the lock is not poisoned");
+            database
+                .sessions()
+                .create(
+                    &NewSession {
+                        project: "holosmith".to_string(),
+                        model: "claude-sonnet-4.5".to_string(),
+                        thinking: "high".to_string(),
+                        network: false,
+                        client_key: Some(format!("merge-{label}")),
+                        base_commit: None,
+                    },
+                    clock::unix_now(),
+                )
+                .expect("a second session is created")
+                .id
+        };
+        let path = self.projects.join(".worktrees").join(&id);
+        git(
+            &self.repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                &format!("agent/{id}"),
+                path.to_str().expect("a UTF-8 temp path"),
+                &self.base,
+            ],
+        );
+        (id, path)
     }
 
     async fn served(&self) -> Served {
@@ -521,6 +617,464 @@ fn a_worktree_that_is_gone_is_the_changes_view_s_refusal() {
     }
 }
 
+// --- the two strategies (HS-055) ---------------------------------------------------------------------------
+
+#[test]
+fn a_merge_makes_one_commit_with_two_parents_the_old_target_first() {
+    // The `merge` strategy's whole meaning, and the assertion that separates it from `ff-only`: a branch that
+    // *could* be fast-forwarded still gets a commit whose parents are the old target and the branch's tip. Two
+    // commits on the branch, so "the tip" is not "one commit after the base", and the old target is asserted
+    // as the **first** parent because that is what makes the target's own history first-parent-readable.
+    let fixture = Fixture::new("strategy-merge");
+    fixture.commit("a.txt", b"a\n", "one file");
+    fixture.commit("b.txt", b"b\n", "a second file");
+    let tip = fixture.rev(&fixture.branch());
+    let before = fixture.rev("refs/heads/main");
+
+    let merged = fixture
+        .land_by(Strategy::Merge, None)
+        .expect("a merge commit lands");
+
+    assert_eq!(merged.strategy, "merge");
+    assert_eq!(merged.target, "main");
+    assert_ne!(
+        merged.merged_commit, tip,
+        "a merge commit is not the branch's tip"
+    );
+    assert_ne!(merged.merged_commit, before);
+    assert_eq!(fixture.rev("refs/heads/main"), merged.merged_commit);
+    assert_eq!(fixture.parents("refs/heads/main"), vec![before, tip]);
+    // The commit this build wrote is holosmith's, not the machine's: `snapshot::IDENTITY`, carried by `-c` on the
+    // command rather than read from a git config (a fresh container or a bare server has none). Dropping the two
+    // `-c user.*` pairs makes this assertion name whoever the machine's config does.
+    assert_eq!(
+        git(
+            &fixture.repo,
+            &["log", "-1", "--format=%an <%ae>", "refs/heads/main"]
+        ),
+        "holosmith <holosmith@localhost>"
+    );
+    // The working tree moved with the ref: the ordinary path, so the operator's checkout holds the work.
+    assert_eq!(
+        std::fs::read(fixture.repo.join("b.txt")).expect("the file is in the checkout"),
+        b"b\n"
+    );
+    assert_eq!(fixture.status(&fixture.repo), "");
+    // Rule 2's last sentence, measured: `<data>/merge` is empty afterwards.
+    assert_eq!(
+        fixture.temporary(),
+        Vec::<String>::new(),
+        "a worktree was left behind"
+    );
+}
+
+#[test]
+fn a_squash_makes_one_commit_whose_parent_is_the_old_target_and_whose_tree_is_the_branch_s() {
+    // "Squash a three-commit session into one": three commits on the branch, **one** new commit on the target,
+    // one parent, and — the assertion `git log --oneline` cannot make — the branch's **tree**. A squash that
+    // lost a hunk would still be one commit with one parent.
+    let fixture = Fixture::new("strategy-squash");
+    fixture.commit("a.txt", b"a\n", "one file");
+    fixture.commit("b.txt", b"b\n", "a second file");
+    fixture.commit("c.txt", b"c\n", "a third file");
+    let tip = fixture.rev(&fixture.branch());
+    let before = fixture.rev("refs/heads/main");
+    assert_eq!(
+        git(
+            &fixture.repo,
+            &["rev-list", "--count", &format!("{before}..{tip}")]
+        ),
+        "3"
+    );
+
+    let merged = fixture
+        .land_by(Strategy::Squash, None)
+        .expect("a squashed commit lands");
+
+    assert_eq!(merged.strategy, "squash");
+    assert_ne!(merged.merged_commit, tip);
+    assert_eq!(fixture.rev("refs/heads/main"), merged.merged_commit);
+    assert_eq!(fixture.parents("refs/heads/main"), vec![before.clone()]);
+    assert_eq!(
+        fixture.tree("refs/heads/main"),
+        fixture.tree(&fixture.branch()),
+        "the squash's tree is not the branch's tree"
+    );
+    // One commit, not three: the count of commits above the old target is the strategy's own promise.
+    assert_eq!(
+        git(
+            &fixture.repo,
+            &["rev-list", "--count", &format!("{before}..refs/heads/main")]
+        ),
+        "1"
+    );
+    // The default message, because git has none for a squash: the sentence the build writes, naming both refs.
+    assert_eq!(
+        git(
+            &fixture.repo,
+            &["log", "-1", "--format=%s", "refs/heads/main"]
+        ),
+        format!("Squash {} into main", fixture.branch())
+    );
+    // The identity too, on this strategy's own commit: `git commit` is the command that would otherwise take the
+    // machine's config, and the same `-c` pair carries it.
+    assert_eq!(
+        git(
+            &fixture.repo,
+            &["log", "-1", "--format=%an <%ae>", "refs/heads/main"]
+        ),
+        "holosmith <holosmith@localhost>"
+    );
+    assert_eq!(fixture.temporary(), Vec::<String>::new());
+}
+
+#[test]
+fn the_operator_s_message_is_the_commit_s_and_its_absence_is_the_build_s_one_sentence() {
+    // Two rules in one place because they are one decision: a request's `message` is the commit's prose
+    // **verbatim**, and no message means the build's own sentence naming both refs. Git's default is not
+    // available here and that is a measurement: with no `-m` a detached worktree merging a fully qualified ref
+    // writes `Merge branch 'refs/heads/agent/<id>' into HEAD`, which describes this module's scratch directory
+    // rather than the operator's branch.
+    let fixture = Fixture::new("strategy-message");
+    fixture.commit("a.txt", b"a\n", "one file");
+    fixture
+        .land_by(Strategy::Merge, None)
+        .expect("a merge commit lands");
+    assert_eq!(
+        git(
+            &fixture.repo,
+            &["log", "-1", "--format=%s", "refs/heads/main"]
+        ),
+        format!("Merge {} into main", fixture.branch())
+    );
+
+    let named = Fixture::new("strategy-message-named");
+    named.commit("a.txt", b"a\n", "one file");
+    named
+        .land_by(Strategy::Merge, Some("Land the session's work"))
+        .expect("a merge commit lands");
+    assert_eq!(
+        git(
+            &named.repo,
+            &["log", "-1", "--format=%s", "refs/heads/main"]
+        ),
+        "Land the session's work"
+    );
+
+    let squashed = Fixture::new("strategy-message-squash");
+    squashed.commit("a.txt", b"a\n", "one file");
+    squashed
+        .land_by(Strategy::Squash, None)
+        .expect("a squashed commit lands");
+    assert_eq!(
+        git(
+            &squashed.repo,
+            &["log", "-1", "--format=%s", "refs/heads/main"]
+        ),
+        format!("Squash {} into main", squashed.branch())
+    );
+
+    let one = Fixture::new("strategy-message-squash-named");
+    one.commit("a.txt", b"a\n", "one file");
+    one.land_by(Strategy::Squash, Some("One commit for the review"))
+        .expect("a squashed commit lands");
+    assert_eq!(
+        git(&one.repo, &["log", "-1", "--format=%s", "refs/heads/main"]),
+        "One commit for the review"
+    );
+}
+
+#[test]
+fn a_merge_lands_a_branch_the_target_has_already_moved_past() {
+    // The case `merge` exists for and `ff-only` refuses: the target has a commit the branch does not. The real
+    // merge reconciles both and writes a commit whose two parents are the moved-on target and the branch — which
+    // is why the ancestry test must **not** run for this strategy (`a_target_ahead_of_the_branch_is_not_fast_
+    // forward` is the same repository shape, answered by the default strategy with a refusal).
+    let fixture = Fixture::new("strategy-target-ahead");
+    fixture.commit("a.txt", b"a\n", "the session's change");
+    fixture.commit_target("t.txt", b"target\n", "the target moves on");
+    let tip = fixture.rev(&fixture.branch());
+    let before = fixture.rev("refs/heads/main");
+    // The default strategy is the same request and is refused, which is what makes this a comparison.
+    assert!(matches!(
+        fixture.refused("main"),
+        MergeError::NotFastForward { .. }
+    ));
+
+    let merged = fixture
+        .land_by(Strategy::Merge, None)
+        .expect("a moved-on target is what a real merge is for");
+
+    assert_eq!(fixture.parents("refs/heads/main"), vec![before, tip]);
+    assert_eq!(fixture.rev("refs/heads/main"), merged.merged_commit);
+    // Both halves of the history are in the checkout: the target's file and the branch's.
+    assert!(
+        fixture.repo.join("a.txt").exists(),
+        "the branch's work is missing"
+    );
+    assert!(
+        fixture.repo.join("t.txt").exists(),
+        "the target's work is missing"
+    );
+    assert_eq!(fixture.status(&fixture.repo), "");
+}
+
+#[test]
+fn a_conflict_is_its_paths_and_nothing_moves() {
+    // Rule 3, module level. The two branches touch one path, so the landing cannot reconcile them: the answer is
+    // the **paths** (the one refusal with a payload), and "nothing changes" is measured about the project
+    // repository — the target ref, the checkout's worktree and its status — because the merge never ran there.
+    let fixture = Fixture::new("strategy-conflict");
+    fixture.commit("f.txt", b"the branch's line\n", "the session's change");
+    fixture.commit_target("f.txt", b"the target's line\n", "the target's change");
+    let tip = fixture.rev(&fixture.branch());
+    let main = fixture.rev("refs/heads/main");
+    let checkout = fixture.status(&fixture.repo);
+
+    for strategy in [Strategy::Merge, Strategy::Squash] {
+        match fixture.land_by(strategy, None) {
+            Err(MergeError::Conflict { paths }) => assert_eq!(paths, vec!["f.txt"], "{strategy:?}"),
+            other => panic!("{strategy:?} on a conflicting branch is not a conflict: {other:?}"),
+        }
+        assert_eq!(
+            fixture.rev("refs/heads/main"),
+            main,
+            "{strategy:?} moved the target"
+        );
+        assert_eq!(
+            fixture.rev(&fixture.branch()),
+            tip,
+            "{strategy:?} moved the branch"
+        );
+        assert_eq!(
+            fixture.status(&fixture.repo),
+            checkout,
+            "{strategy:?} touched the checkout"
+        );
+        assert_eq!(
+            fixture.temporary(),
+            Vec::<String>::new(),
+            "{strategy:?} left its temporary worktree behind"
+        );
+    }
+    // The conflict *is* a conflict: the same two branches, read by the changes view's own trial, agree.
+    assert!(
+        git(&fixture.worktree, &["status", "--porcelain"]).is_empty(),
+        "the session's worktree was touched"
+    );
+}
+
+#[test]
+fn a_stale_temporary_worktree_from_a_killed_run_is_removed_and_the_merge_lands() {
+    // Rule 2 creates `<data>/merge/<id>`, so a killed merge leaves one there. The story's decision is that such a
+    // directory is **removed, never refused**: `409 merge_in_progress` would be an answer about concurrency, and
+    // a leftover directory is not a question about concurrency. Git does not know this path (nothing registered
+    // it), which is the arm `worktree remove` cannot take and `remove_dir_all` can.
+    let fixture = Fixture::new("strategy-stale");
+    fixture.commit("a.txt", b"a\n", "the session's change");
+    let stale = fixture
+        .state
+        .config
+        .data_root
+        .join("merge")
+        .join(&fixture.id);
+    std::fs::create_dir_all(&stale).expect("the stale directory is creatable");
+    std::fs::write(stale.join("leftover.txt"), b"from a killed run")
+        .expect("the stale file is writable");
+    assert_eq!(fixture.temporary(), vec![fixture.id.clone()]);
+
+    let merged = fixture
+        .land_by(Strategy::Merge, None)
+        .expect("a stale directory blocks nothing");
+
+    assert_eq!(fixture.rev("refs/heads/main"), merged.merged_commit);
+    assert_eq!(fixture.temporary(), Vec::<String>::new());
+    assert!(!stale.exists(), "the stale directory survived the merge");
+}
+
+#[test]
+fn the_temporary_worktree_is_gone_even_when_the_move_is_refused_after_it_landed() {
+    // The acceptance's "removed afterwards even on failure", in its hardest shape: the landing **succeeded** — a
+    // commit exists — and the *move* is what fails (`409 target_dirty`, because the branch adds a file the
+    // checkout already holds untracked). A build that tore the worktree down after the move would leave
+    // `<data>/merge/<id>` behind here, and a build that tore it down in a `?`-short-circuit would too.
+    let fixture = Fixture::new("strategy-dirty-after-landing");
+    fixture.commit("a.txt", b"the session's version\n", "the session's change");
+    let main = fixture.rev("refs/heads/main");
+    write(&fixture.repo, "a.txt", b"the operator's work in progress\n");
+
+    match fixture.land_by(Strategy::Merge, None) {
+        Err(MergeError::TargetDirty { target, .. }) => assert_eq!(target, "main"),
+        other => panic!("a dirty checkout the merge would overwrite is not a refusal: {other:?}"),
+    }
+
+    assert_eq!(
+        fixture.rev("refs/heads/main"),
+        main,
+        "the target moved anyway"
+    );
+    assert_eq!(
+        std::fs::read(fixture.repo.join("a.txt")).expect("the operator's file is still there"),
+        b"the operator's work in progress\n",
+        "the refusal overwrote the operator's file"
+    );
+    assert_eq!(
+        fixture.temporary(),
+        Vec::<String>::new(),
+        "the temporary worktree outlived a refused move"
+    );
+}
+
+#[test]
+fn no_hook_runs_for_either_strategy() {
+    // Rule 2's `-c core.hooksPath=/dev/null`, on the three commands an agent-adjacent repository could otherwise
+    // get a program run by: `worktree add` runs `post-checkout`, a `merge` runs `post-merge` and the message
+    // hooks, a `commit` runs `pre-commit` and its own pair. Hooks live in the **common** git directory, so a
+    // project's hook is reachable from the temporary worktree — which is exactly why the flag is on all three.
+    // Dropping it from `landing_prefix` makes both halves of this test red.
+    for (strategy, label) in [
+        (Strategy::Merge, "hooks-merge"),
+        (Strategy::Squash, "hooks-squash"),
+    ] {
+        let fixture = Fixture::new(label);
+        fixture.commit("a.txt", b"a\n", "the session's change");
+        let marker = fixture._dir.file(&format!("{label}-hook-ran"));
+        for hook in ["post-merge", "post-checkout", "pre-commit", "commit-msg"] {
+            let path = fixture.repo.join(".git").join("hooks").join(hook);
+            std::fs::create_dir_all(path.parent().expect("the hooks directory has a parent"))
+                .expect("the hooks directory is creatable");
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\ntouch '{}-{hook}'\n",
+                    marker.to_str().expect("a UTF-8 temp path")
+                ),
+            )
+            .expect("the hook is written");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                    .expect("the hook is executable");
+            }
+        }
+
+        fixture
+            .land_by(strategy, None)
+            .unwrap_or_else(|error| panic!("{strategy:?} did not land: {error:?}"));
+
+        let ran: Vec<String> = std::fs::read_dir(fixture._dir.path())
+            .expect("the temp dir is readable")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.contains("hook-ran"))
+            .collect();
+        assert!(
+            ran.is_empty(),
+            "{strategy:?} ran a project's hook: agent-written code executed on the host: {ran:?}"
+        );
+    }
+}
+
+#[test]
+fn a_landing_that_has_nothing_to_do_is_a_no_op_naming_the_target_s_own_commit() {
+    // The second-merge shape, one strategy further out: after the first merge the target *is* the branch's
+    // history, so a second `merge` is "Already up to date" and a second `squash` stages nothing at all. Both are
+    // answered with the target's own commit rather than with a refusal for a request that is already satisfied —
+    // and the `squash` half is the one that needs a measurement, because `git commit` **fails** when the index
+    // holds no change.
+    let fixture = Fixture::new("strategy-noop");
+    fixture.commit("a.txt", b"a\n", "the session's change");
+    let first = fixture
+        .land_by(Strategy::Merge, None)
+        .expect("the first merge lands");
+    let reflog = git(&fixture.repo, &["reflog", "show", "refs/heads/main"]);
+
+    let second = fixture
+        .land_by(Strategy::Merge, None)
+        .expect("a second merge is not an error");
+    assert_eq!(second.merged_commit, first.merged_commit);
+    assert_eq!(
+        git(&fixture.repo, &["reflog", "show", "refs/heads/main"]),
+        reflog,
+        "the no-op wrote the ref"
+    );
+
+    let third = fixture
+        .land_by(Strategy::Squash, None)
+        .expect("a squash with nothing to squash is not an error");
+    assert_eq!(third.merged_commit, first.merged_commit);
+    assert_eq!(
+        git(&fixture.repo, &["reflog", "show", "refs/heads/main"]),
+        reflog,
+        "the squash no-op wrote the ref"
+    );
+    assert_eq!(fixture.temporary(), Vec::<String>::new());
+}
+
+#[test]
+fn two_merges_of_one_project_serialise_and_both_land() {
+    // Rule 2's "one merge per project at a time", measured as a client sees it: two sessions of **one**
+    // repository merge at the same instant from a barrier, and both land — the second waited for the first, and
+    // its own landing was built from the target the first had already produced. Without the lock both read the
+    // same `old`, one of them writes the ref first, and the other is refused (`not_fast_forward`) because its
+    // landing descends from a commit the target no longer holds. `Merges`' identity is the deterministic half of
+    // this (see the unit test); this is the half an operator would notice.
+    let fixture = Fixture::new("strategy-concurrent");
+    fixture.commit("a.txt", b"a\n", "the first session's change");
+    let (other_id, other_path) = fixture.other_session("concurrent");
+    write(&other_path, "b.txt", b"b\n");
+    git(&other_path, &["add", "b.txt"]);
+    git(
+        &other_path,
+        &["commit", "--quiet", "-m", "the second session's change"],
+    );
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let targets = vec!["main".to_string(), "master".to_string()];
+    let land = |id: &str| {
+        let request = Request {
+            target: "main".to_string(),
+            strategy: Strategy::Merge,
+            message: None,
+        };
+        let worktree = Worktree::of(&fixture.projects, "holosmith", id);
+        let merges = fixture.state.merges.clone();
+        let data_root = fixture.state.config.data_root.clone();
+        let targets = targets.clone();
+        let barrier = std::sync::Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            merge(&worktree, &request, &targets, &merges, &data_root)
+        })
+    };
+    let first = land(&fixture.id);
+    let second = land(&other_id);
+    let first = first.join().expect("the thread finishes");
+    let second = second.join().expect("the thread finishes");
+
+    let (first, second) = (
+        first.unwrap_or_else(|error| panic!("a concurrent merge was refused: {error:?}")),
+        second.unwrap_or_else(|error| panic!("a concurrent merge was refused: {error:?}")),
+    );
+    // Both landed, in some order: the target and its first parent are exactly the two merge commits the two
+    // requests produced. One landing on top of the other is the whole shape of "they serialised" — and the
+    // second parent of the target is the second branch's tip, so neither landing swallowed the other's work.
+    let head = fixture.rev("refs/heads/main");
+    let parents = fixture.parents("refs/heads/main");
+    assert_eq!(
+        parents.len(),
+        2,
+        "main is not a two-parent merge commit: {parents:?}"
+    );
+    let mut produced = vec![first.merged_commit.clone(), second.merged_commit.clone()];
+    let mut written = vec![head.clone(), parents[0].clone()];
+    produced.sort();
+    written.sort();
+    assert_eq!(written, produced, "one of the two merges was lost");
+    assert_eq!(fixture.temporary(), Vec::<String>::new());
+}
+
 // --- the merge at the wire ---------------------------------------------------------------------------------
 
 /// `POST /api/sessions/{id}/merge` with a body, the way the app's own client sends it.
@@ -602,9 +1156,9 @@ async fn every_bad_request_moves_no_ref() {
     for (body, code) in [
         (r#"{"target":"nope"}"#, "bad_target"),
         (r#"{"target":"trunk"}"#, "bad_target"),
-        (r#"{"target":"main","strategy":"squash"}"#, "unsupported"),
-        (r#"{"target":"main","delete_session":true}"#, "unsupported"),
         (r#"{"target":"main","strategy":"rebase"}"#, "bad_strategy"),
+        (r#"{"target":"main","delete_session":true}"#, "unsupported"),
+        (r#"{"target":"main","message":""}"#, "bad_body"),
         (r#"{"target":"main","force":true}"#, "unknown_field"),
         (r#"{"strategy":"ff-only"}"#, "bad_body"),
     ] {
@@ -612,6 +1166,12 @@ async fn every_bad_request_moves_no_ref() {
         assert_eq!(response.status, 422, "{body}: {}", response.body);
         assert_eq!(envelope(&response)["code"], code, "{body}");
         assert_eq!(response.header("content-type"), Some("application/json"));
+        // The envelope is `{code, message}` for every error that is not a conflict: `conflicts` is skipped when
+        // it is absent, so the shape a client already reads did not change.
+        assert!(
+            envelope(&response).get("conflicts").is_none(),
+            "a non-conflict carried a conflicts key: {body}"
+        );
     }
     assert_eq!(
         (
@@ -709,6 +1269,111 @@ fn the_merge_route_is_mutating_and_in_the_manifest() {
         .expect("the route is in the manifest");
     assert_eq!(entry.kind, http::RouteKind::Mutating);
     assert_eq!(entry.method, Method::POST);
+}
+
+#[tokio::test]
+async fn a_squash_at_the_wire_answers_the_strategy_that_ran_and_moves_the_target() {
+    // The story's demo as an assertion: `{target:"main",strategy:"squash"}` over three commits is a `200` whose
+    // `strategy` echoes the request (not the default), whose `merged_commit` is the new commit, and whose
+    // repository state is one commit with the branch's tree — read by the test from the repository.
+    let fixture = Fixture::new("merge-wire-squash");
+    fixture.commit("a.txt", b"a\n", "one file");
+    fixture.commit("b.txt", b"b\n", "a second file");
+    fixture.commit("c.txt", b"c\n", "a third file");
+    let before = fixture.rev("refs/heads/main");
+    let branch_tree = fixture.tree(&fixture.branch());
+    let served = fixture.served().await;
+
+    let response = post_merge(
+        served.addr,
+        &fixture.id,
+        r#"{"target":"main","strategy":"squash"}"#,
+    )
+    .await;
+
+    assert_eq!(response.status, 200, "{}", response.body);
+    assert_eq!(response.header("content-type"), Some("application/json"));
+    let body = envelope(&response);
+    assert_eq!(body["strategy"], "squash");
+    assert_eq!(body["target"], "main");
+    assert_eq!(body.as_object().expect("an object").len(), 3);
+    assert_eq!(fixture.rev("refs/heads/main"), body["merged_commit"]);
+    assert_eq!(fixture.parents("refs/heads/main"), vec![before]);
+    assert_eq!(fixture.tree("refs/heads/main"), branch_tree);
+    assert_eq!(
+        std::fs::read(fixture.repo.join("c.txt")).expect("the file is in the checkout"),
+        b"c\n"
+    );
+    served.finish().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn a_merge_at_the_wire_answers_two_parents_and_the_operator_s_message() {
+    let fixture = Fixture::new("merge-wire-merge");
+    fixture.commit("a.txt", b"a\n", "the session's change");
+    let tip = fixture.rev(&fixture.branch());
+    let before = fixture.rev("refs/heads/main");
+    let served = fixture.served().await;
+
+    let response = post_merge(
+        served.addr,
+        &fixture.id,
+        r#"{"target":"main","strategy":"merge","message":"Land the session"}"#,
+    )
+    .await;
+
+    assert_eq!(response.status, 200, "{}", response.body);
+    let body = envelope(&response);
+    assert_eq!(body["strategy"], "merge");
+    assert_eq!(fixture.rev("refs/heads/main"), body["merged_commit"]);
+    assert_eq!(fixture.parents("refs/heads/main"), vec![before, tip]);
+    assert_eq!(
+        git(
+            &fixture.repo,
+            &["log", "-1", "--format=%s", "refs/heads/main"]
+        ),
+        "Land the session"
+    );
+    served.finish().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn a_conflict_at_the_wire_is_a_409_whose_body_names_the_paths() {
+    // Rule 3 as a client reads it: a `409`, the code `conflict`, the **paths** in an additive key, and a sentence
+    // that says nothing changed and names the next step. "Nothing changes" is measured on the repository, and the
+    // temporary directory is measured empty — the refusal is the *abort*, and nothing of the attempt survives.
+    let fixture = Fixture::new("merge-wire-conflict");
+    fixture.commit("f.txt", b"the branch's line\n", "the session's change");
+    fixture.commit_target("f.txt", b"the target's line\n", "the target's change");
+    let main = fixture.rev("refs/heads/main");
+    let served = fixture.served().await;
+
+    let response = post_merge(
+        served.addr,
+        &fixture.id,
+        r#"{"target":"main","strategy":"merge"}"#,
+    )
+    .await;
+
+    assert_eq!(response.status, 409, "{}", response.body);
+    assert_eq!(response.header("content-type"), Some("application/json"));
+    let body = envelope(&response);
+    assert_eq!(body["code"], "conflict");
+    assert_eq!(body["conflicts"], serde_json::json!(["f.txt"]));
+    assert!(
+        body["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("nothing was merged")),
+        "the sentence does not say nothing happened: {body}"
+    );
+    assert_eq!(fixture.rev("refs/heads/main"), main, "the target moved");
+    assert_eq!(
+        fixture.status(&fixture.repo),
+        "",
+        "the checkout was touched"
+    );
+    assert_eq!(fixture.temporary(), Vec::<String>::new());
+    served.finish().await.expect("the server stops");
 }
 
 #[tokio::test]

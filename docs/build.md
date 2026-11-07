@@ -236,13 +236,22 @@ which boots its own Docker run over a real repository and the same `_ping`-only 
 worktree, and walks **one** repository through both of rule 4's update paths: `git checkout --detach` makes
 `main` unchecked-out, so a `POST …/merge {"target":"main"}` moves the ref and *not* the checkout (the agent's
 file never appears there), and `git checkout main` then makes the same merge move the working tree as well —
-with `git rev-parse` run by the case on both sides. In between it asserts the four refused requests
-(`bad_target` twice, `unsupported` for `strategy:"squash"` and for `delete_session:true`) as status **and**
-code with the target unmoved across them, and it ends with `target_dirty` (an untracked file the branch adds,
-untouched by the refusal and merged once it is out of the way) and `not_fast_forward` (a commit on the target,
-with both refs and the checkout unchanged); the default `strategy` is asserted to be `ff-only` on a body that
-names none. No daemon is used — "all git work for review and merge runs on the host", which is the story's own
-sentence; see ADR-0063), and the hardened mounts
+with `git rev-parse` run by the case on both sides. In between it asserts the refused requests
+(`bad_target` twice, `bad_strategy` for `strategy:"rebase"`, `unsupported` for `delete_session:true`) as status
+**and** code with the target unmoved across them, and it ends with `target_dirty` (an untracked file the branch
+adds, untouched by the refusal and merged once it is out of the way) and `not_fast_forward` (a commit on the
+target, with both refs and the checkout unchanged); the default `strategy` is asserted to be `ff-only` on a body
+that names none. No daemon is used — "all git work for review and merge runs on the host", which is the story's
+own sentence; see ADR-0063), the two landing strategies (`case_merge_strategies`, which boots its own Docker run
+over its own projects root **and its own data root** — `<data>/merge` is what it measures — re-makes the worktree
+with the step's own command, and walks one session's history through all three: a **`squash`** of three commits
+is `200` with `strategy:"squash"`, `git rev-list --count <base>..main` is `1`, `main^` is the old target and
+`main^{tree}` equals `agent/<id>^{tree}` (the tree, because one commit that lost a hunk is still one commit); two
+more commits then a **`merge`** is `200` with `rev-list --parents -n 1 main` exactly `<new> <squashed> <tip>`; a
+planted conflict on `f.txt` is `409 conflict` with `"conflicts":["f.txt"]`, the target unmoved, the checkout's
+`status --porcelain` empty and the operator's file untouched; and `<data>/merge` is `0` entries at the end,
+measured with `find … -mindepth 1 | wc -l` after asserting the directory exists; see ADR-0064), and the hardened
+mounts
 (`case_container_mounts`,
 which needs no server at all: it builds a real repository and worktree under `target/`, runs one real
 container with the spec's four mounts and `--cap-drop ALL`, and asserts the three writes fail on the host

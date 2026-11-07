@@ -1954,3 +1954,72 @@ it rather than adding a caveat beside it.
   `merge::listed` straight after the body so one bad `target` is one answer whatever the session's shape; the
   first draft asked it after the row's `base_commit` and so answered `409 no_worktree` for a body that would have
   been `422` on a session with a worktree. `merge()` asks it again as its own precondition.
+
+### Landmines: the two landing strategies (HS-055)
+
+- **Git's own default merge message is `Merge branch 'refs/heads/agent/<id>' into HEAD` in a temporary
+  worktree, and the plan to use it went red on the story's first test run.** A detached checkout has no branch
+  name to say "into", and the argument this module passes is a fully qualified ref (so a tag called `main`
+  cannot be what a merge lands into), so both halves of the sentence are this build's internals. The build
+  writes `Merge agent/<id> into <target>` and `Squash agent/<id> into <target>` instead — one shape for both,
+  because `--squash` has no default at all. Any future `git` invocation whose *prose* reaches the operator has
+  the same trap: run it once and read what it says before deciding it reads well.
+- **A commit this build makes must carry `-c user.name`/`-c user.email`, and on this machine that is
+  measurable only by reading the commit.** The global config here is `Adam Olsson`, so dropping the two pairs
+  leaves every test *green* unless something asserts the author. `snapshot::IDENTITY` is reused (`holosmith
+  <holosmith@localhost>`) and both integration tests read `git log -1 --format='%an <%ae>'`; `support::git`
+  passing its own `-c` pairs per invocation is why the merge's own commit — made by `git_output` — is the one
+  that would have been wrong.
+- **`git worktree add` refuses a path that has a *prunable* registration**, and a killed merge leaves exactly
+  that shape. So the preparation is `worktree remove --force` first, `remove_dir_all` **measured by
+  `path.exists()`** (git does not know a directory it never registered, and its exit status says nothing useful),
+  and then `worktree prune` **unconditionally** — prune is a no-op for every registration whose directory is
+  still there, which is every live worktree, and it is the only thing that clears the prunable case where the
+  directory is already gone. Dropping the whole preparation turns
+  `a_stale_temporary_worktree_from_a_killed_run_is_removed_and_the_merge_lands` red; keeping it but skipping
+  `prune` turns it green and leaves the rare half unhandled.
+- **The teardown belongs *before* the target moves, and the `?` is what makes it easy to get wrong.** `409
+  target_dirty` is discovered by running the fast-forward in the operator's checkout — long after the landing
+  succeeded — so a `let new = land(...)?; remove(...)` shape leaves the worktree behind on exactly the failure
+  the acceptance names. Moving the removal after the move turns **eight** tests red, the conflict ones included
+  (a conflicted worktree is dirty and needs `--force`). The cost is a dangling commit when the move fails; its
+  id is in the log line, and leaving the worktree for inspection would fail "removed afterwards even on
+  failure".
+- **A conflict is the *index*'s answer, so `git ls-files --unmerged -z` and not `diff --diff-filter=U`.** The
+  `-z` record is `<mode> <sha> <stage>\t<path>\0`, one per stage, so the walk takes what follows the tab and
+  dedupes — a path conflicted at three stages appears three times and the operator acts on it once. `ls-files`
+  runs no diff driver and no `diff.external`, which is ADR-0062's lesson applied one command further out. A
+  non-zero exit **with** no unmerged path is not a conflict: `git merge` also fails for "not something we can
+  merge", so that arm is a `500` with git's words, measured apart from the conflict arm in the same function.
+- **`git merge --abort` is not run, and the reason has to be written down or the next agent will add it back.**
+  The abort *is* the temporary worktree's removal: `merge --abort` restores a working tree that is about to be
+  deleted, and for a `squash` there is no `MERGE_HEAD` for it to restore from at all. What "nothing changes"
+  means is measured about the **project** repository — the target ref, the checkout's files, `git status
+  --porcelain` — because the merge never ran there.
+- **A `squash` with nothing to squash makes `git commit` *fail*, and that failure is the no-op.** After a merge
+  the target is the branch's history, so `merge --squash` stages nothing and `git commit` refuses with "nothing
+  to commit" — prose, not a contract. The answer is measured with `git diff-index --cached --quiet HEAD` (exit
+  0 = nothing staged) and answered as a `200` naming the target's own commit, exactly HS-054's second-merge
+  shape. Reading the sentence instead is how a `409` for a request that is already satisfied would get written.
+- **`merge` and `squash` must not ask the fast-forward question, and the test that proves it is a pair.** The
+  same repository shape — a target with a commit the branch lacks — is `409 not_fast_forward` by the default
+  strategy and a two-parent `200` by `merge`, in `a_merge_lands_a_branch_the_target_has_already_moved_past`.
+  Making the ancestry test run for every strategy turns five tests red, so the decision is measured rather than
+  asserted.
+- **The lock's wait is observable now, and it was not for `ff-only`.** Two `merge`s of one project's two
+  sessions from a `Barrier` both land, and the target and its first parent *are* the two merge commits; without
+  the lock both landings are built from the same `old` and the second's move fails. That is a client-visible
+  measurement of rule 2, on top of HS-054's mutex-identity test (which stays — it is deterministic and the
+  barrier test is not).
+- **`ErrorBody` grew one optional key and that is the whole envelope change.** `conflicts` is
+  `skip_serializing_if = "Option::is_none"`, so every other error's body is byte-identical, and
+  `every_bad_request_moves_no_ref` asserts a non-conflict carries no `conflicts` key — a `409` whose message is
+  a fixed sentence (ADR-0008) cannot carry paths any other way. ADR-0052's additive `kept` on the delete's 202
+  is the same shape.
+- **`case_merge` asserted `422 unsupported` for `strategy:"squash"`, so the gate had to change with the
+  feature.** The entry was replaced by `strategy:"rebase"` → `422 bad_strategy`, so the refusal table is still
+  walked end to end. Any story that *builds* something a previous `case_*` asserted was refused has this same
+  obligation, and it is invisible in `cargo test`.
+- **The gate case boots its own **data root** as well as its own projects root**, because `<data>/merge` is what
+  it measures. `find "$data/merge" -mindepth 1 | wc -l` and not an inference: the case asserts the directory
+  exists first, so a merge that never created one cannot pass by measuring nothing.

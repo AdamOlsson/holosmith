@@ -146,11 +146,23 @@ pub const TARGET_DIRTY: &str = "target_dirty";
 /// and says what to change.
 pub const TARGET_CHECKED_OUT: &str = "target_checked_out";
 
+/// A merge that could not reconcile two branches (HS-055, spec item 12's rule 3).
+///
+/// The only code whose response carries a **second payload key**: rule 3 says the call returns "409 `conflict`
+/// with the conflicting paths", and the envelope's message is a fixed sentence (ADR-0008), so the paths travel
+/// in `conflicts` and the sentence names the next step. ADR-0052's additive `kept` on the delete's 202 is the
+/// same shape one route over.
+pub const CONFLICT: &str = "conflict";
+
 /// The body of every error response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ErrorBody {
     pub code: &'static str,
     pub message: &'static str,
+    /// The paths a conflict could not merge, and `None` for every other error — skipped on the wire, so every
+    /// other error's body is byte-identical to what it was before this key existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conflicts: Option<Vec<String>>,
 }
 
 /// A status and its envelope, ready to answer with.
@@ -164,7 +176,11 @@ impl ApiError {
     pub fn new(status: StatusCode, code: &'static str, message: &'static str) -> Self {
         Self {
             status,
-            body: ErrorBody { code, message },
+            body: ErrorBody {
+                code,
+                message,
+                conflicts: None,
+            },
         }
     }
 
@@ -432,6 +448,23 @@ impl ApiError {
     /// What a merge whose target is checked out outside the project's own checkout answers (HS-054).
     pub fn target_checked_out(message: &'static str) -> Self {
         Self::new(StatusCode::CONFLICT, TARGET_CHECKED_OUT, message)
+    }
+
+    /// What a merge that conflicted answers: rule 3's `409`, with the paths.
+    ///
+    /// The sentence is fixed, and it describes **this** request's next step — the spec's own "merge the target
+    /// into the session's branch and fix the conflicts; then retry", which is also what the Changes sheet's
+    /// Resolve-with-agent affordance prompts (HS-058). The paths are the payload.
+    pub fn conflict(conflicts: Vec<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            body: ErrorBody {
+                code: CONFLICT,
+                message: "the merge conflicts, so nothing was merged; merge the target into the session's \
+                          branch and resolve the conflicts there, then merge again",
+                conflicts: Some(conflicts),
+            },
+        }
     }
 
     /// What a resume at the cap answers (HS-018, spec item 8's "or returns 409").

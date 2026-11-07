@@ -426,6 +426,7 @@ serve_cases=(
   case_changes
   case_changes_diff
   case_merge
+  case_merge_strategies
   case_docker_preflight
   case_doctor_quick
   case_server_images
@@ -5544,10 +5545,12 @@ case_merge() {
   fi
   assertions=$((assertions + 1))
 
-  # 2. **The four refusals that move nothing**, with the target compared across all of them.
+  # 2. **The refusals that move nothing**, with the target compared across all of them. `squash` used to be one of
+  # these (`422 unsupported`) and is a strategy since HS-055, so the two `422`s that remain are the parameter's
+  # (`bad_target` twice, for the two different facts) and the one field this build still cannot honour.
   main="$(git -C "$repo" rev-parse refs/heads/main)"
   for pair in '{"target":"nope"}|bad_target' '{"target":"trunk"}|bad_target' \
-    '{"target":"main","strategy":"squash"}|unsupported' \
+    '{"target":"main","strategy":"rebase"}|bad_strategy' \
     '{"target":"main","delete_session":true}|unsupported'; do
     fixture_body="${pair%|*}"
     fixture_code="${pair##*|}"
@@ -5644,6 +5647,182 @@ case_merge() {
   check "${name}_behind/ref" "$main" "$(git -C "$repo" rev-parse refs/heads/main)"
   check "${name}_behind/branch" "$tip3" "$(git -C "$repo" rev-parse "agent/$id")"
   check "${name}_behind/checkout" "" "$(git -C "$repo" status --porcelain)"
+
+  kill "$socket_pid" 2>/dev/null || true
+  wait "$socket_pid" 2>/dev/null || true
+  socket_pid=""
+}
+
+# HS-055's proof from the artifact: the two strategies that make a commit, and rule 3's conflict, over **one**
+# repository. It boots its own Docker run over its own projects root and data root for the reason `case_merge`
+# does — a case here must own the repository it moves — and it re-makes the worktree the failed network step took
+# back with the step's own command.
+#
+# The three phases are one session's history, in order, because that is the shape the operator's is:
+#   * a **squash** of three commits is *one* commit whose parent is the old target and whose tree is the
+#     branch's — the tree, because `git log --oneline` cannot tell one commit from one commit that lost a hunk;
+#   * a **merge** of two more commits is *one* commit with two parents, the target and the branch's tip;
+#   * a **conflict** on one path is a `409 conflict` whose body names it, with the target unmoved and the
+#     checkout's status untouched.
+# `<data>/merge` is measured empty after every one of them: rule 2 says the temporary worktree is removed
+# afterwards, and "afterwards" includes a refusal.
+case_merge_strategies() {
+  local name=case_merge_strategies response body id base wt tip main squashed parents merge_dir
+  # Two statements, not one, for the reason `case_changes` gives: in a single `local` every right-hand side
+  # expands before either assignment, so `repo="$projects/holosmith"` would read an unset `projects` under
+  # `set -u`.
+  local projects="$WORK/projects-strategies"
+  local data="$WORK/data-strategies"
+  local repo="$projects/holosmith"
+  merge_dir="$data/merge"
+  # The guard comes first, before `stop_serve`, for the reason `case_worktree` gives.
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to answer the docker preflight (tests/merge.rs covers this)\n' "$name"
+    return 0
+  fi
+  stop_serve
+  mkdir -p "$repo"
+  git -C "$repo" init --quiet -b main || fail "$name/git" "git init did not work in $repo"
+  git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet --allow-empty \
+    -m "the first commit" || fail "$name/git" "git commit did not work in $repo"
+  base="$(git -C "$repo" rev-parse HEAD)" || fail "$name/git" "git rev-parse did not work in $repo"
+
+  socket_pid="$(fake_docker_ping "$WORK/docker-strategies.sock")"
+  for _ in $(seq 1 100); do
+    [ -S "$WORK/docker-strategies.sock" ] && break
+    sleep 0.05
+  done
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\ndocker_host = "unix://%s/docker-strategies.sock"\nmin_free_gb = 1\nidle_stop_min = 0\n[merge]\ntargets = ["main"]\n' \
+    "$owner" "$projects" "$WORK" >"$WORK/config-strategies.toml"
+  start_serve "$WORK/config-strategies.toml" "$data"
+
+  fetch_body "${name}_create" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-strategies-1" ||
+    fail "${name}_create/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "${name}_create")"
+  expect_status "${name}_create" "$response" 202
+  body="$(cat "$WORK/responses/${name}_create.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id" ] || fail "${name}_create/id" "the response names no id: $body"
+  body=""
+  for _ in $(seq 1 100); do
+    fetch "${name}_row" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "${name}_row/no_answer" "GET /api/sessions/$id did not answer"
+    body="$(cat "$WORK/responses/${name}_row.body")"
+    case "$body" in
+      *'"status":"starting"'*) sleep 0.1 ;;
+      *) break ;;
+    esac
+  done
+  printf '%s\n' "$body" | grep -qF "\"base_commit\":\"$base\"" ||
+    fail "${name}_row/base" "the row does not record the branch's base commit: $body"
+
+  wt="$projects/.worktrees/$id"
+  # The step's own command, absolute paths (HS-025's measurement), because the failed network step took the
+  # worktree back — a fixture, not a re-implementation of the step.
+  git -C "$repo" worktree add --quiet -b "agent/$id" "$wt" "$base" ||
+    fail "${name}/worktree" "git worktree add did not work for $wt"
+  for file in one two three; do
+    printf '%s\n' "$file" >"$wt/$file.txt" || fail "${name}/write" "$file.txt is not writable"
+    git -C "$wt" add "$file.txt" || fail "${name}/add" "git add did not work in $wt"
+    git -C "$wt" -c user.name=verify -c user.email=verify@example commit --quiet -m "the $file change" ||
+      fail "${name}/commit" "git commit did not work in $wt"
+  done
+  tip="$(git -C "$wt" rev-parse HEAD)" || fail "${name}/head" "git rev-parse did not work in $wt"
+
+  # 1. **`squash`**: three commits become one. The target's new commit has **one** parent, the old target, and the
+  # branch's **tree** — one commit that lost a hunk is still one commit with one parent, so the tree is what has
+  # to be compared.
+  fetch_body "${name}_squash" POST "/api/sessions/$id/merge" '{"target":"main","strategy":"squash"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_squash/no_answer" "POST /api/sessions/$id/merge did not answer"
+  response="$(answer "${name}_squash")"
+  expect_status "${name}_squash" "$response" 200
+  expect_header "${name}_squash" "$response" "Content-Type" "application/json"
+  body="$(cat "$WORK/responses/${name}_squash.body")"
+  squashed="$(git -C "$repo" rev-parse refs/heads/main)" || fail "${name}/rev" "git rev-parse did not work"
+  printf '%s\n' "$body" | grep -qF "\"merged_commit\":\"$squashed\"" ||
+    fail "${name}_squash/commit" "the answer does not name where the target is: $body"
+  assertions=$((assertions + 1))
+  printf '%s\n' "$body" | grep -qF '"strategy":"squash"' ||
+    fail "${name}_squash/strategy" "the answer does not name the strategy that ran: $body"
+  assertions=$((assertions + 1))
+  check "${name}_squash/count" "1" "$(git -C "$repo" rev-list --count "$base..refs/heads/main")"
+  check "${name}_squash/parent" "$base" "$(git -C "$repo" rev-parse refs/heads/main^)"
+  check "${name}_squash/tree" "$(git -C "$wt" rev-parse "agent/$id^{tree}")" \
+    "$(git -C "$repo" rev-parse "refs/heads/main^{tree}")"
+  # The working tree moved with the ref: the ordinary path.
+  if [ ! -e "$repo/three.txt" ]; then
+    fail "${name}_squash/working_tree" "the squash did not move the checkout's working tree"
+  fi
+  assertions=$((assertions + 1))
+  check "${name}_squash/clean" "" "$(git -C "$repo" status --porcelain)"
+
+  # 2. **`merge`**: two more commits on the branch, and the target gets a commit with **two** parents — the
+  # squashed target and the branch's tip. This is the assertion `strategy:"merge"` exists for, and the one an
+  # implementation that quietly fast-forwarded cannot pass.
+  for file in four five; do
+    printf '%s\n' "$file" >"$wt/$file.txt" || fail "${name}/write" "$file.txt is not writable"
+    git -C "$wt" add "$file.txt" || fail "${name}/add" "git add did not work in $wt"
+    git -C "$wt" -c user.name=verify -c user.email=verify@example commit --quiet -m "the $file change" ||
+      fail "${name}/commit" "git commit did not work in $wt"
+  done
+  tip="$(git -C "$wt" rev-parse HEAD)" || fail "${name}/head" "git rev-parse did not work in $wt"
+  fetch_body "${name}_merge" POST "/api/sessions/$id/merge" '{"target":"main","strategy":"merge"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_merge/no_answer" "the merge did not answer"
+  response="$(answer "${name}_merge")"
+  expect_status "${name}_merge" "$response" 200
+  body="$(cat "$WORK/responses/${name}_merge.body")"
+  printf '%s\n' "$body" | grep -qF '"strategy":"merge"' ||
+    fail "${name}_merge/strategy" "the answer does not name the strategy that ran: $body"
+  assertions=$((assertions + 1))
+  parents="$(git -C "$repo" rev-list --parents -n 1 refs/heads/main)" ||
+    fail "${name}/rev" "git rev-list did not work"
+  check "${name}_merge/parents" "$(git -C "$repo" rev-parse refs/heads/main) $squashed $tip" "$parents"
+  check "${name}_merge/clean" "" "$(git -C "$repo" status --porcelain)"
+
+  # 3. **The conflict**: one path touched on both sides. `409 conflict`, the path in the body's `conflicts`, the
+  # target unmoved, the checkout's status untouched — and the temporary directory empty, because the abort *is*
+  # the worktree's removal.
+  printf 'the target\x27s line\n' >"$repo/f.txt" || fail "${name}/write" "f.txt is not writable in the repo"
+  git -C "$repo" add f.txt || fail "${name}/add" "git add did not work in $repo"
+  git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet -m "the target's line" ||
+    fail "${name}/commit" "git commit did not work in $repo"
+  printf 'the branch\x27s line\n' >"$wt/f.txt" || fail "${name}/write" "f.txt is not writable in the worktree"
+  git -C "$wt" add f.txt || fail "${name}/add" "git add did not work in $wt"
+  git -C "$wt" -c user.name=verify -c user.email=verify@example commit --quiet -m "the branch's line" ||
+    fail "${name}/commit" "git commit did not work in $wt"
+  main="$(git -C "$repo" rev-parse refs/heads/main)" || fail "${name}/rev" "git rev-parse did not work"
+  fetch_body "${name}_conflict" POST "/api/sessions/$id/merge" '{"target":"main","strategy":"merge"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_conflict/no_answer" "the conflicting merge did not answer"
+  response="$(answer "${name}_conflict")"
+  expect_status "${name}_conflict" "$response" 409
+  expect_code "${name}_conflict" "$response" conflict
+  body="$(cat "$WORK/responses/${name}_conflict.body")"
+  printf '%s\n' "$body" | grep -qF '"conflicts":["f.txt"]' ||
+    fail "${name}_conflict/paths" "the body does not name the conflicting path: $body"
+  assertions=$((assertions + 1))
+  printf '%s\n' "$body" | grep -qF 'nothing was merged' ||
+    fail "${name}_conflict/sentence" "the sentence does not say nothing happened: $body"
+  assertions=$((assertions + 1))
+  check "${name}_conflict/unmoved" "$main" "$(git -C "$repo" rev-parse refs/heads/main)"
+  check "${name}_conflict/checkout" "" "$(git -C "$repo" status --porcelain)"
+  check "${name}_conflict/operator_file" "the target's line" "$(cat "$repo/f.txt")"
+
+  # Rule 2's last sentence, measured after all three: `<data>/merge` exists and holds nothing. `find` rather than
+  # an inference from a status code — a worktree left behind is exactly what an `ls` would show.
+  if [ -d "$merge_dir" ]; then
+    check "${name}/temporary" "0" "$(find "$merge_dir" -mindepth 1 | wc -l | tr -d ' ')"
+  else
+    fail "${name}/temporary" "the merge never made $merge_dir, so this case measured nothing"
+  fi
 
   kill "$socket_pid" 2>/dev/null || true
   wait "$socket_pid" 2>/dev/null || true
