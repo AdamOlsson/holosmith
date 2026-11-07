@@ -208,6 +208,86 @@ async fn a_drain_with_nothing_running_stops_the_idle_sessions() {
     wait_for_stops(&stub, 2).await;
 }
 
+/// Break the database's schema, from a second connection on the same file, so one query fails.
+///
+/// The subject of these two tests is what the drain says when it **cannot look** — the arm that used to report
+/// `drained` and exit 0 — and a schema the queries no longer fit is the honest way to reach it.
+fn break_schema(dir: &TempDir, statement: &str) {
+    let connection = rusqlite::Connection::open(dir.database()).expect("the database opens");
+    connection
+        .execute_batch(statement)
+        .expect("the schema change applies");
+}
+
+/// It cannot count the turns: one terminal line, `refused`, and no sentence claiming the wait ran out.
+///
+/// `wait_for_turns` used to send its own `result: refused` and then return "not quiet", which `run` read as an
+/// expiry — so the client (last terminal line wins) saw a false "the wait ran out after 10m with a turn still
+/// running" and exited 1 for the wrong reason.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wait_that_cannot_count_the_turns_is_one_refused_line() {
+    let dir = TempDir::new("drain-unreadable");
+    let state = state(&dir);
+    break_schema(&dir, "DROP TABLE sessions");
+
+    let (report, mut lines) = sink();
+    let ending = state.drainer().run(Duration::from_secs(30), &report).await;
+    let lines = drain_lines(&mut lines);
+
+    assert_eq!(ending, Ending::Refused);
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.starts_with("result: "))
+            .count(),
+        1,
+        "one terminal line: {lines:?}"
+    );
+    assert_eq!(result_of(&lines), "refused");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("note: the sessions could not be read")),
+        "the report says what it could not do: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("the wait ran out")),
+        "a database that cannot be read is not an expiry: {lines:?}"
+    );
+    assert!(
+        state.drain.is_draining(),
+        "an unanswerable drain still leaves the flag on"
+    );
+}
+
+/// It can count the turns but not list the rows it has to stop: `refused`, never `drained` and never a count.
+///
+/// `stop_idle` used to fold the read's failure into the sentence `no session could be read` and let `run` report
+/// `drained` — exit 0, "the machine is quiet, go", over a machine whose idle sessions were still live.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_phase_that_cannot_list_the_rows_is_refused_rather_than_quiet() {
+    let dir = TempDir::new("drain-unlistable");
+    let state = state(&dir);
+    seed(&state, Status::Idle).await;
+    // `counts_by_status` reads `status` and the count; `list` reads every column of `COLUMNS`. Renaming one of
+    // the others is the smallest break that the wait survives and the stop's read does not.
+    break_schema(
+        &dir,
+        "ALTER TABLE sessions RENAME COLUMN project TO project_renamed",
+    );
+
+    let (report, mut lines) = sink();
+    let ending = state.drainer().run(Duration::from_secs(30), &report).await;
+    let lines = drain_lines(&mut lines);
+
+    assert_eq!(ending, Ending::Refused);
+    assert_eq!(result_of(&lines), "refused");
+    assert!(
+        !lines.iter().any(|line| line.starts_with("stopped: ")),
+        "nothing was stopped, so nothing may be counted: {lines:?}"
+    );
+}
+
 /// A sink and the receiver a test reads the sequence's lines from.
 fn sink() -> (LineSink, tokio::sync::mpsc::UnboundedReceiver<String>) {
     LineSink::new()
@@ -606,7 +686,9 @@ async fn while_draining_the_create_and_the_prompt_are_refused_and_the_reads_are_
     assert_eq!(response.status, 202, "{}", response.body);
 
     // And a steer on the surviving running session is still delivered: guidance into a turn already running
-    // starts no new work.
+    // starts no new work. The `202` rather than "not 503" is the assertion: `steer` refuses a session that is not
+    // `running` (`NOT_RUNNING_STEER`) and answers `500` when the backend cannot take it, and neither of those is
+    // "the drain let it through".
     let response = guarded(
         served.addr,
         "POST",
@@ -614,7 +696,7 @@ async fn while_draining_the_create_and_the_prompt_are_refused_and_the_reads_are_
         r#"{"guidance":"narrow it"}"#,
     )
     .await;
-    assert_ne!(response.status, 503, "{}", response.body);
+    assert_eq!(response.status, 202, "{}", response.body);
 
     served.finish().await.expect("the app stops");
 }

@@ -233,11 +233,6 @@ impl Drain {
         }
     }
 
-    /// The flag this drain sets, for a caller that wants to read it (the handlers reach the state's own copy).
-    pub fn control(&self) -> &Control {
-        &self.control
-    }
-
     /// Run one drain, reporting each fact as it happens.
     ///
     /// The order is the acceptance's third bullet and it is not interchangeable: **set the flag** (so a create
@@ -263,29 +258,55 @@ impl Drain {
             report.result(Ending::Refused);
             return Ending::Refused;
         };
-        if !self.wait_for_turns(deadline, report).await {
-            report.send(&format!(
-                "note: the wait ran out after {} with a turn still running; this machine is still draining",
-                describe(wait)
-            ));
-            report.result(Ending::Expired);
-            return Ending::Expired;
+        match self.wait_for_turns(deadline, report).await {
+            Wait::Quiet => {}
+            Wait::Expired => {
+                report.send(&format!(
+                    "note: the wait ran out after {} with a turn still running; this machine is still draining",
+                    describe(wait)
+                ));
+                report.result(Ending::Expired);
+                return Ending::Expired;
+            }
+            // The wait said what it could not do; this is the one terminal line every sequence owes its client,
+            // because the client takes the **last** `result:` and a report without one is a connection that
+            // looks like it died mid-drain.
+            Wait::Unreadable => {
+                report.result(Ending::Refused);
+                return Ending::Refused;
+            }
         }
-        report.send(&format!(
-            "stopped: {} with reason {SERVER_RESTART}",
-            self.stop_idle().await
-        ));
-        report.result(Ending::Drained);
-        Ending::Drained
+        match self.stop_idle().await {
+            Ok(stopped) => {
+                report.send(&format!(
+                    "stopped: {} with reason {SERVER_RESTART}",
+                    plural(stopped, "session")
+                ));
+                report.result(Ending::Drained);
+                Ending::Drained
+            }
+            // The rows could not be read or could not be moved, so this machine is not quiet and 0 would say it
+            // was. No count is reported: there is no honest number to give.
+            Err(()) => {
+                report.result(Ending::Refused);
+                Ending::Refused
+            }
+        }
     }
 
-    /// Wait until no row is `running`, or the deadline passes. `false` means the deadline came first.
+    /// Wait until no row is `running`, or the deadline passes.
+    ///
+    /// The answer is three-valued because the two failures are not the same fact: a turn that outlasted the wait
+    /// leaves the drain **on and honest** (`Expired`), while a database that cannot be read leaves this command
+    /// unable to say what the machine is doing (`Unreadable`, which the caller turns into `refused`). Reporting the
+    /// second as the first would print "the wait ran out with a turn still running" over a machine whose turns
+    /// nobody counted.
     ///
     /// `starting` is deliberately **not** waited for: the table has one `Drain` row and it leaves `starting`,
     /// so a provisioning session cannot be stopped by this policy and must not be lied about. It comes back as
     /// `idle` through the startup reconcile (ADR-0053), which is item 10 step 6's own sentence — so it is
     /// reported once and left alone.
-    async fn wait_for_turns(&self, deadline: tokio::time::Instant, report: &LineSink) -> bool {
+    async fn wait_for_turns(&self, deadline: tokio::time::Instant, report: &LineSink) -> Wait {
         let mut reported = None;
         let mut noted_starting = false;
         loop {
@@ -296,8 +317,7 @@ impl Drain {
                 // could not do and the client exits non-zero.
                 Err(error) => {
                     report.send(&format!("note: the sessions could not be read ({error})"));
-                    report.result(Ending::Refused);
-                    return false;
+                    return Wait::Unreadable;
                 }
             };
             if reported != Some(counts.running) && counts.running > 0 {
@@ -315,10 +335,10 @@ impl Drain {
                 noted_starting = true;
             }
             if counts.running == 0 {
-                return true;
+                return Wait::Quiet;
             }
             if tokio::time::Instant::now() >= deadline {
-                return false;
+                return Wait::Expired;
             }
             // Sleep to the poll or to the deadline, whichever is sooner, so a short `--wait` expires when it
             // said it would rather than a poll after it.
@@ -327,13 +347,17 @@ impl Drain {
         }
     }
 
-    /// Stop every `idle` session with [`SERVER_RESTART`], and describe what was done.
+    /// Stop every `idle` session with [`SERVER_RESTART`], and answer how many were moved.
     ///
     /// The row moves first and the container's stop goes to a task of its own — ADR-0020's order, ADR-0024's
     /// shape and the sweeper's: the row is what the next boot reads, so a wedged `docker stop` must not hold
     /// this command up. `Stopper` writes spec item 6's flag before the call, so the exit this produces is one
     /// we asked for rather than a crash (ADR-0038).
-    async fn stop_idle(&self) -> String {
+    ///
+    /// `Err` means the rows could not be read or could not be moved, which is **not** the same fact as
+    /// "there was nothing to stop": the caller turns it into `refused` and a non-zero exit, because a machine
+    /// whose rows this command could not read is not a machine it may call quiet.
+    async fn stop_idle(&self) -> Result<u64, ()> {
         let candidates = match self.idle() {
             Ok(candidates) => candidates,
             Err(error) => {
@@ -342,7 +366,7 @@ impl Drain {
                     %error,
                     "the drain could not read the sessions it has to stop"
                 );
-                return "no session could be read".to_string();
+                return Err(());
             }
         };
         let mut stopped = 0_u64;
@@ -356,10 +380,10 @@ impl Drain {
                 // The row is `stopped` and only the report of it was lost (a process on its way down), so the
                 // container must still be stopped.
                 Err(StateError::Unreported(_)) => {}
-                Err(error) => {
-                    // A session that took a prompt between the read and the move is `running` again, and the
-                    // `Drain` row does not accept it. That is an ordinary race, not a failure: the operator's
-                    // restart is theirs to time, and this drain said it was quiet when it looked.
+                // An ordinary race, not a failure: the session took a prompt between the read and the move (which
+                // the flag now prevents, so this is the millisecond before it), or somebody deleted it. The
+                // operator's restart is theirs to time, and this drain said it was quiet when it looked.
+                Err(error @ (StateError::Illegal { .. } | StateError::UnknownSession(_))) => {
                     tracing::info!(
                         target: "holosmith::drain",
                         session = %session.id,
@@ -367,6 +391,16 @@ impl Drain {
                         "an idle session left idle before the drain stopped it"
                     );
                     continue;
+                }
+                // The row could not be written: this machine is not quiet and the count would be a lie.
+                Err(error) => {
+                    tracing::error!(
+                        target: "holosmith::drain",
+                        session = %session.id,
+                        %error,
+                        "the drain could not stop a session"
+                    );
+                    return Err(());
                 }
             }
             stopped += 1;
@@ -377,7 +411,7 @@ impl Drain {
             );
             self.spawn_stop(session);
         }
-        plural(stopped, "session")
+        Ok(stopped)
     }
 
     /// The container stop, off this command's path (ADR-0024's reason, the sweeper's shape).
@@ -451,10 +485,19 @@ impl LineSink {
     }
 }
 
-impl Default for LineSink {
-    fn default() -> Self {
-        Self::new().0
-    }
+/// How the wait ended, which is three facts and not two.
+///
+/// `Expired` and `Unreadable` are both "not quiet", and they are the two answers that must never be printed as
+/// each other: the first leaves the drain on and reports the turn it waited for, the second cannot report a turn
+/// at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Wait {
+    /// No row is `running`: the machine is quiet enough to stop the idle sessions.
+    Quiet,
+    /// The deadline passed with a turn still running. The drain stays on.
+    Expired,
+    /// The rows could not be read, so nothing about this machine can be said.
+    Unreadable,
 }
 
 /// The two counts the wait reads.

@@ -79,6 +79,13 @@ already set (so the report says `already draining`), the wait is that client's o
 finds nothing left. An operator reaching for the same tool twice is not an error, and a refusal would need a second
 verb to ask "is one running?" — which D3 does not have.
 
+**On the client side a read timeout is "nothing yet", not "gone".** The server is silent between progress lines by
+design — it reports a change, and a turn that takes a minute changes nothing for a minute — so the client tolerates
+silence up to the `--wait` it asked for (plus one `ANSWER_TIMEOUT` of grace) and only the **first** line is bounded by
+`ANSWER_TIMEOUT` alone. Treating the first timeout as a dead socket made `holosmith drain --wait 1m` fail after five
+seconds against any turn longer than that, which is the story's own demo; the bound that remains is the one that
+matters — a socket whose server accepted and then said nothing at all is still refused.
+
 **A dropped client does not abandon the sequence.** A write that fails is logged and the drain continues: the
 report is the account, the state change is the thing, and stopping halfway would leave a machine that refuses work
 and never stopped its idle sessions.
@@ -174,8 +181,9 @@ The ADR says it because "drain" invites the assumption that the process goes awa
 
 The default is `/run/holosmith/drain.sock` — a real path on a real host. A test or a gate case that boots `serve`
 without `--admin-dir` therefore creates and binds the *machine's* admin socket, which is how this story first went
-wrong: `tests/db_migrations.rs`'s three spawns, two direct spawns in `tests/serve_cli.rs` and three of `verify.sh`'s
-own boots all did, and the leftover `/run/holosmith` (0775, from an earlier session's by-hand `mkdir`) then failed
+wrong: eight spawns across three files — `tests/db_migrations.rs`'s three, two direct spawns in
+`tests/serve_cli.rs`, and three of `verify.sh`'s own boots (a fourth, `start_serve`, had been given the flag when it
+was written, which is why the mistake was invisible in the case that uses it most) — all did, and the leftover `/run/holosmith` (0775, from an earlier session's by-hand `mkdir`) then failed
 `tests/deploy.rs`'s `perms` check on the next run — a failure with no relationship to the code under test.
 
 The rule is the one `--data-dir` already had: a boot that is not the machine's says so on its command line. And

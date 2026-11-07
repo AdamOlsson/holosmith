@@ -1746,8 +1746,9 @@ it rather than adding a caveat beside it.
 
 - **`serve`'s default admin directory is the machine's real `/run/holosmith`, and in this sandbox an unprivileged
   user can write it — so a test that forgets `--admin-dir` binds a real socket silently.** This story's first
-  handoff had six such spawns (`tests/db_migrations.rs`'s three, two direct ones in `tests/serve_cli.rs`, three of
-  `verify.sh`'s own boots) and the first `cargo test` after them left `/run/holosmith/drain.sock` behind, which then
+  handoff had eight such spawns (`tests/db_migrations.rs`'s three, two direct ones in `tests/serve_cli.rs`, three of
+  `verify.sh`'s own boots; `start_serve` already had the flag, which is why the mistake stayed invisible in the case
+  that uses it most) and the first `cargo test` after them left `/run/holosmith/drain.sock` behind, which then
   failed `tests/deploy.rs`'s `perms` check with `/run/holosmith is 0775 where server deploy writes 0700` — a
   leftover from an *earlier* session's by-hand `mkdir -p /run/holosmith` (eight of them are in the operator's log)
   and a failure with no relationship to the code under test. Two rules came out of it: every boot in a test or a
@@ -1759,8 +1760,17 @@ it rather than adding a caveat beside it.
   (refused → dead → unlink and bind; connected → another server owns it → `warn` and serve without one), and
   anything that is not a socket is an operator's file that is named and left alone.
 - **A drain test that "waits for the turn" passes by finishing at once unless the deadline is under one frame.** The
-  stub's turn is ten 200 ms frames, so `--wait 200ms` is what makes the expiry arm a measurement rather than a race;
+  stub's turn is twelve 200 ms frames (~2.4 s), so `--wait 200ms` is what makes the expiry arm a measurement rather
+  than a race;
   the same shape applies to `case_drain_restart`, which needs the turn still `running` when the `kill -9` lands.
+- **A read timeout on a protocol that is *silent between facts* is not a dead connection.** `drain`'s socket writes a
+  line when the count changes and nothing in between, so a turn that takes a minute produces two lines and then a
+  minute of silence; the client's `ANSWER_TIMEOUT` is a `SO_RCVTIMEO`, and treating its first expiry as "the server
+  stopped answering" made `holosmith drain --wait 1m` fail after five seconds against exactly the turn it exists to
+  protect. The rule is the one `commands/drain.rs::ask_with` now follows: bound the **first** line (is anything there
+  at all), then tolerate silence up to the deadline the operator asked for. Any future streaming client of a
+  progress-line protocol has the same trap, and the gate cannot see it because every fake socket in
+  `tests/drain_cli.rs` wrote all its lines before the client read.
 - **`steer` refuses unless the row is `running`** (`NOT_RUNNING_STEER`), which is the whole reason a draining machine
   can keep answering it: it cannot start work, only shape a turn that is already ending. Any future handler that
   *can* start work belongs in the refused list beside create/prompt/resume, not beside steer.

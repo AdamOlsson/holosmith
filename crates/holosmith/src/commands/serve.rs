@@ -353,9 +353,10 @@ pub fn run(args: ServeArgs) -> ExitCode {
         // is wrong. The path is the run's `--admin-dir`, or the machine's `/run/holosmith` (step 2's directory).
         let drain_socket = match crate::drain::listen(&admin_dir) {
             Ok(listener) => Some(crate::drain::spawn(listener, state.drainer())),
-            // The reason is a `warn` when the directory is not usable and a `debug` when another server owns the
-            // socket: the first is a machine this run cannot drain, the second is a second server nobody meant to
-            // start (and the line says which, so an operator can tell them apart).
+            // Every reason is one `warn`, because every one of them means this run has no admin socket; the
+            // sentence is what tells them apart (a directory this user cannot write, a socket a live server
+            // already owns, a regular file at the path). `serve` keeps serving either way, for the preview
+            // listener's reason: the control UI is what an operator needs when something else is wrong.
             Err(sentence) => {
                 tracing::warn!(
                     target: "holosmith::serve",
