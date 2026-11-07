@@ -495,8 +495,12 @@ _Avoid_: Parent, origin, fork point
 The number of commits a session branch has that its base commit does not: `git rev-list --count <base_commit>..agent/<id>`. It is computed when it is asked for, and never stored.
 _Avoid_: Distance, progress, delta
 
+**Behind**:
+The number of commits a **target branch** has that a session branch does not: `git rev-list --count agent/<id>..<target>`. The other half of **Ahead**, and computed rather than stored. It is `null` (not `0`) when the repository has no target, because there is then no branch to be behind.
+_Avoid_: Lag, drift, gap
+
 **Target branch**:
-The branch a session's work is merged into.
+The branch a session's work is merged into: the first **existing** branch of the configured `[merge] targets`, in that order (default `main`, then `master`), which is the one the UI preselects. A name the repository does not have is not a target.
 _Avoid_: Main, trunk, destination
 
 **WIP snapshot**:
@@ -527,8 +531,12 @@ was there, and the transcript draws **one link per picture** rather than the pic
 _Avoid_: Attachment, picture, screenshot, image blob
 
 **Changes view**:
-A read-only diff of a session's branch against its target. Not a file browser.
+The answer to `GET /api/sessions/{id}/changes`: what a session's branch changed against its **base commit** and whether it would merge into its **target branch**. Eleven keys — `branch`, `base_commit`, `head`, `target`, `ahead`, `behind`, `dirty`, `mergeable`, `files[]` (`path`, `status`, `additions`, `deletions`), `touches_ci` — plus the additive `mergeable_reason`. It is a **host** read (never a container), it writes nothing, and `dirty` uses the same definition of work as the **WIP snapshot**. Its machine names are `changes::Changes::read` and `http::changes`.
 _Avoid_: Diff viewer, explorer, file tree
+
+**Mergeability**:
+Whether a session branch would merge into its target without a conflict, asked with `git merge-tree --write-tree` (git 2.38+), which writes a tree object and touches no working tree. Three answers, not two: `true` clean, `false` a conflict (with the paths in `mergeable_reason`), and `null` with a sentence when the question could not be asked (no target, a git too old). It is not the delete's question — **Ahead** and the keep-rules ask "can I lose this branch?", which is a different question with a different function.
+_Avoid_: Conflicts, rebase, apply
 
 **Merge**:
 Landing a session branch on a target branch, on the server, never in a container.
@@ -539,7 +547,7 @@ Pushing a session branch to a configured remote.
 _Avoid_: Deploy, release, ship
 
 **`touches_ci`**:
-Whether a session's diff changes CI configuration or hook directories, which warrants a warning before publish.
+Whether a session's diff changes CI configuration or a hook directory, which warrants a warning before publish. One constant (`changes::CI_PATHS`) and one predicate (`changes::touches_ci`, which **Publish** reads): directory prefixes (`.github/`, `.gitlab/`, `.circleci/`, `.buildkite/`, `.woodpecker/`, `.husky/`, `.githooks/`) and file names matched on the last path segment (`.gitlab-ci.yml`, `.travis.yml`, `Jenkinsfile`, …). An **added** file counts like a modified one; `.git/hooks` is not in the set because a diff can never contain it.
 _Avoid_: CI flag, risk flag
 
 ### Network and credentials

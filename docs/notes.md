@@ -1783,3 +1783,42 @@ it rather than adding a caveat beside it.
   unrelated `Uninstall` help-text line had been shortened to `Uninstall.` on the way past. A handoff brief says "stop
   green"; a killed session cannot, so the *next* session checks `git status`, the Linear plan and `cargo fmt` before
   believing a dirty tree.
+
+### Landmines: the changes view (HS-052)
+
+- **A symmetric fixture cannot measure a direction, and the first version of this story's own proof could not tell
+  `behind` from `ahead`.** `the_summary_names_every_field_and_counts_both_sides` had one commit on the branch and one
+  on the target, so both counts were `1`; mutating `behind`'s range from `<branch>..<target>` to `<target>..<branch>`
+  left it **green**. The bullet it exists for — "behind counts commits on the target the branch lacks" — was unmeasured
+  until the fixture gained a second branch commit (2 and 1), and the gate's `case_changes` had the identical shape and
+  got the identical fix plus an explicit `counts_differ` assertion. Any pair of counts that are "each way" needs
+  unequal numbers in the fixture, and the only reliable proof is to mutate the code and watch the test go red.
+- **`git diff --numstat --name-status` together prints only the name-status** (measured) — the two reads are two
+  commands, and they cannot disagree because both name the same two commit ids (objects are content-addressed). The
+  `-z` shapes are `<additions>\t<deletions>\t<path>\0` for numstat (with `-` for a count git cannot make) and
+  `<status>\0<path>\0` for name-status; with `--no-renames` the status is always one letter, so a reader never has to
+  parse an `R100\0old\0new` triple.
+- **`status.showUntrackedFiles = no` is a repository setting that makes `dirty` lie**, and a local `git config` is
+  exactly what a test can write without `unsafe`. `a_repository_config_cannot_hide_an_untracked_file` sets it and
+  asserts the file still counts; deleting `--untracked-files=normal` from `changes::dirty` turns that test red. The
+  same class as HS-025's `worktree list --porcelain` and HS-026's `CONFIG_READ`: a read that inherits config is not a
+  measurement.
+- **`merge-tree --write-tree`'s two shapes, measured on 2.43:** exit 0 prints one line (the tree's id); exit 1 prints
+  the tree's id, then `<mode> <oid> <stage>\t<path>` per conflicted path per stage, then a blank line and git's prose.
+  A reader that took every line after the first would report `Auto-merging f.txt` as a path, so the walk stops at the
+  first line without a tab (the unit test pins both). Exit 1 is a **measurement** (`mergeable: false`), not a failure
+  to run the command.
+- **The provisioner takes the worktree back when a later step fails (ADR-0029), so a gate case that wants a real
+  worktree with no daemon must re-make it with the step's own command.** `case_changes` boots `backend = "docker"`
+  against a `_ping`-only socket (the `case_worktree` trick): the worktree step runs and writes the row, the network
+  step fails and the provisioner removes the directory and `agent/<id>`. The case then runs `git worktree add -b
+  agent/<id> <absolute path> <base>` itself — absolute, because a relative path resolves against the repository
+  (HS-025) — which is a fixture, not a re-implementation of the step.
+- **The handler builds the worktree from the naming rule, not the row's recorded path.** `Worktree::of` derives the
+  branch, the repository and the directory from the same three facts, so a row whose path is stale and a rule that
+  disagrees cannot produce two spellings of one worktree; `Changes::read` then refuses a directory git does not
+  register rather than trusting either.
+- **A prior session left this tree dirty with the implementation half done and no docs.** What made it adoptable was
+  that the Linear plan comment matched the code field-for-field and the code compiled; what it cost was a re-read of
+  every line (and the mutation pass above, which found the `behind` gap). A dirty tree from a killed session is not
+  evidence of anything on its own — read it, do not inherit its claims.

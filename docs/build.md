@@ -216,7 +216,15 @@ step's refusal, the worktree and branch gone afterwards, the registration back t
 absent), and the project's refusals (`case_worktree_refusal`, which boots a Docker run of its own over
 a projects root holding a `.git` file, a repository with `.gitmodules` and one with
 `extensions.worktreeConfig`, and asserts each create's `422` with its own code, `application/json`, no
-session row afterwards and no `.worktrees` directory), and the hardened mounts (`case_container_mounts`,
+session row afterwards and no `.worktrees` directory), and the changes view (`case_changes`, which boots
+its own Docker run over a real repository and the same `_ping`-only socket, re-makes the worktree the
+failed network step took back, commits twice on `agent/<id>` and once on `main`, writes an uncommitted
+file, and asserts every field of `GET /api/sessions/{id}/changes` — `branch`, `base_commit`, `head`,
+`target`, `ahead` 2 and `behind` 1 against `git rev-list --count` run by the case, `dirty`, `mergeable`,
+`files[]` with a file's line counts and `touches_ci` — then plants a conflict and asserts `mergeable:
+false` with the path *and* that no working tree moved, then removes and re-creates-as-unregistered the
+worktree for the two `409 no_worktree` arms; no daemon is used, which is the story's own "no container is
+involved"; see ADR-0061), and the hardened mounts (`case_container_mounts`,
 which needs no server at all: it builds a real repository and worktree under `target/`, runs one real
 container with the spec's four mounts and `--cap-drop ALL`, and asserts the three writes fail on the host
 as well as in the container, the three git commands work, the process is not root and neither `mount
@@ -423,7 +431,8 @@ prove the shipped binary does it, and since HS-046 every case prints one `ok <ca
 that printed `SKIP` withholds it, so a skip can never read as a pass — which is what makes a green run name what
 it proved instead of only counting it. A case that needs a setting the rest of the run must not carry gets a
 boot of its own (see `case_token_budget`, `case_usage_survives_resume`,
-`case_compaction`, `case_history`, `case_backup`, `case_worktree` and `case_worktree_refusal`), the
+`case_compaction`, `case_history`, `case_backup`, `case_worktree`, `case_worktree_refusal` and
+`case_changes`), the
 Internet-access checkbox (`case_internet_toggle`, described above), and a database from a newer release
 (`case_schema_newer`, which needs no daemon: it boots the artifact twice over one data root, rewrites the
 recorded `schema_version` to 99 in between with `python3`'s `sqlite3`, and asserts that the second boot's
