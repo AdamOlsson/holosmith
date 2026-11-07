@@ -1,4 +1,4 @@
-# RESUME — one issue per session (next: PER-82 / HS-050, `status`, `logs`, `uninstall`)
+# RESUME — one issue per session (next: PER-83 / HS-051, `drain` over the admin socket)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating procedure and
 still governs the cycle; this file is the state of the world, and it adds one rule of its own:
@@ -45,187 +45,189 @@ sandbox-specific incantation (§2).
 
 ---
 
-## 1. The issue this session picks up: `PER-82` — HS-050, `status`, `logs`, `uninstall`
+## 1. The issue this session picks up: `PER-83` — HS-051, `drain` over the admin socket
 
-**State when this file was written** (the story's last commit is `origin/master` and the tree is clean apart
-from the operator's own `log.txt`/`orchestrate.sh`): **54 of 80 stories Done, 26 Backlog**, all in project
-`Holosmith`. `PER-82` is `Backlog`, it is the next in `HS-###` order, and its one blocker (`HS-049`, `PER-81`)
-is `Done` — so it is eligible. Nothing in the queue is blocked on the machine (§2).
+**State when this file was written** (the story's last commit is `origin/master` and the tree is clean apart from the
+operator's own `log.txt`/`orchestrate.sh`): **55 of 80 stories Done, 25 Backlog**, all in project `Holosmith`.
+`PER-83` is `Backlog`, it is the next in `HS-###` order, and its one blocker (`HS-049`, `PER-81`) is `Done` — so it is
+eligible. Nothing in the queue is blocked on the machine (§2).
 
-The last shipped story was `PER-81` (HS-049, the service install, the VAPID pair, the two Tailscale origins and
-the `perms` finding, **ADR-0058**) — the fourth of phase 2's twenty-one. Its gate run — the one the ship comment
-pasted — was green: **72 cases, 958 assertions**, no `SKIP` line; `cargo test` is **874 tests across 49 targets**
-in the gate's phase, and `web/`'s runner is **52**. It ended with `server deploy` installing a *machine*: nothing
-in the seven steps is `skipped` any more.
+The last shipped story was `PER-82` (HS-050, `status`, `logs`, `uninstall`, **ADR-0059**) — the fifth of phase 2's
+twenty-one. Its gate run was green: **75 cases, 1034 assertions**, no `SKIP` line; `cargo test` is **899 tests across
+49 targets** in the gate's phase, and `web/`'s runner is **52**. Its §1 material is now Linear, `docs/review/PER-82.md`,
+`git log` and §9 below.
 
 ### 1.1 The slice (verbatim from `docs/stories/phase-2-deployable-mvp.md`; Linear's body is the same text)
 
-> ### HS-050 — `status`, `logs`, `uninstall`
+> ### HS-051 — Drain over the admin socket
 >
-> **As** the operator **I want** to see and control the service from the CLI **so that** I do not need to remember systemd incantations.
+> **As** the operator **I want** to drain before restarting **so that** an upgrade does not kill a turn I am watching.
 >
-> - **Size:** S · **Blocked by:** HS-049 · **Spec:** Commands table
-> - **Demo:** `status` prints role, version, uptime, session counts, proxy health and last health of registered machines; `logs -f` streams.
+> - **Size:** M · **Blocked by:** HS-049 · **Spec:** item 10 (step 3), item 8, API table
+> - **Demo:** start a turn, run `holosmith drain --wait 1m`, and see creates refused with 503 `draining` until the turn
+>   finishes.
 >
 > **Acceptance**
-> - [ ] `holosmith status` reports role, version, uptime, live/stopped session counts, proxy state, and last health per registered machine.
-> - [ ] `holosmith logs [-f] [--session ID]` reads journald, or a session's `session.log` when `--session` is given.
-> - [ ] `holosmith uninstall` removes the unit, proxies and networks but keeps data; `--purge` also removes data.
-> - [ ] Uninstall refuses to purge while sessions are live unless `--force`.
+> - [ ] `holosmith drain [--wait 10m]` talks to a local unix socket, not HTTP; the command is unreachable over the
+>       network.
+> - [ ] While draining, creates and prompts return 503 `draining`; reads still work.
+> - [ ] It waits for running turns, then stops idle sessions with reason `server_restart`.
+> - [ ] `--wait` expiry returns non-zero and leaves the drain state active rather than silently succeeding.
+> - [ ] Sessions live at drain time return to `idle` on the next startup.
 
-`docs/stories/**` is **not edited** (§7). This is an **S** story: §5 says write the plan yourself — and it is the
-first story in this repository that is mostly a *reader* of state other stories wrote, so most of the plan is
-"which existing reader is this one".
+`docs/stories/**` is **not edited** (§7). This is an **M** story with new surface (a second listener, a new state, a new
+error code, a new reason word, a new command), so §5's worker route is available — but most of it is one flag read by
+handlers that already exist, so read the code before deciding.
 
 ### 1.2 The spec it closes
 
-`HolosmithSpec.md`'s **Commands** table, three rows:
-
-| Row | Words |
-| --- | --- |
-| `holosmith status` | "Role, version, uptime, session count, proxies, last health of registered machines" |
-| `holosmith logs [-f] [--session ID]` | "Server log from journald, or a session's `session.log`" |
-| `holosmith uninstall [--purge]` | "Removes unit, proxies and networks; `--purge` also removes data" |
-
-Nothing else in the spec is this story's: the admin socket and `drain` are HS-051, `upgrade`/`rollback` are
-HS-078/079, and `hub host ...` is phase 3.
+- **Item 10 step 3**: "Drain: `holosmith admin drain --wait 10m` over a local unix socket. It refuses new creates and
+  prompts (503 `draining`), waits for running turns, then stops idle sessions with reason `server_restart`."
+  **Note the two spellings**: the Commands table's row and the story's acceptance both say `holosmith drain [--wait
+  10m]`, while item 10's prose says `holosmith admin drain`. Decide (the Commands table + the acceptance are the
+  contract, and HS-050's precedent is that the table wins), record it in the ADR and in the line's help text.
+- **Item 8's transition table**, the `idle` row: "`evict`, idle stop, **`drain`** → `stopped`" — the trigger and its row
+  already exist (`sessions/state.rs`'s `Trigger::Drain`).
+- **Item 10 step 6**: "Sessions that were live before the drain return to idle on startup" — which the startup reconcile
+  already does for a live row (ADR-0053); what a drain adds is that the sessions it stopped are `stopped` with
+  `server_restart`, and the ones it could not stop (a running turn) are `live` and come back through the reconcile.
+- **The API table's `Admin unix socket` row**: "`drain` command, not reachable over HTTP". The socket is *outside*
+  `App` — no guard, no route, no CORS layer — which is the whole of "unreachable over the network".
 
 ### 1.3 What already exists
 
-- **The unit and the two proxies are one story old and their names are public.** `deploy::UNIT_NAME`
-  (`holosmith.service`), `deploy::UNIT_DIR` (`/etc/systemd/system`), `deploy::SERVICE_USER`/`SERVICE_GROUP`,
-  `deploy::Target::{unit_path, admin_dir, etc_config}`,
-  `deploy::CONTROL_HTTPS`/`PREVIEW_HTTPS` (443/8444), and `deploy::Tools` (the child seam: `systemctl`,
-  `tailscale`, `docker` through `proxies::Containers`). The proxies are `container::PROXY_NAME` (`hs_egress`),
-  `key::KEY_PROXY_NAME` (`hs_key`), `container::EgressProxy::run_args`, `proxies::{running, start_egress,
-  start_key, START_TIMEOUT}`, and the machine's network is `docker::EGRESS_NETWORK` (`egress`). A per-session
-  network is `container::network_name(id)`; `docker::{remove_container_bounded, remove_network_bounded,
-  container_names, network_names, running}` are the bounded family the startup path already uses.
-- **`uninstall` is the inverse of steps 5 and 6, and the halves already exist as reads and applies**: step 5's
-  read is the unit's bytes plus `systemctl is-enabled`; step 6's is `tailscale serve status --json`;
-  `proxies_line`'s read is the network plus both containers. Nothing about those has to be invented — the
-  question is which of them `uninstall` *reverses* (`systemctl disable --now`, the `tailscale serve reset` or a
-  per-port `serve clear`, `docker rm -f` the two proxies, `docker network rm egress`) and which it merely
-  reports.
-- **`status`'s four facts are each somebody's existing reader.** Role is `config.role`; version is
-  `version::VersionInfo` (what `holosmith version --json` prints); session counts are
-  `sessions::repository::{live_count, …}` (a `LIVE_COUNT` SQL constant) plus `Status::ALL` — there is **no**
-  per-status count query yet, so a `stopped` count is new work; proxy state is `proxies::running(config, machine)`;
-  the database is `db::recorded_without_migrating` + `schema::verdict` (ADR-0047).
-- **`logs`'s two sources.** A session's log is `<data>/sessions/<id>/session.log` (`exit::LOG_FILE`,
-  `exit::session_dir`), written by `Exits::record` (the launch line plus the stderr tail). The server's is
-  journald's: `journalctl -u holosmith.service` — the program exists on this machine but nothing is running
-  under it, so the arm is a shim's here (§1.5, §1.9).
-- **`--root` and the child seam.** Every write is one child through `deploy::Tools`/`child`/`execute` (sudo
-  prefixed when the paths are the system's), so `uninstall`'s children are assertable without a machine, and
-  `deploy::Target` is what tells a `--root` run from a real one. `deploy::Report`/`Line`/`Word` is the report
-  shape a destructive command may or may not reuse (§1.5).
-- **The database is the only thing that says "live".** `Status::{Starting, Idle, Running}` are live and
-  `{Stopped, Error, Deleting}` are not (`live_count`'s three parameters) — so "refuses to purge while sessions are
-  live" is one query, and the *machine's* containers are a second question (`docker ps`), which a purge should
-  probably not rely on.
-- **What does not exist at all**: the three subcommands (`cli.rs` has `serve`, `version`, `config`, `proxy`,
-  `doctor`, `key`, `container`, `server`), any uptime record (the process does not write one; `/proc` and the
-  unit's `ActiveEnterTimestamp` are the two candidates), a hosts registry ("last health of registered machines"
-  is HS-068's `POST /api/hosts`, phase 3 — so this line's honest answer on a phase-2 machine is `unknown` or
-  `none`), and any `case_*` for the three commands.
+- **`Trigger::Drain` and its row.** `sessions/state.rs` has `Trigger::Drain` (in `Trigger::ALL`, 15 triggers) and one
+  transition row `Idle → Stopped` on it, and a second copy of the same row in the table's own test. Nothing produces it
+  yet. `Transitioner::apply` (and `apply_logged`) is the only way a state changes.
+- **The reason words are per-module constants**, one per producer: `deleter::DELETED` ("deleted"), `ladder::FORCED_ABORT`,
+  `sweeper::IDLE_STOP`, `turn::TURN_TIMEOUT`, `turn::BUDGET_EXCEEDED`, `reconcile::INTERRUPTED`,
+  `http::sessions::EVICTED`, `exit::PI_EXIT`. `server_restart` does not exist yet; its home is whatever module owns the
+  drain, by that precedent.
+- **`deploy::ADMIN_DIR`** (`/run/holosmith`) is public and `deploy::Target::admin_dir()` prefixes it under `--root`
+  (`<root>/run/holosmith`). `server deploy`'s step 2 creates it at mode **0700** and chowns it to the service user
+  (`items`/`read_owner` in `deploy.rs`), and `doctor`'s `perms` finding reads it — so it is a directory the unit's
+  `User=` can already write, which is what a socket needs. HS-049's notes record that `/run/holosmith` is a tmpfs
+  recreated **root-owned** after every boot, which is why step 2 chowns it non-recursively on every run; a drain
+  socket therefore has to cope with a directory that is the service user's rather than assume `/run` is writable.
+- **`serve.rs` is process shutdown, not the drain**, and its module doc says so in one sentence: `SIGTERM`/`SIGINT` →
+  stop accepting → a bounded grace (`DEFAULT_SHUTDOWN_GRACE`, 10 s) → cut → exit 0. `commands/serve.rs` assembles the
+  app, installs the signal handler *before* binding, prints the eight-line banner, awaits the reconcile, then serves.
+- **`AppState`** (`http/app.rs`) is `{ config, runtime, database, events, streams, backend }` with **eight** wiring
+  helpers (`provisioner`, `turner`, `transitioner`, `ladder`, `deleter`, `sweeper`, `compactor`, `reconciler`). A
+  `draining` flag would be a new field — and it must be shared with tasks that already hold `AppState` clones.
+- **The refusal family** is `http/error.rs`'s `ApiError` (`not_in_state`, `bad_prompt`, `cap_reached`, …), every one the
+  ADR-0008 envelope `{"code","message"}`. There is no `503` code at all today; `draining` is the first.
+- **The create and the prompt/steer/resume/abort handlers** are `http/sessions.rs`'s; the create's order is fixed (the
+  idempotency check first, then the cap), and `refuse_project`, `evict_one`/`slot_for`, and the `202` with `events` are
+  all in there. "Refuses new creates and prompts" is therefore a guard in front of two handlers, and **which** of
+  resume/delete/abort keep working is a decision (the spec says "creates and prompts"; a drain that refused a delete
+  would trap a session the operator wants gone).
+- **Waiting for running turns** has two candidate readers: the row count (`sessions().counts_by_status()`, HS-050's
+  reader) or the in-process turn tasks. The row is the honest one, and a turn ends through `turn.rs`/`ladder.rs`.
+- **Stopping idle sessions** goes through `Stopper` (HS-030) — the one routine that writes `expected_stop` before the
+  `docker stop` — exactly as the sweeper and the eviction do. The drain is a **fourth** policy that stops something:
+  `evicted`, `idle_stop`, `turn_timeout`/`budget_exceeded` and now `drain` must not be confused.
+- **The startup reconcile** (ADR-0053) moves every live row to `starting` with reason `interrupted` when a turn was in
+  flight, then re-provisions; a second pass leaves the same rows and restarts live sessions again. That is already
+  acceptance bullet 5's mechanism.
+- **`db::Reader`** (HS-050) is the read-only opener a drain's report may use, and `counts_by_status` its query.
 
 ### 1.4 What does not exist
 
-No `status`, no `logs`, no `uninstall`; no uptime record; no per-status session count; no journald reader; no
-`tailscale serve reset`/`clear` call; no removal of the unit; no `--purge`/`--force` refusal. And no decision
-about what `status` prints as "last health" when no host registry exists.
+No admin socket (no `UnixListener` in production code — the crate's only one is `status.rs`'s test fixture for a fake `_ping` daemon), no `draining` state or flag, no `503` error code, no
+`server_restart` reason, no `drain` command or `admin` subcommand group, no `--wait` deadline with a non-zero exit, no
+`case_drain`, and no decision about what the socket answers (a line of text? JSON? what a second `drain` while one is
+active says).
 
 ### 1.5 The decisions that shape the design
 
-1. **`status`'s shape and its "unknown" arms.** One line per fact (`key value`, the shape `holosmith version`
-   already prints and `docs/build.md` documents) or a table? What does it print for a machine that has never
-   deployed, for journald that does not answer, and for "last health per registered machine" while the registry
-   is HS-068's? The precedent that matters: `doctor` prints `check: pass|fail|unknown: sentence`, and `unknown`
-   with a sentence is this repository's honest third answer (ADR-0044/ADR-0054) — a `status` line that printed
-   `0` where it could not measure would be the one thing the whole build refuses to do. Also: exit code 0 unless
-   something *failed*, or always 0 because it is a report?
-2. **Uptime.** The three candidates: the process's own start (`serve` can print it, but `status` is a **second**
-   process, so it needs a file or `/proc`), the unit's `ActiveEnterTimestamp` (`systemctl show -p … --value`, a
-   child that answers only on a systemd machine), or `/proc/uptime`'s machine uptime (a different fact).
-   Decide which fact "uptime" is, and make the arm say which it measured. A `--root` or hand-run `serve` has no
-   unit, so the answer for it is a decision too.
-3. **`logs`'s journald invocation.** One child `journalctl -u holosmith.service -n <N> [-f]`, or a `serve`-owned
-   log file? The spec says journald, so the child is the shape; the decisions are the arguments (lines, `-f`'s
-   foreground behaviour, whether `--since` is reachable), what a machine without journald prints (a sentence and
-   exit 1, or the session-log arm's advice), and whether `--session` and `-f` combine (`tail -f` on
-   `session.log`, which is a file this build wrote, so it is a read of its own).
-4. **`uninstall`'s order and its refusals.** What it removes (the unit, `hs_egress`, `hs_key`, the `egress`
-   network, `agents_*` networks and per-session containers?) and in what order (the unit first, so nothing
-   restarts them; the networks after the containers that hold endpoints — `remove_network` already leaves
-   first). What it **keeps** (the data root, `secrets/keys.toml`, `vapid.toml`, the worktrees? the projects?).
-   `--purge` removes the data root — and its refusal is `--force` over `live_count`, which is the one place the
-   database decides a destructive command's answer. Does it reuse `deploy::Report`'s `Line`/`Word` shape (a step
-   is a read and an apply) or is a one-line report enough? ADR-0056's five words are a *deploy* contract; a second
-   command printing them would be a second user of a shape nobody documented for it.
-5. **Idempotency and the exit code.** `uninstall` on a machine that has nothing installed should say so and exit
-   0 (like a deploy's `satisfied`), not fail. A `systemctl` that answers non-zero because the unit is not there is
-   **not** a failure of the command — the same distinction `disable --now` on an absent unit makes.
-6. **The gate.** One `case_*` per command or one case with three halves? The `status` half needs a boot (its
-   counts and its proxy lines), `logs --session` needs a session's log (a stub create plus a simulated exit gives
-   one — the `case_exit_classification` pattern), and `uninstall` needs the `--root` + shims harness §D8 of
-   ADR-0058 built (`deploy_machine_shims`, `health_responder`) plus a `systemctl`/`docker` recorder. The rule
-   stands: a case that `SKIP`ped on the bug it exists to catch is this project's P1.
-7. **Where the code lives.** `commands/status.rs`, `commands/logs.rs`, `commands/uninstall.rs` answer; the reads
-   they share (a session count by status, the unit's state, the proxies') belong in the module that already owns
-   them (`sessions::repository`, `deploy`, `proxies`) rather than in a command — the "one reader" rule ADR-0054
-   states and `deploy::preflight` already follows.
-8. **No config key** unless a fact has no other home (a `status --json`? a log line count?). A new key moves
-   `KNOWN_KEYS` (33) and the golden file, and the story has no need for one yet.
+1. **The command's name and its two spellings** (§1.2): `holosmith drain [--wait 10m]` per the Commands table and the
+   acceptance, with item 10's `holosmith admin drain` recorded as the prose's older spelling. Does the socket path come
+   from `--root`/the config, or always from `ADMIN_DIR`? (`doctor`'s `perms` already reads the *caller's* tree through
+   `Tools`, so a `--root` run's socket is a different path — and a `drain` against a `--root` install is what a gate
+   case can actually measure.)
+2. **The protocol.** One request, one answer, over `UnixStream`: a verb (`drain <seconds>`/`status`) and a line that a
+   human and a test can both read. What does a *second* drain do (join the active one? answer `already draining`?)? What
+   does `holosmith drain` print on success, and what does it print while it waits?
+3. **Where `draining` lives.** An `Arc<AtomicBool>` field on `AppState` (cloned into every handler and task), a
+   `tokio::sync::watch` (a task can await the flip), or the database (a row is wrong — the state is the process's). The
+   handlers that must see it are the create, the prompt and the steer; the ones that must not are the reads, the abort,
+   the delete and the resume (decide, and say why in the ADR).
+4. **The 503's shape.** A new `ApiError` variant with `code: "draining"`, `503`, and a sentence naming the drain and the
+   `--wait` — the first non-4xx code in the family, so `http/error.rs`'s tests (status/code/content-type, ADR-0008) grow
+   one arm.
+5. **"Waits for running turns."** A poll over the rows (`counts_by_status`) with a deadline, or an await on the turn
+   tasks. The row is the honest reader and the one a crash also leaves in place; the deadline must be the `--wait` value
+   and its expiry must be a **non-zero exit with the drain still active** (bullet 4) — not a silent success and not a
+   cancelled drain.
+6. **"Then stops idle sessions with reason `server_restart`."** Through `Stopper` (the flag before the `docker stop`) and
+   `Transitioner::apply` with `Trigger::Drain` and the new reason. Does a drain also stop `starting` rows (a provisioner
+   mid-flight)? The table has only `idle → stopped` on `Drain`, so a `starting` row is *not* stoppable by it — decide
+   whether that is a refusal, a wait, or a wait-then-timeout.
+7. **What the drain does to the listener.** Item 10 step 3's drain precedes a restart: does the server keep serving
+   (reads yes, writes refused) until `SIGTERM`, or does a successful drain end the process? The acceptance says reads
+   still work while draining, so the process stays up; the sentence in the ADR should say what ends it.
+8. **The socket's permissions and the `--root` arm.** `/run/holosmith` is root-owned on a system install and the unit
+   runs as `holosmith`; a socket in a directory the service user cannot write is a drain nobody can connect to. Under
+   `--root` the path is `<root>/run/holosmith`, which is what a gate case can measure with no systemd.
+9. **The gate.** A `case_drain` needs a turn that lasts: the shared boot's stub turn is fast, so the case needs either
+   the slow stub (`SLOW_STUB_STEP` is a *test* constant, not a gate one) or its own boot with a Docker session holding a
+   turn. What is measurable without a turn: the socket refusing non-HTTP use (no listener on the control port answers
+   it), a create answered `503 draining` after a drain, the `--wait` expiry's non-zero exit with the drain still active,
+   and a second `drain` answering honestly.
+10. **The reason word's home** (`server_restart`) and whether `reconcile::INTERRUPTED` is the reason a *drain-stopped*
+    session gets on the next boot (it is `stopped`, so the reconcile does not touch it — bullet 5 is about the rows that
+    were `running`).
 
 ### 1.6 The questions the plan must answer (before code)
 
-1. **What is `status`'s exact output, line by line, including the three arms that cannot measure (no unit, no
-   journald, no host registry)?**
-2. **Which fact is "uptime", and how is it read by a process that did not start the server?**
-3. **What is `logs`'s child argv, and what does it print where there is no journald?**
-4. **Does `uninstall` print deploy words, and what exactly does it remove, in what order, keeping what?**
-5. **What does `--purge` refuse on, and what does the refusal say?**
-6. **Which `case_*` proves each of the three, and which half can `SKIP` without skipping on its own subject?**
+1. **The exact bytes on the socket**, both directions, and what a second `drain` and a `status` verb answer.
+2. **Where the flag lives**, and which handlers consult it (a list, in the ADR).
+3. **What `--wait` measures** (rows in `running`? `starting` too?) and what the expiry prints and exits.
+4. **What a drained machine looks like**: which rows are `stopped · server_restart`, which are left live, and what the
+   next boot does with each.
+5. **The socket's path and mode** on a system install and under `--root`, and who may connect.
+6. **Which `case_*` proves each acceptance bullet**, and which half can `SKIP` without skipping on its own subject.
 
 ### 1.7 Acceptance, restated as checks
 
-- *"`status` reports role, version, uptime, live/stopped session counts, proxy state, and last health per
-  registered machine"* — one line per fact, each measured from the reader that owns it, and the host-health line
-  naming HS-068 in its `unknown` sentence rather than printing a zero.
-- *"`logs [-f] [--session ID]` reads journald, or a session's `session.log`"* — the child's argv is asserted
-  through a shim; a session id names `<data>/sessions/<id>/session.log` and an unknown one is the session API's
-  own `unknown_session` sentence; `-f` follows.
-- *"`uninstall` removes the unit, proxies and networks but keeps data"* — the children are asserted
-  (`systemctl disable --now`, the unit's file, `docker rm -f` both proxies, `docker network rm`), the data root
-  and `secrets/` are still there, and a second run exits 0 saying there is nothing left.
-- *"`--purge` also removes data; refuses while sessions are live unless `--force`"* — a live row makes it exit 1
-  with the count and the `--force` suggestion; `--force` removes the data root and says what it removed.
-- Plus the usual gates, one new `case_*`, and `docs/build.md`/`docs/notes.md`/`GLOSSARY.md`/an ADR (`0059`).
+- *"`holosmith drain [--wait 10m]` talks to a local unix socket, not HTTP"* — the socket exists at the configured admin
+  path, the command connects to it, and a request on the **control origin** cannot reach it (no route, and the guards
+  layer does not see it at all).
+- *"While draining, creates and prompts return 503 `draining`; reads still work"* — one 503 with the envelope and the new
+  code from the create and the prompt, and a 200 from `GET /api/sessions` and `GET /api/sessions/{id}` **in the same
+  window**.
+- *"It waits for running turns, then stops idle sessions with reason `server_restart`"* — a running row makes the drain
+  wait; when the turn ends, the idle rows are `stopped` with that reason and `expected_stop` set (the `Stopper`
+  contract), and the report says how many.
+- *"`--wait` expiry returns non-zero and leaves the drain state active"* — a turn longer than `--wait` makes the command
+  exit non-zero, and a create **still** answers `503 draining` afterwards.
+- *"Sessions live at drain time return to `idle` on the next startup"* — a `kill -9` after a drain leaves the rows that
+  were `running`, and the next boot's reconcile brings them to `idle · interrupted` (ADR-0053), which the case asserts.
+- Plus the usual gates, one new `case_*`, and `docs/build.md`/`docs/notes.md`/`GLOSSARY.md`/an ADR (**0060**).
 
 ### 1.8 Non-goals
 
-The admin socket and `drain` (HS-051), `upgrade`/`rollback` (HS-078/079), `hub host ...` and the host registry
-(HS-068/HS-072), the VAPID consumer (HS-066), a `status --json` contract nobody asks for, `tailscale serve`
-*configuration* (HS-049's step 6 owns it; `uninstall` may only remove what it wrote), and any UI.
+`upgrade`/`rollback` (HS-078/079 — the drain's *caller*), `hub deploy`/`hub host` (HS-072), the host registry
+(HS-068), any UI affordance for draining (none is asked for), a drain that survives a restart as a *stored* state (the
+flag is the process's), and any admin verb other than the drain.
 
 ### 1.9 The demo
 
-On this machine: `status` against a real stub `serve` (its counts and both proxy lines), `logs --session <id>` on
-a session whose log the exit classifier wrote, `logs` against a `journalctl` stand-in, and `uninstall --root` over
-the `--root` install the previous story's demo leaves (with the `systemctl`/`docker` recorders), then a second
-`uninstall` saying nothing is left, and `uninstall --purge` refusing while a row is live and succeeding with
-`--force`. **Say plainly what was not measured**: no systemd (so `disable --now` and `journalctl` are stand-ins),
-no real `status` uptime from a unit, and no host registry — the "last health" line names its story.
-
+On this machine: boot a Docker `serve` with a real session, start a prompt that takes a while (or hold a turn with the
+slow stub in `cargo test`), run `holosmith drain --wait 1m` **over the socket**, and show a create answered `503
+draining` while a `GET` still answers 200; then the turn ends, the idle rows go `stopped · server_restart`, and a
+`--wait` expiry against a still-running turn exits non-zero with the drain still active. **Say plainly what was not
+measured**: no systemd (so the socket's real directory is `/run/holosmith` only on a deployed machine — the demo and the
+gate use `--root`), and no upgrade/rollback consuming the drain (HS-078/079).
 ### 1.10 What the next agent needs back
 
 When you write the state back (§5, step 10): §1 becomes the **next** issue — by `PROMPT.md`'s ranking that is
-`PER-83` (HS-051, drain over the admin socket) *if* HS-050 ships, and `PER-82` again if it does not — with the
-same shape. Refresh the counts, the ADR number you took (**ADR-0059** is next unless HS-050 takes none), the last
-gate run's own numbers, and replace §9's row with this story's (short — one paragraph). Anything you learned that
-is **not** state and **not** an ADR goes into `docs/notes.md` under a new `### Landmines: …` heading, never into
-§1. Then kill what you started (§5, step 11).
+`PER-84` (HS-052, the changes view) *if* HS-051 ships, and `PER-83` again if it does not — with the same shape. Refresh
+the counts, the ADR number you took (**ADR-0060** is next unless HS-051 takes none), the last gate run's own numbers,
+and replace §9's row with this story's (short — one paragraph). Anything you learned that is **not** state and **not**
+an ADR goes into `docs/notes.md` under a new `### Landmines: …` heading, never into §1. Then kill what you started
+(§5, step 11).
 
 ## 2. Environment (already repaired — do not redo)
 
@@ -978,17 +980,17 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 The catalogue lives in **`docs/notes.md`** — read the **cross-cutting** sections before you start anything,
 then the sections below. It is a reference: everything there is a measurement or a review finding.
 
-| Read | Why it bears on HS-050's three readers |
+| Read | Why it bears on HS-051's drain |
 | --- | --- |
-| Cross-cutting: *Build and toolchain*, *Tests*, *Config and docs*, *Demos*, *Reviews* | True of every story. This one's sharpest: **Tests** — every reader here is a *second* process or a stub `serve`, so "a test that cannot fail" is the live risk (a `status` asserting a fixture's zeros); **Config and docs** — no new key is needed, and a `status --json` nobody asked for is a contract, not a feature. |
-| *Landmines: the doctor, the ports and a read-only open (HS-045)* | `doctor`'s three-armed answer (`pass`/`fail`/`unknown` with a sentence) is the shape `status` must copy for the facts it cannot measure — no unit, no journald, no host registry — and `db::recorded_without_migrating` is the read-only opener a report uses. |
-| *Landmines: the deploy, the ports and what `install` does to a key file (HS-047)* | The five words are a **deploy** contract; `uninstall` reusing them would be a second user of a shape nobody documented for it. `install` truncates, `--root` prefixes only installed paths, and every write is one `sudo`-prefixed child. |
-| *Landmines: the service, the keys and the origins (HS-049)* | The unit's name, path, `UNIT_DIR`, `CONTROL_HTTPS`/`PREVIEW_HTTPS` and `Tools` are public now, the gate's `deploy_machine_shims`/`health_responder` are the harness `uninstall` reuses, `perms` reads the *caller's* tree through `Tools`, and a `--root` deploy must be driven with the **musl** artifact (a glibc debug binary in the proxy image is `exec … no such file`). |
-| *Landmines: the egress proxy (HS-037) and the credential path (HS-040)* | `hs_egress`/`hs_key` are the names `uninstall` removes, `--restart unless-stopped` means the unit must stop first or they come back, and the key store is a **directory** a container mounts — the same reason a purge must remove the directory, not a file. |
-| *Landmines: Docker — mounts, containers, starts (HS-027 – HS-029)* | `docker network rm` refuses a network with an endpoint, so the containers go before the networks (the `remove_network` pattern); a context or scratch path handed to the daemon must be under `target/`. |
-| *Landmines: the startup reconcile (HS-044)* | `reconcile`'s sweep helpers (`containers_to_remove`, `networks_to_remove`, the `--format` listings) are the readers an `uninstall` should reuse rather than re-spell. |
-| *Landmines: the expected-stop flag and the exit classifier (HS-030)* | `<data>/sessions/<id>/session.log` is written by `Exits::record` (`exit::session_dir`, `exit::LOG_FILE`); a `logs --session` arm needs a session whose log exists, and a stub create plus an exit is the cheapest fixture. |
-| *Landmines: the verification run (HS-046)* | The gate withholds an `ok <case>` line for a case that printed `SKIP`, so a case that skips on "no systemd" is not allowed to look like a pass. |
+| Cross-cutting: *Build and toolchain*, *Tests*, *Config and docs*, *Demos*, *Reviews* | True of every story. This one's sharpest: **Tests** — a drain is mostly *waiting*, so every arm is a race, and a test that "waits for the turn" will pass by finishing at once; the gate has no unix-socket client in bash (`fetch` is `/dev/tcp`, network only), so `case_drain` needs `python3` like `case_doctor_quick` and `case_exit_classification` do; **HTTP and the envelope** — `503 draining` is the family's first non-4xx code. |
+| *Landmines: the doctor, the ports and a read-only open (HS-045)* | The three-armed fact (`pass`/`fail`/`unknown` with a sentence) is what the drain's *report* and its refusals must copy, and `preflight::daemon` is the one reader for "did the daemon answer" — a `bool` from `Docker::running` is not. |
+| *Landmines: `status`, `logs` and `uninstall` (HS-050)* | The newest section, and the closest code: `db::Reader` (a read-only opener for the rows a drain counts), `preflight::daemon`, and the **P1 lesson** — a read that folds "could not look" into a value is the one thing these reports refuse to do (T1/T2 in it). `uninstall` is also what a drain precedes. |
+| *Landmines: the expected-stop flag and the exit classifier (HS-030)* | "Stops idle sessions with reason `server_restart`" must go through `Stopper` — the flag written **before** the `docker stop` — and the drain is a **fourth** policy that stops something (after eviction, the idle stop and the turn's two endings). A row the drain stopped is `stopped`, so the reconcile leaves it alone. |
+| *Landmines: the startup reconcile (HS-044)* | Acceptance bullet 5 ("sessions live at drain time return to `idle` on the next startup") is mostly **this** story's mechanism: a live row becomes `starting` with reason `interrupted` and is re-provisioned. What the drain adds is which rows it leaves live and which it stops. |
+| *Landmines: the turn runner, the ladder and the two turn endings (HS-015, HS-016, HS-022)* | "Waits for running turns" needs the one honest reader of "is a turn in flight" — the row, not the tasks — and the turn's own endings are what make the wait finish. |
+| *Landmines: the service, the keys and the origins (HS-049)* | `/run/holosmith` is the admin directory (`deploy::ADMIN_DIR`, `Target::admin_dir()` prefixed under `--root`), created by step 2 and read by `doctor`'s `perms`; on a real host it is a tmpfs the unit's `User=` must be able to write, and `uninstall` deliberately keeps it. |
+| *Landmines: the deploy, the ports and what `install` does to a key file (HS-047)* | `--root` prefixes what a command *installs* and nothing it reads about the machine — so a socket under `--root` is `<root>/run/holosmith`, which is what a gate case can actually connect to. |
+| *Landmines: the verification run (HS-046)* | The gate withholds an `ok <case>` line for a case that printed `SKIP`, so a case that skips on "no systemd" or "no turn" must find another way to measure its subject. |
 
 Three rules worth repeating here because they are the most expensive to relearn: **a test that cannot fail
 is worse than no test** (mutate the behaviour and watch it go red); **a gate case that SKIPs on the bug it
@@ -1029,7 +1031,7 @@ cd /home/adamolsson/projects/holosmith
 git status --short                                  # clean apart from log.txt/orchestrate.sh
 . ~/.pi/toolchains/env.sh                           # ALWAYS before cargo/rustc
 python3 /tmp/lin.py issues | grep -v ' Done ' | head # recreate /tmp/lin.py first (§2)
-python3 /tmp/lin.py issue PER-82                    # scoped, Backlog, the issue §1 names
+python3 /tmp/lin.py issue PER-83                    # scoped, Backlog, the issue §1 names
 docker version                                      # the daemon must answer, or a Docker check cannot be measured
 docker image inspect pi-agent:local                 # the image the Docker stories run
 docker network ls | grep -w egress                  # the proxy test's premise (§2); `grep -x` never matches
@@ -1039,7 +1041,7 @@ scripts/verify.sh                                   # baseline green, ~9–12 mi
 
 If the baseline is red before you touch anything, that is the first thing you fix — and say so in Linear.
 
-Then start §5 on **§1's issue** (`PER-82`, HS-050) and stop after step 11.
+Then start §5 on **§1's issue** (`PER-83`, HS-051) and stop after step 11.
 
 Before you begin, check that the last session left nothing behind — `subagent({action:"list"})` should show
 no run in progress, `docker ps` none of its containers, and `git status --short` should look like the line
@@ -1058,22 +1060,21 @@ from those three; do not carry old sessions' ledgers in this file.
 If you stop before the issue ships, say so explicitly, name the next action, and leave the tree clean and the
 gates green — **a half-finished story is worse than an honest stop**.
 
-**The last shipped story** (`PER-81`, HS-049, ADR-0058; commits `50b22bc`, `2375f37`, `cfb2775`): `server deploy`
-now installs a *machine*. Step 2 creates the `holosmith` service user in the docker group, reads `id`/`stat` and
-chowns the tree to it, and writes the machine's **VAPID pair** to `<data>/secrets/vapid.toml` (0600, two unpadded
-base64url strings, one `openssl ecparam … -outform DER` child parsed by `vapid::from_der`) — the one writer, absent
-is the only state that generates, and a non-pair is a step that fails rather than regenerating. Step 5 renders
-`holosmith.service` from the running binary's path with `Restart=on-failure` and `ExecStartPre=<binary> doctor
---quick`, and its read is the bytes **plus** `systemctl is-enabled`; step 6 asks `tailscale serve` for 443 and 8444
-and reads `serve status --json`'s `Web[].Handlers["/"].Proxy` back; step 7 waits for `/api/health` and then asks
-`doctor --full` in process. `doctor --quick` gained the check word **`perms`** (the installed paths' modes and
-owners, the data root's owner as the reference, `unknown` when the tree is absent), so a wrong mode stops
-`ExecStartPre`; the *deploy* only remarks on it, because step 2 is the repair. **Nothing is `skipped` any more** —
-the owner table, the `incomplete` line and step 2's old remark are deleted. The review's two P1s: `perms` spelled
-the machine's two paths (fixed by threading the `Target` through `doctor::Tools`), and the `keys.toml` mode-repair
-arm's fixture had become its own subject (fixed; the mutation fails now). The gate: **72 cases, 958 assertions**, no
-`SKIP`; `cargo test` 874/49, `web` 52. Its full record is Linear, `docs/review/PER-81.md` and `git log`; do not
-carry it forward.
+**The last shipped story** (`PER-82`, HS-050, ADR-0059; commits `deccc7c`, `b0b513e`, `4a7cc40`, `5dc08df`,
+`887de9e`, `11b020f`): three commands, each mostly a reader of state earlier stories own. `status` prints one
+`key value` line per fact with `doctor`'s three arms — `role`, `version`, `uptime` (asked of `GET /api/health`, because
+`Runtime::uptime_s` is the only owner and the `unknown:` sentence is where "not serving" is said), six
+`sessions <status>` lines from one `GROUP BY` through a new read-only `db::Reader`, both `proxy` lines (with
+`preflight::daemon` asked **first**, so "could not look" is `unknown:` not `not running` — its review's P1), and a
+`machines` line naming HS-068. `logs` is one `journalctl -u holosmith.service [-f]` child with no `-n` and inherited
+stdio, or a session's `session.log` read in-process with `-f` a 200 ms poll loop. `uninstall` prints
+`uninstall: <what>: <word>: <sentence>` with four words of its own (`removed`/`kept`/`nothing`/`failed`), removes the
+unit then both proxies then the `egress` network, keeps the data root, `secrets/`, the projects and the sessions' own
+containers and networks, and `--purge` sweeps the rows' `s_<id>`/`agents_<id>` names before deleting the tree — with a
+refusal over `live_count` **before any child runs** unless `--force`. The review raised one P1 and eight P2s, all
+fixed; three spec findings were dismissed with citations (the registry clause → HS-068, six counts → ADR-0059 D3, a
+session's network surviving → ADR-0059 D6). The gate: **75 cases, 1034 assertions**, no `SKIP`; `cargo test` 899/49,
+`web` 52. Its full record is Linear, `docs/review/PER-82.md` and `git log`; do not carry it forward.
 
 **One thing this build does not do, recorded rather than discovered:** a resumed session's pi has **no
 memory** of earlier turns (`--no-session`; the transcript is Holosmith's log). Replaying the log into a new pi
