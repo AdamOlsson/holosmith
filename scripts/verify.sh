@@ -195,9 +195,15 @@ expect_code() {
 }
 
 # expect_no_cors <name> <response>: no access-control-* header, and no Vary that implies one.
+#
+# The header block is cut with bash's own suffix removal rather than `sed '/^\r$/q'`, and the reason is
+# measured (HS-053): a `sed …q` closes the pipe at the blank line while `printf` is still writing, and under
+# `pipefail` that SIGPIPE is a 141 that kills the whole run — which is exactly what a 256 KB answer did. Bash's
+# `${var%%pattern}` cannot be interrupted.
 expect_no_cors() {
   local name="$1" response="$2" headers
-  headers="$(printf '%s\n' "$response" | sed '/^\r$/q' | tr -d '\r')"
+  headers="${response%%$'\r\n\r\n'*}"
+  headers="$(printf '%s\n' "$headers" | tr -d '\r')"
   if printf '%s\n' "$headers" | grep -qi '^access-control-'; then
     fail "$name/no_cors" "the answer carried a CORS header: $headers"
   fi
@@ -347,8 +353,11 @@ fetch_sse_until() {
 
 # expect_header <name> <response> <header> <expected>: one header's value, compared exactly.
 expect_header() {
-  local name="$1" response="$2" header="$3" expected="$4" value
-  value="$(printf '%s\n' "$response" | sed '/^\r$/q' | tr -d '\r' |
+  local name="$1" response="$2" header="$3" expected="$4" value headers
+  # The header block alone, for `expect_no_cors`'s reason: a `sed '/^\r$/q'` on a large answer is a SIGPIPE
+  # under `pipefail` (measured, HS-053), so the cut is bash's own.
+  headers="${response%%$'\r\n\r\n'*}"
+  value="$(printf '%s\n' "$headers" | tr -d '\r' |
     { grep -i "^${header}:" || true; } | sed -n '1s/^[^:]*: *//p')"
   check "$name/$header" "$expected" "$value"
 }
