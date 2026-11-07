@@ -1,8 +1,9 @@
 //! `holosmith logs`: the server's log from journald, or one session's `session.log` (HS-050).
 //!
-//! Thin, like the other commands: the config is read the way every command reads it (the data root is where a
-//! session's log lives), the one seam is [`crate::logs::Tools`], and the exit code is the child's own for the
-//! journald arm — journald's "no journal" answer is a fact this command has no better words for.
+//! Thin, like the other commands: the one seam is [`crate::logs::Tools`], and the exit code is the child's own for
+//! the journald arm — journald's "no journal" answer is a fact this command has no better words for. The config is
+//! read **only for `--session`**, because the journald arm needs nothing from it: a machine with a broken config is
+//! one whose log an operator most wants to read.
 //!
 //! `--session` and `-f` combine: a followed session log prints what is there and then what arrives
 //! ([`crate::logs::follow`]).
@@ -25,17 +26,9 @@ pub struct LogsArgs {
 }
 
 pub fn run(args: LogsArgs) -> ExitCode {
-    let loaded = match Config::load(args.config) {
-        Ok(loaded) => loaded,
-        Err(LoadError::Invalid(problems)) => {
-            eprint!("{problems}");
-            return ExitCode::FAILURE;
-        }
-        Err(error) => {
-            eprintln!("holosmith: logs: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
+    // The journald arm comes **first and reads no config**: the unit's log is journald's, so a machine whose
+    // `config.toml` is broken can still be read — which is exactly the machine an operator runs `logs` on (HS-050's
+    // review, S4). The session arm is where a data root is needed, and that is where the config is read.
     let Some(id) = args.session else {
         let tools = logs::Tools::default();
         return match logs::server(args.follow, &tools) {
@@ -47,6 +40,17 @@ pub fn run(args: LogsArgs) -> ExitCode {
                 ExitCode::FAILURE
             }
         };
+    };
+    let loaded = match Config::load(args.config) {
+        Ok(loaded) => loaded,
+        Err(LoadError::Invalid(problems)) => {
+            eprint!("{problems}");
+            return ExitCode::FAILURE;
+        }
+        Err(error) => {
+            eprintln!("holosmith: logs: {error}");
+            return ExitCode::FAILURE;
+        }
     };
     let mut out = std::io::stdout().lock();
     match logs::session(&id, args.follow, &loaded.config, &mut out) {

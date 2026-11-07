@@ -133,9 +133,11 @@ pub fn session(
 /// is what makes "a line appended after the first read is printed" a test with no clock, no child and no file
 /// watcher in it.
 ///
-/// Reading stops at end of file rather than waiting for a change, and a file that shrinks (a log rewritten) is
-/// re-read from the start: `session.log` is append-only, so neither is a case this build produces, and the simple
-/// rule is the one an operator's `tail`-less machine can afford.
+/// Reading stops at end of file rather than waiting for a change, and the position is the file handle's: **a file
+/// that shrinks is not re-read** and a file replaced by a new inode is not followed at all. That is deliberate and it
+/// is a limit, not a claim — `session.log` is append-only (`Exits::record` only appends) and a session's directory is
+/// removed rather than rewritten, so neither case is one this build produces. A follower that seeks back on a size
+/// change would have to decide what "the same log" means; this command does not, and says so.
 pub fn follow(
     path: &Path,
     out: &mut impl Write,

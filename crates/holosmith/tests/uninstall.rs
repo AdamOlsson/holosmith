@@ -101,6 +101,9 @@ struct Fake {
     networks: Mutex<Vec<String>>,
     removed_containers: Mutex<Vec<String>>,
     removed_networks: Mutex<Vec<String>>,
+    /// Every removal in the order it happened, so "containers before the network" is a measurement rather than a
+    /// claim the two vectors above cannot support.
+    calls: Mutex<Vec<String>>,
     /// A removal that refuses, for the arm where the daemon says no.
     refuse_removal: bool,
 }
@@ -123,6 +126,13 @@ impl Fake {
 
     fn removed_networks(&self) -> Vec<String> {
         self.removed_networks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.calls
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -152,6 +162,10 @@ impl Machines for Fake {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(name.to_string());
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(format!("container {name}"));
         true
     }
 
@@ -184,6 +198,10 @@ impl Machines for Fake {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(name.to_string());
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(format!("network {name}"));
         true
     }
 }
@@ -386,6 +404,16 @@ fn the_proxies_and_the_egress_network_go_containers_first() {
         [holosmith::docker::EGRESS_NETWORK],
         "the machine's network goes, and a session's does not: a session's names belong to the row that holds it"
     );
+    // The order the name claims: `docker network rm` refuses a network with an endpoint, so both containers have to
+    // go first — and the two vectors above cannot say that, which is what the ordered log is for.
+    assert_eq!(
+        machine.calls(),
+        [
+            format!("container {}", container::PROXY_NAME),
+            format!("container {}", holosmith::key::KEY_PROXY_NAME),
+            format!("network {}", holosmith::docker::EGRESS_NETWORK),
+        ]
+    );
 }
 
 #[test]
@@ -523,7 +551,7 @@ fn a_forced_purge_removes_the_data_and_the_rows_own_names() {
 }
 
 #[test]
-fn the_system_path_asks_systemd_and_prefixes_its_write_with_sudo() {
+fn a_system_path_run_with_no_unit_file_asks_systemd_and_writes_nothing() {
     let _guard = one_at_a_time();
     let dir = TempDir::new("uninstall-system");
     // No `--root`: the system paths, and `privileged()`. The config's data root is this test's temp directory, so

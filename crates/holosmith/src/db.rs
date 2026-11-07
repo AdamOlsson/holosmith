@@ -150,8 +150,18 @@ impl Reader {
     /// Open `path` read-only, or `None` when there is no file yet — a machine that has never served, which is not
     /// a finding (its own command says so in its own words).
     pub fn open(path: &Path) -> Result<Option<Self>, DbError> {
-        if !path.exists() {
-            return Ok(None);
+        // `NotFound` is the only "there is nothing to read". `Path::exists()` answers `false` for **any** stat
+        // failure, which would turn "this user may not look inside the data root" into "this machine has never
+        // served" — and one caller of this opener decides whether to delete the tree over that answer (HS-050).
+        match std::fs::metadata(path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(DbError::Sqlite {
+                    path: path.to_path_buf(),
+                    source: rusqlite::Error::ToSqlConversionFailure(Box::new(error)),
+                });
+            }
         }
         let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(sqlite_error_about(path))?;

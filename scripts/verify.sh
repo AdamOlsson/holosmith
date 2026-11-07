@@ -6247,12 +6247,11 @@ case_status() {
   grep -qxE "uptime ($uptime|$((uptime + 1))|$((uptime + 2)))s" "$WORK/$name.out" ||
     fail "$name/uptime" "the uptime line is not the endpoint's $uptime: $(cat "$WORK/$name.out")"
   assertions=$((assertions + 1))
-  # One line per status, in the enum's own words, and none of them invented.
-  total=0
+  # One line per status, in the enum's own words, and none of them invented. The *sum* is checked below, against
+  # the sessions list, where there is something to compare it with — summing here measured nothing.
   for word in starting idle running stopped error deleting; do
-    line="$(grep -E "^sessions $word [0-9]+$" "$WORK/$name.out" || true)"
-    [ -n "$line" ] || fail "$name/sessions" "no \`sessions $word N\` line: $(cat "$WORK/$name.out")"
-    total=$((total + ${line##* }))
+    grep -qE "^sessions $word [0-9]+$" "$WORK/$name.out" ||
+      fail "$name/sessions" "no \`sessions $word N\` line: $(cat "$WORK/$name.out")"
     assertions=$((assertions + 1))
   done
   # Both proxy lines, each the daemon's own answer.
@@ -6286,11 +6285,19 @@ case_status() {
   [ -n "$id" ] || fail "$name/create" "the create names no id: $(cat "$WORK/responses/$name-create.body")"
   wait_for_idle_id "$name-idle" "$id"
 
+  # Two seconds later, so "the uptime moved" is a fact about the clock rather than about rounding: a `status` that
+  # printed `0s` would satisfy "well-formed" and fail this.
+  sleep 2
   status=0
   "$artifact" status --config "$WORK/config-status.toml" >"$WORK/$name.after.out" 2>&1 || status=$?
   check "$name/after/exit" 0 "$status"
   grep -qx 'sessions idle 1' "$WORK/$name.after.out" ||
     fail "$name/after/idle" "a created session is not counted as idle: $(cat "$WORK/$name.after.out")"
+  assertions=$((assertions + 1))
+  line="$(sed -n 's/^uptime \([0-9][0-9]*\)s$/\1/p' "$WORK/$name.after.out")"
+  [ -n "$line" ] || fail "$name/after/uptime" "the uptime line is not a measurement: $(cat "$WORK/$name.after.out")"
+  [ "$line" -ge "$((uptime + 2))" ] ||
+    fail "$name/after/uptime_moved" "the uptime was $uptime earlier and is $line now, two seconds later"
   assertions=$((assertions + 1))
   total=0
   for word in starting idle running stopped error deleting; do
@@ -6302,6 +6309,23 @@ case_status() {
     fail "$name/list" "GET /api/sessions did not answer"
   listed="$(grep -o '"id":"[0-9a-f]\{16\}"' "$WORK/responses/$name-list.body" | wc -l | tr -d ' ')"
   check "$name/after/total" "$listed" "$total"
+
+  # The one arm that changes the exit code: a database nobody can read is a `fail:` line and exit 1, not six
+  # measured zeros. A file where the database should be is the cheapest way to make SQLite refuse.
+  mkdir -p "$root/broken"
+  printf 'this is not a database' >"$root/broken/app.db"
+  printf 'owner = "%s"\nrole = "server"\nbackend = "stub"\ndata_root = "%s"\ncontrol_listen = "127.0.0.1:%s"\nmin_free_gb = 1\n' \
+    "$owner" "$root/broken" "$control" >"$WORK/config-status-broken.toml"
+  status=0
+  "$artifact" status --config "$WORK/config-status-broken.toml" >"$WORK/$name.broken.out" 2>&1 || status=$?
+  check "$name/broken/exit" 1 "$status"
+  grep -q '^sessions fail: ' "$WORK/$name.broken.out" ||
+    fail "$name/broken/line" "an unreadable database is not a failed read: $(cat "$WORK/$name.broken.out")"
+  assertions=$((assertions + 1))
+  if grep -q '^sessions idle ' "$WORK/$name.broken.out"; then
+    fail "$name/broken/zeros" "the counts were printed over a read that failed: $(cat "$WORK/$name.broken.out")"
+  fi
+  assertions=$((assertions + 1))
 
   # What this case made it takes back: its own data root dies with the directory, and the shared boot goes back
   # for the cases after this one.

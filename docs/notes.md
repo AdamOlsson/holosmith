@@ -1730,3 +1730,14 @@ it rather than adding a caveat beside it.
   the machine's real `/var/lib/holosmith` — which is how HS-050's first demo printed "no log for session <id>" over
   a session that had one. Two configs is the shape that works: one for the run (`data_root` in the file) and one for
   a `--root` teardown (`data_root` omitted, because `--root` prefixes what the file spells).
+- **`Docker::running` answers a `bool`, and every daemon error is folded into `false`.** So a report that asks it
+  alone cannot tell "the container is down" from "I could not look" — a socket this user may not open, a daemon that
+  is down and an account outside the `docker` group all print `not running`. `preflight::daemon` is the one reader that
+  separates the two, and both `doctor`'s proxy findings and `status`'s proxy lines ask it **first** (HS-050's review,
+  T1, which is the story's own rule turned on itself). The same shape applies to any future read that returns a
+  `bool` over a fallible question: the question's failure has to be answerable separately, or the report invents a
+  measurement.
+- **`Path::exists()` is `false` for every stat error, not just "not there".** A read-only opener that answers "no
+  file" over a permission error turns an unreadable data root into "this machine has never served" — and one caller
+  decides whether to *delete* the tree over that answer. `db::Reader::open` matches `ErrorKind::NotFound` and returns
+  the error for anything else (HS-050's review, T2).

@@ -14,7 +14,7 @@
 //!   `--config` and `--root` made absolute and never `--dry-run`. Every step reads state first, so re-running is
 //!   the whole recovery procedure, and a second syntax would be a second entry point (ADR-0055/ADR-0056).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crate::config::{Config, LoadError};
@@ -76,19 +76,13 @@ pub fn run(args: DeployArgs) -> ExitCode {
 fn resume(args: &DeployArgs) -> String {
     let mut command = String::from("deploy: resume: holosmith server deploy");
     if let Some(config) = &args.config {
-        command.push_str(&format!(" --config {}", absolute(config).display()));
+        command.push_str(&format!(" --config {}", deploy::absolute(config).display()));
     }
     if let Some(root) = &args.root {
-        command.push_str(&format!(" --root {}", absolute(root).display()));
+        command.push_str(&format!(" --root {}", deploy::absolute(root).display()));
     }
     if args.dry_run {
         command.push_str(" --dry-run");
     }
     command
-}
-
-/// One path made absolute, or kept verbatim when the kernel cannot answer — a resume naming a path this process
-/// could not resolve is better than no resume at all.
-fn absolute(path: &Path) -> PathBuf {
-    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }

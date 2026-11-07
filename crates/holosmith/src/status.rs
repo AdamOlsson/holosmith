@@ -17,8 +17,13 @@
 //! | `version` | [`crate::version::VersionInfo`], the same value `holosmith version --json` prints |
 //! | `uptime` | `GET /api/health` ([`crate::http::health::ask`]): [`Runtime::uptime_s`] is the one owner of "how long has this process been up" |
 //! | `sessions <status>` | `sessions` rows, through a **read-only** [`crate::db::Reader`] |
-//! | `proxy <name>` | [`crate::proxies::running`], the same read `doctor --full` and `server deploy`'s step 4 use |
+//! | `proxy <name>` | `preflight::daemon` first (did it answer?), then [`crate::proxies::running`] |
 //! | `machines` | nothing yet — the registry is HS-068 (phase 3) |
+//!
+//! The proxy pair is the one line family whose first question is *whether it could be asked at all*: `Docker::running`
+//! folds every daemon error into `false`, so a `status` that asked it alone would print `not running` for a machine
+//! nobody looked at. `preflight::daemon` is the reader that separates the two, and a daemon that does not answer makes
+//! both lines `unknown:` — not a failure, because describing a machine whose daemon is down is what this command is for.
 //!
 //! [`Runtime::uptime_s`]: crate::runtime::Runtime::uptime_s
 //!
@@ -54,6 +59,7 @@ use std::fmt::{self, Write as _};
 use crate::config::Config;
 use crate::db;
 use crate::http::health;
+use crate::preflight::{self, Outcome};
 use crate::proxies;
 use crate::sessions::Status;
 use crate::version::VersionInfo;
@@ -137,23 +143,49 @@ pub fn run(config: &Config, machine: &dyn proxies::Containers) -> Report {
         uptime(config),
     ];
     lines.extend(counts(config));
-    for (running, name) in proxies::running(config, machine)
-        .into_iter()
-        .zip(proxies::NAMES)
-    {
-        // Both arms are a measurement: the daemon answered, and the answer is whether the container is up. A
-        // machine with no daemon at all has nothing running, which is the same fact and not an error — the
-        // proxy's own recipe treats an absent container the same way (`replace` removes before it runs).
-        lines.push(measured(
-            &format!("proxy {name}"),
-            if running { "running" } else { "not running" },
-        ));
-    }
+    lines.extend(proxies(config, machine));
     lines.push(Line {
         key: "machines".to_string(),
         value: Value::Unknown(NO_REGISTRY.to_string()),
     });
     Report { lines }
+}
+
+/// The two `proxy <name>` lines, which are three-armed like every other fact.
+///
+/// **The daemon is asked first, and that question is what makes these lines honest.** [`crate::proxies::running`]
+/// answers a `bool`, and [`crate::docker::Docker::running`] folds *every* failure into `false` — a socket this user
+/// cannot open, a daemon that is down, an account outside the `docker` group — so asking it alone would print
+/// `not running` for a machine nobody looked at. `preflight::daemon` is the one reader that separates "it answered"
+/// from "it could not be asked" (ADR-0028/ADR-0054), and it is the same finding `doctor` and `serve` rest on, so
+/// `status` cannot say something about the daemon that the boot's refusal would contradict.
+///
+/// A missing daemon is **not** a failure of this command: describing a machine whose daemon is down is exactly what
+/// `status` is for, and the two `unknown:` lines say which fact was not measured and why.
+fn proxies(config: &Config, machine: &dyn proxies::Containers) -> Vec<Line> {
+    let daemon = preflight::daemon(config);
+    if daemon.outcome != Outcome::Pass {
+        return proxies::NAMES
+            .into_iter()
+            .map(|name| Line {
+                key: format!("proxy {name}"),
+                value: Value::Unknown(format!(
+                    "whether it is running was not measured: {}",
+                    daemon.sentence
+                )),
+            })
+            .collect();
+    }
+    proxies::running(config, machine)
+        .into_iter()
+        .zip(proxies::NAMES)
+        .map(|(running, name)| {
+            measured(
+                &format!("proxy {name}"),
+                if running { "running" } else { "not running" },
+            )
+        })
+        .collect()
 }
 
 /// One measured fact.
@@ -223,6 +255,8 @@ fn counts(config: &Config) -> Vec<Line> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -254,22 +288,37 @@ mod tests {
         }
     }
 
-    /// A config whose data root is a fresh temp directory and whose control port is one nothing listens on, so
-    /// every test's start is "a machine that is not serving", the honest arm.
+    /// A config whose data root is a fresh temp directory and whose daemon is one **this machine does not have**, so
+    /// every test starts from "the daemon could not be asked" — the honest arm — unless it builds a socket.
     fn config(label: &str) -> (Config, PathBuf) {
         let root =
             std::env::temp_dir().join(format!("holosmith-status-{label}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("the temp data root is creatable");
-        let mut config = Config {
+        let config = Config {
             role: Role::Server,
             data_root: root.clone(),
+            control_listen: "127.0.0.1:1".parse().expect("a literal address"),
+            docker_host: Some(format!("unix://{}", root.join("no-daemon.sock").display())),
             ..Config::default()
         };
-        // A port the kernel gave and this process gave back: nothing answers there, and no test can collide with
-        // another by picking a fixed one.
-        config.control_listen = "127.0.0.1:1".parse().expect("a literal address");
         (config, root)
+    }
+
+    /// A daemon that answers `GET /_ping` for the rest of the test's life, at `path`.
+    ///
+    /// `tests/doctor.rs`'s helper, and here for the same reason: the daemon question is a real socket read, so the
+    /// "it answered" arm has to be answered by something.
+    fn fake_daemon(path: &PathBuf) {
+        let listener = UnixListener::bind(path).expect("the test socket is bindable");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut request = [0_u8; 512];
+                let _ = stream.read(&mut request);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nApi-Version: 1.51\r\n\r\nOK");
+            }
+        });
     }
 
     #[test]
@@ -351,8 +400,8 @@ mod tests {
             "nothing is serving, so the uptime line says so: {rendered}"
         );
         assert!(
-            rendered.contains("proxy hs_egress not running\n"),
-            "{rendered}"
+            rendered.contains("proxy hs_egress unknown: whether it is running was not measured"),
+            "a daemon nobody could reach is not a proxy that is down: {rendered}"
         );
         assert!(
             rendered.contains(&format!("machines unknown: {NO_REGISTRY}")),
@@ -363,7 +412,10 @@ mod tests {
 
     #[test]
     fn a_running_proxy_is_measured_from_the_daemons_answer() {
-        let (config, root) = config("proxy");
+        let (mut config, root) = config("proxy");
+        let socket = root.join("daemon.sock");
+        fake_daemon(&socket);
+        config.docker_host = Some(format!("unix://{}", socket.display()));
         let machine = Fake {
             running: vec![crate::container::PROXY_NAME],
         };
@@ -372,6 +424,27 @@ mod tests {
         assert!(
             rendered.contains("proxy hs_key not running\n"),
             "{rendered}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_database_that_cannot_be_read_fails_the_sessions_reading_rather_than_printing_zeros() {
+        // The one arm that changes the exit code: a file where the database should be, which SQLite will not open as
+        // a database. Six zeros here would be a guess about a machine nobody could look at.
+        let (config, root) = config("broken");
+        std::fs::write(root.join(db::DATABASE_FILE), "this is not a database")
+            .expect("the temp file is writable");
+        let report = run(&config, &Fake::default());
+        let rendered = report.render();
+        assert!(
+            rendered.contains("sessions fail: "),
+            "an unreadable database is a failed read, not zero rows: {rendered}"
+        );
+        assert!(report.failed(), "{rendered}");
+        assert!(
+            !rendered.contains("sessions idle 0"),
+            "the counts were printed over a read that failed: {rendered}"
         );
         let _ = std::fs::remove_dir_all(root);
     }

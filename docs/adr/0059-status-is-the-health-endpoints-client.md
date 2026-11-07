@@ -37,6 +37,15 @@ until there is something to ask.
 `not running` are not failures: a stopped machine is a machine `status` is *for*, and ADR-0054's rule (only `fail`
 changes the code) is what makes that expressible.
 
+**The proxy pair is the one family whose first question is whether it could be asked at all.** `proxies::running`
+answers a `bool` and `Docker::running` folds *every* daemon error into `false` — a socket this user may not open, a
+daemon that is down, an account outside the `docker` group — so a `status` that asked it alone would print
+`not running` for a machine nobody looked at, which is the one thing these reports refuse to do. `preflight::daemon`
+(the same finding `serve`'s refusal and `doctor` rest on, ADR-0028/ADR-0054) is asked **first**, and a daemon that
+does not answer makes both lines `unknown: whether it is running was not measured: …`. A missing daemon is *not* a
+failure of this command: describing a machine whose daemon is down is what `status` is for, unlike `doctor --quick`,
+whose question is "may `serve` run here" (HS-050's review, T1).
+
 ## D2 — uptime is asked, not recorded
 
 `status` is a **second** process, so the server's start time has to be read from somewhere. The candidates were: a
@@ -97,6 +106,11 @@ log is one sentence naming the path.
 
 `--session` and `-f` combine, which is the acceptance's only claim about them together.
 
+**The journald arm reads no config.** `--config` belongs to the `--session` arm, where a data root is needed, so a
+machine whose `config.toml` is broken — which is exactly the machine an operator runs `logs` on — still prints its
+unit's log (HS-050's review, S4). Every other command refuses a broken file before it does anything, and that
+difference is deliberate: this one arm reads nothing from it.
+
 ## D5 — `uninstall` is not a deploy, and does not print its words
 
 ADR-0056's five words (`satisfied`, `needs`, `changed`, `skipped`, `failed`) are a **deploy** contract: a step that
@@ -119,10 +133,13 @@ teardown's commonest answer and the one the acceptance's idempotency asks for.
 4. **The data** — kept, or purged (D7).
 
 It keeps the data root (`app.db`, every session's `session.log`, `secrets/keys.toml`, `secrets/vapid.toml`), the
-projects and their worktrees and branches, the two images — and **the sessions' own containers and `agents_*`
-networks**, which belong to the rows the kept data describes: a boot's reconcile owns them (ADR-0053), and a plain
-`uninstall` that killed a live session would destroy a turn it was never asked about. The `data: kept:` line says
-so, and `--purge` is the arm where they go.
+projects and their worktrees and branches, the two images, the **deployed `config.toml` and the admin directory**
+(`/run/holosmith`, which HS-051's socket is created in — neither is data and neither is named by the spec's teardown
+row, so removing them is a later story's decision and one sentence here) — and **the sessions' own containers and
+`agents_*` networks**, which belong to the rows the kept data describes: a boot's reconcile owns them (ADR-0053), and
+a plain `uninstall` that killed a live session would destroy a turn it was never asked about. The `data: kept:` line
+says so, and `--purge` is the arm where they go. The keeps list is exhaustive on purpose: a list that says "the data
+root" and means "some paths" is how a teardown removes something nobody agreed to.
 
 **`systemctl`'s answers are remarks, not failures.** An unloaded unit answers `disable --now` non-zero, a machine
 whose systemd is not running answers the same way, and neither is a reason to stop a teardown whose deliverable is
@@ -140,6 +157,10 @@ networks the rows name (`s_<id>`, `agents_<id>`) — names derived from an id, n
 named can be swept by accident. Never a branch, never a worktree, never an image: a purge that removed the
 operator's projects would be a delete of something it does not own. A daemon that refuses is counted in the line's
 sentence rather than failing the run, because the data root is the deliverable.
+
+The refusal's reader is the **same** read-only `db::Reader` `status` uses, and "there is no database" is
+`ErrorKind::NotFound` only: any other stat failure is a refusal with its reason, because a purge that cannot count the
+rows it is about to describe must not delete them (HS-050's review, T2).
 
 The refusal — `live_count() > 0` and no `--force` — happens **before any child runs**, and is a refusal rather than a
 report: one sentence on stderr, exit 1, nothing removed. A run that removed the unit and then discovered it could

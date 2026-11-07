@@ -285,11 +285,17 @@ pub fn check_with(config: &Config, tools: &Tools) -> Vec<Complaint> {
 /// [`check`] is its failures: one list, one spelling of each sentence, so `serve`'s refusal and `doctor`'s report
 /// cannot say different things about one machine (ADR-0028, ADR-0054).
 pub fn report_with(config: &Config, tools: &Tools) -> Vec<Finding> {
-    vec![
-        docker(config.docker_host.as_deref()),
-        git(&tools.git),
-        disk(config, &tools.df),
-    ]
+    vec![daemon(config), git(&tools.git), disk(config, &tools.df)]
+}
+
+/// Whether the daemon answers, asked on its own — the check `holosmith status`'s two proxy lines rest on (HS-050).
+///
+/// One function, two callers: [`report_with`]'s list and `status`, which asks it **first** so that a daemon nobody
+/// could reach makes both proxy lines `unknown:` instead of `not running`. That distinction is the whole of ADR-0054
+/// applied to this read — `Docker::running` folds every daemon error into `false`, so asking it alone would turn "I
+/// could not look" into a measurement, and `doctor` has made the same call for its own proxy findings.
+pub fn daemon(config: &Config) -> Finding {
+    docker(config.docker_host.as_deref())
 }
 
 /// `GET /_ping` against the daemon, over the socket `docker_host` names.

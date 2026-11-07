@@ -13,7 +13,7 @@
 //!   `--config` and `--root` made absolute, and `--purge`/`--force` only when this run had them. Every step reads
 //!   before it applies, so re-running *is* the recovery.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crate::config::{Config, LoadError};
@@ -74,10 +74,16 @@ pub fn run(args: UninstallArgs) -> ExitCode {
 fn resume(args: &UninstallArgs) -> String {
     let mut command = String::from("uninstall: resume: holosmith uninstall");
     if let Some(config) = &args.config {
-        command.push_str(&format!(" --config {}", absolute(config).display()));
+        command.push_str(&format!(
+            " --config {}",
+            crate::deploy::absolute(config).display()
+        ));
     }
     if let Some(root) = &args.root {
-        command.push_str(&format!(" --root {}", absolute(root).display()));
+        command.push_str(&format!(
+            " --root {}",
+            crate::deploy::absolute(root).display()
+        ));
     }
     if args.purge {
         command.push_str(" --purge");
@@ -86,10 +92,4 @@ fn resume(args: &UninstallArgs) -> String {
         command.push_str(" --force");
     }
     command
-}
-
-/// One path made absolute, or kept verbatim when the kernel cannot answer — a resume naming a path this process
-/// could not resolve is better than no resume at all.
-fn absolute(path: &Path) -> PathBuf {
-    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }

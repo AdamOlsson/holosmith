@@ -52,7 +52,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::config::Config;
-use crate::container::{NAME_PREFIX, PROXY_NAME, network_name};
+use crate::container::{NAME_PREFIX, NETWORK_PREFIX, PROXY_NAME, network_name};
 use crate::db;
 use crate::deploy::{Target, UNIT_NAME};
 use crate::docker::{self, Docker};
@@ -339,18 +339,28 @@ fn unit(target: &Target, tools: &Tools) -> Line {
     // can link one from `/run/systemd/system`, and a file removed by hand leaves the unit loaded. So on a privileged
     // run the file's absence is *confirmed* by asking systemd rather than believed — one child on a machine with
     // nothing installed, and the only question this step asks before it acts.
-    let known = !present
-        && target.privileged()
-        && systemctl(tools, &["is-enabled", UNIT_NAME])
-            .remark()
-            .is_none();
+    let asked =
+        (!present && target.privileged()).then(|| systemctl(tools, &["is-enabled", UNIT_NAME]));
+    let known = asked
+        .as_ref()
+        .is_some_and(|answer| answer.answered() && answer.remark().is_none());
     if !present && !known {
+        // Three sentences, because there are three facts: systemd said no, systemd could not be asked, or this is a
+        // `--root` tree where no question was asked at all.
+        let why = match (&asked, target.privileged()) {
+            (Some(Answer::No(line)), _) => format!(
+                "`systemctl is-enabled {UNIT_NAME}` answers that systemd knows of none ({line})"
+            ),
+            (Some(Answer::Unasked(line)), _) => format!(
+                "systemd could not be asked whether it knows one ({line}), so whether it is loaded was not measured"
+            ),
+            _ => "--root: this run did not ask systemd, because a unit in a tree is not one it can read".to_string(),
+        };
         return Line {
             what: What::Unit,
             word: Word::Nothing,
             sentence: format!(
-                "no unit at {}, and `systemctl is-enabled {UNIT_NAME}` answers that systemd knows of none: nothing \
-                 has installed one, or this run already removed it",
+                "no unit at {}, and {why}: nothing has installed one, or this run already removed it",
                 path.display()
             ),
         };
@@ -359,11 +369,18 @@ fn unit(target: &Target, tools: &Tools) -> Line {
     if target.privileged() {
         // Stop it before its file goes: a unit whose `ExecStart` is still running would keep the proxies alive and
         // the port held, and nothing would be able to address it afterwards.
-        if let Some(line) = systemctl(tools, &["disable", "--now", UNIT_NAME]).remark() {
-            remarks.push(format!(
-                "`systemctl disable --now {UNIT_NAME}` answered non-zero, which is what a unit systemd has not \
-                 loaded looks like ({line})"
-            ));
+        let answer = systemctl(tools, &["disable", "--now", UNIT_NAME]);
+        if let Some(line) = answer.remark() {
+            remarks.push(match answer {
+                Answer::Unasked(_) => format!(
+                    "`systemctl disable --now {UNIT_NAME}` could not be run ({line}), so the unit was not stopped \
+                     through systemd"
+                ),
+                _ => format!(
+                    "`systemctl disable --now {UNIT_NAME}` answered non-zero, which is what a unit systemd has not \
+                     loaded looks like ({line})"
+                ),
+            });
         }
     }
     if present && let Err(sentence) = remove(path.as_path(), false, target, tools) {
@@ -373,12 +390,16 @@ fn unit(target: &Target, tools: &Tools) -> Line {
             sentence,
         };
     }
-    if target.privileged()
-        && let Some(line) = systemctl(tools, &["daemon-reload"]).remark()
-    {
-        remarks.push(format!(
-            "`systemctl daemon-reload` answered non-zero ({line})"
-        ));
+    if target.privileged() {
+        let answer = systemctl(tools, &["daemon-reload"]);
+        if let Some(line) = answer.remark() {
+            remarks.push(match answer {
+                Answer::Unasked(_) => {
+                    format!("`systemctl daemon-reload` could not be run ({line})")
+                }
+                _ => format!("`systemctl daemon-reload` answered non-zero ({line})"),
+            });
+        }
     }
     let mut sentence = match (present, target.privileged()) {
         (true, true) => format!(
@@ -406,28 +427,49 @@ fn unit(target: &Target, tools: &Tools) -> Line {
     }
 }
 
-/// One `systemctl` child: its first stderr (or stdout) line when it failed, and nothing when it succeeded.
+/// What one `systemctl` child answered, in the three shapes that matter to a teardown.
 ///
-/// A child that could not be run at all is the same answer as a non-zero exit — a remark — for [`unit`]'s reason:
-/// on a machine with no systemd there is nothing to ask, and the file's removal is what the step promised.
-struct Answer(Option<String>);
+/// **"No" and "nothing answered" are different facts**, and the whole of this type is that distinction: a
+/// `disable --now` that exits non-zero over a unit systemd has not loaded is a *remark* (the file's removal is the
+/// deliverable), and a `systemctl` that could not be run at all — a machine with no systemd, or none on `PATH` — is
+/// not systemd saying "no such unit". Collapsing the two made the `nothing` line assert something no program had
+/// said (HS-050's review, T4), which is the one thing these reports refuse to do.
+enum Answer {
+    /// Exit zero.
+    Yes,
+    /// It ran and refused, and this is its own first line.
+    No(String),
+    /// It could not be run: not a verdict about the unit.
+    Unasked(String),
+}
 
 impl Answer {
     /// The remark a failed child earned, or nothing when it succeeded.
-    fn remark(self) -> Option<String> {
-        self.0
+    fn remark(&self) -> Option<&str> {
+        match self {
+            Self::Yes => None,
+            Self::No(line) | Self::Unasked(line) => Some(line),
+        }
+    }
+
+    /// Whether this is systemd *answering* — either word — rather than the program being absent.
+    fn answered(&self) -> bool {
+        !matches!(self, Self::Unasked(_))
     }
 }
 
 fn systemctl(tools: &Tools, arguments: &[&str]) -> Answer {
     match Command::new(&tools.systemctl).args(arguments).output() {
-        Ok(output) if output.status.success() => Answer(None),
-        Ok(output) => Answer(Some(
+        Ok(output) if output.status.success() => Answer::Yes,
+        Ok(output) => Answer::No(
             first_line(&String::from_utf8_lossy(&output.stderr))
                 .or_else(|| first_line(&String::from_utf8_lossy(&output.stdout)))
                 .unwrap_or_else(|| format!("exit {:?}", output.status.code())),
+        ),
+        Err(error) => Answer::Unasked(format!(
+            "`{}` could not be run: {error}",
+            tools.systemctl.display()
         )),
-        Err(error) => Answer(Some(format!("it could not be run: {error}"))),
     }
 }
 
@@ -605,10 +647,26 @@ fn data(
         };
     }
     if let Err(sentence) = remove(root, true, target, tools) {
+        // The sweep ran **before** this, so a failure here cannot claim nothing was removed: the containers and
+        // networks are gone, and a line that said otherwise would be the report contradicting itself one line later.
         return Line {
             what: What::Data,
             word: Word::Failed,
-            sentence,
+            sentence: format!(
+                "{sentence}; the sessions' own names went before it: {} container{} and {} network{} removed{}",
+                swept.containers,
+                if swept.containers == 1 { "" } else { "s" },
+                swept.networks,
+                if swept.networks == 1 { "" } else { "s" },
+                if swept.refused.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        ", and {} the daemon would not remove",
+                        swept.refused.join(", ")
+                    )
+                }
+            ),
         };
     }
     let mut sentence = format!(
@@ -658,9 +716,19 @@ fn sweep(machine: &dyn Machines, rows: &[crate::sessions::Session], tools: &Tool
             }
         }
     }
-    let names = machine
-        .network_names(NAME_PREFIX, tools.bound)
-        .unwrap_or_default();
+    // The **network** prefix, not the container's: `agents_` happens to contain `s_`, so a listing filtered by
+    // `s_` would answer both by accident, and a rule that is right by accident is one edit away from being wrong.
+    // A daemon that cannot list is recorded as a refusal rather than read as "no session networks" — the count in
+    // the line is a measurement or it is a sentence saying what was not measured.
+    let names = match machine.network_names(NETWORK_PREFIX, tools.bound) {
+        Ok(names) => names,
+        Err(sentence) => {
+            swept.refused.push(format!(
+                "the daemon could not list its networks ({sentence})"
+            ));
+            Vec::new()
+        }
+    };
     for row in rows {
         let wanted = network_name(&row.id);
         if names.contains(&wanted) {

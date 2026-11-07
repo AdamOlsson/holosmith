@@ -61,8 +61,13 @@ use crate::vapid;
 
 /// The admin socket's directory (spec item 10 step 2's "admin socket directory", path fixed by HS-051).
 ///
-/// Public because it is a path `doctor`'s `perms` finding and HS-050's `uninstall` both have to know, and a second
-/// spelling of `/run/holosmith` is a second thing to change.
+/// Public because it is a path `doctor`'s `perms` finding has to know (and HS-051's socket will be created in it), and
+/// a second spelling of `/run/holosmith` is a second thing to change.
+///
+/// **`uninstall` does not remove it**, and that is a decision rather than an oversight: the directory holds the admin
+/// socket of a *running* server, and the two files `server deploy` installs outside the data root are
+/// `config.toml` and this directory — neither is data, and neither is named by the spec's teardown row. ADR-0059
+/// records the keeps list with them in it, so a later story that removes them changes one sentence in one place.
 pub const ADMIN_DIR: &str = "/run/holosmith";
 
 /// The user `serve` runs as (spec item 10 step 2's "service user", named by the unit file's `User=`).
@@ -89,6 +94,15 @@ pub const HEALTH_WAIT: Duration = Duration::from_secs(60);
 /// How often that wait asks again. A serving unit answers in milliseconds; the interval is what a wait costs the
 /// command, and 250 ms is four asks a second for a minute.
 pub const HEALTH_POLL: Duration = Duration::from_millis(250);
+
+/// One path made absolute, or kept verbatim when the kernel cannot answer.
+///
+/// The two commands that print a **resume** line need it — `server deploy` and `uninstall` — and a resume that named
+/// a relative path would mean a different tree from another directory. One function, because the second copy was
+/// byte for byte the first (HS-050's review, T9): a helper whose whole job is "the same path" should not exist twice.
+pub fn absolute(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
 
 /// The remark a held port earns instead of failing the deploy — step 1's one divergence (see [`preflight`]).
 const HELD_PORT: &str =
