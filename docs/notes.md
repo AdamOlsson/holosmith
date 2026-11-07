@@ -1682,3 +1682,37 @@ it rather than adding a caveat beside it.
 - **`scripts/verify.sh` is bash, not sh.** `sh -n` fails on it at `HEAD` (line 207's `local -a sent=("$@")`), so
   `bash -n scripts/verify.sh` is the cheap check after every edit to it — cheaper than the minutes a full run
   costs, and it catches the quoting mistake a heredoc full of shims invites.
+
+### Landmines: `status`, `logs` and `uninstall` (HS-050)
+
+- **`status` asks the address in the config, and `start_serve` passes `--port 0`.** So a case that wants the uptime
+  line measured has to boot its own `serve` *on the config's port* (`case_doctor_full`'s shape, not `start_serve`'s)
+  or it will read `uptime unknown:` and quietly test the arm it did not mean. That is also the shape of the mistake
+  this bullet exists to prevent: a `status` case against the shared boot would print SKIP-worthy nonsense and still
+  pass, because `unknown` is a legal line.
+- **The health payload is `Health`'s five keys, and a 200 is not enough.** `http::health::ask` parses the body, so a
+  test fixture that answers `200` with `{}` is *not* a serving machine any more (HS-045's doctor test had exactly
+  that fixture and went red when the reader landed). `doctor::health_answers` is now `ask(...).is_ok()`: one reader,
+  and "a port somebody else holds" is a different answer from "this machine's own server answers".
+- **`docker rm -f` on an absent name exits non-zero**, so "removed" cannot be read from the child: `uninstall` reads
+  **existence** (`docker container inspect`) and then removes. `running` is the wrong read for a teardown —
+  `--restart unless-stopped` keeps a stopped container's name and definition.
+- **`uninstall --root` asks systemd nothing, so the privileged arm's `disable --now` argv is only reachable where a
+  unit file exists.** `tests/uninstall.rs` gets there by making `systemctl is-enabled` answer 0 with no file (a
+  linked unit, or one left loaded after a hand removal) — which is a real state, not a test fiction. The gate's case
+  is the `--root` arm, and `docs/build.md`'s by-hand section is the privileged one.
+- **A privileged teardown must not exec its own `rm`.** `tests/deploy.rs`'s `sudo` recorder exists for the same
+  reason and applies here twice over: the argv names `/etc/systemd/system`, and a shim that forwarded to the real
+  `sudo` would remove a unit from the machine running the tests.
+- **`rm -rf` of a data root is one child, and the purge's names come from the rows.** `s_<id>`/`agents_<id>` are
+  derived from an id, never from a `docker ps` listing, so nothing an operator named can be swept — the same rule
+  the startup reconcile follows (ADR-0053) from the other direction.
+- **The purge refusal is a `Result::Err`, not a failed step**, and the command prints it on stderr with no resume
+  line. A report with a `failed` line would invite "re-run the resume command", which would be refused the same way;
+  the sentence names `--force`, which is the only thing that changes the answer.
+- **`uninstall`'s own three words are not the deploy's five.** `satisfied`/`needs`/`changed`/`skipped` describe a
+  read-and-apply step; a teardown's commonest answer is "there was nothing there", which a deploy has no word for.
+  `tests/uninstall.rs::the_report_prints_its_target_and_one_line_per_thing` fails if a deploy word reappears.
+- **A followed session log is a poll loop, and the test appends on the closure's second call.** That is what makes
+  "a line appended after the first read is printed" a measurement with no clock and no `tail`; a loop that read once
+  and returned prints the first line and returns, which is exactly the mutation the test catches.

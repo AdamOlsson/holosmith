@@ -892,6 +892,57 @@ the gate's stand-in answer), no `useradd` (so the service user, the three `chown
 identity across two runs and `doctor`'s `perms` arms are measured; "reachable over HTTPS" is this section, run on a
 machine that has the three programs this one does not (ADR-0058).
 
+## Watching and tearing a host down: `status`, `logs`, `uninstall`
+
+Three commands an operator runs *after* a deploy, and the reason they exist is that none of them should need a
+systemd incantation or a hand-written `docker` call (HS-050, ADR-0059).
+
+```bash
+holosmith status                     # one `key value` line per fact
+holosmith status | grep '^uptime'    # works on a machine that is not serving: it says `unknown:` and why
+holosmith logs                       # journalctl -u holosmith.service, all of it
+holosmith logs -f                    # ... and follow
+holosmith logs --session <id>        # <data>/sessions/<id>/session.log
+holosmith logs -f --session <id>     # ... and follow the file
+```
+
+`status` prints `role`, `version`, `uptime`, one `sessions <status>` line per session status, one `proxy <name>` line
+per proxy, and `machines`. **`uptime` is the running server's**, read from `GET /api/health` on the config's
+`control_listen`: a machine that is not serving prints `uptime unknown: …` rather than a number from `/proc` or from
+systemd, and that is also how it says "not serving". `machines` is `unknown:` with a sentence naming HS-068 (phase 3)
+— there is no host registry yet, and the line says so instead of printing a zero. The exit code is 1 only when a
+fact could not be **read** (an unreadable database); a stopped server is a report, not a failure.
+
+`logs` reads journald through one child and a session's log through one file. The session log is the one the exit
+classifier wrote (the launch line, and a failed container's stderr tail); `-f` follows either, and an id that is not
+a session and an id with no log yet are one sentence each. No `-n` is passed to `journalctl`: any window would be a
+truncation the command cannot label, so journalctl's own pager shows everything and `journalctl -u holosmith.service
+--since …` is the operator's own filter.
+
+```bash
+holosmith uninstall                  # the unit, hs_egress, hs_key and the egress network; the data stays
+holosmith uninstall                  # ... again: every step reads first, so the second run says `nothing`
+holosmith uninstall --root /tmp/tree # the same over an install tree an unprivileged run made
+holosmith uninstall --purge          # also the data root; refuses while a session is live
+holosmith uninstall --purge --force  # ... and over a live session
+```
+
+What it removes, in order: the unit (`systemctl disable --now holosmith.service`, the file, `systemctl
+daemon-reload`; a `systemctl` that answers non-zero over an unloaded unit is a **remark**, not a failure), then
+`hs_egress` and `hs_key` (`docker rm --force`), then the `egress` network. What it **keeps**: the data root — the
+database, every session's log and `secrets/` with the provider keys and the VAPID pair — the projects with their
+worktrees and branches, and the sessions' own containers and `agents_*` networks, which belong to the rows the kept
+data describes and are put right by the next boot's reconcile. `--purge` removes the data root and, first, the
+`s_<id>` containers and `agents_<id>` networks the rows named; never a branch, a worktree or an image. The
+refusal over a live session happens **before anything is removed** and prints the count and the `--force` that
+overrides it, because a run that removed the unit and then refused would leave the machine half uninstalled.
+
+**What this repository's environment cannot measure**, and what the by-hand procedure above is for: there is no
+systemd here, so no unit is loaded and `disable --now`/`daemon-reload` are `tests/uninstall.rs`'s recorders (and a
+privileged run's unit *file* lives in `/etc/systemd/system`, which an unprivileged test cannot write); `journalctl`
+exists here but nothing runs under the unit, so the server arm is measured against a stand-in; and there is no host
+registry, which is why `status`'s `machines` line names HS-068.
+
 ## Where the target settings live
 
 `.cargo/config.toml` names the two linkers and sets

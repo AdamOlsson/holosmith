@@ -343,7 +343,8 @@ no timestamps, plus the server's own **launch line**. It is the complete
 record, where the row's `status_reason` keeps only the last few lines of a failure; spec item 15's "stderr
 only" is what keeps a **tool's** output out of it — that goes to a file of its own. Its machine names are
 `exit::LOG_FILE` and `exit::session_dir`. The badge a row shows is not this file: a multi-line reason is
-rendered as its last line, clipped, by `transcript.ts`'s `stateText`.
+rendered as its last line, clipped, by `transcript.ts`'s `stateText`. `holosmith logs --session ID` is its reader
+(and `-f` follows it), which is why the command needs no `tail`.
 _Avoid_: Container log, pi log, stderr log, transcript
 
 **Event writer**:
@@ -653,6 +654,29 @@ One of the four checks the control listener makes on a request that is not a hea
 _Avoid_: Filter, middleware, auth
 
 ### Operations
+
+**Status command**:
+`holosmith status`: one `key value` line per fact about this machine — its role, its version, the running
+server's uptime, one count per session status, whether each of the two proxies is running, and the last health of
+every machine registered with it. Each value has three arms, `measured`, `unknown: sentence` and `fail: sentence`,
+and only `fail` changes the exit code. Its machine name is `status::Report`. Never the same thing as the health
+endpoint: the endpoint answers about one running binary, and this command asks other machines too (which, until
+HS-068, is the line that says so).
+_Avoid_: Health, healthcheck, ping, machine state
+
+**Uptime**:
+How long the **running** server has been up, in seconds, as its own health payload reports it (`uptime_s`, from
+`Runtime`). It is a fact about a process rather than about a machine: a stopped server has no uptime, a rebooted
+machine starts a new one, and `holosmith status` prints `unknown:` with a sentence when nothing answers rather than
+guessing from `/proc` or from systemd.
+
+**Uninstall**:
+`holosmith uninstall [--purge]`: the inverse of `server deploy`. It removes the unit, the two proxies and the
+machine's `egress` network, and **keeps** the data root, the projects and every session's own container and network;
+`--purge` also removes the data root (and the containers and networks the rows named), and refuses while a session
+is live unless `--force`. Its lines carry four words of its own — `removed`, `kept`, `nothing`, `failed` — not the
+deploy's five. Its machine name is `uninstall::Report`.
+_Avoid_: Teardown, remove, destroy, deploy --reverse
 
 **Version**:
 The semantic version of the `holosmith` binary itself, such as `0.1.0`. It is not a Release and never a synonym for one.

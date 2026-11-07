@@ -28,7 +28,10 @@
 # says `not yet run`, every row carries its verdict and an automation this repository has, and V11 is
 # still deferred to phase 3), the service, the keys and the origins a deploy installs in a case of their own
 # straight after `case_server_deploy` (`case_server_service`: the unit's bytes, the VAPID pair, both `tailscale`
-# argvs and `doctor`'s `perms` arms), and a Docker preflight that
+# argvs and `doctor`'s `perms` arms), the three service commands of HS-050 (`case_status`: one line per fact, with
+# the uptime read from the endpoint the boot answers; `case_logs`: the journald child's argv through a stand-in and a
+# session's log printed byte for byte; `case_uninstall`: the unit and the two proxies gone, the data kept, a second
+# run saying `nothing`, and a purge refused over a live row until `--force`), and a Docker preflight that
 # refuses to start with one sentence naming the fix, with no CORS header
 # on any answer, and stopping on SIGTERM with exit 0. Each case prints `ok <case>` once it passes — a
 # case that printed SKIP withholds that line, so the log can never call a check that measured nothing a
@@ -409,6 +412,9 @@ serve_cases=(
   case_server_images
   case_server_deploy
   case_server_service
+  case_status
+  case_logs
+  case_uninstall
   case_worktree_refusal
   case_container_mounts
   case_agent_launch
@@ -4980,13 +4986,15 @@ SHIM
 #
 # Two callers ask one question and both need a *listener*: `server deploy`'s step 7 waits for `GET /api/health`
 # before it calls a start successful, and `doctor`'s port check reads "the port is held and `/api/health` answers" as
-# the serving pass. A responder is all this machine can offer there — there is no systemd and no unit boot — which is
-# why the body is unimportant: what is measured is that something holds the port and answers 200, not what it says.
+# the serving pass. A responder is all this machine can offer there — there is no systemd and no unit boot — and its
+# body **is** the health payload since HS-050: `http::health::ask` parses it, so a bare `200` reads as "a port
+# somebody else holds" and would make step 7's wait fail. The stricter answer is also the true one — this is what
+# `serve` really answers.
 health_responder() {
   python3 - "$1" <<'PY' >/dev/null 2>&1 &
 import socket, sys
 
-body = b'{"status":"ok","version":"verify"}'
+body = b'{"name":"holosmith","version":"verify","role":"server","uptime_s":0,"preview_origin":"http://localhost:8081"}'
 server = socket.socket()
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("127.0.0.1", int(sys.argv[1])))
@@ -6163,6 +6171,424 @@ case_no_cors_header() {
     # of failing an assertion (measured, with HS-033's two-megabyte tool output).
     expect_no_cors "$label" "$(sed '/^\r$/q' "$file")"
   done
+}
+
+# --------------------------------------------------------------------------------------------------------------
+# HS-050's three commands, from the shipped artifact: `status`, `logs`, `uninstall`.
+# --------------------------------------------------------------------------------------------------------------
+
+# The one command that describes a machine, one `key value` line per fact (spec's Commands table, ADR-0059).
+#
+# It boots a `serve` of **its own**, and that is load-bearing rather than tidy: `start_serve` always passes
+# `--port 0`, while `status` asks the address the *config* names — so against the shared boot every uptime line
+# would be `unknown:` and this case would be measuring the arm it did not come for. The config therefore names both
+# the listener and the origin, the banner is what proves they agree, and the shared boot is put back afterwards
+# because the cases after this one talk to `$port`.
+#
+# What is measured, each from the reader that owns it: `role` and `version` against the endpoint's own answer,
+# `uptime` against its `uptime_s`, the six `sessions <status>` lines against the sessions list's own length (and
+# `idle` moving by one when a session is created), both `proxy` lines against the daemon's answer, and the
+# `machines` line naming HS-068 — the story that will build the registry it cannot read yet.
+case_status() {
+  local name=case_status root="$repo_root/target/verify-status-$$"
+  local control preview status body role_word uptime listed total line proxy state id
+  local create_body='{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}'
+
+  if [ -n "$serve_pid" ] && kill -0 "$serve_pid" 2>/dev/null; then
+    stop_serve
+  fi
+  rm -rf "$root"
+  mkdir -p "$root"
+  control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a second port"
+  # `data_root`, both listeners and the control origin are in the *file*, because `status` reads the config and
+  # nothing else (`--port` and `--data-dir` are `serve` overrides).
+  printf 'owner = "%s"\nrole = "server"\nbackend = "stub"\ndata_root = "%s"\ncontrol_listen = "127.0.0.1:%s"\ncontrol_origin = "http://127.0.0.1:%s"\npreview_listen = "127.0.0.1:%s"\nidle_stop_min = 0\nmin_free_gb = 1\n' \
+    "$owner" "$root/data" "$control" "$control" "$preview" >"$WORK/config-status.toml"
+  serve_err="$WORK/serve-status.err"
+  "$artifact" serve --config "$WORK/config-status.toml" --data-dir "$root/data" \
+    >"$WORK/$name.serve.out" 2>"$serve_err" &
+  serve_pid=$!
+  for _ in $(seq 1 400); do
+    grep -q '^control_listen ' "$serve_err" 2>/dev/null && break
+    kill -0 "$serve_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  grep -q "^control_listen 127.0.0.1:$control\$" "$serve_err" ||
+    fail "$name/serve" "serve did not bind the config's control port: $(cat "$serve_err")"
+  assertions=$((assertions + 1))
+  # The globals the fetch helpers use: this boot's own port and origin, not the shared ones.
+  port="$control"
+  control_listen="127.0.0.1:$control"
+  control_origin="http://127.0.0.1:$control"
+  preview_port="$preview"
+  preview_listen="127.0.0.1:$preview"
+
+  fetch "$name-health" GET /api/health "Host: 127.0.0.1" "Origin: $control_origin" ||
+    fail "$name/health" "GET /api/health did not answer"
+  body="$(cat "$WORK/responses/$name-health.body")"
+  role_word="$(printf '%s\n' "$body" | sed -n 's/.*"role":"\([a-z]*\)".*/\1/p')"
+  uptime="$(printf '%s\n' "$body" | sed -n 's/.*"uptime_s":\([0-9]*\).*/\1/p')"
+  [ -n "$role_word" ] || fail "$name/health" "the health answer names no role: $body"
+  [ -n "$uptime" ] || fail "$name/health" "the health answer carries no uptime: $body"
+
+  status=0
+  "$artifact" status --config "$WORK/config-status.toml" >"$WORK/$name.out" 2>&1 || status=$?
+  check "$name/exit" 0 "$status"
+  # `role` and `version` are the machine's own two facts: the config's role and this binary's version.
+  grep -qx "role $role_word" "$WORK/$name.out" ||
+    fail "$name/role" "the role line is not the machine's role ($role_word): $(cat "$WORK/$name.out")"
+  assertions=$((assertions + 1))
+  grep -qx "version $version" "$WORK/$name.out" ||
+    fail "$name/version" "the version line is not this artifact's: $(cat "$WORK/$name.out")"
+  assertions=$((assertions + 1))
+  # `uptime` is the endpoint's own number: the two runs are seconds apart, so it may have moved by a second or two
+  # and may not have gone backwards.
+  grep -qxE "uptime ($uptime|$((uptime + 1))|$((uptime + 2)))s" "$WORK/$name.out" ||
+    fail "$name/uptime" "the uptime line is not the endpoint's $uptime: $(cat "$WORK/$name.out")"
+  assertions=$((assertions + 1))
+  # One line per status, in the enum's own words, and none of them invented.
+  total=0
+  for word in starting idle running stopped error deleting; do
+    line="$(grep -E "^sessions $word [0-9]+$" "$WORK/$name.out" || true)"
+    [ -n "$line" ] || fail "$name/sessions" "no \`sessions $word N\` line: $(cat "$WORK/$name.out")"
+    total=$((total + ${line##* }))
+    assertions=$((assertions + 1))
+  done
+  # Both proxy lines, each the daemon's own answer.
+  for proxy in hs_egress hs_key; do
+    state=""
+    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+      state="$(docker inspect --format '{{.State.Running}}' "$proxy" 2>/dev/null || true)"
+    fi
+    if [ "$state" = true ]; then
+      grep -qx "proxy $proxy running" "$WORK/$name.out" ||
+        fail "$name/proxy" "$proxy is running and status does not say so: $(cat "$WORK/$name.out")"
+    else
+      grep -qx "proxy $proxy not running" "$WORK/$name.out" ||
+        fail "$name/proxy" "$proxy is not running and status does not say so: $(cat "$WORK/$name.out")"
+    fi
+    assertions=$((assertions + 1))
+  done
+  # The one fact with no reader yet says which story owns it, rather than printing a zero.
+  grep -q '^machines unknown: .*HS-068' "$WORK/$name.out" ||
+    fail "$name/machines" "the machines line does not name HS-068: $(cat "$WORK/$name.out")"
+  assertions=$((assertions + 1))
+
+  # A session moves one count, and the six counts are the table's own sum: `1 idle` is what a create leaves, and
+  # the list's length is the independent reader of the same rows.
+  fetch_body "$name-create" POST /api/sessions "$create_body" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-status-1" ||
+    fail "$name/create" "POST /api/sessions did not answer"
+  expect_status "$name/create" "$(answer "$name-create")" 202
+  id="$(sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p' "$WORK/responses/$name-create.body" | sed -n '1p')"
+  [ -n "$id" ] || fail "$name/create" "the create names no id: $(cat "$WORK/responses/$name-create.body")"
+  wait_for_idle_id "$name-idle" "$id"
+
+  status=0
+  "$artifact" status --config "$WORK/config-status.toml" >"$WORK/$name.after.out" 2>&1 || status=$?
+  check "$name/after/exit" 0 "$status"
+  grep -qx 'sessions idle 1' "$WORK/$name.after.out" ||
+    fail "$name/after/idle" "a created session is not counted as idle: $(cat "$WORK/$name.after.out")"
+  assertions=$((assertions + 1))
+  total=0
+  for word in starting idle running stopped error deleting; do
+    line="$(grep -E "^sessions $word [0-9]+$" "$WORK/$name.after.out" || true)"
+    [ -n "$line" ] || fail "$name/after/sessions" "no \`sessions $word N\` line: $(cat "$WORK/$name.after.out")"
+    total=$((total + ${line##* }))
+  done
+  fetch "$name-list" GET /api/sessions "Host: 127.0.0.1" "Origin: $control_origin" ||
+    fail "$name/list" "GET /api/sessions did not answer"
+  listed="$(grep -o '"id":"[0-9a-f]\{16\}"' "$WORK/responses/$name-list.body" | wc -l | tr -d ' ')"
+  check "$name/after/total" "$listed" "$total"
+
+  # What this case made it takes back: its own data root dies with the directory, and the shared boot goes back
+  # for the cases after this one.
+  rm -rf "$root"
+  stop_serve
+  start_serve
+}
+
+# The two log sources, and the one child each needs (spec's Commands table, ADR-0059).
+#
+# No server and no daemon: the journald arm is a stand-in on `PATH` — the command names `journalctl`, exactly as a
+# machine does — and the session arm is a file this case wrote at the path `exit::SessionLog` owns. Nothing here
+# needs python3 either, so the case has no `SKIP` line.
+#
+# What a shell can measure about `-f` is that the flag reaches the child; that a followed **file** prints what
+# arrives is `logs.rs`'s unit test (a line appended after the first read is printed), because the alternative here
+# would be a sleep and a race.
+case_logs() {
+  local name=case_logs root="$repo_root/target/verify-logs-$$"
+  local shims status log line
+
+  rm -rf "$root"
+  shims="$root/shims"
+  mkdir -p "$shims" "$root/data/sessions/0123456789abcdef"
+  export HS_JOURNAL_LOG="$root/journal.log"
+  cat >"$shims/journalctl" <<'SHIM'
+#!/bin/sh
+# The gate's journald: records the argv, then prints what a unit's log looks like — or refuses, when the case asks
+# it to. `-f` is recorded and not honoured, so a following run exits instead of holding the case open.
+printf 'journalctl %s\n' "$*" >>"$HS_JOURNAL_LOG"
+if [ -n "${HS_JOURNAL_FAIL:-}" ]; then
+  printf 'journalctl: no journal files were found\n' >&2
+  exit 3
+fi
+printf 'holosmith[42]: control_listen 127.0.0.1:8080\nholosmith[42]: serving\n'
+SHIM
+  chmod 0755 "$shims/journalctl"
+  log="$root/data/sessions/0123456789abcdef/session.log"
+  printf 'launch: pi --mode rpc\nexit 0\n' >"$log"
+  printf 'owner = "%s"\nbackend = "stub"\ndata_root = "%s"\nmin_free_gb = 1\n' \
+    "$owner" "$root/data" >"$WORK/config-logs.toml"
+
+  # The server's log: one child, inherited stdout, and its own exit code.
+  status=0
+  PATH="$shims:$PATH" "$artifact" logs --config "$WORK/config-logs.toml" \
+    >"$root/server.out" 2>"$root/server.err" || status=$?
+  check "$name/server/exit" 0 "$status"
+  grep -qx 'holosmith\[42\]: serving' "$root/server.out" ||
+    fail "$name/server/out" "the child's log did not reach stdout: $(cat "$root/server.out" "$root/server.err")"
+  assertions=$((assertions + 1))
+  check "$name/server/argv" "journalctl -u holosmith.service" "$(cat "$HS_JOURNAL_LOG")"
+
+  # `-f` is the child's flag: `journalctl -u holosmith.service -f`, nothing else.
+  : >"$HS_JOURNAL_LOG"
+  status=0
+  PATH="$shims:$PATH" "$artifact" logs -f --config "$WORK/config-logs.toml" \
+    >"$root/follow.out" 2>&1 || status=$?
+  check "$name/follow/exit" 0 "$status"
+  check "$name/follow/argv" "journalctl -u holosmith.service -f" "$(cat "$HS_JOURNAL_LOG")"
+
+  # A journald that refuses is its own answer and its own code — the command adds one sentence, not a verdict.
+  : >"$HS_JOURNAL_LOG"
+  status=0
+  HS_JOURNAL_FAIL=1 PATH="$shims:$PATH" "$artifact" logs --config "$WORK/config-logs.toml" \
+    >"$root/failing.out" 2>"$root/failing.err" || status=$?
+  check "$name/journald/exit" 3 "$status"
+  grep -q 'no journal files were found' "$root/failing.err" ||
+    fail "$name/journald/sentence" "the child's own line did not reach stderr: $(cat "$root/failing.err")"
+  assertions=$((assertions + 1))
+
+  # A session's log, byte for byte, and no child asked for it.
+  : >"$HS_JOURNAL_LOG"
+  status=0
+  PATH="$shims:$PATH" "$artifact" logs --session 0123456789abcdef --config "$WORK/config-logs.toml" \
+    >"$root/session.out" 2>"$root/session.err" || status=$?
+  check "$name/session/exit" 0 "$status"
+  cmp -s "$log" "$root/session.out" ||
+    fail "$name/session/bytes" "the session's log was not printed as written: $(cat "$root/session.out" "$root/session.err")"
+  assertions=$((assertions + 1))
+  [ ! -s "$HS_JOURNAL_LOG" ] ||
+    fail "$name/session/child" "the session arm asked journald: $(cat "$HS_JOURNAL_LOG")"
+  assertions=$((assertions + 1))
+
+  # Following a file prints it and keeps following: `timeout` kills the loop, and the exit code is its own 124.
+  status=0
+  timeout 2 env PATH="$shims:$PATH" "$artifact" logs -f --session 0123456789abcdef \
+    --config "$WORK/config-logs.toml" >"$root/session-follow.out" 2>&1 || status=$?
+  check "$name/session/follow/exit" 124 "$status"
+  grep -qx 'launch: pi --mode rpc' "$root/session-follow.out" ||
+    fail "$name/session/follow/out" "the followed log printed nothing: $(cat "$root/session-follow.out")"
+  assertions=$((assertions + 1))
+
+  # Two refusals, each one sentence: an id that is not one (checked before it becomes a path), and one this machine
+  # has written no log for.
+  status=0
+  PATH="$shims:$PATH" "$artifact" logs --session ../../etc/passwd --config "$WORK/config-logs.toml" \
+    >"$root/bad-id.out" 2>&1 || status=$?
+  check "$name/bad_id/exit" 1 "$status"
+  grep -q 'is not a session id' "$root/bad-id.out" ||
+    fail "$name/bad_id/sentence" "the refusal does not say what is wrong: $(cat "$root/bad-id.out")"
+  assertions=$((assertions + 1))
+  status=0
+  PATH="$shims:$PATH" "$artifact" logs --session ffffffffffffffff --config "$WORK/config-logs.toml" \
+    >"$root/no-log.out" 2>&1 || status=$?
+  check "$name/no_log/exit" 1 "$status"
+  grep -q 'session.log' "$root/no-log.out" ||
+    fail "$name/no_log/sentence" "the refusal names no path: $(cat "$root/no-log.out")"
+  assertions=$((assertions + 1))
+
+  unset HS_JOURNAL_LOG
+  rm -rf "$root"
+}
+
+# The teardown: the unit, the two proxies and the network go, the data stays, and a second run says `nothing`
+# (spec's Commands table, ADR-0059).
+#
+# **A daemon is this case's premise**, because the command removes the machine's `egress` network and asks the daemon
+# what is there — a teardown with no daemon is not a teardown this case can measure, and `tests/uninstall.rs` covers
+# the same four words over a fake machine on every `cargo test` run, so the SKIP line does not hide the subject.
+# The machine's own network is **restored** at the end: `tests/container.rs`'s egress test needs it, and a case that
+# left the machine worse than it found it is the orphan HS-044 owns.
+#
+# The refusal's live row comes from a boot of its own over the tree's data root, which is the only way to put a row
+# in a database this case is about to delete without writing SQL by hand.
+case_uninstall() {
+  local name=case_uninstall root="$repo_root/target/verify-uninstall-$$"
+  local image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
+  local tree status line id networks egress_before control preview
+  local create_body='{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}'
+
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    printf 'SKIP %s: no Docker daemon answers, and this command removes the machine network (tests/uninstall.rs covers the words)\n' "$name"
+    return 0
+  fi
+  rm -rf "$root"
+  mkdir -p "$root"
+  printf 'owner = "%s"\nrole = "server"\nbackend = "stub"\nmin_free_gb = 1\n' \
+    "$owner" >"$WORK/config-uninstall.toml"
+  # The machine's network, as this case found it: `uninstall` removes it, so a run that did not put it back would
+  # break `tests/container.rs` — and this machine's own egress network is not a container either case made.
+  networks="$(docker network ls --format '{{.Name}}')"
+  egress_before=0
+  printf '%s\n' "$networks" | grep -qx 'egress' && egress_before=1
+
+  # ---- 1. the tree: the unit goes, the data stays, the second run says nothing -------------------
+  tree="$root/tree"
+  install -d -m 0755 "$tree/etc/systemd/system" "$tree/var/lib/holosmith/secrets" ||
+    fail "$name/tree" "could not create the install tree"
+  install -m 0644 /dev/null "$tree/etc/systemd/system/holosmith.service" ||
+    fail "$name/tree/unit" "could not create the unit"
+  install -m 0600 /dev/null "$tree/var/lib/holosmith/secrets/keys.toml" ||
+    fail "$name/tree/keys" "could not create the key store"
+  install -m 0600 /dev/null "$tree/var/lib/holosmith/secrets/vapid.toml" ||
+    fail "$name/tree/vapid" "could not create the VAPID pair"
+  status=0
+  "$artifact" uninstall --root "$tree" --config "$WORK/config-uninstall.toml" \
+    >"$root/first.out" 2>&1 || status=$?
+  check "$name/first/exit" 0 "$status"
+  grep -q '^uninstall: unit: removed: ' "$root/first.out" ||
+    fail "$name/first/unit" "the unit was not reported removed: $(cat "$root/first.out")"
+  assertions=$((assertions + 1))
+  grep -q '^uninstall: data: kept: ' "$root/first.out" ||
+    fail "$name/first/data" "the data was not reported kept: $(cat "$root/first.out")"
+  assertions=$((assertions + 1))
+  if [ "$egress_before" -eq 1 ]; then
+    grep -q '^uninstall: network: removed: ' "$root/first.out" ||
+      fail "$name/first/network" "the machine's egress network was there and is not reported removed: $(cat "$root/first.out")"
+  else
+    grep -q '^uninstall: network: nothing: ' "$root/first.out" ||
+      fail "$name/first/network" "there was no egress network and the line claims one: $(cat "$root/first.out")"
+  fi
+  assertions=$((assertions + 1))
+  [ ! -e "$tree/etc/systemd/system/holosmith.service" ] ||
+    fail "$name/first/file" "the unit file is still there"
+  assertions=$((assertions + 1))
+  # The data root and the secrets are what "keeps data" means, and the key store is the file a careless teardown
+  # would take with it.
+  [ -d "$tree/var/lib/holosmith" ] || fail "$name/first/root" "the data root was removed without --purge"
+  assertions=$((assertions + 1))
+  [ -f "$tree/var/lib/holosmith/secrets/keys.toml" ] ||
+    fail "$name/first/keys" "the provider keys were removed without --purge"
+  assertions=$((assertions + 1))
+  [ -f "$tree/var/lib/holosmith/secrets/vapid.toml" ] ||
+    fail "$name/first/vapid" "the VAPID pair was removed without --purge"
+  assertions=$((assertions + 1))
+
+  # The second run: nothing installed, nothing removed, and exit 0 — a teardown of nothing is not a failure.
+  status=0
+  "$artifact" uninstall --root "$tree" --config "$WORK/config-uninstall.toml" \
+    >"$root/second.out" 2>&1 || status=$?
+  check "$name/second/exit" 0 "$status"
+  for what in unit proxies network; do
+    grep -q "^uninstall: $what: nothing: " "$root/second.out" ||
+      fail "$name/second/$what" "the second run does not say \`$what: nothing\`: $(cat "$root/second.out")"
+    assertions=$((assertions + 1))
+  done
+  grep -q '^uninstall: data: kept: ' "$root/second.out" ||
+    fail "$name/second/data" "the second run does not say \`data: kept\`: $(cat "$root/second.out")"
+  assertions=$((assertions + 1))
+  grep -q '^uninstall: resume: ' "$root/second.out" &&
+    fail "$name/second/resume" "a successful run printed a resume command: $(cat "$root/second.out")"
+  assertions=$((assertions + 1))
+
+  # ---- 2. the two proxies: `rm --force` by the names the machine's install gave them -------------
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    printf 'SKIP %s/proxies: no %s image to stand in for the two proxies (tests/uninstall.rs covers the removal)\n' \
+      "$name" "$image"
+  else
+    timeout 60 docker rm -f hs_egress hs_key >/dev/null 2>&1 || true
+    docker run --detach --name hs_egress --entrypoint /bin/sleep "$image" 120 >/dev/null ||
+      fail "$name/proxies/egress" "could not start a stand-in for hs_egress"
+    docker run --detach --name hs_key --entrypoint /bin/sleep "$image" 120 >/dev/null ||
+      fail "$name/proxies/key" "could not start a stand-in for hs_key"
+    install -d -m 0755 "$tree/var/lib/holosmith" || fail "$name/proxies/tree" "could not recreate the data root"
+    status=0
+    "$artifact" uninstall --root "$tree" --config "$WORK/config-uninstall.toml" \
+      >"$root/proxies.out" 2>&1 || status=$?
+    check "$name/proxies/exit" 0 "$status"
+    grep -q '^uninstall: proxies: removed: hs_egress and hs_key' "$root/proxies.out" ||
+      fail "$name/proxies/line" "both proxies were running and the line does not say so: $(cat "$root/proxies.out")"
+    assertions=$((assertions + 1))
+    for proxy in hs_egress hs_key; do
+      if docker inspect "$proxy" >/dev/null 2>&1; then
+        fail "$name/proxies/gone" "$proxy outlived the teardown"
+      fi
+      assertions=$((assertions + 1))
+    done
+    timeout 60 docker rm -f hs_egress hs_key >/dev/null 2>&1 || true
+  fi
+  # The machine's network, back as this case found it, because the rest of the gate runs after this.
+  if [ "$egress_before" -eq 1 ]; then
+    docker network create egress >/dev/null 2>&1 || true
+  fi
+
+  # ---- 3. --purge: refused over a live row, and it removes nothing --------------------------------
+  tree="$root/purge"
+  install -d -m 0755 "$tree/etc/systemd/system" ||
+    fail "$name/purge/tree" "could not create the purge tree"
+  install -m 0644 /dev/null "$tree/etc/systemd/system/holosmith.service" ||
+    fail "$name/purge/unit" "could not create the purge unit"
+  if [ -n "$serve_pid" ] && kill -0 "$serve_pid" 2>/dev/null; then
+    stop_serve
+  fi
+  control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a second port"
+  # A boot of its own over the tree's data root: `--data-dir` is the override, and the tree's root is what the
+  # `--root` uninstall will purge, so the row and the tree are the same install.
+  start_serve "$WORK/config-uninstall.toml" "$tree/var/lib/holosmith"
+  fetch_body "$name-create" POST /api/sessions "$create_body" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-uninstall-1" ||
+    fail "$name/create" "POST /api/sessions did not answer"
+  expect_status "$name/create" "$(answer "$name-create")" 202
+  id="$(sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p' "$WORK/responses/$name-create.body" | sed -n '1p')"
+  [ -n "$id" ] || fail "$name/create" "the create names no id: $(cat "$WORK/responses/$name-create.body")"
+  wait_for_idle_id "$name-idle" "$id"
+
+  status=0
+  "$artifact" uninstall --root "$tree" --purge --config "$WORK/config-uninstall.toml" \
+    >"$root/refused.out" 2>&1 || status=$?
+  check "$name/refused/exit" 1 "$status"
+  line="$(grep 'live' "$root/refused.out" || true)"
+  [ -n "$line" ] || fail "$name/refused/sentence" "the refusal does not say what is live: $(cat "$root/refused.out")"
+  case "$line" in
+    *--force*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/refused/force" "the refusal names no override: $line" ;;
+  esac
+  # Nothing was removed: the refusal is before the first child, which is the whole reason it is asked first.
+  [ -f "$tree/etc/systemd/system/holosmith.service" ] ||
+    fail "$name/refused/unit" "a refused purge removed the unit"
+  assertions=$((assertions + 1))
+  [ -d "$tree/var/lib/holosmith" ] || fail "$name/refused/root" "a refused purge removed the data root"
+  assertions=$((assertions + 1))
+
+  # With `--force`, the data root goes and the session that was live is named in the line.
+  status=0
+  "$artifact" uninstall --root "$tree" --purge --force --config "$WORK/config-uninstall.toml" \
+    >"$root/forced.out" 2>&1 || status=$?
+  check "$name/forced/exit" 0 "$status"
+  grep -q '^uninstall: data: removed: ' "$root/forced.out" ||
+    fail "$name/forced/data" "the purge did not report the data removed: $(cat "$root/forced.out")"
+  assertions=$((assertions + 1))
+  [ ! -e "$tree/var/lib/holosmith" ] || fail "$name/forced/root" "the data root outlived --purge"
+  assertions=$((assertions + 1))
+  stop_serve
+  start_serve
+  rm -rf "$root"
 }
 
 # start_serve [config] [data dir]: boot the artifact and read the values the cases need from its
