@@ -1887,3 +1887,50 @@ it rather than adding a caveat beside it.
   adds `git_bytes` (untrimmed, with the production flags) rather than comparing against the module's own output;
   the gate's `case_changes_diff` does the same with `git diff … > file` and `cmp -s`, because `fetch`'s `sed`
   strips only the header block and leaves the body's bytes alone.
+
+### Landmines: the fast-forward merge (HS-054)
+
+- **A dirtiness *pre-check* is the wrong answer, and the wrongness is measurable.** `409 target_dirty` is "the
+  checkout has local work the fast-forward would overwrite", and the obvious implementation reads `git status
+  --porcelain` in that checkout *before* merging. An **unrelated** dirty file is not that: git carries it across a
+  fast-forward and the merge succeeds. So the merge runs first and only a non-zero exit is classified, by
+  re-measuring two facts — the ancestry (the target moved → `not_fast_forward`) and `changes::dirty` in that
+  checkout (`target_dirty`) — and nothing else. `an_unrelated_dirty_file_does_not_block_the_merge` is the test:
+  adding the pre-check back turns exactly that one red (measured).
+- **`git merge --ff-only` aborts without touching anything when the tree is dirty**, which is what makes the
+  classify-afterwards shape safe: the "would be overwritten" refusal leaves both the ref and the operator's files
+  exactly as they were. A **dirty *untracked* file the branch adds** is the same refusal (`The following untracked
+  working tree files would be overwritten`), which is the `case_merge` step 4 fixture.
+- **`git worktree list --porcelain` prints one block per checkout — `worktree <path>`, `HEAD <sha>`, then
+  `branch refs/heads/<name>` *or* `detached` — and a detached checkout has no `branch` line at all.** That is what
+  makes rule 4's unchecked-out path reachable in a repository that is always "checked out" somewhere: detach the
+  project's own checkout (`git checkout --detach <base>`) and `main` is then a ref no working tree holds. Both
+  update paths are asserted separately for this reason, and they differ in *what moves*: the CAS moves the ref and
+  not the checkout's files, `merge --ff-only` moves both.
+- **`git update-ref <ref> <new> <old>`'s third argument is the whole race-free half of rule 4**, and its *failure*
+  arm cannot be provoked from a test without a race. So the argument vector is what a unit test pins
+  (`update_ref_arguments`: three arguments, new before old); dropping `old` makes that test red while the
+  unchecked-out integration test stays green — which is why the vector exists as a test rather than a comment.
+- **A `post-merge` hook is the one hook a fast-forward can run, and it only runs when the merge advanced.** So a
+  hook test must commit on the branch first: with "Already up to date" git runs nothing and the test would pass
+  for the wrong reason. `a_hook_does_not_run` writes a real `.git/hooks/post-merge` that touches a marker, and
+  dropping `-c core.hooksPath=/dev/null` from `merge_arguments` makes it red (measured).
+- **A second merge of the same session is a `200` no-op, and asserting that means asserting the reflog too.** After
+  the first merge the target *is* the branch's tip, so the ancestry holds and git answers "Already up to date";
+  the test checks the same `merged_commit`, an unchanged `status --porcelain` **and** an unchanged
+  `git reflog show refs/heads/main`, because a needless `update-ref` would leave the tree identical and still have
+  written the ref.
+- **The per-project lock's effect is not observable in an outcome.** Without `merge::Merges`, two concurrent
+  merges of two sessions would both pass the ancestry test and one would lose the compare-and-swap — the same
+  visible result. So what a test measures is the lock's *identity* (one repository answers one mutex, two
+  repositories two; a fresh mutex per call goes red), and the ADR says plainly that the CAS is what actually
+  protects the ref.
+- **`case_merge` walks one repository through both update paths and both refusals**, which is why it moves `main`
+  back and forth with `git checkout --detach` / `git checkout main` rather than creating a second project: the two
+  paths are the same repository in two shapes, and a second repository would not prove they differ. It re-makes the
+  worktree the failed network step took back with the step's own command (the `case_changes` trick) and needs
+  `python3` for the `_ping` socket, whose guard must stay **above** `stop_serve`.
+- **`http::changes::refusal` and its `NO_WORKTREE` sentence are `pub(crate)` so the merge inherits them**, and the
+  five new codes are `bad_target`, `bad_strategy`, `unsupported` (422) and `not_fast_forward`, `target_dirty`,
+  `target_checked_out` (409). `bad_body` has a fourth sentence (`ApiError::bad_merge_body`) for the reason it has
+  a third: a client told about a create's fields is being told about the wrong request.

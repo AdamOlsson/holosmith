@@ -500,7 +500,7 @@ The number of commits a **target branch** has that a session branch does not: `g
 _Avoid_: Lag, drift, gap
 
 **Target branch**:
-The branch a session's work is merged into: the first **existing** branch of the configured `[merge] targets`, in that order (default `main`, then `master`), which is the one the UI preselects. A name the repository does not have is not a target.
+The branch a session's work is merged into: the first **existing** branch of the configured `[merge] targets`, in that order (default `main`, then `master`), which is the one the UI preselects. A name the repository does not have is not a target — for the read *and* for the merge (`422 bad_target`), which are one rule rather than two. A **Merge** may write only a branch in that list, and where it writes it depends on which checkout holds it (see **Fast-forward**).
 _Avoid_: Main, trunk, destination
 
 **WIP snapshot**:
@@ -543,8 +543,12 @@ Whether a session branch would merge into its target without a conflict, asked w
 _Avoid_: Conflicts, rebase, apply
 
 **Merge**:
-Landing a session branch on a target branch, on the server, never in a container.
+Landing a session branch on a **Target branch**, on the server, never in a container. `POST /api/sessions/{id}/merge` with `{target, strategy?, message?, delete_session?}`; the answer is `{merged_commit, target, strategy}` and nothing about the session row changes, because a merge is neither a transition nor an event. Item 12's five rules; this build has the first two, which is to say **Fast-forward** only — `merge` and `squash` and `delete_session` are refused (`422 unsupported`) rather than ignored. Its machine names are `merge::merge`, `merge::Merged` and `http::merge`.
 _Avoid_: Apply, integrate, land
+
+**Fast-forward** (`ff-only`):
+The one **Merge** strategy this build has, and the only one that needs no temporary worktree: the target is moved to the session branch's tip, and refused with `409 not_fast_forward` if the target has commits the branch does not. The check is `git merge-base --is-ancestor refs/heads/<target> refs/heads/agent/<id>` — an exit code that *is* the answer — and where the write lands is decided by **which checkout holds the target**: nowhere → `git update-ref refs/heads/<target> <new> <old>` (a compare-and-swap, so a target that moved is the same refusal), the project's own checkout → `git merge --ff-only <new>` there (`409 target_dirty` when local work would be overwritten), anywhere else → `409 target_checked_out`, because in practice that is a session's worktree with a container working in it. Every `git merge` it runs carries `-c core.hooksPath=/dev/null`, so a project's `post-merge` hook never runs on an agent's behalf. One per project at a time (`merge::Merges`), on the host.
+_Avoid_: Rebase, cherry-pick, reset, squash
 
 **Publish**:
 Pushing a session branch to a configured remote.
