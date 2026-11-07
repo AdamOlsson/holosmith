@@ -67,6 +67,30 @@ pub enum Cmd {
         #[command(subcommand)]
         action: ContainerAction,
     },
+    /// What this machine is and what it is doing: role, version, uptime, session counts, the proxies, and the
+    /// health of the machines registered with it (spec's Commands table).
+    Status,
+    /// The server's log from journald, or one session's log (`-f` follows either).
+    Logs {
+        /// Keep printing what arrives.
+        #[arg(short = 'f', long)]
+        follow: bool,
+        /// One session's `<data>/sessions/<id>/session.log` instead of the unit's journald log.
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
+    },
+    /// Remove the unit, the two proxies and the machine's networks, keeping the data (spec's Commands table).
+    Uninstall {
+        /// Also remove the data root: the database, every session's log and `secrets/`.
+        #[arg(long)]
+        purge: bool,
+        /// Override the refusal to purge while sessions are live. Only meaningful with `--purge`.
+        #[arg(long, requires = "purge")]
+        force: bool,
+        /// Tear down this install tree instead of the system paths, as the invoking user (no sudo).
+        #[arg(long, value_name = "DIR")]
+        root: Option<PathBuf>,
+    },
     /// Install and start a server on this machine (spec item 10's seven steps).
     Server {
         #[command(subcommand)]

@@ -51,6 +51,20 @@ fn main() -> ExitCode {
         Cmd::Container { action } => match action {
             ContainerAction::Snapshot => commands::container::run_snapshot(),
         },
+        Cmd::Status => commands::status::run(commands::status::StatusArgs { config: cli.config }),
+        Cmd::Logs { follow, session } => commands::logs::run(commands::logs::LogsArgs {
+            config: cli.config,
+            follow,
+            session,
+        }),
+        Cmd::Uninstall { purge, force, root } => {
+            commands::uninstall::run(commands::uninstall::UninstallArgs {
+                config: cli.config,
+                root,
+                purge,
+                force,
+            })
+        }
         Cmd::Server { action } => match action {
             ServerAction::Deploy { dry_run, root } => {
                 commands::deploy::run(commands::deploy::DeployArgs {
