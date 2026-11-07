@@ -460,6 +460,7 @@ pub fn router(state: AppState) -> Routes {
     let tool_output_state = Arc::clone(&state);
     let tool_image_state = Arc::clone(&state);
     let changes_state = Arc::clone(&state);
+    let changes_diff_state = Arc::clone(&state);
     let prompt_state = Arc::clone(&state);
     let abort_state = Arc::clone(&state);
     let steer_state = Arc::clone(&state);
@@ -567,6 +568,20 @@ pub fn router(state: AppState) -> Routes {
                 let state = Arc::clone(&changes_state);
                 let id = id.map(|Path(id)| id).unwrap_or_default();
                 async move { changes::respond(&state, &id).await }
+            },
+        )
+        // The unified diff (HS-053): spec item 12's second bullet, `…/changes`'s read with a `path` to narrow it.
+        // Read-only on the same terms as its neighbours — a `GET`, so the manifest records `ReadOnly` and every
+        // guard applies — and host git in the project repository like the summary beside it. The query is taken
+        // as `RawQuery`, whose rejection is `Infallible`: `path` is optional (no `path` is the whole branch) and
+        // what it means is the handler's to read, refuse and answer. The path is a `Result` for the same reason
+        // as its siblings: a `%FF` segment is a session the table does not hold.
+        .get(
+            "/api/sessions/{id}/changes/diff",
+            move |id: Result<Path<String>, PathRejection>, query: RawQuery| {
+                let state = Arc::clone(&changes_diff_state);
+                let id = id.map(|Path(id)| id).unwrap_or_default();
+                async move { changes::respond_diff(&state, &id, query).await }
             },
         )
         // The prompt: a mutating route, so every guard applies and the manifest records it (HS-015).

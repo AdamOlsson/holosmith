@@ -25,16 +25,25 @@
 use std::sync::PoisonError;
 
 use axum::Json;
-use axum::http::StatusCode;
+use axum::extract::RawQuery;
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
-use crate::changes::{Changes, ChangesError};
+use crate::changes::{Changes, ChangesError, DiffError, diff};
 use crate::http::app::AppState;
-use crate::http::error::{ApiError, internal};
+use crate::http::error::{ApiError, NOT_FOUND, internal};
 use crate::worktree::Worktree;
 
 /// The sentence a row with no worktree earns: a stub session, or a create that stopped before that step.
 const NO_WORKTREE: &str = "this session has no worktree, so there is nothing to review";
+
+/// The sentence a `path` this session did not change earns.
+///
+/// A fixed sentence, like every other envelope message (ADR-0008), so it cannot echo a path back — the path a
+/// client sent goes to the log. It names the next step, which is where a client gets a good value: `files[]`
+/// on the summary, which is the same list this route validates against.
+const NOT_CHANGED: &str = "this session's changes do not include that file, so there is no diff of it; list \
+                            the session's changes and pick a path from files[]";
 
 /// The sentence a worktree directory that is not there earns — and the next step, which is a resume.
 ///
@@ -85,6 +94,147 @@ pub(crate) async fn respond(state: &AppState, id: &str) -> Response {
         // A task that panicked or was cancelled has said nothing about the session: `internal` logs the
         // operation and the error once, and the client gets the one fixed sentence.
         Err(error) => internal("changes", error).into_response(),
+    }
+}
+
+/// Answer one session's unified diff: 200 and the patch as text, or an envelope (HS-053).
+///
+/// The scope is the summary's, in the same order and for the same reasons: one lock for the row (never held
+/// across an `.await`), the row's `base_commit` or the same `409 no_worktree`, the worktree from the naming
+/// rule, and the git read on a blocking task. Only the read is new — [`diff`] — and only one answer is: a
+/// `path` this session did not change is a `404`, the resource a client asked for rather than a state of the
+/// session.
+///
+/// The body is `text/plain`, because a patch is what a browser can show: no JSON envelope wraps it, and the
+/// marker for a truncated one is a line of the body rather than a header the reader would never see. The
+/// `charset` is claimed only when the bytes really are UTF-8 — git prints a file's own bytes, so a Latin-1
+/// file's patch is not, and a charset that is a guess is worse than none.
+pub(crate) async fn respond_diff(state: &AppState, id: &str, query: RawQuery) -> Response {
+    let path = path_of(query.0.as_deref());
+    let session = {
+        let database = state
+            .database
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        database.sessions().get(id)
+    };
+    let session = match session {
+        Ok(Some(session)) => session,
+        Ok(None) => return ApiError::unknown_session().into_response(),
+        Err(error) => return internal("get", error).into_response(),
+    };
+    let Some(base_commit) = session.base_commit.clone() else {
+        return ApiError::no_worktree(NO_WORKTREE).into_response();
+    };
+    let worktree = Worktree::of(&state.config.projects_root, &session.project, &session.id);
+    let read =
+        tokio::task::spawn_blocking(move || diff(&worktree, &base_commit, path.as_deref())).await;
+    match read {
+        Ok(Ok(patch)) => {
+            let content_type = if patch.utf8 {
+                "text/plain; charset=utf-8"
+            } else {
+                "text/plain"
+            };
+            (
+                StatusCode::OK,
+                [(
+                    header::CONTENT_TYPE,
+                    header::HeaderValue::from_static(content_type),
+                )],
+                patch.body,
+            )
+                .into_response()
+        }
+        Ok(Err(error)) => diff_refusal(error).into_response(),
+        Err(error) => internal("changes_diff", error).into_response(),
+    }
+}
+
+/// The envelope a [`DiffError`] is answered with: the summary's four refusals, and the one new fact.
+fn diff_refusal(error: DiffError) -> ApiError {
+    match error {
+        DiffError::Changes(error) => refusal(error),
+        DiffError::NotChanged { path } => {
+            // The path goes to the log rather than into the sentence, for the reason every envelope message is
+            // fixed (ADR-0008): it is the client's own input, and it is what an operator needs when a client's
+            // encoding is the thing that is wrong.
+            tracing::debug!(
+                target: "holosmith::http::changes",
+                path,
+                "the diff was asked for a path this session did not change"
+            );
+            ApiError::new(StatusCode::NOT_FOUND, NOT_FOUND, NOT_CHANGED)
+        }
+    }
+}
+
+/// The `path` a request names, decoded, or `None` when it names none (HS-053).
+///
+/// No `path` is the whole branch, which is why absence and an empty value are different: `?path=` names the
+/// empty name, which no file has, so it is a `404` rather than a request for everything. Every other parameter
+/// is ignored rather than refused, the way the delete reads `?force` and history reads its query.
+fn path_of(query: Option<&str>) -> Option<String> {
+    let mut named: Option<String> = None;
+    for pair in query.unwrap_or_default().split('&') {
+        let Some((name, value)) = pair.split_once('=') else {
+            continue;
+        };
+        if name == "path" {
+            named = Some(decode(value));
+        }
+    }
+    named
+}
+
+/// Percent-decode a query value: `%20` is a space, `+` is a space, everything else is itself.
+///
+/// Written out rather than pulled in, the house rule `tool::decode_base64` follows: the input is a query string
+/// and the alphabet is two hex digits. Decoding happens *before* the membership test, so a client that encodes a
+/// space arrives with the name git printed — and an escape that is not two hex digits stays literal rather than
+/// failing the request, because the value's only use is to be compared with a path git printed, and a literal
+/// `%zz` is simply a name no file has. **Nothing here is a path**: the result is compared, never joined.
+fn decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' if index + 2 < bytes.len() => {
+                match (hex(bytes[index + 1]), hex(bytes[index + 2])) {
+                    (Some(high), Some(low)) => {
+                        out.push(high * 16 + low);
+                        index += 3;
+                    }
+                    _ => {
+                        out.push(b'%');
+                        index += 1;
+                    }
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                index += 1;
+            }
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    // A decoded escape is a byte, and a multi-byte character arrives as several of them; a value that is not
+    // UTF-8 after decoding is read the way `files[]` reads a path (lossily), so the two sides of the
+    // comparison are spelled the same way.
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// One hex digit, or `None` when the byte is not one.
+fn hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 

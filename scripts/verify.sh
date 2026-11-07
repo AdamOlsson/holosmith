@@ -415,6 +415,7 @@ serve_cases=(
   case_backup
   case_worktree
   case_changes
+  case_changes_diff
   case_docker_preflight
   case_doctor_quick
   case_server_images
@@ -5225,6 +5226,198 @@ case_changes() {
   body="$(cat "$WORK/responses/${name}_pruned.body")"
   printf '%s\n' "$body" | grep -qF 'resume' ||
     fail "${name}_pruned/sentence" "the sentence names no next step: $body"
+  assertions=$((assertions + 1))
+
+  kill "$socket_pid" 2>/dev/null || true
+  wait "$socket_pid" 2>/dev/null || true
+  socket_pid=""
+}
+
+# HS-053's proof from the artifact: the unified diff itself. One real repository under a temp projects root and
+# a `_ping`-only socket (no daemon, which is what item 12 asks for — "all git work for review and merge runs on
+# the host"), a session whose worktree the provisioner took back and this case re-makes with the step's own
+# command, and three commits on `agent/<id>`: a text file, a NUL-bearing binary, and one large enough that its
+# patch is past the 256 KB cap.
+#
+# Every byte this case accepts is compared with `git diff` run by the case itself, so the artifact cannot pass
+# by agreeing with its own arithmetic; the two refusals are asserted as status **and** code **and** sentence,
+# because a path that leaked would still be a 404 for a file that is not there. It boots its own server for the
+# reason `case_changes` does: the worktree it asserts is the one the failed network step took back.
+case_changes_diff() {
+  local name=case_changes_diff response body id base tip wt size counted marker attempted label
+  # Two statements, not one, for the reason `case_changes` gives: in a single `local` every right-hand side
+  # expands before either assignment, so `repo="$projects/..."` would read an unset `projects` under `set -u`.
+  local projects="$WORK/projects-diff"
+  local repo="$projects/holosmith"
+  # The guards come first, before `stop_serve`: a skipped case that stopped the server leaves the phase's own
+  # teardown with no pid to signal.
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to answer the docker preflight (tests/changes.rs covers this)\n' "$name"
+    return 0
+  fi
+  if ! command -v seq >/dev/null 2>&1; then
+    printf 'SKIP %s: no seq to generate a patch past the cap (tests/changes.rs covers this)\n' "$name"
+    return 0
+  fi
+  stop_serve
+  mkdir -p "$repo"
+  git -C "$repo" init --quiet -b main || fail "$name/git" "git init did not work in $repo"
+  # A file the base holds and the branch does not touch: the sharpest `path` refusal, because git *would*
+  # answer an empty patch for it and only the changed-file list knows there is nothing to show.
+  printf 'kept\n' >"$repo/keep.txt" || fail "$name/write" "the file is not writable"
+  git -C "$repo" add keep.txt || fail "$name/add" "git add did not work in $repo"
+  git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet -m "the first commit" ||
+    fail "$name/git" "git commit did not work in $repo"
+  base="$(git -C "$repo" rev-parse HEAD)" || fail "$name/git" "git rev-parse did not work in $repo"
+
+  socket_pid="$(fake_docker_ping "$WORK/docker-diff.sock")"
+  for _ in $(seq 1 100); do
+    [ -S "$WORK/docker-diff.sock" ] && break
+    sleep 0.05
+  done
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\ndocker_host = "unix://%s/docker-diff.sock"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
+    "$owner" "$projects" "$WORK" >"$WORK/config-diff.toml"
+  start_serve "$WORK/config-diff.toml" "$WORK/data-diff"
+
+  fetch_body "${name}_create" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-diff-1" ||
+    fail "${name}_create/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "${name}_create")"
+  expect_status "${name}_create" "$response" 202
+  body="$(cat "$WORK/responses/${name}_create.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id" ] || fail "${name}_create/id" "the response names no id: $body"
+  body=""
+  for _ in $(seq 1 100); do
+    fetch "${name}_row" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "${name}_row/no_answer" "GET /api/sessions/$id did not answer"
+    body="$(cat "$WORK/responses/${name}_row.body")"
+    case "$body" in
+      *'"status":"starting"'*) sleep 0.1 ;;
+      *) break ;;
+    esac
+  done
+  printf '%s\n' "$body" | grep -qF "\"base_commit\":\"$base\"" ||
+    fail "${name}_row/base" "the row does not record the branch's base commit: $body"
+
+  wt="$projects/.worktrees/$id"
+  # The step's own command, absolute paths, because `worktree add` resolves a relative one against the
+  # repository (HS-025's measurement) — a fixture, not a re-implementation of the step.
+  git -C "$repo" worktree add --quiet -b "agent/$id" "$wt" "$base" ||
+    fail "${name}/worktree" "git worktree add did not work for $wt"
+  printf 'one\ntwo\n' >"$wt/a.txt" || fail "${name}/write" "the session's file is not writable"
+  git -C "$wt" add a.txt || fail "${name}/add" "git add did not work in $wt"
+  git -C "$wt" -c user.name=verify -c user.email=verify@example commit --quiet -m "the text change" ||
+    fail "${name}/commit" "git commit did not work in $wt"
+  # A NUL in the first 8000 bytes is git's whole definition of a binary file.
+  printf '\000\001\002binary\n' >"$wt/bin.dat" || fail "${name}/write" "the binary file is not writable"
+  git -C "$wt" add bin.dat || fail "${name}/add" "git add did not work in $wt"
+  git -C "$wt" -c user.name=verify -c user.email=verify@example commit --quiet -m "the binary" ||
+    fail "${name}/commit" "git commit did not work in $wt"
+  # 60000 lines is ~1 MB of patch: past the 256 KB cap with room to spare, and small enough that the count is
+  # exact rather than a lower bound (`changes::COUNT_MAX` is 2 MiB of diff).
+  seq 1 60000 >"$wt/big.txt" || fail "${name}/write" "the large file is not writable"
+  git -C "$wt" add big.txt || fail "${name}/add" "git add did not work in $wt"
+  git -C "$wt" -c user.name=verify -c user.email=verify@example commit --quiet -m "the large file" ||
+    fail "${name}/commit" "git commit did not work in $wt"
+  tip="$(git -C "$wt" rev-parse HEAD)" || fail "${name}/head" "git rev-parse did not work in $wt"
+
+  # 1. One text file: the bytes are git's own, compared with the command the module runs.
+  fetch "${name}_file" GET "/api/sessions/$id/changes/diff?path=a.txt" "Host: 127.0.0.1" ||
+    fail "${name}_file/no_answer" "GET /api/sessions/$id/changes/diff?path=a.txt did not answer"
+  response="$(answer "${name}_file")"
+  expect_status "${name}_file" "$response" 200
+  expect_header "${name}_file" "$response" "Content-Type" "text/plain; charset=utf-8"
+  git -C "$repo" diff --no-ext-diff --no-textconv --no-renames --no-color "$base" "$tip" -- a.txt \
+    >"$WORK/responses/$name.git-a.txt" || fail "${name}/git" "git diff did not work in $repo"
+  cmp -s "$WORK/responses/${name}_file.body" "$WORK/responses/$name.git-a.txt" ||
+    fail "${name}_file/bytes" "the answer is not git's own diff of a.txt"
+  assertions=$((assertions + 1))
+  body="$(cat "$WORK/responses/${name}_file.body")"
+  printf '%s\n' "$body" | grep -qF '+two' ||
+    fail "${name}_file/hunk" "the answer carries no hunk of the change: $body"
+  assertions=$((assertions + 1))
+
+  # 2. The whole branch, with no `path`: capped like any other answer, and it names the first file alphabetically.
+  fetch "${name}_branch" GET "/api/sessions/$id/changes/diff" "Host: 127.0.0.1" ||
+    fail "${name}_branch/no_answer" "GET /api/sessions/$id/changes/diff did not answer"
+  response="$(answer "${name}_branch")"
+  expect_status "${name}_branch" "$response" 200
+  expect_header "${name}_branch" "$response" "Content-Type" "text/plain; charset=utf-8"
+  body="$(cat "$WORK/responses/${name}_branch.body")"
+  printf '%s\n' "$body" | grep -qF 'diff --git a/a.txt b/a.txt' ||
+    fail "${name}_branch/names" "the branch patch names no file: $body"
+  assertions=$((assertions + 1))
+  size="$(wc -c <"$WORK/responses/${name}_branch.body")"
+  [ "$size" -le 262144 ] || fail "${name}_branch/cap" "the whole-branch answer is $size bytes, past the cap"
+  assertions=$((assertions + 1))
+  marker="$(tail -1 "$WORK/responses/${name}_branch.body")"
+  case "$marker" in
+    '[diff truncated:'*) ;;
+    *) fail "${name}_branch/marker" "a capped answer ends with no marker: $marker" ;;
+  esac
+  assertions=$((assertions + 1))
+
+  # 3. The binary file: git's own summary, and not one NUL byte on the wire.
+  fetch "${name}_binary" GET "/api/sessions/$id/changes/diff?path=bin.dat" "Host: 127.0.0.1" ||
+    fail "${name}_binary/no_answer" "the binary diff did not answer"
+  response="$(answer "${name}_binary")"
+  expect_status "${name}_binary" "$response" 200
+  body="$(cat "$WORK/responses/${name}_binary.body")"
+  printf '%s\n' "$body" | grep -qF 'Binary files /dev/null and b/bin.dat differ' ||
+    fail "${name}_binary/summary" "the binary file was not summarised: $body"
+  assertions=$((assertions + 1))
+  size="$(wc -c <"$WORK/responses/${name}_binary.body")"
+  counted="$(tr -d '\000' <"$WORK/responses/${name}_binary.body" | wc -c)"
+  [ "$size" = "$counted" ] || fail "${name}_binary/nul" "a NUL byte reached the answer"
+  assertions=$((assertions + 1))
+
+  # 4. A file past the cap: at most 256 KB, and the marker names what git really printed.
+  fetch "${name}_large" GET "/api/sessions/$id/changes/diff?path=big.txt" "Host: 127.0.0.1" ||
+    fail "${name}_large/no_answer" "the large diff did not answer"
+  response="$(answer "${name}_large")"
+  expect_status "${name}_large" "$response" 200
+  size="$(wc -c <"$WORK/responses/${name}_large.body")"
+  [ "$size" -le 262144 ] || fail "${name}_large/cap" "the answer is $size bytes, past the cap"
+  assertions=$((assertions + 1))
+  counted="$(git -C "$repo" diff --no-ext-diff --no-textconv --no-renames --no-color "$base" "$tip" -- big.txt | wc -c)" ||
+    fail "${name}/git" "git diff did not work in $repo"
+  [ "$counted" -gt 262144 ] || fail "${name}_large/fixture" "the fixture's patch is only $counted bytes"
+  assertions=$((assertions + 1))
+  marker="$(tail -1 "$WORK/responses/${name}_large.body")"
+  case "$marker" in
+    *'diff is '"$counted"' bytes'*) ;;
+    *) fail "${name}_large/marker" "the marker does not name git's $counted bytes: $marker" ;;
+  esac
+  assertions=$((assertions + 1))
+
+  # 5. A traversal and an unchanged path: the same 404, and neither reaches git.
+  for attempted in '..%2Fetc%2Fpasswd' '%2Fetc%2Fpasswd' 'keep.txt'; do
+    label="${name}_miss_$(printf '%s' "$attempted" | tr -c 'a-zA-Z0-9' '_')"
+    fetch "$label" GET "/api/sessions/$id/changes/diff?path=$attempted" "Host: 127.0.0.1" ||
+      fail "$label/no_answer" "a refused path did not answer"
+    response="$(answer "$label")"
+    expect_status "$label" "$response" 404
+    expect_code "$label" "$response" not_found
+    if grep -qF 'root:' "$WORK/responses/$label.body"; then
+      fail "$label/leak" "the answer carried a file's contents"
+    fi
+    assertions=$((assertions + 1))
+  done
+
+  # 6. The worktree gone: the summary's own `409 no_worktree`, which is the fact a client already knows how to
+  # read — never a 500 from a git asked about a directory that is not there.
+  rm -rf "$wt"
+  fetch "${name}_gone" GET "/api/sessions/$id/changes/diff?path=a.txt" "Host: 127.0.0.1" ||
+    fail "${name}_gone/no_answer" "the gone-worktree diff did not answer"
+  response="$(answer "${name}_gone")"
+  expect_status "${name}_gone" "$response" 409
+  expect_code "${name}_gone" "$response" no_worktree
+  body="$(cat "$WORK/responses/${name}_gone.body")"
+  printf '%s\n' "$body" | grep -qF 'resume' ||
+    fail "${name}_gone/sentence" "the sentence names no next step: $body"
   assertions=$((assertions + 1))
 
   kill "$socket_pid" 2>/dev/null || true

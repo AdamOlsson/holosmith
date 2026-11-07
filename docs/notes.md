@@ -1829,3 +1829,51 @@ it rather than adding a caveat beside it.
   that the Linear plan comment matched the code field-for-field and the code compiled; what it cost was a re-read of
   every line (and the mutation pass above, which found the `behind` gap). A dirty tree from a killed session is not
   evidence of anything on its own — read it, do not inherit its claims.
+
+### Landmines: the unified diff (HS-053)
+
+- **A repository's *local* config is a test's to write, so `--no-ext-diff`, `--no-textconv` and `--no-color` are
+  measurable rather than merely pinned — and HS-052's comment claiming otherwise was wrong.** `git config
+  diff.external /path/script` in `.git/config` makes a plain `git diff` print whatever that program prints
+  (measured: the whole answer became `EXTERNAL DIFF RAN` on one line for one file); a `diff.‹driver›.textconv`
+  plus a `*.dat diff=‹driver›` line in `.gitattributes` turns a NUL-bearing binary file's summary into a diff of
+  the filter's output; `color.ui = always` makes a *piped* diff carry ANSI escapes (`033 [ 1 m` before
+  `diff --git`). The three `tests/changes.rs` tests `a_repository_config_cannot_{run_a_program, make_a_binary_file_
+  look_textual, colour}_the_patch` set each one and each goes red when its flag is dropped from the vector —
+  which is a stronger proof than the pinned argument list alone, and the reason the previous story's "a
+  behavioural test cannot set `diff.external` (the crate denies `unsafe`)" is a lesson: `unsafe` is what a test
+  cannot use, and *config files* are what it can.
+- **git's binary summary is free and complete: `Binary files /dev/null and b/bin.dat differ` for an added file,
+  `Binary files a/x and b/x differ` for a modified one, and not one NUL on stdout.** So "binary files are
+  summarised, not emitted" needs no code of ours — only the `--no-textconv` that keeps a repository from
+  overriding it. `path=` naming a binary file is a `200` with that line; a `4xx` would say the file is not in
+  the changes, which is false.
+- **The marker's own length has to be inside the cap, and a marker that names what was *shown* cannot be.**
+  `body.len() <= 256 KB` is the acceptance, so the budget for the diff is `DIFF_CAP - marker.len() - 2` and the
+  marker is assembled first. A marker like `[showed N of M bytes]` would make N depend on the cut, the cut on the
+  marker's length, and the loop either drops a digit or overshoots the cap — so this marker names the **total**
+  and leaves "how much is here" to whoever measures the body. Mutating the budget to `DIFF_CAP + 2` turns both
+  cap tests red.
+- **A cut is floored twice, and the order is a decision.** First to the last `\n` in the budget (a diff is
+  line-oriented; half a hunk line misrepresents content), then to a UTF-8 boundary **only when
+  `Utf8Error::error_len()` is `None`** — that `None` is what distinguishes "the cut fell inside a character" from
+  "these bytes are not UTF-8", and the second must be reported rather than repaired. Dropping the line-boundary
+  floor turns the module's cap test red (the wire test cannot see it: it only asserts the marker).
+- **A bounded read of stdout must drain stderr on another thread.** Reading stdout in 64 KiB chunks while the
+  child's stderr pipe fills is a deadlock the moment git says more than a pipe's worth — `docker.rs`'s `bounded`
+  gets away with reading both at the end because `wait_with_output` reads them concurrently; this one spawns the
+  drain. And after a kill the exit status is **not** a verdict: the ceiling is ours, so `complete == false`
+  suppresses the "git exited N" error that would otherwise turn a deliberately cut diff into a `500`.
+- **Counting is what makes the marker honest, so the ceiling is a number and not "stop reading".** Keep
+  `DIFF_CAP`, count up to `COUNT_MAX` (8 MiB) and then kill: everything under the ceiling gets an exact total (the
+  demo's 2 MB and the gate's `seq 1 60000` included), and a monstrous diff gets "longer than N bytes" instead of
+  a number that stopped being measured.
+- **`sub/../a.txt` is the case that proves membership rather than normalisation.** It resolves to a file the
+  branch *did* change, so an implementation that joined the path (or let git resolve it) would return a patch;
+  the changed-file list does not contain the string, so the answer is the same `404` as an unchanged file. The
+  gate asserts `..%2Fetc%2Fpasswd`, `%2Fetc%2Fpasswd` and a file the base holds, plus "no `root:` in the body" —
+  a leak is a `200` with a file in it, which a status-only assertion would pass over.
+- **`support::git` trims stdout, so a byte-for-byte comparison of a patch needs its own helper.** `tests/changes.rs`
+  adds `git_bytes` (untrimmed, with the production flags) rather than comparing against the module's own output;
+  the gate's `case_changes_diff` does the same with `git diff … > file` and `cmp -s`, because `fetch`'s `sed`
+  strips only the header block and leaves the body's bytes alone.

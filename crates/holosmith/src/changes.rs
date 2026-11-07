@@ -47,15 +47,25 @@
 //!   repository config cannot hide an untracked file and a read taken while the agent is committing does not
 //!   fail because git wanted to refresh an index somebody else holds.
 //!
-//! What this module does not do: no write, no fetch, no lock, and no diff. The unified diff is HS-053's,
-//! the merge is HS-054's, and `touches_ci`'s *consumer* is HS-058's (which reads [`CI_PATHS`] through
-//! [`touches_ci`], so the warning before a publish cannot become a second predicate).
+//! The module's **second** answer is the unified diff itself ([`diff`], HS-053): `GET
+//! /api/sessions/:id/changes/diff?path=` — item 12's next bullet, "the unified diff, capped at 256 KB, computed
+//! with `--no-ext-diff --no-textconv`". It shares this module for the reason [`basis`] exists rather than being
+//! copied: the refusals and the base/head resolution are one rule, and a second file with its own copy would be
+//! a second answer to "what is this session's diff base". What it adds is a *bounded* read ([`DIFF_CAP`] kept,
+//! [`COUNT_MAX`] counted), a marker that says how much was withheld, and one new refusal — a `path` that is not
+//! in [`Changes::files`].
+//!
+//! What this module does not do: no write, no fetch, no lock. The merge is HS-054's, and `touches_ci`'s
+//! *consumer* is HS-058's (which reads [`CI_PATHS`] through [`touches_ci`], so the warning before a publish
+//! cannot become a second predicate).
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use serde::Serialize;
 
-use crate::worktree::{GitError, Worktree, git_command, git_error, git_output};
+use crate::worktree::{GitError, Worktree, git_command, git_error, git_error_from, git_output};
 
 /// The paths a publish warns about (spec item 12's `touches_ci`), in one place.
 ///
@@ -93,6 +103,34 @@ pub const CI_PATHS: &[&str] = &[
 /// `--no-renames` because a rename prints `{old => new}` in the path column of both reads — one spelling per
 /// path is what lets the two reads be joined, and a delete plus an add is a truthful account of the lines.
 const DIFF_FLAGS: [&str; 3] = ["--no-ext-diff", "--no-textconv", "--no-renames"];
+
+/// The most bytes of a patch one response carries: spec item 12's 256 KB.
+///
+/// A constant rather than a config key, for the reason [`crate::tool::CAP`] is: it is a rule of the contract,
+/// not a property of a machine. It is the cap on the **whole body**, the marker included — a response that is
+/// 256 KB plus a marker line would not be "capped at 256 KB" — which is why [`assemble`] budgets the marker's
+/// own length out of the cut.
+pub const DIFF_CAP: usize = 256 * 1024;
+
+/// The most bytes of git's output this module will *count* before it kills the child.
+///
+/// The cap protects the phone; this protects the server. A patch is read in chunks, never buffered whole, so
+/// memory is [`DIFF_CAP`] however large the diff is — but the marker names the total size, and a total can only
+/// be counted by reading to the end. Eight megabytes is far past any patch a person reads on a phone (a whole
+/// source tree's diff is smaller than that), so every real answer gets an exact number, and a diff an agent
+/// made out of a multi-gigabyte file costs milliseconds of counting rather than a request that runs for however
+/// long the file is.
+pub const COUNT_MAX: usize = 8 * DIFF_CAP;
+
+/// How much of the child's stdout is read at a time. Large enough that the loop is not the cost, small enough
+/// that it is not a copy of the patch.
+const CHUNK: usize = 64 * 1024;
+
+/// `--no-color` is the one flag the patch needs that the two counting reads do not: a repository's
+/// `color.ui = always` would otherwise put escape codes in a body meant to be read on a phone. It is appended
+/// in [`patch_arguments`] rather than added to [`DIFF_FLAGS`], because the counts are never coloured and this
+/// way the three flags that change an *answer* stay one list.
+const NO_COLOR: &str = "--no-color";
 
 /// One file a session changed, as the changes sheet lists it.
 ///
@@ -165,34 +203,7 @@ impl Changes {
         base_commit: &str,
         targets: &[String],
     ) -> Result<Self, ChangesError> {
-        if !worktree.repository.is_dir() {
-            return Err(ChangesError::NoRepository {
-                repository: worktree.repository.clone(),
-            });
-        }
-        if !worktree.path.is_dir() {
-            return Err(ChangesError::Missing {
-                path: worktree.path.clone(),
-            });
-        }
-        match worktree.registered() {
-            Ok(true) => {}
-            Ok(false) => {
-                return Err(ChangesError::Unregistered {
-                    path: worktree.path.clone(),
-                });
-            }
-            Err(error) => return Err(ChangesError::Git(error)),
-        }
-        let head = match worktree.branch_head() {
-            Ok(Some(head)) => head,
-            Ok(None) => {
-                return Err(ChangesError::NoBranch {
-                    branch: worktree.branch.clone(),
-                });
-            }
-            Err(error) => return Err(ChangesError::Git(error)),
-        };
+        let head = basis(worktree)?;
         let repository = worktree.repository.as_path();
         let ahead = worktree.ahead(base_commit).map_err(ChangesError::Git)?;
         let files = files(repository, base_commit, &head).map_err(ChangesError::Git)?;
@@ -233,6 +244,46 @@ impl Changes {
     }
 }
 
+/// The four refusals both answers share, then the branch's tip: what a patch and a summary are both measured
+/// from.
+///
+/// Extracted rather than copied, because "what is this session's diff base" must have one answer: the diff
+/// endpoint's refusals are the summary's, byte for byte (ADR-0062), and the order is the reason a pruned
+/// worktree whose directory is back answers `409` rather than a `500` from a read inside it.
+///
+/// 1. the repository is there (a project checkout that has gone away);
+/// 2. the worktree directory is there (a `rm -rf`, or a teardown's leftovers);
+/// 3. git registers it as a worktree of the repository (a `git worktree prune`);
+/// 4. the branch is there, and its tip is what the patch is measured to.
+fn basis(worktree: &Worktree) -> Result<String, ChangesError> {
+    if !worktree.repository.is_dir() {
+        return Err(ChangesError::NoRepository {
+            repository: worktree.repository.clone(),
+        });
+    }
+    if !worktree.path.is_dir() {
+        return Err(ChangesError::Missing {
+            path: worktree.path.clone(),
+        });
+    }
+    match worktree.registered() {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(ChangesError::Unregistered {
+                path: worktree.path.clone(),
+            });
+        }
+        Err(error) => return Err(ChangesError::Git(error)),
+    }
+    match worktree.branch_head() {
+        Ok(Some(head)) => Ok(head),
+        Ok(None) => Err(ChangesError::NoBranch {
+            branch: worktree.branch.clone(),
+        }),
+        Err(error) => Err(ChangesError::Git(error)),
+    }
+}
+
 /// Why the changes view has nothing to answer — one variant per fact an operator can act on.
 ///
 /// The handler answers every one of these as `409 no_worktree` with its own sentence, because the four facts
@@ -270,6 +321,269 @@ impl ChangesError {
             Self::NoBranch { branch } => format!("the branch {branch} is not there"),
             Self::Git(error) => error.to_string(),
         }
+    }
+}
+
+/// One patch, as much of it as [`DIFF_CAP`] holds.
+///
+/// `body` is bytes rather than a `String` because a patch is a *file's* text, not ours: git prints a file's own
+/// bytes, so a Latin-1 file's diff is not UTF-8, and pretending otherwise would either corrupt it or make the
+/// answer's `charset` a lie. `total` is how many bytes git printed — exact unless `complete` was false, which
+/// means the counting ceiling was reached and `total` is a lower bound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Diff {
+    /// The patch, cut to fit [`DIFF_CAP`] with a marker on its last line when it did not fit.
+    pub body: Vec<u8>,
+    /// Whether anything was withheld: `body` is then a prefix of git's output plus one marker line.
+    pub truncated: bool,
+    /// How many bytes git printed, or — when the diff passed [`COUNT_MAX`] — a lower bound on them.
+    pub total: u64,
+    /// Whether `body` is valid UTF-8, which is the only thing that lets the answer claim `charset=utf-8`.
+    pub utf8: bool,
+}
+
+/// Why the diff has nothing to answer: the summary's own facts, or a `path` that is not in the diff.
+///
+/// Two arms and not five, because the four `no_worktree` sentences and the `500` are the summary's: a client
+/// that already reads `GET …/changes` learns nothing new. The new fact is the `path`, and it is a `404` — the
+/// resource a client asked for does not exist — rather than a `422`: the parameter is well-formed, it just
+/// names a file this session did not change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiffError {
+    /// Nothing to read, or git could not be asked — [`ChangesError`]'s own two families.
+    Changes(ChangesError),
+    /// `path` is not one of the changed paths: an unchanged file, an absolute path, a traversal.
+    NotChanged { path: String },
+}
+
+impl From<ChangesError> for DiffError {
+    fn from(error: ChangesError) -> Self {
+        Self::Changes(error)
+    }
+}
+
+impl From<GitError> for DiffError {
+    fn from(error: GitError) -> Self {
+        Self::Changes(ChangesError::Git(error))
+    }
+}
+
+impl DiffError {
+    /// The sentence an operator reads in the log, with the path the envelope is not allowed to carry.
+    pub fn sentence(&self) -> String {
+        match self {
+            Self::Changes(error) => error.sentence(),
+            Self::NotChanged { path } => {
+                format!("{path} is not one of the paths this session changed")
+            }
+        }
+    }
+}
+
+/// Answer the unified diff for one session's worktree: the whole branch, or one changed path in it.
+///
+/// The patch is `<base_commit>..<head>`, the **same two-dot basis** the summary's `files[]` is measured on
+/// (ADR-0061's D2), so the index a client picks a path out of is the index this function validates against.
+/// Two consequences are worth stating because they are not obvious:
+///
+/// - **It is commits only.** Uncommitted work is `dirty`'s fact on the summary, and the WIP snapshot
+///   (`refs/holosmith/wip/<id>`, ADR-0049) is how a reader sees the working tree. A diff that mixed the two
+///   would answer a question nobody asked ("what is in `/work`?") with a patch named after two commits.
+/// - **`path` is a member of the list, not a path.** It is never joined to a filesystem path or handed to git
+///   until the membership test has passed, so `..`, an absolute path and a spelled-around traversal are all the
+///   same answer ("not a path this session changed"), and no traversal needs cleaning up because none is ever
+///   built.
+///
+/// `None` is the whole branch, capped at [`DIFF_CAP`] like a single file's patch — the demo's "the whole branch"
+/// and a 2 MB file are the same size question.
+pub fn diff(worktree: &Worktree, base_commit: &str, path: Option<&str>) -> Result<Diff, DiffError> {
+    let head = basis(worktree)?;
+    let repository = worktree.repository.as_path();
+    if let Some(path) = path {
+        let changed = files(repository, base_commit, &head)?;
+        if !changed.iter().any(|file| file.path == path) {
+            return Err(DiffError::NotChanged {
+                path: path.to_string(),
+            });
+        }
+    }
+    let args = patch_arguments(base_commit, &head, path);
+    let patch = run_patch(repository, &args)?;
+    Ok(assemble(patch))
+}
+
+/// The patch's argument vector: the three flags that make an answer the command's, `--no-color`, the two
+/// commits, and `--` before a path so a name that begins with `-` can never be read as an option.
+///
+/// Split out so the vector can be asserted without running git. The vector is not the only proof that
+/// `--no-ext-diff --no-textconv --no-color` are passed — a *repository-local* config can be written by a test
+/// (`tests/changes.rs`'s three `a_repository_config_cannot_*` tests do exactly that, and each goes red when its
+/// flag is dropped) — but it is the proof that survives a config a test cannot write, and it says in one place
+/// what the command line is.
+fn patch_arguments(base: &str, head: &str, path: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = vec!["diff".to_string()];
+    args.extend(DIFF_FLAGS.iter().map(|flag| (*flag).to_string()));
+    args.push(NO_COLOR.to_string());
+    args.push(base.to_string());
+    args.push(head.to_string());
+    if let Some(path) = path {
+        args.push("--".to_string());
+        args.push(path.to_string());
+    }
+    args
+}
+
+/// What one `git diff` read produced: the bytes kept, how many git printed, and whether the count is exact.
+#[derive(Clone)]
+struct Patch {
+    head: Vec<u8>,
+    total: usize,
+    complete: bool,
+}
+
+/// Run the patch under [`DIFF_CAP`] and [`COUNT_MAX`], killing the child if it would exceed the count.
+///
+/// The read is **bounded, not buffered**: a 2 MB diff is never held in memory to be cut to 256 KB. At most
+/// [`DIFF_CAP`] bytes are kept and at most [`COUNT_MAX`] counted; past the ceiling the child is killed and
+/// `complete` is false, which the marker turns into "longer than N bytes" rather than a number it did not
+/// measure.
+///
+/// stderr is drained on its own thread, so a git that says a great deal cannot fill its pipe and deadlock
+/// against our reading of stdout. A non-zero exit **before** the ceiling is a failure to ask — [`GitError`],
+/// the `500` — and never an empty `200`; an exit status observed after a kill is not a verdict, because the
+/// ceiling is ours.
+fn run_patch(repository: &Path, args: &[String]) -> Result<Patch, GitError> {
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    let command = git_command(repository, &borrowed);
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(&borrowed)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| GitError {
+            command: command.clone(),
+            detail: format!("git is not runnable ({error}): install git 2.38 or newer"),
+        })?;
+    let mut stdout = child.stdout.take().ok_or_else(|| GitError {
+        command: command.clone(),
+        detail: "git's output could not be read".to_string(),
+    })?;
+    let mut stderr = child.stderr.take();
+    let drained = std::thread::spawn(move || {
+        let mut said = Vec::new();
+        if let Some(pipe) = stderr.as_mut() {
+            let _ = pipe.read_to_end(&mut said);
+        }
+        said
+    });
+    let mut head: Vec<u8> = Vec::new();
+    let mut total = 0usize;
+    let mut complete = true;
+    let mut chunk = vec![0u8; CHUNK];
+    loop {
+        if total >= COUNT_MAX {
+            complete = false;
+            let _ = child.kill();
+            break;
+        }
+        match stdout.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => {
+                total += read;
+                let room = DIFF_CAP.saturating_sub(head.len());
+                head.extend_from_slice(&chunk[..read.min(room)]);
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(GitError {
+                    command,
+                    detail: format!("git's output could not be read ({error})"),
+                });
+            }
+        }
+    }
+    let status = child.wait().map_err(|error| GitError {
+        command: command.clone(),
+        detail: format!("git could not be waited on ({error})"),
+    })?;
+    let said = drained.join().unwrap_or_default();
+    if complete && !status.success() {
+        return Err(git_error_from(command, &said, status));
+    }
+    Ok(Patch {
+        head,
+        total,
+        complete,
+    })
+}
+
+/// Turn what git printed into the answer's body: a short patch untouched, a long one cut at a line boundary
+/// with a marker on its last line.
+///
+/// The cut lands on a **line boundary** because a diff is line-oriented: half a hunk line would be a lie about
+/// content the reader is looking at. It then lands on a UTF-8 boundary **only when the cut fell mid-sequence of
+/// an otherwise UTF-8 patch** (the error's `error_len()` is `None`); a patch that really is not UTF-8 keeps its
+/// bytes and answers without a `charset` claim.
+///
+/// The marker's own length is inside the cap, so `body.len() <= DIFF_CAP` for every answer. It names the
+/// **total**, never "showed N": the number shown would depend on the cut, the cut would depend on the marker's
+/// length, and that circle would either make the marker a digit short or a promise broken. What was shown is
+/// whatever the body holds above the marker line.
+fn assemble(patch: Patch) -> Diff {
+    let total = patch.total as u64;
+    let truncated = patch.total > patch.head.len();
+    if !truncated {
+        let utf8 = std::str::from_utf8(&patch.head).is_ok();
+        return Diff {
+            body: patch.head,
+            truncated,
+            total,
+            utf8,
+        };
+    }
+    let marker = truncated_marker(total, patch.complete);
+    let budget = DIFF_CAP.saturating_sub(marker.len() + 2);
+    let mut kept = &patch.head[..budget.min(patch.head.len())];
+    if let Some(end) = kept.iter().rposition(|byte| *byte == b'\n') {
+        kept = &kept[..=end];
+    }
+    let mut utf8 = true;
+    if let Err(error) = std::str::from_utf8(kept) {
+        match error.error_len() {
+            // The cut fell inside a character: give back the incomplete sequence, and the rest is UTF-8.
+            None => kept = &kept[..error.valid_up_to()],
+            // These bytes are not UTF-8, so nothing is given back and the answer says so.
+            Some(_) => utf8 = false,
+        }
+    }
+    let mut body = kept.to_vec();
+    if !body.last().is_some_and(|byte| *byte == b'\n') {
+        body.push(b'\n');
+    }
+    body.extend_from_slice(marker.as_bytes());
+    body.push(b'\n');
+    Diff {
+        body,
+        truncated: true,
+        total,
+        utf8,
+    }
+}
+
+/// The line a truncated patch ends with: how big git's output was, and that this is not all of it.
+///
+/// Two sentences, because the two facts are different: an exact total is a measurement, and "longer than" is
+/// what happens when the diff passed [`COUNT_MAX`] and the child was killed rather than read to its end.
+fn truncated_marker(total: u64, complete: bool) -> String {
+    if complete {
+        format!("[diff truncated: the diff is {total} bytes; only the first part is shown]")
+    } else {
+        format!(
+            "[diff truncated: the diff is longer than {total} bytes; only the first part is shown]"
+        )
     }
 }
 
@@ -671,9 +985,10 @@ mod tests {
     #[test]
     fn the_diff_reads_ask_for_the_command_and_not_the_repository_s_config() {
         // Three flags are the rule, and each answers one config key: `diff.external`, a `.gitattributes`
-        // textconv filter, and rename detection's `{old => new}` spelling. A behavioural test cannot set
-        // those (the crate denies `unsafe`, so no test sets the process's git config), so the spelling is
-        // pinned — the same reason `worktree.rs` pins `CONFIG_READ`.
+        // textconv filter, and rename detection's `{old => new}` spelling. The first two are also measured
+        // behaviourally for the *patch* (`tests/changes.rs`'s `a_repository_config_cannot_*`), but these two
+        // reads are joined by path, so the spelling is pinned here as well — the same reason `worktree.rs`
+        // pins `CONFIG_READ`.
         assert!(DIFF_FLAGS.contains(&"--no-ext-diff"));
         assert!(DIFF_FLAGS.contains(&"--no-textconv"));
         assert!(DIFF_FLAGS.contains(&"--no-renames"));
@@ -695,5 +1010,148 @@ mod tests {
                 "bbb"
             ]
         );
+    }
+
+    /// A patch read with `total` bytes of which `head` is what was kept.
+    fn patch(head: &[u8], total: usize) -> Patch {
+        Patch {
+            head: head.to_vec(),
+            total,
+            complete: true,
+        }
+    }
+
+    #[test]
+    fn the_patch_vector_pins_the_flags_the_no_color_and_the_separator() {
+        // The acceptance's third bullet, pinned: `tests/changes.rs` measures all three flags against a
+        // repository config that would undo them, and this pins the vector itself, so a flag added or dropped
+        // here is a diff a reviewer sees rather than a behaviour nobody checked. `--` before the path is the
+        // reason a name that begins with `-` can never be read as an option.
+        assert_eq!(
+            patch_arguments("aaa", "bbb", Some("a.txt")),
+            [
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                "--no-color",
+                "aaa",
+                "bbb",
+                "--",
+                "a.txt"
+            ]
+            .map(str::to_string)
+        );
+    }
+
+    #[test]
+    fn the_whole_branch_patch_names_no_path_and_no_separator() {
+        // A bare `--` with no path after it is accepted by git but reads like a mistake; the vector without a
+        // path is the two commits and nothing else.
+        assert_eq!(
+            patch_arguments("aaa", "bbb", None),
+            [
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                "--no-color",
+                "aaa",
+                "bbb"
+            ]
+            .map(str::to_string)
+        );
+    }
+
+    #[test]
+    fn a_short_patch_is_the_command_s_own_bytes() {
+        let bytes = b"diff --git a/a.txt b/a.txt\n+one\n";
+        let diff = assemble(patch(bytes, bytes.len()));
+        assert!(!diff.truncated);
+        assert_eq!(diff.body, bytes.to_vec());
+        assert_eq!(diff.total, bytes.len() as u64);
+        assert!(diff.utf8);
+    }
+
+    #[test]
+    fn a_patch_that_is_not_utf8_keeps_its_bytes_and_claims_no_charset() {
+        // git prints a *file's* bytes: a Latin-1 file's diff has 0xe9 in it, and a `charset=utf-8` claim or a
+        // lossy conversion would both be lies about text the operator asked to read.
+        let bytes = b"diff --git a/x b/x\n+caf\xe9\n";
+        let diff = assemble(patch(bytes, bytes.len()));
+        assert_eq!(diff.body, bytes.to_vec());
+        assert!(!diff.utf8, "0xe9 alone is not UTF-8");
+    }
+
+    #[test]
+    fn an_over_cap_patch_is_cut_at_a_line_boundary_and_names_the_total() {
+        let mut bytes = Vec::new();
+        while bytes.len() <= DIFF_CAP * 2 {
+            bytes.extend_from_slice(b"+a line of the diff\n");
+        }
+        let total = bytes.len();
+        let diff = assemble(patch(&bytes[..DIFF_CAP], total));
+        assert!(diff.truncated);
+        assert_eq!(diff.total, total as u64);
+        assert!(
+            diff.body.len() <= DIFF_CAP,
+            "the whole response, marker included, is capped: {} bytes",
+            diff.body.len()
+        );
+        let text = String::from_utf8(diff.body.clone()).expect("the kept prefix is UTF-8");
+        let marker = text.lines().last().expect("a last line");
+        assert!(marker.starts_with("[diff truncated:"), "{marker}");
+        assert!(
+            marker.contains(&total.to_string()),
+            "the marker names the total, not a guess: {marker}"
+        );
+        let kept = &text[..text.len() - marker.len() - 1];
+        assert!(kept.ends_with('\n'), "the cut is not a line boundary");
+        assert!(
+            bytes.starts_with(kept.as_bytes()),
+            "the body is not a prefix of what git printed"
+        );
+    }
+
+    #[test]
+    fn a_cut_inside_a_character_gives_the_incomplete_sequence_back() {
+        // One line with no newline at all, so the line boundary cannot help: the cut lands wherever the budget
+        // falls, and if that is inside a character the body would not be UTF-8. The floor fixes it, and the
+        // charset claim survives — which is the difference between this and a file that is really not UTF-8.
+        let mut bytes = b"+".to_vec();
+        bytes.extend_from_slice("é".repeat(DIFF_CAP).as_bytes());
+        let total = bytes.len();
+        let diff = assemble(patch(&bytes[..DIFF_CAP], total));
+        assert!(diff.truncated);
+        assert!(diff.body.len() <= DIFF_CAP);
+        assert!(
+            diff.utf8,
+            "a mid-character cut does not make the text non-UTF-8"
+        );
+        assert!(std::str::from_utf8(&diff.body).is_ok());
+    }
+
+    #[test]
+    fn a_patch_past_the_counting_ceiling_says_longer_than_rather_than_a_number() {
+        // The ceiling is ours, not git's: past it the child is killed, so the total is a lower bound and the
+        // marker must say so instead of printing a figure that stopped being the answer.
+        let mut counted = Patch {
+            head: vec![b'x'; DIFF_CAP],
+            total: COUNT_MAX + CHUNK,
+            complete: false,
+        };
+        let diff = assemble(counted.clone());
+        let text = String::from_utf8(diff.body.clone()).expect("ASCII is UTF-8");
+        let marker = text.lines().last().expect("a last line");
+        assert!(marker.contains("longer than"), "{marker}");
+        assert!(marker.contains(&counted.total.to_string()), "{marker}");
+        assert!(diff.body.len() <= DIFF_CAP);
+        // The exact-total arm, for contrast: the same size but counted to the end.
+        counted.complete = true;
+        let exact = assemble(counted);
+        let text = String::from_utf8(exact.body.clone()).expect("ASCII is UTF-8");
+        let marker = text.lines().last().expect("a last line");
+        assert!(!marker.contains("longer than"), "{marker}");
+        assert!(exact.body.len() <= DIFF_CAP, "the cap still holds");
     }
 }

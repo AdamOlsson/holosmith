@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use axum::http::Method;
-use holosmith::changes::{Changes, ChangesError, touches_ci};
+use holosmith::changes::{Changes, ChangesError, DIFF_CAP, DiffError, touches_ci};
 use holosmith::clock;
 use holosmith::config::Config;
 use holosmith::http::{self, AppState};
@@ -831,4 +831,485 @@ async fn the_route_is_read_only_and_reachable_with_the_ordinary_guards() {
     .await;
     assert_eq!(response.status, 200, "{}", response.body);
     served.finish().await.expect("the server stops");
+}
+
+// --- the unified diff (HS-053) -----------------------------------------------------------------------------
+
+/// The patch for one path, or `None` for the whole branch, as the handler would ask for it.
+fn patch(fixture: &Fixture, path: Option<&str>) -> holosmith::changes::Diff {
+    holosmith::changes::diff(&fixture.worktree(), &fixture.base, path).expect("the diff answers")
+}
+
+fn patch_err(fixture: &Fixture, path: Option<&str>) -> DiffError {
+    holosmith::changes::diff(&fixture.worktree(), &fixture.base, path)
+        .expect_err("the diff refuses")
+}
+
+/// git's own bytes for a command, **untrimmed** — `support::git` trims, and a patch is compared byte for byte.
+///
+/// The flags are the production ones, so what the test compares against is the same command the module runs
+/// rather than a second reading of the same two commits.
+fn git_bytes(dir: &Path, args: &[&str]) -> Vec<u8> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=holosmith-test",
+            "-c",
+            "user.email=test@example",
+        ])
+        .args(args)
+        .output()
+        .expect("git runs");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    output.stdout
+}
+
+/// `git diff <base> <head> [-- <path>]` with the flags the module passes, as bytes.
+fn git_patch(fixture: &Fixture, path: Option<&str>) -> Vec<u8> {
+    let head = head(&fixture.worktree);
+    let mut args = vec![
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        "--no-color",
+        fixture.base.as_str(),
+        head.as_str(),
+    ];
+    if let Some(path) = path {
+        args.push("--");
+        args.push(path);
+    }
+    git_bytes(&fixture.repo, &args)
+}
+
+/// Text a reader would call large: enough lines that the patch is comfortably past the cap.
+fn large_text() -> Vec<u8> {
+    let mut text = String::new();
+    for line in 0..40_000 {
+        text.push_str(&format!("+the {line}th line the agent wrote\n"));
+    }
+    text.into_bytes()
+}
+
+#[test]
+fn the_patch_for_one_path_is_the_command_s_own_bytes() {
+    // The acceptance's first bullet, measured rather than self-consistent: the body is compared with `git diff`
+    // run by the test itself, so a wrong flag, a wrong range or a dropped hunk is a failure here.
+    let fixture = Fixture::with_base("diff-one-file", &[("a.txt", b"a\nb\n")]);
+    fixture.commit("a.txt", b"a\nB\nc\n", "the session's change");
+    fixture.commit("other.txt", b"unrelated\n", "another file");
+    let diff = patch(&fixture, Some("a.txt"));
+    assert!(!diff.truncated);
+    assert!(diff.utf8);
+    assert_eq!(
+        diff.body,
+        git_patch(&fixture, Some("a.txt")),
+        "the body is not git's own diff of a.txt"
+    );
+    assert!(diff.total > 0);
+}
+
+#[test]
+fn the_whole_branch_patch_names_every_changed_file() {
+    let fixture = Fixture::with_base("diff-branch", &[("a.txt", b"a\n")]);
+    fixture.commit("a.txt", b"a\nB\n", "one");
+    fixture.commit("b.txt", b"new\n", "two");
+    let diff = patch(&fixture, None);
+    let text = String::from_utf8(diff.body.clone()).expect("the patch is UTF-8");
+    for path in ["a.txt", "b.txt"] {
+        assert!(
+            text.contains(&format!("diff --git a/{path} b/{path}")),
+            "the branch patch does not name {path}: {text}"
+        );
+    }
+    assert_eq!(diff.body, git_patch(&fixture, None));
+}
+
+#[test]
+fn a_binary_file_is_summarised_and_never_emitted() {
+    // The acceptance's fourth bullet. git's own line *is* the summary, so this compares against it byte for
+    // byte and then asserts the thing the bullet really asks: no NUL byte reaches the body.
+    let fixture = Fixture::with_base("diff-binary", &[("bin.dat", b"before\n")]);
+    fixture.commit("bin.dat", BINARY, "the binary changes");
+    let diff = patch(&fixture, Some("bin.dat"));
+    let text = String::from_utf8(diff.body.clone()).expect("a summary is text");
+    assert!(
+        text.contains("Binary files a/bin.dat and b/bin.dat differ"),
+        "the body is not a summary: {text}"
+    );
+    assert!(!diff.body.contains(&0), "a NUL byte reached the body");
+    assert_eq!(diff.body, git_patch(&fixture, Some("bin.dat")));
+}
+
+#[test]
+fn an_over_cap_patch_is_cut_with_a_marker_inside_the_cap() {
+    let fixture = Fixture::new("diff-cap");
+    fixture.commit("big.txt", &large_text(), "the large file");
+    let whole = git_patch(&fixture, Some("big.txt"));
+    assert!(
+        whole.len() > DIFF_CAP,
+        "the fixture is not past the cap: {} bytes",
+        whole.len()
+    );
+    let diff = patch(&fixture, Some("big.txt"));
+    assert!(diff.truncated);
+    assert_eq!(
+        diff.total as usize,
+        whole.len(),
+        "the marker's total is not git's own byte count"
+    );
+    assert!(
+        diff.body.len() <= DIFF_CAP,
+        "the response is {} bytes, past the cap",
+        diff.body.len()
+    );
+    let text = String::from_utf8(diff.body.clone()).expect("the kept prefix is UTF-8");
+    let marker = text.lines().last().expect("a last line");
+    assert!(marker.starts_with("[diff truncated:"), "{marker}");
+    assert!(marker.contains(&whole.len().to_string()), "{marker}");
+    let kept = &text[..text.len() - marker.len() - 1];
+    assert!(kept.ends_with('\n'), "the cut is not a line boundary");
+    assert!(
+        whole.starts_with(kept.as_bytes()),
+        "the kept text is not a prefix of git's own patch"
+    );
+}
+
+/// An executable script in the projects root, for the tests that make a repository's config name a program.
+///
+/// Written outside the worktree on purpose: a helper file inside it would be untracked work, and these tests are
+/// about what git *runs*, not about what it sees.
+fn script(fixture: &Fixture, name: &str, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = fixture.projects.join(name);
+    std::fs::write(&path, body).expect("the script is written");
+    let mut mode = std::fs::metadata(&path)
+        .expect("the script is a file")
+        .permissions();
+    mode.set_mode(0o755);
+    std::fs::set_permissions(&path, mode).expect("the script is executable");
+    path
+}
+
+#[test]
+fn a_repository_config_cannot_run_a_program_for_the_patch() {
+    // `--no-ext-diff`, measured rather than pinned: `diff.external` in the repository's own config *is* honoured
+    // by a plain `git diff` — the script below replaces the whole answer with one line — so removing the flag
+    // turns this test red. The vector test pins the spelling; this one measures what the spelling buys.
+    let fixture = Fixture::with_base("diff-ext", &[("a.txt", b"a\n")]);
+    fixture.commit("a.txt", b"a\nB\n", "the session's change");
+    let program = script(
+        &fixture,
+        "external-diff.sh",
+        "#!/bin/sh\necho 'EXTERNAL DIFF RAN'\n",
+    );
+    git(
+        &fixture.repo,
+        &[
+            "config",
+            "diff.external",
+            program.to_str().expect("a UTF-8 path"),
+        ],
+    );
+    let diff = patch(&fixture, Some("a.txt"));
+    let text = String::from_utf8(diff.body.clone()).expect("the patch is UTF-8");
+    assert!(
+        !text.contains("EXTERNAL DIFF RAN"),
+        "a repository config ran a program for the patch: {text}"
+    );
+    assert_eq!(diff.body, git_patch(&fixture, Some("a.txt")));
+}
+
+#[test]
+fn a_repository_config_cannot_make_a_binary_file_look_textual() {
+    // `--no-textconv`, measured: a `.gitattributes` driver with a shell textconv turns the binary file's summary
+    // into a diff of whatever that program prints. Without the flag git runs it and the acceptance's "binary
+    // files are summarised, not emitted" is false for a repository that says so.
+    let fixture = Fixture::with_base(
+        "diff-textconv",
+        &[
+            ("bin.dat", b"\x00before\n"),
+            (".gitattributes", b"*.dat diff=mine\n"),
+        ],
+    );
+    fixture.commit("bin.dat", BINARY, "the binary changes");
+    let program = script(&fixture, "textconv.sh", "#!/bin/sh\ncat \"$1\"\n");
+    git(
+        &fixture.repo,
+        &[
+            "config",
+            "diff.mine.textconv",
+            program.to_str().expect("a UTF-8 path"),
+        ],
+    );
+    let diff = patch(&fixture, Some("bin.dat"));
+    assert!(
+        diff.body
+            .windows(12)
+            .any(|window| window == b"Binary files"),
+        "the textconv filter was run: {}",
+        String::from_utf8_lossy(&diff.body)
+    );
+    assert!(!diff.body.contains(&0), "a NUL byte reached the body");
+}
+
+#[test]
+fn a_repository_config_cannot_colour_the_patch() {
+    // `--no-color`, measured: `color.ui = always` in a repository's config makes a *piped* diff carry ANSI
+    // escapes, which is not text a phone can read. It is the same class of fact as the two above — a read that
+    // inherits config is not a measurement — and it is why the flag is in the vector at all.
+    let fixture = Fixture::with_base("diff-colour", &[("a.txt", b"a\n")]);
+    fixture.commit("a.txt", b"a\nB\n", "the session's change");
+    git(&fixture.repo, &["config", "color.ui", "always"]);
+    let diff = patch(&fixture, Some("a.txt"));
+    assert!(
+        !diff.body.contains(&0x1b),
+        "an escape reached the body: {:?}",
+        String::from_utf8_lossy(&diff.body)
+    );
+    assert_eq!(diff.body, git_patch(&fixture, Some("a.txt")));
+}
+
+#[test]
+fn a_path_that_did_not_change_is_refused_without_asking_git() {
+    // The acceptance's fifth bullet. Three spellings of a miss and one of them is the sharp case: `sub/../a.txt`
+    // *normalises* to a changed file, so an implementation that resolved the path instead of comparing it would
+    // answer a patch. The list is the answer — git is never asked about a name it did not print.
+    let fixture = Fixture::with_base(
+        "diff-miss",
+        &[("a.txt", b"a\n"), ("keep.txt", b"unchanged\n")],
+    );
+    fixture.commit("a.txt", b"a\nB\n", "the session's change");
+    for path in [
+        "keep.txt",
+        "sub/../a.txt",
+        "../etc/passwd",
+        "/etc/passwd",
+        "",
+    ] {
+        assert_eq!(
+            patch_err(&fixture, Some(path)),
+            DiffError::NotChanged {
+                path: path.to_string()
+            },
+            "{path} was not refused"
+        );
+    }
+    // And the file it names is really changed, so the refusal above is the membership test and not "there is
+    // nothing to show": git answers a patch when asked directly.
+    assert!(!git_patch(&fixture, Some("a.txt")).is_empty());
+}
+
+#[test]
+fn a_worktree_that_is_gone_is_the_summary_s_refusal_not_a_500() {
+    // The diff inherits the summary's ordered refusals, so a session with no worktree answers the same fact
+    // here — never a `500` from a git that was asked about a directory that is not there.
+    let fixture = Fixture::new("diff-gone");
+    std::fs::remove_dir_all(&fixture.worktree).expect("the worktree is removed");
+    match patch_err(&fixture, Some("a.txt")) {
+        DiffError::Changes(ChangesError::Missing { .. }) => {}
+        other => panic!("a missing worktree is not the summary's refusal: {other:?}"),
+    }
+}
+
+#[test]
+fn the_result_does_not_depend_on_the_working_tree() {
+    // Commits only: an uncommitted change in the worktree is `dirty`'s fact on the summary, and it must not
+    // appear in the patch — otherwise "the diff of this branch" would move between two identical requests.
+    let fixture = Fixture::with_base("diff-dirty", &[("a.txt", b"a\n")]);
+    fixture.commit("a.txt", b"a\nB\n", "committed");
+    let committed = patch(&fixture, Some("a.txt"));
+    std::fs::write(fixture.worktree.join("a.txt"), b"a\nuncommitted\n")
+        .expect("the file is written");
+    assert_eq!(patch(&fixture, Some("a.txt")).body, committed.body);
+}
+
+// --- the diff at the wire ----------------------------------------------------------------------------------
+
+/// A GET of one path with an optional query, the way the app's own client sends it.
+async fn get_diff(addr: std::net::SocketAddr, id: &str, query: &str) -> support::Response {
+    fetch(addr, &format!("/api/sessions/{id}/changes/diff{query}")).await
+}
+
+#[tokio::test]
+async fn the_diff_endpoint_answers_a_patch_as_text() {
+    let fixture = Fixture::with_base("diff-wire", &[("a.txt", b"a\n")]);
+    fixture.commit("a.txt", b"a\nB\n", "the session's change");
+    let served = fixture.served().await;
+    let response = get_diff(served.addr, &fixture.id, "?path=a.txt").await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    assert_eq!(
+        response.header("content-type"),
+        Some("text/plain; charset=utf-8"),
+        "a patch is not JSON and not an octet stream"
+    );
+    assert_eq!(response.bytes, git_patch(&fixture, Some("a.txt")));
+    served.finish().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn no_path_answers_the_whole_branch_at_the_wire() {
+    let fixture = Fixture::with_base("diff-wire-branch", &[("a.txt", b"a\n")]);
+    fixture.commit("a.txt", b"a\nB\n", "one");
+    fixture.commit("b.txt", b"new\n", "two");
+    let served = fixture.served().await;
+    let response = get_diff(served.addr, &fixture.id, "").await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    assert_eq!(response.bytes, git_patch(&fixture, None));
+    for path in ["a.txt", "b.txt"] {
+        assert!(
+            response
+                .body
+                .contains(&format!("diff --git a/{path} b/{path}")),
+            "the answer does not name {path}: {}",
+            response.body
+        );
+    }
+    served.finish().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn a_binary_file_answers_a_summary_and_no_nul_byte_at_the_wire() {
+    let fixture = Fixture::with_base("diff-wire-binary", &[("bin.dat", b"before\n")]);
+    fixture.commit("bin.dat", BINARY, "the binary changes");
+    let served = fixture.served().await;
+    let response = get_diff(served.addr, &fixture.id, "?path=bin.dat").await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    assert!(
+        response
+            .body
+            .contains("Binary files a/bin.dat and b/bin.dat differ"),
+        "the body is not a summary: {}",
+        response.body
+    );
+    assert!(!response.bytes.contains(&0), "a NUL byte reached the wire");
+    served.finish().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn an_over_cap_patch_is_capped_at_the_wire() {
+    let fixture = Fixture::new("diff-wire-cap");
+    fixture.commit("big.txt", &large_text(), "the large file");
+    let served = fixture.served().await;
+    let response = get_diff(served.addr, &fixture.id, "?path=big.txt").await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    assert!(
+        response.bytes.len() <= DIFF_CAP,
+        "the answer is {} bytes, past the cap",
+        response.bytes.len()
+    );
+    assert!(
+        response
+            .body
+            .lines()
+            .last()
+            .is_some_and(|line| line.starts_with("[diff truncated:")),
+        "the last line is not the marker: {}",
+        response.body.lines().last().unwrap_or_default()
+    );
+    served.finish().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn a_traversal_and_an_unchanged_path_are_the_same_404_at_the_wire() {
+    // The encoding is the client's, so the handler decodes before comparing: `..%2Fetc%2Fpasswd` is the literal
+    // string `../etc/passwd`, which no changed path is. One answer for both because the client's move is one:
+    // pick a path out of `files[]`.
+    let fixture = Fixture::with_base("diff-wire-miss", &[("a.txt", b"a\n"), ("keep.txt", b"x\n")]);
+    fixture.commit("a.txt", b"a\nB\n", "the session's change");
+    let served = fixture.served().await;
+    for query in [
+        "?path=..%2Fetc%2Fpasswd",
+        "?path=%2Fetc%2Fpasswd",
+        "?path=keep.txt",
+        "?path=",
+    ] {
+        let response = get_diff(served.addr, &fixture.id, query).await;
+        assert_eq!(response.status, 404, "{query}: {}", response.body);
+        assert_eq!(response.header("content-type"), Some("application/json"));
+        let body: Value = serde_json::from_str(&response.body).expect("the envelope is JSON");
+        assert_eq!(body["code"], "not_found", "{query}: {body}");
+        assert!(
+            !response.body.contains("root:"),
+            "{query}: the answer leaked a file"
+        );
+    }
+    served.finish().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn a_percent_encoded_name_arrives_as_the_name_git_printed() {
+    // A path with a space is the one case where decoding is the difference between answering and refusing: git
+    // printed `two words.txt` and a client sends `two%20words.txt`.
+    let fixture = Fixture::new("diff-wire-encoded");
+    fixture.commit("two words.txt", b"one\n", "a name with a space");
+    let served = fixture.served().await;
+    let response = get_diff(served.addr, &fixture.id, "?path=two%20words.txt").await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    assert!(
+        response
+            .body
+            .contains("diff --git a/two words.txt b/two words.txt")
+    );
+    served.finish().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn a_session_with_no_worktree_is_the_summary_s_409_here_too() {
+    // The same fact and the same sentence as `GET …/changes`: a client that learned one route learned both.
+    let fixture = Fixture::new("diff-wire-no-worktree");
+    let fresh = {
+        let database = fixture
+            .state
+            .database
+            .lock()
+            .expect("the lock is not poisoned");
+        database
+            .sessions()
+            .create(
+                &NewSession {
+                    project: "holosmith".to_string(),
+                    model: "claude-sonnet-4.5".to_string(),
+                    thinking: "high".to_string(),
+                    network: false,
+                    client_key: Some("changes-diff-no-worktree".to_string()),
+                    base_commit: None,
+                },
+                clock::unix_now(),
+            )
+            .expect("a second session is created")
+            .id
+    };
+    let served = fixture.served().await;
+    let response = get_diff(served.addr, &fresh, "?path=a.txt").await;
+    assert_eq!(response.status, 409, "{}", response.body);
+    let body: Value = serde_json::from_str(&response.body).expect("the envelope is JSON");
+    assert_eq!(body["code"], "no_worktree");
+    served.finish().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn the_diff_route_is_read_only_and_in_the_manifest() {
+    // A `GET`, so the manifest records `ReadOnly` and every guard applies with nothing new — the property that
+    // keeps a read from ever being refused by a mutating route's rules.
+    let fixture = Fixture::new("diff-guards");
+    let app = http::App::new(
+        http::router(fixture.state.clone()),
+        http::Guards::from_config(&fixture.state.config),
+    );
+    let entry = app
+        .manifest()
+        .iter()
+        .find(|entry| entry.path == "/api/sessions/{id}/changes/diff")
+        .expect("the route is in the manifest");
+    assert_eq!(entry.kind, http::RouteKind::ReadOnly);
+    assert_eq!(entry.method, Method::GET);
 }

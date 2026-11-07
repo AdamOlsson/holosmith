@@ -594,12 +594,27 @@ pub(crate) fn git_error(
     args: &[&str],
     output: &std::process::Output,
 ) -> GitError {
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let detail = stderr.trim();
+    git_error_from(git_command(repository, args), &output.stderr, output.status)
+}
+
+/// The same sentence for a caller that read git's streams itself instead of collecting an [`Output`].
+///
+/// `changes::run_patch` is that caller: a patch is bounded rather than buffered, so its stdout is consumed in
+/// chunks and stderr on its own thread, and there is no `Output` to hand over. One spelling of "what git said"
+/// is what keeps a failure's sentence the same whichever reader reported it.
+///
+/// [`Output`]: std::process::Output
+pub(crate) fn git_error_from(
+    command: String,
+    stderr: &[u8],
+    status: std::process::ExitStatus,
+) -> GitError {
+    let said = String::from_utf8_lossy(stderr);
+    let detail = said.trim();
     GitError {
-        command: git_command(repository, args),
+        command,
         detail: if detail.is_empty() {
-            format!("git exited {} without saying why", output.status)
+            format!("git exited {status} without saying why")
         } else {
             detail.to_string()
         },

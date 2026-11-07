@@ -224,7 +224,15 @@ file, and asserts every field of `GET /api/sessions/{id}/changes` — `branch`, 
 `files[]` with a file's line counts and `touches_ci` — then plants a conflict and asserts `mergeable:
 false` with the path *and* that no working tree moved, then removes and re-creates-as-unregistered the
 worktree for the two `409 no_worktree` arms; no daemon is used, which is the story's own "no container is
-involved"; see ADR-0061), and the hardened mounts (`case_container_mounts`,
+involved"; see ADR-0061), and the unified diff (`case_changes_diff`, which boots its own Docker run over a
+real repository and the same `_ping`-only socket, re-makes the worktree, commits a text file, a
+NUL-bearing binary and a `seq`-generated file whose patch is past 256 KB, and then asserts
+`GET /api/sessions/{id}/changes/diff`: the file's body byte-for-byte against `git diff` run by the case, the
+whole-branch answer naming its files and capped with a marker, the binary file as git's own summary with no
+NUL byte in the answer, the large file at most 262144 bytes with a marker naming git's own byte count, and
+`..%2Fetc%2Fpasswd`, `%2Fetc%2Fpasswd` and an unchanged path each a `404 not_found` that leaks nothing,
+then the worktree gone for the summary's `409 no_worktree`; see ADR-0062), and the hardened mounts
+(`case_container_mounts`,
 which needs no server at all: it builds a real repository and worktree under `target/`, runs one real
 container with the spec's four mounts and `--cap-drop ALL`, and asserts the three writes fail on the host
 as well as in the container, the three git commands work, the process is not root and neither `mount
