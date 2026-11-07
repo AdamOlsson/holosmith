@@ -1078,11 +1078,16 @@ it rather than adding a caveat beside it.
 
 ### Landmines: tool output, usage and the gate's shell (HS-033, HS-034)
 
-- **A large body in a shell variable kills the gate with no failing assertion.** `expect_header`/`expect_no_cors`
-  pipe their argument through `sed '/^\r$/q'`, which quits at the blank line, so a two-megabyte
-  `$(cat …)` leaves the writer with SIGPIPE and `set -o pipefail` exits the run **141**, printing only
-  `work dir kept:` — no `FAIL` line at all. Both helpers' call sites read the *header block* off the saved file
-  now (`sed '/^\r$/q' "$file"`); a new case with a large answer must do the same.
+- **A large body in a shell variable kills the gate with no failing assertion — and it has now happened twice
+  (HS-033, HS-053).** `sed '/^\r$/q'` and `grep -q` quit at the first match while the writer is still writing, so a
+  256 KB `$(cat …)` leaves `printf` with SIGPIPE and `set -o pipefail` exits the run **141**, printing only
+  `work dir kept:` — no `FAIL` line at all. HS-033 moved the call sites to reading the *header block* off the saved
+  file; HS-053 made `expect_header` and `expect_no_cors` cut with bash's own `${response%%$'\r\n\r\n'*}`, which
+  cannot be interrupted, so a call site no longer has to know. The same trap inside an **assertion** is quieter
+  still: `printf '%s\n' "$body" | grep -qF needle` reports **141 when the needle matched**, so a passing check
+  prints a `FAIL` (`case_changes_diff`'s first run did exactly that, after the same SIGPIPE had already killed the
+  run once). Read the saved `.body` file with `grep -qF needle "$file"` instead of piping a large variable, and
+  keep `printf`-fed pipelines for the answers that are a few hundred bytes.
 - **Axum decodes `%2F` inside a path segment** (measured, under a mutated `valid_id`): `/tool-output/..%2Fsecret`
   reaches the handler as `../secret`. So an id allow-list really is the defence, and a traversal test can be made
   to discriminate — but only if the canary is where a naive join *lands*. The stored name is `<id>.txt`, so the
@@ -1866,8 +1871,13 @@ it rather than adding a caveat beside it.
   suppresses the "git exited N" error that would otherwise turn a deliberately cut diff into a `500`.
 - **Counting is what makes the marker honest, so the ceiling is a number and not "stop reading".** Keep
   `DIFF_CAP`, count up to `COUNT_MAX` (8 MiB) and then kill: everything under the ceiling gets an exact total (the
-  demo's 2 MB and the gate's `seq 1 60000` included), and a monstrous diff gets "longer than N bytes" instead of
-  a number that stopped being measured.
+  demo's 2 MB and the gate's 520 KB included), and a monstrous diff gets "at least N bytes" instead of a number
+  that stopped being measured. "At least" rather than "longer than", because the loop stops *at* the ceiling
+  without asking whether anything follows — a diff of exactly 8 MiB is the case that tells the two words apart.
+- **A member of `files[]` is a name, not a pathspec.** A git pathspec is a glob by default and `:x` is magic, so
+  `patch_arguments` leads with `--literal-pathspecs`: a changed file literally called `a*.md` would otherwise hand
+  git a pattern and get back the union of every match (measured — dropping the flag makes
+  `a_name_that_looks_like_a_pattern_is_the_name_and_not_a_pattern` red by returning `abc.md`'s diff too).
 - **`sub/../a.txt` is the case that proves membership rather than normalisation.** It resolves to a file the
   branch *did* change, so an implementation that joined the path (or let git resolve it) would return a patch;
   the changed-file list does not contain the string, so the answer is the same `404` as an unchanged file. The

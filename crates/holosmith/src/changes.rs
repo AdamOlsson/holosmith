@@ -420,8 +420,13 @@ pub fn diff(worktree: &Worktree, base_commit: &str, path: Option<&str>) -> Resul
 /// (`tests/changes.rs`'s three `a_repository_config_cannot_*` tests do exactly that, and each goes red when its
 /// flag is dropped) — but it is the proof that survives a config a test cannot write, and it says in one place
 /// what the command line is.
+///
+/// **`--literal-pathspecs` leads the vector** because the member is a *name*, not a pattern. `files[]` is a list
+/// of exact strings and the membership test is an equality, but a git pathspec is a glob by default: a changed
+/// file literally called `a*.md` would hand git `a*.md` and get the union of every matching path back, and a
+/// leading `:` would be read as pathspec magic. A git *global* option, so it comes before `diff`.
 fn patch_arguments(base: &str, head: &str, path: Option<&str>) -> Vec<String> {
-    let mut args: Vec<String> = vec!["diff".to_string()];
+    let mut args: Vec<String> = vec!["--literal-pathspecs".to_string(), "diff".to_string()];
     args.extend(DIFF_FLAGS.iter().map(|flag| (*flag).to_string()));
     args.push(NO_COLOR.to_string());
     args.push(base.to_string());
@@ -445,7 +450,7 @@ struct Patch {
 ///
 /// The read is **bounded, not buffered**: a 2 MB diff is never held in memory to be cut to 256 KB. At most
 /// [`DIFF_CAP`] bytes are kept and at most [`COUNT_MAX`] counted; past the ceiling the child is killed and
-/// `complete` is false, which the marker turns into "longer than N bytes" rather than a number it did not
+/// `complete` is false, which the marker turns into "at least N bytes" rather than a number it did not
 /// measure.
 ///
 /// stderr is drained on its own thread, so a git that says a great deal cannot fill its pipe and deadlock
@@ -575,14 +580,16 @@ fn assemble(patch: Patch) -> Diff {
 
 /// The line a truncated patch ends with: how big git's output was, and that this is not all of it.
 ///
-/// Two sentences, because the two facts are different: an exact total is a measurement, and "longer than" is
-/// what happens when the diff passed [`COUNT_MAX`] and the child was killed rather than read to its end.
+/// Two sentences, because the two facts are different. An exact total is a measurement; "at least" is what the
+/// ceiling earns, because the loop stops *at* [`COUNT_MAX`] without asking whether anything follows — so a diff
+/// that is exactly the ceiling is reported as "at least", not as "longer than", which would be a claim about one
+/// byte nobody read.
 fn truncated_marker(total: u64, complete: bool) -> String {
     if complete {
         format!("[diff truncated: the diff is {total} bytes; only the first part is shown]")
     } else {
         format!(
-            "[diff truncated: the diff is longer than {total} bytes; only the first part is shown]"
+            "[diff truncated: the diff is at least {total} bytes; only the first part is shown]"
         )
     }
 }
@@ -1030,6 +1037,7 @@ mod tests {
         assert_eq!(
             patch_arguments("aaa", "bbb", Some("a.txt")),
             [
+                "--literal-pathspecs",
                 "diff",
                 "--no-ext-diff",
                 "--no-textconv",
@@ -1051,6 +1059,7 @@ mod tests {
         assert_eq!(
             patch_arguments("aaa", "bbb", None),
             [
+                "--literal-pathspecs",
                 "diff",
                 "--no-ext-diff",
                 "--no-textconv",
@@ -1118,21 +1127,33 @@ mod tests {
         // One line with no newline at all, so the line boundary cannot help: the cut lands wherever the budget
         // falls, and if that is inside a character the body would not be UTF-8. The floor fixes it, and the
         // charset claim survives — which is the difference between this and a file that is really not UTF-8.
+        //
+        // The test also asserts that the raw cut **is** mid-character, because only that makes it a test of the
+        // floor: the parity depends on the marker's length, so a one-byte change to the marker's wording could
+        // land the cut on a character boundary and leave this green with the floor deleted. Asserting the
+        // premise turns that into a failure whose sentence says what to do about it.
         let mut bytes = b"+".to_vec();
         bytes.extend_from_slice("é".repeat(DIFF_CAP).as_bytes());
         let total = bytes.len();
         let diff = assemble(patch(&bytes[..DIFF_CAP], total));
         assert!(diff.truncated);
-        assert!(diff.body.len() <= DIFF_CAP);
+        let text = String::from_utf8(diff.body.clone()).expect("the kept prefix is UTF-8");
+        let marker = text.lines().last().expect("a last line");
+        let budget = DIFF_CAP - marker.len() - 2;
+        assert!(
+            std::str::from_utf8(&bytes[..budget]).is_err(),
+            "the fixture's cut is character-aligned, so this test proves nothing about the floor: make the \
+             marker's wording a byte longer, or use a 3-byte character"
+        );
         assert!(
             diff.utf8,
             "a mid-character cut does not make the text non-UTF-8"
         );
-        assert!(std::str::from_utf8(&diff.body).is_ok());
+        assert!(diff.body.len() <= DIFF_CAP);
     }
 
     #[test]
-    fn a_patch_past_the_counting_ceiling_says_longer_than_rather_than_a_number() {
+    fn a_patch_past_the_counting_ceiling_says_at_least_rather_than_a_number() {
         // The ceiling is ours, not git's: past it the child is killed, so the total is a lower bound and the
         // marker must say so instead of printing a figure that stopped being the answer.
         let mut counted = Patch {
@@ -1143,7 +1164,7 @@ mod tests {
         let diff = assemble(counted.clone());
         let text = String::from_utf8(diff.body.clone()).expect("ASCII is UTF-8");
         let marker = text.lines().last().expect("a last line");
-        assert!(marker.contains("longer than"), "{marker}");
+        assert!(marker.contains("at least"), "{marker}");
         assert!(marker.contains(&counted.total.to_string()), "{marker}");
         assert!(diff.body.len() <= DIFF_CAP);
         // The exact-total arm, for contrast: the same size but counted to the end.
@@ -1151,7 +1172,7 @@ mod tests {
         let exact = assemble(counted);
         let text = String::from_utf8(exact.body.clone()).expect("ASCII is UTF-8");
         let marker = text.lines().last().expect("a last line");
-        assert!(!marker.contains("longer than"), "{marker}");
+        assert!(!marker.contains("at least"), "{marker}");
         assert!(exact.body.len() <= DIFF_CAP, "the cap still holds");
     }
 }

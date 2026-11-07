@@ -5253,7 +5253,7 @@ case_changes() {
 # because a path that leaked would still be a 404 for a file that is not there. It boots its own server for the
 # reason `case_changes` does: the worktree it asserts is the one the failed network step took back.
 case_changes_diff() {
-  local name=case_changes_diff response body id base tip wt size counted marker attempted label
+  local name=case_changes_diff response body id base tip wt size counted marker attempted label n
   # Two statements, not one, for the reason `case_changes` gives: in a single `local` every right-hand side
   # expands before either assignment, so `repo="$projects/..."` would read an unset `projects` under `set -u`.
   local projects="$WORK/projects-diff"
@@ -5262,10 +5262,6 @@ case_changes_diff() {
   # teardown with no pid to signal.
   if ! command -v python3 >/dev/null 2>&1; then
     printf 'SKIP %s: no python3 to answer the docker preflight (tests/changes.rs covers this)\n' "$name"
-    return 0
-  fi
-  if ! command -v seq >/dev/null 2>&1; then
-    printf 'SKIP %s: no seq to generate a patch past the cap (tests/changes.rs covers this)\n' "$name"
     return 0
   fi
   stop_serve
@@ -5325,9 +5321,16 @@ case_changes_diff() {
   git -C "$wt" add bin.dat || fail "${name}/add" "git add did not work in $wt"
   git -C "$wt" -c user.name=verify -c user.email=verify@example commit --quiet -m "the binary" ||
     fail "${name}/commit" "git commit did not work in $wt"
-  # 60000 lines is ~1 MB of patch: past the 256 KB cap with room to spare, and small enough that the count is
-  # exact rather than a lower bound (`changes::COUNT_MAX` is 2 MiB of diff).
-  seq 1 60000 >"$wt/big.txt" || fail "${name}/write" "the large file is not writable"
+  # ~520 KB of patch: past the 256 KB cap with room to spare, and well under `changes::COUNT_MAX` (8 MiB), so
+  # the marker's total is an exact count rather than a lower bound. Written with a shell loop rather than `seq`,
+  # because a fixture must not be the reason this case skips: `seq` is not the feature, and the wait loops below
+  # already assume coreutils on a machine that runs the gate at all.
+  n=0
+  : >"$wt/big.txt" || fail "${name}/write" "the large file is not writable"
+  while [ "$n" -lt 20000 ]; do
+    printf 'the agent wrote this line\n' >>"$wt/big.txt" || fail "${name}/write" "the large file is not writable"
+    n=$((n + 1))
+  done
   git -C "$wt" add big.txt || fail "${name}/add" "git add did not work in $wt"
   git -C "$wt" -c user.name=verify -c user.email=verify@example commit --quiet -m "the large file" ||
     fail "${name}/commit" "git commit did not work in $wt"

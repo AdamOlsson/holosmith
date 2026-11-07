@@ -155,13 +155,13 @@ pub(crate) async fn respond_diff(state: &AppState, id: &str, query: RawQuery) ->
 fn diff_refusal(error: DiffError) -> ApiError {
     match error {
         DiffError::Changes(error) => refusal(error),
-        DiffError::NotChanged { path } => {
-            // The path goes to the log rather than into the sentence, for the reason every envelope message is
-            // fixed (ADR-0008): it is the client's own input, and it is what an operator needs when a client's
-            // encoding is the thing that is wrong.
+        // The path goes to the log rather than into the sentence, for the reason every envelope message is fixed
+        // (ADR-0008): it is the client's own input, and it is what an operator needs when a client's encoding is
+        // the thing that is wrong. `sentence()` is what puts it there, so the arm has one spelling.
+        other => {
             tracing::debug!(
                 target: "holosmith::http::changes",
-                path,
+                sentence = other.sentence(),
                 "the diff was asked for a path this session did not change"
             );
             ApiError::new(StatusCode::NOT_FOUND, NOT_FOUND, NOT_CHANGED)

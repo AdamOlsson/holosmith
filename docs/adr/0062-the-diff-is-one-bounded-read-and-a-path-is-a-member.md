@@ -55,7 +55,7 @@ marker line, which a client can measure.
 
 ```text
 [diff truncated: the diff is 2097152 bytes; only the first part is shown]
-[diff truncated: the diff is longer than 8388608 bytes; only the first part is shown]
+[diff truncated: the diff is at least 8388608 bytes; only the first part is shown]
 ```
 
 ## D4 — A binary file is summarised by git's own line, and `path=` naming one is a `200`
@@ -94,11 +94,19 @@ The handler percent-decodes the value before comparing (`%20` is a name with a s
 arrives as several decoded bytes, read the way `files[]` reads a path — lossily), and an escape that is not two hex
 digits stays literal, which makes it a name no file has rather than a second kind of error.
 
+The vector also leads with **`--literal-pathspecs`**, because a git pathspec is a *glob* by default while `files[]`
+is a list of exact names: a changed file literally called `a*.md` would otherwise hand git a pattern and get back
+the union of every match, and a leading `:` would be read as pathspec magic. The membership test is what refuses;
+this is what makes the patch that follows it *that file's* patch.
+(`a_name_that_looks_like_a_pattern_is_the_name_and_not_a_pattern` measures it, and goes red without the flag.)
+
 ## D6 — No `path` is the whole branch, and an empty branch is a `200` with an empty body
 
 The demo asks for both, so the parameter is optional. The whole-branch answer is capped at the same 256 KB — "how
 big is a patch" does not depend on how many files it covers — and it truncates the same way, with the same marker.
-Nothing changed yet is a real answer: `200`, `text/plain`, zero bytes.
+Nothing changed yet is a real answer: `200`, `text/plain`, zero bytes, which
+`tests/changes.rs`'s `an_empty_branch_is_an_empty_patch_rather_than_an_error` measures on a session with no commit
+on its branch.
 
 ## D7 — `--no-renames` on the patch, at the cost of a rename reading as a delete plus an add
 
@@ -117,9 +125,11 @@ ids, and would move between two identical requests while the agent works. `tests
 ## D9 — The child is bounded, not buffered: 256 KB kept, 8 MiB counted, then killed
 
 `Command::spawn` with a piped stdout, read in 64 KiB chunks; the first `DIFF_CAP` bytes are kept and everything
-else is counted up to `COUNT_MAX = 8 * DIFF_CAP`, past which the child is killed and the marker says "longer than"
-instead of printing a number it stopped measuring. Memory is the cap plus a chunk; time is bounded by 8 MiB of
-git's output rather than by the size of a file an agent chose. Every diff under 8 MiB — the demo's 2 MB included —
+else is counted up to `COUNT_MAX = 8 * DIFF_CAP`, past which the child is killed and the marker says "at least N"
+instead of printing a number it stopped measuring. **stdout's** memory is the cap plus a chunk; time is bounded by
+8 MiB of git's output rather than by the size of a file an agent chose. stderr is drained whole on its own thread —
+bounded by what git prints there, which for `git diff` is a sentence, and reading it to the end is what keeps a
+large answer from deadlocking. Every diff under 8 MiB — the demo's 2 MB included —
 gets an **exact** total, which is what makes the marker worth reading.
 
 stderr is drained on its own thread, so a git that says a great deal cannot fill its pipe and deadlock against our

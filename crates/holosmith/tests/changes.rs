@@ -874,6 +874,7 @@ fn git_bytes(dir: &Path, args: &[&str]) -> Vec<u8> {
 fn git_patch(fixture: &Fixture, path: Option<&str>) -> Vec<u8> {
     let head = head(&fixture.worktree);
     let mut args = vec![
+        "--literal-pathspecs",
         "diff",
         "--no-ext-diff",
         "--no-textconv",
@@ -1106,6 +1107,35 @@ fn a_path_that_did_not_change_is_refused_without_asking_git() {
     // And the file it names is really changed, so the refusal above is the membership test and not "there is
     // nothing to show": git answers a patch when asked directly.
     assert!(!git_patch(&fixture, Some("a.txt")).is_empty());
+}
+
+#[test]
+fn an_empty_branch_is_an_empty_patch_rather_than_an_error() {
+    // D6's second half: "nothing changed yet" is an answer, not a refusal and not a `500`. The fixture is a fresh
+    // session with no commit on `agent/<id>`, which is what a create that never ran a turn looks like.
+    let fixture = Fixture::new("diff-empty");
+    let diff = patch(&fixture, None);
+    assert!(diff.body.is_empty(), "an empty branch has nothing to say");
+    assert!(!diff.truncated);
+    assert_eq!(diff.total, 0);
+    assert!(diff.utf8);
+}
+
+#[test]
+fn a_name_that_looks_like_a_pattern_is_the_name_and_not_a_pattern() {
+    // A git pathspec is a glob by default, and `files[]` is a list of exact names. A changed file literally called
+    // `a*.md` must be handed to git as itself: without `--literal-pathspecs` the answer for `?path=a*.md` would
+    // also carry `abc.md`, which is a diff of a file the client did not ask for.
+    let fixture = Fixture::new("diff-glob");
+    fixture.commit("a*.md", b"star\n", "one");
+    fixture.commit("abc.md", b"abc\n", "two");
+    let diff = patch(&fixture, Some("a*.md"));
+    let text = String::from_utf8(diff.body.clone()).expect("the patch is UTF-8");
+    assert!(text.contains("diff --git a/a*.md b/a*.md"), "{text}");
+    assert!(
+        !text.contains("abc.md"),
+        "the name was expanded as a pattern: {text}"
+    );
 }
 
 #[test]
