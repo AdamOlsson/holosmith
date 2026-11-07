@@ -122,9 +122,10 @@ pub const BAD_STRATEGY: &str = "bad_strategy";
 
 /// A merge asked for a field this build does not implement yet (HS-054).
 ///
-/// `merge` and `squash` (HS-055) and `delete_session` (HS-056) are in the contract and not in this build, so a
-/// request that names one is refused with a sentence saying so rather than accepted and quietly not done — the
-/// one thing an endpoint must never do to a request that says "delete the session".
+/// One field is left: `delete_session` (HS-056). It is in the contract and not in this build, so a request that
+/// names it is refused with a sentence saying so rather than accepted and quietly not done — the one thing an
+/// endpoint must never do to a request that says "delete the session". HS-055 built the two `strategy` words
+/// that used to share this code, and their arm and sentence went with it.
 pub const UNSUPPORTED: &str = "unsupported";
 
 /// A merge could not fast-forward because the target has moved (HS-054, spec item 12's rule 2).
@@ -428,9 +429,9 @@ impl ApiError {
 
     /// What a merge naming a field this build does not implement answers (HS-054).
     ///
-    /// The **message** is the caller's for [`Self::not_in_state`]'s reason: `strategy: "squash"` and
-    /// `delete_session: true` are two requests whose next steps differ, and a sentence about one read on the
-    /// other would be a guess.
+    /// The **message** is the caller's for [`Self::not_in_state`]'s reason, and it still is even though only one
+    /// field is left: `delete_session`'s next step is a second request, and the sentence has to say that nothing
+    /// was merged either or a client would think its work had landed.
     pub fn unsupported(message: &'static str) -> Self {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, UNSUPPORTED, message)
     }

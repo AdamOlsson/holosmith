@@ -434,10 +434,11 @@ impl MergeError {
 ///    that is no longer there;
 /// 3. **the four `no_worktree` facts and the branch's tip** — [`basis`], the changes view's own function;
 /// 4. **the target is a branch this repository has** ([`MergeError::NoTarget`]);
-/// 5. **where the target is checked out** — the repository's own checkout, nowhere, or somewhere else. Asked
-///    *before* the landing, so a `409 target_checked_out` costs no temporary worktree at all;
-/// 6. **the strategy**: `ff-only` asks whether the target is an ancestor of the branch and writes nothing; the
-///    other two build a commit in the temporary worktree ([`land`]);
+/// 5. **the strategy**: `ff-only` first asks whether the target is an ancestor of the branch — a fact about the
+///    request, and a refusal that costs nothing — and writes no commit; the other two build a commit in the
+///    temporary worktree ([`land`]), which is why *their* checkout question comes first;
+/// 6. **where the target is checked out** — the repository's own checkout, nowhere, or somewhere else. Asked
+///    before the landing, so a `409 target_checked_out` costs no temporary worktree at all;
 /// 7. **the write**, by one of rule 4's two commands — the same two for all three strategies, because a merge
 ///    commit descends from the target and is therefore itself a fast-forward of it.
 ///
@@ -468,9 +469,21 @@ pub fn merge(
     let old = target_head(repository, &reference)?.ok_or_else(|| MergeError::NoTarget {
         target: target.to_string(),
     })?;
-    // Where the write will land, asked before anything is built: inside a session's worktree a container is
-    // working, and a host write there would move files under it. The spec's rule 4 names two shapes; this is the
-    // third, and a refusal is the only honest answer this build can give.
+    let landing = request.strategy.landing();
+    // The fast-forward test comes **before** the checkout question, and that order is HS-054's: "the target has
+    // commits the branch does not" is a fact about the request, while `target_checked_out`'s advice ("check out
+    // another branch in that worktree") would send the operator to a second refusal. A `merge` or a `squash` does
+    // not ask it — a target that has moved on is the ordinary case a real merge exists for — and for those the
+    // checkout question comes first, so a `409 target_checked_out` costs no temporary worktree at all.
+    if landing.is_none() && !is_ancestor(repository, &reference, &head)? {
+        return Err(MergeError::NotFastForward {
+            target: target.to_string(),
+            branch: worktree.branch.clone(),
+        });
+    }
+    // Where the write will land. Inside a session's worktree a container is working, and a host write there would
+    // move files under it. The spec's rule 4 names two shapes; this is the third, and a refusal is the only honest
+    // answer this build can give.
     let site = match checkout_of(repository, target)? {
         None => Site::Ref,
         Some(path) if is_the_repository(&path, repository) => Site::Checkout(path),
@@ -481,22 +494,9 @@ pub fn merge(
             });
         }
     };
-    let new = match request.strategy.landing() {
-        None => {
-            // The fast-forward test, and the honest one: a target with commits the branch lacks cannot be
-            // fast-forwarded at all. The test is asked about **`head`**, the commit this merge will write,
-            // rather than about the branch's ref read a second time: the test and the write must be about one
-            // commit, or a commit landing on the branch in between would let the target advance to a commit
-            // that is no longer the branch's tip. A `merge` or a `squash` does not ask it — a target that has
-            // moved on is the ordinary case a real merge exists for.
-            if !is_ancestor(repository, &reference, &head)? {
-                return Err(MergeError::NotFastForward {
-                    target: target.to_string(),
-                    branch: worktree.branch.clone(),
-                });
-            }
-            head.clone()
-        }
+    let new = match landing {
+        // The commit this merge will write is the branch's tip, and the ancestry test above was asked about it.
+        None => head.clone(),
         Some(landing) => land(repository, worktree, request, landing, data_root)?,
     };
     match site {

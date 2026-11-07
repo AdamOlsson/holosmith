@@ -1,4 +1,5 @@
-//! `POST /api/sessions/:id/merge`: land a session's branch on a target (HS-054, spec item 12's rules 2 and 4).
+//! `POST /api/sessions/:id/merge`: land a session's branch on a target (HS-054 and HS-055, spec item 12's rules
+//! 2, 3 and 4).
 //!
 //! The route is a `POST`, so every mutating guard applies and the manifest records it [`Mutating`] — and it is
 //! the first route in this build whose work **writes to the project repository**. It is also the one session
@@ -9,7 +10,7 @@
 //! Three scopes, in the order the handler takes them:
 //!
 //! 1. **the body** — taken as a `Result<Bytes, BytesRejection>` for the reason the create's is, and parsed by
-//!    hand so `unknown_field` and the two `unsupported` sentences are decisions rather than serde's error text;
+//!    hand so `unknown_field` and the one `unsupported` sentence are decisions rather than serde's error text;
 //! 2. **the row** — one lock, no `.await` inside it; an unknown id is the envelope's `404 not_found`, and a row
 //!    with no `base_commit` never reaches git at all, because a session with no worktree has no branch to merge
 //!    and answers `409 no_worktree` with **this route's** sentence (the code is the changes view's, the sentence
@@ -26,9 +27,11 @@
 //! again as its own precondition (`merge::listed`).
 //!
 //! **Nothing about the row changes.** A merge is not a state transition and not an event: the session stays
-//! whatever it was and the branch is merged. `GET …/changes` is therefore **unchanged** by a merge — `ahead`
-//! counts the branch's commits and the branch did not move, and `behind` was already zero because a fast-forward
-//! requires the target to be an ancestor of the branch.
+//! whatever it was and the branch is merged. `GET …/changes` is **unchanged** by a merge: `ahead` counts the
+//! branch's commits and the branch did not move, `dirty` is the working tree's, and `behind`/`mergeable` were
+//! already what they are — a fast-forward requires the target to be an ancestor of the branch, so `behind` was
+//! `0`; after a `merge` or a `squash` the target has gained a commit the branch does not, and `behind` is the
+//! `1` that says so. Those fields were never *this route's* claim to keep.
 
 use std::sync::PoisonError;
 

@@ -2023,3 +2023,29 @@ it rather than adding a caveat beside it.
 - **The gate case boots its own **data root** as well as its own projects root**, because `<data>/merge` is what
   it measures. `find "$data/merge" -mindepth 1 | wc -l` and not an inference: the case asserts the directory
   exists first, so a merge that never created one cannot pass by measuring nothing.
+- **A squash leaves the branch a non-ancestor of the target, so HS-043's keep-rule keeps it — and that is a fact
+  HS-056 inherits, not a bug here.** `Worktree::merged_into` is `git merge-base --is-ancestor agent/<id>
+  <target>`, and a squash's commit has the *old target* as its only parent, so the branch's tip is not in the
+  target's history. `retained` therefore answers `branch: Some(agent/<id>)`. That is right — the branch holds
+  the session's commits, and a squash deliberately keeps them out — but it makes rule 5's "the branch is deleted
+  because it is merged" a decision for HS-056 rather than a git question, which ADR-0064 D11 records.
+  `a_squash_keeps_the_branch_a_merge_does_not` asks `retained` after each strategy so the assumption is a red
+  test rather than a surprise.
+- **`config.worktreePruneExpire` does not stop `git worktree prune` here (measured on 2.43), but the *needle* in
+  a test about a prunable registration must not be the word alone.** A fresh worktree whose directory is removed
+  becomes `prunable gitdir file points to non-existent location` and a plain `git worktree prune` clears it, so
+  `clear`'s unconditional prune is what lets `worktree add` take the path back. The trap is the assertion: the
+  first version of the new test asserted `listing.contains("prunable")` while its fixture was labelled
+  `strategy-prunable`, so the *temporary directory's own path* satisfied it — vacuous, and it hid the fact that
+  the test's second half was failing for a real reason. Assert `"prunable "` with git's reason, keep the word out
+  of the fixture's label, and note that HS-054's `a_prunable_registration_is_not_a_checkout_and_the_merge_lands`
+  had the identical defect (fixture `merge-prunable`) and is fixed here.
+- **The refusal order is strategy-dependent and that is deliberate.** `ff-only` asks the ancestry question before
+  the checkout one (HS-054's order: "check out another branch in that worktree" is advice that leads straight to
+  a second refusal), while `merge`/`squash` ask the checkout question first (a `409 target_checked_out` should
+  cost no temporary worktree). One shared function would have silently swapped HS-054's order for its own path;
+  `the_fast_forward_refusal_comes_before_the_checkout_one_and_the_landings_do_not` pins both halves.
+- **A `strategy` that is not a string is `bad_body`, not `bad_strategy`** (HS-054's string comparison answered
+  the latter). It is the body's *shape* rather than a value outside the vocabulary — the create's split for a
+  numeric `model` — and the wire table asserts it rather than leaving the reclassification to a reader of
+  ADR-0008.

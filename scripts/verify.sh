@@ -5546,8 +5546,9 @@ case_merge() {
   assertions=$((assertions + 1))
 
   # 2. **The refusals that move nothing**, with the target compared across all of them. `squash` used to be one of
-  # these (`422 unsupported`) and is a strategy since HS-055, so the two `422`s that remain are the parameter's
-  # (`bad_target` twice, for the two different facts) and the one field this build still cannot honour.
+  # these (`422 unsupported`) and is a strategy since HS-055, so what remains is three facts on two codes: the
+  # parameter's (`bad_target` twice, for the two different facts), a fourth strategy word (`bad_strategy`), and
+  # the one field this build still cannot honour (`unsupported`).
   main="$(git -C "$repo" rev-parse refs/heads/main)"
   for pair in '{"target":"nope"}|bad_target' '{"target":"trunk"}|bad_target' \
     '{"target":"main","strategy":"rebase"}|bad_strategy' \

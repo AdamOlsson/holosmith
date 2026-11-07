@@ -1,20 +1,32 @@
-//! The merge's fast-forward path over a real repository (HS-054, spec item 12's rules 2 and 4).
+//! The merge over a real repository: the fast-forward (HS-054) and the two strategies that build a commit
+//! (HS-055), spec item 12's rules 2, 3 and 4.
 //!
-//! Every acceptance bullet of the story is a *git* fact — a ref that moved or did not, a working tree that
-//! changed or did not, a hook that ran or did not — so these tests own a real repository in a `TempDir`, exactly
-//! as `tests/changes.rs` does for the read side, and move refs and files between two assertions. No Docker, no
-//! daemon, no backend: item 12's sentence is that all merge work runs on the host in the project repository, so
-//! the interesting half needs none of them.
+//! Every acceptance bullet of both stories is a *git* fact — a ref that moved or did not, a working tree that
+//! changed or did not, a hook that ran or did not, a commit whose parents are these two and not those — so these
+//! tests own a real repository in a `TempDir`, exactly as `tests/changes.rs` does for the read side, and move
+//! refs and files between two assertions. No Docker, no daemon, no backend: item 12's sentence is that all merge
+//! work runs on the host in the project repository, so the interesting half needs none of them.
 //!
 //! The wire group at the end boots the real router over the same repository, because a `TempDir` cannot prove
-//! what a client sees: the three keys, the `strategy` default, and every refusal as status **and** code.
+//! what a client sees: the three keys, the `strategy` default and echo, and every refusal as status **and** code.
 //!
-//! Two of the story's decisions are only provable by measuring the thing that would otherwise happen:
+//! Four of the decisions are only provable by measuring the thing that would otherwise happen:
 //!
-//! - **the hook test** writes a real `post-merge` hook and asserts its marker never appears, which is the only
-//!   way to show that `-c core.hooksPath=/dev/null` is load-bearing rather than decorative;
+//! - **the hook tests** write real `post-merge`, `post-checkout`, `pre-commit` and `commit-msg` hooks and assert
+//!   their markers never appear, which is the only way to show that `-c core.hooksPath=/dev/null` is load-bearing
+//!   rather than decorative;
 //! - **the unrelated-dirty-file test** asserts that a checkout with work in it still merges, which is what makes
-//!   "measure the failure rather than pre-check the status" a decision with a test behind it instead of a taste.
+//!   "measure the failure rather than pre-check the status" a decision with a test behind it instead of a taste;
+//! - **the temporary-directory assertions** read the filesystem (`<data>/merge` and the registration list) after
+//!   a success, a conflict and a refusal that happened *after* the landing — "removed afterwards even on failure"
+//!   is a fact about a directory, not about a return value;
+//! - **the keep-rule test** asks HS-043's function after each strategy, because a squash leaves the branch a
+//!   non-ancestor of the target and that has a consequence for a delete nobody has built yet.
+//!
+//! The unrelated [identity] claim is measured the only way it can be on a machine that has a global `user.name`:
+//! by reading `%an <%ae>` off the commit this build wrote.
+//!
+//! [identity]: holosmith::snapshot::IDENTITY
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -26,7 +38,7 @@ use holosmith::config::Config;
 use holosmith::http::{self, AppState};
 use holosmith::merge::{FF_ONLY, MergeError, Merged, Request, Strategy, merge};
 use holosmith::sessions::NewSession;
-use holosmith::worktree::Worktree;
+use holosmith::worktree::{Retained, Worktree};
 use serde_json::Value;
 
 mod support;
@@ -510,7 +522,7 @@ fn a_prunable_registration_is_not_a_checkout_and_the_merge_lands_by_the_ref() {
     // operator can perform, with advice ("check out another branch in that worktree") that cannot be followed —
     // and this build leaves such registrations behind routinely (HS-052's landmine is exactly one). Dropping the
     // `prunable` filter in `checkout_of` turns this test from a `200` into that refusal.
-    let fixture = Fixture::new("merge-prunable");
+    let fixture = Fixture::new("merge-pruned-registration");
     fixture.commit("a.txt", b"a\n", "the session's change");
     let tip = fixture.rev(&fixture.branch());
     git(&fixture.repo, &["checkout", "--quiet", "-b", "elsewhere"]);
@@ -527,7 +539,7 @@ fn a_prunable_registration_is_not_a_checkout_and_the_merge_lands_by_the_ref() {
     );
     std::fs::remove_dir_all(&other).expect("the checkout's directory is removed");
     assert!(
-        git(&fixture.repo, &["worktree", "list", "--porcelain"]).contains("prunable"),
+        git(&fixture.repo, &["worktree", "list", "--porcelain"]).contains("prunable "),
         "the fixture did not leave a prunable registration"
     );
 
@@ -865,6 +877,93 @@ fn a_conflict_is_its_paths_and_nothing_moves() {
 }
 
 #[test]
+fn the_fast_forward_refusal_comes_before_the_checkout_one_and_the_landings_do_not() {
+    // Two facts, one repository, and the order is a decision. A branch the target has moved past **and** a target
+    // checked out in somebody else's worktree answers `not_fast_forward` by the default strategy — because "check
+    // out another branch in that worktree and merge again" would send the operator straight to a second refusal —
+    // and `target_checked_out` by `merge`, which asks the checkout question first because asking it after the
+    // landing would have built a commit for nothing. HS-054's order for its own path is therefore preserved, and
+    // the two new strategies' order is deliberate rather than a side effect of one shared function.
+    let fixture = Fixture::new("merge-refusal-order");
+    fixture.commit("a.txt", b"a\n", "the session's change");
+    fixture.commit_target("t.txt", b"target\n", "the target moves on");
+    git(&fixture.repo, &["checkout", "--quiet", "-b", "elsewhere"]);
+    let other = fixture.projects.join("a-third-checkout");
+    git(
+        &fixture.repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            other.to_str().expect("a UTF-8 temp path"),
+            "main",
+        ],
+    );
+
+    assert!(
+        matches!(fixture.refused("main"), MergeError::NotFastForward { .. }),
+        "the default strategy answered about the checkout before asking about the branch"
+    );
+    match fixture.land_by(Strategy::Merge, None) {
+        Err(MergeError::CheckedOutElsewhere { target, path }) => {
+            assert_eq!(target, "main");
+            assert_eq!(path, other);
+        }
+        other => panic!("a landing into a checkout it must not touch was not refused: {other:?}"),
+    }
+    // The refusal did not build anything: no commit, no temporary directory, and the checkout it named is
+    // untouched.
+    assert_eq!(fixture.temporary(), Vec::<String>::new());
+    assert!(
+        !other.join("a.txt").exists(),
+        "the refusal wrote into the working tree it said it would not touch"
+    );
+}
+
+#[test]
+fn a_squash_keeps_the_branch_a_merge_does_not() {
+    // HS-043's keep-rule, asked after each strategy — the interaction the handoff's notes named and this story
+    // has to decide rather than discover. `Worktree::merged_into` is `git merge-base --is-ancestor agent/<id>
+    // <target>`, and a **squash** writes a commit whose only parent is the old target, so the branch's tip is not
+    // an ancestor and the branch is *kept* — which is honest (the branch carries the session's own history, and
+    // the target does not have it) and which makes rule 5's "the branch is deleted because it is merged" a fact
+    // HS-056 must decide for this strategy, not a fact it can read off git. A `merge` commit, by contrast, has the
+    // branch's tip as a parent, so the same question answers yes and the branch is not kept.
+    let merged = Fixture::new("keep-rule-merge");
+    merged.commit("a.txt", b"a\n", "the session's change");
+    merged
+        .land_by(Strategy::Merge, None)
+        .expect("a merge commit lands");
+    let targets = ["main".to_string(), "master".to_string()];
+    match merged
+        .worktree()
+        .retained(Some(&merged.base), &targets)
+        .expect("the keep-rule can be asked")
+    {
+        Retained::Known { branch, .. } => assert_eq!(branch, None),
+        other => panic!("a merged branch's keep-rule is not `Known`: {other:?}"),
+    }
+
+    let squashed = Fixture::new("keep-rule-squash");
+    squashed.commit("a.txt", b"a\n", "the session's change");
+    squashed
+        .land_by(Strategy::Squash, None)
+        .expect("a squashed commit lands");
+    match squashed
+        .worktree()
+        .retained(Some(&squashed.base), &targets)
+        .expect("the keep-rule can be asked")
+    {
+        Retained::Known { branch, .. } => assert_eq!(
+            branch,
+            Some(squashed.branch()),
+            "a squashed branch is not an ancestor of the target, so the keep-rule must keep it"
+        ),
+        other => panic!("a kept branch's keep-rule is not `Known`: {other:?}"),
+    }
+}
+
+#[test]
 fn a_stale_temporary_worktree_from_a_killed_run_is_removed_and_the_merge_lands() {
     // Rule 2 creates `<data>/merge/<id>`, so a killed merge leaves one there. The story's decision is that such a
     // directory is **removed, never refused**: `409 merge_in_progress` would be an answer about concurrency, and
@@ -890,6 +989,52 @@ fn a_stale_temporary_worktree_from_a_killed_run_is_removed_and_the_merge_lands()
     assert_eq!(fixture.rev("refs/heads/main"), merged.merged_commit);
     assert_eq!(fixture.temporary(), Vec::<String>::new());
     assert!(!stale.exists(), "the stale directory survived the merge");
+
+    // The other leftover shape, and the one `remove_dir_all` cannot reach: a **registration** whose directory is
+    // gone. Git calls such a registration prunable and `worktree add` refuses a path git holds one for, so
+    // `clear`'s unconditional `worktree prune` is what makes this arm work — dropping it turns this half red with
+    // git's own "is a missing but already registered worktree".
+    let registered = Fixture::new("strategy-registered");
+    registered.commit("a.txt", b"a\n", "the session's change");
+    let path = registered
+        .state
+        .config
+        .data_root
+        .join("merge")
+        .join(&registered.id);
+    std::fs::create_dir_all(path.parent().expect("the directory has a parent"))
+        .expect("the merge directory is creatable");
+    git(
+        &registered.repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            path.to_str().expect("a UTF-8 temp path"),
+            "refs/heads/main",
+        ],
+    );
+    std::fs::remove_dir_all(&path).expect("the registered directory is removed");
+    // `prunable <reason>`, and not the bare word: a fixture whose own label contained it would make this
+    // assertion vacuous, which is how the first version of this test passed over a registration it did not
+    // have.
+    assert!(
+        git(&registered.repo, &["worktree", "list", "--porcelain"]).contains("prunable "),
+        "the fixture did not leave a prunable registration"
+    );
+
+    let landed = registered
+        .land_by(Strategy::Merge, None)
+        .expect("a prunable registration is a leftover to clear, not a merge to refuse");
+
+    assert_eq!(registered.rev("refs/heads/main"), landed.merged_commit);
+    assert_eq!(registered.temporary(), Vec::<String>::new());
+    let listing = git(&registered.repo, &["worktree", "list", "--porcelain"]);
+    assert!(
+        !listing.contains("prunable "),
+        "the prunable registration survived the merge: {listing}"
+    );
 }
 
 #[test]
@@ -1157,6 +1302,11 @@ async fn every_bad_request_moves_no_ref() {
         (r#"{"target":"nope"}"#, "bad_target"),
         (r#"{"target":"trunk"}"#, "bad_target"),
         (r#"{"target":"main","strategy":"rebase"}"#, "bad_strategy"),
+        // A `strategy` that is not a string at all is the *body's* shape rather than a value outside the
+        // vocabulary, so it is `bad_body` — the same answer the create gives a numeric `model`. It was
+        // `bad_strategy` under HS-054, where every strategy check was a string comparison; the change is
+        // deliberate and ADR-0064 records it.
+        (r#"{"target":"main","strategy":3}"#, "bad_body"),
         (r#"{"target":"main","delete_session":true}"#, "unsupported"),
         (r#"{"target":"main","message":""}"#, "bad_body"),
         (r#"{"target":"main","force":true}"#, "unknown_field"),

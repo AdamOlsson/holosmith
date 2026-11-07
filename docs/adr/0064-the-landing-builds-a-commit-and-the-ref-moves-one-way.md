@@ -137,6 +137,15 @@ target_has_already_moved_past` is the pair: the same repository shape is a `409 
 strategy and a `200` with two parents by `merge`, in one test. Making the test run for every strategy turns five
 tests red.
 
+**The two orders are different on purpose.** `ff-only` asks the ancestry question *before* the checkout one,
+which is HS-054's order and the right one: "the target has commits the branch does not" is a fact about the
+request, while `target_checked_out`'s advice ("check out another branch in that worktree and merge again") would
+send the operator straight to a second refusal. The two landing strategies ask the checkout question first,
+because for them the ancestry question does not exist and a `409 target_checked_out` should cost no temporary
+worktree at all. `the_fast_forward_refusal_comes_before_the_checkout_one_and_the_landings_do_not` is the pair:
+one repository — a branch the target has moved past, and a target checked out in a third working tree — answers
+`not_fast_forward` by the default strategy and `target_checked_out` by `merge`.
+
 The move still uses `409 not_fast_forward` when it fails because the ref no longer holds what this module read.
 That code names the **ref update**, which is a fast-forward in all three strategies — the commit descends from
 the target — so the sentence "the target has commits the session's branch does not, so it cannot be
@@ -188,13 +197,45 @@ branch and fix conflicts, then retries."*
 
 There is no screen to put it on. The Changes sheet — the file list, the diff, the target and strategy picker, the
 Merge button — is HS-058, and a phase-2 story that adds a button to a screen the next story rewrites is work
-thrown away. HS-038 set the precedent (ADR-0046: it left the Internet-access checkbox's copy to whoever next
-owned the create form, because "a new element is a UI change"). **HS-058 implements this affordance against
+thrown away. HS-038 set the precedent — ADR-0046 cut the Internet-access checkbox's copy for the same reason,
+that it was a new visible element and belonged to the story that owned the form (`docs/notes.md`'s HS-038
+landmine states the rule in as many words). **HS-058 implements this affordance against
 this route's `409 conflict` and its `conflicts` list**, and the story's acceptance is answered with that pointer
 rather than a tick. What HS-055 builds is everything the affordance needs: a refusal a client can act on, naming
 the paths, with a sentence that already says what the prompt should say.
 
-## D11 — The gate case walks one repository through all three strategies
+## D11 — A squash keeps the branch, and that makes rule 5 a question HS-056 has to decide
+
+HS-043's keep-rule is `git merge-base --is-ancestor agent/<id> refs/heads/<target>` (`Worktree::merged_into`), and
+a **squash** writes a commit whose only parent is the old target — so after a squash the branch's tip is *not* an
+ancestor of the target, `merged_into` answers `No`, and `retained` **keeps** `agent/<id>`.
+
+That is the honest answer and not a gap in this story. The branch carries the session's own commits, which the
+target does not have: a squash deliberately leaves them out of the target's history, so "this branch's commits
+are in the target" is false, and a teardown that deleted it would delete the only place they still exist (the
+WIP ref is a tree, not a history). What it does change is rule 5's sentence — "The branch `agent/<id>` is then
+deleted because it is merged" — which **HS-056** cannot implement by re-asking git after a squash. Its
+`delete_session` request already knows a merge just succeeded, so the evidence it needs is the answer it got,
+not a second ancestry question; and where it chooses to ask git anyway, the honest version is the *tree*
+comparison (`git diff --quiet <branch> <target>`), not ancestry.
+
+`a_squash_keeps_the_branch_a_merge_does_not` asks `Worktree::retained` after each strategy and requires
+`branch: None` after a `merge` and `branch: Some(agent/<id>)` after a `squash`. It is the interaction, recorded
+as a measurement rather than as prose, so HS-056 meets it as a red test if it assumes otherwise.
+
+Two smaller record-keeping decisions this story made while the review was read back:
+
+- **`{"strategy": 3}` is now `422 bad_body`** where HS-054 answered `bad_strategy`: a `strategy` that is not a
+  string is the *body's* shape rather than a value outside the vocabulary, which is the create's own split
+  (`bad_body` for a numeric `model`). The wire table in `tests/merge.rs` asserts it.
+- **`git worktree prune` is what clears a registration whose directory is gone**, and git only calls it
+  `prunable` when the record is unreachable — which is why the test that measures it asserts `"prunable "` with
+  its reason and a fixture label that does not contain the word. The first version of that test was **vacuous**:
+  its fixture was called `strategy-prunable`, and the word was in the listing's own path. HS-054's
+  `a_prunable_registration_is_not_a_checkout_and_the_merge_lands` had the identical defect (fixture
+  `merge-prunable`) and is fixed here for the same reason.
+
+## D12 — The gate case walks one repository through all three strategies
 
 `case_merge_strategies` boots its own Docker run over its own projects root **and data root** (so `<data>/merge`
 is the case's to measure), re-makes the worktree the failed network step took back with the step's own command,
@@ -210,13 +251,16 @@ and then:
    exactly what an `ls` would show, and the case asserts the directory exists first so a merge that never made
    one cannot pass.
 
-`case_merge` loses one of its four refused requests (`strategy:"squash"` was `422 unsupported`; it is a strategy
-now) and gains `strategy:"rebase"` → `422 bad_strategy`, so the refusal table is still walked end to end.
+`case_merge` loses one of its refused requests (`strategy:"squash"` was `422 unsupported`; it is a strategy now)
+and gains `strategy:"rebase"` → `422 bad_strategy` on top of the two `bad_target`s and the one `unsupported`, so
+the refusal table is still walked end to end — three facts on two codes, which is what its comment now says.
 
 ## What this ADR does not decide
 
 Rule 1's two guards (`session_running`, `dirty_worktree`) and `delete_session: true` — still `422 unsupported`
-with no new sentence — are HS-056, which also owns the 60-second merge/publish timeout. Publish is HS-057. The
+with no new sentence — are HS-056, which also owns the 60-second merge/publish timeout **and, per D11, the
+question of what "the branch is deleted because it is merged" means after a squash**, which it cannot answer by
+re-asking git. Publish is HS-057. The
 Changes sheet, the target and strategy picker and the Resolve-with-agent affordance are HS-058 (D10). The hub is
 phase 3. `worktree.rs`'s create refusals are untouched, and the merge's git commands are still unbounded: a
 timeout on the *request* is HS-056's, and an arbitrary bound on a git command the operator asked for would be
