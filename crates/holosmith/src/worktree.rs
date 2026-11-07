@@ -569,34 +569,54 @@ pub struct Checkout {
     pub path: PathBuf,
     /// The branch this checkout has checked out, or `None` when its HEAD is detached.
     pub branch: Option<String>,
+    /// Whether git calls this registration **prunable**: the directory is gone and `git worktree prune` has not
+    /// run yet.
+    ///
+    /// A field rather than a filter, because the two readers want different things from it: the startup sweep
+    /// wants every registration it can compare against the filesystem, and the merge wants only the ones with a
+    /// **working tree**. A prunable registration has none, so refusing a merge because the target is "checked
+    /// out" there would refuse for a reason that is not true — the merge goes through the ref instead, and
+    /// HS-052's landmine is exactly such a registration.
+    pub prunable: bool,
 }
 
 /// Every checkout `repository` registers, with the branch each one holds (HS-054).
 ///
 /// `git worktree list --porcelain` prints one block per checkout — `worktree <path>`, `HEAD <sha>`, then
-/// either `branch refs/heads/<name>` or `detached` — separated by a blank line. The merge needs the *branch*,
-/// which [`registrations`] throws away: "is the target checked out anywhere" and, if so, "where" are one
-/// question, and the answer decides whether the target is updated in a working tree or through the ref.
+/// either `branch refs/heads/<name>` or `detached`, and `prunable <reason>` when the directory is gone —
+/// separated by a blank line. The merge needs the *branch*, which [`registrations`] throws away: "is the target
+/// checked out anywhere" and, if so, "where" are one question, and the answer decides whether the target is
+/// updated in a working tree or through the ref.
 ///
-/// A block only carries a branch when it has one, so the walk keeps the latest `worktree` line and fills the
-/// branch from a later line in the same block. Nothing else in the format matters here, and `locked`/`prunable`
-/// are ignored rather than interpreted.
+/// A block carries a branch only when it has one, and `prunable` only when git says so, so the walk keeps the
+/// latest `worktree` line and fills the rest of its own block. `locked` and a checkout's own `HEAD` are ignored:
+/// neither answers a question this build asks of one.
 pub fn checkouts(repository: &Path) -> Result<Vec<Checkout>, GitError> {
     let listing = git_run(repository, &["worktree", "list", "--porcelain"])?;
+    Ok(parse_checkouts(&listing))
+}
+
+/// The listing's blocks as [`Checkout`]s — split out so the shapes git prints are testable with no repository.
+fn parse_checkouts(listing: &str) -> Vec<Checkout> {
     let mut found: Vec<Checkout> = Vec::new();
     for line in listing.lines() {
         if let Some(path) = line.strip_prefix("worktree ") {
             found.push(Checkout {
                 path: PathBuf::from(path),
                 branch: None,
+                prunable: false,
             });
         } else if let Some(reference) = line.strip_prefix("branch ")
             && let Some(checkout) = found.last_mut()
         {
             checkout.branch = reference.strip_prefix("refs/heads/").map(str::to_string);
+        } else if line.starts_with("prunable ")
+            && let Some(checkout) = found.last_mut()
+        {
+            checkout.prunable = true;
         }
     }
-    Ok(found)
+    found
 }
 
 // The four functions below are the crate's one way to spawn git: `Command::new("git")` appears here and
@@ -723,5 +743,29 @@ mod tests {
             CONFIG_READ[CONFIG_READ.len() - 1],
             "extensions.worktreeConfig"
         );
+    }
+
+    #[test]
+    fn the_three_block_shapes_git_prints_are_read_apart() {
+        // One listing, hand-written in the shape git 2.43 prints (measured): the project's checkout on a
+        // branch, a session's worktree on another, a detached checkout, and a **prunable** registration — a
+        // directory that is gone and has not been pruned. The last is the one that matters to the merge: a
+        // `409 target_checked_out` there would refuse for a reason that is not true, so the flag has to survive
+        // the parse rather than be assumed absent.
+        let listing = "worktree /projects/holosmith\nHEAD 0123456\nbranch refs/heads/main\n\n\
+                       worktree /projects/.worktrees/abc\nHEAD 789abcd\nbranch refs/heads/agent/abc\n\n\
+                       worktree /projects/elsewhere\nHEAD fedcba9\ndetached\n\n\
+                       worktree /projects/gone\nHEAD 1234567\nbranch refs/heads/trunk\nprunable gitdir file \
+                       points to non-existent path\n\n";
+        let found = parse_checkouts(listing);
+        assert_eq!(found.len(), 4, "{found:?}");
+        assert_eq!(found[0].path, PathBuf::from("/projects/holosmith"));
+        assert_eq!(found[0].branch.as_deref(), Some("main"));
+        assert!(!found[0].prunable);
+        assert_eq!(found[1].branch.as_deref(), Some("agent/abc"));
+        assert_eq!(found[2].branch, None, "a detached checkout has no branch");
+        assert!(!found[2].prunable, "the flag leaked from another block");
+        assert_eq!(found[3].branch.as_deref(), Some("trunk"));
+        assert!(found[3].prunable, "the prunable block lost its flag");
     }
 }

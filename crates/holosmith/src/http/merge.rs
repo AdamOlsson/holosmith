@@ -12,7 +12,8 @@
 //!    hand so `unknown_field` and the two `unsupported` sentences are decisions rather than serde's error text;
 //! 2. **the row** — one lock, no `.await` inside it; an unknown id is the envelope's `404 not_found`, and a row
 //!    with no `base_commit` never reaches git at all, because a session with no worktree has no branch to merge
-//!    and answers the changes view's own `409 no_worktree` sentence;
+//!    and answers `409 no_worktree` with **this route's** sentence (the code is the changes view's, the sentence
+//!    describes the request — ADR-0063 D1);
 //! 3. **the merge** — [`crate::merge::merge`] on a blocking task (the whole operation is synchronous git, and a
 //!    request path must not park a runtime worker on it), then the three keys, or one of the refusals.
 //!
@@ -20,9 +21,14 @@
 //! the reason `http::changes` gives: the rule derives the branch, the repository and the directory from the same
 //! three facts, and the merge's basis refuses a path git does not register rather than trusting either spelling.
 //!
+//! The target's **first** fact — that it is a branch this machine will merge into — is asked before the row is
+//! read, so the same bad request is answered the same way whatever the session's state is; the module asks it
+//! again as its own precondition (`merge::listed`).
+//!
 //! **Nothing about the row changes.** A merge is not a state transition and not an event: the session stays
-//! whatever it was, the branch is merged, and `GET …/changes` then answers `ahead: 0` because that is a
-//! measurement of the branch rather than a flag somebody wrote.
+//! whatever it was and the branch is merged. `GET …/changes` is therefore **unchanged** by a merge — `ahead`
+//! counts the branch's commits and the branch did not move, and `behind` was already zero because a fast-forward
+//! requires the target to be an ancestor of the branch.
 
 use std::sync::PoisonError;
 
@@ -33,10 +39,10 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::Value;
 
+use crate::changes::ChangesError;
 use crate::http::app::AppState;
-use crate::http::changes::{NO_WORKTREE, refusal};
 use crate::http::error::{ApiError, internal};
-use crate::merge::{FF_ONLY, MergeError, merge};
+use crate::merge::{FF_ONLY, MergeError, listed, merge};
 use crate::worktree::Worktree;
 
 /// The body's fields, exactly: any other key is `unknown_field`, the create's own rule.
@@ -73,6 +79,26 @@ const BAD_STRATEGY: &str = "`strategy` must be `ff-only`, `merge` or `squash`";
 const UNBUILT_DELETE: &str = "`delete_session` is not built yet, so nothing was merged and the session was not deleted; merge with \
      `delete_session` absent, then delete the session";
 
+/// The four `no_worktree` facts, in this route's words.
+///
+/// One **code** is shared with `GET …/changes` — the client's move is the same ("there is nothing here to act
+/// on") — and the sentences are not, because a sentence must describe the request it answers and the summary's
+/// end in "there is nothing to review" (ADR-0008, and the reason `ApiError::no_worktree` takes its message from
+/// the caller at all). The next-step halves are the same and stay: a resume re-provisions the session and
+/// `Worktree::ensure` adopts the branch that already holds the commits.
+const NO_WORKTREE: &str = "this session has no worktree, so there is no branch to merge";
+
+const WORKTREE_GONE: &str = "the session's worktree is gone, so there is nothing to merge; resume the session to make it again from \
+     the branch";
+
+const NOT_REGISTERED: &str = "git no longer registers the session's worktree, so there is nothing to merge; resume the session to make \
+     it again from the branch";
+
+const NO_BRANCH: &str = "the session's branch is gone, so there is nothing to merge";
+
+const NO_REPOSITORY: &str = "the project's repository is gone, so there is nothing to merge into; restore the project's checkout \
+     under the projects root";
+
 /// A merge that could not fast-forward: the target has commits the branch does not.
 const NOT_FAST_FORWARD: &str = "the target has commits the session's branch does not, so it cannot be fast-forwarded and nothing was \
      merged; merge the target into the session's branch and try again";
@@ -101,6 +127,13 @@ pub(crate) async fn respond(
         Ok(target) => target,
         Err(error) => return error.into_response(),
     };
+    // The target's first fact is asked here and not later, because it is the **request's**: a body naming a
+    // branch this machine will not merge into is malformed whatever the session's state is, so it must not be
+    // answered differently for a session with no worktree than for one with (ADR-0012's order). `merge` asks
+    // the same predicate again as its own precondition.
+    if !listed(&target, &state.config.merge.targets) {
+        return ApiError::bad_target(UNLISTED_TARGET).into_response();
+    }
     let session = {
         let database = state
             .database
@@ -172,17 +205,37 @@ fn parse_body(bytes: &[u8]) -> Result<String, ApiError> {
 
 /// The envelope a [`MergeError`] is answered with.
 ///
-/// The changes view's family first, because it is one rule and one spelling (`http::changes::refusal`), and then
-/// this route's five facts. The path the changes view's sentences cannot carry goes to the log here too, and for
-/// the same reason.
+/// Every refusal is logged with [`MergeError::sentence`], which is where the target, the configured list and the
+/// checkout's path belong: the envelope's messages are fixed sentences (ADR-0008) and a path on a phone is noise
+/// beside the next step, while an operator reading the log wants exactly those facts.
 fn refusal_of(error: MergeError) -> ApiError {
+    tracing::warn!(
+        target: "holosmith::http::merge",
+        sentence = error.sentence(),
+        "a merge was refused"
+    );
     match error {
-        MergeError::Changes(error) => refusal(error),
+        MergeError::Changes(error) => changes_refusal(error),
         MergeError::Unlisted { .. } => ApiError::bad_target(UNLISTED_TARGET),
         MergeError::NoTarget { .. } => ApiError::bad_target(MISSING_TARGET),
         MergeError::NotFastForward { .. } => ApiError::not_fast_forward(NOT_FAST_FORWARD),
         MergeError::TargetDirty { .. } => ApiError::target_dirty(TARGET_DIRTY),
         MergeError::CheckedOutElsewhere { .. } => ApiError::target_checked_out(TARGET_CHECKED_OUT),
+    }
+}
+
+/// The envelope a [`ChangesError`] is answered with on **this** route: the same code, this request's sentences.
+///
+/// The state facts are one code with four sentences (ADR-0063 D1), and the one arm that is not a `409` is a
+/// repository git cannot read — a machine problem, answered by `internal` with the operation *and* git's words,
+/// which is the split `http::changes` makes for its own route.
+fn changes_refusal(error: ChangesError) -> ApiError {
+    match error {
+        ChangesError::NoRepository { .. } => ApiError::no_worktree(NO_REPOSITORY),
+        ChangesError::Missing { .. } => ApiError::no_worktree(WORKTREE_GONE),
+        ChangesError::Unregistered { .. } => ApiError::no_worktree(NOT_REGISTERED),
+        ChangesError::NoBranch { .. } => ApiError::no_worktree(NO_BRANCH),
+        ChangesError::Git(error) => internal("merge", error),
     }
 }
 

@@ -18,9 +18,10 @@
 //! - **One merge per project at a time** ([`Merges`]): a `std::sync::Mutex` per repository path, held for the
 //!   whole write. It is taken inside the caller's `spawn_blocking`, because that is where the whole operation
 //!   runs and a `std` mutex across an `.await` would park a runtime worker.
-//! - **The four refusals are the changes view's** ([`crate::changes::basis`]): "there is no worktree" is one
-//!   fact with four sentences, and a client that learned `GET …/changes` learned the merge's refusals. The
-//!   module imports that function rather than copying it; what it *adds* is the target's own three facts.
+//! - **The no-worktree rules are the changes view's** ([`crate::changes::basis`]): "there is no worktree" is one
+//!   fact with four refusals, and the module imports that function rather than copying it. What it *adds* is the
+//!   target's own facts; what it does *not* inherit is the sentences, which `http::merge` writes for its own
+//!   request (a `409` on a merge that says "there is nothing to review" is about the wrong request).
 //! - **Every answer is measured, never inferred from git's English.** `merge-base --is-ancestor` exits 0/1 as
 //!   an answer (the same shape HS-043's keep-rule reads), `update-ref`'s compare-and-swap is the race-free
 //!   guard, and a failed `git merge --ff-only` is classified by re-measuring two facts of our own — the
@@ -32,8 +33,9 @@
 //!
 //! What this module does not do: no `merge` or `squash` strategy and no temporary worktree (HS-055), no
 //! conflict arm, no `delete_session` and none of rule 1's guards (HS-056), no publish (HS-057). It also does
-//! not touch the database: a merge is neither a state transition nor an event, and `GET …/changes` answers
-//! `ahead: 0` afterwards because that is a measurement of the branch.
+//! not touch the database: a merge is neither a state transition nor an event, and the changes view is
+//! **unchanged** by one — `ahead` counts the branch's commits and the branch did not move, and `behind` was
+//! already zero because a fast-forward requires the target to be an ancestor of the branch.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -238,7 +240,7 @@ pub fn merge(
     targets: &[String],
     merges: &Merges,
 ) -> Result<Merged, MergeError> {
-    if !targets.iter().any(|listed| listed == target) {
+    if !listed(target, targets) {
         return Err(MergeError::Unlisted {
             target: target.to_string(),
             targets: targets.to_vec(),
@@ -254,11 +256,10 @@ pub fn merge(
     let old = target_head(repository, &reference)?.ok_or_else(|| MergeError::NoTarget {
         target: target.to_string(),
     })?;
-    if !is_ancestor(
-        repository,
-        &reference,
-        &format!("refs/heads/{}", worktree.branch),
-    )? {
+    // The ancestry test is asked about **`head`**, the commit this merge will write, rather than about the
+    // branch's ref read a second time: the test and the write must be about one commit, or a commit landing on
+    // the branch in between would let the target advance to a commit that is no longer the branch's tip.
+    if !is_ancestor(repository, &reference, &head)? {
         return Err(MergeError::NotFastForward {
             target: target.to_string(),
             branch: worktree.branch.clone(),
@@ -292,6 +293,17 @@ pub fn merge(
         target: target.to_string(),
         strategy: FF_ONLY.to_string(),
     })
+}
+
+/// Whether `target` is one of the branches the config lets this machine merge into (item 12's rule 6).
+///
+/// One predicate with two callers, and the pair is deliberate: the handler asks it **before** it reads the
+/// session, because a request naming a branch this machine will not merge into is malformed whatever the
+/// session's state is, and [`merge`] asks it again as its own precondition — a module that would merge into any
+/// name it was handed is a module whose refusal depends on its caller. Both answers are the same `422`; the
+/// handler's is the one a client sees first.
+pub fn listed(target: &str, targets: &[String]) -> bool {
+    targets.iter().any(|listed| listed == target)
 }
 
 /// The commit `reference` points at, or `None` when the repository has no such ref.
@@ -336,6 +348,12 @@ fn checkout_of(repository: &Path, branch: &str) -> Result<Option<PathBuf>, GitEr
     let found: Vec<Checkout> = checkouts(repository)?;
     Ok(found
         .into_iter()
+        // A **prunable** registration has no working tree — the directory is gone and `git worktree prune` has
+        // not run — so the target is not really checked out there and there is nothing to move. Counting it
+        // would refuse a merge the operator can perform, with advice ("check out another branch in that
+        // worktree") that cannot be followed; the ref is the right arm instead. HS-052's landmine is exactly
+        // such a registration.
+        .filter(|checkout| !checkout.prunable)
         .find(|checkout| checkout.branch.as_deref() == Some(branch))
         .map(|checkout| checkout.path))
 }
@@ -431,12 +449,10 @@ fn fast_forward(
             ),
         })));
     }
+    // Re-measured about the same commit the merge was asked to write, so the question is "is the target still
+    // an ancestor of `head`" rather than about wherever the branch has got to since.
     let reference = format!("refs/heads/{target}");
-    if !is_ancestor(
-        repository,
-        &reference,
-        &format!("refs/heads/{}", worktree.branch),
-    )? {
+    if !is_ancestor(repository, &reference, head)? {
         return Err(MergeError::NotFastForward {
             target: target.to_string(),
             branch: worktree.branch.clone(),

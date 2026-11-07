@@ -20,10 +20,16 @@ are the same two facts. That is answered by import rather than by cohabitation:
 
 - `changes::basis` (the four ordered refusals and the branch's tip) and `changes::dirty` (any line of `git status
   --porcelain`, `--untracked-files=normal --no-optional-locks`) became `pub(crate)` and merge calls them;
-- `http::changes::refusal` (the one envelope for `ChangesError`) and `http::changes::NO_WORKTREE` became
-  `pub(crate)` and the merge handler calls them.
+- `merge::listed` is the "is this a target" predicate, asked by the handler (before the row, for the `422`) and
+  again by `merge()` as its own precondition.
 
-So there is one spelling of each rule and two modules. The alternative — a `Merge` struct hung on `Worktree` —
+So there is one spelling of each **rule** and two modules. The **sentences** are not shared, and the first draft
+of this ADR got that wrong: `http/merge.rs` writes its own four `no_worktree` messages ("…so there is no branch
+to merge") because a message must describe *its own* request — the rule `ApiError::no_worktree(message)` exists
+for, and the one that made HS-015's prompt stop reusing the create's sentence. The **code** is shared, which is
+the part a client branches on. A merge's git failure is answered by `internal("merge", …)` rather than by the
+changes view's mapper, for the same reason: a failed *write* logged as "the changes view could not read the
+repository" is a sentence about the wrong operation. The alternative — a `Merge` struct hung on `Worktree` —
 was rejected for ADR-0061's reason one layer down: the worktree knows a branch and a directory, and "which
 branch may receive this one, and is it checked out" is the review-and-merge item's question.
 
@@ -55,12 +61,18 @@ about what happens to the repository or the row, and those two change everything
 
 ## D3 — Request validity before session state, and the create's order
 
-Body → row (`404`) → the row's `base_commit` (`409 no_worktree`) → the target is in `merge.targets` (`422`) →
-the four basis refusals → the target branch exists (`422`, second sentence) → the fast-forward test → the write.
+Body → **target listed** (`422`) → row (`404`) → the row's `base_commit` (`409 no_worktree`) → the four basis
+refusals → the target branch exists (`422`, second sentence) → the fast-forward test → the write.
 
-The first two questions are the *request's*, and ADR-0012's create established that a malformed request outranks
-a session-state refusal. The rest is the changes view's own "cheapest and most fundamental first": a repository
-that is gone is a `409` before any read inside it can become a `500`.
+The first three questions are the *request's*, and ADR-0012's create established that a malformed request outranks
+a session-state refusal. The target's membership is checked in the **handler**, immediately after the body,
+because it is pure — `merge.targets` is already in hand — and because the first draft asked it after the row's
+`base_commit`, which made one bad body answer `409` on a session with no worktree and `422` on a session whose
+directory was gone. `merge()` asks the same predicate again as its own precondition, so a module that would merge
+into any name it was handed cannot exist.
+
+The rest is the changes view's own "cheapest and most fundamental first": a repository that is gone is a `409`
+before any read inside it can become a `500`.
 
 Two facts share `bad_target`, on the `cap_reached` precedent: a name the config does not list, and a listed name
 the repository has no branch for — one code, two sentences, because the client's move is one and the operator's
@@ -80,7 +92,10 @@ same command HS-043's keep-rule reads, and read the same way — an exit code th
 named rather than inferred.
 
 The ancestry test is the primary check because it is the one that explains itself: "the target has commits the
-branch does not" is a sentence an operator can act on. The compare-and-swap
+branch does not" is a sentence an operator can act on. It is asked about **`head`**, the commit this merge will
+write, rather than about the branch's ref read a second time — the test and the write have to be about one commit,
+or a commit landing on the branch in between would let the target advance to a commit that is no longer the
+branch's tip (reachable here, because rule 1's `session_running` guard is HS-056's and deliberately absent). The compare-and-swap
 (`git update-ref refs/heads/<target> <new> <old>`) is what makes the unchecked-out path race-free: the third
 argument makes git refuse the write unless the ref still holds the value this module read, which is exactly the
 window a test cannot close. When it refuses, the module re-reads the ref — moved → the same
@@ -98,9 +113,16 @@ Rule 4 is written for a world with two shapes: not checked out anywhere, or chec
 
 | Where the target is checked out | What the merge does | Why |
 | --- | --- | --- |
-| nowhere | `git update-ref` — rule 4's first arm | no working tree to update |
+| nowhere (or only in a **prunable** registration) | `git update-ref` — rule 4's first arm | no working tree to update |
 | the project's own checkout | `git merge --ff-only <new>` there — rule 4's second arm | git updates the tree safely, and refuses to overwrite local work |
 | anywhere else | `409 target_checked_out` | in practice a session's worktree, where a container is working |
+
+**A prunable registration is not a checkout.** `git worktree list --porcelain` prints `prunable <reason>` for a
+worktree whose directory is gone and which `git worktree prune` has not caught up with — a state this build
+leaves behind routinely (HS-052's own landmine is one). Such a registration has no working tree to move, so
+counting it would refuse a merge the operator can perform with advice ("check out another branch in that
+worktree") that cannot be followed. `worktree::Checkout` carries the flag and `checkout_of` filters it out; the
+startup sweep still sees every registration, because there the flag is not a reason to ignore anything.
 
 The third is a refusal on purpose. The alternative — updating whichever checkout has the branch — is the same
 git command and would "work", but in a session's worktree it moves an agent's files under a running turn, and
@@ -139,10 +161,14 @@ ran) is derivable from the three — `merged_commit` equal to the branch's tip m
 `GET …/changes` says the rest.
 
 **Nothing about the session row changes.** A merge is not a state transition and not an event: the row is
-`Transitioner::apply`'s (ADR-0016), and there is no state a merge moves a session to. `GET …/changes` answers
-`ahead: 0` afterwards because `ahead` is `rev-list --count <base>..agent/<id>` and the *target* moved — the branch
-did not — so what actually changes is `behind` (to `0`) and, for a branch that was behind, `mergeable`. That is
-recorded here because "a merge changed nothing in the answer" is the intuitive and wrong reading.
+`Transitioner::apply`'s (ADR-0016), and there is no state a merge moves a session to.
+
+`GET …/changes` is **unchanged** by a merge, field for field, and that is the correct answer rather than an
+oversight: `ahead` is `rev-list --count <base>..agent/<id>` and the branch did not move; `behind` was already `0`,
+because a fast-forward requires the target to be an ancestor of the branch, so a target with commits the branch
+lacks is `409 not_fast_forward` rather than a successful merge; and `mergeable` stays `true`. `tests/merge.rs`'s
+`a_merge_leaves_the_changes_view_unchanged` asserts the summary is unchanged **and** that the target is now the
+branch's tip, because a JSON-only assertion would pass over a merge that wrote nothing.
 
 ## D8 — One merge per project at a time is a `std` mutex per repository, held inside the blocking task
 
@@ -202,5 +228,9 @@ used `update-ref` would fail step 3's "the file is on disk".
 
 The `merge` and `squash` strategies and the temporary merge worktree (HS-055), rule 3's conflict arm, the
 `delete_session` half and rule 1's two guards (HS-056), publish (HS-057), the Changes sheet (HS-058), the hub's
-60-second merge timeout, and any change to `worktree.rs`'s create refusals. The two `unsupported` sentences in
+60-second merge timeout, and any change to `worktree.rs`'s create refusals.
+
+One fact the UI inherits from D5 and does not decide here: `409 target_checked_out` is a state the Changes sheet
+(HS-058) must render and HS-056 must not lose, because it is the only refusal whose next step is a git command in
+another directory. The two `unsupported` sentences in
 `http/merge.rs` exist only until HS-055 and HS-056 land, and go with them.

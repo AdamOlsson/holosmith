@@ -7,7 +7,7 @@
 //! the interesting half needs none of them.
 //!
 //! The wire group at the end boots the real router over the same repository, because a `TempDir` cannot prove
-//! what a client sees: the three keys, the `strategy` default, and the six refusals as status **and** code.
+//! what a client sees: the three keys, the `strategy` default, and every refusal as status **and** code.
 //!
 //! Two of the story's decisions are only provable by measuring the thing that would otherwise happen:
 //!
@@ -407,6 +407,42 @@ fn a_target_checked_out_in_another_worktree_is_refused() {
     );
 }
 
+#[test]
+fn a_prunable_registration_is_not_a_checkout_and_the_merge_lands_by_the_ref() {
+    // The `409 target_checked_out` arm must be about a working tree, and a registration git calls **prunable**
+    // has none: the directory is gone and `git worktree prune` has not run. Counting it would refuse a merge the
+    // operator can perform, with advice ("check out another branch in that worktree") that cannot be followed —
+    // and this build leaves such registrations behind routinely (HS-052's landmine is exactly one). Dropping the
+    // `prunable` filter in `checkout_of` turns this test from a `200` into that refusal.
+    let fixture = Fixture::new("merge-prunable");
+    fixture.commit("a.txt", b"a\n", "the session's change");
+    let tip = fixture.rev(&fixture.branch());
+    git(&fixture.repo, &["checkout", "--quiet", "-b", "elsewhere"]);
+    let other = fixture.projects.join("gone-checkout");
+    git(
+        &fixture.repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            other.to_str().expect("a UTF-8 temp path"),
+            "main",
+        ],
+    );
+    std::fs::remove_dir_all(&other).expect("the checkout's directory is removed");
+    assert!(
+        git(&fixture.repo, &["worktree", "list", "--porcelain"]).contains("prunable"),
+        "the fixture did not leave a prunable registration"
+    );
+
+    let merged = fixture
+        .run("main")
+        .expect("a prunable registration is not a checkout");
+
+    assert_eq!(merged.merged_commit, tip);
+    assert_eq!(fixture.rev("refs/heads/main"), tip);
+}
+
 // --- the facts around a merge that does happen ------------------------------------------------------------
 
 #[test]
@@ -551,7 +587,7 @@ async fn an_explicit_ff_only_is_the_same_request_as_no_strategy() {
 }
 
 #[tokio::test]
-async fn the_four_bad_requests_move_no_ref() {
+async fn every_bad_request_moves_no_ref() {
     // The acceptance's first two bullets and the two `unsupported`s, at the wire: the codes are the machine's and
     // the refs are the repository's, and neither a refused strategy nor a bad target moves anything.
     let fixture = Fixture::new("merge-wire-refusals");
@@ -701,39 +737,110 @@ async fn a_merge_without_the_client_headers_never_reaches_the_repository() {
 }
 
 #[tokio::test]
-async fn the_sessions_changes_view_answers_ahead_zero_after_a_merge() {
-    // Nothing about the row changes, and the read that describes the branch says so: `ahead` is a measurement of
-    // `base_commit..agent/<id>`, and the merge moved the *target* rather than the branch, so what changes is
-    // `behind` (to 0) and `mergeable` (still true, of a no-op). Asserted here because it is the sentence ADR-0063
-    // records as the answer to "what does a merge tell the changes view".
+async fn a_merge_leaves_the_changes_view_unchanged() {
+    // ADR-0063's D7, and the JSON half is deliberately **not** the proof: `ahead`, `behind` and `mergeable` are
+    // the same after a fast-forward as before it, and they have to be — the merge moves the *target*, `ahead` is
+    // `rev-list --count <base>..agent/<id>`, and `behind` was already `0` because a fast-forward requires the
+    // target to be an ancestor of the branch. A build that wrote nothing would pass a JSON-only assertion, so the
+    // contrast comes from the repository: the summary is unchanged **and** the target is now the branch's tip,
+    // which is the fact a merge that did nothing cannot produce.
     let fixture = Fixture::new("merge-wire-changes");
     fixture.commit("a.txt", b"a\n", "the session's change");
+    let tip = fixture.rev(&fixture.branch());
     let served = fixture.served().await;
-    let before = fetch(
-        served.addr,
-        &format!("/api/sessions/{}/changes", fixture.id),
+    let before: Value = serde_json::from_str(
+        &fetch(
+            served.addr,
+            &format!("/api/sessions/{}/changes", fixture.id),
+        )
+        .await
+        .body,
     )
-    .await;
-    assert_eq!(before.status, 200, "{}", before.body);
-    let before: Value = serde_json::from_str(&before.body).expect("the summary is JSON");
+    .expect("the summary is JSON");
     assert_eq!(before["ahead"], 1);
     assert_eq!(before["behind"], 0);
+    assert_eq!(before["mergeable"], true);
 
     let response = post_merge(served.addr, &fixture.id, r#"{"target":"main"}"#).await;
     assert_eq!(response.status, 200, "{}", response.body);
 
-    let after = fetch(
-        served.addr,
-        &format!("/api/sessions/{}/changes", fixture.id),
+    let after: Value = serde_json::from_str(
+        &fetch(
+            served.addr,
+            &format!("/api/sessions/{}/changes", fixture.id),
+        )
+        .await
+        .body,
     )
-    .await;
-    assert_eq!(after.status, 200, "{}", after.body);
-    let after: Value = serde_json::from_str(&after.body).expect("the summary is JSON");
-    // The branch did not move ...
-    assert_eq!(after["ahead"], 1);
-    assert_eq!(after["base_commit"], before["base_commit"]);
-    // ... and the target now holds everything the branch does.
-    assert_eq!(after["behind"], 0);
-    assert_eq!(after["mergeable"], true);
+    .expect("the summary is JSON");
+    // The merge happened ...
+    assert_eq!(
+        fixture.rev("refs/heads/main"),
+        tip,
+        "the target did not move"
+    );
+    assert_eq!(fixture.rev(&fixture.branch()), tip);
+    // ... and the branch's summary is unchanged field for field, which is why nothing about the row had to be
+    // written.
+    for field in [
+        "branch",
+        "base_commit",
+        "head",
+        "target",
+        "ahead",
+        "behind",
+        "mergeable",
+        "files",
+    ] {
+        assert_eq!(
+            after[field], before[field],
+            "{field} changed because of a merge"
+        );
+    }
+    assert_eq!(after["dirty"], false);
+    served.finish().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn a_target_checked_out_in_another_worktree_is_a_409_at_the_wire() {
+    // The third answer to rule 4's two-arm question, at the status-and-code level: the project's own checkout
+    // leaves the target and a second worktree takes it, which is what a session's worktree holding `main` looks
+    // like. The module's own test asserts the variant; this one asserts what a client is told, and that the
+    // working tree the refusal said it would not touch really is untouched.
+    let fixture = Fixture::new("merge-wire-elsewhere");
+    fixture.commit("a.txt", b"a\n", "the session's change");
+    let main = fixture.rev("refs/heads/main");
+    git(&fixture.repo, &["checkout", "--quiet", "-b", "elsewhere"]);
+    let other = fixture.projects.join("another-checkout");
+    git(
+        &fixture.repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            other.to_str().expect("a UTF-8 temp path"),
+            "main",
+        ],
+    );
+    let served = fixture.served().await;
+    let response = post_merge(served.addr, &fixture.id, r#"{"target":"main"}"#).await;
+    assert_eq!(response.status, 409, "{}", response.body);
+    let body = envelope(&response);
+    assert_eq!(body["code"], "target_checked_out");
+    assert!(
+        body["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("nothing was merged")),
+        "the sentence does not say nothing happened: {body}"
+    );
+    assert_eq!(
+        fixture.rev("refs/heads/main"),
+        main,
+        "the refusal moved the target"
+    );
+    assert!(
+        !other.join("a.txt").exists(),
+        "the refusal wrote into the working tree it said it would not touch"
+    );
     served.finish().await.expect("the server stops");
 }

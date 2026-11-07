@@ -35,11 +35,7 @@ use crate::http::error::{ApiError, NOT_FOUND, internal};
 use crate::worktree::Worktree;
 
 /// The sentence a row with no worktree earns: a stub session, or a create that stopped before that step.
-///
-/// `pub(crate)` since HS-054: a merge has the same fact (there is no branch to merge either) and answers it with
-/// the same sentence, because a client that read this one on `GET …/changes` should not have to learn a second
-/// spelling of it on `POST …/merge`.
-pub(crate) const NO_WORKTREE: &str = "this session has no worktree, so there is nothing to review";
+const NO_WORKTREE: &str = "this session has no worktree, so there is nothing to review";
 
 /// The sentence a `path` this session did not change earns.
 ///
@@ -249,9 +245,7 @@ fn hex(byte: u8) -> Option<u8> {
 /// path a sentence would have named goes to the log instead, because the envelope's messages are fixed
 /// sentences (ADR-0008) and a path on a phone is noise beside the next step.
 ///
-/// `pub(crate)` since HS-054, whose merge inherits the whole family: it is one rule with one spelling rather
-/// than a second copy that could drift the first time an arm is added.
-pub(crate) fn refusal(error: ChangesError) -> ApiError {
+fn refusal(error: ChangesError) -> ApiError {
     match error {
         ChangesError::NoRepository { .. } => ApiError::no_worktree(NO_REPOSITORY),
         ChangesError::Missing { .. } => ApiError::no_worktree(WORKTREE_GONE),

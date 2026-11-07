@@ -1930,7 +1930,27 @@ it rather than adding a caveat beside it.
   paths are the same repository in two shapes, and a second repository would not prove they differ. It re-makes the
   worktree the failed network step took back with the step's own command (the `case_changes` trick) and needs
   `python3` for the `_ping` socket, whose guard must stay **above** `stop_serve`.
-- **`http::changes::refusal` and its `NO_WORKTREE` sentence are `pub(crate)` so the merge inherits them**, and the
-  five new codes are `bad_target`, `bad_strategy`, `unsupported` (422) and `not_fast_forward`, `target_dirty`,
-  `target_checked_out` (409). `bad_body` has a fourth sentence (`ApiError::bad_merge_body`) for the reason it has
-  a third: a client told about a create's fields is being told about the wrong request.
+- **The merge shares the changes view's *rules* and not its *sentences*.** `changes::basis`/`dirty` are
+  `pub(crate)`; the four `no_worktree` messages are the merge's own ("…so there is no branch to merge") because a
+  message must describe its own request, which is why `ApiError::no_worktree` takes its message from the caller at
+  all. A merge's git failure answers `internal("merge", …)` — a failed *write* logged as "the changes view could
+  not read the repository" is a sentence about the wrong operation. The new codes are `bad_target`,
+  `bad_strategy`, `unsupported` (422) and `not_fast_forward`, `target_dirty`, `target_checked_out` (409), and
+  `bad_body` has a fourth sentence (`ApiError::bad_merge_body`) for the reason it has a third.
+- **`git worktree list --porcelain` prints `prunable <reason>` for a registration whose directory is gone**, and
+  such a registration is **not** a checkout: it has no working tree to move, so counting it turns a merge the
+  operator can perform into `409 target_checked_out` with advice ("check out another branch in that worktree")
+  that cannot be followed. `worktree::Checkout` carries the flag and the merge filters it out; the startup sweep
+  still sees every registration. `a_prunable_registration_is_not_a_checkout_and_the_merge_lands_by_the_ref`
+  removes a checkout's directory and merges anyway, and dropping the filter turns it red (measured). The parse is
+  a separate `parse_checkouts(&str)` so the four block shapes git prints — branch, detached, prunable, the main
+  checkout — are testable with no repository.
+- **The ancestry test must be asked about the commit the merge will write, not about the branch's ref.** `head`
+  comes from `basis`; asking `merge-base --is-ancestor refs/heads/<target> refs/heads/agent/<id>` instead
+  re-reads the branch, and a commit landing between the two reads would advance the target to a commit that is no
+  longer the branch's tip while answering `200` — reachable here because rule 1's `session_running` guard is
+  HS-056's and deliberately absent. The same sha is used for the test, the write and the re-measurement.
+- **The target's membership is checked twice, on purpose, and once of them is early.** The handler asks
+  `merge::listed` straight after the body so one bad `target` is one answer whatever the session's shape; the
+  first draft asked it after the row's `base_commit` and so answered `409 no_worktree` for a body that would have
+  been `422` on a session with a worktree. `merge()` asks it again as its own precondition.
