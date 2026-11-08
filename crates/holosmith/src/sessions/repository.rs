@@ -228,7 +228,7 @@ impl<'a> SessionRepository<'a> {
     /// **All of them, not one**, for [`Self::idle_before`]'s reason: the daily pass is a policy over every
     /// session that has been stopped for too long, so a pass that removed one and waited for the next day would
     /// make the window a function of how many sessions were forgotten. The predicate lives in
-    /// [`expired_before_filter`], so "never an `error` row" is one place and not a filter a caller could forget.
+    /// [`EXPIRED_BEFORE_FILTER`], so "never an `error` row" is one place and not a filter a caller could forget.
     pub fn expired_before(&self, cutoff: i64) -> Result<Vec<Session>, RepoError> {
         self.many(
             "expired_before",

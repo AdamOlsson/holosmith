@@ -3923,15 +3923,29 @@ PY
     fail "${name}/ref" "the snapshot ref did not survive the expiry"
   assertions=$((assertions + 1))
 
-  # 3. What it removed: the worktree, the session's directory and its network. The container was gone already —
-  #    a stopped session's `--rm` run removed it — so the network is the one resource this asserts by name.
+  # 3. What it left behind: nothing. The worktree, the session's directory, the container and the network are all
+  #    gone. Which of them the delete flow took and which a `--rm` run took when the server it was attached to was
+  #    stopped is deliberately not asserted — this is the acceptance's claim ("its container and network gone"),
+  #    and it is an outcome. The network is the one only `backend.delete` removes, so the flow's teardown is
+  #    measured there.
   [ ! -e "$wt" ] || fail "${name}/worktree" "the worktree is still there: $wt"
   assertions=$((assertions + 1))
   [ ! -e "$data/sessions/$id" ] || fail "${name}/session_dir" "the session directory is still there"
   assertions=$((assertions + 1))
+  if docker inspect "s_$id" >/dev/null 2>&1; then
+    fail "${name}/container" "the session's container is still there: s_$id"
+  fi
+  assertions=$((assertions + 1))
   if docker network inspect "agents_$id" >/dev/null 2>&1; then
     fail "${name}/network" "the session's network is still there: agents_$id"
   fi
+  assertions=$((assertions + 1))
+
+  # ...and the job's own line, which is the only trace a removal leaves once the row is gone (`case_disk_quota`
+  # asserts its policy's line the same way). A daily policy that fails silently is the failure mode the story's
+  # "skip and retry" wording is about, so the line is part of the contract.
+  grep -q 'holosmith::expiry' "$serve_err" ||
+    fail "${name}/log" "the job logged nothing about the pass: $(tail -5 "$serve_err")"
   assertions=$((assertions + 1))
 
   # 4. An `error` row is never auto-deleted, however stale its clock.

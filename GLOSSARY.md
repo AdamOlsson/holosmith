@@ -181,7 +181,7 @@ One of `starting`, `idle`, `running`, `stopped`, `error`, `deleting`. Its machin
 _Avoid_: Status code, phase
 
 **Trigger**:
-The cause of one state change, one per row of the transition table: `create_accepted`, `pi_ready`, `provisioning_failed`, `prompt`, `agent_settled`, `abort_completed`, `abort_ladder`, `evict`, `idle_stop`, `drain`, `resume`, `unexpected_exit`, `pi_exit`, `delete`, `crash_recovery`, `disk_quota`. Its machine name is the `Trigger` type.
+The cause of one state change, one per row of the transition table: `create_accepted`, `pi_ready`, `provisioning_failed`, `prompt`, `agent_settled`, `abort_completed`, `abort_ladder`, `evict`, `idle_stop`, `drain`, `resume`, `unexpected_exit`, `pi_exit`, `delete`, `crash_recovery`, `disk_quota`, `expire`. Its machine name is the `Trigger` type.
 _Avoid_: Event, action, cause, command
 
 **Transition**:
@@ -297,10 +297,10 @@ removes the row and its event log. A snapshot that fails answers 409 **unsaved w
 request carried `?force=true`, and the session is left where the delete found it — except that a
 running turn has already been ended by then, which is the order the spec asks for and the price of
 learning that the work could not be saved. Repeating the request while the row exists re-runs the
-removal; once the row is gone the answer is 404. It has two **halves and
-two callers**: the request half (`sessions::deletion`) reads the row, answers a `deleting` one by re-running the
-removal and ends a running turn, and the second half (`sessions::complete_deletion`) is the snapshot, the keep
-rules, the transition and the spawned task. A `DELETE` is not its only entry — a **Merge** with
+removal; once the row is gone the answer is 404. It has two **halves and two callers**: the request half
+(`sessions::deletion`) reads the row, answers a `deleting` one by re-running the removal and ends a running
+turn, and the second half (`sessions::complete_deletion`) is the snapshot, the keep rules, the transition and
+the spawned task. A `DELETE` is not its only entry — a **Merge** with
 `delete_session` runs the same request half with `force` false and the target it just landed in, so the branch
 is not **Kept work**, and a **Stopped-session expiry** runs the same second half with `Trigger::Expire` and
 `force` false, which is what "using the delete flow" means.

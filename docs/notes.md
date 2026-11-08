@@ -2274,7 +2274,9 @@ it rather than adding a caveat beside it.
   cosmetic (it keeps the log line honest); the safety is the table. Two guards that agree make a test that
   cannot tell them apart: `tests/expiry.rs`'s "a row that left `stopped` is not expired" proves the *outcome*,
   and `tests/state_machine.rs`'s `the_expirys_row_admits_stopped_and_nothing_else` is what isolates the row —
-  change `FromStates::OneOf(&[Status::Stopped])` to `Any` and only that test goes red.
+  change `FromStates::OneOf(&[Status::Stopped])` to `Any` and that test goes red (as do the table's own
+  row-by-row test and its `lookup(Deleting, …)` spot check, which is the point: the table is one fact with
+  three witnesses).
 - **`set_status` is the only way to backdate a stop, and it needs no second statement.** `set_status` writes
   `stopped_at = now` when the new status is `stopped`, so passing a `now` of eight days ago *is* the backdate.
   `Database` has no public `connection()`, so a test that reached for `UPDATE sessions SET stopped_at = …`
@@ -2284,6 +2286,14 @@ it rather than adding a caveat beside it.
   untouched. That is why `expiry::run` sweeps immediately where `quota::run` waits — and why the gate and the
   demo observe a daily policy in seconds (backdate the row, restart, read the disappearance). Copying the
   quota's settle into a later policy over non-live rows would be a 60-second delay for nothing.
+- **The pass's status re-read is isolated in-crate, because the interleaving cannot be built outside it.**
+  `Expiry::expire` is private, and an integration test that resumes a row before calling `sweep` proves only the
+  *statement's* predicate (a resumed row is not a candidate). The guard "do not hand the flow a row that left
+  `stopped`" is `src/expiry.rs`'s own `#[tokio::test]`: it reads a stale candidate, resumes it through
+  `Transitioner`, then calls `expire` with the stale row and asserts the stub recorded **no `Snapshot`** —
+  which is what makes deleting the re-read go red, where the row's survival alone would not (the table refuses
+  the move either way). A guard whose only effect is "we did not do expensive work on a row we would refuse"
+  needs an assertion about the work, not about the row.
 - **The removal is the delete flow's own task, so "the row is gone" is a fact that arrives after the pass.**
   `complete_deletion` spawns `Deleter::remove` and answers; a test that asserted the row's absence straight
   after `Expiry::sweep` is a race (it failed on the first run of `tests/expiry.rs`). Wait for it

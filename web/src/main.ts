@@ -174,9 +174,6 @@ const LIVE_STATES: ReadonlySet<SessionState> = new Set<SessionState>([
 const MINUTE = 60;
 const HOUR = 60 * MINUTE;
 
-// HS-064's placeholder: a stopped row's detail line once auto-delete gives it a number. It is also the
-// title of that span while the span holds a reason's sentence instead.
-
 const app = document.querySelector<HTMLElement>("#app");
 
 // The open stream per row, and every open stream: a row that leaves a live state lets go of its
@@ -361,10 +358,14 @@ function applyStatus(row: HTMLLIElement, frame: StatusFrame): void {
     // A frame carries no `stopped_at`: the transition that produced it just wrote the clock, so this
     // instant *is* the row's stop as far as the page can tell, and the countdown starts from a number no
     // fresher answer could improve on (HS-064).
-    const now = secondsNow();
+    //
+    // Two numbers that happen to be equal, named apart: the transition just wrote `stopped_at`, so the stop
+    // instant is the frame's arrival, while `now` is what the countdown is measured against.
+    const stoppedAt = secondsNow();
+    const now = stoppedAt;
     const expires =
       frame.to === "stopped"
-        ? expiryText(now, stoppedTtlDays(row.closest("#session-list")), now)
+        ? expiryText(stoppedAt, stoppedTtlDays(row.closest("#session-list")), now)
         : null;
     const detail = stoppedDetail(frame.to, frame.reason, expires);
     retention.hidden = frame.to !== "stopped";

@@ -332,10 +332,15 @@ async fn every_reason_into_stopped_sets_the_clock_and_the_resume_clears_it() {
                 .expect("the table is readable")
                 .expect("the row is there")
         };
-        assert_eq!(
-            row.stopped_at,
-            Some(now),
-            "{trigger} reached `stopped` without recording when"
+        // A window, not an equality: `Transitioner::apply` reads its own `clock::unix_now()`, so a run that
+        // crosses a second boundary would flake an exact assertion (HS-017's `last_active_at` lesson). The
+        // claim is "the transition recorded when it happened", and this is that claim without the race.
+        let stopped_at = row
+            .stopped_at
+            .unwrap_or_else(|| panic!("{trigger} reached `stopped` without recording when"));
+        assert!(
+            stopped_at >= now && stopped_at <= clock::unix_now(),
+            "{trigger} recorded a clock outside the test's own window: {stopped_at} vs {now}"
         );
         assert_eq!(row.status_reason.as_deref(), Some(reason));
 
@@ -360,11 +365,12 @@ async fn every_reason_into_stopped_sets_the_clock_and_the_resume_clears_it() {
 }
 
 #[tokio::test]
-async fn a_row_that_left_stopped_is_not_expired_even_after_the_pass_read_it() {
-    // The race acceptance bullet 6 covers, made deterministic: a row that is a candidate when the pass reads it
-    // and resumed before the flow's transition is **refused by the table**, not removed. The expiry's read and
-    // its write are two moments, and a policy that destroyed a session somebody had just brought back would be
-    // the worst bug this story could ship.
+async fn a_row_that_left_stopped_is_not_a_candidate_at_all() {
+    // Acceptance bullet 6's other half, and the cheaper one: a resumed row is not a candidate, because the
+    // statement's predicate is `status = 'stopped'` and it answers before any policy code runs. A row that is
+    // resumed *between* the pass's read and the flow's write is a different rule — the pass's status re-read and
+    // `Trigger::Expire`'s `stopped`-only row — and it is isolated in `src/expiry.rs`'s own unit test, where the
+    // interleaving can actually be built (`expire` is private, and a whole `sweep` cannot be interleaved).
     let dir = TempDir::new("expiry-refused");
     let stub = stub();
     let state = state(&dir, &stub, Config::default());

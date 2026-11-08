@@ -207,11 +207,16 @@ impl Expiry {
                 session = %session.id,
                 "the snapshot failed, so the session was not expired; it is a candidate again tomorrow"
             ),
-            Err(error) => tracing::info!(
+            // Anything else is a machine failure rather than a decision — a state the table refused in the
+            // window, a repository or a teardown that broke — so it is a `warn`: a `stopped` row this job can
+            // never remove is something an operator has to see, and the sibling policy logs the equivalent
+            // "cannot measure" the same way (ADR-0069).
+            Err(error) => tracing::warn!(
                 target: "holosmith::expiry",
                 session = %session.id,
                 status = error.status.as_u16(),
                 code = error.body.code,
+                message = %error.body.message,
                 "the session was not expired"
             ),
         }
@@ -230,7 +235,172 @@ impl Expiry {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
     use super::*;
+    use crate::backend::Backends;
+    use crate::backend::{Call, StubBackend};
+    use crate::config::Config;
+    use crate::db::{Database, OpenOptions};
+    use crate::events::{StreamRegistry, WriterOptions};
+    use crate::merge::Merges;
+    use crate::preflight::Tools;
+    use crate::runtime::Backend;
+    use crate::runtime::Runtime;
+    use crate::sessions::{NewSession, Status};
+
+    /// A database in a directory of this test's own, so no two tests share a file (ADR-0009's measured
+    /// same-process "database is locked" trap).
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "holosmith-expiry-unit-{}-{name}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("a scratch directory");
+            Self(path)
+        }
+
+        /// The database file inside it, which is the name  uses.
+        fn database(&self) -> PathBuf {
+            self.0.join("app.db")
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A state over a fresh database, with the stub a test can still ask what it was told to do.
+    ///
+    /// Built here rather than reached for, because the thing under test is `Expiry::expire` — the pass's own
+    /// decision about one row — and it is private for the reason `sweep` is public: production calls it one way,
+    /// and the *interleaving* it guards against cannot be built from an integration test at all.
+    fn state(dir: &Scratch) -> (AppState, StubBackend) {
+        let database = Arc::new(Mutex::new(
+            Database::open(&dir.database(), OpenOptions::default(), clock::unix_now())
+                .expect("a fresh database opens"),
+        ));
+        let (events, _stream) =
+            crate::events::spawn(Arc::clone(&database), WriterOptions::default());
+        let stub = StubBackend::new(Duration::from_millis(1));
+        (
+            AppState {
+                config: Config::default(),
+                runtime: Runtime::started(Backend::Stub),
+                database,
+                events,
+                streams: StreamRegistry::default(),
+                backend: Backends::Stub(stub.clone()),
+                drain: crate::drain::Control::new(),
+                merges: Merges::new(),
+                tools: Tools::default(),
+            },
+            stub,
+        )
+    }
+
+    /// One row taken to `stopped` through the table, which is the only way a state changes in this crate
+    /// (`no_status_write_outside_the_one_function` walks `src/**` and would refuse a raw write here — the right
+    /// answer for a test that lives beside the policy).
+    ///
+    /// The row is handed to `expire` by hand and `complete_deletion` never consults the cutoff, so nothing here
+    /// needs a backdated clock: the transition writes "now" and the test's subject is the *state* the row is in.
+    async fn stopped_row(state: &AppState, key: &str) -> crate::sessions::Session {
+        let created = {
+            let database = state.database.lock().expect("the lock is not poisoned");
+            database
+                .sessions()
+                .create(
+                    &NewSession {
+                        project: "holosmith".to_string(),
+                        model: "claude-sonnet-4.5".to_string(),
+                        thinking: "high".to_string(),
+                        network: false,
+                        client_key: Some(key.to_string()),
+                        base_commit: None,
+                    },
+                    clock::unix_now(),
+                )
+                .expect("a session is created")
+        };
+        let transitioner = state.transitioner();
+        transitioner
+            .apply(&created.id, Trigger::PiReady, None)
+            .await
+            .expect("starting -> idle");
+        transitioner
+            .apply(&created.id, Trigger::IdleStop, Some("idle_stop"))
+            .await
+            .expect("idle -> stopped");
+        state
+            .database
+            .lock()
+            .expect("the lock is not poisoned")
+            .sessions()
+            .get(&created.id)
+            .expect("the row reads back")
+            .expect("the row is there")
+    }
+
+    #[tokio::test]
+    async fn a_row_resumed_after_the_pass_read_it_is_left_alone_and_never_snapshotted() {
+        // The interleaving the policy has to survive, made deterministic: the pass reads a candidate, the
+        // operator resumes it, and the row the pass is holding is handed to `expire` anyway.
+        //
+        // What this isolates is the **status re-read**, and only that: deleting it makes `expire` hand a
+        // `starting` row to the delete flow, the stub records a `Snapshot` of a session that is being
+        // re-provisioned, and the first assertion goes red. (The move itself would still be refused — by
+        // `Trigger::Expire`'s `stopped`-only row — so the second assertion is the backstop and not this test's
+        // witness; `tests/state_machine.rs`'s `the_expirys_row_admits_stopped_and_nothing_else` is.)
+        //
+        // It is in the crate because `expire` is private: an integration test can only observe what a whole
+        // `sweep` does, and by then a resumed row is not even a candidate — the statement's predicate answers
+        // first, which is a different rule (`tests/expiry.rs` proves that one).
+        let dir = Scratch::new("resumed");
+        let (state, stub) = state(&dir);
+        let stale = stopped_row(&state, "resumed").await;
+
+        state
+            .transitioner()
+            .apply(&stale.id, Trigger::Resume, None)
+            .await
+            .expect("stopped -> starting");
+
+        Expiry::new(state.clone(), Config::default().stopped_ttl_days)
+            .expire(stale.clone())
+            .await;
+
+        let row = state
+            .database
+            .lock()
+            .expect("the lock is not poisoned")
+            .sessions()
+            .get(&stale.id)
+            .expect("the table is readable")
+            .expect("a resumed session was removed by the expiry");
+        assert_eq!(
+            row.status,
+            Status::Starting,
+            "the expiry moved a row it did not own"
+        );
+        assert!(
+            !stub.calls().contains(&Call::Snapshot),
+            "the flow snapshotted a session it was not going to remove: {:?}",
+            stub.calls()
+        );
+        assert!(
+            !stub.calls().contains(&Call::Delete),
+            "the expiry removed a resumed session: {:?}",
+            stub.calls()
+        );
+    }
 
     #[test]
     fn the_tick_is_one_day_and_the_spec_says_so() {
@@ -245,7 +415,8 @@ mod tests {
         let now = 1_700_000_000;
         assert_eq!(cutoff(now, 7), now - 7 * 86_400);
         assert_eq!(cutoff(now, 1), now - 86_400);
-        // Nothing is past a zero window, and a row stopped exactly "now" is not older than "now".
+        // A zero window puts the cutoff at "now", and the comparison is strict: a row stopped exactly now is
+        // not past it. (The config refuses `0`, so this is the arithmetic being total rather than a mode.)
         assert_eq!(cutoff(now, 0), now);
     }
 
