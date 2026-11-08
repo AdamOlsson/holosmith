@@ -4695,10 +4695,13 @@ case_pwa() {
   cmp -s "$WORK/responses/${name}_asset.body" "web/dist$asset" ||
     fail "${name}_asset/bytes" "the served bundle is not this tree's web/dist$asset"
   assertions=$((assertions + 1))
+  # `serviceWorker.register("/sw.js")` is in this list because the first draft of this screen forgot the call, and a
+  # manifest without a registration is an installable app a push can never arrive at — a fact no gate can see a
+  # browser decide (this story's demo found it).
   for needle in \
     'id="settings"' 'id="settings-machine"' 'id="settings-state"' 'id="settings-action"' \
     'id="settings-detail"' 'id="settings-install"' 'id="settings-per-machine"' 'id="settings-notice"' \
-    'id="nav"' 'id="nav-link"' \
+    'id="nav"' 'id="nav-link"' 'serviceWorker.register("/sw.js")' \
     'iOS delivers notifications only to an app on the home screen: tap Share, then Add to Home Screen, and open Holosmith from the icon' \
     'each machine has its own Web Push key pair, so a phone subscribes on every machine it uses' \
     'notifications are blocked for this app' \

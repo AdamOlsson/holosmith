@@ -2150,6 +2150,17 @@ window.addEventListener("beforeunload", () => {
   openSources.clear();
 });
 
+// The service worker, registered from every screen (HS-067, ADR-0072 D4). The manifest is what makes the app
+// installable; the worker is what a push arrives at, and it is registered at load rather than from the settings
+// screen so that an app opened from a home-screen icon — which lands on `/` or on a session — is already reachable
+// when the notification comes. A registration that fails is not a reason to draw nothing: the settings screen reads
+// `serviceWorker.supported` and says so, and this page still serves its sessions.
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/sw.js").catch((error: unknown) => {
+    console.error("the service worker did not register:", error);
+  });
+}
+
 show().catch((error: unknown) => {
   renderFailure("unreachable", String(error));
 });
