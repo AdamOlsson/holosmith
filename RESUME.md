@@ -1,4 +1,4 @@
-# RESUME — one issue per session (next: PER-98 / HS-066, Web Push backend)
+# RESUME — one issue per session (next: PER-99 / HS-067, installable app and notification permission)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating procedure and
 still governs the cycle; this file is the state of the world, and it adds one rule of its own:
@@ -45,42 +45,36 @@ sandbox-specific incantation (§2).
 
 ---
 
-## 1. The issue this session picks up: `PER-98` — HS-066, Web Push backend
+## 1. The issue this session picks up: `PER-99` — HS-067, installable app and notification permission
 
-**State when this file was written** (`origin/master` at `df7a34d`, the tree clean apart from the operator's own
-`orchestrate.sh`/`log.txt`): **66 of 80 stories Done, 14 Backlog**, all in project `Holosmith`. `PER-98` is
-`Backlog`, it is the next in `HS-###` order, and its one blocker (HS-049, the VAPID pair) is `Done` — so it is
-eligible. The stories still Backlog are `PER-98` (HS-066) and then, in order, `PER-99` (HS-067, blocked by this
-one), `PER-100` – `PER-106` (phase 3, HS-068 … HS-074) and `PER-108` – `PER-112` (phase 4, HS-076 … HS-080);
-check the Linear `Blocked by` list rather than this sentence if HS-066 turns out to be a stop.
+**State when this file was written** (`origin/master` at `5eef3bd`, the tree clean apart from the operator's own
+`orchestrate.sh`/`log.txt`): **67 of 80 stories Done, 13 Backlog**, all in project `Holosmith`. `PER-99` is
+`Backlog`, it is the next in `HS-###` order, and its one blocker (HS-066, the Web Push backend) is `Done` — so it
+is eligible. Check Linear's `Blocked by` list rather than this sentence if HS-067 turns out to be a stop.
 
-The last shipped story was `PER-96` (HS-064, the stopped-session expiry, **ADR-0070**) — item 15's retention
-bullet and its last sentence: the build's fourth periodic policy, and the first that *destroys* something on a
-timer. Its gate run was green: **87 cases, 1500 assertions**, no `SKIP`; `cargo test` is **1117 tests** (57
-binaries) and `web/`'s runner is **79**. Its §1 material is now Linear, `docs/review/PER-96.md`, `git log` and §9.
+The last shipped story was `PER-98` (HS-066, the Web Push backend, **ADR-0071**) — the wire and the rows, and
+deliberately **not** the browser half. Its §1 material is now Linear, `docs/review/PER-98.md`, `git log` and §9.
 
 ### 1.1 The slice (verbatim from `docs/stories/phase-2-deployable-mvp.md`; Linear's body is the same text)
 
-> ### HS-066 — Web Push backend
+> ### HS-067 — Installable app and notification permission
 >
-> **As** the operator **I want** a notification when a long turn finishes **so that** I can put my phone down.
+> **As** the operator **I want** the app on my home screen with notifications enabled **so that** iOS actually
+> delivers them.
 >
-> - **Size:** M · **Blocked by:** HS-049 · **Spec:** item 11
-> - **Demo:** subscribe from a phone, start a turn that runs 30 s, lock the phone, get a notification that opens
->   that session.
+> - **Size:** S · **Blocked by:** HS-066 · **Spec:** item 11
+> - **Demo:** add to home screen on iOS, grant notifications, receive a push.
 >
 > **Acceptance**
-> - [ ] `POST /api/push/subscribe` and `DELETE /api/push/subscribe` manage rows in `push_subscriptions`
->   (`endpoint` PK, `p256dh`, `auth`, `created_at`).
-> - [ ] VAPID keys from HS-049 sign every send; dead endpoints (404/410) are removed.
-> - [ ] Triggers: a turn that ran longer than 20 s, `session.status` error, and a budget or timeout stop.
-> - [ ] No notification is sent while an SSE stream for that session is open.
-> - [ ] Payload carries only `{host, session_id, kind}` — never content.
-> - [ ] The server, not the containers, holds the outbound access to the push services.
+> - [ ] The web app is a valid installable PWA (manifest, icons, service worker) served from the control origin.
+> - [ ] A settings screen subscribes and unsubscribes, and shows the current state per machine.
+> - [ ] The iOS "must be installed to home screen" requirement is stated in the UI, not just in docs.
+> - [ ] Tapping a notification opens the named session.
+> - [ ] Each machine's keys are independent, so the app subscribes per machine it uses.
 
-`docs/stories/**` is **not edited** (§7). An **M** story — and this one's difficulty is not the triggers or the
-table: it is that this build has **no dependencies and no HTTP client**, so "sign with the VAPID pair and POST to
-an endpoint" is a decision about *how*, and that decision is the story.
+`docs/stories/**` is **not** edited (§7). An **S** story — and its difficulty is that everything it needs is in
+`web/`, which the previous stories have deliberately not touched for anything but screens, and that **no gate may
+need a browser**.
 
 ### 1.2 The spec it closes
 
@@ -95,204 +89,163 @@ Item 11, in full:
 > - Each machine has its own keys, so the web app subscribes on every machine it uses (through the hub). The
 >   server, not the containers, needs outbound access to the push services.
 
-The neighbours: **HS-049/ADR-0058** wrote the VAPID pair (`<data>/secrets/vapid.toml`, 0600, generated once,
-never rewritten, mode-checked by `doctor`'s `perms`) and deliberately stored **no `sub` claim** — "a JWT subject
-is a claim rather than key material and HS-066 decides it". **HS-067** (the next story, blocked by this one) owns
-the PWA, the service worker, the settings screen and the tap-to-open; this story owns the wire and the rows.
+The neighbours: **HS-066/ADR-0071** built the wire — the two routes, the table, the four `kind` words
+(`turn_finished`, `error`, `turn_timeout`, `budget_exceeded`), the 20-second threshold, the stream rule, and the
+payload `{"host":"local","session_id":"<id>","kind":"…"}` sealed to each subscription's `p256dh`/`auth`. **HS-069**
+(the hub's forwarding) and **HS-074** (cross-machine notifications) come later, so "per machine" in this story is
+"per origin the app is served from".
 
 ### 1.3 What already exists (read this before planning)
 
-- **The key pair, and its one reader.** `src/vapid.rs`: `Pair` (base64url, unpadded, the 65-byte uncompressed
-  P-256 point and the 32-byte scalar), `store(root)` → `<data>/secrets/vapid.toml`, `render`, `parse`, `is_pair`,
-  `from_der` (the SEC1 walk), `base64url`/`unbase64url` (both unit-tested against RFC 4648's vectors). **There is
-  no signer and no `sub`**: `parse` gives the two scalars; turning them into an ES256 JWT is this story's.
-- **The stream count already exists and is public.** `events::StreamRegistry::count(session) -> usize` — and
-  `AppState::streams` is that registry. `app.rs`'s own doc comment on the field says "HS-066 reads the count".
-  That is item 11's "not sent while an SSE stream for that session is open", already half-built.
-- **`AppState`** is `{ config, runtime, database, events, streams, backend, drain, merges, tools }` with
-  **eleven** wiring helpers — `provisioner()`, `turner()`, `transitioner()`, `ladder()`, `deleter()`,
-  `sweeper()` (`Option`), `compactor()`, `reconciler()`, `stopper()`, `quota()` (`Option`) and since HS-064
-  `expiry()`. Every policy and every spawned task is built here, so a new one has an obvious place.
-- **The three triggers are three different producers, and two of them already have a reason word.**
-  `turn::TURN_TIMEOUT` (`turn_timeout`) and `turn::BUDGET_EXCEEDED` (`budget_exceeded`) are the turn runner's
-  (`src/turn.rs`'s `Turn::run`, which already knows how long the turn took because it sets a deadline);
-  `session.status → error` is the *transitioner's*, written by `set_status` under
-  `Transitioner::apply` — and a notification is not a state change, so the trigger must read the event, not
-  write one.
-- **The event writer is the one place every frame already passes through** (`events/writer.rs`'s
-  `collect` → `coalesce` → `commit`), which is where a `session.status` listener could hang without a second
-  broadcast channel. `EventStream` (the reader half) is what a task can subscribe to; `events::spawn` returns it.
-- **Migrations are four files and `SCHEMA_VERSION` is `4`.** `push_subscriptions` is a **new table**, so this
-  story is the first *additive* migration since `0004_expected_stop.sql`: `0005_push_subscriptions.sql`,
-  `SCHEMA_VERSION = 5`, and `tests/db_migrations.rs`/`tests/schema_previous.rs` are the two halves of the rule
-  (`contract_violations` refuses an unmarked destructive statement; the subset test refuses a drop or a rename
-  against `docs/schema/previous.sql`, which a new table does not touch — refreshing that snapshot is a
-  **release** step, `scripts/schema-snapshot.sh`, not a story's).
-- **No config key is needed.** Item 11 names no key, the 20-second threshold is a constant for the sweeper's,
-  compactor's and expiry's reason (the spec's config list is exhaustive; DP: `sweeper::TICK`, `compactor::TICK`,
-  `quota::TICK`, `expiry::TICK`). If a key is added, the golden file and `KNOWN_KEYS.len()` (**33**) move.
-- **`openssl` is a dependency the build already leans on, per process, never as a crate.** `src/keyproxy.rs`
-  forwards by spawning `openssl s_client`; `server deploy`'s step 2 generates the VAPID pair with one `openssl
-  ecparam` child and walks its DER in Rust. `holosmith-proxy:<version>`'s image exists precisely because
-  `hs_key` spawns `openssl` (ADR-0057). **Nothing in this build makes an outbound HTTPS POST today.**
-- **The route table and the guard shape**: a mutating route needs `Content-Type` and `X-Holosmith-Client` and
-  passes the four guards (`http/guard.rs`); errors are ADR-0008's one envelope; `Routes`'s manifest records
-  read-only vs mutating and `tests/guards.rs` pins it.
+- **The backend is complete and its API is small.** `POST /api/push/subscribe` takes exactly
+  `{endpoint, p256dh, auth}` and answers `204` (a re-subscribe of one endpoint is an upsert);
+  `DELETE /api/push/subscribe?endpoint=<percent-encoded>` answers `204`, or `404` for a row that is not stored, or
+  `422 bad_query`. Refusals: `422 bad_endpoint` (not `https://`, no host, whitespace, a fragment) and
+  `422 bad_subscription_key` (`p256dh` not a base64url 65-byte point starting `0x04`; `auth` not 16 bytes). Both
+  are mutating, so every guard applies: `Content-Type` **and** `X-Holosmith-Client`, plus the Host allow-list and
+  the owner.
+- **The subtype the browser must send is the browser's own.** `pushManager.subscribe()` returns
+  `{endpoint, keys: {p256dh, auth}}` — the app has to flatten `keys` into the two top-level fields, and the
+  endpoint is a capability URL that must never be logged or shown.
+- **The application server key is NOT reachable from the browser today.** `pushManager.subscribe({applicationServerKey})`
+  needs this machine's VAPID **public** key, and nothing serves it: the pair is in `<data>/secrets/vapid.toml`
+  (written once by `server deploy`, `vapid::{store, parse}`), the JWT carries `k=<public key>` on every send, and the
+  server reads it per send (`push::Pusher::pair`). **This is the story's one new server-side decision** — see 1.5.
+- **The web app is Vite 7 + TypeScript with no framework.** `web/src/main.ts` is the DOM, `web/src/transcript.ts`
+  is every rule (a pure function with a node test in `web/test/transcript.test.ts`, run by `npm test`), `web/
+  index.html` is a static shell, and `scripts/build-web.sh` runs `npm ci`, `npm test` and `vite build` into
+  `web/dist`, which `src/web.rs` embeds with `include_dir!` (a placeholder when the build is absent). The shell is
+  served for every non-`/api` path, so `/sessions/<id>` survives a reload (ADR-0007's fallback).
+- **The page already reads machine facts from `/api/health`.** `main.ts` sets
+  `session-list.dataset.stoppedTtlDays` from the health answer (HS-064's countdown), and `Health` is
+  `{name, version, role, uptime_s, preview_origin}` (`src/http/health.rs`) — so an additive key there is the
+  established shape for "a machine fact the page needs".
+- **`web/` has no manifest, no icons, no service worker and no `pushManager` call.** `web/index.html` links
+  `favicon.svg` and `/src/style.css`; there is no `public/` directory and no binary asset in the repository.
+- **A demo may use a browser; a gate may not** (ADR-0046's rule, and `docs/build.md`'s). Playwright's Chromium and
+  the `playwright` npm package are on this machine (§2), with two quirks recorded there: ESM ignores `NODE_PATH`
+  (import `…/playwright/index.mjs`), and Chromium needs `--no-sandbox`. `networkidle` never settles on the sessions
+  list, because a live row holds an `EventSource` open.
+- **The gate's model for a screen is `case_changes_screen`**: it asserts the screen is `web/dist/index.html` byte
+  for byte, that the **served bundle** carries the sheet's element ids and the three ADR sentences, and that the
+  answer carries the keys the sheet reads. That is how a story that changes the page proves it without a browser.
 
 ### 1.4 What does not exist
 
-No `push.rs` and no push module of any kind; no `push_subscriptions` table or migration; no `POST`/`DELETE
-/api/push/subscribe` route and no `push` row in the API table's implementation; no JWT signer (ES256), no
-`sub` claim, no VAPID `Authorization` header, no HTTP client, no outbound POST anywhere in the crate, no
-"turn ran longer than 20 s" notion (`Turn::run` knows a deadline, not a duration it reports), and no subscriber
-side: `web/` has no service worker, no `pushManager` call and no notification handling — that is HS-067's, so
-this story's own demo cannot be "subscribe from a phone" end to end, which is a fact the plan has to say out
-loud and answer with a stand-in.
+No `manifest.webmanifest`, no icon of any size, no service worker (`sw.js`), no `pushManager.subscribe`, no
+`pushsubscriptionchange` handling, no notification click handler, no settings screen, no JS route, no `/api/push/key`
+or health key carrying the application-server key, no `display-mode` detection for the iOS sentence, and no browser
+test of any kind (`web/test/` is node-only).
 
 ### 1.5 What the plan must decide (and the shape this handoff recommends)
 
-1. **How a VAPID JWT is signed with no crypto dependency.** The pair is two base64url scalars in a file. ES256 is
-   ECDSA over P-256 with SHA-256, and a Web Push `Authorization` is
-   `vapid t=<jwt>, k=<base64url public key>`, the JWT carrying `{aud, exp, sub}` with `aud` = the endpoint's
-   origin. Three shapes, and the recommendation is the **second**:
-   - hand-roll P-256 (point arithmetic, a nonce, DER→raw `r‖s`): ~400 lines of arithmetic nothing else in the
-     build needs, and the one place a subtle bug is silent (a bad signature is a 401/403 from the push service,
-     which looks like a config mistake);
-   - **`openssl` as a program**, like `keyproxy` and the deploy: write the scalar to a `0600` temporary file in
-     the data root, `openssl dgst -sha256 -sign <key>`, and convert the DER `SEQUENCE { r, s }` to the 64-byte
-     raw form Web Push wants (a small, testable parser — `vapid::from_der` is the precedent for hand-walking a
-     DER shape in-crate). The cost is that the host must have `openssl`, which `doctor` can say;
-   - a new dependency: **no**. Every ADR since 0001 has kept the crate dependency-free, `Cargo.lock` is
-     registry-only and `check-static.sh` guards it.
-   Either arm needs an ADR, and whichever it is, the **signature is verifiable in a test** without a push
-   service: a `tests/push.rs` can verify the ES256 signature with a second `openssl dgst -verify` child, which
-   makes "we signed with the machine's pair" a measurement rather than a claim.
-2. **How the POST goes out, with no HTTP client.** Same three choices, same recommendation (spawn
-   `openssl s_client`-style or `curl`): `curl` is present on this machine but is **not** something the build may
-   assume on a deployment host, whereas `openssl` already is (ADR-0057's proxy image, `keyproxy`'s forward, the
-   deploy's step 2). A `POST` with `TTL`, `Content-Encoding: aes128gcm`, `Authorization: vapid …` and a body is
-   ~20 lines of request writing over `openssl s_client`; the encryption of the *payload* is where item 11's
-   "never content" matters — see 3.
-3. **What is actually sent, given the payload is content-free.** `{host, session_id, kind}` is the **plaintext
-   after decryption** in a real Web Push message (the body is `aes128gcm`-encrypted to the subscription's
-   `p256dh`/`auth`), and implementing RFC 8291 encryption is a second crypto problem. Two honest routes:
-   **encrypt properly** (HKDF + AES-128-GCM from the subscription's keys — hand-rolling AES is unacceptable, so
-   this pulls the openssl arm in again: `openssl enc`/`openssl pkeyutl` cannot do ECDH+HKDF+AES-GCM in one call
-   cleanly) or **record the decision that the payload is content-free by construction and send it in a form the
-   push service will accept** — an unencrypted push is refused by the real services, so this is not a shortcut
-   that survives contact. Recommended: treat RFC 8291 encryption as *the* hard part, scope it explicitly, and if
-   it cannot be done honestly without a dependency, **say so in the ADR and in the ship comment** rather than
-   shipping a `push` endpoint that always 400s. A legitimate smaller shape: encrypt with `openssl`'s
-   `pkeyutl -derive` for ECDH, `openssl kdf`/`dgst` for the HKDF and `openssl enc -aes-128-gcm`… all of which
-   exist, and each of which must be **measured** by a test that decrypts the body back with the subscription's
-   private key. That is the story's real cost and the plan should budget it.
-4. **A row per subscription, and a `DELETE` that names one.** `push_subscriptions(endpoint PRIMARY KEY, p256dh,
-   auth, created_at)` — the endpoint is the natural key (a browser gives one per subscription), so `DELETE
-   /api/push/subscribe` takes the endpoint in the body or the query, and a `POST` of an endpoint already stored
-   is an upsert (a browser can re-subscribe with the same endpoint and new keys). The repository pattern is
-   `sessions/repository.rs`'s: **one file owns every statement** and a `src/**` walk enforces it, so a new
-   `src/push/repository.rs` (or a `push` module with the repository inside) with its own SQL-location guard.
-   `created_at` is `clock::unix_now()`.
-5. **Where the three triggers are read, and why not in the transitioner.** `session.status → error` already
-   exists as an event; `turn_timeout` and `budget_exceeded` are reasons the turn runner records. The cheapest
-   honest shape is a **subscriber on the event stream** — `events::spawn`'s `EventStream` is a broadcast reader,
-   so a `Pusher` task can watch `session.status` frames, spot `to == "error"` and the two reason words, and know
-   the turn's duration from the `turn.start`…`agent_settled` pair (or from a new key on the settle frame, which
-   would be an API change — the frame is pinned at `{from, to, step, reason}`, so **do not** add one; read
-   `turn.start`'s arrival instead, which is what "ran longer than 20 s" means for a phone). The alternative —
-   calling the pusher from `Turn::run` — puts a network call on the turn's path and gives the error arm no home.
-   One rule to keep: **the pusher must not need the database lock across a send**, and it must never be able to
-   block the writer.
-6. **"Not while an SSE stream is open"** is `StreamRegistry::count(session) > 0` read at the moment of sending
-   (not at the moment of the trigger), because a client that connected during the turn is watching. The
-   registry is the state's own, so a `Pusher` built by `AppState::pusher()` gets the same one. Add the inverse
-   test: a session with an open stream produces zero sends, and the same session with the stream closed produces
-   one — the pair, not the single arm.
-7. **Dead endpoints are removed**: a `404`/`410` answer deletes the row (and `401`/`403` is a *key* problem, not a
-   dead endpoint — do not delete a good subscription because the machine's VAPID pair was rotated). The
-   distinction belongs in one `fn` with a test per arm.
-8. **`{host, session_id, kind}` and `host`.** `host` is this machine's identity — the config's `owner`? No: the
-   spec's "each machine has its own keys" implies a machine name, and `docs/stories/README.md`/GLOSSARY's
-   **Machine** entry is the vocabulary to check first. Whatever it is, it must already exist in the config
-   (`docs/notes.md`'s *Config and docs*: no new key without the golden file, `KNOWN_KEYS.len()` and a validation
-   rule).
-9. **The gate case.** No push service exists in the gate, so `case_push` must own a **stand-in receiver**: a
-   local TLS or plain listener the case points the subscription at (a `python3` HTTP responder, like
-   `health_responder`) and asserts the request it *received* — the `Authorization: vapid t=…, k=…` shape, the
-   `TTL`, the `Content-Encoding`, the encrypted body, and the `{host, session_id, kind}` recovered by decrypting
-   it with the subscription's own private key (generated by the case with `openssl`, which is the same tool the
-   sender used, so the case proves the exchange rather than agreeing with the sender's arithmetic). Plus the
-   `404`/`410` deletion and the "stream open, nothing sent" pair. A `SKIP` line when `openssl` is absent, and the
-   `tests/push.rs` unit half for everything that does not need a socket.
-10. **A subscriber's row is a browser's secret.** `p256dh` and `auth` are the subscription's public key and its
-    auth secret; they are not provider keys and not `keys.toml`'s, and they belong in the **database** (the
-    spec's table), not `secrets/`. Nothing logs them: `tracing` lines name the endpoint's *host*, never the full
-    URL (a push endpoint is a capability URL — anyone with it can push).
+1. **How the browser learns the application-server key.** Three arms:
+   - **an additive key on `GET /api/health`** (`application_server_key`, base64url or `null` when the machine has no
+     pair), read once by `main.ts` — the recommendation: one request, the machine's facts, and `preview_origin` +
+     `stopped_ttl_days` are the precedent for "a config-derived value the page needs". The cost is that
+     `tests/http_contract.rs`/`health` pin the payload's keys and `docs/` names "the machine's five keys";
+   - a new `GET /api/push/key` — a route the spec's API table does not list, which is the argument against it;
+   - served into the shell by `web.rs` — the shell is an embedded static file, so this means templating, which
+     nothing in the build does today.
+   Whichever arm, **the key is public** (it is the `k=` of every JWT, by design) and the **private** half never
+   leaves `<data>/secrets`.
+2. **What the service worker is, and where it lives.** It must be a real asset at `/sw.js` (scope `/`), not a
+   fallback-served shell; a Vite `public/` file lands at the root of `web/dist`, so that is the cheap shape. It
+   handles three events: `push` (decrypt is the browser's job — the payload arrives as JSON in `event.data`),
+   `notificationclick` (open or focus `/sessions/<session_id>`) and `pushsubscriptionchange` (re-subscribe and
+   `POST` the new endpoint; a browser rotates a subscription without asking).
+3. **What the notification says, given the payload is content-free.** `{host, session_id, kind}` is all there is:
+   the SW maps `kind` to one sentence per word (`turn_finished` → "a turn finished", `error` → "a session failed",
+   `turn_timeout` → "a turn timed out", `budget_exceeded` → "a turn ran out of its budget"), with the host as the
+   title and the session id in the tag so two sessions do not replace each other. **One rule**: a `kind` this build
+   does not know is a notification that still opens the session, never an exception in a worker (a throw in a `push`
+   handler ends that subscription's delivery silently).
+4. **The settings screen.** The app has two screens today (`/` and `/sessions/<id>`), both read from the address by
+   `main.ts` and not by a router. A third screen is a third path in that dispatch, or a section on the Sessions
+   screen (ADR-0067's precedent: the Changes sheet is a *section* with one toggle, and the spec says the Session
+   screen "gets" it). Item 11 says the app "subscribes on every machine it uses", and today there is one origin, so
+   the screen's "state per machine" is one row — with the sentence that each machine has its own keys, so the
+   operator understands why a second machine is a second subscription.
+5. **The iOS sentence, in the UI.** `navigator.standalone` (iOS Safari) and `matchMedia("(display-mode: standalone)")`
+   are the two detections; the sentence belongs next to the Subscribe control, not only in docs. It is a **pure
+   function with a node test** (the rule "which sentence does this browser earn"), like every other sentence the
+   page draws.
+6. **The manifest and the icons.** `display: "standalone"`, `start_url: "/"`, `scope: "/"`, `name`/`short_name`,
+   `theme_color`/`background_color`, and at least 192/512 `any` plus a maskable — **in a repository with no binary
+   assets**. Three arms: hand-written SVG only (Chrome accepts an SVG icon; **iOS does not**, and it needs an
+   `apple-touch-icon` PNG to look right on the home screen), a checked-in PNG pair (a small binary in `git`, which
+   is what every PWA does), or a generated-at-build PNG (needs a rasteriser, which is not on the machine). The
+   recommendation is **SVG + a checked-in 180/192/512 PNG pair made once with a tool outside the repo**, and the
+   ADR says where they came from.
+7. **No gate may need a browser, so what does `case_*` assert?** The served shell carries
+   `<link rel="manifest">`; `/manifest.webmanifest` is a real asset with the fields its own test parses (a JSON
+   parse of the *served bytes*); `/sw.js` is served with a JavaScript content type and is not the shell; the
+   **bundle** carries the settings screen's element ids and the four `kind` sentences and the iOS sentence; and
+   `/api/health` (or whichever arm) carries the application-server key **byte-identical to `vapid.toml`'s
+   `public_key`** — that last one is the measurement that the browser could actually subscribe.
+8. **The tap.** `notificationclick` → `clients.matchAll` then `clients.openWindow("/sessions/<id>")`, and the
+   session id comes from the payload, so **the SW must not trust it either**: an id that is not 16 hex characters is
+   an id that opens `/` rather than a path built from arbitrary text.
 
 ### 1.6 The questions the plan must answer (before code)
 
-1. Which arm signs (openssl child vs hand-rolled P-256), and where the temporary key file lives and is removed?
-2. Which arm sends (openssl `s_client` vs `curl`), and what happens when the program is missing — a `doctor`
-   finding, a `warn` per attempt, or a refusal at subscribe time?
-3. Is RFC 8291 payload encryption in scope? If yes, with which programs, and how does a test decrypt the body
-   back without trusting the sender's own code? If no, what does the endpoint answer, and is a route that cannot
-   deliver honest to keep?
-4. Does the trigger read the event stream or hook the turn runner — and how does it know the turn's duration
-   without adding a key to the pinned `session.status` payload?
-5. Does the new table need a migration number bump *and* a `docs/schema/previous.sql` refresh? (It should not: an
-   added table is additive. Confirm against `tests/schema_previous.rs`'s subset rule.)
-6. What is `host`, and is it already in the config?
-7. What does `POST /api/push/subscribe` refuse (a body with no `endpoint`, a non-https endpoint, a second
-   subscription for the same endpoint), and which code carries each?
-8. What is the *scope* of a subscription — the whole machine (one row per browser, no session) or per session?
-   The payload carries `session_id`, so the row is machine-wide; confirm and record it.
+1. Is the application-server key an additive `/api/health` key, and what is it called? (Whichever, `Health`'s
+   tests and the docs' "the machine's keys" sentence move with it.)
+2. Is the settings screen a third path or a section of the Sessions screen — and what is its toggle called?
+3. Icons: checked-in PNGs or SVG only, and what does iOS's home screen get?
+4. Does the SW live in `web/public/sw.js` (a plain file, no bundling) or as a built module (needing a second Rollup
+   entry, which Vite does not do without config)? The recommendation is the plain file: a worker needs no imports
+   and a bundled chunk would be a build shape this project does not otherwise have.
+5. What does `pushsubscriptionchange` do when the server refuses the new endpoint — retry, or drop it and let the
+   settings screen say "not subscribed"?
+6. What does the settings screen show when `Notification.permission === "denied"`, and when the browser has no
+   `PushManager` at all (a desktop Safari, an insecure origin)?
+7. Does the page's own `npm test` reach every new sentence, and what is the one browser-shaped thing left to the
+   demo (the tap, which needs a real `clients.openWindow`)?
 
 ### 1.7 Acceptance, restated as checks
 
-- *The two endpoints manage rows in `push_subscriptions`* — a `tests/push.rs` over a real database and the route
-  table: `POST` twice with one endpoint upserts (one row, new keys), `DELETE` removes it, a second `DELETE` is
-  `404`, and the table's four columns are asserted by name (the `sessions` repository's own habit).
-- *VAPID keys from HS-049 sign every send; dead endpoints are removed* — the signature verified by a **second**
-  `openssl` child in `tests/push.rs` (`dgst -verify` against the pair's public key), and the four answers
-  (`404`/`410` delete; `401`/`403`/`429` keep) as one table-driven test.
-- *Three triggers* — a `tests/push.rs` that drives each: a turn that runs past 20 s (the stub's pacing makes it
-  cheap), `session.status → error`, and each of the two stop reasons. Plus the negative: a 5-second turn sends
-  nothing.
-- *No notification while a stream is open* — the pair: `StreamRegistry::open(…)` held → no send; dropped → one
-  send. The `StreamGuard` is the state's, so the test uses the real registry.
-- *Payload is `{host, session_id, kind}` and nothing else* — the decrypted body parsed and its key set asserted
-  exactly, plus a grep-free guarantee: the sentence never carries a message, a prompt or a path.
-- *The server, not the containers* — a test over the two `docker run` vectors (the shape `tests/quota.rs`'s D2
-  test already uses): no container gains a credential, an endpoint or a route to the push services; the sender is
-  a host process.
-- Plus the usual gates, one new `case_Push`, `docs/build.md`'s case list, `GLOSSARY.md` (**Web Push
-  subscription**; check whether **Notification** is already there), and an ADR (**0071** is next).
+- *Valid installable PWA served from the control origin* — `case_pwa` (or the name the plan picks): the shell is
+  `web/dist/index.html` byte for byte and links the manifest; `/manifest.webmanifest` parses as JSON with
+  `display: standalone`, a `start_url` and both icon sizes; `/sw.js` is served as JavaScript and is not the shell;
+  and the icons are the bytes in `web/dist` (a `cmp` against the file).
+- *A settings screen that subscribes, unsubscribes and shows the state* — the **bundle** carries the screen's ids
+  (`case_*`'s shape, no browser), and the node tests cover the pure rules: which control is offered per
+  `permission`/`PushManager`/installed state, and what the "subscribed/unsubscribed/denied" sentence is.
+- *The iOS requirement is in the UI* — one pure function decides the sentence, one node test per arm, and the
+  bundle contains it.
+- *Tapping opens the session* — the SW's `notificationclick` handler is one function whose "which path does this id
+  open" half is a pure function with a node test (16 hex characters → `/sessions/<id>`, anything else → `/`), and
+  the **demo** drives the real `clients.openWindow` in Chromium.
+- *Keys are independent per machine* — the sentence, and the fact that the subscribe request sends *this* origin's
+  key: a `tests/push.rs`-style assertion that the key the health answer carries is the one `vapid.toml` holds, so
+  two machines cannot agree by accident.
+- Plus the usual gates, `docs/build.md`'s case list, `GLOSSARY.md`, and an ADR (**0072** is next).
 
 ### 1.8 Non-goals
 
-The PWA, the manifest, the icons, the service worker and the settings screen (HS-067); tapping a notification to
-open a session (HS-067's acceptance, though the payload must make it possible); per-session subscriptions;
-notification content of any kind; a push for anything other than item 11's three triggers; the hub forwarding a
-push (that is phase 3, HS-074); retries or a send queue (a dead endpoint is deleted, a live one is not retried).
+The hub forwarding a push or a subscription (HS-074); per-session subscriptions; a notification's content; a
+service worker that caches the app (a cache is a second source of truth for a page that must show live state);
+push delivery itself (HS-066's, done); any change to the wire format.
 
 ### 1.9 The demo
 
-There is no phone here and no push service. The honest demo is **two halves**: (1) over the shipped artifact,
-subscribe with a subscription whose endpoint points at a **local stand-in receiver** and show the request that
-arrives — the `vapid` header with its JWT, the `TTL`, the body decrypted with the subscription's own private key,
-carrying `{host, session_id, kind}` and nothing else; and (2) the three triggers and the two refusals (stream
-open; `404`/`410` deleting the row) driven from the same script. Say plainly what was **not** measured: a real
-push service, a real browser subscription, iOS's installed-to-home-screen requirement, and the tap that opens a
-session — all of which are HS-067's or a by-hand procedure.
+There is no phone here, so the honest demo is Chromium: serve the artifact, load the sessions screen, show the
+manifest link and the served manifest, subscribe through `pushManager` against a **stand-in push service** (the
+node TLS receiver `case_push` and `/tmp/holosmith/demo/push-receiver.mjs` already are one — it decrypts and can be
+asked to POST a payload back to the page), fire a `push` event at the service worker with
+`{host:"local",session_id:"<id>",kind:"turn_finished"}`, and show the notification appearing and the click handler
+opening `/sessions/<id>`. Say plainly what was **not** measured: a real push service, a real iOS device, the
+home-screen install itself, and iOS's own delivery rules.
 
 ### 1.10 What the next agent needs back
 
 When you write the state back (§5, step 10): §1 becomes the **next** issue — by `PROMPT.md`'s ranking that is
-`PER-99` (HS-067, the installable app and notification permission) *if* HS-066 ships and HS-067's blocker is
-still `Done`, and `PER-98` again if it does not. Take the same shape. Refresh the counts, the ADR number you took
-(**0071** is next; **0072** if you write two), the last gate run's own numbers (and `web/`'s test count), and
-replace §9's row with this story's. Anything you learned that is **not** state and **not** an ADR goes into
-`docs/notes.md` under a new `### Landmines: …` heading, never into §1. Then kill what you started (§5, step 11).
+`PER-100` (HS-068, the host registry and `POST /api/hosts`, the first phase-3 story) *if* HS-067 ships and HS-068's
+blockers are `Done`, and `PER-99` again if it does not; check Linear's `Blocked by` list. Take the same shape.
+Refresh the counts, the ADR number you took (**0072** is next), the last gate run's own numbers (and `web/`'s test
+count), and replace §9's row with this story's. Anything you learned that is **not** state and **not** an ADR goes
+into `docs/notes.md` under a new `### Landmines: …` heading, never into §1. Then kill what you started (§5, step 11).
 
 ## 2. Environment (already repaired — do not redo)
 
@@ -525,6 +478,7 @@ Some cases bring their own boot, and they are the ones a new story is most likel
 | `case_key_proxy_request` | a stand-in `openssl` on `PATH`; asserts the bytes the key proxy really sends |
 | `case_server_deploy`, `case_server_service` | two halves each: an **offline** one (`python3` for a `_ping` socket / a `/api/health` responder) and an **online** one (the daemon and an image) that drives a `--root` deploy with `deploy_machine_shims`' `tailscale` on `PATH`; they remove `hs_egress`/`hs_key` before and after, and `case_server_images` must have run first |
 | `case_preview` | **its own boot** (stub backend, own data root, `preview_listen = "127.0.0.1:0"`) and, for its second half, the daemon and `agent_image` — it makes its own `s_<id>` container on an `--internal` `agents_<id>` and prints one `SKIP` line without them; the first half always runs and puts the shared boot back |
+| `case_push` | **no daemon, no image**: its own stub boot, a `node:https` receiver on `127.0.0.1:0` (so `node`), a CA and a `localhost` certificate plus the machine's VAPID pair (so `openssl`), and `python3` for the SEC1 walk and `app.db`. It exports `SSL_CERT_FILE` around `start_serve` and unsets it at once — the sender passes no `-CAfile` on purpose (ADR-0071), which is what lets a private CA stand in front of it. It holds an SSE stream open **across** a turn (a raw `/dev/tcp` descriptor, because `fetch_stream` closes its socket and releases the guard) |
 
 A story is not done until the gates are green on a clean tree, and then you run the story's own demo
 yourself and paste its output.
@@ -563,6 +517,7 @@ crates/holosmith/
   migrations/0002_sessions.sql  sessions + two indexes (schema 2)
   migrations/0003_events.sql    events + sessions.last_seq (schema 3)
   migrations/0004_expected_stop.sql  sessions.expected_stop (schema 4, HS-030)
+  migrations/0005_push_subscriptions.sql  push_subscriptions (schema 5, HS-066)
   src/main.rs               dispatcher only
   src/cli.rs                clap: version, config {validate,show,edit}, serve [--port|--data-dir|--backend],
                             proxy {egress --listen --allow}
@@ -662,6 +617,23 @@ crates/holosmith/
                             `PROXY_START_TIMEOUT` (90 s); and since HS-039 the key proxy:
                             `KeyProxy` (`of(&Config)`, `run_args`), which mounts the key file read-only
                             and runs `proxy key` on `hs_key`
+  src/push/                 the Web Push backend (HS-066, ADR-0071): mod.rs (the four kind words —
+                            `turn_finished` is its own, `error`/`turn_timeout`/`budget_exceeded` are words the build
+                            already had —, `LONG_TURN` (20 s, a constant), `Watcher` (the trigger table as one pure
+                            function over frame, arrival and threshold), `Pusher` (`new`/`with_threshold`/
+                            `with_deliver`/`spawn`/`run`/`announce`/`threshold`), the `Deliver` trait (which takes the
+                            send's scratch directory), `Payload` = `{host, session_id, kind}` with `host` =
+                            `preview::HOST`, and `Watcher::forget_all` for a lagged broadcast), repository.rs
+                            (every `push_subscriptions` statement + the `sql::guard` walk), crypto.rs
+                            (HMAC-SHA-256 on `images::sha256`, HKDF, AES-128 encryption, GCM's GHASH — pinned by RFC
+                            4231, RFC 5869, FIPS 197 and NIST SP 800-38D, plus a `cfg(test)` `open`), encrypt.rs
+                            (RFC 8291: the `pkeyutl -derive` child, the three HKDF chains, the 86-octet header and the
+                            `aes128gcm` body, with §5's example byte for byte), jwt.rs (the ES256 VAPID token via
+                            `dgst -sha256 -sign`, the `sec1`/`spki` DER writers, `raw_signature`, `origin`, `verify`
+                            for tests, and `Temp`: a `0700` directory under `<data>/push/tmp/` with `0600` files,
+                            removed on drop), send.rs (`request`'s byte-exact head, `status_of`, `Disposition`,
+                            `DELIVER_TIMEOUT` = 60 s, and `SslClient`: one `s_client` child whose streams go to files
+                            and whose wait is `try_wait` against that deadline), `OPENSSL`, `SUB`
   src/vapid.rs              the machine's Web Push key pair (HS-049, ADR-0058): `VAPID_FILE` (`vapid.toml`),
                             `Pair`, `store`, `render`, `parse`, `is_pair`, `from_der` (the SEC1 walk), `base64url`/
                             `unbase64url`; unit tests for the DER vector, RFC 4648's vectors and the three refusals
@@ -703,6 +675,9 @@ crates/holosmith/
                             `BackupError`, `KEEP` (7), `BACKUPS` ("backups"), and the private `day`/
                             `civil_from_days` (UTC, integer-only, no dependency). Sync and std-only, and
                             it logs nothing — the create logs its error
+  src/http/push.rs          the two routes of item 11 (HS-066): `POST /api/push/subscribe` (204, an upsert on the
+                            endpoint) and `DELETE /api/push/subscribe?endpoint=` (204/404/422), the codes
+                            `bad_endpoint` and `bad_subscription_key`, and the query read through `changes::decode`
   src/http/tool_output.rs   one tool's stored output (HS-033): 404 for an unknown session, an id that cannot be
                             a filename and a missing file; `text/plain; charset=utf-8` otherwise
   src/rpc.rs                the mapping (HS-032, ADR-0040; HS-033's tool pair in ADR-0041; HS-034's usage
@@ -718,7 +693,7 @@ crates/holosmith/
   src/runtime.rs            runtime::Backend {Stub,Docker} — which backend this run uses
   src/http/                 mod.rs, app.rs (Routes/App seam, AppState + provisioner()/turner()/
                             transitioner()/ladder()/deleter()/sweeper()/compactor()/reconciler()/
-                            stopper()/quota()/expiry(), edge layer,
+                            stopper()/quota()/expiry()/pusher(), edge layer,
                             is_guard_exempt), error.rs
                             (the one envelope — `{code, message}`, plus `conflicts` when and only when a
                             merge conflicted — every code, ApiError::not_in_state / bad_prompt /
@@ -910,13 +885,15 @@ crates/holosmith/
                             clean 0, conflict 1 with the path), Tailscale (`status --json`'s `BackendState`),
                             the two ports (free before a start, held by this machine's own `/api/health`
                             after one), the database (`db::recorded_without_migrating` + `schema::verdict`),
-                            the self-test, `hs_egress`/`hs_key`, the image's pi; `SYSTEMD_DIR`, `PROBE_TIMEOUT`
+                            the self-test, `hs_egress`/`hs_key`, the image's pi, and since HS-066 `openssl`
+                            (`Check::Openssl`, **`--full` only** — `--quick` is the unit's `ExecStartPre`, so a
+                            missing notification channel must not refuse a boot); `SYSTEMD_DIR`, `PROBE_TIMEOUT`
   src/commands/doctor.rs    the subcommand: config, `doctor::run`, print, exit 1 iff a finding failed
   src/db.rs                 pragmas + read-back, apply_pending (which switches on `schema::verdict`),
                             `recorded_without_migrating` (SQLITE_OPEN_READ_ONLY: `doctor`'s reader, which must
-                            not migrate), Database::sessions()/events()
+                            not migrate), Database::sessions()/events()/push()
   src/sql.rs                the one SQL statement scanner + the shared source walk (cfg(test) guard)
-  src/schema.rs             SCHEMA_VERSION (= 4), include_dir! embed, check_embed, contract_violations,
+  src/schema.rs             SCHEMA_VERSION (= 5), include_dir! embed, check_embed, contract_violations,
                             and since HS-075 `Verdict {Same, Older, Newer}`, `verdict` and `Verdict::sentence`
                             (the sentence the boot warns with and `doctor` refuses with, ADR-0047)
   docs/schema/previous.sql   the previous release's schema as a dump (HS-075, ADR-0047): compared with this
@@ -925,6 +902,11 @@ crates/holosmith/
   scripts/schema-snapshot.sh  the release step that regenerates it (`<data root>/app.db`, read-only open)
   src/{serve,web,logging,clock,version,pins}.rs
   tests/                    version_cli, config_cli, http_contract, serve_cli, db_migrations, exit, agent,
+                            push (HS-066: the rows and both routes over a real database, the trigger table, the three
+                            triggers through the real Pusher with a recorder, the stream-open pair on the real
+                            registry, the disposition table, the payload's three keys, a token signed by a real
+                            `ecparam` pair and verified by a second `openssl` child, and the containers holding
+                            nothing),
                             disk (HS-062: a `df` stand-in the test rewrites — the boot's check and a real
                             `POST /api/sessions` read one number, 507 on create and on resume with the code and
                             both numbers, no row and no worktree, a replay answering its own row, a create at
@@ -1019,7 +1001,8 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   `GET /api/sessions/{id}/events`, `…/events/history`, `…/tool-output/{tool_id}`,
   `…/tool-image/{tool_id}/{index}`, `…/changes`, `…/changes/diff[?path=]`, `POST …/merge` with all three of
   item 12's strategies, rule 1's two guards and rule 5's `delete_session`, `POST …/publish` with the config's
-  remotes, the protected names, the merge target and a `confirm` that is required), SQLite with **four**
+  remotes, the protected names, the merge target and a `confirm` that is required), `POST`/`DELETE
+  /api/push/subscribe` (which store a browser's subscription and nothing a phone shows), SQLite with **five**
   migrations, the guards, the event writer (which coalesces a commit's deltas), the SSE stream, the stub
   backend and its four-step provisioner, the
   enforced state machine, the abort ladder, the delete flow, the cap with eviction, the create's and the
@@ -1111,10 +1094,11 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   one — which is also how HS-019 provoked a real failed snapshot from the shipped artifact.)
 - **`AppState`** is `{ config, runtime, database: Arc<std::sync::Mutex<Database>>, events: EventWriter,
   streams: StreamRegistry, backend: Backends, drain: Control, merges: Merges, tools: preflight::Tools }` — the
-  last three since HS-051, HS-054 and HS-062 — with **ten** wiring helpers — `provisioner()`,
+  last three since HS-051, HS-054 and HS-062 — with **thirteen** wiring helpers — `provisioner()`,
   `turner()`, `transitioner()`, `ladder()`, `deleter()`, `sweeper()` (an `Option`, `None` when
-  `idle_stop_min` is 0), `compactor()` (always `Some`), `reconciler()` (HS-044), `stopper()` (HS-030) and
-  `quota()` (an `Option`, `None` when `session_disk_soft_gb` is 0, HS-063). The mutex is an explicit
+  `idle_stop_min` is 0), `compactor()` (always `Some`), `reconciler()` (HS-044), `stopper()` (HS-030),
+  `quota()` (an `Option`, `None` when `session_disk_soft_gb` is 0, HS-063), `expiry()` (always present,
+  HS-064), `drainer()` (HS-051) and `pusher()` (always present, HS-066). The mutex is an explicit
   stopgap (ADR-0012/0013; `docs/notes.md`'s *Data and state* landmines).
 - **`sessions::state::Transitioner::apply`** is the only way a session's state changes; `apply_logged`
   is the runners' wrapper (log, never return). A provisioning step report is `from == to` with `step`
@@ -1225,20 +1209,20 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 The catalogue lives in **`docs/notes.md`** — read the **cross-cutting** sections before you start anything,
 then the sections below. It is a reference: everything there is a measurement or a review finding.
 
-| Read | Why it bears on HS-066's Web Push backend |
+| Read | Why it bears on HS-067's installable app |
 | --- | --- |
-| Cross-cutting: *HTTP and the envelope*, *Data and state*, *Config and docs*, *Web* | **HTTP and the envelope** is the two new routes' shape: every fallible extractor answers `text/plain` unless you map it, a mutating route needs `Content-Type` **and** `X-Holosmith-Client` or it is `403 bad_client`, `is_guard_exempt` is the only exemption list, and codes are constants in `http/error.rs` (two requests may share a code and differ in sentence). **Data and state**: ADR-0016's one writer (a notification is *not* a state change, so read events and write nothing), the repository owning every statement with a `src/**` walk enforcing it, and `SCHEMA_VERSION` moving in the same commit as its migration. **Config and docs**: no new key without the golden file and `KNOWN_KEYS.len()` (**33**). **Web**: `web/` is HS-067's, so this story adds no page code. |
-| *Landmines: the credential path (HS-040)* and *the service, the keys and the origins (HS-049)* | The two stories that own secrets. `keys.toml` is the provider store and `vapid.toml` is the machine's push pair — **not** the same file, not the same reader, and the subscription's `p256dh`/`auth` belong in neither (they are rows). `perms` is `doctor`'s check on the secrets directory's modes, and HS-049's ADR-0058 records why no `sub` claim was stored: **this story decides it.** |
-| *Landmines: the per-session disk cap (HS-063)* | The nearest neighbour in shape: a task with a constant `TICK`, a `Tools`-shaped program seam (which is how a test owns a program this crate spawns — `preflight::Tools { git, df, du }` is where a new `openssl` seam goes), the rule that a subprocess call is never under the database lock, and the event-kind lesson: a frame's kind is its `event:` line, and a `code` is API. |
-| *Landmines: the turn runner and the turn timeout (HS-015, HS-022)* and *the abort ladder (HS-016)* | The two triggers that are the *runner's* (`turn_timeout`, `budget_exceeded`) and the pinned `session.status` payload (`{from, to, step, reason}` — **four keys; do not add a fifth**). "A turn ran longer than 20 s" has to be derived from `turn.start`'s arrival, not from a new field, and the ladder's `Ending::{Asked,Forced}` is why a forced stop is a different event from an asked one. |
-| *Landmines: the egress proxy (HS-037)* and *the key proxy (HS-039)* | The build's two existing answers to "talk to somebody else's service with no HTTP client": `keyproxy::forward` spawns **`openssl s_client`** and counts the bytes, and `egress` tunnels TCP. That is the pattern item 11's "the server, not the containers, holds the outbound access" is asking to reuse — plus `hs_egress`'s presence on the host, which a boot already starts. |
-| *Landmines: a gate's scripts and stand-ins (HS-033, HS-034, HS-049)* | `scripts/verify.sh`'s `health_responder` and `deploy_machine_shims` are the two existing `python3`/`sh` stand-ins for a service that is not there — the model for a **push receiver** the case owns, and the reason a case may not need a browser. Also: a case must own its state and its `SKIP` may not fire on the feature it checks. |
-| *Landmines: the per-session disk cap's review (PER-95)* and *this story's predecessor (PER-96)* | Two reviews' worth of lessons that recur here: an interval with no witness is a number nothing can fail on (assert the constant), a test that agrees with the code it tests proves nothing (the gate's receiver must decrypt with the **case's own** key material), and a broken intra-doc link is only ever a review finding because `cargo doc` is not in the gate. |
+| Cross-cutting: *Web*, then *HTTP and the envelope*, *Config and docs* | **Web** is this story's home: `web/src/transcript.ts` is every rule and `main.ts` is the DOM, `npm test` is node's runner, `scripts/build-web.sh` is `npm ci` + `npm test` + `vite build`, `web/dist` is what `src/web.rs` embeds, and **no gate may need a browser**. **HTTP and the envelope**: the app is served by the control listener, so the service worker and the manifest are assets the same fallback serves, and every `/api/` path answers ADR-0008's envelope. **Config and docs**: the health answer's keys are pinned by tests, so an additive one moves `docs/` with it. |
+| *Landmines: the push, the pair and the payload (HS-066)* | The backend this story drives: the two routes' refusals, the four `kind` words, `{host, session_id, kind}`, the 20-second threshold, the stream rule, and the fact that the application-server **public** key is the `k=` of every JWT. It also records what the gate's receiver is, and that a **capability URL is never logged**. |
+| *Landmines: the Changes sheet (HS-058)* | The one story so far that added a *screen-shaped* thing to the page: a **section** behind one toggle, every sentence a pure `transcript.ts` function with a node test, and `case_changes_screen` asserting the served bundle's element ids because no gate may run a browser. That is the model the settings screen should copy. |
+| *Landmines: stopped-session expiry (HS-064)* and *the service, the keys and the origins (HS-049)* | HS-064 is where a page learned a machine fact: `main.ts` sets `session-list.dataset.stoppedTtlDays` from the answer, because the page keeps no state beyond the DOM — the precedent for carrying the application-server key the same way. HS-049 owns `vapid.toml`: written once by `server deploy`, never rewritten, and its **public** half is what the browser needs. |
+| *Landmines: a gate's scripts and stand-ins (HS-033, HS-034, HS-049)* | `case_push`'s `node:https` receiver is the newest stand-in and the one this story wants: it decrypts an RFC 8291 body and answers a status per path, so it can also be the thing that *fires* a `push` event at the service worker in the demo. Also: a case must own its state, and its `SKIP` may not fire on the feature it checks. |
+| *Landmines: the push's review (PER-98)* and *the disk cap's review (PER-95)* | Two reviews' worth of lessons that recur: a test that agrees with the code it tests proves nothing (here: the page's rules must be tested as rules, and the served bytes as bytes), and a child or a connection on a background path needs a deadline — a service-worker event handler that hangs is the browser-shaped version of the same bug. |
 
-Three rules worth repeating here because they are the most expensive to relearn: **a test that cannot fail
-is worse than no test** (mutate the behaviour and watch it go red); **a gate case that SKIPs on the bug it
-exists to catch is this project's P1**; and **after any scripted Markdown edit, read the changed lines** —
-three such edits have cost a review finding each.
+Three rules worth repeating here because they are the most expensive to relearn: **a test that cannot fail is worse
+than no test** (mutate the behaviour and watch it go red); **a gate case that SKIPs on the bug it exists to catch is
+this project's P1**; and **after any scripted Markdown edit, read the changed lines** — three such edits have cost a
+review finding each. One more, new here: **`case_push`'s stream arm holds a raw `/dev/tcp` descriptor**, because
+`fetch_stream` closes its socket — a case that copies the helper for a "keep it open" arm measures nothing.
 
 ## 7. Decisions taken on the operator's behalf (do not silently undo)
 
@@ -1274,7 +1258,7 @@ cd /home/adamolsson/projects/holosmith
 git status --short                                  # clean apart from log.txt/orchestrate.sh
 . ~/.pi/toolchains/env.sh                           # ALWAYS before cargo/rustc
 python3 /tmp/lin.py issues | grep -v ' Done ' | head # recreate /tmp/lin.py first (§2)
-python3 /tmp/lin.py issue PER-98                    # scoped, Backlog, the issue §1 names
+python3 /tmp/lin.py issue PER-99                    # scoped, Backlog, the issue §1 names
 docker version                                      # the daemon must answer, or a Docker check cannot be measured
 docker image inspect pi-agent:local                 # the image the Docker stories run
 docker network ls | grep -w egress                  # the proxy test's premise (§2); `grep -x` never matches
@@ -1284,7 +1268,7 @@ scripts/verify.sh                                   # baseline green, ~13–14 m
 
 If the baseline is red before you touch anything, that is the first thing you fix — and say so in Linear.
 
-Then start §5 on **§1's issue** (`PER-98`, HS-066) and stop after step 11.
+Then start §5 on **§1's issue** (`PER-99`, HS-067) and stop after step 11.
 
 Before you begin, check that the last session left nothing behind — `subagent({action:"list"})` should show
 no run in progress, `docker ps` none of its containers, and `git status --short` should look like the line
@@ -1303,29 +1287,28 @@ from those three; do not carry old sessions' ledgers in this file.
 If you stop before the issue ships, say so explicitly, name the next action, and leave the tree clean and the
 gates green — **a half-finished story is worse than an honest stop**.
 
-**The last shipped story** (`PER-96`, HS-064, ADR-0070; commits `36923f9`, `f90ca2f`, `98485a4`, `5cd6a72`,
-`df7a34d`): item 15's retention bullet and its last sentence — the fourth periodic policy, and the first that
-*destroys* something on a timer. `stopped_ttl_days` had existed since HS-034 and nothing read it, so the story was
-a new module, a new `AppState::expiry()`, a new table row and **one extracted function**. Three decisions are worth
-carrying: **the policy runs the delete flow's own second half** (`http::complete_deletion`, extracted out of the
-request handler) rather than a copy, so the snapshot order, the keep-rules, the one-transaction row-plus-log
-removal and the stream closing stay one code path — "using the delete flow from item 9" is that function and not a
-rewrite; **the destructive decision is a table row** (`Trigger::Expire`, `stopped → deleting` only), so a session
-the operator resumed between the pass's read and the flow's write is refused by `Transitioner::apply` and not by a
-comparison in the job — and the pass's status re-read is a *courtesy* that keeps the log honest, isolated by an
-in-crate test that asserts the stub took no snapshot; and **a policy must not force**, so the snapshot's
-`409 unsaved_work` becomes "skip and retry tomorrow", where the retry is literally the candidate set (nothing
-about the row moves). Two more worth knowing: the first pass is **immediate with no `SETTLE`**, because the
-reconcile only touches live rows and a `stopped` one is not live — that is what makes a daily policy observable in
-a gate and a demo; and the days-remaining sentence is a pure `transcript.ts` function whose clock is passed in,
-saying "expires in N days" and never "will be deleted", because the snapshot can keep the work. The gate: **87
-cases, 1500 assertions**, no `SKIP`; `cargo test` 1117 (57 binaries); `web` 79. **The review's eleven findings had
-no blocker**: the two that mattered were a stale phrase in `GLOSSARY.md`'s trigger list and a test named for a race
-it did not build — the interleaving is only constructible inside the crate, so that guard got a `#[cfg(test)]` test
-beside `expire` that asserts the *work* was not done, which is the assertion a "we did not do a delete we were about
-to refuse" guard needs. Its full record is Linear, `docs/review/PER-96.md` and `git log`; do not carry it forward.
+**The last shipped story** (`PER-98`, HS-066, ADR-0071; commits `09f862f`, `848eb65`, `5eef3bd`): item 11's wire
+— the two routes, the `push_subscriptions` table, the trigger table over the event stream, the stream rule, and a
+VAPID-signed RFC 8291 message with no HTTP client and no crypto dependency to build it from. Three decisions are
+worth carrying: **the child-process arms were measured and both fail**, which is what made the encryption in-crate
+rather than a fifth subprocess (`openssl enc` refuses AEAD; `openssl kdf` answers the wrong bytes for RFC 5869's own
+first case), and each primitive is pinned by the document that defines it plus RFC 8291 §5's example byte for byte,
+with the RFC's five intermediates as separate witnesses — the stake being bounded by the payload's own rule, that it
+carries `{host, session_id, kind}` and never content; **the trigger reads the event stream**, because a poll of a
+column cannot tell one long turn from two short ones and `session.status` is pinned at four keys, so a turn's
+duration is `turn.start`'s arrival — and a lagged broadcast forgets every recorded start rather than measuring one
+whose ending it missed; and **the server holds the outbound access**, one bounded `openssl s_client` per message
+whose streams go to files so the wait is a deadline (`try_wait` against 60 s) rather than a read that blocks on EOF —
+which the review found, because an endpoint that accepts a connection and goes quiet would otherwise have silenced
+every later notification for the process's life. `401`/`403` keeps a row: a rotated pair must not silently
+unsubscribe a phone. The gate: **88 cases, 1565 assertions**, no `SKIP`; `cargo test` **1160** (58 binaries); `web/`
+**79**. The review's eleven findings had no blocker beyond that deadline: the rest were accuracy (ADR decisions
+cited by the plan's numbers rather than the ADR's, a doc block that had drifted onto the wrong function, a dead
+accessor whose doc claimed a caller) and four tests that claimed more than they measured — RFC 4231's long-key
+vector instead of "did not panic", the shipped `Payload` instead of a copy, the `openssl` finding on both arms and
+its `--quick` absence, and an endpoint with `&` in it deleted through its escape. Its full record is Linear,
+`docs/review/PER-98.md` and `git log`; do not carry it forward.
 
-**One thing this build does not do, recorded rather than discovered:** a resumed session's pi has **no
-memory** of earlier turns (`--no-session`; the transcript is Holosmith's log). Replaying the log into a new pi
-is a product decision with a token cost and needs its own story — ADR-0040 and ADR-0039 both say so, and
-nothing in the backlog owns it yet.
+**Two things this build does not do, recorded rather than discovered:** a resumed session's pi has **no memory** of
+earlier turns (`--no-session`; the transcript is Holosmith's log), and a notification's payload is deliberately
+content-free, so the browser half (HS-067) has four `kind` words and a session id and nothing else to draw with.
