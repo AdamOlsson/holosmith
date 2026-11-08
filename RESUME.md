@@ -1,4 +1,4 @@
-# RESUME — one issue per session (next: PER-88 / HS-056, the merge's guards, `delete_session` and the 60 seconds)
+# RESUME — one issue per session (next: PER-89 / HS-057, publish)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating procedure and
 still governs the cycle; this file is the state of the world, and it adds one rule of its own:
@@ -45,216 +45,207 @@ sandbox-specific incantation (§2).
 
 ---
 
-## 1. The issue this session picks up: `PER-88` — HS-056, the merge's guards, `delete_session` and the 60 seconds
+## 1. The issue this session picks up: `PER-89` — HS-057, publish
 
-**State when this file was written** (`origin/master` at `213f9d3`, the tree clean apart from the operator's own
-`orchestrate.sh`/`log.txt`): **60 of 80 stories Done, 20 Backlog**, all in project `Holosmith`. `PER-88` is
-`Backlog`, it is the next in `HS-###` order, and its one blocker (`HS-055`) is `Done` — so it is eligible.
-`PER-89` (HS-057, publish) is blocked by HS-054, which is also `Done`, so **HS-056 comes first only because of
-`HS-###` order**; if HS-056 turns out to be a stop, HS-057 is the next eligible one and PER-90 (HS-058) is
-blocked by both.
+**State when this file was written** (`origin/master` at `43eaf02`, the tree clean apart from the operator's own
+`orchestrate.sh`/`log.txt`): **61 of 80 stories Done, 19 Backlog**, all in project `Holosmith`. `PER-89` is
+`Backlog`, it is the next in `HS-###` order, and its one blocker (`HS-054`) is `Done` — so it is eligible. `PER-90`
+(HS-058, the Changes sheet) is blocked by HS-057, so it is *not* eligible until this one ships; nothing else in
+phase 2 is unblocked (HS-062 … HS-067 are blocked by HS-061/HS-060/HS-059, which are Done, so check the Linear
+`Blocked by` list rather than this sentence if HS-057 turns out to be a stop).
 
-The last shipped story was `PER-87` (HS-055, the merge's `merge` and `squash`, **ADR-0064**) — the second route in
-this build that writes to the project repository, and the one that made a commit there. Its gate run was green:
-**81 cases, 1254 assertions**, no `SKIP`; `cargo test` is **1038 tests**, and `web/`'s runner is **52**. Its §1
-material is now Linear, `docs/review/PER-87.md`, `git log` and §9.
+The last shipped story was `PER-88` (HS-056, the merge's guards and `delete_session`, **ADR-0065**) — the last of
+item 12's merge: rule 1's two guards in the route, rule 5's delete after a landing, and rule 6's 60 seconds
+recorded rather than built. Its gate run was green: **82 cases, 1313 assertions**, no `SKIP`; `cargo test` is
+**1042 tests**, and `web/`'s runner is **52**. Its §1 material is now Linear, `docs/review/PER-88.md`, `git log`
+and §9.
 
 ### 1.1 The slice (verbatim from `docs/stories/phase-2-deployable-mvp.md`; Linear's body is the same text)
 
-> ### HS-056 — Merge guards and `delete_session`
+> ### HS-057 — Publish
 >
-> **As** the operator **I want** merge to refuse while work is in flight **so that** I cannot merge half a turn.
+> **As** the operator **I want** to push a session branch **so that** I can open a PR without a laptop.
 >
-> - **Size:** S · **Blocked by:** HS-055 · **Spec:** item 12 (rules 1, 5, 6)
-> - **Demo:** merge during a running turn → 409 `session_running`; merge with a dirty worktree → 409
->   `dirty_worktree` with the commit offer.
+> - **Size:** M · **Blocked by:** HS-054 · **Spec:** item 12
+> - **Demo:** with `publish.remotes = ["origin"]`, publish pushes `agent/<id>`; with it empty, the endpoint is
+>   disabled.
 >
 > **Acceptance**
-> - [ ] 409 `session_running` while a turn runs.
-> - [ ] 409 `dirty_worktree` while the session has uncommitted work; the UI offers to prompt the agent to commit
->   with a clear message.
-> - [ ] `delete_session: true` runs the delete flow after a successful merge; the branch is then deleted because
->   it is merged.
-> - [ ] Merge and publish use a 60 second timeout; other calls keep the 5 second default.
-> - [ ] A merge that fails after the temporary worktree is created leaves no directory behind.
+> - [ ] `POST /api/sessions/:id/publish` with `{remote, branch?, confirm:true}`; pushes using the host's own git
+>   credentials.
+> - [ ] Only remotes named in `publish.remotes` are allowed; empty config disables the endpoint (404 or 403 with a
+>   clear code).
+> - [ ] Never force-pushes; refuses protected names (`main`, `master`, `release/*`).
+> - [ ] `touches_ci` is true when the diff changes `.github/`, other CI files or hook directories, and the UI warns
+>   before confirm.
+> - [ ] Pushing the merged target branch is not supported and returns a clear refusal.
+> - [ ] Containers never hold a git credential — asserted by a test.
 
-`docs/stories/**` is **not edited** (§7). An **S** story, and it is mostly *edges*: two refusals, one field this
-build has refused since HS-054, one timeout, and one acceptance bullet that HS-055 already satisfies (see §1.3).
+`docs/stories/**` is **not edited** (§7). An **M** story, and the last route of item 12: it is the one that reaches
+*out* of the machine, and the one whose subject is not a ref of ours but somebody else's repository.
 
 ### 1.2 The spec it closes
 
-Item 12's rule **1**, rule **5**, and rule 6's timeout clause, in full:
+Item 12's publish paragraph, in full:
 
-> **Rule 1.** Refused with 409 `session_running` while a turn runs, and with 409 `dirty_worktree` while the
-> session has uncommitted work. The UI then offers to prompt the agent to commit with a clear message. Only
-> commits are merged.
->
-> **Rule 5.** `delete_session: true` runs the delete flow after a successful merge. The branch `agent/<id>` is
-> then deleted because it is merged.
->
-> **Rule 6 (the pair of numbers).** Returns `{merged_commit, target, strategy}`. The hub timeout for merge and
-> publish is 60 seconds (the default stays 5).
+> `POST /api/sessions/:id/publish` with `{remote, branch?, confirm:true}`. The server pushes the session branch
+> `agent/<id>` using the host's own git credentials. Rules: only remotes named in `publish.remotes` config (empty
+> by default, so the endpoint is disabled); never force; refuse protected names (main, master, release/\*);
+> `touches_ci` is true when the diff changes `.github/`, other CI files or hook directories, and the UI shows a
+> warning before confirm. Pushing the merged target branch is not supported from the app; push main from the host.
+> Containers still never hold a git credential.
 
-Nothing else in item 12 is this story's. Publish (rule 6's second route, `publish.remotes`, the protected names,
-`touches_ci`'s warning) is HS-057; the Changes sheet, the target/strategy picker and **the Resolve-with-agent
-affordance** are HS-058.
+And the UI sentence next to it ("a Publish button when configured, with a confirm step and the CI warning") is
+HS-058's, exactly as the Merge button is.
 
 ### 1.3 What already exists (read this before planning)
 
-- **`merge.rs` is done and every piece of it is reusable.** `merge::merge(&Worktree, &Request, &[String],
-  &Merges, &Path) -> Result<Merged, MergeError>`; `Request { target, strategy, message }`; `Strategy::{FastForward,
-  Merge, Squash}` with `parse`/`as_str` (and a private `landing()`); `MERGE_DIR`, `HOOKS_PATH`/`hooks_flag`,
-  `landing_prefix` (hooks **and** `snapshot::IDENTITY`), `worktree_add_arguments`, `merge_arguments`,
-  `squash_arguments`, `commit_arguments`, `message_for`, `land`, `apply`, `run_in`, `unmerged`/`conflict_paths`,
-  `nothing_staged`, `head_of`, `clear`/`add`/`remove`, `Site`, `listed`, `target_head`, `is_ancestor`,
-  `checkout_of`, `is_the_repository`, `update_ref`, `fast_forward`, `Merges`, `FF_ONLY`.
-- **`MergeError` has eight arms** — `Changes`, `Unlisted`, `NoTarget`, `NotFastForward`, `TargetDirty`,
-  `CheckedOutElsewhere`, `Conflict { paths }`, `Temporary { path, detail }` — and `sentence()` is called by
-  `http::merge::refusal_of`, which logs and then answers. **A new arm per new fact is the shape.**
-- **`http/merge.rs`** parses the contract's four keys into `merge::Request`, refuses an unknown key
-  (`unknown_field`), a fourth strategy word (`bad_strategy`), a non-string or empty `message` (`bad_body`) and
-  **`delete_session: true` (`422 unsupported`, `UNBUILT_DELETE` — this story's to remove)**; then asks
-  `listed` → the row → `base_commit` → `spawn_blocking(merge)`. Its sentences are its own (ADR-0063 D1).
-- **`http/error.rs`** has `CONFLICT` + `ApiError::conflict(paths)` and `ErrorBody.conflicts`
-  (`skip_serializing_if`), the envelope's one additive key. `UNSUPPORTED` now names one field.
-- **The delete flow is `http::sessions::delete`** and it is not one call: read the row (`deleting` → re-spawn and
-  answer; `running` → `Ladder::end_turn(DELETED)`), `backend.snapshot` (refusing `409 unsaved_work` unless
-  `?force=true`), `retained_for` (HS-043's keep-rule, **one** answer used by both the 202 and the removal),
-  `apply_trigger(Trigger::Delete)` (`409 not_deletable`), then `state.deleter().spawn(row, retained)` and a 202
-  whose body is the `deleting` row plus `kept`. `retained_for` is **private** in that module.
-- **`worktree::retained(base, targets)`** is the keep-rule: `Known { branch, wip }` / `Unknown`, and
-  `merged_into` is `git merge-base --is-ancestor agent/<id> refs/heads/<target>`.
-- **`changes::dirty(&Path)`** is `pub(crate)` and is the changes view's definition of work — the same one the
-  merge's `409 target_dirty` already uses, asked of the session's worktree this time.
-- **The gate** has `case_merge` and now `case_merge_strategies`, which boots its own Docker run over its own
-  projects root **and data root** (`<data>/merge` is what it measures), re-makes the worktree the failed network
-  step takes back with the step's own command, and drives squash → merge → conflict through the artifact.
-  `tests/merge.rs`'s `Fixture` (a real repository, a row, a worktree, `Fixture::run`/`land_by`/`temporary`) and
-  `tests/delete.rs` are the crate-level precedents.
-- **There is no hub, and therefore no 5-second default anywhere in this build.** `web/main.ts` has no `fetch`
-  timeout; the config has `allowed_hubs` and `role`, and the hub itself is phase 3 (HS-069/HS-070). Rule 6's
-  pair of numbers has **no existing implementation to change**.
+- **`config.publish.remotes` is built and validated, and nothing reads it.** `Config.publish: Publish { remotes }`,
+  the `publish.remotes` key in the schema (`KNOWN_KEYS` is 33), `is_remote_name` (letters, digits, `.`, `_`, `-`,
+  not starting with `-`), duplicate detection, the golden file, and `[publish]` in `config::render`. An **empty
+  list is the documented default** — so "empty disables the endpoint" is a decision the config already made and the
+  route has to honour, not a new key.
+- **`changes::touches_ci(&[FileChange]) -> bool` and `changes::CI_PATHS` are `pub` and tested** (HS-052, "public
+  for HS-058"): directory prefixes (`.github/`, `.gitlab/`, `.circleci/`, `.buildkite/`, `.woodpecker/`, `.husky/`,
+  `.githooks/`) matched against the whole path and file names matched against the last segment, the two arms
+  exclusive. `Changes::read` gives `files[]`, `head`, `base_commit`, `dirty`.
+- **`changes::basis(&Worktree) -> Result<String, ChangesError>` is `pub(crate)`** and is the four ordered
+  refusals (no repository, the directory is gone, git does not register it, the branch is gone) plus the branch's
+  tip. `http::changes`' and `http::merge`'s `changes_refusal`-style mapping is the precedent for answering them with
+  a route's own sentences.
+- **`merge.rs` is the shape a second writer takes**, and publish is a writer of somebody else's repository: its own
+  module (`src/publish.rs`) plus a handler (`src/http/publish.rs`), an error enum with **one arm per fact** and a
+  `sentence()` for the log, `git_output`-style runners that never parse English, and `spawn_blocking` for the git
+  work (`ADR-0063`/`ADR-0064` are the two records; `merge::listed` is the "is this name allowed" predicate shape
+  that `publish.remotes` repeats).
+- **The refusal vocabulary is in `http/error.rs`** — `no_worktree` (four sentences, per route), `bad_target`,
+  `not_fast_forward`, `target_dirty`, `target_checked_out`, `conflict`, `dirty_worktree`, `session_running`,
+  `unsaved_work`, `draining` — and `ApiError::not_in_state` gives one code per state. Publish needs its own words:
+  a remote the config does not list, an endpoint the config has turned off, a protected name, a request to push the
+  target, and a `confirm` that is not `true`.
+- **The credentials story is already measured.** Nothing a container has can push: the four mounts are the
+  worktree, the agent directory, the tool output and the key-proxy directory (ADR-0035), the agent's `pi-home` is
+  seeded with a **dummy** `auth.json` (HS-040/ADR-0048), and the session's network is `--internal` — V3, V4 and V5
+  are HS-040's. What is *new* is the assertion the acceptance asks for on the publish path: the push runs on the
+  **host**, as the server's user, through whatever git credential store that user has, and the test must say so
+  while also saying that no session container carries one.
+- **`tests/merge.rs`'s `Fixture` is the harness precedent** (a repository in a `TempDir`, a row, a worktree,
+  `support::git`), and a publish fixture needs one thing more: a **bare repository** as the remote
+  (`git init --bare <dir>`, then `git remote add origin <dir>` in the project) — which makes a real push possible
+  with no network, no credential and no daemon. `git ls-remote <bare>` is then the measurement.
+- **The gate's shape** for a case that owns a repository is `case_merge`/`case_merge_strategies`/
+  `case_merge_guards`: its own projects root, its own data root (they measure `<data>/merge`), a `_ping`-only socket
+  for the Docker preflight, and the worktree re-made with the step's own command because the failed network step
+  takes it back. A publish case needs the same, plus a bare remote under `$WORK`.
+- **`docs/notes.md`'s "the credential path (HS-040)" and "the egress proxy (HS-037)" sections are the two landmines
+  a publish touches**; nothing in the build has yet run a `git push`, so the first one is a measurement.
 
 ### 1.4 What does not exist
 
-No `session_running` guard on the merge route (the code names it and the spec says "a prompt" elsewhere, so the
-code constant exists and the merge never asks); no `dirty_worktree` code at all; no delete-after-merge; no
-timeout of any kind on the merge route or in the web client; and no `case_merge_guards`. **HS-055 already
-satisfies the fifth bullet** — `land` removes the temporary worktree on every path, and
-`the_temporary_worktree_is_gone_even_when_the_move_is_refused_after_it_landed` plus the gate's `find` measure it
-— so that bullet is a thing to *keep true*, not to build.
+No `POST /api/sessions/{id}/publish`, no `src/publish.rs`, no route-level refusal for an unlisted remote or a
+protected name, no `confirm` handling, no `case_publish`, and no test that a `git push` from this server works with
+the host's own credentials. `touches_ci` exists and is not wired to anything but the changes view.
 
-### 1.5 The decisions that shape the design
+### 1.5 What the plan must decide (and the shape this handoff recommends)
 
-1. **Where rule 1's two guards sit in the question order.** They are about the *session*, and the merge handler
-   already reads the row before `base_commit`. Recommend: after the row and before `spawn_blocking` —
-   `session_running` from the row's `status` (`Running` only; `starting`/`deleting`/`error`/`stopped` all have
-   their own answers today, and inventing a fourth is a decision to record), and `dirty_worktree` from
-   `changes::dirty` on `Worktree::of(...).path` inside the same `spawn_blocking` as the merge — **or** before it
-   in its own blocking task. Decide which, because the second gives rule 1's refusal a *pre*-check the merge
-   itself deliberately does not have for `target_dirty` (ADR-0063 D5: "a dirtiness pre-check is the wrong answer"
-   — but that was about the *checkout*, where git carries an unrelated file across; a session's own uncommitted
-   work is the request's subject, so the pre-check is right here and the ADR should say why the two differ).
-2. **The `dirty_worktree` offer is a UI bullet and HS-058 owns the sheet.** The precedent is ADR-0064 D10 /
-   ADR-0046: there is no screen. Recommend: refuse with `409 dirty_worktree` and a sentence that names the commit
-   the operator could ask for, and record in the ADR that the offer is HS-058's — **but** name the exact prompt
-   text in the ADR so HS-058 has a decision rather than a blank. Two codes on the wire, one per bullet, is the
-   shape; the sentences must say what did not happen (nothing was merged).
-3. **`delete_session: true`, and the fact that its second half is almost false.** "The branch is then deleted
-   because it is merged" is *true* for `merge` (the branch's tip is a parent of the target) and **false for
-   `squash`** — ADR-0064 **D11** records that a squash leaves `agent/<id>` a non-ancestor, so `retained` keeps
-   it. So this story must decide, for each strategy, what `delete_session` means. Recommend: the merge **knows**
-   its own outcome, so it passes the fact rather than re-asking git — a `Retained` whose branch is `None` when
-   the merge landed, `Some` when it was a squash — and the branch is then deleted *because this merge put its
-   work in the target*, by tree for a squash and by ancestry for a merge. That is the reading in which rule 5's
-   sentence is true of both strategies, and it is the one D11 says HS-056 has to make. The alternative (delete
-   only after a `merge`, refuse `delete_session` for a `squash`) is defensible and must be recorded if chosen.
-4. **Where the delete flow is entered from, and what the merge answers.** `retained_for` is private to
-   `http::sessions`; the honest reuse is to make it `pub(crate)` (or to move the "snapshot → retained →
-   transition → spawn" sequence into one function both routes call), not to copy it — the snapshot's
-   before-the-transition order and the one `Retained` shared by the 202 and the removal are the whole point of
-   HS-043. And rule 6 says the answer is `{merged_commit, target, strategy}`: a merge with `delete_session` has
-   already changed the row, so decide whether the three keys stay alone (recommend: yes, and the row's state is
-   what `GET /api/sessions/{id}` answers) or gain `kept` (HS-043's additive key). The merge must **not** wait
-   for the removal — a `docker rm` is not a merge's business — and the row must be `deleting` before the answer
-   so a client cannot prompt it.
-5. **The 60 seconds has no home in this build, and that is the whole decision.** Read rule 6 again: it is the
-   **hub's** timeout for merge and publish. There is no hub until phase 3. Options: (a) a client-side
-   `AbortSignal.timeout(60_000)` in the merge/publish call and 5 s everywhere else — but there is no merge
-   *button* yet, so that is HS-058's file; (b) a server-side ceiling on the merge route's blocking task, which
-   the spec does not ask for and which would have to invent a code for "the git work outran 60 s"; (c) record it
-   as the hub's clause, note that both routes' work is already bounded by git's own commands, and hand the pair
-   to HS-069 (forwarding) — with HS-058 for the client's half. Recommend **(c) plus a line in `web/main.ts`'s
-   `fetch` helper if one exists by then**, and say plainly in the ADR which of the two remaining halves this
-   build has no place for. Do not silently tick the bullet.
-6. **`session_running`'s status set.** Rule 1 says "while a turn runs". `Status::Running` is exactly that; a
-   `starting` row has no turn, a `deleting` one is being removed, and `error`/`stopped` have nothing to run.
-   Recommend `Running` only, and a test per non-running status proving the merge is *not* refused (the negative
-   half is what stops a `!= Idle` guard from shipping).
-7. **A merge whose guard refuses must move nothing, and a merge with `delete_session` that fails after the merge
-   must leave the session alone.** The first is the `case_merge` shape; the second is new — the delete flow's own
-   failure modes (`unsaved_work`, `not_deletable`) must not turn a landed merge into a failed merge. Decide: a
-   landed merge answers 200 and a *failed delete* is the delete's own refusal (recommend), or the whole request
-   is a 409 (which would tell a client its work did not land when it did).
-8. **`<data>/merge/<id>` cleanup on a delete.** The delete flow removes the worktree, the branch, the session's
-   own directory — but `merge/<id>` is the *merge's*, not the session's, and HS-055's `clear` already handles a
-   leftover. Recommend: nothing new, and one line in the ADR (HS-055 D9 said the same for boot).
+1. **What `branch?` names: the remote's ref, not ours.** The spec's sentence is "pushes the session branch
+   `agent/<id>`", so the ref *pushed from* is ours and `branch` can only name the destination —
+   `git push <remote> refs/heads/agent/<id>:refs/heads/<branch>`. That is the reading in which "refuses protected
+   names" means something (a destination called `main`), and in which "pushing the merged target branch is not
+   supported" is a *second* fact (a destination equal to the configured target). Record it either way: the other
+   reading (push a different local branch) makes `agent/<id>` optional and turns the route into a general push
+   endpoint, which the sentence "the server pushes the session branch" rules out.
+2. **Where the protected names live.** One constant (`publish::PROTECTED`), with `main`, `master` and the
+   `release/*` prefix — and the target branches of `merge.targets` are *not* the same list (a machine may merge
+   into `trunk` and must still refuse a destination named `main`). Recommend: the constant, checked with the same
+   two-arm predicate shape `changes::touches_ci` uses (a trailing `/` is a prefix, everything else is a name), and
+   the `merge.targets` check as its own arm with its own sentence.
+3. **`confirm: true` is required, and `false` is a refusal rather than a no-op.** A missing/non-boolean `confirm`
+   is `bad_body` (the body's shape, ADR-0064 D5's split); `false` is a request that asked *not* to push, so it is a
+   `422`/`409` with a sentence saying nothing was pushed. Recommend `422 confirm_required`, because nothing about
+   the machine or the session is in the way — the client's own form is.
+4. **The disabled endpoint's answer.** The acceptance allows 404 or 403. Recommend **`403 publish_disabled`** with a
+   sentence naming the `publish.remotes` key: a `404` for a route that exists is a lie about the table, and this
+   build's `not_found` is "no such path". Record the choice; the gate asserts whichever you take.
+5. **What the answer is.** The spec does not say. Recommend `{remote, branch, commit}` — the remote as asked, the
+   destination ref's short name, and the **branch's tip read before the push** (never the push's own prose, which
+   git makes no contract about). Record it; a client that wants more reads `GET …/changes`.
+6. **Hooks, and never force.** `git push` runs `pre-push`, which is a program the host runs on an agent-written
+   branch — the same class as `post-merge`, so recommend `-c core.hooksPath=/dev/null` on the push, with the ADR
+   saying why (ADR-0064 D2's rule applied one command further out). And **no `--force`, no `+` refspec**: a
+   non-fast-forward is the remote's answer, so it is a refusal (`409 not_fast_forward_push`? name it) and never a
+   retry with force.
+7. **The 60 seconds, again.** Rule 6's pair covers publish as well as merge, and §1.5 D8 of the previous handoff
+   recorded it as the hub's (HS-069) — so publish records the same sentence and does not invent a server-side
+   ceiling. Say it in the ADR rather than omitting it.
+8. **`touches_ci` and the confirm step are HS-058's UI half.** The route does not warn; the flag is in the changes
+   view and the button is the sheet's. Record it (ADR-0064 D10's precedent) and name the sentence the button will
+   show, so HS-058 inherits a decision.
+9. **The credential assertion the acceptance asks for.** Recommend two tests: `tests/publish.rs` runs a real push
+   into a **bare repository** with no credential of its own (a `file://`-shaped path needs none), and
+   `tests/container.rs` (or a new `tests/publish.rs` case) asserts the container's four mounts and its environment
+   hold no key, no ssh material and no credential helper — the *positive* half being that the push ran on the host.
+   The gate cannot push to a remote it does not own, so `case_publish` publishes into a bare repository under
+   `$WORK` — which is the only honest way to measure a push without a network.
+10. **Refusal order.** The request's facts first (body, `confirm`, `remote` listed, `branch` name, protected
+    names, the target), then the row (`404`), then `changes::basis`' four refusals (`409 no_worktree`, this route's
+    sentences), then the push. That keeps ADR-0012's order (a malformed body is answered the same way whatever the
+    session is) and `merge`'s `listed`-before-the-row shape.
 
 ### 1.6 The questions the plan must answer (before code)
 
-1. The exact request/response for: a merge while `running`, while `idle`, while `starting`/`stopped`/`error`, a
-   merge with an uncommitted file in the worktree, a merge with an uncommitted *ignored* file, `delete_session:
-   true` with each of the three strategies, a merge plus a delete whose snapshot fails, and a merge whose guard
-   fires twice.
-2. Which status set `session_running` refuses, and what each refusal's envelope sentence says it did **not** do.
-3. Where `dirty` is asked (the worktree's directory, `--untracked-files=normal --no-optional-locks`, the same
-   function as `409 target_dirty`) and why the pre-check is right here and wrong there.
-4. What `Retained` the merge hands the delete flow, per strategy, and whether `kept` appears in the answer.
-5. Where the 60 seconds lives, and what the ADR says about the half that has no home.
-6. Which `case_*` proves each acceptance bullet, and which half can `SKIP` without skipping on its own subject
-   (`case_merge_guards` should not need a daemon: it can create a session against the `_ping`-only socket and
-   *set the row `running` by hand* the way `tests/*` does — decide, and say so).
+1. The exact request/response for: `publish.remotes = []`, an unlisted remote, a protected destination, a
+   destination equal to the target, `confirm` absent/false/true, `branch` absent/empty/protected, a session whose
+   branch has no commits, a worktree that is gone, and a push that the remote refuses as non-fast-forward.
+2. What each refusal's envelope sentence says it did **not** do (nothing was pushed).
+3. Whether `branch` is the destination (recommended) and how an empty string is answered.
+4. What `touches_ci` does on this route (nothing) and where the warning lives.
+5. Whether a `git push` runs with `-c core.hooksPath=/dev/null`, and what measures it (a real `pre-push` hook that
+   must not fire, as `tests/merge.rs` does for `post-merge`).
+6. Which `case_publish` measures what, and how it avoids a remote it does not own (a bare repository under `$WORK`,
+   `git ls-remote` before and after).
+7. Whether the credential assertion belongs in one test or two, and what exactly it reads (the mount vector, the
+   environment, the agent directory's seeded `auth.json`).
 
 ### 1.7 Acceptance, restated as checks
 
-- *`session_running`* — a session whose row is `running`: `409 session_running`, the target unmoved, `<data>/merge`
-  still empty. And the negative half: a merge of an `idle` row lands (already `case_merge`).
-- *`dirty_worktree`* — an untracked file written into the session's own worktree: `409 dirty_worktree`, the
-  target unmoved, the file untouched; an **ignored** file does not refuse (the definition of work is
-  `changes::dirty`'s). And the sentence names the commit the operator could ask for.
-- *`delete_session`* — after a successful `merge`, the row reaches `deleting` and then is gone, the worktree is
-  gone, and `agent/<id>` is gone **because it is merged**; after a successful `squash`, the branch is *kept*
-  (`kept` names it or the ADR says why not) and the row still goes. A failed delete leaves the landed merge's
-  answer intact.
-- *The 60 seconds* — whatever the ADR decides, measured or explicitly recorded as the hub's.
-- *The temporary worktree* — HS-055's tests keep passing; one new assertion that a **refused** merge (either
-  guard) creates no directory at all.
-- *Plus* the usual gates, one new `case_merge_guards`, and `docs/build.md`/`docs/notes.md`/`GLOSSARY.md`/an ADR
-  (**0065**).
+- *The contract* — `POST …/publish` with `{remote, branch?, confirm:true}` pushes `refs/heads/agent/<id>` to the
+  remote, and `git ls-remote <bare>` on the remote names it afterwards. `confirm` absent/false refuses and pushes
+  nothing.
+- *The config is the authority* — an empty `publish.remotes` is a `403` (or `404`) with a code; an unlisted remote
+  is a `422`; a listed one works.
+- *Never force, never protected* — a destination named `main`, `master` or `release/…` is refused; a non-fast-forward
+  is refused with git's answer and **no** force retry; `git ls-remote` shows the remote unmoved.
+- *`touches_ci`* — the flag is the changes view's and this route reads none of it; the warning is HS-058's, recorded.
+- *The target is not pushable* — a destination naming the configured target is refused with its own sentence.
+- *No container holds a credential* — a test asserts the mount vector and the environment carry none, and that the
+  push used the host's own git.
+- *Plus* the usual gates, one new `case_publish`, and `docs/build.md`/`docs/notes.md`/`GLOSSARY.md`/an ADR
+  (**0066**).
 
 ### 1.8 Non-goals
 
-Publish (HS-057), the Changes sheet and the commit-offer affordance (HS-058, unless §1.5 D2 decides otherwise),
-the hub and forwarding (phase 3), and any change to `worktree.rs`'s create refusals or to HS-055's strategies.
+The Changes sheet, the Publish button and its confirm/CI warning (HS-058), the hub and forwarding (phase 3), any
+credential *management* (`key set` is the provider-key store, not a git credential), and any push of the merged
+target (the spec's own "push main from the host").
 
 ### 1.9 The demo
 
-On this machine: `case_merge`'s boot (a real repository under a temp projects root, `backend = "docker"` against
-a `_ping`-only socket), a session with a three-commit branch; print the row `running` and `POST …/merge` →
-`409 session_running`; then write an untracked file in the worktree and `POST …/merge` → `409 dirty_worktree`
-with its sentence; remove the file, merge with `{"target":"main","strategy":"squash","delete_session":true}` →
-`200`, then `GET /api/sessions/{id}` → the row `deleting`, then gone, the worktree gone, and `git branch --list
-'agent/*'` showing what the keep-rule decided. **Say plainly what was not measured**: no container, no hub, no
-UI, no publish.
+On this machine: a project with a **bare repository** as `origin` under `/tmp`, `publish.remotes = ["origin"]` in
+the config, a session with a commit on `agent/<id>`; `POST …/publish {"remote":"origin","confirm":true}` → 200 and
+`git ls-remote origin` naming `refs/heads/agent/<id>`; then the same request with `{"remote":"origin","branch":
+"main","confirm":true}` → the protected-name refusal; then a second boot with `publish.remotes = []` → the disabled
+refusal; and `git ls-remote` unchanged after both. **Say plainly what was not measured**: no container, no real
+github credential (the push is to a local bare repository), no hub, no UI.
 
 ### 1.10 What the next agent needs back
 
 When you write the state back (§5, step 10): §1 becomes the **next** issue — by `PROMPT.md`'s ranking that is
-`PER-89` (HS-057, publish) *if* HS-056 ships, and `PER-88` again if it does not (HS-057 is blocked only by
-HS-054, which is Done, so it is eligible now) — with the same shape. Refresh the counts, the ADR number you took
-(**0065** is next), the last gate run's own numbers, and replace §9's row with this story's. Anything you learned
-that is **not** state and **not** an ADR goes into `docs/notes.md` under a new `### Landmines: …` heading, never
-into §1. Then kill what you started (§5, step 11).
+`PER-90` (HS-058, the Changes sheet) *if* HS-057 ships, and `PER-89` again if it does not (HS-058 is blocked by
+HS-057, so nothing else in phase 2 is eligible until it lands) — with the same shape. Refresh the counts, the ADR
+number you took (**0066** is next), the last gate run's own numbers, and replace §9's row with this story's.
+Anything you learned that is **not** state and **not** an ADR goes into `docs/notes.md` under a new
+`### Landmines: …` heading, never into §1. Then kill what you started (§5, step 11).
 
 ---
 
@@ -478,7 +469,7 @@ Some cases bring their own boot, and they are the ones a new story is most likel
 | Case | What it needs |
 | --- | --- |
 | `case_token_budget`, `case_usage_survives_resume`, `case_compaction`, `case_history`, `case_backup`, `case_worktree`, `case_worktree_refusal`, `case_agent_launch`, `case_docker_resume`, `case_docker_turn`, `case_internet_toggle`, `case_doctor_full` | its own `serve`, and (the last five) the daemon and `agent_image` |
-| `case_changes`, `case_changes_diff`, `case_merge`, `case_merge_strategies` | `python3` for a `_ping`-only docker socket, a real repository under their own `projects_root`, and (for the two merge cases) their own **data root**, because `<data>/merge` is what they measure. No daemon. |
+| `case_changes`, `case_changes_diff`, `case_merge`, `case_merge_strategies`, `case_merge_guards` | `python3` for a `_ping`-only docker socket, a real repository under their own `projects_root`, and (for the three merge cases) their own **data root**, because `<data>/merge` is what they measure. `case_merge_guards` also writes one column (`sessions.status`, with python3's `sqlite3`) because a gate may not run a turn. No daemon. |
 | `case_verification_table` | no server, no daemon, no image: it reads `HolosmithSpec.md`'s eleven `V<n>` rows (and runs first in `serve_cases`, so a rotted table fails before the Docker cases) |
 | `case_docker_preflight`, `case_doctor_quick` | no server at all (`case_doctor_quick` builds its own `_ping` socket and picks its ports, so it needs `python3` and nothing else) |
 | `case_container_mounts` | no server *and* no daemon — one printed `SKIP` line when there is neither a daemon nor an image |
@@ -686,13 +677,17 @@ crates/holosmith/
                             merge conflicted — every code, ApiError::not_in_state / bad_prompt /
                             bad_steer / unsaved_work / unknown_session / cap_without_idle /
                             git_not_directory / submodules_present / worktree_config_enabled /
-                            bad_target / bad_strategy / unsupported / not_fast_forward / target_dirty /
-                            target_checked_out / conflict),
+                            bad_target / bad_strategy / not_fast_forward / target_dirty /
+                            target_checked_out / conflict / dirty_worktree — `unsupported` retired with
+                            its last field in HS-056),
                             health.rs, guard.rs (the four checks), sessions.rs (POST+GET
                             /api/sessions, GET /api/sessions/{id}, POST …/prompt, …/abort, …/steer,
                             …/resume, DELETE /api/sessions/{id}[?force=true], TURN_STEER, EVICTED,
-                            `Slot` + `slot_for` + `evict_one`, `apply_trigger`, and the project's
-                            refusals: `refuse_project` + `refusal_error`), streams.rs (the SSE
+                            `Slot` + `slot_for` + `evict_one`, `apply_trigger`, the project's
+                            refusals: `refuse_project` + `refusal_error`, and since HS-056 `deletion` —
+                            the delete flow's request half, `delete()`'s body and the merge's rule 5 —
+                            with `retained_for(state, session, landed)` and its `pub(crate)` answer
+                            `DeleteAnswer`/`Kept`), streams.rs (the SSE
                             handler)
   src/sessions/             mod.rs (Status, Session, NewSession, RepoError, `is_id`), repository.rs (every
                             `sessions` statement + its SQL-location guard; includes touch,
@@ -718,9 +713,11 @@ crates/holosmith/
                             remove → branch −D **only when not kept** → prune), and `GitError`; since
                             HS-026 the refusal reads (ADR-0030): `refuse`, `Refusal`, `repository_of`,
                             `CONFIG_READ` (`--local --type=bool`); and since HS-043 the keep-rule
-                            (ADR-0052): `retained(base, targets)` → `Retained::{Known { branch, wip },
-                            Unknown}` (`merges_into` per existing target, `differing_ref` by tree) and
-                            `Retained::{keeps_branch, recovery}`; and since HS-053 `git_error_from`, the same
+                            (ADR-0052): `retained(base, targets, landed)` → `Retained::{Known { branch, wip },
+                            Unknown}` (`merges_into` per existing target, `differing_ref` by tree, and since
+                            HS-056 a **tip comparison** against `landed` — the commit a merge measured — so a
+                            branch that has moved since is kept; ADR-0065 D6) and `Retained::{keeps_branch,
+                            recovery}`; and since HS-053 `git_error_from`, the same
                             sentence for a caller that read git's streams itself (`changes::run_patch`); and
                             since HS-054 `checkouts` → `Checkout { path, branch, prunable }` with
                             `parse_checkouts` (the four block shapes git prints) and `registrations` delegating.
@@ -749,7 +746,7 @@ crates/holosmith/
                             cannot read; the diff answers `text/plain` (`charset=utf-8` only for real UTF-8
                             bytes) or a `404 not_found` for a `path` outside `files[]`, and `path_of`/`decode`
                             read the query (percent-decoded, invalid escapes literal)
-  src/merge.rs              the merge (HS-054 and HS-055, ADR-0063/0064): the first writer of the project
+  src/merge.rs              the merge (HS-054, HS-055; ADR-0063/0064): the first writer of the project
                             repository. `merge(&Worktree, &Request, &[String], &Merges, data_root)` → `Merged
                             { merged_commit, target, strategy }` or `MergeError { Changes, Unlisted, NoTarget,
                             NotFastForward, TargetDirty, CheckedOutElsewhere, Conflict { paths }, Temporary
@@ -773,13 +770,18 @@ crates/holosmith/
                             an unconditional `worktree prune`), `MERGE_DIR`, `Merges` (one `std` mutex per
                             repository path, held inside `spawn_blocking`), `FF_ONLY`. Sync and std-only
   src/http/merge.rs         one handler: `POST /api/sessions/{id}/merge` — body → **target listed** (422) → row
-                            (404) → `base_commit` (409 `no_worktree`, this route's sentences) →
-                            `spawn_blocking(merge)` → the three keys; `parse_body` → `merge::Request` (the four
-                            keys, `unknown_field`, `bad_strategy` for a fourth word, `bad_body` for a non-string
-                            or empty `message`, and the `422 unsupported` for `delete_session` that **HS-056
-                            removes**), `refusal_of` (logs `sentence()`, then answers — including
-                            `ApiError::conflict(paths)`), `changes_refusal` (the same `no_worktree` code, this
-                            request's four messages, `internal("merge", ..)` for git)
+                            (404) → **rule 1a** the row's `status` (409 `session_running`, the only state
+                            refused) → `base_commit` (409 `no_worktree`, this route's sentences) → **rule 1b**
+                            `changes::basis` then `changes::dirty` in the session's own worktree (409
+                            `no_worktree` or 409 `dirty_worktree`), both guards before the blocking task →
+                            `spawn_blocking(merge)` → the three keys, and **rule 5** `sessions::deletion(…,
+                            Some(tip))` when `delete_session` is true and the row is not already `deleting`
+                            (ADR-0065); `parse_body` → `Parsed { request: merge::Request, delete_session }` (the
+                            four keys, `unknown_field`, `bad_strategy` for a fourth word, `bad_body` for a
+                            non-string or empty `message` or a non-boolean `delete_session`), `refusal_of` (logs
+                            `sentence()`, then answers — including `ApiError::conflict(paths)`),
+                            `changes_refusal` (the same `no_worktree` code, this request's four messages,
+                            `internal("merge", ..)` for git)
   src/egress.rs             the egress proxy (HS-037, ADR-0045): `Request::parse`/`username`, `Rules`
                             (`new`/`allow`/`permits`/`target`), `Target`, `Refusal` (status, word, sentence),
                             `address_problem`/`embedded_v4` (the ranges, IPv4-mapped, 6to4/NAT64/compatible),
@@ -853,7 +855,10 @@ crates/holosmith/
                             the verdict's sentences), merge (the fast-forward, both landing strategies, the
                             conflict's paths, the temporary worktree's lifecycle, the keep-rule after each
                             strategy, the identity and message of the commit this build writes — all over a
-                            real repository, plus the wire group), container (V1 + the container's flags + stop/remove/resume +
+                            real repository, plus the wire group; since HS-056 rule 1's two guards with a
+                            per-status negative half, the `dirty_worktree` and ignored-file pair, the
+                            basis-before-dirty order, `delete_session` as far as a stub backend can carry it,
+                            and the landed-tip rule's two halves), container (V1 + the container's flags + stop/remove/resume +
                             eight concurrent starts; **needs a daemon and `$HOLOSMITH_TEST_IMAGE`,
                             default `pi-agent:local`, and skips otherwise**), support/mod.rs
                             (the shared harness, which also has `repository`/`git`/`head`/
@@ -879,9 +884,10 @@ scripts/verify.sh           the one-command gate (see §3), including the two st
                             --json` from the pairs it was asked for) and `health_responder` (a `python3` that
                             answers `/api/health` for a whole case)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0064          read the recent ones before planning anything (0064 is the two landing strategies')
+docs/adr/0001…0065          read the recent ones before planning anything (0065 is the merge's guards and
+                            `delete_session`)
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-87, PER-91…PER-93, PER-97, PER-107  each a verbatim review + a `## Resolution` table
+docs/review/PER-33…PER-88, PER-91…PER-93, PER-97, PER-107  each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -893,7 +899,7 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   `POST /api/sessions/{id}/{prompt,abort,steer,resume}`, `DELETE /api/sessions/{id}[?force=true]`,
   `GET /api/sessions/{id}/events`, `…/events/history`, `…/tool-output/{tool_id}`,
   `…/tool-image/{tool_id}/{index}`, `…/changes`, `…/changes/diff[?path=]`, `POST …/merge` with all three of
-  item 12's strategies), SQLite with **four**
+  item 12's strategies, rule 1's two guards and rule 5's `delete_session`), SQLite with **four**
   migrations, the guards, the event writer (which coalesces a commit's deltas), the SSE stream, the stub
   backend and its four-step provisioner, the
   enforced state machine, the abort ladder, the delete flow, the cap with eviction, the create's and the
@@ -1097,16 +1103,16 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 The catalogue lives in **`docs/notes.md`** — read the **cross-cutting** sections before you start anything,
 then the sections below. It is a reference: everything there is a measurement or a review finding.
 
-| Read | Why it bears on HS-056's guards, `delete_session` and the 60 seconds |
+| Read | Why it bears on HS-057's publish |
 | --- | --- |
-| Cross-cutting: *Build and toolchain*, *Tests*, *Config and docs*, *Demos*, *Reviews* | True of every story. This one's sharpest is **Tests** again, and it is the project's most expensive lesson: a guard refused for the *wrong* reason passes. `session_running`'s negative half (an `idle`, a `stopped`, an `error` and a `starting` row all still merge) and `dirty_worktree`'s (an **ignored** file does not refuse) are each a second test, and the two vacuous assertions HS-055's review found — a needle satisfied by the fixture's own path — are the cautionary tale in *Landmines: the two landing strategies*. |
-| *Landmines: the two landing strategies (HS-055)* | **The section this story is the last edges of.** The temporary worktree's lifecycle (bullet 5 is *already* satisfied — keep it true, do not rebuild it), the keep-rule's answer after each strategy (`retained` keeps a squashed branch), the refusal arms and their sentences, and the reason the identity/message decisions are measured rather than asserted. |
-| *Landmines: what a delete keeps (HS-043)* | `retained`/`merged_into`, `Kept`, and "the branch is deleted because it is merged" (rule 5). **ADR-0064 D11 hands this story the decision**: a squash leaves `agent/<id>` a non-ancestor of the target, so `retained` keeps it — and `delete_session` after a squash is the one place rule 5's sentence is not readable off git. |
-| Cross-cutting: *Data and state*, *HTTP and the envelope* (there is no landmine heading for the delete flow; the HS-019/HS-020 entries there are it) | The delete is not one call: snapshot → `retained` → `apply_trigger(Delete)` → spawn, with the **row moved before the container** and a `deleting` row answering a retry. `retained_for` is private to `http::sessions`, so reusing it is a visibility decision and copying it is the bug ADR-0064 warns about. |
-| *Landmines: the fast-forward merge (HS-054)* | "A dirtiness **pre-check** is the wrong answer" — and why that is about the *checkout*, not the session's own work. The two refusals this story adds are pre-checks by nature; the ADR must say why the two differ or the next reader will think the rule was broken. |
-| *Landmines: the changes view (HS-052)* | `changes::dirty` is `pub(crate)` and is the one definition of work (`--untracked-files=normal --no-optional-locks`, ignored files not counted) — the same function `409 target_dirty` uses, asked of a different directory. |
-| *Landmines: the drain and its socket (HS-051)* | The boot discipline a case that owns a repository must keep (`--admin-dir` and `projects_root` passed, never inherited; a `python3` guard **above** `stop_serve`) — and the one case here that could avoid a daemon by setting a row's state by hand. |
-| *Landmines: the doctor, the ports and a read-only open (HS-045)* | The three-armed fact (`pass`/`fail`/`unknown`) is the shape a fallible question takes — worth reading before deciding whether "the merge took longer than 60 s" is a refusal, a `5xx`, or nothing this build can answer. |
+| Cross-cutting: *Build and toolchain*, *Tests*, *Config and docs*, *Demos*, *Reviews* | True of every story. This one's sharpest is **Tests** and **Demos** together: a push is a *remote's* state, so an assertion that only reads this repository proves nothing — `git ls-remote <bare>` before and after is the measurement, and a fixture that never pushed would still show a branch here. The second is *Config and docs*: `publish.remotes` is already a key with a golden file, so nothing here adds one. |
+| *Landmines: the credential path (HS-040)* | The story's fifth bullet ("containers never hold a git credential — asserted by a test") is answered by facts this section measured: the four mounts, the dummy `auth.json` the pi-home is seeded with, the `--internal` network, and the key proxy as the one route out. Read it before writing an assertion about credentials, because the assertion is about **what is not there** and the positive half (the push ran on the host) is the part that can fail. |
+| *Landmines: the egress proxy (HS-037)* | A publish does **not** go through the proxy: the push is the *host's* git, and the host has whatever network it has. Worth reading so the ADR can say plainly that the session's network is irrelevant to a publish, and so `case_publish` does not try to route it. |
+| *Landmines: the two landing strategies (HS-055)* and *the fast-forward merge (HS-054)* | The two writers this one joins: the `-c core.hooksPath=/dev/null` decision (a `pre-push` hook is a program the host runs on an agent's branch, the same class as `post-merge`), the one-arm-per-fact error enum and its `sentence()`, the "never parse English" rule, and the refusal order (the request's facts, then the row, then the repository). |
+| *Landmines: the merge's guards and the delete after a merge (HS-056)* | The most recent section, and the one whose shape a publish repeats: guards in the route, `changes::basis` first, a sentence that says what did **not** happen, and the two changes the review forced (a rule that needs a commit compares a commit; an assertion's needle must not be a word the sentence already contains). |
+| *Landmines: the changes view (HS-052)* | `touches_ci` and `CI_PATHS` are public and tested, and `Changes::read` is where `files[]` comes from; `dirty` is the one definition of work. Read this before deciding that publish needs anything from the working tree (it does not — it needs the branch). |
+| *Landmines: the drain and its socket (HS-051)* | The boot discipline a case that owns a repository must keep (`--admin-dir` and `projects_root` passed, never inherited; a `python3` guard **above** `stop_serve`), and the reason a case that needs a row in a state no request produces writes one column by hand. |
+| *Landmines: the doctor, the ports and a read-only open (HS-045)* | The three-armed fact (`pass`/`fail`/`unknown`) — the shape a fallible question takes, which is what "the remote refused" and "we could not ask the remote" have to be told apart as. |
 
 Three rules worth repeating here because they are the most expensive to relearn: **a test that cannot fail
 is worse than no test** (mutate the behaviour and watch it go red); **a gate case that SKIPs on the bug it
@@ -1115,7 +1121,7 @@ three such edits have cost a review finding each.
 
 ## 7. Decisions taken on the operator's behalf (do not silently undo)
 
-Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0064`, one line each in
+Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0065`, one line each in
 `docs/stories/README.md`): read the recent ones before planning, and **amend rather than rewrite** — an ADR
 a later story changes gets a "Superseded by ADR-00xx" note (0012/0013, and 0026 amended 0020). The **ADR index in
 `docs/stories/README.md` is the one part of that directory a story edits** — it is the record of the decisions,
@@ -1147,7 +1153,7 @@ cd /home/adamolsson/projects/holosmith
 git status --short                                  # clean apart from log.txt/orchestrate.sh
 . ~/.pi/toolchains/env.sh                           # ALWAYS before cargo/rustc
 python3 /tmp/lin.py issues | grep -v ' Done ' | head # recreate /tmp/lin.py first (§2)
-python3 /tmp/lin.py issue PER-88                    # scoped, Backlog, the issue §1 names
+python3 /tmp/lin.py issue PER-89                    # scoped, Backlog, the issue §1 names
 docker version                                      # the daemon must answer, or a Docker check cannot be measured
 docker image inspect pi-agent:local                 # the image the Docker stories run
 docker network ls | grep -w egress                  # the proxy test's premise (§2); `grep -x` never matches
@@ -1157,7 +1163,7 @@ scripts/verify.sh                                   # baseline green, ~9–12 mi
 
 If the baseline is red before you touch anything, that is the first thing you fix — and say so in Linear.
 
-Then start §5 on **§1's issue** (`PER-88`, HS-056) and stop after step 11.
+Then start §5 on **§1's issue** (`PER-89`, HS-057) and stop after step 11.
 
 Before you begin, check that the last session left nothing behind — `subagent({action:"list"})` should show
 no run in progress, `docker ps` none of its containers, and `git status --short` should look like the line
@@ -1176,29 +1182,32 @@ from those three; do not carry old sessions' ledgers in this file.
 If you stop before the issue ships, say so explicitly, name the next action, and leave the tree clean and the
 gates green — **a half-finished story is worse than an honest stop**.
 
-**The last shipped story** (`PER-87`, HS-055, ADR-0064; commits `94252e9`, `213f9d3`): the merge's `merge` and
-`squash` strategies — the second route that writes to the project repository, and the one that makes a **commit**
-there. The shape is one decision repeated: the commit is built **somewhere else**, in a temporary detached
-worktree at `<data>/merge/<id>` made from the target's commit, and then handed to HS-054's two update paths
-unchanged — a merge commit descends from the target, so its landing is a fast-forward of it and the module still
-has exactly one way to move a ref. Four decisions had a plausible wrong answer. **The message**: the plan was to
-leave it to git, and git writes `Merge branch 'refs/heads/agent/<id>' into HEAD` — a sentence about this module's
-scratch directory, because the worktree is detached and the ref is fully qualified — so the build writes `Merge
-agent/<id> into <target>` / `Squash agent/<id> into <target>` and a request's `message` replaces it verbatim. **The
-identity** is `snapshot::IDENTITY` carried as `-c` pairs, because a commit this build writes is holosmith's and a
-bare machine's git has no `user.name`; on *this* machine that is measurable only by reading `%an <%ae>` off the
-commit, since the global config would otherwise say `Adam Olsson`. **The teardown comes before the move** —
-`409 target_dirty` is discovered after a landing succeeded, so a `?`-short-circuit would leave the directory
-behind on exactly the failure the acceptance names (moving it after the move turns eight tests red). And **the
-conflict is read from the index** (`ls-files --unmerged -z`), never from a diff, because a diff is where a
-repository's `diff.external` gets a say; the abort *is* the worktree's removal, and the paths travel in the
-envelope's first additive key, `conflicts`. The review's one P1 was a decision the handoff had asked for and the
-story had not recorded: a **squash keeps the branch**, because `merged_into` is `merge-base --is-ancestor` and a
-squash's commit has only the old target as a parent — honest, and it makes rule 5 HS-056's to decide. Two of its
-own assertions were *vacuous* (the word `prunable` was in the fixture's label, so the temp path satisfied the
-check), and HS-054's near-identical test had the same defect; both are fixed, and the half that was failing for a
-real reason is now measured. The gate: **81 cases, 1254 assertions**, no `SKIP`; `cargo test` 1038; `web` 52. Its
-full record is Linear, `docs/review/PER-87.md` and `git log`; do not carry it forward.
+**The last shipped story** (`PER-88`, HS-056, ADR-0065; commits `7b3fa4b`, `43eaf02`): the merge's guards, rule
+5's `delete_session`, and the decision that rule 6's 60 seconds has no client in this build. The shape is *where a
+fact lives*. Rule 1's two guards are the **route's** and only the route's — a session row is ADR-0063's "not
+consulted", so `merge::merge` was left alone, and both guards sit **before** the blocking task, which is what makes
+"a refused merge creates no `<data>/merge` at all" true by construction rather than by cleanup. Only `running`
+refuses: the `error` row a failed provision leaves is the session an operator most wants to merge, and an
+`!= Idle` guard (how "not running" gets written by mistake) turns the negative-half test red for four of five
+states. `dirty_worktree` **is** a pre-check and `target_dirty` is not, and the ADR's D3 does the work of saying why
+— an unrelated file in the operator's checkout rides across a fast-forward, while a session's own uncommitted work
+*is* the request's subject — with `changes::basis` asked first so a gone worktree is `409 no_worktree` and not a
+`500` from `git status` in a missing directory.
+
+Rule 5 changed shape twice. The plan had the handler force `Retained { branch: None }` because the request that
+merges is better placed than `merge-base --is-ancestor` to say "this landed" (a squash's commit is nobody's
+ancestor). **The review's P1 showed what that cannot see**: `merge()` writes the commit `basis` read, so an agent's
+commit during the landing is work nothing landed — and the fix is not a cleverer handler but a **different place**:
+`landed` became the *commit*, it travels through `Backends::retained` into `Worktree::retained`, and the rule there
+is a **tip comparison** (a branch whose tip is the landed commit is not kept; one that has moved past it is the
+ordinary ancestry question's). Its second P1 was this repository's oldest lesson wearing a new hat: the assertion
+that the refusal's sentence names a commit used the needle `commit`, which `uncommitted` already contains, so
+deleting the whole next-step half left both the test and the gate's grep green. The `deleting` row is the one state
+where `delete_session` is refused (its removal is already in flight with its own keep-rule answer), and rule 6's
+60 seconds is **recorded, not ticked** — it is HS-069's pair, and a blanket 5 s client timeout would cut the
+delete's own `abort_grace` wait. `422 unsupported` retired with its last field. The gate: **82 cases, 1313
+assertions**, no `SKIP`; `cargo test` 1042; `web` 52. Its full record is Linear, `docs/review/PER-88.md` and
+`git log`; do not carry it forward.
 
 **One thing this build does not do, recorded rather than discovered:** a resumed session's pi has **no
 memory** of earlier turns (`--no-session`; the transcript is Holosmith's log). Replaying the log into a new pi
