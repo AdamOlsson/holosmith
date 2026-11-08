@@ -34,6 +34,7 @@ pub mod preview;
 pub mod provisioner;
 pub mod proxies;
 pub mod publish;
+pub mod quota;
 pub mod reconcile;
 pub mod rpc;
 pub mod runtime;

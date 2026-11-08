@@ -73,6 +73,8 @@ fn tools(dir: &TempDir, version: &str, available_kb: u64) -> Tools {
     Tools {
         git: git_shim(dir, version),
         df: df_shim(dir, available_kb),
+        // The soft cap's program (HS-063): no preflight check runs it, so this test never cares which it is.
+        du: std::path::PathBuf::from("du"),
     }
 }
 
@@ -204,6 +206,7 @@ fn a_git_that_cannot_be_run_is_a_complaint_and_not_a_pass() {
         &Tools {
             git: dir.file("no-such-git"),
             df: df_shim(&dir, 480_000_000),
+            du: std::path::PathBuf::from("du"),
         },
     );
     assert_eq!(

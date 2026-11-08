@@ -203,6 +203,31 @@ impl AppState {
         Compactor::new(Arc::clone(&self.database))
     }
 
+    /// The per-session disk soft cap's watchdog, wired to this state's ladder, stopper, rows, writer, the
+    /// `du` this run measures with and the cap itself (HS-063, spec item 14).
+    ///
+    /// `None` when `session_disk_soft_gb` is 0, which is the key's off switch: an operator who wants no cap
+    /// should not pay for a task that measures nothing (the sweeper's rule, ADR-0025). The decision lives here
+    /// rather than in `serve` so there is one place that reads the key — and so a `0` never reaches
+    /// [`crate::quota::over`], whose comparison against a zero cap would answer "over" for any worktree at all.
+    ///
+    /// Here for the same reason as the six above: the handles a background policy needs are cloned in one
+    /// place, and the ladder is the state's own, so the `abort_grace` a forced stop waits out is the config's.
+    pub fn quota(&self) -> Option<crate::quota::Quota> {
+        let limit_gb = self.config.session_disk_soft_gb;
+        if limit_gb == 0 {
+            return None;
+        }
+        Some(crate::quota::Quota::new(
+            self.ladder(),
+            self.stopper(),
+            Arc::clone(&self.database),
+            self.events.clone(),
+            self.tools.du.clone(),
+            limit_gb,
+        ))
+    }
+
     /// The startup reconcile, wired to this state's rows, backend, writer, config and this run's backend
     /// (HS-044).
     ///

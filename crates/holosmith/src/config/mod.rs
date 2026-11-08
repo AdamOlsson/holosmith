@@ -228,6 +228,11 @@ pub struct Config {
     pub max_session_tokens: Option<u64>,
     pub abort_grace: Duration,
     pub min_free_gb: u64,
+    /// The per-session disk soft cap, in whole GB (HS-063, spec item 14): a session whose worktree grows past
+    /// this is stopped with reason `disk_quota`, and `0` is the off switch (no watchdog, no `du`). A worktree's
+    /// size includes everything under it — `target/` and `node_modules/` as much as `src/` — so a large Rust
+    /// project should raise it rather than rebuild from scratch on every resume; caches are per session by
+    /// design (D2), which is why one session's build tree is its own to answer for.
     pub session_disk_soft_gb: u64,
     pub stopped_ttl_days: u64,
     /// How many messages a client that opens a stream with no `Last-Event-ID` is replayed (HS-061).

@@ -62,6 +62,16 @@ pub const TURN_STEER: &str = "turn.steer";
 /// shows and `method` is pi's own name for what was asked.
 pub const TURN_ERROR: &str = "turn.error";
 
+/// A machine policy ending a session, with the code a client reads: `{"code", "message", …}` (HS-063).
+///
+/// The one producer today is the per-session disk soft cap, whose frame carries `disk_quota`, the measurement
+/// and the limit it crossed (spec item 14). It is a *new* kind rather than a `turn.error` because the two say
+/// different things: `turn.error` is about the agent failing to do something, and this is the machine deciding
+/// the session must stop. Its `code` is the same word the row's `status_reason` carries, so a client can group
+/// the two without learning a second vocabulary (ADR-0008: a code is API), and `message` is the sentence a
+/// screen shows.
+pub const ERROR: &str = "error";
+
 /// One durable record in a session's stream: the row in `events`, with the seq the writer gave it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Event {

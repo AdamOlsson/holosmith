@@ -236,25 +236,30 @@ impl fmt::Display for Finding {
     }
 }
 
-/// The external programs the preflight runs, as paths.
+/// The external programs this build runs under a test's control, as paths.
 ///
-/// Two of the three checks are a program's answer, and this is the seam that lets a test point them at a
-/// shim: the production value is the name, which the machine's `PATH` resolves, and a test's is the shim
-/// it wrote. It is a parameter rather than an environment variable because this crate denies `unsafe`,
-/// so `set_var` is not reachable — and because an environment a second test could see is a flake waiting
-/// to happen.
+/// Three checks are a program's answer, and this is the seam that lets a test point them at a shim: the
+/// production value is the name, which the machine's `PATH` resolves, and a test's is the shim it wrote. It is
+/// a parameter rather than an environment variable because this crate denies `unsafe`, so `set_var` is not
+/// reachable — and because an environment a second test could see is a flake waiting to happen.
+///
+/// `git` and `df` are the startup check's (HS-024) and `df` is the disk floor's, on both request paths
+/// (HS-062); `du` is the per-session soft cap's watchdog (HS-063), which is neither a request path nor a
+/// startup check — so the value rides here because this is the one place a test can own a program.
 #[derive(Debug, Clone)]
 pub struct Tools {
     pub git: PathBuf,
     pub df: PathBuf,
+    pub du: PathBuf,
 }
 
 impl Default for Tools {
-    /// `git` and `df` from `PATH`, which is what a machine has.
+    /// `git`, `df` and `du` from `PATH`, which is what a machine has.
     fn default() -> Self {
         Self {
             git: PathBuf::from("git"),
             df: PathBuf::from(crate::disk::DF),
+            du: PathBuf::from(crate::quota::DU),
         }
     }
 }

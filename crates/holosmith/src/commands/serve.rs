@@ -355,6 +355,34 @@ pub fn run(args: ServeArgs) -> ExitCode {
             "the compaction task is running"
         );
         let compactor = state.compactor().spawn();
+        // The **per-session disk soft cap** (HS-063, spec item 14) joins the two policies above, wired the same
+        // way and for the same reason: built before the state is handed to the router, spawned after the
+        // reconcile so no row it reads is half-recovered, and absent (`None`) when `session_disk_soft_gb` is
+        // `0`. Its own state is a `debug` line rather than a banner line, because the startup contract is the
+        // eight lines `tests/serve_cli.rs` pins byte for byte.
+        //
+        // Its first pass is **not** immediate, unlike the sweeper's: the reconcile has just moved every live row
+        // to `starting` and restarted its provisioning, so a pass taken now would measure nothing — and the
+        // pass after a restart is the one that catches a session that was already over its cap. The wait is the
+        // watchdog's own (`quota::SETTLE`), bounded there rather than here.
+        let quota = match state.quota() {
+            Some(quota) => {
+                tracing::debug!(
+                    target: "holosmith::serve",
+                    limit_gb = loaded.config.session_disk_soft_gb,
+                    tick_s = crate::quota::TICK.as_secs(),
+                    "the per-session disk cap's watchdog is running"
+                );
+                Some(quota.spawn())
+            }
+            None => {
+                tracing::debug!(
+                    target: "holosmith::serve",
+                    "session_disk_soft_gb is 0, so no session is stopped for its worktree's size"
+                );
+                None
+            }
+        };
         // The **admin socket** (HS-051, spec item 10 step 3): the one way to drain this machine, and the one thing
         // in the build that is deliberately *not* an HTTP route — the API table says "not reachable over HTTP",
         // and a second listener outside `App` is what that sentence means. It is bound here, beside the two
@@ -437,6 +465,11 @@ pub fn run(args: ServeArgs) -> ExitCode {
         // leave a half-written transaction behind. `abort` drops the task at its next await point, and the
         // transaction it was in rolls back on drop — which is also why the fold itself holds no await.
         compactor.abort();
+        // And the disk cap's watchdog, for the sweeper's reason: it is a policy over rows rather than part of
+        // serving, so its next tick must not hold the process open after the drain is done.
+        if let Some(quota) = quota {
+            quota.abort();
+        }
         // And the admin socket (HS-051): a drain that started is finished or abandoned with the process, so its
         // accept loop must not hold the runtime open a moment longer than the listeners do. The socket *file* is
         // not removed here — a `serve` that is killed leaves one behind on purpose, and the next boot probes it

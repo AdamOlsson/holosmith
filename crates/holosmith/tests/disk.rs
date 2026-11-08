@@ -117,6 +117,8 @@ fn floored_state(dir: &TempDir, df: PathBuf, min_free_gb: u64) -> AppState {
     state.tools = Tools {
         git: PathBuf::from("git"),
         df,
+        // The soft cap's program (HS-063); this test is about `df`.
+        du: PathBuf::from("du"),
     };
     state
 }
@@ -241,6 +243,8 @@ async fn the_boot_and_the_request_paths_read_one_number() {
         &Tools {
             git: PathBuf::from("git"),
             df: df.clone(),
+            // The soft cap's program (HS-063); this test is about `df`.
+            du: PathBuf::from("du"),
         },
     );
     let disk_finding = findings
@@ -267,6 +271,8 @@ async fn the_boot_and_the_request_paths_read_one_number() {
     state.tools = Tools {
         git: PathBuf::from("git"),
         df,
+        // The soft cap's program (HS-063); this test is about `df`.
+        du: PathBuf::from("du"),
     };
     let served = Served::start(http::router(state.clone()), GRACE).await;
     let refused = post_create(served.addr, "disk-floor-agree").await;
@@ -431,6 +437,8 @@ async fn a_stub_run_is_not_measured_at_all() {
     state.tools = Tools {
         git: PathBuf::from("git"),
         df,
+        // The soft cap's program (HS-063); this test is about `df`.
+        du: PathBuf::from("du"),
     };
     // `state_in` leaves `runtime` on the stub, which is what `serve --backend stub` would build.
     assert_eq!(state.runtime.backend, Backend::Stub);
@@ -488,6 +496,8 @@ async fn a_floor_of_zero_does_not_need_a_df_at_all() {
     state.tools = Tools {
         git: PathBuf::from("git"),
         df: PathBuf::from("/nonexistent-holosmith-df"),
+        // The soft cap's program (HS-063); this test is about `df`.
+        du: PathBuf::from("du"),
     };
     let served = Served::start(http::router(state.clone()), GRACE).await;
     let response = post_create(served.addr, "disk-floor-zero-no-df").await;

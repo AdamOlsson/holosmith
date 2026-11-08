@@ -72,11 +72,18 @@ pub enum Trigger {
     Delete,
     /// The process restarted and this row was live when it died.
     CrashRecovery,
+    /// The session's worktree is over `session_disk_soft_gb` (HS-063, spec item 14).
+    ///
+    /// An `idle` session's stop, and only that: a `running` one ends its turn through the abort ladder's own
+    /// row ([`Self::AbortLadder`], with this policy's reason), because a turn is the ladder's to end and a row
+    /// with no turn is the table's. The word is the reason the row records and the code the event carries —
+    /// [`crate::quota::DISK_QUOTA`], and a test keeps the two spellings one.
+    DiskQuota,
 }
 
 impl Trigger {
     /// Every trigger, so a test can prove the table and this enum agree.
-    pub const ALL: [Trigger; 15] = [
+    pub const ALL: [Trigger; 16] = [
         Trigger::CreateAccepted,
         Trigger::PiReady,
         Trigger::ProvisioningFailed,
@@ -92,6 +99,7 @@ impl Trigger {
         Trigger::PiExit,
         Trigger::Delete,
         Trigger::CrashRecovery,
+        Trigger::DiskQuota,
     ];
 
     /// The table's word for this trigger.
@@ -112,6 +120,7 @@ impl Trigger {
             Self::PiExit => "pi_exit",
             Self::Delete => "delete",
             Self::CrashRecovery => "crash_recovery",
+            Self::DiskQuota => "disk_quota",
         }
     }
 }
@@ -215,6 +224,16 @@ pub const TABLE: &[Transition] = &[
     Transition {
         from: FromStates::OneOf(&[Status::Idle]),
         trigger: Trigger::Drain,
+        to: Status::Stopped,
+    },
+    // Item 14's per-session soft cap (HS-063): an idle session whose worktree is over `session_disk_soft_gb`
+    // is stopped and stays stopped until the operator cleans up, so this is a row of its own rather than a
+    // second reason on `idle_stop` — the two answer different questions ("nobody used it" and "it is holding
+    // too much disk"), and a client reads the reason. A `running` session does not take this row: its turn is
+    // the abort ladder's to end, and the ladder writes `stopped` with the same reason (ADR-0069).
+    Transition {
+        from: FromStates::OneOf(&[Status::Idle]),
+        trigger: Trigger::DiskQuota,
         to: Status::Stopped,
     },
     Transition {
@@ -472,7 +491,7 @@ mod tests {
 
     #[test]
     fn every_trigger_has_a_word_and_every_word_is_the_tables() {
-        assert_eq!(Trigger::ALL.len(), 15);
+        assert_eq!(Trigger::ALL.len(), 16);
         for trigger in Trigger::ALL {
             assert_eq!(trigger.to_string(), trigger.as_str());
             let rows = TABLE.iter().filter(|row| row.trigger == trigger).count();
@@ -540,6 +559,13 @@ mod tests {
             (
                 FromStates::OneOf(&[Status::Idle]),
                 Trigger::Drain,
+                Status::Stopped,
+            ),
+            // Item 14's per-session soft cap (HS-063): the story's amendment, the way `pi_exit` is
+            // ADR-0038's. A `running` session does not take this row — its turn is the abort ladder's.
+            (
+                FromStates::OneOf(&[Status::Idle]),
+                Trigger::DiskQuota,
                 Status::Stopped,
             ),
             (

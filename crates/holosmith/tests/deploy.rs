@@ -140,6 +140,7 @@ fn doctor_tools(dir: &TempDir) -> doctor::Tools {
         preflight: preflight::Tools {
             git: PathBuf::from("git"),
             df: df_shim(dir),
+            du: PathBuf::from("du"),
         },
         tailscale: tailscale_serve_shim(
             dir,
