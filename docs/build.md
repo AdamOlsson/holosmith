@@ -479,7 +479,11 @@ the screen's ten element ids, the iOS sentence, the per-machine sentence and two
 as an assignment so a deleted container cannot be covered by a sibling's id; and `GET /api/health` carries the pair's
 `public_key` **byte for byte** and the private half nowhere, then `null` once `<data>/secrets/vapid.toml` is removed —
 the last measurement being the one that proves a browser could really subscribe. What it cannot see is the tap, the
-notification and the install itself: those are `web/test/push.test.ts`'s 25 rules and the demo's (ADR-0072).
+notification and the install itself: the sentences and the branches are `web/test/push.test.ts`'s, and the demo is
+what judges the rest — Chromium's own `Page.getInstallabilityErrors`, a `push` event delivered to the registered
+worker, the notification it draws, and the handler's `clients.openWindow("/sessions/<id>")`. An install on a device
+and a click on a system notification are the two things no machine here can do, and both are stated as
+not-measured (ADR-0072 D9).
 
 …and since HS-047, **`server deploy`**: `case_server_deploy` has two halves that skip independently, because the
 bugs it exists to catch are of two kinds. The **offline** half needs `python3` and nothing else: a `_ping` socket

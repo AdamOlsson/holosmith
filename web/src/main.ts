@@ -1993,7 +1993,7 @@ function settingsSection(health: Health): HTMLElement {
     }
     const response = await fetch(SUBSCRIBE_PATH, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-holosmith-client": "1" },
+      headers: JSON_HEADERS,
       body: JSON.stringify(body),
     });
     if (!response.ok) {
@@ -2017,9 +2017,9 @@ function settingsSection(health: Health): HTMLElement {
     const query = new URLSearchParams({ endpoint: subscription.endpoint }).toString();
     const response = await fetch(`${SUBSCRIBE_PATH}?${query}`, {
       method: "DELETE",
-      // A mutating request needs this header even with no body (ADR-0010); `404` is the row already gone, which
-      // is the answer the operator wanted.
-      headers: { "content-type": "application/json", "x-holosmith-client": "1" },
+      // A mutating request carries these even with no body (ADR-0010); `404` is the row already gone, which is the
+      // answer the operator wanted.
+      headers: JSON_HEADERS,
     });
     if (!response.ok && response.status !== 404) {
       const envelope = (await response.json()) as ErrorEnvelope;

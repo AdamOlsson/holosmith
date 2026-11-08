@@ -199,6 +199,15 @@ test("the arms' order is what makes the sentences true", () => {
   // A subscription can always be undone — even on a machine whose pair has gone, which is exactly when an
   // operator needs the button.
   assert.equal(pushState(facts({ subscribed: true, hasKey: false })).action, "unsubscribe");
+  // And even after the operator blocked notifications: the browser still holds the subscription, so a row this
+  // machine keeps delivering to is a row the screen has to be able to remove. The refusal is not lost — it is the
+  // arm's detail.
+  const blockedButSubscribed = pushState(facts({ subscribed: true, permission: "denied" }));
+  assert.equal(blockedButSubscribed.action, "unsubscribe");
+  assert.match(blockedButSubscribed.detail ?? "", /browser's settings/);
+  // The two states that only *look* similar: a refusal with nothing stored offers no button at all.
+  assert.equal(pushState(facts({ permission: "denied" })).action, "blocked");
+  assert.equal(pushState(facts({ permission: "denied" })).detail, blockedButSubscribed.detail);
   // No pair means no subscribe, and the sentence names the command that writes one.
   const keyless = pushState(facts({ hasKey: false }));
   assert.equal(keyless.action, "no-key");

@@ -135,9 +135,17 @@ export type PushState = { action: PushAction; sentence: string; detail: string |
 // Which control the screen offers, and the sentence beside it.
 //
 // The order is load-bearing and is the arms' own justification: a browser that cannot push is told that before
-// anything else; a permission the operator refused can only be undone in the browser's settings, so no button is
-// offered; an existing subscription can always be undone, even on a machine whose pair has gone; a machine with
-// no pair cannot be subscribed to, and the sentence names the command that writes one.
+// anything else; **an existing subscription can always be undone** — even on a machine whose pair has gone, and
+// even after the operator blocked notifications, because a row this machine still holds is a row it will keep
+// trying to deliver to; then a permission the operator refused, which only their browser's settings can undo; then
+// a machine with no pair, whose sentence names the command that writes one.
+//
+// `subscribed` before `denied` is the arm that is easy to get wrong and was: a browser that accepted a subscription
+// and was then told to block notifications still has that subscription, so the screen has to offer the one thing
+// that removes it. The blocked fact is not lost — it becomes the `detail` under `subscribed`.
+const BLOCKED_DETAIL =
+  "this browser remembers a refusal and will not ask again: allow notifications for this site in the browser's settings, then reload";
+
 export function pushState(facts: PushFacts): PushState {
   if (!facts.supported) {
     return {
@@ -147,19 +155,18 @@ export function pushState(facts: PushFacts): PushState {
         "push needs a secure origin (https, or localhost) and a browser with service-worker support; on iOS it needs 16.4 or later",
     };
   }
-  if (facts.permission === "denied") {
-    return {
-      action: "blocked",
-      sentence: "notifications are blocked for this app",
-      detail:
-        "this browser remembers a refusal and will not ask again: allow notifications for this site in the browser's settings, then reload",
-    };
-  }
   if (facts.subscribed) {
     return {
       action: "unsubscribe",
       sentence: "subscribed on this machine",
-      detail: null,
+      detail: facts.permission === "denied" ? BLOCKED_DETAIL : null,
+    };
+  }
+  if (facts.permission === "denied") {
+    return {
+      action: "blocked",
+      sentence: "notifications are blocked for this app",
+      detail: BLOCKED_DETAIL,
     };
   }
   if (!facts.hasKey) {

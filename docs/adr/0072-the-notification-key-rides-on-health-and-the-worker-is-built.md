@@ -166,8 +166,13 @@ alphabet, the path rule, the payload's three keys and twelve non-shapes, the sub
 seven refusals, the five control arms and their order, the labels, the iOS sentence's three arms, the user-agent
 detection, the per-machine row, the header's link, the manifest, and every icon's bytes.
 
-The demo drives the one thing neither can: Chromium, a real `push` event delivered to the registered worker, the
-notification appearing, and the click opening `/sessions/<id>`.
+The demo drives the four things neither can: **Chromium's own install judgement** (`Page.getInstallabilityErrors`
+answers `[in-incognito]` — the automation profile and nothing about the app, which is the measurement that says a
+cache-less worker still installs), a real `push` event delivered to the registered worker, the notification it draws,
+and the tap's `clients.openWindow("/sessions/<id>")`. It does **not** install the app on a device, and it cannot
+click a system notification: a synthetic dispatch carries no user activation, so `openWindow` is recorded rather than
+opened — the acceptance's tap is the handler's call, measured, with the window that a real tap opens stated as the
+one thing left to a phone.
 
 ## What this ADR does not decide
 

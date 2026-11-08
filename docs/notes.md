@@ -1698,7 +1698,8 @@ it rather than adding a caveat beside it.
   or it will read `uptime unknown:` and quietly test the arm it did not mean. That is also the shape of the mistake
   this bullet exists to prevent: a `status` case against the shared boot would print SKIP-worthy nonsense and still
   pass, because `unknown` is a legal line.
-- **The health payload is `Health`'s five keys, and a 200 is not enough.** `http::health::ask` parses the body, so a
+- **The health payload is `Health`'s six keys (the sixth is HS-067's `application_server_key`), and a 200 is not enough.**
+  `http::health::ask` parses the body, so a
   test fixture that answers `200` with `{}` is *not* a serving machine any more (HS-045's doctor test had exactly
   that fixture and went red when the reader landed). `doctor::health_answers` is now `ask(...).is_ok()`: one reader,
   and "a port somebody else holds" is a different answer from "this machine's own server answers".
@@ -2384,3 +2385,27 @@ it rather than adding a caveat beside it.
   the machine's (`/var/lib/holosmith`), which this sandbox lets an unprivileged user write: two tests sharing it
   passed until one of them removed the pair for its own negative case, and then a third failed. Every test in
   `tests/push.rs` builds its config from `TempDir::join`, the same rule every database in the suite follows.
+
+### Landmines: the installable app (HS-067)
+
+- **Chromium's install criteria do not need a `fetch` handler, and `Page.getInstallabilityErrors` is how that is
+  measured.** The plan's "no `fetch` handler" (ADR-0072 D4) looked like it might cost an install prompt, because
+  older guidance says Chrome requires a registered worker *with* a fetch handler. Measured against the shipped
+  artifact in Chromium **141.0.7390.37** over CDP: `Page.getInstallabilityErrors` answers exactly
+  `[{"errorId":"in-incognito"}]` — the automation profile, not the app — and `Page.getAppManifest` reports no
+  errors. So a cache-less worker is installable, and the demo asserts that list rather than a rendered prompt.
+- **Playwright's headless *shell* reports `Notification.permission` as `denied` and cannot be granted it.** The
+  settings screen's Subscribe button is therefore unreachable in the default `chromium.launch()`: use
+  `channel: "chromium"` (the full build), where `context.grantPermissions(["notifications"], {origin})` answers
+  `granted`. The shell says `denied` for every origin, which reads exactly like an app bug.
+- **A service worker needs `navigator.serviceWorker.register`, and no gate can see it missing.** The first draft of
+  this story shipped the manifest, the served `/sw.js` compared byte for byte, and no registration at all: a push
+  can only arrive at a registered worker, and the gate's nearest witness is a grep for the call in the served
+  bundle (`case_pwa` now has one). The demo is what actually noticed.
+- **The stand-in subscription has to be `https://`.** The route refuses anything else with `422 bad_endpoint`, so a
+  demo that points its synthetic endpoint at its own origin gets a 422 that looks like a key problem.
+- **A `page.evaluate` patch of `ServiceWorkerRegistration.prototype` does not survive a `goto`.** A navigation is a
+  new realm, so the synthetic `pushManager` has to be installed *after* every load — and the screen's first
+  `gather()` then reads the real API, which is the honest order anyway (the state must first be "not subscribed").
+- **`waitForFunction` on `textContent.includes("subscribed on this machine")` resolves on "not subscribed…".** The
+  settings screen's two sentences are substrings of each other; every wait on them compares the whole string.

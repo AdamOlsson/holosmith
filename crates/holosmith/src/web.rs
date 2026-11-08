@@ -105,6 +105,11 @@ mod tests {
         // manifest and the worker are files the app carries, and the worker is JavaScript rather than the shell
         // (a `/sw.js` answered by the fallback's shell would register a page as a service worker, and every
         // browser refuses it — silently).
+        //
+        // The `HOLOSMITH_REQUIRE_WEB` guard is the same one the index test keeps: a tree without `web/dist` serves
+        // a placeholder on purpose (ADR-0007). `scripts/verify.sh` exports the variable for its `test` phase when a
+        // build is present, so this body runs in the gate; `case_pwa` is the measurement that matters, and this is
+        // the cheaper one that fails first.
         let index = index_html();
         assert!(
             index.contains(r#"<link rel="manifest" href="/manifest.webmanifest""#),

@@ -1418,8 +1418,8 @@ PY
   rm -rf "$root"
 }
 
-# The health payload: exactly five keys, and the uptime is not predictable, so the assertion is
-# the prefix and the closing brace (the shape tests/http_contract.rs uses).
+# The health payload: exactly six keys (the sixth is HS-067's application server key), and the uptime is not
+# predictable, so the assertion is the prefix and the closing brace (the shape tests/http_contract.rs uses).
 case_health() {
   local name=case_health response content_type body expected
   fetch "$name" GET /api/health "Host: 127.0.0.1" ||
@@ -4698,6 +4698,11 @@ case_pwa() {
   # `serviceWorker.register("/sw.js")` is in this list because the first draft of this screen forgot the call, and a
   # manifest without a registration is an installable app a push can never arrive at — a fact no gate can see a
   # browser decide (this story's demo found it).
+  #
+  # These needles spell `id="…"` while the source spells `machine.id = "settings-machine"`: they match because
+  # Vite minifies the app bundle by default, which strips the spaces. That is the opposite of the **worker**'s
+  # config, which turns minification off on purpose (ADR-0072 D4) — so turning it off for the app too would red
+  # this loop with a message pointing at the wrong thing.
   for needle in \
     'id="settings"' 'id="settings-machine"' 'id="settings-state"' 'id="settings-action"' \
     'id="settings-detail"' 'id="settings-install"' 'id="settings-per-machine"' 'id="settings-notice"' \
@@ -9916,6 +9921,14 @@ command -v cargo >/dev/null 2>&1 ||
 
 run_phase fmt cargo fmt --check
 run_phase clippy cargo clippy --all-targets -- -D warnings
+# The embedded-app assertions in `web.rs` carry a `HOLOSMITH_REQUIRE_WEB=1` arm — a placeholder build is legal
+# (ADR-0007), so the tests cannot assert a real app unless a build says one exists. `scripts/build.sh` exports it
+# around `cargo build`; exporting it here as well, when a build is present, is what makes those assertions bite in
+# the gate rather than pass vacuously (`case_pwa` is the measurement that matters, but a test that cannot fail is
+# worse than no test — RESUME §6).
+if [ -f web/dist/index.html ]; then
+  export HOLOSMITH_REQUIRE_WEB=1
+fi
 run_phase test cargo test
 # HS-075: the expand/contract rule in one named command. The destructive side is refused where a migration is
 # written (`schema::contract_violations`, which `cargo test` already runs); this is the other half — the previous

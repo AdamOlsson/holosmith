@@ -6,15 +6,34 @@
 
 use std::time::{Duration, Instant};
 
+use holosmith::config::Config;
 use holosmith::http::{self, Routes};
 use holosmith::web;
 
 mod support;
-use support::{Served, fetch, fetch_head, state, version};
+use support::{Served, TempDir, fetch, fetch_head, state, state_in, version};
+
+/// RFC 8291 §5's application-server point, as base64url: the one P-256 public key this suite has a published
+/// vector for, so "the answer carries the pair's public half" can be asserted byte for byte.
+const AS_PUBLIC: &str =
+    "BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8";
+const AS_PRIVATE: &str = "yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw";
 
 #[tokio::test]
 async fn the_health_endpoint_answers_the_six_keys() {
-    let served = Served::start(http::router(state()), Duration::from_secs(10)).await;
+    // The data root is this test's own: `Config::default` names the *machine's*, and a machine that has deployed
+    // holds a pair — which would make the sixth key a fact about the host rather than about this test (HS-067,
+    // the same hazard `health.rs`'s unit test works around).
+    let dir = TempDir::new("health-six-keys");
+    let config = Config {
+        data_root: dir.path().join("data"),
+        ..Config::default()
+    };
+    let served = Served::start(
+        http::router(state_in(&dir, config.clone())),
+        Duration::from_secs(10),
+    )
+    .await;
     let response = fetch(served.addr, "/api/health").await;
     assert_eq!(response.status, 200);
     assert_eq!(response.header("content-type"), Some("application/json"));
@@ -34,21 +53,39 @@ async fn the_health_endpoint_answers_the_six_keys() {
         "the fifth key is the preview origin: {}",
         response.body
     );
-    // The sixth (HS-067): the application server key, `null` on a machine with no pair and a base64url point
-    // when there is one — and it is last, so the five keys before it keep their order.
-    let tail = response
-        .body
-        .find(r#","application_server_key":"#)
-        .map(|at| &response.body[at..])
-        .expect("the sixth key is the application server key");
+    // The sixth (HS-067) is last, `null` on a machine with no pair — so the five keys before it keep their order.
     assert!(
-        tail.ends_with('}'),
-        "the sixth key is the last one: {}",
+        response
+            .body
+            .ends_with(r#","application_server_key":null}"#),
+        "a machine with no pair answers an explicit null: {}",
         response.body
     );
-    assert!(
-        tail.trim_end_matches('}') == r#","application_server_key":null"# || tail.contains("\"B"),
-        "the sixth key is a base64url point (it starts 0x04, so a `B`) or null: {}",
+
+    // And with a pair on disk it is that pair's **public** half, byte for byte — not a re-derivation, which is
+    // what makes "each machine's keys are independent" a fact a browser can rely on.
+    let path = holosmith::vapid::store(&config.data_root);
+    std::fs::create_dir_all(path.parent().expect("the secrets directory")).expect("the directory");
+    let pair = holosmith::vapid::Pair {
+        public_key: AS_PUBLIC.to_string(),
+        private_key: AS_PRIVATE.to_string(),
+    };
+    std::fs::write(&path, holosmith::vapid::render(&pair)).expect("the pair is writable");
+    let response = fetch(served.addr, "/api/health").await;
+    assert_eq!(
+        response.body,
+        format!(
+            r#"{{"name":"holosmith","version":"{}","role":"both","uptime_s":{},"preview_origin":"http://localhost:8081","application_server_key":"{AS_PUBLIC}"}}"#,
+            version(),
+            // The uptime is the one field that moves; the assertion is the whole shape around it.
+            response
+                .body
+                .split(r#""uptime_s":"#)
+                .nth(1)
+                .and_then(|rest| rest.split(',').next())
+                .expect("the uptime is in the payload")
+        ),
+        "the sixth key is the pair's public half and the private half is nowhere: {}",
         response.body
     );
     served.finish().await.expect("a clean shutdown");

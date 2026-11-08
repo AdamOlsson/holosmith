@@ -945,5 +945,8 @@ _Avoid_: Worker thread, background page, PWA script
 The app's third screen, at `/settings`: this machine's **Web Push subscription** state (one row, because there is one
 control origin), the one control the browser's state allows, and the iOS home-screen sentence. It is a path of its
 own rather than a section of the **Sessions screen** because a subscription belongs to the machine — and a machine
-just installed has no sessions. Its every word is a `web/src/push.ts` function with a node test.
+just installed has no sessions. What it *says* is `web/src/push.ts`'s and has a node test per sentence — the state
+sentence and its detail, the button's label, the per-machine row, the two install sentences and the four a
+notification draws; what the page adds (the heading, the busy label and the two refusals it makes about its own
+failed request) is the DOM's, like every other affordance's.
 _Avoid_: Preferences, config screen (the **Config** is the machine's TOML file, and this screen edits nothing in it)
