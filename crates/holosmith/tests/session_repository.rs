@@ -583,6 +583,72 @@ fn set_status_sets_stopped_at_only_while_the_session_is_stopped() {
 }
 
 #[test]
+fn expired_before_answers_only_stopped_rows_oldest_first() {
+    // HS-064's one statement: the predicate and the order are the repository's, so a policy cannot forget either.
+    // A cutoff far in the future makes the *clock* answer "yes" for every row, so what is left is the status
+    // predicate and the ordering — which is what this test is about.
+    let dir = TempDir::new("expired-before");
+    let database = open(&dir);
+    let repository = database.sessions();
+
+    let idle = repository
+        .create(&new_session(Some("still-working")), NOW)
+        .expect("a session is creatable");
+    let error = repository
+        .create(&new_session(Some("failed")), NOW)
+        .expect("a session is creatable");
+    repository
+        .set_status(&error.id, Status::Error, Some("provisioning_failed"), NOW)
+        .expect("the update succeeds");
+    let young = repository
+        .create(&new_session(Some("young")), NOW)
+        .expect("a session is creatable");
+    repository
+        .set_status(&young.id, Status::Stopped, Some("idle_stop"), NOW + 50)
+        .expect("the update succeeds");
+    let old = repository
+        .create(&new_session(Some("old")), NOW)
+        .expect("a session is creatable");
+    repository
+        .set_status(&old.id, Status::Stopped, Some("idle_stop"), NOW + 10)
+        .expect("the update succeeds");
+
+    // A cutoff past every `stopped_at`: only the two stopped rows, and the older stop first, so the queue a pass
+    // walks is a queue rather than whatever the table returned.
+    let candidates = repository
+        .expired_before(NOW + 1_000)
+        .expect("the read succeeds");
+    let ids: Vec<&str> = candidates.iter().map(|row| row.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec![old.id.as_str(), young.id.as_str()],
+        "the candidates are not the stopped rows in stop order"
+    );
+    assert!(
+        !ids.contains(&idle.id.as_str()),
+        "an idle row was a candidate"
+    );
+    assert!(
+        !ids.contains(&error.id.as_str()),
+        "an error row was a candidate, and item 15 says it never is"
+    );
+
+    // The clock is the other half: a cutoff before both stops answers nobody, and the boundary is strict.
+    assert!(
+        repository
+            .expired_before(NOW + 10)
+            .expect("the read succeeds")
+            .is_empty(),
+        "a row stopped exactly at the cutoff is not past it"
+    );
+    let one = repository
+        .expired_before(NOW + 11)
+        .expect("the read succeeds");
+    assert_eq!(one.len(), 1, "the strict comparison moved");
+    assert_eq!(one[0].id, old.id);
+}
+
+#[test]
 fn set_status_leaves_last_active_at_alone() {
     // Activity is not status: HS-020 and HS-021 own when `last_active_at` moves.
     let dir = TempDir::new("last-active");

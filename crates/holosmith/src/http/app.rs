@@ -228,6 +228,24 @@ impl AppState {
         ))
     }
 
+    /// The stopped-session expiry's daily job, wired to this state (HS-064, spec item 15).
+    ///
+    /// **Always present, unlike [`Self::sweeper`] and [`Self::quota`]** — there is no off switch, and the absence
+    /// is a decision rather than an omission: `stopped_ttl_days` already refuses `0` (`config/mod.rs`), and a `0`
+    /// here would mean "remove every stopped session the moment it stops", not "never". An operator who wants no
+    /// expiry raises the number. A `None` arm would be a second spelling of an answer the config already
+    /// gives.
+    ///
+    /// It takes the state itself rather than four handles, because it calls the delete flow's own second half
+    /// ([`crate::http::sessions::complete_deletion`]) and a second wiring of backend, transitioner, deleter and
+    /// `[merge] targets` would be exactly the drift that rule exists to prevent.
+    ///
+    /// Here for the same reason as the eight above: the handles a background policy needs are cloned in one
+    /// place, so a test drives the wiring `serve` uses rather than a second one.
+    pub fn expiry(&self) -> crate::expiry::Expiry {
+        crate::expiry::Expiry::new(self.clone(), self.config.stopped_ttl_days)
+    }
+
     /// The startup reconcile, wired to this state's rows, backend, writer, config and this run's backend
     /// (HS-044).
     ///

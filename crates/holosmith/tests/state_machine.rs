@@ -221,6 +221,59 @@ async fn stopped_at_is_set_by_the_transition_into_stopped_and_cleared_by_the_one
 }
 
 #[tokio::test]
+async fn the_expirys_row_admits_stopped_and_nothing_else() {
+    // HS-064, spec item 15: the daily job's move is the table's narrow `expire` row, not the delete's `any`
+    // one — a request may end a running turn first and is entitled to any state, while a job that destroys a
+    // forgotten session must do it to *this* one. The row that matters is the refused one: a session the
+    // operator resumed in the window between the pass's read and this write is left alone, and the table is
+    // what says so (ADR-0016, ADR-0070).
+    let dir = TempDir::new("state-expire");
+    let state = state_with_writer(&dir, Config::default(), WriterOptions::default());
+    let session = starting_session(&state, "expire");
+    let transitioner = state.transitioner();
+
+    transitioner
+        .apply(&session.id, Trigger::PiReady, None)
+        .await
+        .expect("starting -> idle");
+    let idle = row(&state, &session.id);
+    let error = transitioner
+        .apply(&session.id, Trigger::Expire, None)
+        .await
+        .expect_err("`idle` is not a state the expiry may remove");
+    assert!(
+        matches!(
+            error,
+            StateError::Illegal {
+                from: Status::Idle,
+                trigger: Trigger::Expire
+            }
+        ),
+        "an idle row was refused for the wrong reason: {error:?}"
+    );
+    assert_eq!(
+        row(&state, &session.id),
+        idle,
+        "the refusal changed the row"
+    );
+
+    transitioner
+        .apply(&session.id, Trigger::IdleStop, Some("idle_stop"))
+        .await
+        .expect("idle -> stopped");
+    let deleting = transitioner
+        .apply(&session.id, Trigger::Expire, None)
+        .await
+        .expect("stopped -> deleting is the expiry's row");
+    assert_eq!(deleting, Status::Deleting);
+    let row = row(&state, &session.id);
+    assert_eq!(row.status, Status::Deleting);
+    // `deleting` is not `stopped`, so the clock the row has left the state with is cleared — and the row is
+    // about to stop existing, which is why nothing reads it.
+    assert_eq!(row.stopped_at, None, "leaving `stopped` left the clock set");
+}
+
+#[tokio::test]
 async fn interrupted_is_a_reason_on_a_recovery_transition_not_a_state() {
     // The spec removed `ended` and says `interrupted` is a reason. Recovery from a crashed run is
     // the transition that carries it, and the state after it is `starting`.

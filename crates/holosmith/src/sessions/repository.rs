@@ -111,6 +111,21 @@ fn idle_before_filter() -> String {
     format!("WHERE status = ?1 AND last_active_at < ?2 {QUIETEST_FIRST}")
 }
 
+/// The stopped-session expiry's candidates (HS-064, spec item 15): rows that have been `stopped` since before
+/// the cutoff, oldest first.
+///
+/// The `status = 'stopped'` predicate is item 15's "sessions in `error` are never auto-deleted", and it keeps a
+/// `deleting` row out of a job's hands as well (its removal is the delete flow's own in-flight work). It has a
+/// second guarantee behind it — `stopped_at` is `NULL` in every state but `stopped` (ADR-0016's one writer),
+/// and `NULL < x` is not true — and the two are independent on purpose: `case_stopped_expiry` writes an `error`
+/// row *with* a stale `stopped_at`, a row no writer of this build can produce, and only the predicate keeps it.
+/// `stopped_at` is whole seconds, so `<` is "stopped for strictly longer than the window".
+///
+/// A constant rather than a builder, unlike [`idle_before_filter`]: there is nothing to interpolate, and a
+/// function whose body is a `format!` with no arguments is a `String` allocated for nothing.
+const EXPIRED_BEFORE_FILTER: &str =
+    "WHERE status = ?1 AND stopped_at < ?2 ORDER BY stopped_at ASC, id ASC";
+
 /// The only way to read or write a `sessions` row. Obtained from `Database::sessions`.
 pub struct SessionRepository<'a> {
     connection: &'a Connection,
@@ -204,6 +219,24 @@ impl<'a> SessionRepository<'a> {
             "idle_before",
             &idle_before_filter(),
             &[&Status::Idle.as_str() as &dyn ToSql, &cutoff as &dyn ToSql],
+        )
+    }
+
+    /// Every `stopped` session whose `stopped_at` is older than `cutoff`: the stopped-session expiry's
+    /// candidates (HS-064, spec item 15), oldest first.
+    ///
+    /// **All of them, not one**, for [`Self::idle_before`]'s reason: the daily pass is a policy over every
+    /// session that has been stopped for too long, so a pass that removed one and waited for the next day would
+    /// make the window a function of how many sessions were forgotten. The predicate lives in
+    /// [`expired_before_filter`], so "never an `error` row" is one place and not a filter a caller could forget.
+    pub fn expired_before(&self, cutoff: i64) -> Result<Vec<Session>, RepoError> {
+        self.many(
+            "expired_before",
+            EXPIRED_BEFORE_FILTER,
+            &[
+                &Status::Stopped.as_str() as &dyn ToSql,
+                &cutoff as &dyn ToSql,
+            ],
         )
     }
 

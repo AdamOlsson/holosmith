@@ -383,6 +383,22 @@ pub fn run(args: ServeArgs) -> ExitCode {
                 None
             }
         };
+        // The **stopped-session expiry** (HS-064, spec item 15) is the fourth policy and is wired like the three
+        // above: built before the state is handed to the router, spawned after the reconcile so no row it reads is
+        // half-recovered, and reported by a `debug` line rather than a banner line — the startup contract is the
+        // eight lines `tests/serve_cli.rs` pins byte for byte.
+        //
+        // Unlike the three it has no off switch (`stopped_ttl_days` refuses `0`), and unlike the disk cap its
+        // first pass is **immediate**: the reconcile moves every *live* row to `starting`, and a `stopped` row is
+        // not live, so a pass taken now already sees every candidate. That is what makes a daily policy
+        // observable — backdate a row, restart, read the row's disappearance.
+        tracing::debug!(
+            target: "holosmith::serve",
+            ttl_days = loaded.config.stopped_ttl_days,
+            tick_s = crate::expiry::TICK.as_secs(),
+            "the stopped-session expiry is running"
+        );
+        let expiry = state.expiry().spawn();
         // The **admin socket** (HS-051, spec item 10 step 3): the one way to drain this machine, and the one thing
         // in the build that is deliberately *not* an HTTP route — the API table says "not reachable over HTTP",
         // and a second listener outside `App` is what that sentence means. It is bound here, beside the two
@@ -470,6 +486,11 @@ pub fn run(args: ServeArgs) -> ExitCode {
         if let Some(quota) = quota {
             quota.abort();
         }
+        // And the stopped-session expiry, for the sweeper's reason and with one of its own: a pass that started
+        // must not be allowed to remove a row after the answer promised it was gone — `abort` drops the task at
+        // its next await point, and the transition it already wrote stays either way (the delete flow's own
+        // task, spawned by it, is a separate one and runs to its end).
+        expiry.abort();
         // And the admin socket (HS-051): a drain that started is finished or abandoned with the process, so its
         // accept loop must not hold the runtime open a moment longer than the listeners do. The socket *file* is
         // not removed here — a `serve` that is killed leaves one behind on purpose, and the next boot probes it

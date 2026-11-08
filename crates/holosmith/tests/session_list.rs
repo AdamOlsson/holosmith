@@ -83,8 +83,8 @@ async fn an_empty_machine_answers_no_sessions_and_the_machines_default() {
     let response = fetch(served.addr, "/api/sessions").await;
     let body = listed(&response);
     assert_eq!(
-        response.body, r#"{"sessions":[],"network_default":false}"#,
-        "the empty list is one object with two keys"
+        response.body, r#"{"sessions":[],"network_default":false,"stopped_ttl_days":7}"#,
+        "the empty list is one object with three keys"
     );
     assert_eq!(body["sessions"].as_array().map(Vec::len), Some(0));
     served.finish().await.expect("a clean shutdown");
@@ -127,6 +127,10 @@ async fn a_created_session_is_listed_with_every_column_and_still_starting() {
     // create answered with, which is what the screen renders before any stream frame arrives.
     assert_eq!(row["status"].as_str(), Some("starting"));
     assert_eq!(body["network_default"].as_bool(), Some(false));
+    // HS-064: the machine's stopped-session window, beside the machine's other setting. The default is the
+    // spec's seven days (item 15), and it is a number rather than a sentence because the page draws the
+    // countdown from it and the row's own `stopped_at`.
+    assert_eq!(body["stopped_ttl_days"].as_u64(), Some(7));
     // A list element is a `Session` and nothing else: only the create's answer adds `events`.
     assert!(!row.contains_key("events"), "{}", response.body);
     served.finish().await.expect("a clean shutdown");
@@ -145,6 +149,28 @@ async fn the_lists_network_default_is_the_configs() {
         response.body
     );
     assert_eq!(body["sessions"].as_array().map(Vec::len), Some(0));
+    served.finish().await.expect("a clean shutdown");
+}
+
+#[tokio::test]
+async fn the_lists_retention_window_is_the_configs() {
+    // HS-064's number is the machine's and not the renderer's: a machine that keeps stopped sessions for a
+    // fortnight says so, and the page's countdown follows. A second config, because a test that only ever read
+    // the default could pass over a hard-coded `7`.
+    let dir = TempDir::new("session-list-ttl");
+    let config = Config {
+        stopped_ttl_days: 14,
+        ..Config::default()
+    };
+    let served = Served::start(http::router(state_in(&dir, config)), GRACE).await;
+    let response = fetch(served.addr, "/api/sessions").await;
+    let body = listed(&response);
+    assert_eq!(
+        body["stopped_ttl_days"].as_u64(),
+        Some(14),
+        "the window is the machine's: {}",
+        response.body
+    );
     served.finish().await.expect("a clean shutdown");
 }
 

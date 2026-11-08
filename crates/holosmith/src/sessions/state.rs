@@ -79,11 +79,20 @@ pub enum Trigger {
     /// with no turn is the table's. The word is the reason the row records and the code the event carries —
     /// [`crate::quota::DISK_QUOTA`], and a test keeps the two spellings one.
     DiskQuota,
+    /// The daily job found this session stopped for longer than `stopped_ttl_days` (HS-064, spec item 15).
+    ///
+    /// A row of its own rather than the delete's `any` row, because this caller is not a request: an operator's
+    /// `DELETE` may end a running turn first and is entitled to any row, while a job that destroys a forgotten
+    /// session must do it to *this* one and nothing else. The narrow `from` is what makes a resume that lands
+    /// between the pass's read and the delete a **refusal** — the row left `stopped`, so the table says no —
+    /// rather than a session somebody just brought back being removed under them. It has no reason word: the
+    /// row is `deleting` and then gone, so nothing can read one.
+    Expire,
 }
 
 impl Trigger {
     /// Every trigger, so a test can prove the table and this enum agree.
-    pub const ALL: [Trigger; 16] = [
+    pub const ALL: [Trigger; 17] = [
         Trigger::CreateAccepted,
         Trigger::PiReady,
         Trigger::ProvisioningFailed,
@@ -100,6 +109,7 @@ impl Trigger {
         Trigger::Delete,
         Trigger::CrashRecovery,
         Trigger::DiskQuota,
+        Trigger::Expire,
     ];
 
     /// The table's word for this trigger.
@@ -121,6 +131,7 @@ impl Trigger {
             Self::Delete => "delete",
             Self::CrashRecovery => "crash_recovery",
             Self::DiskQuota => "disk_quota",
+            Self::Expire => "expire",
         }
     }
 }
@@ -264,6 +275,16 @@ pub const TABLE: &[Transition] = &[
     Transition {
         from: FromStates::Any,
         trigger: Trigger::Delete,
+        to: Status::Deleting,
+    },
+    // Item 15's stopped-session expiry (HS-064): the daily job's own move, and the story's amendment the way
+    // `pi_exit` is ADR-0038's and `disk_quota` is ADR-0069's. It admits `stopped` and nothing else, which is
+    // what keeps a job from removing a session a resume brought back in the window between its read and this
+    // write: the delete's own row is `any` because a request is entitled to end a turn first, and a job is
+    // not entitled to anything. `deleting` is where both rows arrive; what follows is the delete flow.
+    Transition {
+        from: FromStates::OneOf(&[Status::Stopped]),
+        trigger: Trigger::Expire,
         to: Status::Deleting,
     },
     Transition {
@@ -491,7 +512,7 @@ mod tests {
 
     #[test]
     fn every_trigger_has_a_word_and_every_word_is_the_tables() {
-        assert_eq!(Trigger::ALL.len(), 16);
+        assert_eq!(Trigger::ALL.len(), 17);
         for trigger in Trigger::ALL {
             assert_eq!(trigger.to_string(), trigger.as_str());
             let rows = TABLE.iter().filter(|row| row.trigger == trigger).count();
@@ -589,6 +610,12 @@ mod tests {
                 Status::Starting,
             ),
             (FromStates::Any, Trigger::Delete, Status::Deleting),
+            // Item 15's stopped-session expiry (HS-064): the job's narrow row, beside the request's `any` one.
+            (
+                FromStates::OneOf(&[Status::Stopped]),
+                Trigger::Expire,
+                Status::Deleting,
+            ),
             (
                 FromStates::OneOf(&[Status::Starting, Status::Idle, Status::Running]),
                 Trigger::CrashRecovery,

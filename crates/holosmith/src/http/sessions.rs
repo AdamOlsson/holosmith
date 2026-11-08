@@ -601,17 +601,24 @@ fn created(session: Session) -> Response {
     response
 }
 
-/// The list's body: every row in the repository's own order, plus the machine setting the
-/// new-session form's Internet-access checkbox defaults from.
+/// The list's body: every row in the repository's own order, plus the two machine settings the screen needs
+/// to draw itself.
 ///
 /// `network_default` rides here rather than on `/api/health` because that payload is pinned at four
 /// keys (ADR-0009) and because the screen needs both answers to draw itself: one round trip, no new
 /// endpoint (ADR-0017). The elements are the `Session` row itself, so the list cannot drift from the
 /// create's answer.
+///
+/// `stopped_ttl_days` is the second such setting, and it is here for exactly the same reason (HS-064, spec item
+/// 15): a stopped row shows the days it has left, the *number* is the machine's rather than the row's, and the
+/// screen has no other way to learn it. It is one number and not an `expires_at` per row, because the row
+/// already carries `stopped_at`: the client adds the two and compares them with its own clock, which is the
+/// only clock that can draw a countdown.
 #[derive(Debug, Serialize)]
 pub struct SessionList {
     sessions: Vec<Session>,
     network_default: bool,
+    stopped_ttl_days: u64,
 }
 
 /// Answer `GET /api/sessions`: 200 and the collection, or the ADR-0008 envelope.
@@ -640,6 +647,7 @@ fn list_locked(state: &AppState) -> Result<SessionList, ApiError> {
     Ok(SessionList {
         sessions,
         network_default: state.config.network_default,
+        stopped_ttl_days: state.config.stopped_ttl_days,
     })
 }
 
@@ -1026,6 +1034,37 @@ pub(crate) async fn deletion(
             current = row;
         }
     }
+    complete_deletion(state, current, Trigger::Delete, force, landed).await
+}
+
+/// The delete flow's **second half**, from a row nobody's turn is running to the spawned removal: the
+/// snapshot, the keep-rule, the transition into `deleting`, and the task.
+///
+/// One function because there are two callers and they must not be two flows (HS-064, spec item 15): the
+/// operator's request ([`deletion`]) and the stopped-session expiry's daily job ([`crate::expiry`]). Everything
+/// that makes a delete safe lives here — the snapshot before anything is removed, the keep-rules
+/// ([`retained_for`], ADR-0052/ADR-0065), the row's removal and its event log in one transaction
+/// ([`Deleter::remove`](crate::deleter::Deleter::remove)) and the closing of the session's streams — so a
+/// second implementation would be the same promises written twice, and the day they disagreed one of them would
+/// be wrong about somebody's work.
+///
+/// `trigger` is the only thing the two callers do not share, and it is the difference between a request and a
+/// policy: [`Trigger::Delete`] admits any row (a request may end a turn first, which `deletion` does before
+/// calling this), while [`Trigger::Expire`] admits `stopped` only — so a row the operator resumed in the window
+/// is refused by the table rather than removed under them (ADR-0016, ADR-0070).
+///
+/// The snapshot's failure is [`ApiError::unsaved_work`] for both: the request answers the `409` that names
+/// `?force=true`, and the job reads the code and treats it as "skip this row and ask again tomorrow".
+/// `force` is the request's query and is always `false` for the job: **a policy must not force**, because
+/// "discard the work" is a decision only an operator can make.
+pub(crate) async fn complete_deletion(
+    state: &AppState,
+    current: Session,
+    trigger: Trigger,
+    force: bool,
+    landed: Option<&str>,
+) -> Result<DeleteAnswer, ApiError> {
+    let id = current.id.as_str();
     if let Err(error) = state.backend.snapshot(&current).await {
         if !force {
             return Err(ApiError::unsaved_work());
@@ -1042,7 +1081,7 @@ pub(crate) async fn deletion(
     // HS-043: *after* the snapshot, because the snapshot is what writes or removes the ref this answers
     // about, and *before* the transition, so a refusal there leaves the row where the operator found it.
     let retained = retained_for(state, &current, landed).await;
-    apply_trigger(state, id, Trigger::Delete, NOT_DELETABLE, "delete").await?;
+    apply_trigger(state, id, trigger, NOT_DELETABLE, trigger.as_str()).await?;
     // `deleting` now, and the removal runs off this task: the answer is the row as the table has
     // just written it, and the refetch only makes sure nothing about it is stale.
     let mut deleting = current.clone();

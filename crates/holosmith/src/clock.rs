@@ -5,7 +5,12 @@
 //! the only place that asks the operating system what time it is: the startup's migration
 //! timestamp (HS-004) and a create's `created_at`/`last_active_at` (HS-008). It also holds [`minutes`],
 //! which asks the clock nothing but is the one spelling of "a config key in minutes" the idle stop
-//! (HS-021) and the turn timeout (HS-022) both read.
+//! (HS-021) and the turn timeout (HS-022) both read, and [`days`], which is the same arithmetic for the one
+//! key measured in days (HS-064's `stopped_ttl_days`).
+
+/// How many seconds a day is, named once: the multiplier [`days`] uses and the one the stopped-session
+/// expiry's cutoff is stated in.
+pub const SECONDS_PER_DAY: u64 = 86_400;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -27,4 +32,15 @@ pub fn unix_now() -> i64 {
 /// the sweeper and the turn runner cannot disagree about what a minute is.
 pub fn minutes(minutes: u64) -> Duration {
     Duration::from_secs(minutes.saturating_mul(60))
+}
+
+/// A config key measured in whole days, as a duration.
+///
+/// Saturating for [`minutes`]'s reason, one factor further out: `stopped_ttl_days` is a `u64` the config layer
+/// accepts without a ceiling, and a wrapped window would turn "keep a stopped session for a week" into
+/// "delete every stopped session the moment it stops" — the opposite of what the operator asked for, and the
+/// one failure mode a policy that destroys rows cannot afford. Saturating makes an absurd number a window
+/// nothing is past instead.
+pub fn days(days: u64) -> Duration {
+    Duration::from_secs(days.saturating_mul(SECONDS_PER_DAY))
 }

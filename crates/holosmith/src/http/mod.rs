@@ -21,3 +21,12 @@ pub use app::{
 };
 pub use guard::Guards;
 pub use streams::KEEP_ALIVE_INTERVAL;
+
+/// The delete flow's second half, named for its one caller outside this module (HS-064).
+///
+/// The forced-session expiry's daily job runs the *same* removal an operator's `DELETE` does — that is the
+/// whole of item 15's "using the delete flow from item 9" — and this is the one name it may reach, rather than
+/// the module being opened to the crate. The alternative (a second implementation beside the policy) is the
+/// thing the story exists to prevent: the keep-rules, the log's removal and the streams' closing would be
+/// written twice.
+pub(crate) use sessions::complete_deletion;
