@@ -151,7 +151,7 @@ Ending a turn early, on request or by timeout. The work is the abort ladder's.
 _Avoid_: Cancel, kill, stop
 
 **Abort ladder**:
-The two-rung routine that ends a turn which will not end itself: rung 1 clears the agent's queue and then asks it to abort; rung 2 is reached when the row is still `running` after the grace, and kills the container and records the reason. Its machine names are the `Ladder` type and its two entry points: `Ladder::climb` (the rungs and then the way back, so rung 2 resumes the session at once) and `Ladder::end_turn` (the rungs alone, which is what a delete climbs, because resuming a session that is being removed would provision a container in order to delete it). The reason rung 2 records is the caller's — `forced_abort` for an abort, `deleted` for a delete, and the turn timeout's and the token budget's own words.
+The two-rung routine that ends a turn which will not end itself: rung 1 clears the agent's queue and then asks it to abort; rung 2 is reached when the row is still `running` after the grace, and kills the container and records the reason. Its machine names are the `Ladder` type and its two entry points: `Ladder::climb` (the rungs and then the way back, so rung 2 resumes the session at once) and `Ladder::end_turn` (the rungs alone, which is what a delete climbs, because resuming a session that is being removed would provision a container in order to delete it). The reason rung 2 records is the caller's — `forced_abort` for an abort, `deleted` for a delete, and the turn timeout's, the token budget's and the **session disk cap**'s own words (`turn_timeout`, `budget_exceeded`, `disk_quota`).
 _Avoid_: Kill path, escape hatch, force stop, cancel chain
 
 **Rung**:
@@ -181,7 +181,7 @@ One of `starting`, `idle`, `running`, `stopped`, `error`, `deleting`. Its machin
 _Avoid_: Status code, phase
 
 **Trigger**:
-The cause of one state change, one per row of the transition table: `create_accepted`, `pi_ready`, `provisioning_failed`, `prompt`, `agent_settled`, `abort_completed`, `abort_ladder`, `evict`, `idle_stop`, `drain`, `resume`, `unexpected_exit`, `pi_exit`, `delete`, `crash_recovery`. Its machine name is the `Trigger` type.
+The cause of one state change, one per row of the transition table: `create_accepted`, `pi_ready`, `provisioning_failed`, `prompt`, `agent_settled`, `abort_completed`, `abort_ladder`, `evict`, `idle_stop`, `drain`, `resume`, `unexpected_exit`, `pi_exit`, `delete`, `crash_recovery`, `disk_quota`. Its machine name is the `Trigger` type.
 _Avoid_: Event, action, cause, command
 
 **Transition**:
@@ -189,7 +189,7 @@ One legal state change: a from, a trigger and a to, held as data in the transiti
 _Avoid_: Move, step, change, migration
 
 **Stopped**:
-A session whose container is gone but whose history, worktree and events are kept, and which can be resumed. Reached from `idle` by `evict`, `idle_stop` and `drain`, from a killed `running` turn by the abort ladder, and from any live state by a **clean exit** — the container's own exit code `0` with no **expected stop** recorded, which is the agent finishing rather than failing; never a dead end, because resume always accepts it. A delete can leave one on its way past: a running turn it had to stop (reason `deleted`) and then would not remove, which is a `stopped` session with nothing wrong with it.
+A session whose container is gone but whose history, worktree and events are kept, and which can be resumed. Reached from `idle` by `evict`, `idle_stop`, `drain` and `disk_quota`, from a killed `running` turn by the abort ladder, and from any live state by a **clean exit** — the container's own exit code `0` with no **expected stop** recorded, which is the agent finishing rather than failing; never a dead end, because resume always accepts it. A delete can leave one on its way past: a running turn it had to stop (reason `deleted`) and then would not remove, which is a `stopped` session with nothing wrong with it.
 _Avoid_: Ended, closed, paused, evicted
 
 **Expected stop**:
@@ -225,8 +225,23 @@ request paths do not ask, which is the same split as a stub `serve` booting on a
 the project's refusals and before the cap, and only starts are refused: nothing on a running turn's path reads
 the disk. Its machine names are `disk::{measure, available_gb, verdict, guarded}`, `http::disk::refusal`,
 `DISK_FLOOR` and `ApiError::disk_floor`.
-_Avoid_: Disk quota, storage limit, free-space check (a **disk floor** is the machine's; `session_disk_soft_gb`
-is a per-session watchdog over the worktree's own size and belongs to spec item 14's next sentence)
+_Avoid_: Disk quota, storage limit, free-space check (a **disk floor** is the machine's; a **session disk cap**
+is one session's)
+
+**Session disk cap**:
+`session_disk_soft_gb` (default 10, and `0` means **off**): how large one session's worktree may grow before
+the machine stops it, so one bad build cannot starve the others. A **watchdog** (`quota::Quota`, spawned by
+`serve` beside the **sweeper**) measures every `running` and `idle` session's worktree with `du -sk` on a
+five-minute tick — the interval is a constant, because it *is* the policy — and when the size is over the cap
+it ends the turn (the **abort ladder**'s second rung, with the reason `disk_quota`), moves the row to
+`stopped` (never `error`), stops the container through the **expected stop**, and writes one `error` event with
+`code: "disk_quota"`, the measured size and the cap. The stop is **resumable after cleanup**: nothing is
+deleted, and the operator raises the cap for a large Rust project rather than fighting it, because `target/`
+and `node_modules/` are inside the worktree and therefore counted. Caches are per session (decision D2, spec
+item 14): nothing a session mounts is shared except the project's `.git`, so a first build is slow and nothing
+else pays. Its machine names are `quota::{Quota, DISK_QUOTA, watchable, measure, over}`, the trigger
+`Trigger::DiskQuota`, the event kind `events::ERROR` and the reason `DISK_QUOTA`.
+_Avoid_: Disk quota (the code's word, not the concept), storage limit, per-session filesystem, hard cap
 
 **Evict**:
 Stopping the least recently active `idle` session so a create can take its slot: the row becomes `stopped` with reason `evicted` and the container is stopped, while history, worktree and events stay. "Least recently active" is `last_active_at`, and a `starting` or `running` session is never a candidate — it is live and its turn is nobody's to end. Its machine names are `Trigger::Evict`, `SessionRepository::oldest_idle` and the reason `EVICTED`.
