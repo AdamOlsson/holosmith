@@ -232,7 +232,7 @@ whole-branch answer naming its files and capped with a marker, the binary file a
 NUL byte in the answer, the large file at most 262144 bytes with a marker naming git's own byte count, and
 `..%2Fetc%2Fpasswd`, `%2Fetc%2Fpasswd` and an unchanged path each a `404 not_found` that leaks nothing,
 then the worktree gone for the summary's `409 no_worktree`; see ADR-0062), the Changes sheet
-(`case_changes_screen`, which is the one case a **UI** story adds and deliberately uses no browser: it boots its
+(`case_changes_screen`, which is one of the two cases a **UI** story adds and deliberately uses no browser: it boots its
 own Docker run over a real repository and the `_ping`-only socket, re-makes the worktree, commits a `Jenkinsfile`,
 and asserts the three things a browser would otherwise be the only witness of — `GET /sessions/<id>` is this
 tree's `web/dist/index.html` byte for byte, the **served** bundle (the `<script src>` in that page, fetched from the
@@ -464,6 +464,22 @@ the **disposition table** at the far end (`/gone/` answers `410` and its row dis
 its row stays). It prints one `SKIP` line and passes without `openssl`, `node` or `python3`. What it cannot reach is
 why the long-turn and `error` triggers are `tests/push.rs`'s: the stub's turn is a fixed 2.4-second script with no
 failure mode over HTTP, and `LONG_TURN` is a constant twenty seconds with no key to shorten it.
+
+…and since HS-067, **the installable app**: `case_pwa` is the other case a **UI** story adds without a browser, and it
+measures what a browser would otherwise be the only witness of, as bytes. It boots the artifact on its own data root
+with a hand-written VAPID pair, so it needs **no `openssl`, `node` or `python3` and prints no `SKIP` line at all** — a
+skip here would fire exactly when the feature was deleted. It asserts `GET /` is this tree's `web/dist/index.html`
+byte for byte and names the manifest and iOS's `apple-touch-icon`; `GET /manifest.webmanifest` is this tree's file
+served as `application/manifest+json` with `display: standalone`, `start_url`/`scope` `/`, both `any` sizes and the
+`maskable` icon; `GET /sw.js` is `web/dist/sw.js` byte for byte, served as JavaScript, **not** the shell (a `/sw.js`
+answered by the fallback is a registration every browser refuses, silently) and carries the four `kind` sentences, the
+three events and the sixteen-hex id rule; each of the four icons is its file's bytes as `image/png`; `GET /settings`
+is that same shell (the third screen needs no route — ADR-0007's fallback answers it); the **served bundle** carries
+the screen's ten element ids, the iOS sentence, the per-machine sentence and two state sentences, each needle quoted
+as an assignment so a deleted container cannot be covered by a sibling's id; and `GET /api/health` carries the pair's
+`public_key` **byte for byte** and the private half nowhere, then `null` once `<data>/secrets/vapid.toml` is removed —
+the last measurement being the one that proves a browser could really subscribe. What it cannot see is the tap, the
+notification and the install itself: those are `web/test/push.test.ts`'s 25 rules and the demo's (ADR-0072).
 
 …and since HS-047, **`server deploy`**: `case_server_deploy` has two halves that skip independently, because the
 bugs it exists to catch are of two kinds. The **offline** half needs `python3` and nothing else: a `_ping` socket
