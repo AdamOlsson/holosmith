@@ -598,11 +598,16 @@ impl ApiError {
 
     /// What a create or a resume answers on a data root below `min_free_gb` (HS-062, spec item 14).
     ///
-    /// The **message is this request's own** and it carries both numbers, which is the one place in this
-    /// envelope where the sentence is not a literal: the boot's sentence about the same machine names the same
-    /// two numbers and offers the boot's fix ("install coreutils", "there is no data root yet"), while an
-    /// operator who tapped *create* needs to know how much space to free and nothing about a startup check
-    /// (ADR-0008's "a message must describe its own request", ADR-0068).
+    /// The sentence carries both numbers, which is the one place in this envelope where the message is not a
+    /// literal: the boot's sentence about the same machine names the same two numbers and offers the boot's fix
+    /// ("install coreutils", "there is no data root yet"), while an operator who tapped a button needs to know how
+    /// much space to free and nothing about a startup check (ADR-0008, ADR-0068).
+    ///
+    /// It is **shared by both requests**, which is why it says "this machine starts nothing" rather than "no new
+    /// session": a create would make another one and a resume would bring back an existing one, so anything
+    /// naming a *new* session would be describing only half the callers. `cap_reached` has two sentences because
+    /// its two requests have two different fixes; item 14 gives a create and a resume one fix, so it gets one
+    /// sentence (ADR-0068 D5).
     ///
     /// `507` rather than `503`: the machine is able to serve everything else, and the thing that is missing is
     /// storage — the status item 14 names.
@@ -612,8 +617,8 @@ impl ApiError {
             body: ErrorBody {
                 code: DISK_FLOOR,
                 message: Cow::Owned(format!(
-                    "{} has {available_gb} GB free and min_free_gb is {min_free_gb}, so no new session is \
-                     started: free some space, or lower min_free_gb if this machine really has room for fewer \
+                    "{} has {available_gb} GB free and min_free_gb is {min_free_gb}, so this machine starts \
+                     nothing: free some space, or lower min_free_gb if this machine really has room for fewer \
                      sessions",
                     data_root.display()
                 )),

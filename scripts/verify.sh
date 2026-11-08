@@ -7046,7 +7046,8 @@ PY
 # `backend = "docker"` for the predicate itself: `disk::guarded` asks the *run's* backend, and a stub run is not
 # measured at all. The daemon is `fake_docker_ping`, so nothing here can start a container.
 #
-# It leaves behind only its scratch root and the socket pid it kills.
+# It takes back what it made — its scratch root, its stand-in, its socket — and puts the shared boot back, like
+# every other case that reboots the fixture.
 case_disk_floor() {
   local name=case_disk_floor root="$WORK/disk-floor" body id response status line saved_path
   local healthy=500 short=5
@@ -7180,11 +7181,15 @@ case_disk_floor() {
   esac
 
   export PATH="$saved_path"
-  stop_serve
   kill "$socket_pid" 2>/dev/null || true
   wait "$socket_pid" 2>/dev/null || true
   socket_pid=""
   rm -rf "$root"
+  # The shared boot comes back: the cases after this one talk to `$port` and to `$control_origin`, and a case
+  # that stopped it and left `serve_pid` empty would make the next unguarded `stop_serve` a hard failure
+  # (`case_delete_session`'s idiom, and `case_status` says why).
+  stop_serve
+  start_serve
 }
 
 # The two lines a POSIX `df -Pk` prints, with `gb` gigabytes free. `%%` because it is a printf format.

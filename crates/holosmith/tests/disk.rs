@@ -114,7 +114,7 @@ fn floored_state(dir: &TempDir, df: PathBuf, min_free_gb: u64) -> AppState {
         StubBackend::new(Duration::from_millis(50)),
     );
     state.runtime = Runtime::started(Backend::Docker);
-    state.preflight = Tools {
+    state.tools = Tools {
         git: PathBuf::from("git"),
         df,
     };
@@ -259,6 +259,19 @@ async fn the_boot_and_the_request_paths_read_one_number() {
         "the request paths would read a second number"
     );
     assert_eq!(disk::verdict(5, FLOOR), Verdict::Short);
+
+    // And the number a *handler* computes is the same one, which is the half a direct `measure` call cannot see:
+    // a refusal with its own parser and its own divisor would pass everything above and fail here.
+    let mut state = with_stub(state_in(&dir, config), fast_stub());
+    state.runtime = Runtime::started(Backend::Docker);
+    state.tools = Tools {
+        git: PathBuf::from("git"),
+        df,
+    };
+    let served = Served::start(http::router(state.clone()), GRACE).await;
+    let refused = post_create(served.addr, "disk-floor-agree").await;
+    assert_floor(&refused, 5, &state.config.data_root);
+    served.finish().await.expect("a clean shutdown");
 }
 
 #[tokio::test]
@@ -415,7 +428,7 @@ async fn a_stub_run_is_not_measured_at_all() {
         ..Config::default()
     };
     let mut state = with_stub(state_in(&dir, config), fast_stub());
-    state.preflight = Tools {
+    state.tools = Tools {
         git: PathBuf::from("git"),
         df,
     };
@@ -424,6 +437,60 @@ async fn a_stub_run_is_not_measured_at_all() {
     assert_eq!(state.config.role, Role::Both);
     let served = Served::start(http::router(state.clone()), GRACE).await;
     let response = post_create(served.addr, "disk-floor-stub").await;
+    assert_eq!(response.status, 202, "{}", response.body);
+    served.finish().await.expect("a clean shutdown");
+}
+
+#[tokio::test]
+async fn a_create_at_the_cap_refuses_the_floor_instead_of_evicting() {
+    let _one = one_at_a_time().await;
+    // `create_locked` raises its refusal between the idempotency key and the cap, so a create that cannot run
+    // answers its own refusal rather than stopping somebody else's session (HS-026's rule, ADR-0068 D1). One live
+    // session at a cap of one is what makes that order observable: raised after the cap, this create would evict
+    // the idle session on its way to saying no.
+    let dir = TempDir::new("disk-cap");
+    let (df, answer_path) = stand_in(&dir, 500);
+    let mut state = floored_state(&dir, df, FLOOR);
+    state.config.max_live_sessions = 1;
+    let served = Served::start(http::router(state.clone()), GRACE).await;
+
+    let id = created_id(&post_create(served.addr, "disk-floor-cap").await);
+    wait_status(&state, &id, Status::Idle).await;
+
+    plant(&answer_path, 5);
+    let refused = post_create(served.addr, "disk-floor-cap-2").await;
+    assert_floor(&refused, 5, &state.config.data_root);
+    assert_eq!(
+        row(&state, &id).status,
+        Status::Idle,
+        "the floor evicted the idle session to make room for work that will not happen"
+    );
+    assert_eq!(session_count(&state), 1);
+    served.finish().await.expect("a clean shutdown");
+}
+
+#[tokio::test]
+async fn a_floor_of_zero_does_not_need_a_df_at_all() {
+    let _one = one_at_a_time().await;
+    // ADR-0068 D4: `min_free_gb = 0` is *no floor*, so there is nothing to compare and nothing to measure — which
+    // has to include the reader itself. Measuring first and then comparing would answer `500 internal` for a
+    // machine with no `df` over a floor it does not have.
+    let dir = TempDir::new("disk-zero-no-df");
+    let data_root = dir.path().join("data");
+    std::fs::create_dir_all(&data_root).expect("the data root is creatable");
+    let config = Config {
+        data_root,
+        min_free_gb: 0,
+        ..Config::default()
+    };
+    let mut state = with_stub(state_in(&dir, config), fast_stub());
+    state.runtime = Runtime::started(Backend::Docker);
+    state.tools = Tools {
+        git: PathBuf::from("git"),
+        df: PathBuf::from("/nonexistent-holosmith-df"),
+    };
+    let served = Served::start(http::router(state.clone()), GRACE).await;
+    let response = post_create(served.addr, "disk-floor-zero-no-df").await;
     assert_eq!(response.status, 202, "{}", response.body);
     served.finish().await.expect("a clean shutdown");
 }

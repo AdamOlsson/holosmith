@@ -4,6 +4,7 @@
 
 pub mod app;
 mod changes;
+mod disk;
 pub mod error;
 pub mod guard;
 pub mod health;

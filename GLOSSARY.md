@@ -219,9 +219,12 @@ the comparison in `disk::verdict` — is read by three places: `serve`'s **prefl
 `doctor --quick`, which prints the same finding; and the two request paths that *start* work,
 `POST /api/sessions` and `POST /api/sessions/{id}/resume`, which answer `507 disk_floor` below it with a
 sentence naming both numbers and the fix. Only a run that provisions containers is measured at all
-(`disk::guarded`: Docker, and not a `hub`), the refusal is asked before the project's refusals and before the
-cap, and only new starts are refused — nothing on a running turn's path reads the disk. Its machine names are
-`disk::{measure, available_gb, verdict, guarded}`, `DISK_FLOOR` and `ApiError::disk_floor`.
+(`disk::guarded`: Docker, and not a `hub`) — so on a stub run `doctor` still reports the `disk` line and the
+request paths do not ask, which is the same split as a stub `serve` booting on a full disk — and `0` means
+*nothing is measured*, not "measured and passed", so a floor of `0` needs no `df`. The refusal is asked before
+the project's refusals and before the cap, and only starts are refused: nothing on a running turn's path reads
+the disk. Its machine names are `disk::{measure, available_gb, verdict, guarded}`, `http::disk::refusal`,
+`DISK_FLOOR` and `ApiError::disk_floor`.
 _Avoid_: Disk quota, storage limit, free-space check (a **disk floor** is the machine's; `session_disk_soft_gb`
 is a per-session watchdog over the worktree's own size and belongs to spec item 14's next sentence)
 

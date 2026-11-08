@@ -201,17 +201,24 @@ mod tests {
         assert!(!guarded(Backend::Docker, Role::Hub));
     }
 
-    /// The files allowed to name the measurement outside this one.
+    /// The files allowed to name the measurement outside this one: the measurement itself, the boot's check, and
+    /// the request-path refusal.
+    ///
+    /// `http/disk.rs` and not `http/sessions.rs` — the file that holds `prompt`, `abort` and `steer` beside the
+    /// two starts must stay *checked*, or the guard would exempt exactly where a disk read on a turn's path would
+    /// be added. That is why the refusal has a module of its own (PER-94's review).
     const THE_MEASURED_HALF: &str = "disk.rs";
     const THE_BOOT: &str = "preflight.rs";
-    const THE_REQUEST_PATHS: &str = "http/sessions.rs";
+    const THE_REQUEST_PATHS: &str = "http/disk.rs";
 
     /// Every file under `root` that names `disk::measure` outside the three allowed ones, as `<file>:<line>`.
     ///
     /// One function, so the rule and any planted test share the matcher. It is what makes item 14's "running
     /// turns are not interrupted; only new starts are refused" a fact about the tree rather than a claim: the
-    /// floor has exactly the callers that *start* work, and a turn, a ladder, a sweeper or a provisioner that
-    /// grew a disk read would fail here. Both callers spell it `crate::disk::measure`, so the token is stable.
+    /// floor has exactly the callers that *start* work, and a turn, a ladder, a sweeper, a provisioner — or a
+    /// handler in `http/sessions.rs` — that grew a disk read would fail here. Both callers spell it
+    /// `crate::disk::measure`, so the token is stable (and a hand-rolled `Command::new("df")` elsewhere is what
+    /// the boot's and the request path's *sentences* are for: `tests/disk.rs` compares their numbers).
     fn offenders_under(root: &Path) -> Vec<String> {
         let mut offenders = Vec::new();
         for (file, text) in crate::sql::guard::sources_under(root) {

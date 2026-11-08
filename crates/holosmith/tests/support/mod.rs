@@ -102,7 +102,7 @@ pub fn state() -> AppState {
         backend: Backends::Stub(slow_stub()),
         drain: Control::new(),
         merges: Merges::new(),
-        preflight: preflight::Tools::default(),
+        tools: preflight::Tools::default(),
     }
 }
 
@@ -151,7 +151,7 @@ pub fn state_with_writer(dir: &TempDir, config: Config, options: WriterOptions) 
         backend: Backends::Stub(slow_stub()),
         drain: Control::new(),
         merges: Merges::new(),
-        preflight: preflight::Tools::default(),
+        tools: preflight::Tools::default(),
     }
 }
 

@@ -279,7 +279,7 @@ pub async fn create(
     // process to answer itself. In the same order the resume asks it, and for the same reason.
     let refusal = if state.drain.is_draining() {
         Some(ApiError::draining())
-    } else if let Some(floor) = disk_floor(state).await {
+    } else if let Some(floor) = crate::http::disk::refusal(state).await {
         Some(floor)
     } else {
         refuse_project(state, &parsed.project).await
@@ -352,42 +352,6 @@ async fn back_up(state: &AppState, project: &str) {
             %error,
             "the backup task did not run; the session is created anyway"
         ),
-    }
-}
-
-/// The disk floor, as a refusal: `None` when this run may start work (or is not measured at all).
-///
-/// Spec item 14: "session creation and resume fail with 507 below `min_free_gb`". Both callers ask this before
-/// they change anything — the create before its project's refusals, the resume before the project's read and the
-/// cap — so a full machine is answered as a *machine* fact, no `git` process runs, and nothing is created to
-/// clean up (HS-062, ADR-0068).
-///
-/// The measurement is [`crate::disk::measure`], the boot's and `doctor`'s reader, on a blocking task for the
-/// reason every subprocess on a request path is. Only `crate::disk::guarded` runs are measured: a stub session
-/// starts no container and fills no filesystem, which is the preflight's own rule one level down.
-///
-/// A measurement that **could not be made** is not a 507 — there is no number to report and "free some space"
-/// would be a lie about a machine nobody measured — so it is the envelope's 500, logged with its reason. On this
-/// path that means the machine changed under a server that passed the same check at boot.
-async fn disk_floor(state: &AppState) -> Option<ApiError> {
-    if !crate::disk::guarded(state.runtime.backend, state.config.role) {
-        return None;
-    }
-    let df = state.preflight.df.clone();
-    let root = state.config.data_root.clone();
-    let measured = tokio::task::spawn_blocking(move || crate::disk::measure(&df, &root)).await;
-    let available_gb = match measured {
-        Ok(Ok(available_gb)) => available_gb,
-        Ok(Err(error)) => return Some(internal("disk", error)),
-        Err(error) => return Some(internal("disk", error)),
-    };
-    match crate::disk::verdict(available_gb, state.config.min_free_gb) {
-        crate::disk::Verdict::Enough => None,
-        crate::disk::Verdict::Short => Some(ApiError::disk_floor(
-            available_gb,
-            state.config.min_free_gb,
-            &state.config.data_root,
-        )),
     }
 }
 
@@ -908,7 +872,7 @@ pub async fn resume(state: &AppState, id: &str) -> Response {
     // bringing a stopped session back is *starting* work, a full machine needs no `git` process to say so, and
     // when the cap and the floor both hold the floor is the answer — a slot is not worth freeing if there is no
     // space to write in. Nothing has moved at this point, so the row is still resumable once space is freed.
-    if let Some(floor) = disk_floor(state).await {
+    if let Some(floor) = crate::http::disk::refusal(state).await {
         return floor.into_response();
     }
     // The project's refusals are read for a resume too (HS-026): a session created while its project was

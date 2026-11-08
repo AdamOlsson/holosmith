@@ -85,7 +85,7 @@ pub struct AppState {
     /// state's for the reason [`Tools`](crate::preflight::Tools) is a parameter at all — this crate denies
     /// `unsafe`, so a test cannot `set_var` a `PATH`, and a shim it wrote is the only way to put a machine's
     /// answer under a test's control. The production value is the program's name, which `PATH` resolves.
-    pub preflight: crate::preflight::Tools,
+    pub tools: crate::preflight::Tools,
 }
 
 impl AppState {
