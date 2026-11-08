@@ -106,6 +106,10 @@ assertions=0
 # the orphan the trap exists to prevent.
 docker_session_id=""
 docker_second_session_id=""
+# A case that runs a **process of its own** sets this, so `fail` — which exits the script, leaving the EXIT trap as
+# the only hook — takes it down too (HS-066's push receiver is the first: a `node` listener on a port and a data
+# root, which outlived two failing runs of `case_push` before the trap learned about it).
+extra_pid=""
 
 cleanup() {
   local status=$?
@@ -123,6 +127,12 @@ cleanup() {
     kill "$holder_pid" 2>/dev/null || true
     wait "$holder_pid" 2>/dev/null || true
   fi
+  # And a case's own process, for the same reason (`case_push`'s receiver).
+  if [ -n "$extra_pid" ] && kill -0 "$extra_pid" 2>/dev/null; then
+    kill "$extra_pid" 2>/dev/null || true
+    wait "$extra_pid" 2>/dev/null || true
+  fi
+  extra_pid=""
   local id
   for id in ${docker_session_id:-} ${docker_second_session_id:-}; do
     docker rm --force "s_$id" >/dev/null 2>&1 || true
@@ -4247,6 +4257,9 @@ JS
     "$vapid_public" "$subscription_private_hex" "$subscription_public_hex" "$rotated_hex" \
     >"$WORK/push-receiver.out" 2>"$WORK/push-receiver.err" &
   local receiver_pid=$!
+  # Registered with the trap as well as held here: a `fail` below exits the script, and this is the only other
+  # thing that would leave a `node` listener behind on a port the next run could bind.
+  extra_pid=$receiver_pid
   for _ in $(seq 1 100); do
     port_line="$(sed -n 's/^PORT \([0-9]*\)$/\1/p' "$WORK/push-receiver.out" | sed -n '1p')"
     [ -n "$port_line" ] && break
@@ -4528,6 +4541,7 @@ PY
   # `stop_serve` finds a pid (`case_disk_quota`'s idiom).
   kill "$receiver_pid" 2>/dev/null || true
   wait "$receiver_pid" 2>/dev/null || true
+  extra_pid=""
   rm -rf "$root"
   stop_serve
   start_serve
