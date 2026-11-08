@@ -9922,14 +9922,18 @@ command -v cargo >/dev/null 2>&1 ||
 run_phase fmt cargo fmt --check
 run_phase clippy cargo clippy --all-targets -- -D warnings
 # The embedded-app assertions in `web.rs` carry a `HOLOSMITH_REQUIRE_WEB=1` arm — a placeholder build is legal
-# (ADR-0007), so the tests cannot assert a real app unless a build says one exists. `scripts/build.sh` exports it
-# around `cargo build`; exporting it here as well, when a build is present, is what makes those assertions bite in
-# the gate rather than pass vacuously (`case_pwa` is the measurement that matters, but a test that cannot fail is
-# worse than no test — RESUME §6).
+# (ADR-0007), so the tests cannot assert a real app unless a build says one exists. Setting it for this one phase,
+# when a build is present, is what makes those assertions bite in the gate rather than pass vacuously (`case_pwa` is
+# the measurement that matters, but a test that cannot fail is worse than no test — RESUME §6).
+#
+# It is **scoped to this invocation** rather than exported: `scripts/check-embed.sh`'s second case builds with
+# `web/dist` removed and *requires* the placeholder, so an exported variable would fail the `embed` phase. The gate
+# found that, which is the reason this comment exists.
 if [ -f web/dist/index.html ]; then
-  export HOLOSMITH_REQUIRE_WEB=1
+  HOLOSMITH_REQUIRE_WEB=1 run_phase test cargo test
+else
+  run_phase test cargo test
 fi
-run_phase test cargo test
 # HS-075: the expand/contract rule in one named command. The destructive side is refused where a migration is
 # written (`schema::contract_violations`, which `cargo test` already runs); this is the other half — the previous
 # release's schema checked against this build's — given a phase of its own so a migration author sees the rule
