@@ -83,6 +83,13 @@ items were a stale vocabulary list and a test whose name promised more than it p
 destructive path, which the reviewer traced end to end and confirmed (one code path for both callers, the
 snapshot before any row write, `force` a literal `false`, and the `stopped`-only table row atomic with the write).
 
+**One thing the gate caught that the review did not:** the in-crate interleaving test S2 asked for reached its
+states with the repository's raw `set_status`, and `sessions::state::tests::no_status_write_outside_the_one_function`
+— the walk over `src/**` — failed the `test` phase with `["expiry.rs:309: set_status", "expiry.rs:328: set_status"]`.
+The guard is right and the test was wrong: it now drives `Transitioner::apply` (`starting → idle → stopped`), which
+is the only way a state changes in this crate and is why the landmine "an in-crate test cannot call `set_status`"
+is now in `docs/notes.md`.
+
 **Mutation checks run in this session, and reverted before the gate run:** widening `Trigger::Expire` to
 `FromStates::Any` (turns `the_expirys_row_admits_stopped_and_nothing_else` red), `Math.ceil` → `Math.floor` in
 `expiryText` (turns the node test red), and deleting the pass's status re-read (turns the new in-crate

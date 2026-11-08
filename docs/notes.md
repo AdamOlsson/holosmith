@@ -2294,6 +2294,12 @@ it rather than adding a caveat beside it.
   which is what makes deleting the re-read go red, where the row's survival alone would not (the table refuses
   the move either way). A guard whose only effect is "we did not do expensive work on a row we would refuse"
   needs an assertion about the work, not about the row.
+- **An in-crate test cannot call `set_status`.** `no_status_write_outside_the_one_function` walks `src/**` and
+  allows the raw write only in `sessions/repository.rs` and `sessions/state.rs`; integration tests are exempt
+  because the walk does not read `tests/`, but a `#[cfg(test)]` module inside a policy is not. So a test beside a
+  policy drives the table (`Transitioner::apply`) to reach the state it needs — which is also the honest route,
+  and it costs the backdating an integration test can do with `set_status`'s `now` parameter. This one was found
+  by the gate, after the review, in a fix the review asked for.
 - **The removal is the delete flow's own task, so "the row is gone" is a fact that arrives after the pass.**
   `complete_deletion` spawns `Deleter::remove` and answers; a test that asserted the row's absence straight
   after `Expiry::sweep` is a race (it failed on the first run of `tests/expiry.rs`). Wait for it
