@@ -672,7 +672,8 @@ fn semantic_problems(
                 format!(
                     "{name:?} must be a plain branch name: no whitespace or control \
                      characters, no \"..\", no \"@{{\", not \"@\", no leading \"-\", none of \
-                     ~^:?*[\\, no trailing \"/\" or \".\""
+                     ~^:?*[\\, no trailing \"/\" or \".\", no empty component, none beginning \
+                     with \".\" and none ending in \".lock\""
                 ),
             );
         }
@@ -910,6 +911,13 @@ pub(crate) fn is_ref_name(name: &str) -> bool {
                 || character.is_control()
                 || matches!(character, '~' | '^' | ':' | '?' | '*' | '[' | '\\')
         })
+        // Git's **component** rules, which the checks above do not reach: no empty component (so `a//b` and a
+        // leading `/` are out), no component beginning with `.`, and none ending in `.lock`. HS-057 measured
+        // them: `git push` refuses `refs/heads/a.lock`, `.hidden` and `a/.b` with `fatal: invalid refspec`
+        // before it contacts a remote, and `git check-ref-format` refuses exactly those.
+        && !name
+            .split('/')
+            .any(|component| component.is_empty() || component.starts_with('.') || component.ends_with(".lock"))
 }
 
 /// A remote name `publish` may push to (item 12).
@@ -1501,8 +1509,20 @@ allow = ["crates.io"]
     fn merge_targets_must_be_plain_branch_names() {
         let message = "must be a plain branch name: no whitespace or control characters, no \"..\", \
                        no \"@{\", not \"@\", no leading \"-\", none of ~^:?*[\\, no trailing \
-                       \"/\" or \".\"";
-        for name in ["a..b", "-bad", "a/", "@", "a.", "@{upstream}"] {
+                       \"/\" or \".\", no empty component, none beginning with \".\" and none \
+                       ending in \".lock\"";
+        for name in [
+            "a..b",
+            "-bad",
+            "a/",
+            "@",
+            "a.",
+            "@{upstream}",
+            "a//b",
+            "a/.b",
+            "a.lock",
+            "a/b.lock",
+        ] {
             assert_eq!(
                 problems_of(&format!("[merge]\ntargets = [\"{name}\"]\n")),
                 format!(

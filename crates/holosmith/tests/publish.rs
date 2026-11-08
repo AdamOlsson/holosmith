@@ -623,9 +623,10 @@ async fn confirm_is_required_and_false_pushes_nothing() {
 
 #[tokio::test]
 async fn the_state_refusals_are_this_route_s_sentences() {
-    // Three of the changes view's four `no_worktree` facts, at the wire, with **publish**'s words: no recorded
-    // worktree, a worktree directory that is gone, and a project repository that is gone. The code is shared and
-    // the sentences are not — a publish that said "there is nothing to review" would describe another request.
+    // All four of the changes view's `no_worktree` facts, at the wire, with **publish**'s words: no recorded
+    // worktree, a worktree directory that is gone, the branch gone, and a project repository that is gone. The
+    // code is shared and the sentences are not — a publish that said "there is nothing to review" would describe
+    // another request.
     let fresh = Fixture::new("publish-no-base");
     let id = {
         let database = fresh
@@ -692,6 +693,39 @@ async fn the_state_refusals_are_this_route_s_sentences() {
         "{}",
         response.body
     );
+    served.finish().await.expect("the server stops");
+
+    // The fourth fact: the branch itself is gone while the directory and its registration are intact — what a
+    // `git update-ref -d` (or a hand-run `branch -D` in another checkout) leaves behind. Without this arm the
+    // `NoBranch` sentence is a line nothing measures, which `docs/notes.md` records as the merge's own lesson.
+    let gone_branch = Fixture::new("publish-branch-gone");
+    gone_branch.commit("a.txt", b"a\n", "the session's change");
+    git(
+        &gone_branch.repo,
+        &[
+            "update-ref",
+            "-d",
+            &format!("refs/heads/{}", gone_branch.branch()),
+        ],
+    );
+    let served = gone_branch.served().await;
+    let response = post_publish(
+        served.addr,
+        &gone_branch.id,
+        r#"{"remote":"origin","confirm":true}"#,
+    )
+    .await;
+    assert_eq!(response.status, 409, "{}", response.body);
+    assert_eq!(envelope(&response)["code"], "no_worktree");
+    assert!(
+        envelope(&response)["message"]
+            .as_str()
+            .expect("a sentence")
+            .contains("the session's branch is gone"),
+        "{}",
+        response.body
+    );
+    assert!(gone_branch.remote_heads().is_empty());
     served.finish().await.expect("the server stops");
 
     let missing = Fixture::new("publish-repository-gone");

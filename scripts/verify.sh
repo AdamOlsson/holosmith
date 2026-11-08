@@ -6193,7 +6193,7 @@ case_merge_guards() {
 # so the target refusal is reachable and distinct from the protected names — with the default list, `main` is
 # protected first and the second fact could not be measured at all.
 case_publish() {
-  local name=case_publish response body id base wt tip first refs_before
+  local name=case_publish response body id base wt tip first refs_before pushurl refusals arm
   # Two statements, not one, for the reason `case_changes` gives: in a single `local` every right-hand side
   # expands before either assignment, so `repo="$projects/holosmith"` would read an unset `projects` under
   # `set -u`.
@@ -6374,7 +6374,32 @@ case_publish() {
     "$(git -C "$bare" for-each-ref --format='%(refname) %(objectname)' refs/heads | sort)"
   check "${name}_moved_on/ref" "$tip" "$(git -C "$bare" rev-parse "refs/heads/agent/$id")"
 
-  # 5. **The disabled endpoint is the process's config**, so it is a second boot over the same data root: the key
+  # 5. **The push is the host's own git, with the host's environment.** The server is booted with git's
+  # `GIT_CONFIG_*` pair naming a `remote.origin.pushurl` for a **second** bare repository, so a push that inherits
+  # the environment lands there and not at the URL the repository itself names. This is the arm that makes the
+  # inheritance a measurement: `.env_clear()` on the push's command is the one change that would silently destroy
+  # "the host's own git credentials" while every other arm stayed green (the other pushes go to a local path that
+  # needs no credential at all), and under it this ref would appear in `$bare` and not in `$pushurl` — which is
+  # exactly the pair asserted here.
+  stop_serve
+  pushurl="$WORK/publish-pushurl.git"
+  mkdir -p "$pushurl" || fail "$name/mkdir" "$pushurl is not creatable"
+  git -C "$pushurl" init --quiet --bare || fail "$name/git" "git init --bare did not work in $pushurl"
+  refs_before="$(git -C "$bare" for-each-ref --format='%(refname) %(objectname)' refs/heads | sort)"
+  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.pushurl GIT_CONFIG_VALUE_0="$pushurl" \
+    start_serve "$config" "$data"
+  fetch_body "${name}_environment" POST "/api/sessions/$id/publish" \
+    '{"remote":"origin","branch":"env/one","confirm":true}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_environment/no_answer" "the environment publish did not answer"
+  response="$(answer "${name}_environment")"
+  expect_status "${name}_environment" "$response" 200
+  check "${name}_environment/ref" "$first" "$(git -C "$pushurl" rev-parse refs/heads/env/one)"
+  check "${name}_environment/not_the_url" "$refs_before" \
+    "$(git -C "$bare" for-each-ref --format='%(refname) %(objectname)' refs/heads | sort)"
+
+  # 6. **The disabled endpoint is the process's config**, so it is a third boot over the same data root: the key
   # names no remote, and the answer is `403 publish_disabled` — for the row that exists and for an id the table
   # does not hold, because an endpoint the config turned off answers before it reads a session.
   stop_serve

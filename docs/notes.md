@@ -2146,6 +2146,20 @@ it rather than adding a caveat beside it.
   `target_not_pushable` could never be reached — `case_publish` sets `targets = ["trunk"]` and asserts both orders,
   and `tests/publish.rs` asserts the precedence separately (`main` on a machine whose target is `main` is
   `protected_branch`).
+- **`config::is_ref_name` was not git's refname alphabet, and `git push` is where that shows.** It checked the
+  whole-name rules and the forbidden characters but not git's **component** rules, so `a.lock`, `.hidden` and
+  `a/.b` passed it and reached `git push`, which refuses each with `fatal: invalid refspec` **before** contacting
+  a remote (measured) — a `500` for the client's mistake, with a sentence about the remote. `git check-ref-format
+  refs/heads/<name>` is the oracle: it also refuses `a//b` (an empty component) and allows `a./b`, `x.locked` and
+  `a/b.`'s *component* (only the whole ref may not end with a dot, which the predicate already checked). The
+  predicate now refuses an empty component, one beginning with `.`, and one ending in `.lock`; because it is the
+  same predicate `merge.targets` is validated with, that config got stricter in the same commit.
+- **An inherited environment is not measurable by `Command::get_envs`.** That reports only what the command sets
+  *explicitly*, so `.env_clear()` would keep the unit test green while destroying "the host's own git
+  credentials". The measurement is a boot with git's own `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/
+  `GIT_CONFIG_VALUE_0` naming a `remote.origin.pushurl` for a second bare repository: a push that inherited the
+  environment lands there, and one that did not lands at the URL the repository names. `case_publish` asserts
+  both halves (the ref in the pushurl repository, the original's refs unchanged).
 - **The disabled endpoint is the process's config, so its gate arm is a second boot**, not a request against the
   first: `[publish] remotes = []` in a rewritten config, `start_serve` again over the same data root, and the
   `403` asserted for the existing row *and* for an id the table does not hold (the claim that it is answered

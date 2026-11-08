@@ -231,8 +231,11 @@ fn parse_body(bytes: &[u8]) -> Result<Parsed, ApiError> {
         Some(_) => return Err(ApiError::bad_publish_body()),
     };
     // The machine's one alphabet for a branch name (`config::is_ref_name`, which `merge.targets` is validated
-    // with). A name git would refuse is the body's shape, not a state and not a machine problem: there is no
-    // list to ask about a destination, so the alphabet *is* the validation.
+    // with, and which HS-057 extended with git's component rules — no empty component, none beginning with `.`,
+    // none ending in `.lock`). A name git's own `check-ref-format` refuses is the body's shape, not a state and
+    // not a machine problem: without the alphabet the same name would reach `git push`, which refuses the
+    // refspec with `fatal: invalid refspec` **before** contacting a remote — a `500` for what is the client's
+    // mistake. There is no list to ask about a destination, so the alphabet *is* the validation.
     if let Some(branch) = &branch
         && !is_ref_name(branch)
     {
@@ -393,6 +396,12 @@ mod tests {
             r#"{"remote":"origin","branch":"a..b","confirm":true}"#,
             r#"{"remote":"origin","branch":"a b","confirm":true}"#,
             r#"{"remote":"origin","branch":"release/x\n","confirm":true}"#,
+            // git's component rules, measured: `git push` refuses each of these with `fatal: invalid refspec`
+            // before it contacts the remote, so they are the body's shape rather than a push's refusal.
+            r#"{"remote":"origin","branch":"a.lock","confirm":true}"#,
+            r#"{"remote":"origin","branch":".hidden","confirm":true}"#,
+            r#"{"remote":"origin","branch":"a/.b","confirm":true}"#,
+            r#"{"remote":"origin","branch":"a//b","confirm":true}"#,
             r#"{"remote":"origin","branch":3,"confirm":true}"#,
         ] {
             let error = parse(text).expect_err(text);

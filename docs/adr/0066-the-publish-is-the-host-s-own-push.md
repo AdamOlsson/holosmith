@@ -138,7 +138,13 @@ take away the store — credential helpers, `~/.git-credentials` and an `ssh-age
 missing credential becomes git's own error, which is a `500` with its words.
 
 A unit test pins the whole environment the command sets (`get_envs`), which is both halves at once: exactly one
-variable, and no injected credential.
+variable, and no injected credential — but that is a *pin*, not a measurement: `get_envs` reports only what the
+command sets explicitly, so adding `.env_clear()` would leave it green while destroying the inheritance. The
+**gate** measures the real thing: `case_publish` boots the server with git's `GIT_CONFIG_COUNT=1`,
+`GIT_CONFIG_KEY_0=remote.origin.pushurl` and `GIT_CONFIG_VALUE_0=<a second bare repository>`, publishes, and
+asserts the ref landed in *that* repository and not at the URL the project's own remote names. Only a push that
+inherited the server's environment can put it there, so the arm is the acceptance bullet's proof (the review's
+S2, fixed).
 
 ## D9 — A remote the config lists but the repository lacks is the same `bad_remote`, its own sentence
 
@@ -190,31 +196,42 @@ client's own. ADR-0065 D8 recorded the same for the merge; a push is bounded by 
 
 `merge.targets` is validated by `is_ref_name`, and a publish's `branch` names a ref too — so the function became
 `pub(crate)` rather than gaining a second copy (ADR-0063's import-not-copy rule). There is no list to ask about a
-destination, so the alphabet **is** the validation, and a name git would refuse is the body's shape: `422
-bad_body`, like the merge's empty `message`. An empty string is refused rather than read as "the default" — the
-default is the *absent* field, and a client that sent `""` asked for a ref whose name is nothing.
+destination, so the alphabet **is** the validation, and a name it refuses is the body's shape: `422 bad_body`,
+like the merge's empty `message`. An empty string is refused rather than read as "the default" — the default is
+the *absent* field, and a client that sent `""` asked for a ref whose name is nothing.
+
+**The review is why the alphabet grew.** `is_ref_name` checked the whole-name rules and the forbidden characters,
+but not git's **component** rules, so `a.lock`, `.hidden` and `a/.b` passed it, were not protected and were not a
+target, and reached `git push` — which refuses each with `fatal: invalid refspec` **before** contacting a remote
+(measured), i.e. a `500` for what is the client's mistake, with a sentence naming the remote. The predicate now
+refuses an empty component, a component beginning with `.`, and one ending in `.lock`, which is what
+`git check-ref-format` refuses for every case measured here. The cost is stated: `merge.targets` is validated by
+the same predicate, so a config naming such a branch is now a config error — which is right, since git would
+refuse to create it.
 
 ## D14 — The route's order
 
 | # | Question | Answer |
 | --- | --- | --- |
-| 1 | the body | `bad_body` / `unknown_field` — shape first, then the key set |
+| 1 | the body | `bad_body` / `unknown_field` / `branch`'s alphabet (D13) — `parse_body`'s, before the handler does anything |
 | 2 | `publish.remotes` is empty | `403 publish_disabled`, before the row (D4) |
 | 3 | `confirm` | `422 confirm_required` when false (D3) |
 | 4 | `remote` is listed in the config | `422 bad_remote` (D9) |
-| 5 | `branch` is a ref name | `bad_body` (D13) |
-| 6 | the destination is protected | `422 protected_branch` (D2) |
-| 7 | the destination is a `[merge] target` | `422 target_not_pushable` (D2) |
-| 8 | the row exists | `404 not_found` |
-| 9 | the row has a `base_commit` | `409 no_worktree`, this route's sentence (D10) |
-| 10 | the branch's four state facts | `409 no_worktree` (D10) |
-| 11 | the remote exists in this repository | `422 bad_remote`, the second sentence (D9) |
-| 12 | the push | the three keys, or `409 push_rejected` (D7) |
+| 5 | the destination is protected | `422 protected_branch` (D2) |
+| 6 | the destination is a `[merge] target` | `422 target_not_pushable` (D2) |
+| 7 | the row exists | `404 not_found` |
+| 8 | the row has a `base_commit` | `409 no_worktree`, this route's sentence (D10) |
+| 9 | the branch's four state facts | `409 no_worktree` (D10) |
+| 10 | the remote exists in this repository | `422 bad_remote`, the second sentence (D9) |
+| 11 | the push | the three keys, or `409 push_rejected` (D7) |
 
-Steps 1–7 are the request's and are answered before any row is read, which is ADR-0012's order ("a malformed
+Steps 1–6 are the request's and are answered before any row is read, which is ADR-0012's order ("a malformed
 body is answered the same way whatever the session is") and the reason the disabled endpoint is at 2 — a fact
-about the machine, not about the request. Steps 9–12 run inside one `spawn_blocking` except for step 9, which is
-one column, so the ordering is observable as "a refused publish made no push at all".
+about the machine, not about the request. Step 1 comes first in **both** senses: it is the body's shape, so a
+body whose `branch` is not a ref name is `bad_body` even on a machine whose `publish.remotes` is empty (the
+review found the table claiming otherwise, which the code never did). Steps 8–11 run inside one
+`spawn_blocking` except for step 8, which is one column, so the ordering is observable as "a refused publish
+made no push at all".
 
 ## What the gate measures, and what this machine cannot
 

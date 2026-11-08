@@ -274,10 +274,14 @@ protected `main`, the configured target `trunk` (`[merge] targets = ["trunk"]` i
 reachable at all), an unlisted remote and `confirm:false` — are `422` with `protected_branch`,
 `target_not_pushable`, `bad_remote` and `confirm_required` and the remote's `for-each-ref` output unchanged across
 every one of them; a second commit published and the branch then rewound is `409 push_rejected` with the remote's
-refs still unchanged, which is "never force-pushes" as a fact about a ref; and a **second boot** with
-`[publish] remotes = []` answers `403 publish_disabled` for the row *and* for an id the table does not hold, with
-the remote untouched — the disabled endpoint is the process's config, so it is a boot and not a request; see
-ADR-0066), and the hardened mounts
+refs still unchanged, which is "never force-pushes" as a fact about a ref; a **second boot** with git's
+`GIT_CONFIG_COUNT=1` / `GIT_CONFIG_KEY_0=remote.origin.pushurl` / `GIT_CONFIG_VALUE_0=<a second bare repository>`
+in the server's environment publishes `branch:"env/one"` and the case asserts it landed in *that* repository and
+not at the URL the project's remote names — the arm that makes "the host's own git, with the host's environment"
+a measurement, since `.env_clear()` on the push's command would turn exactly that pair red while every other arm
+stayed green; and a **third boot** with `[publish] remotes = []` answers `403 publish_disabled` for the row *and*
+for an id the table does not hold, with the remote untouched — the disabled endpoint is the process's config, so
+it is a boot and not a request; see ADR-0066), and the hardened mounts
 (`case_container_mounts`,
 which needs no server at all: it builds a real repository and worktree under `target/`, runs one real
 container with the spec's four mounts and `--cap-drop ALL`, and asserts the three writes fail on the host
