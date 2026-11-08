@@ -433,6 +433,7 @@ serve_cases=(
   case_docker_preflight
   case_doctor_quick
   case_disk_floor
+  case_disk_quota
   case_server_images
   case_server_deploy
   case_server_service
@@ -7196,6 +7197,180 @@ case_disk_floor() {
 disk_floor_answer() {
   printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/mapper/root 1000000000 1 %s 1%% /\n' \
     "$(( $2 * 1024 * 1024 ))" >"$1"
+}
+
+# HS-063: the per-session disk soft cap (spec item 14). One pass, over the shipped artifact, with the size a
+# stand-in reports.
+#
+# The policy's interval is the spec's five minutes, so this case cannot wait for a tick — and `session_disk_soft_gb`
+# is not the interval. What it does instead is let the watchdog's **first** pass do it: the pass after a restart
+# waits for the boot's own re-provisioning to settle (ADR-0069 D6) and then measures, which is two seconds after a
+# second `serve` rather than five minutes after the first. So the shape is: a real session, idle, then a restart.
+#
+# Five measurements:
+#
+#   measured  the `du` stand-in logged its arguments and they name **that session's** `.worktrees/<id>` — not the
+#             data root and not the projects root. This is the story's "a watchdog runs `du` on each live session's
+#             worktree", and the only way a gate can see it: no worktree a gate can build is 10 GB, and a case
+#             that set a small cap to avoid the stand-in would be measuring the size of a checkout.
+#   stopped   the row is `stopped` with `status_reason: "disk_quota"` — the third acceptance bullet, which is the
+#             row and not the event ("not `error`").
+#   reported  the transition carries the reason on the stream, and the `error` event with `code: "disk_quota"` is
+#             in the durable log both ways — the raw payload on the stream and the `type: "error"` frame in a page
+#             of `GET …/events/history`.
+#   resumed   `POST …/resume` answers 202 and the row walks back to `idle`: "resumable after cleanup", measured. The
+#             shim still reports 15 GB, and the session is not stopped again inside this case because the next pass
+#             is five minutes away — which is the interval doing its job, not a hole.
+#
+# It needs the daemon **and** an `agent_image`, because a worktree is the Docker backend's (a stub session has no
+# worktree column at all, ADR-0015) and the row has to reach `idle` for the sweep to see it. `tests/quota.rs`
+# covers both ladder rungs, the under-the-cap arm, an unmeasurable worktree, `session_disk_soft_gb = 0` and the
+# arithmetic without a daemon, so a `SKIP` here is not the bug this case exists to catch.
+case_disk_quota() {
+  local name=case_disk_quota root="$repo_root/target/verify-quota-$$" image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
+  local repo="$root/projects/holosmith" data="$root/data" saved_path
+  local response body id worktree
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    printf 'SKIP %s: no Docker daemon answers (tests/quota.rs covers both arms without one)\n' "$name"
+    return 0
+  fi
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    printf 'SKIP %s: no image %s (HOLOSMITH_TEST_IMAGE names another)\n' "$name" "$image"
+    return 0
+  fi
+  stop_serve
+  rm -rf "$root"
+  mkdir -p "$root/bin" "$repo" || fail "$name/mkdir" "could not create $root"
+  git -C "$repo" init --quiet -b main || fail "$name/git" "git init did not work in $repo"
+  git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet \
+    --allow-empty -m "the first commit" || fail "$name/git" "git commit did not work"
+
+  # The stand-in: `du -sk -- <path>` answered with 15 GiB, and every question recorded. Everything on `PATH` except
+  # `du` stays the machine's, which is what keeps the boot's other checks and git's work real.
+  {
+    printf '#!/bin/sh\n'
+    printf 'printf "%%s\\n" "$*" >> "%s"\n' "$root/du.log"
+    printf 'printf "15728640\\t%%s\\n" "$3"\n'
+  } >"$root/bin/du" || fail "$name/stand_in" "could not write the du stand-in"
+  chmod 0755 "$root/bin/du"
+
+  # `session_disk_soft_gb` at its default (10) rather than a case-specific number: the story's own number, and one
+  # the shim's 15 GiB is over. `min_free_gb = 1` because the gate's `/tmp` is small and this case is not about the
+  # floor (HS-062's case is).
+  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "docker"\nprojects_root = "%s"\ndata_root = "%s"\nagent_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\nturn_timeout_min = 0\nsession_disk_soft_gb = 10\n' \
+    "$owner" "$root/projects" "$data" "$image" >"$WORK/config-disk-quota.toml"
+
+  saved_path="$PATH"
+  export PATH="$root/bin:$PATH"
+  start_serve "$WORK/config-disk-quota.toml" "$data"
+
+  fetch_body "${name}_create" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-disk-quota-1" ||
+    fail "${name}_create/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "${name}_create")"
+  expect_status "${name}_create" "$response" 202
+  body="$(cat "$WORK/responses/${name}_create.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id" ] || fail "${name}_create/id" "the response names no id: $body"
+  docker_session_id="$id"
+  wait_for_idle_docker "${name}_create" "$id"
+
+  # The worktree the row recorded: the shim's arguments have to name this, not a path of the case's choosing.
+  fetch "${name}_row" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+    fail "${name}_row/no_answer" "GET /api/sessions/$id did not answer"
+  body="$(cat "$WORK/responses/${name}_row.body")"
+  worktree="$(printf '%s\n' "$body" | sed -n 's/.*"worktree":"\([^"]*\)".*/\1/p')"
+  [ -n "$worktree" ] || fail "${name}_row/worktree" "the row names no worktree: $body"
+
+  # The restart: the reconcile re-provisions the row and the watchdog's first pass waits for that and measures.
+  stop_serve
+  start_serve "$WORK/config-disk-quota.toml" "$data"
+  wait_for_stopped_id "${name}_stopped" "$id"
+  body="$(cat "$WORK/responses/${name}_stopped.body")"
+  case "$body" in
+    *'"status":"stopped"'*'"status_reason":"disk_quota"'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "${name}_stopped/reason" "the stopped row does not say why: $body"
+      ;;
+  esac
+
+  # 1. The measurement: that session's own worktree, and not the data root.
+  if grep -qF -- "-- $worktree" "$root/du.log" 2>/dev/null; then
+    assertions=$((assertions + 1))
+  else
+    fail "${name}/measured" \
+      "the watchdog did not measure $worktree: $(cat "$root/du.log" 2>/dev/null | sed -n '1,5p')"
+  fi
+  if grep -qF -- "-- $data" "$root/du.log" 2>/dev/null; then
+    fail "${name}/data_root" "the watchdog measured the data root rather than the worktree: $(cat "$root/du.log")"
+  fi
+  assertions=$((assertions + 1))
+
+  # 2. The transition, on the stream a client watches, with the reason the policy's own word.
+  fetch_sse_until "${name}_stream" "/api/sessions/$id/events" '"reason":"disk_quota"' "Host: 127.0.0.1" ||
+    fail "${name}_stream/no_answer" "GET /api/sessions/$id/events did not answer"
+  response="$(answer "${name}_stream")"
+  expect_status "${name}_stream" "$response" 200
+  expect_header "${name}_stream" "$response" content-type "text/event-stream"
+  body="$(cat "$WORK/responses/${name}_stream.body")"
+  case "$body" in
+    *'"from":"idle","to":"stopped","step":null,"reason":"disk_quota"'*)
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "${name}_stream/transition" "the cap's transition is not in the transcript: $body"
+      ;;
+  esac
+
+  # 3. The event: `error`, with the code, the measured size and the cap — the story's second bullet.
+  fetch_sse_until "${name}_event" "/api/sessions/$id/events" '"code":"disk_quota"' "Host: 127.0.0.1" ||
+    fail "${name}_event/no_answer" "GET /api/sessions/$id/events did not answer"
+  body="$(cat "$WORK/responses/${name}_event.body")"
+  for needle in '"type":"error"' '"code":"disk_quota"' '"size_kib":15728640' '"limit_gb":10'; do
+    printf '%s\n' "$body" | grep -qF -- "$needle" ||
+      fail "${name}_event/payload" "the event does not carry $needle: $body"
+    assertions=$((assertions + 1))
+  done
+
+  # 4. The same frame in a page of history, which is the durable half: the kind is the page's own field.
+  fetch "${name}_history" GET "/api/sessions/$id/events/history?before=1000000" "Host: 127.0.0.1" ||
+    fail "${name}_history/no_answer" "GET /api/sessions/$id/events/history did not answer"
+  response="$(answer "${name}_history")"
+  expect_status "${name}_history" "$response" 200
+  body="$(cat "$WORK/responses/${name}_history.body")"
+  printf '%s\n' "$body" | grep -qF '"type":"error"' ||
+    fail "${name}_history/kind" "history does not carry the cap's event: $body"
+  assertions=$((assertions + 1))
+  # …and nothing in the log says `error` as a *state*: the row's third bullet is the row's.
+  if printf '%s\n' "$body" | grep -qF '"status":"error"'; then
+    fail "${name}_history/state" "the cap's stop was recorded as a state: $body"
+  fi
+  assertions=$((assertions + 1))
+
+  # 5. Resumable after cleanup: the operator frees space and asks for the session back.
+  fetch "${name}_resume" POST "/api/sessions/$id/resume" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_resume/no_answer" "POST /api/sessions/$id/resume did not answer"
+  response="$(answer "${name}_resume")"
+  expect_status "${name}_resume" "$response" 202
+  expect_header "${name}_resume" "$response" content-type "application/json"
+  wait_for_idle_docker "${name}_resume" "$id"
+
+  # The machine as it was found: this case's container and its scratch root go, and the shared boot comes back
+  # (`case_disk_floor`'s idiom — a case that stopped it and left `serve_pid` empty fails the *next* `stop_serve`).
+  docker rm --force "s_$id" >/dev/null 2>&1 || true
+  docker network disconnect --force "agents_$id" hs_egress >/dev/null 2>&1 || true
+  docker network rm "agents_$id" >/dev/null 2>&1 || true
+  docker_session_id=""
+  export PATH="$saved_path"
+  rm -rf "$root"
+  stop_serve
+  start_serve
 }
 
 # HS-048's step 3: the two images, built from the Dockerfiles embedded in the artifact, and what is inside them.

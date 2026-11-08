@@ -415,6 +415,20 @@ stand-in fails its `disk` line with the same two numbers — the acceptance's "t
 It needs `python3` for the `_ping` socket and prints one `SKIP` line without it; `tests/disk.rs` covers both
 paths, the turn that settles mid-crossing and `min_free_gb = 0` without a socket (ADR-0068).
 
+…and since HS-063, **the per-session disk soft cap**: `case_disk_quota` boots its own Docker run with a `du`
+**stand-in** on `PATH` — a `/bin/sh` script that appends its arguments to a file this case reads and answers a
+`du -sk` line over the cap — because the size a real worktree reaches is not something a gate can build, and
+because the recorded arguments are the proof that the watchdog measured *that session's* worktree rather than
+the data root. It creates one session, waits for `idle` (so the worktree is real: a stub session has none),
+**restarts the server**, and lets the watchdog's first pass — which waits for the boot's own re-provisioning to
+settle (ADR-0069) — measure it. It asserts the row is `stopped` with `"status_reason":"disk_quota"` and not
+`error`; that the stand-in was asked about `<projects>/.worktrees/<id>`; that the `session.status` frame is
+`idle → stopped` with that reason; that `GET …/events/history` carries an `error` frame with
+`"code":"disk_quota"` and the two numbers; and that `POST …/resume` answers `202` and walks the row back to
+`idle` — the acceptance's “resumable after cleanup” measured. It needs the daemon **and** an `agent_image` and
+prints one `SKIP` line without them; `tests/quota.rs` covers both ladder rungs, the under-the-cap case, an
+unmeasurable worktree, `session_disk_soft_gb = 0` and the measurement's arithmetic without a daemon (ADR-0069).
+
 …and since HS-047, **`server deploy`**: `case_server_deploy` has two halves that skip independently, because the
 bugs it exists to catch are of two kinds. The **offline** half needs `python3` and nothing else: a `_ping` socket
 it answers stands in for the daemon, and the case asserts that the dry run lists the seven steps in the spec's
