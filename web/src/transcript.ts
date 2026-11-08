@@ -874,7 +874,10 @@ export function publishVisible(changes: Changes | null): boolean {
 export function publishQuestion(branch: string, remote: string, touchesCi: boolean): string {
   const ask = `publish ${branch} to ${remote}? this machine's own git credentials do the push, and nothing is forced`;
   const warning = ciWarning(touchesCi);
-  return warning === null ? ask : `${ask} ${warning}`;
+  // Its own line rather than a second clause: the ask is the request and the warning is a fact about it, and a
+  // paragraph that read "…nothing is forced this branch changes CI configuration…" would be two sentences the
+  // operator has to separate themselves. The confirm's paragraph renders the break (`white-space: pre-line`).
+  return warning === null ? ask : `${ask}\n${warning}`;
 }
 
 // The prompt the "ask the agent to commit" shortcut sends. ADR-0065 D4 named this sentence when it built the

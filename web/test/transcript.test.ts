@@ -1193,7 +1193,11 @@ test("the CI warning is inside the publish confirm, not only above the list", ()
   // is before the *button*; the confirm step is the paragraph the operator reads as they tap, so the sentence goes
   // in it — and this is the test that goes red if the flag stops being passed.
   const question = publishQuestion("agent/0123456789abcdef", "origin", true);
-  assert.ok(question.includes(CI_WARNING), question);
+  // Its own line, not a second clause glued to the ask.
+  assert.deepEqual(question.split("\n"), [
+    "publish agent/0123456789abcdef to origin? this machine's own git credentials do the push, and nothing is forced",
+    CI_WARNING,
+  ]);
   assert.ok(!publishQuestion("agent/0123456789abcdef", "origin", false).includes(CI_WARNING));
 });
 

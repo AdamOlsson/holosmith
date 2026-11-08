@@ -380,6 +380,8 @@ textarea {
   margin: 0 0 0.25rem;
   font-size: 0.875rem;
   opacity: 0.8;
+  /* The publish confirm's second line is the CI warning (HS-058), and it is a sentence of its own. */
+  white-space: pre-line;
 }
 
 /* The Changes sheet (HS-058). A folded section rather than an overlay: the transcript stays where it was, a
