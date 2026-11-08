@@ -18,7 +18,10 @@ A check that cannot run — an `ssh://` daemon, a missing `git` — is a complai
 ADR-0044:** the network **self-test** is a fourth check with a different rule — "could not run" is one `warn`
 and the boot continues, because it needs a container rather than a command. **Amended by ADR-0054:** a finding
 is one value with two arms, so the preflight reports passes as well as failures and `serve` prints the failing
-projection of it. Its machine names are `preflight::{check, report, check_with, report_with}`, `Finding`,
+projection of it. **Amended by ADR-0068:** the disk check's *measurement* moved to `disk` and two more
+readers use it — the create and the resume, which answer `507 disk_floor` — while the four sentences here stay
+the boot's and `doctor`'s, because an operator who taps *create* is not reading a startup check.
+Its machine names are `preflight::{check, report, check_with, report_with}`, `Finding`,
 `Outcome`, `Complaint` and `Check`.
 _Avoid_: Sanity check, health check, smoke test (a **preflight** is not `doctor`, which is the command that
 prints one)
@@ -208,6 +211,19 @@ _Avoid_: Active session, running session, open session
 **Cap**:
 `max_live_sessions`: how many live sessions a machine allows at once, and never fewer than one. A create at the cap stops the least recently active `idle` session and takes its slot, and answers 409 `cap_reached` only when nothing is idle to stop; a resume at the cap refuses (ADR-0022).
 _Avoid_: Limit, quota, maximum sessions
+
+**Disk floor**:
+`min_free_gb` (default 20, and `0` means **no floor**, ADR-0068): the free space the data root's filesystem must
+have before a machine starts work. One measurement — `df -Pk`, its `Available` column in `disk::available_gb`,
+the comparison in `disk::verdict` — is read by three places: `serve`'s **preflight**, which refuses the boot;
+`doctor --quick`, which prints the same finding; and the two request paths that *start* work,
+`POST /api/sessions` and `POST /api/sessions/{id}/resume`, which answer `507 disk_floor` below it with a
+sentence naming both numbers and the fix. Only a run that provisions containers is measured at all
+(`disk::guarded`: Docker, and not a `hub`), the refusal is asked before the project's refusals and before the
+cap, and only new starts are refused — nothing on a running turn's path reads the disk. Its machine names are
+`disk::{measure, available_gb, verdict, guarded}`, `DISK_FLOOR` and `ApiError::disk_floor`.
+_Avoid_: Disk quota, storage limit, free-space check (a **disk floor** is the machine's; `session_disk_soft_gb`
+is a per-session watchdog over the worktree's own size and belongs to spec item 14's next sentence)
 
 **Evict**:
 Stopping the least recently active `idle` session so a create can take its slot: the row becomes `stopped` with reason `evicted` and the container is stopped, while history, worktree and events stay. "Least recently active" is `last_active_at`, and a `starting` or `running` session is never a candidate — it is live and its turn is nobody's to end. Its machine names are `Trigger::Evict`, `SessionRepository::oldest_idle` and the reason `EVICTED`.

@@ -402,6 +402,19 @@ is gone afterwards; it needs the daemon **and** the image, and prints one `SKIP`
 the bug it exists to catch (a missing `network` line fails while the machine serves). It stops the shared boot and
 leaves its own running, so it is last.
 
+…and since HS-062, **the disk floor on the request paths**: `case_disk_floor` boots its own Docker run with a
+`df` **stand-in** on `PATH` — a `/bin/sh` script that `cat`s a two-line answer this case rewrites
+(`deploy_machine_shims`' shape), because the boot itself refuses below the floor, so a case about the request
+paths cannot start on a small disk — plants a healthy answer, creates one session (the row reaches `error`, the
+`_ping`-only socket failing its network step, which is a state the resume accepts), and then lowers the answer
+**under the running server**. It asserts `POST /api/sessions` answers `507` with `code: disk_floor`, JSON, and a
+sentence naming the free space, `min_free_gb` and the data root; that `POST /api/sessions/{id}/resume` answers the
+same for the row that already exists and leaves it `error` rather than `starting`; that `GET /api/sessions` still
+answers `200` with the row and never carries the floor's code; and that `holosmith doctor --quick` over the *same*
+stand-in fails its `disk` line with the same two numbers — the acceptance's "the two never disagree", measured.
+It needs `python3` for the `_ping` socket and prints one `SKIP` line without it; `tests/disk.rs` covers both
+paths, the turn that settles mid-crossing and `min_free_gb = 0` without a socket (ADR-0068).
+
 …and since HS-047, **`server deploy`**: `case_server_deploy` has two halves that skip independently, because the
 bugs it exists to catch are of two kinds. The **offline** half needs `python3` and nothing else: a `_ping` socket
 it answers stands in for the daemon, and the case asserts that the dry run lists the seven steps in the spec's

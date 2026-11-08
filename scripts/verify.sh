@@ -432,6 +432,7 @@ serve_cases=(
   case_publish
   case_docker_preflight
   case_doctor_quick
+  case_disk_floor
   case_server_images
   case_server_deploy
   case_server_service
@@ -7025,6 +7026,171 @@ PY
   wait "$socket_pid" 2>/dev/null || true
   socket_pid=""
   rm -rf "$root"
+}
+
+# HS-062's floor on the two request paths that *start* work: item 14's "session creation and resume fail with 507
+# below `min_free_gb`".
+#
+# The boot already refuses below the floor (HS-024), so this case cannot simply be run on a small disk — a server
+# that would refuse to start has no request path to measure. The stand-in is therefore a `df` on `PATH` that
+# `cat`s a file this case rewrites (`deploy_machine_shims`' shape): the boot measures a healthy machine, one
+# session is created on it, and then the answer is lowered so the floor can fire **while the server is up**.
+#
+# Three facts, and the third is the acceptance's "`doctor` reports the same measurement, so the two never
+# disagree": the create answers 507 with the envelope's code and a sentence naming both numbers, a resume of a
+# row that already exists answers the same, and `doctor --quick` over the *same* stand-in fails with the same two
+# numbers. The row is created before the floor is crossed and is never touched by either refusal, which is item
+# 14's fourth line — "only new starts are refused" — as far as a gate may measure it (`tests/disk.rs` measures
+# a turn that settles mid-flight; this case only asserts the row is where it was).
+#
+# `backend = "docker"` for the predicate itself: `disk::guarded` asks the *run's* backend, and a stub run is not
+# measured at all. The daemon is `fake_docker_ping`, so nothing here can start a container.
+#
+# It leaves behind only its scratch root and the socket pid it kills.
+case_disk_floor() {
+  local name=case_disk_floor root="$WORK/disk-floor" body id response status line saved_path
+  local healthy=500 short=5
+  # The guard comes first and before `stop_serve`: a skipped case that stopped the server leaves the phase's own
+  # teardown with no pid to signal (`case_changes`' note).
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to answer the docker preflight (tests/disk.rs covers both paths)\n' "$name"
+    return 0
+  fi
+  stop_serve
+  rm -rf "$root"
+  mkdir -p "$root/bin" "$root/data" "$root/projects/holosmith"
+  # The stand-in: the two lines `df -P` promises, written by this case and read by the artifact's own reader.
+  # Everything on `PATH` except `df` stays the machine's, which is what keeps the boot's other checks real.
+  printf '%s\n' '#!/bin/sh' "cat $root/df-answer" >"$root/bin/df" ||
+    fail "$name/stand_in" "could not write the df stand-in"
+  chmod 0755 "$root/bin/df"
+  disk_floor_answer "$root/df-answer" "$healthy"
+
+  # A repository for the one create: `refuse_project` refuses a project that is not a plain checkout before any
+  # row is written (HS-026), and this case is about the floor rather than about that refusal.
+  git -C "$root/projects/holosmith" init --quiet -b main || fail "$name/git" "git init did not work"
+  git -C "$root/projects/holosmith" -c user.name=verify -c user.email=verify@example \
+    commit --quiet --allow-empty -m "the first commit" || fail "$name/git" "git commit did not work"
+
+  socket_pid="$(fake_docker_ping "$root/docker.sock")"
+  for _ in $(seq 1 100); do
+    [ -S "$root/docker.sock" ] && break
+    sleep 0.05
+  done
+  [ -S "$root/docker.sock" ] || fail "$name/socket" "the fake daemon socket never appeared"
+
+  # `min_free_gb` at its default rather than a case-specific number: the story's own "default 20", and the
+  # sentence has to name it.
+  printf 'owner = "%s"\nmax_live_sessions = 3\nbackend = "docker"\nprojects_root = "%s"\ndata_root = "%s"\ndocker_host = "unix://%s/docker.sock"\nmin_free_gb = 20\nidle_stop_min = 0\n' \
+    "$owner" "$root/projects" "$root/data" "$root" >"$WORK/config-disk-floor.toml"
+
+  saved_path="$PATH"
+  export PATH="$root/bin:$PATH"
+  start_serve "$WORK/config-disk-floor.toml" "$root/data"
+
+  # 1. A create on a healthy machine, so there is a row for the resume below to be refused.
+  fetch_body "${name}_create" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-disk-floor-1" ||
+    fail "${name}_create/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "${name}_create")"
+  expect_status "${name}_create" "$response" 202
+  body="$(cat "$WORK/responses/${name}_create.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id" ] || fail "${name}_create/id" "the response names no id: $body"
+  # The row has to be out of `starting` before a resume may be asked for: the network step fails against the
+  # `_ping` shim, which is `case_changes`' boot and leaves the row `error` — a state the resume accepts.
+  body=""
+  for _ in $(seq 1 200); do
+    fetch "${name}_row" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "${name}_row/no_answer" "GET /api/sessions/$id did not answer"
+    body="$(cat "$WORK/responses/${name}_row.body")"
+    case "$body" in
+      *'"status":"starting"'*) sleep 0.05 ;;
+      *) break ;;
+    esac
+  done
+  expect_status "${name}_row" "$(answer "${name}_row")" 200
+  printf '%s\n' "$body" | grep -q '"status":"error"' ||
+    fail "${name}_row/state" "the row did not reach a resumable state: $body"
+  assertions=$((assertions + 1))
+
+  # 2. The floor is crossed under the running server, and only a new start is refused.
+  disk_floor_answer "$root/df-answer" "$short"
+  fetch_body "${name}_floor" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-disk-floor-2" ||
+    fail "${name}_floor/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "${name}_floor")"
+  expect_status "${name}_floor" "$response" 507
+  expect_code "${name}_floor" "$response" disk_floor
+  expect_header "${name}_floor" "$response" content-type "application/json"
+  body="$(cat "$WORK/responses/${name}_floor.body")"
+  # The sentence is the request's own: it names the free space, the floor and the machine, so an operator on a
+  # phone knows how much to free. A sentence that named neither number would pass a status-only assertion.
+  for line in "has $short GB free" "min_free_gb is 20" "$root/data" 'free some space'; do
+    printf '%s\n' "$body" | grep -qF "$line" ||
+      fail "${name}_floor/sentence" "the refusal does not name \"$line\": $body"
+    assertions=$((assertions + 1))
+  done
+
+  # 3. The resume of the row that already exists is refused the same way, and the row is untouched: a refused
+  # resume must not strand it in `starting`.
+  fetch "${name}_resume" POST "/api/sessions/$id/resume" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_resume/no_answer" "POST /api/sessions/$id/resume did not answer"
+  response="$(answer "${name}_resume")"
+  expect_status "${name}_resume" "$response" 507
+  expect_code "${name}_resume" "$response" disk_floor
+  fetch "${name}_after" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+    fail "${name}_after/no_answer" "GET /api/sessions/$id did not answer"
+  body="$(cat "$WORK/responses/${name}_after.body")"
+  printf '%s\n' "$body" | grep -q '"status":"error"' ||
+    fail "${name}_after/state" "the refused resume moved the row: $body"
+  assertions=$((assertions + 1))
+
+  # 4. Everything else still answers, which is what "only new starts are refused" means from outside.
+  fetch "${name}_list" GET /api/sessions "Host: 127.0.0.1" ||
+    fail "${name}_list/no_answer" "GET /api/sessions did not answer"
+  response="$(answer "${name}_list")"
+  expect_status "${name}_list" "$response" 200
+  body="$(cat "$WORK/responses/${name}_list.body")"
+  printf '%s\n' "$body" | grep -qF "\"id\":\"$id\"" ||
+    fail "${name}_list/missing" "the session list lost the row: $body"
+  assertions=$((assertions + 1))
+  # ...and no route other than the two that start work answers the floor's code.
+  if grep -q disk_floor "$WORK/responses/${name}_list.http" "$WORK/responses/${name}_after.http"; then
+    fail "${name}_list/floor" "a read answered the floor's code"
+  fi
+  assertions=$((assertions + 1))
+
+  # 5. `doctor --quick` over the same stand-in: the same measurement, so the two cannot disagree.
+  status=0
+  "$artifact" doctor --quick --config "$WORK/config-disk-floor.toml" \
+    >"$WORK/$name.doctor.out" 2>&1 || status=$?
+  check "$name/doctor/exit" 1 "$status"
+  line="$(grep '^disk: fail: ' "$WORK/$name.doctor.out" || true)"
+  [ -n "$line" ] || fail "$name/doctor/line" "the floor is not a failure in the report: $(cat "$WORK/$name.doctor.out")"
+  case "$line" in
+    *"has $short GB free"*"min_free_gb is 20"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/doctor/sentence" "doctor does not name the numbers the refusal did: $line" ;;
+  esac
+
+  export PATH="$saved_path"
+  stop_serve
+  kill "$socket_pid" 2>/dev/null || true
+  wait "$socket_pid" 2>/dev/null || true
+  socket_pid=""
+  rm -rf "$root"
+}
+
+# The two lines a POSIX `df -Pk` prints, with `gb` gigabytes free. `%%` because it is a printf format.
+disk_floor_answer() {
+  printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/mapper/root 1000000000 1 %s 1%% /\n' \
+    "$(( $2 * 1024 * 1024 ))" >"$1"
 }
 
 # HS-048's step 3: the two images, built from the Dockerfiles embedded in the artifact, and what is inside them.
