@@ -4,7 +4,16 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Holosmith</title>
+    <!-- Installable (HS-067, ADR-0072): the manifest is what makes this an app, and iOS takes a PNG home-screen
+         icon where every other browser follows the manifest's own list. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon-180.png" />
+    <meta name="theme-color" content="#1f6feb" />
+    <!-- iOS opens an app that declares this without Safari's chrome, which is what "on the home screen" means
+         there and what item 11's third bullet is about. -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Holosmith" />
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>

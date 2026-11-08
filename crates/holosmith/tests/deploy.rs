@@ -244,7 +244,7 @@ fn recording_tools(dir: &TempDir, calls: &Path, sudo_calls: &Path) -> deploy::To
 
 /// The body a stand-in for `/api/health` answers: `Health`'s five keys, because the reader parses them (HS-050) —
 /// a `200` with anything else is "a port somebody else holds", which is a different fact from "this machine serves".
-pub const HEALTH_PAYLOAD: &str = r#"{"name":"holosmith","version":"verify","role":"server","uptime_s":0,"preview_origin":"http://localhost:8081"}"#;
+pub const HEALTH_PAYLOAD: &str = r#"{"name":"holosmith","version":"verify","role":"server","uptime_s":0,"preview_origin":"http://localhost:8081","application_server_key":null}"#;
 
 /// A control listener that answers `GET /api/health` for the rest of the test's life, and its address.
 ///

@@ -130,6 +130,19 @@ pub fn unbase64url(text: &str) -> Option<Vec<u8>> {
     (at == 0).then_some(bytes)
 }
 
+/// The machine's **application server key** — the pair's public half, which is public by design: it is the `k=` of
+/// every JWT this machine signs and the value a browser hands to `pushManager.subscribe` (HS-067, ADR-0072).
+///
+/// `None` when this machine has no pair, and also when the file is there and is not one: a browser must not be
+/// handed a key that is not a key, and the two states are the same answer to the only question the caller asks.
+/// `Pusher::pair` is the reader that tells them apart, because its caller has a log line to spend on the
+/// difference. Read at the moment of asking rather than cached, so a machine that ran `server deploy` since the
+/// last request answers with the new pair.
+pub fn public_key(data_root: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(store(data_root)).ok()?;
+    parse(&text).map(|pair| pair.public_key)
+}
+
 /// Whether `path` holds a pair: `Ok(false)` when it is not there at all, `Err` when it is there and is not one.
 ///
 /// The three answers are the deploy's whole "never regenerate" rule: absent is the only state that earns a
@@ -412,6 +425,28 @@ mod tests {
             sentence.contains("short-form"),
             "the sentence does not say what was refused: {sentence}"
         );
+    }
+
+    #[test]
+    fn the_public_key_is_the_pairs_public_half_and_nothing_else() {
+        let dir = std::env::temp_dir().join(format!("holosmith-vapid-key-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("secrets")).expect("the secrets directory is creatable");
+        let path = store(&dir);
+        // Absent, and a file that is not a pair: one answer, because a browser may be handed neither.
+        assert_eq!(public_key(&dir), None);
+        std::fs::write(&path, "public_key = \"not a point\"\n").expect("the file is writable");
+        assert_eq!(public_key(&dir), None);
+
+        let pair = Pair {
+            public_key: PUBLIC_BASE64URL.to_string(),
+            private_key: PRIVATE_BASE64URL.to_string(),
+        };
+        std::fs::write(&path, render(&pair)).expect("the file is writable");
+        assert_eq!(public_key(&dir).as_deref(), Some(PUBLIC_BASE64URL));
+        // The private half is never the answer: this is what a browser is given.
+        assert_ne!(public_key(&dir).as_deref(), Some(PRIVATE_BASE64URL));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

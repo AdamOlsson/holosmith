@@ -374,7 +374,7 @@ fn a_held_port_is_a_failure_before_a_start_and_the_machine_serving_after_one() {
                     let _ = stream.read(&mut request);
                     // The payload, not a bare 200: the reader parses it (HS-050), so `{}` would be "a port
                     // somebody else holds" rather than this machine serving.
-                    let body = r#"{"name":"holosmith","version":"verify","role":"server","uptime_s":0,"preview_origin":"http://localhost:8081"}"#;
+                    let body = r#"{"name":"holosmith","version":"verify","role":"server","uptime_s":0,"preview_origin":"http://localhost:8081","application_server_key":null}"#;
                     let answer = format!(
                         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
                         body.len()

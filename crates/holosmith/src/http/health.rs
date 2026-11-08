@@ -21,7 +21,7 @@ pub const ASK_TIMEOUT: Duration = Duration::from_secs(3);
 /// The largest answer a probe reads before it gives up on the request being a health answer.
 const MAX_ANSWER: usize = 8 * 1024;
 
-/// Exactly five keys, in this order. `target` and the rest of the build metadata stay on the
+/// Exactly six keys, in this order. `target` and the rest of the build metadata stay on the
 /// startup line and in `version --json`: the host registration of item 4 reads name and
 /// version, and a key nobody reads is a promise about a shape.
 ///
@@ -29,6 +29,12 @@ const MAX_ANSWER: usize = 8 * 1024;
 /// where the page already looks — it fetches health before either screen draws, so the link costs no request
 /// and no second route. The alternative, injecting the value into the app shell, would break
 /// `case_app_shell`'s byte-for-byte comparison and would be a dynamic value in a static asset (ADR-0051).
+///
+/// `application_server_key` is the sixth (HS-067, ADR-0072): the Web Push pair's **public** half, which is what
+/// `pushManager.subscribe` needs and what nothing served before. `null` is a machine with no pair, and it is
+/// read at the moment of asking — a `server deploy` between two page loads is answered truthfully by the
+/// second. The same argument as `preview_origin`'s: the page already asks this question, and a browser needs
+/// the value before it can subscribe.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Health {
     pub name: &'static str,
@@ -36,6 +42,7 @@ pub struct Health {
     pub role: Role,
     pub uptime_s: u64,
     pub preview_origin: String,
+    pub application_server_key: Option<String>,
 }
 
 impl Health {
@@ -47,6 +54,7 @@ impl Health {
             role: config.role,
             uptime_s: runtime.uptime_s(),
             preview_origin: config.preview_origin.as_str().to_string(),
+            application_server_key: crate::vapid::public_key(&config.data_root),
         }
     }
 }
@@ -59,8 +67,9 @@ pub fn respond(health: &Health) -> Json<Health> {
 /// The three facts of the payload a **client** reads back: what `holosmith status` prints and what
 /// [`crate::doctor`]'s port check asks about.
 ///
-/// Three fields, not five, because `name` is a constant and `preview_origin` is the app shell's business; a
-/// client struct that carried them would be a second reading of a shape it does not use.
+/// Three fields, not six, because `name` is a constant, `preview_origin` and `application_server_key` are the app
+/// shell's business and `role` is already this machine's config; a client struct that carried them would be a
+/// second reading of a shape it does not use.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Answer {
     pub version: String,
@@ -145,8 +154,14 @@ mod tests {
     use crate::runtime::Backend;
 
     fn health(role: Role) -> Health {
+        let dir =
+            std::env::temp_dir().join(format!("holosmith-health-{role:?}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // The data root is the test's own: `Config::default` names the machine's, and this machine may have
+        // deployed, which would make the sixth key a fact about the host rather than about this test.
         let mut config = Config {
             role,
+            data_root: dir,
             ..Config::default()
         };
         config.apply_overrides(&Overrides::default());
@@ -154,14 +169,51 @@ mod tests {
     }
 
     #[test]
-    fn the_payload_is_exactly_five_keys_in_order() {
+    fn the_payload_is_exactly_six_keys_in_order() {
         assert_eq!(
-            serde_json::to_string(&health(Role::Hub)).expect("five fields always serialise"),
+            serde_json::to_string(&health(Role::Hub)).expect("six fields always serialise"),
             format!(
-                r#"{{"name":"holosmith","version":"{}","role":"hub","uptime_s":0,"preview_origin":"http://localhost:8081"}}"#,
+                r#"{{"name":"holosmith","version":"{}","role":"hub","uptime_s":0,"preview_origin":"http://localhost:8081","application_server_key":null}}"#,
                 env!("CARGO_PKG_VERSION")
             )
         );
+    }
+
+    #[test]
+    fn the_application_server_key_is_the_machines_public_half_or_null() {
+        let dir =
+            std::env::temp_dir().join(format!("holosmith-health-vapid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut config = Config {
+            data_root: dir.clone(),
+            ..Config::default()
+        };
+        config.apply_overrides(&Overrides::default());
+        // No pair: `null`, which is a JSON null rather than an absent key (a client reads one shape).
+        let without = Health::of(&config, &Runtime::started(Backend::Stub));
+        assert_eq!(without.application_server_key, None);
+        assert!(
+            serde_json::to_string(&without)
+                .expect("serialisable")
+                .ends_with(r#""application_server_key":null}"#),
+            "a machine with no pair answers an explicit null"
+        );
+
+        let path = crate::vapid::store(&dir);
+        std::fs::create_dir_all(path.parent().expect("the secrets directory"))
+            .expect("the directory is creatable");
+        let pair = crate::vapid::Pair {
+            public_key: "BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8".to_string(),
+            private_key: "yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw".to_string(),
+        };
+        std::fs::write(&path, crate::vapid::render(&pair)).expect("the pair is writable");
+        let with = Health::of(&config, &Runtime::started(Backend::Stub));
+        assert_eq!(
+            with.application_server_key.as_deref(),
+            Some(pair.public_key.as_str()),
+            "the sixth key is the pair's public half, byte for byte"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

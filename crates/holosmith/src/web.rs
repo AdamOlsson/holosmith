@@ -47,6 +47,9 @@ pub fn asset(path: &str) -> Option<(&'static [u8], &'static str)> {
 
 /// The content type for the extensions the app ships. Anything else is a byte stream: the
 /// set is closed on purpose, so a future asset type arrives with a story and a test.
+///
+/// `webmanifest` is HS-067's: a manifest served as `application/octet-stream` is a manifest Chrome does not
+/// install from, and no browser is available to this build's gate to notice.
 pub fn content_type(path: &str) -> &'static str {
     match path.rsplit_once('.').map(|(_, extension)| extension) {
         Some("html") => "text/html; charset=utf-8",
@@ -55,6 +58,7 @@ pub fn content_type(path: &str) -> &'static str {
         Some("svg") => "image/svg+xml",
         Some("ico") => "image/x-icon",
         Some("png") => "image/png",
+        Some("webmanifest") => "application/manifest+json",
         Some("woff2") => "font/woff2",
         _ => "application/octet-stream",
     }
@@ -78,6 +82,10 @@ mod tests {
         assert_eq!(content_type("favicon.svg"), "image/svg+xml");
         assert_eq!(content_type("favicon.ico"), "image/x-icon");
         assert_eq!(content_type("logo.png"), "image/png");
+        assert_eq!(
+            content_type("/manifest.webmanifest"),
+            "application/manifest+json"
+        );
         assert_eq!(content_type("font.woff2"), "font/woff2");
     }
 
@@ -86,6 +94,45 @@ mod tests {
         assert_eq!(content_type("data.json"), "application/octet-stream");
         assert_eq!(content_type("no-extension"), "application/octet-stream");
         assert_eq!(content_type("archive.tar.gz"), "application/octet-stream");
+    }
+
+    #[test]
+    fn the_app_ships_a_manifest_and_a_worker_in_a_real_build() {
+        if std::env::var("HOLOSMITH_REQUIRE_WEB").as_deref() != Ok("1") {
+            return;
+        }
+        // HS-067's installability, as far as the embedded bytes can prove it: the shell names the manifest, the
+        // manifest and the worker are files the app carries, and the worker is JavaScript rather than the shell
+        // (a `/sw.js` answered by the fallback's shell would register a page as a service worker, and every
+        // browser refuses it — silently).
+        let index = index_html();
+        assert!(
+            index.contains(r#"<link rel="manifest" href="/manifest.webmanifest""#),
+            "the shell does not link the manifest: {index}"
+        );
+        let (manifest, content_type) =
+            asset("/manifest.webmanifest").expect("the app has a manifest");
+        assert_eq!(content_type, "application/manifest+json");
+        assert!(
+            std::str::from_utf8(manifest).is_ok_and(|text| text.contains("\"standalone\"")),
+            "the manifest does not ask for a standalone display"
+        );
+        let (worker, content_type) = asset("/sw.js").expect("the app has a service worker");
+        assert_eq!(content_type, "text/javascript; charset=utf-8");
+        assert!(
+            !worker.starts_with(b"<!doctype html"),
+            "the worker is the app shell, which every browser refuses to register"
+        );
+        for icon in [
+            "/icons/icon-192.png",
+            "/icons/icon-512.png",
+            "/icons/icon-512-maskable.png",
+            "/icons/apple-touch-icon-180.png",
+        ] {
+            let (bytes, content_type) = asset(icon).unwrap_or_else(|| panic!("{icon} is missing"));
+            assert_eq!(content_type, "image/png", "{icon}");
+            assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "{icon} is not a PNG");
+        }
     }
 
     #[test]

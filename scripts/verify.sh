@@ -422,6 +422,7 @@ serve_cases=(
   case_delete_keeps
   case_stopped_expiry
   case_push
+  case_pwa
   case_idle_stop
   case_drain
   case_drain_restart
@@ -4542,6 +4543,195 @@ PY
   kill "$receiver_pid" 2>/dev/null || true
   wait "$receiver_pid" 2>/dev/null || true
   extra_pid=""
+  rm -rf "$root"
+  stop_serve
+  start_serve
+}
+
+# HS-067: the installable app. "Installable" is a browser's judgement and **no gate may have one** (ADR-0046), so
+# this case measures the four things a browser would otherwise be the only witness of, as bytes:
+#
+#   1. the shell names the manifest (and iOS's own PNG link), and `/settings` — the third screen — is that shell;
+#   2. `/manifest.webmanifest` is this tree's file, served as a manifest, and carries the fields an install needs;
+#   3. `/sw.js` is this tree's worker, served as JavaScript, and is **not** the shell (a `/sw.js` answered by the
+#      fallback's shell is a registration every browser refuses, silently);
+#   4. every icon the manifest names is the PNG this tree built.
+#
+# And the story's one server-side claim, which is what makes a subscribe possible at all: `/api/health`'s sixth key
+# is this machine's `vapid.toml` `public_key`, byte for byte — and `null` once the file is removed, because the
+# answer is read at the moment of asking rather than cached at boot.
+#
+# The pair is written by hand rather than generated: it only has to *be* a pair for the health answer to carry it
+# (`vapid::parse` refuses anything else, and the assertion below is what would catch a bad literal), so this case
+# needs no `openssl` and prints **no `SKIP` line at all** — a skip here would fire exactly when the feature was
+# deleted, which is this project's P1 (RESUME §6).
+case_pwa() {
+  local name=case_pwa root data config response asset
+  local vapid_public='BAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-P0A'
+  local vapid_private='ERERERERERERERERERERERERERERERERERERERERERE'
+  local icon
+  # Two statements, not one, because every right-hand side of a single `local` expands before either assignment
+  # (`case_changes`'s note).
+  root="$repo_root/target/verify-pwa-$$"
+  data="$root/data"
+  config="$root/config.toml"
+
+  stop_serve
+  rm -rf "$root"
+  mkdir -p "$root/projects" "$data/secrets" || fail "$name/mkdir" "could not create $root"
+  chmod 0700 "$data/secrets"
+  # The header line `vapid::render` writes, because a reader who opens the file should meet the same sentence.
+  printf '# The machine'"'"'s Web Push key pair (HS-049). `server deploy` writes this once and never rewrites it.\npublic_key = "%s"\nprivate_key = "%s"\n' \
+    "$vapid_public" "$vapid_private" >"$data/secrets/vapid.toml" ||
+    fail "$name/vapid" "could not write the machine's pair"
+  chmod 0600 "$data/secrets/vapid.toml"
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "stub"\nprojects_root = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\npreview_listen = "127.0.0.1:0"\n' \
+    "$owner" "$root/projects" >"$config"
+  start_serve "$config" "$data"
+
+  # 1. The shell: this tree's index.html, and it names the manifest and iOS's icon.
+  fetch "$name" GET / "Host: 127.0.0.1" || fail "$name/no_answer" "GET / did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 200
+  [ -f web/dist/index.html ] ||
+    fail "$name/index_html" "web/dist/index.html is missing: run scripts/build.sh"
+  cmp -s "$WORK/responses/$name.body" web/dist/index.html ||
+    fail "$name/index_html" "GET / is not this tree's web/dist/index.html"
+  assertions=$((assertions + 1))
+  for needle in \
+    '<link rel="manifest" href="/manifest.webmanifest"' \
+    '<link rel="apple-touch-icon" href="/icons/apple-touch-icon-180.png"' \
+    'name="apple-mobile-web-app-capable" content="yes"'; do
+    grep -qF -- "$needle" "$WORK/responses/$name.body" ||
+      fail "$name/shell" "the shell does not carry $needle"
+    assertions=$((assertions + 1))
+  done
+
+  # 2. The manifest: this tree's file, served as one, with the fields an install reads.
+  fetch "${name}_manifest" GET /manifest.webmanifest "Host: 127.0.0.1" ||
+    fail "${name}_manifest/no_answer" "GET /manifest.webmanifest did not answer"
+  response="$(answer "${name}_manifest")"
+  expect_status "${name}_manifest" "$response" 200
+  # A manifest served as `application/octet-stream` is a manifest Chrome does not install from, and nothing else
+  # in this build would notice.
+  expect_header "${name}_manifest" "$response" "Content-Type" "application/manifest+json"
+  [ -f web/dist/manifest.webmanifest ] ||
+    fail "${name}_manifest/dist" "web/dist/manifest.webmanifest is missing: run scripts/build.sh"
+  cmp -s "$WORK/responses/${name}_manifest.body" web/dist/manifest.webmanifest ||
+    fail "${name}_manifest/bytes" "the served manifest is not this tree's web/dist/manifest.webmanifest"
+  assertions=$((assertions + 1))
+  for needle in '"display": "standalone"' '"start_url": "/"' '"scope": "/"' '"sizes": "192x192"' \
+    '"sizes": "512x512"' '"purpose": "maskable"' '"type": "image/png"'; do
+    grep -qF -- "$needle" "$WORK/responses/${name}_manifest.body" ||
+      fail "${name}_manifest/fields" "the manifest does not carry $needle"
+    assertions=$((assertions + 1))
+  done
+
+  # 3. The worker: this tree's `dist/sw.js`, JavaScript, and **not** the shell. The `cmp` against index.html comes
+  # first on purpose: a `/sw.js` answered by the fallback would still be a 200 with `text/html`, and a case that
+  # only grepped for a sentence would pass over a page.
+  fetch "${name}_worker" GET /sw.js "Host: 127.0.0.1" ||
+    fail "${name}_worker/no_answer" "GET /sw.js did not answer"
+  response="$(answer "${name}_worker")"
+  expect_status "${name}_worker" "$response" 200
+  expect_header "${name}_worker" "$response" "Content-Type" "text/javascript; charset=utf-8"
+  [ -f web/dist/sw.js ] || fail "${name}_worker/dist" "web/dist/sw.js is missing: run scripts/build.sh"
+  cmp -s "$WORK/responses/${name}_worker.body" web/dist/sw.js ||
+    fail "${name}_worker/bytes" "the served worker is not this tree's web/dist/sw.js"
+  assertions=$((assertions + 1))
+  if cmp -s "$WORK/responses/${name}_worker.body" web/dist/index.html; then
+    fail "${name}_worker/shell" "/sw.js is the app shell, which no browser will register as a worker"
+  fi
+  assertions=$((assertions + 1))
+  # The four `kind` sentences and the three events, in the bytes the artifact serves: the rules themselves are
+  # `web/test/push.test.ts`'s, and this is the evidence that the built worker is the one they describe.
+  for needle in \
+    'a turn finished' 'a session failed' 'a turn timed out' 'a turn ran out of its budget' \
+    'pushsubscriptionchange' 'notificationclick' 'openWindow' 'addEventListener("push"' \
+    'there is news about a session'; do
+    grep -qF -- "$needle" "$WORK/responses/${name}_worker.body" ||
+      fail "${name}_worker/sentences" "the served worker does not carry $needle"
+    assertions=$((assertions + 1))
+  done
+  # The id rule, as the worker really spells it: a tap may only open a path built from sixteen lowercase hex.
+  grep -qF -- '/^[0-9a-f]{16}$/' "$WORK/responses/${name}_worker.body" ||
+    fail "${name}_worker/id" "the served worker does not gate a tap on the session id's alphabet"
+  assertions=$((assertions + 1))
+
+  # 4. The icons: the manifest's three and iOS's own, each the PNG this tree built.
+  for icon in icon-192.png icon-512.png icon-512-maskable.png apple-touch-icon-180.png; do
+    fetch "${name}_$icon" GET "/icons/$icon" "Host: 127.0.0.1" ||
+      fail "${name}_$icon/no_answer" "GET /icons/$icon did not answer"
+    response="$(answer "${name}_$icon")"
+    expect_status "${name}_$icon" "$response" 200
+    expect_header "${name}_$icon" "$response" "Content-Type" "image/png"
+    [ -f "web/dist/icons/$icon" ] ||
+      fail "${name}_$icon/dist" "web/dist/icons/$icon is missing: run scripts/build.sh"
+    cmp -s "$WORK/responses/${name}_$icon.body" "web/dist/icons/$icon" ||
+      fail "${name}_$icon/bytes" "the served $icon is not this tree's web/dist/icons/$icon"
+    assertions=$((assertions + 1))
+  done
+
+  # 5. `/settings` is the third screen, and it is the same shell: the fallback answers it, so the address bar
+  # survives a reload with no route and no rewrite (ADR-0007, ADR-0072 D2).
+  fetch "${name}_settings" GET /settings "Host: 127.0.0.1" ||
+    fail "${name}_settings/no_answer" "GET /settings did not answer"
+  response="$(answer "${name}_settings")"
+  expect_status "${name}_settings" "$response" 200
+  cmp -s "$WORK/responses/${name}_settings.body" web/dist/index.html ||
+    fail "${name}_settings/shell" "/settings is not this tree's web/dist/index.html"
+  assertions=$((assertions + 1))
+
+  # 6. The screen itself, as far as a served bundle can be read: the **bundle** (the `<script src>` the shell
+  # names, fetched from the artifact and compared with the file) carries every element the screen is made of and
+  # the iOS sentence item 11 asks for. A needle is the assignment's own quotes, so deleting the container element
+  # cannot leave a sibling's id matching (`case_changes_screen`'s lesson), and every needle is counted.
+  asset="$(sed -n 's/.*src="\([^"]*\.js\)".*/\1/p' web/dist/index.html | head -1)"
+  [ -n "$asset" ] || fail "$name/asset" "the shell names no script to fetch"
+  fetch "${name}_asset" GET "$asset" "Host: 127.0.0.1" ||
+    fail "${name}_asset/no_answer" "GET $asset did not answer"
+  response="$(answer "${name}_asset")"
+  expect_status "${name}_asset" "$response" 200
+  cmp -s "$WORK/responses/${name}_asset.body" "web/dist$asset" ||
+    fail "${name}_asset/bytes" "the served bundle is not this tree's web/dist$asset"
+  assertions=$((assertions + 1))
+  for needle in \
+    'id="settings"' 'id="settings-machine"' 'id="settings-state"' 'id="settings-action"' \
+    'id="settings-detail"' 'id="settings-install"' 'id="settings-per-machine"' 'id="settings-notice"' \
+    'id="nav"' 'id="nav-link"' \
+    'iOS delivers notifications only to an app on the home screen: tap Share, then Add to Home Screen, and open Holosmith from the icon' \
+    'each machine has its own Web Push key pair, so a phone subscribes on every machine it uses' \
+    'notifications are blocked for this app' \
+    'this machine has no Web Push key pair'; do
+    grep -qF -- "$needle" "$WORK/responses/${name}_asset.body" ||
+      fail "${name}_asset/settings" "the served bundle does not carry $needle"
+    assertions=$((assertions + 1))
+  done
+
+  # 7. The sixth health key: this machine's pair, byte for byte, and `null` once the file is gone — which is the
+  # measurement that a browser could really subscribe, and that two machines cannot agree by accident.
+  fetch "${name}_health" GET /api/health "Host: 127.0.0.1" ||
+    fail "${name}_health/no_answer" "GET /api/health did not answer"
+  response="$(answer "${name}_health")"
+  expect_status "${name}_health" "$response" 200
+  grep -qF -- "\"application_server_key\":\"$vapid_public\"" "$WORK/responses/${name}_health.body" ||
+    fail "${name}_health/key" "the health answer does not carry the machine's own pair: $(cat "$WORK/responses/${name}_health.body")"
+  assertions=$((assertions + 1))
+  # The private half is never served: it is the one string a browser must not be given.
+  if grep -qF -- "$vapid_private" "$WORK/responses/${name}_health.body"; then
+    fail "${name}_health/private" "the health answer carries the private key"
+  fi
+  assertions=$((assertions + 1))
+  rm -f "$data/secrets/vapid.toml"
+  fetch "${name}_health2" GET /api/health "Host: 127.0.0.1" ||
+    fail "${name}_health2/no_answer" "the second GET /api/health did not answer"
+  response="$(answer "${name}_health2")"
+  expect_status "${name}_health2" "$response" 200
+  grep -qF -- '"application_server_key":null' "$WORK/responses/${name}_health2.body" ||
+    fail "${name}_health2/key" "a machine without a pair must answer null: $(cat "$WORK/responses/${name}_health2.body")"
+  assertions=$((assertions + 1))
+
+  # The whole tree is this case's: it gives the shared boot back, so the next case's `stop_serve` finds a pid.
   rm -rf "$root"
   stop_serve
   start_serve

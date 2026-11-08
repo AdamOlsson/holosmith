@@ -1156,7 +1156,7 @@ mod tests {
         // that answers nothing: the three answers the `--full` moment turns on.
         use std::net::TcpListener as Listener;
         // The payload's own shape (`Health`'s five keys); the reader takes the three it needs.
-        let body = r#"{"name":"holosmith","version":"0.0.0","role":"server","uptime_s":0,"preview_origin":"http://localhost:1"}"#;
+        let body = r#"{"name":"holosmith","version":"0.0.0","role":"server","uptime_s":0,"preview_origin":"http://localhost:1","application_server_key":null}"#;
         let answer = format!(
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()

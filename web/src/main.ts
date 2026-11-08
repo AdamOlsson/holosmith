@@ -63,12 +63,31 @@ import {
   type SessionState,
   type Spend,
 } from "./transcript";
+import {
+  PER_MACHINE_SENTENCE,
+  SETTINGS_PATH,
+  SUBSCRIBE_PATH,
+  installSentence,
+  isIos,
+  machineState,
+  navLink,
+  pushActionLabel,
+  pushActionable,
+  pushState,
+  subscriptionBody,
+  type NavLink,
+  type PushFacts,
+  type PushState,
+} from "./push";
 
 type Health = {
   name: string;
   version: string;
   role: string;
   uptime_s: number;
+  // The machine's Web Push pair's public half, base64url, or `null` when it has none (HS-067, ADR-0072 D1). The
+  // settings screen hands it straight to `pushManager.subscribe`, which is the only use it has.
+  application_server_key: string | null;
   // The origin a session's preview is served on (HS-041): the listener's own origin, never the control one.
   preview_origin: string;
 };
@@ -505,11 +524,21 @@ function createSection(networkDefault: boolean): HTMLElement {
   return section;
 }
 
-function header(health: Health): HTMLElement {
+// The header every screen shares: the machine's own facts, and the one link between the screens. The link's
+// href and label are `push.ts`'s `navLink` rule, so `/settings` returns to the list and every other path offers
+// the settings — one place decides, and `case_pwa` sees the ids in the served bundle.
+function header(health: Health, nav: NavLink): HTMLElement {
   const element = make("header", "machine");
+  const link = make("a", "nav-link", nav.label);
+  link.id = "nav-link";
+  link.href = nav.href;
+  const nav_ = make("nav", "machine-nav");
+  nav_.id = "nav";
+  nav_.append(link);
   element.append(
     make("h1", "", health.name),
     make("p", "meta", `${health.version} · ${health.role} · up ${health.uptime_s}s`),
+    nav_,
   );
   return element;
 }
@@ -1795,7 +1824,7 @@ function sessionScreen(health: Health, session: SessionDetail): void {
     composer.element,
     deleted.element,
   );
-  app.replaceChildren(header(health), section);
+  app.replaceChildren(header(health, navLink(location.pathname)), section);
   openSessionStream(session.id, {
     transcript,
     placeholder,
@@ -1809,12 +1838,245 @@ function sessionPath(id: string): string {
   return `/api/sessions/${encodeURIComponent(id)}`;
 }
 
+// ---- the settings screen (HS-067, ADR-0072 D2/D6) -------------------------------------------
+
+// The machine's notifications: one row per machine the app is served from (one today, because there is one
+// control origin), the sentence this browser earns, and the one control that sentence allows.
+//
+// Every word is `push.ts`'s — the page only decides *when* to ask, never *what* to say. The facts are read from
+// the platform each time the screen is (re)drawn rather than kept: a permission the operator changed in the
+// browser's settings is a fact this page cannot be told about, and a subscription can be rotated by the browser
+// without asking anybody.
+function settingsSection(health: Health): HTMLElement {
+  const section = make("section", "settings");
+  section.id = "settings";
+
+  const machine = make("p", "settings-machine");
+  machine.id = "settings-machine";
+
+  const sentence = make("p", "settings-state");
+  sentence.id = "settings-state";
+
+  const action = make("button", "settings-action");
+  action.id = "settings-action";
+  action.type = "button";
+
+  const detail = make("p", "settings-detail");
+  detail.id = "settings-detail";
+  detail.hidden = true;
+
+  const install = make("p", "settings-install");
+  install.id = "settings-install";
+  install.hidden = true;
+
+  const perMachine = make("p", "settings-per-machine", PER_MACHINE_SENTENCE);
+  perMachine.id = "settings-per-machine";
+
+  const notice = make("p", "notice");
+  notice.id = "settings-notice";
+  notice.hidden = true;
+
+  // The facts as last read, and whether a request of ours is in flight. `busy` exists because the screen is
+  // redrawn after every action: without it a re-render re-enables the button mid-request and a second tap is a
+  // second subscribe (ADR-0067's lesson, in a second screen).
+  let facts: PushFacts = {
+    supported: false,
+    permission: "default",
+    hasKey: health.application_server_key !== null,
+    subscribed: false,
+    installed: false,
+  };
+  let busy = false;
+  let pending: PushState | null = null;
+
+  function draw(): void {
+    const decided = pushState(facts);
+    pending = decided;
+    machine.textContent = machineState(location.origin, facts.subscribed);
+    machine.dataset.origin = location.origin;
+    machine.dataset.subscribed = String(facts.subscribed);
+    sentence.textContent = decided.sentence;
+    detail.textContent = decided.detail ?? "";
+    detail.hidden = decided.detail === null;
+    action.textContent = busy ? "Working…" : pushActionLabel(decided.action);
+    action.hidden = !pushActionable(decided.action);
+    action.disabled = busy;
+    // The iOS requirement is item 11's third bullet, and it is stated here rather than in a document. `null`
+    // once the app really is installed, where the row above already says so.
+    const installText = installSentence({
+      installed: facts.installed,
+      ios: isIos(navigator.userAgent, navigator.maxTouchPoints),
+    });
+    install.textContent = installText ?? "";
+    install.hidden = installText === null;
+  }
+
+  // The platform's answers, read fresh. `supported` covers the three things a subscribe needs at once: a secure
+  // origin (an insecure one has no `serviceWorker` at all), a browser with a `PushManager`, and a `Notification`
+  // to ask for permission with.
+  async function gather(): Promise<PushFacts> {
+    const supported =
+      window.isSecureContext &&
+      "serviceWorker" in navigator &&
+      "PushManager" in window &&
+      "Notification" in window;
+    // SAFETY: `navigator.standalone` is iOS Safari's own non-standard flag, which no lib declares. It is
+    // `undefined` everywhere else, which the comparison reads as "not installed".
+    const standalone = (navigator as unknown as { standalone?: boolean }).standalone === true;
+    const installed = standalone || window.matchMedia("(display-mode: standalone)").matches;
+    let subscribed = false;
+    if (supported) {
+      try {
+        const registration = await navigator.serviceWorker.getRegistration();
+        subscribed =
+          registration !== undefined &&
+          (await registration.pushManager.getSubscription()) !== null;
+      } catch {
+        // A registration this page cannot read is a browser that has no subscription as far as this screen can
+        // tell; the sentence says `not subscribed`, which is the safe half of the two.
+        subscribed = false;
+      }
+    }
+    return {
+      supported,
+      permission: supported ? Notification.permission : "default",
+      hasKey: health.application_server_key !== null,
+      subscribed,
+      installed,
+    };
+  }
+
+  // The worker's registration, or `undefined`. `navigator.serviceWorker.ready` never settles when the registration
+  // failed, so the wait is bounded: a settings screen that waits forever is a screen that cannot be acted on, and
+  // this page's rule is that a sentence describes its own request (ADR-0008).
+  async function registrationFor(): Promise<ServiceWorkerRegistration | undefined> {
+    if (!("serviceWorker" in navigator)) {
+      return undefined;
+    }
+    const timeout = new Promise<undefined>((resolve) => {
+      window.setTimeout(() => resolve(undefined), 5000);
+    });
+    return Promise.race([navigator.serviceWorker.ready, timeout]);
+  }
+
+  function fail(code: string, message: string): void {
+    notice.textContent = `${code}: ${message}`;
+    notice.hidden = false;
+  }
+
+  async function subscribe(): Promise<void> {
+    notice.hidden = true;
+    const key = health.application_server_key;
+    if (key === null) {
+      return;
+    }
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") {
+      return;
+    }
+    const registration = await registrationFor();
+    if (registration === undefined) {
+      fail("no_worker", "this app's service worker is not running, so nothing could be subscribed");
+      return;
+    }
+    const subscription = await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      // The string form the API allows: the browser decodes it, so no hand-written base64url decoder exists on
+      // either side of this call (ADR-0072 D6).
+      applicationServerKey: key,
+    });
+    const body = subscriptionBody(subscription.toJSON());
+    if (body === null) {
+      await subscription.unsubscribe();
+      fail("bad_subscription", "this browser's subscription carried no p256dh/auth pair");
+      return;
+    }
+    const response = await fetch(SUBSCRIBE_PATH, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-holosmith-client": "1" },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      // The row did not land, so the local subscription is not one this machine can deliver to: undo it rather
+      // than leave a screen that says `subscribed` about a subscription no row knows.
+      await subscription.unsubscribe();
+      const envelope = (await response.json()) as ErrorEnvelope;
+      fail(envelope.code, envelope.message);
+      return;
+    }
+  }
+
+  async function unsubscribe(): Promise<void> {
+    notice.hidden = true;
+    const registration = await navigator.serviceWorker.getRegistration();
+    const subscription =
+      registration === undefined ? null : await registration.pushManager.getSubscription();
+    if (subscription === null) {
+      return;
+    }
+    const query = new URLSearchParams({ endpoint: subscription.endpoint }).toString();
+    const response = await fetch(`${SUBSCRIBE_PATH}?${query}`, {
+      method: "DELETE",
+      // A mutating request needs this header even with no body (ADR-0010); `404` is the row already gone, which
+      // is the answer the operator wanted.
+      headers: { "content-type": "application/json", "x-holosmith-client": "1" },
+    });
+    if (!response.ok && response.status !== 404) {
+      const envelope = (await response.json()) as ErrorEnvelope;
+      fail(envelope.code, envelope.message);
+      return;
+    }
+    await subscription.unsubscribe();
+  }
+
+  action.addEventListener("click", () => {
+    const decided = pending;
+    if (busy || decided === null || !pushActionable(decided.action)) {
+      return;
+    }
+    busy = true;
+    draw();
+    const run = decided.action === "subscribe" ? subscribe : unsubscribe;
+    run()
+      .catch((error: unknown) => {
+        fail("unreachable", String(error));
+      })
+      .finally(() => {
+        busy = false;
+        void gather().then((read) => {
+          facts = read;
+          draw();
+        });
+      });
+  });
+
+  // The first draw is the unsupported shape until the platform has answered, so the button is never offered on a
+  // guess.
+  draw();
+  void gather().then((read) => {
+    facts = read;
+    draw();
+  });
+
+  section.append(
+    make("h2", "", "Notifications"),
+    machine,
+    sentence,
+    detail,
+    action,
+    install,
+    perMachine,
+    notice,
+  );
+  return section;
+}
+
 function render(health: Health, list: SessionList): void {
   if (app === null) {
     return;
   }
   app.replaceChildren(
-    header(health),
+    header(health, navLink(location.pathname)),
     sessionList(list.sessions, list.stopped_ttl_days),
     createSection(list.network_default),
   );
@@ -1858,6 +2120,15 @@ async function show(): Promise<void> {
       return;
     }
     sessionScreen(health.value, session.value);
+    return;
+  }
+  // `/settings` is the third screen and the machine's own (HS-067, ADR-0072): it needs no request but the health
+  // this function already made, and it draws one row per machine the app is served from — one today.
+  if (location.pathname === SETTINGS_PATH) {
+    app?.replaceChildren(
+      header(health.value, navLink(location.pathname)),
+      settingsSection(health.value),
+    );
     return;
   }
   // The list after the health: a machine whose database is not open answers 500 here, and that

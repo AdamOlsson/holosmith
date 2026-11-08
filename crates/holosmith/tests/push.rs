@@ -919,3 +919,55 @@ fn no_session_container_carries_a_subscription_the_pair_or_the_word_push() {
         }
     }
 }
+
+/// HS-067's one server-side claim: the browser can learn this machine's **application server key** from the
+/// endpoint the page already fetches, and the value there is the pair's own public half — byte for byte, not a
+/// re-derivation — which is what makes "each machine's keys are independent" a fact rather than a hope.
+///
+/// The second half is the negative a page needs: a machine with no pair answers `null`, so the settings screen
+/// can say why the Subscribe button is not offered instead of subscribing with half a key.
+#[tokio::test]
+async fn the_health_answer_carries_this_machines_application_server_key() {
+    let (_dir, state) = subscribed("health-key");
+    let served = Served::start(http::router(state.clone()), PATIENCE).await;
+    let response = request(
+        served.addr,
+        "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    let payload: Value = serde_json::from_str(&response.body).expect("the answer is JSON");
+    assert_eq!(
+        payload["application_server_key"], AS_PUBLIC,
+        "the health answer does not carry the pair's public half: {}",
+        response.body
+    );
+    assert_eq!(
+        payload["application_server_key"].as_str().map(str::len),
+        Some(87),
+        "a P-256 uncompressed point in base64url is 87 characters"
+    );
+    // The private half never appears anywhere in the answer: it is the one string a browser must not be given.
+    assert!(
+        !response.body.contains(AS_PRIVATE),
+        "the health answer leaks the private key: {}",
+        response.body
+    );
+
+    // The pair goes away while the server keeps serving — a machine whose secrets were removed is asked again —
+    // and the answer is the page's other arm.
+    std::fs::remove_file(vapid::store(&state.config.data_root)).expect("the pair is removable");
+    let response = request(
+        served.addr,
+        "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    let payload: Value = serde_json::from_str(&response.body).expect("the answer is JSON");
+    assert_eq!(
+        payload["application_server_key"],
+        Value::Null,
+        "a machine with no pair must answer null: {}",
+        response.body
+    );
+    served.finish().await.expect("a clean shutdown");
+}

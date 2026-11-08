@@ -13,7 +13,7 @@ mod support;
 use support::{Served, fetch, fetch_head, state, version};
 
 #[tokio::test]
-async fn the_health_endpoint_answers_the_five_keys() {
+async fn the_health_endpoint_answers_the_six_keys() {
     let served = Served::start(http::router(state()), Duration::from_secs(10)).await;
     let response = fetch(served.addr, "/api/health").await;
     assert_eq!(response.status, 200);
@@ -30,8 +30,25 @@ async fn the_health_endpoint_answers_the_five_keys() {
     assert!(
         response
             .body
-            .ends_with(r#","preview_origin":"http://localhost:8081"}"#),
-        "the fifth key is the preview origin, and it is last: {}",
+            .contains(r#""preview_origin":"http://localhost:8081""#),
+        "the fifth key is the preview origin: {}",
+        response.body
+    );
+    // The sixth (HS-067): the application server key, `null` on a machine with no pair and a base64url point
+    // when there is one — and it is last, so the five keys before it keep their order.
+    let tail = response
+        .body
+        .find(r#","application_server_key":"#)
+        .map(|at| &response.body[at..])
+        .expect("the sixth key is the application server key");
+    assert!(
+        tail.ends_with('}'),
+        "the sixth key is the last one: {}",
+        response.body
+    );
+    assert!(
+        tail.trim_end_matches('}') == r#","application_server_key":null"# || tail.contains("\"B"),
+        "the sixth key is a base64url point (it starts 0x04, so a `B`) or null: {}",
         response.body
     );
     served.finish().await.expect("a clean shutdown");
