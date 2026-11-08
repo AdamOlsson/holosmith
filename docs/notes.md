@@ -2201,3 +2201,32 @@ it rather than adding a caveat beside it.
   with `main` and `master` now costs two `rev-parse --verify` calls instead of one. `choices.targets` is filtered
   because an option `merge` refuses is a button that cannot work; `choices.remotes` is **not**, because whether the
   repository has the remote is the publish route's question and its own `422 bad_remote` sentence (ADR-0067 D4).
+
+### Landmines: the disk floor (HS-062)
+
+- **A machine-wide check on a request path multiplies by the test suite.** This sandbox's `/tmp` has **3 GB**
+  free and `min_free_gb` defaults to **20**, so a floor asked unconditionally would turn every stub create in
+  `cargo test` into a 507 — 26 test files create sessions. The fix is not `min_free_gb = 0` everywhere (that
+  hides the code path from every test that exercises it): the *predicate* rides on the preflight's own
+  (`disk::guarded`: Docker and not a `hub`), read from `runtime.backend`, which is what `serve` built `Backends`
+  from. Any later machine-wide refusal meets the same arithmetic — measure the blast radius in `/tmp` before
+  wiring it in.
+- **An async test that writes a shim and forks it needs `tokio::sync::Mutex`, not a `std` one.**
+  `tests/preflight.rs`'s `one_at_a_time` lock exists because `exec` of a file another thread still holds open is
+  `ETXTBSY`; in an `async` test the same lock is held across `.await`s, and `clippy::await_holding_lock` (denied
+  by `-D warnings`) refuses a `std` guard there. `tests/disk.rs` uses `tokio::sync::Mutex::const_new(())`
+  and `.lock().await`, so the guard still spans the whole body.
+- **A `case_*` that stops the shared boot must put it back.** `case_disk_floor` boots its own server and ends
+  with `stop_serve` + `start_serve` (`case_delete_session`'s idiom) even though the cases that follow it happen
+  to boot their own: `stop_serve` fails hard on an empty `serve_pid`, so leaving it empty makes the *next*
+  unguarded `stop_serve` a phase failure that only shows up when someone reorders the list. The review caught
+  this one, not the gate.
+- **The disk floor's sentence is one sentence for two requests, and that is why it says "this machine starts
+  nothing".** A create makes another session and a resume brings an existing one back, so "no new session" was a
+  create's sentence being printed for a resume — the exact shape ADR-0008's "a message must describe its own
+  request" forbids, and the reason `cap_reached` has two sentences. When two requests share a fix (item 14 gives
+  a create and a resume the same one), they share the sentence; when they do not, they must not.
+- **`ErrorBody.message` is a `Cow<'static, str>` since HS-062**, so a refusal can carry a measurement. Every
+  earlier constructor still passes a literal and serialises byte-identically, and `internal` still has a fixed
+  sentence (no rusqlite text on the wire). A new code that wants numbers passes `Cow::Owned`, and a `tracing`
+  field that carried `message` now needs `%error.body.message` — `Cow` is not a `tracing::Value`.

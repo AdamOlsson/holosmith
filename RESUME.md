@@ -1,4 +1,4 @@
-# RESUME — one issue per session (next: PER-94 / HS-062, the disk floor)
+# RESUME — one issue per session (next: PER-95 / HS-063, the per-session disk soft cap)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating procedure and
 still governs the cycle; this file is the state of the world, and it adds one rule of its own:
@@ -45,172 +45,203 @@ sandbox-specific incantation (§2).
 
 ---
 
-## 1. The issue this session picks up: `PER-94` — HS-062, the disk floor
+## 1. The issue this session picks up: `PER-95` — HS-063, the per-session disk soft cap
 
-**State when this file was written** (`origin/master` at `31feb2f`, the tree clean apart from the operator's own
-`orchestrate.sh`/`log.txt`): **63 of 80 stories Done, 17 Backlog**, all in project `Holosmith`. `PER-94` is
-`Backlog`, it is the next in `HS-###` order, and its one blocker (`HS-046`) is `Done` — so it is eligible. The
-stories still Backlog are `PER-94` (HS-062) and then, in order, `PER-95` (HS-063, blocked by HS-062), `PER-96`
-(HS-064, blocked by the done HS-043), `PER-98` (HS-066, blocked by the done HS-049), `PER-99` (HS-067), `PER-100` –
-`PER-106` (phase 3, HS-068 … HS-074) and `PER-108` – `PER-112` (phase 4, HS-076 … HS-080); check the Linear
-`Blocked by` list rather than this sentence if HS-062 turns out to be a stop.
+**State when this file was written** (`origin/master` at `d1a5350`, the tree clean apart from the operator's own
+`orchestrate.sh`/`log.txt`): **64 of 80 stories Done, 16 Backlog**, all in project `Holosmith`. `PER-95` is
+`Backlog`, it is the next in `HS-###` order, and its one blocker (`PER-94`, HS-062) is `Done` — so it is eligible.
+The stories still Backlog are `PER-95` (HS-063) and then, in order, `PER-96` (HS-064, blocked by the done
+HS-043), `PER-98` (HS-066, blocked by the done HS-049), `PER-99` (HS-067), `PER-100` – `PER-106` (phase 3,
+HS-068 … HS-074) and `PER-108` – `PER-112` (phase 4, HS-076 … HS-080); check the Linear `Blocked by` list rather
+than this sentence if HS-063 turns out to be a stop.
 
-The last shipped story was `PER-90` (HS-058, the Changes sheet, **ADR-0067**) — item 12's last bullet and the first
-screen since phase 1. Its gate run was green: **84 cases, 1414 assertions**, no `SKIP`; `cargo test` is **1069
-tests**, and `web/`'s runner is **72**. Its §1 material is now Linear, `docs/review/PER-90.md`, `git log` and §9.
+The last shipped story was `PER-94` (HS-062, the disk floor, **ADR-0068**) — item 14's *first* sentence, and the
+second story whose subject was a number that already existed. Its gate run was green: **85 cases, 1440
+assertions**, no `SKIP`; `cargo test` is **1083 tests** (55 binaries) and `web/`'s runner is **72** (unchanged —
+that story touched no web code). Its §1 material is now Linear, `docs/review/PER-94.md`, `git log` and §9.
 
 ### 1.1 The slice (verbatim from `docs/stories/phase-2-deployable-mvp.md`; Linear's body is the same text)
 
-> ### HS-062 — Disk floor
+> ### HS-063 — Per-session disk soft cap
 >
-> **As** the operator **I want** creation refused when the disk is nearly full **so that** I do not corrupt the
-> machine I depend on.
+> **As** the operator **I want** one session to be stopped when it hoards disk **so that** one bad build does not
+> starve the others.
 >
-> - **Size:** S · **Blocked by:** HS-046 · **Spec:** item 14
-> - **Demo:** fill the disk below `min_free_gb` and see create and resume return 507 with a clear message.
+> - **Size:** M · **Blocked by:** HS-062 · **Spec:** item 14, D2
+> - **Demo:** grow a worktree past `session_disk_soft_gb`; the turn aborts, an `error` event with code
+>   `disk_quota` arrives, and the session stops, resumable.
 >
 > **Acceptance**
-> - [ ] Session creation and resume return 507 when free space is below `min_free_gb` (default 20).
-> - [ ] The check runs before any worktree or network is created.
-> - [ ] `doctor` reports the same measurement, so the two never disagree.
-> - [ ] Running turns are not interrupted by crossing the floor; only new starts are refused.
+> - [ ] A watchdog runs `du` on each live session's worktree every 5 minutes.
+> - [ ] Over `session_disk_soft_gb` (default 10) it emits an `error` event with code `disk_quota`, aborts the turn,
+>   and stops the session.
+> - [ ] The stop is `stopped` (resumable after cleanup), not `error`.
+> - [ ] The soft cap includes `target/` and `node_modules`; the docs say to raise it for large Rust projects.
+> - [ ] No cache directory is shared between sessions (D2), asserted by a test that two sessions cannot see each
+>   other's caches.
 
-`docs/stories/**` is **not edited** (§7). An **S** story, and it is the *second* use of one number: `serve` already
-refuses to boot below the floor and `doctor` already prints the measurement, so what is missing is the two request
-paths — which makes "the same measurement" the load-bearing phrase, not "a new check".
+`docs/stories/**` is **not edited** (§7). An **M** story — the third periodic policy in the build (the idle stop,
+the compaction, and now this) and the first that has to *end a turn* rather than just move a row, so §1.5 is
+where the work is.
 
 ### 1.2 The spec it closes
 
-Item 14, in full (the sentence this story owns is the first):
+Item 14's three remaining sentences and item 14's neighbours in D2:
 
-> `min_free_gb` (default 20): session creation and resume fail with 507 below it.
+> - `session_disk_soft_gb` (default 10): a watchdog runs `du` on each live session's worktree every 5 minutes. Over
+>   the limit it emits an `error` event with code `disk_quota`, aborts the turn and stops the session (resumable
+>   after cleanup).
+> - Docker storage limits do not apply to bind mounts. Optional hardening: project quotas on the data filesystem.
+> - Build and package caches: per-session and isolated (decided in D2). Each session installs and builds from
+>   scratch in its own worktree, and no cache directory is shared between sessions. Expect slow first builds. The
+>   soft cap above includes target/ and node_modules, so raise `session_disk_soft_gb` for large Rust projects.
 
-and item 14's neighbours, which are **HS-063's** and not this story's: `session_disk_soft_gb` (default 10), the
-watchdog that runs `du` every 5 minutes, the `error` event with code `disk_quota`, and "Docker storage limits do not
-apply to bind mounts".
+The last of those is the one that is *already true by construction* — a session's container mounts only its own
+worktree, `.git`, the two read-only git paths and its own pi-home (`container::Mounts`, spec item 1's five since
+HS-031) — so the acceptance's fifth bullet is a **test**, not code: two sessions' containers must be shown not to
+share a writable cache path. `PER-94` just spent 11 review findings on the difference between "true" and
+"witnessed"; expect the same here.
 
 ### 1.3 What already exists (read this before planning)
 
-- **The measurement, once**: `preflight::disk(&Config, &Path) -> Finding` (`crates/holosmith/src/preflight.rs`, the
-  private `disk` and `parse_df_available`) runs `df -Pk <data_root>`, reads the fourth column of the second line,
-  converts to whole GB and compares with `min_free_gb`. Three outcomes, deliberately: no data root yet → `unknown`
-  (ADR-0054's rule, so a fresh host does not fail a check that has nothing to measure), `df` missing/failing/printing
-  nonsense → `fail` with its own sentence, otherwise `pass`/`fail` naming the two numbers. `Tools { git, df }` is the
-  tests' seam and defaults to `PATH` (`preflight::Tools::default`).
-- **`serve` refuses to boot** when that check fails (HS-024): the preflight's failures are `Complaint`s and the boot
-  stops with their sentences. **`doctor --quick` prints the very same finding** (HS-045 routes the preflight's list
-  through `report_with`), which is why the third acceptance bullet is a *proof* rather than new code: the two can
-  only disagree if a story gives the request path a second measurement.
-- **`min_free_gb` is a config key** (`config/mod.rs:230`, default 20, `Kind::Integer`, `u64_setting` — so `0` is
-  accepted and today means "no floor"; a story that keeps it must say so, and `config show`'s golden file is
-  `tests/golden/config-default.toml`).
-- **The create's refusal order**, in `http::sessions`: the idempotency key → the body → `refuse_project` (the three
-  project refusals) → the cap (`cap_without_idle`, with one eviction attempt) → the row → the provisioner. `507` and
-  a code for it **do not exist** (`http/error.rs` has no `INSUFFICIENT_STORAGE`); the resume answers `cap_reached`
-  (HS-022) and checks the cap *before* the transition.
-- **The app's "a machine fact before a session fact" precedent**: the drain's `409 draining` (ADR-0060) is answered
-  before the row is read, and the publish's `403 publish_disabled` before the row too (ADR-0066 D4). A full disk is
-  that kind of fact.
-- **The gate's two neighbours**: `case_docker_preflight` (no server: it builds a `_ping` socket and measures the
-  checks over shims) and `case_doctor_quick` (no server at all). `scripts/verify.sh`'s `deploy_machine_shims` is the
-  precedent for putting a stand-in program on `PATH` and recording what it was asked (`tailscale` there).
-- **The two paths a 507 has to reach**: `POST /api/sessions` and `POST /api/sessions/{id}/resume`. Nothing else
-  starts work — "running turns are not interrupted" is therefore a *structural* fact (no code path in the turn
-  runner reads the disk), and §1.6 asks how to measure it rather than assert it.
+- **`session_disk_soft_gb` is a config key and nothing reads it**: `config/mod.rs:231` (default `10`),
+  `config/schema.rs:230` (`Kind::Integer`, `u64_setting` — so `0` is accepted today), and
+  `tests/golden/config-default.toml:28`. `grep -rn session_disk_soft_gb crates/` finds only config code and the
+  golden file. There is **no** validation refusing `0`, and `0` should mean "off" by `idle_stop_min`'s precedent
+  (ADR-0025) — a decision, not a given.
+- **The periodic-policy template is `sweeper.rs`** (HS-021, ADR-0025): a `TICK` **constant** (5 s) rather than a
+  config key, `spawn`/`run`/`sweep` where `sweep` is public so a test drives one pass, `AppState::sweeper()`
+  returning an `Option` that is `None` when the policy is off, and the four rules its own doc calls load-bearing:
+  the candidate set **is** the repository query, the row moves before the container (ADR-0020), the stop is
+  `Stopper`'s so `expected_stop` is written first, and a refused application is an `info` line and not a bug.
+  `compactor.rs` (HS-060) is the same shape with a 60 s tick and a per-session step that holds the database mutex.
+- **Ending a *turn* is `ladder.rs`'s job, and it already has two callers with a deadline**: `Turn::run` (HS-022,
+  `turn_timeout_min`, `TURN_TIMEOUT`) and the token budget (HS-060, `budget_exceeded`) both `spawn` the ladder and
+  keep awaiting the turn, sharing **one `fired`** so only one climb happens; `climb` is rung one (clear_queue →
+  abort) and `end_turn` is rung two (`stopped` with the caller's reason → `stop`), returning
+  `Ending::{Asked,Forced}`. `FORCED_ABORT` is the reason the timeout uses. The abort ladder's `running → stopped`
+  is `Trigger::AbortLadder`.
+- **`stop.rs`'s `Stopper`** is the one way a container is stopped (HS-030): it writes `sessions.expected_stop`
+  and *then* calls the backend, so the exit classification reads the stop as ours. The sweeper, the create's
+  eviction and the ladder's forced rung all use it.
+- **The event kinds are a fixed list** (`events/mod.rs:33-63`): `turn.start`, `turn.end`, `turn.error`,
+  `turn.steer`, `message.delta`, `message.snapshot`, `message.end`, `tool.start`, `tool.end`, plus
+  `session.status` and `history.truncated`. **There is no `error` kind** — `TURN_ERROR` is `"turn.error"` and is
+  what a failed turn writes — so item 14's "an `error` event with code `disk_quota`" is a *new* kind (or a code
+  on an existing one) and the client's rules for it are a `transcript.ts` function with a node test.
+- **The floor is the machine's; this is the session's.** `disk.rs` (HS-062) is `du`-free and `df`-based: it
+  measures the **filesystem** before a start and answers `507`. Nothing there reads a session's worktree, and
+  `du` is not spelled anywhere in `crates/` (`grep -rn '"du"'` finds nothing) — but `du` **is** on this machine
+  (GNU coreutils 9.4), so a shim is not needed for the gate, only a `PATH` seam for the crate tests if `du` is
+  the reader. The gate's `deploy_machine_shims` is the precedent for a stand-in.
+- **The worktree's path is on the row**: `Worktree::of` names it and `Session.worktree` records it, so "each live
+  session's worktree" is a column read, and `changes::dirty`/`merge` already run host git processes per session
+  on `spawn_blocking`.
+- **A stop is not an `error`.** The acceptance's third bullet (`stopped`, resumable) is the transition table's:
+  `running → stopped` with a reason, and the `error` **event** is what carries the code. The two are different
+  things and the demo says both words.
+- **The gate's periodic-policy case is `case_idle_stop`**, and it costs the spec's real minute on purpose
+  (`idle_stop_min = 1` rather than a knob). A 5-minute tick has no such escape: item 14 fixes the interval, so a
+  gate case must either drive one sweep with a test-only seam (the crate's `Sweeper::sweep` precedent) or measure
+  something that does not need the tick.
 
 ### 1.4 What does not exist
 
-No `507` answer and no code for it; no disk read in the create's or the resume's path; no sentence for a client
-("free some space, or lower `min_free_gb`" is the preflight's wording and this story needs its own, because the
-request is not the boot); no `df` seam for a *server* (only the preflight's `Tools` for tests and `doctor`); no case
-that makes the floor fire while a server is up; and **nothing that records what `min_free_gb = 0` means**.
+No per-session disk read (`du`), no `disk_quota` code, no `error` event kind, no watchdog task or its wiring in
+`serve`/`AppState`, no sentence for the row's reason or for the event, no `transcript.ts` rule for the event, no
+test that two sessions' caches are isolated, and **nothing that records what `session_disk_soft_gb = 0` means**.
 
 ### 1.5 What the plan must decide (and the shape this handoff recommends)
 
-1. **Where the check runs.** Recommend: in `http::sessions`, **after** the body and the idempotency key (a malformed
-   request is still the body's) and **before** `refuse_project`, the cap and the row — so a full machine is answered
-   as a machine fact, no git process runs, and no row exists to clean up. The resume's check goes before its
-   transition, next to the cap check, and needs its own code only if the two facts differ (they do not: `507` both).
-2. **Whether the request path re-uses `preflight::disk` or a narrower reader.** Recommend: extract the *pure*
-   arithmetic (`available_gb(df_output) -> Option<u64>`) and a `pub(crate)` reader that returns
-   `Result<u64, DiskError>`; `preflight::disk` then becomes one caller and keeps its four sentences, and the request
-   path composes its own 507 sentence from the same number. Two spellings of the *measurement* is the failure mode
-   this story exists to prevent; two spellings of the *sentence* is correct (the boot's fix is not the create's).
-3. **What the code is called.** `507` is `StatusCode::INSUFFICIENT_STORAGE`; the envelope code should be the thing,
-   not the status — the project's names are words (`cap_without_idle`, `no_worktree`), so something like
-   `disk_floor` or `insufficient_storage`. Check `GLOSSARY.md` first and add the entry; a code is effectively API
-   (ADR-0008).
-4. **`min_free_gb = 0`.** Recommend: keep it legal and document it as **"no floor"** (the preflight's comparison is
-   `available >= min_free_gb`, so `0` always passes) — the alternative, refusing `0`, would be a new config rule for
-   a story that only asked for a refusal.
-5. **How a gate case makes the floor fire while a server is up.** The boot itself refuses below the floor, so a case
-   cannot simply set `min_free_gb` high: `serve` would never start. Recommend a **`df` shim on `PATH`**, the
-   `deploy_machine_shims` shape: a `python3` script that prints a large available column for the boot and a small one
-   once a marker file exists (or reads the marker's value), with the server's disk read going through the same
-   `PATH` lookup the preflight uses. Then the case boots healthy, creates one session, plants the marker, and asserts
-   the create and the resume answer `507` with the code and the sentence — and that the *boot* still reports what it
-   measured.
-6. **What "running turns are not interrupted" is measured by.** Recommend a crate test that starts a turn (the stub
-   backend is enough), crosses the floor through the same reader (the `df` shim or a `Tools` seam), and asserts the
-   turn still settles — plus the gate's own "no request path other than create/resume reads the disk" being
-   structural: the reader has one or two call sites.
-7. **`doctor`.** The acceptance says "reports the same measurement, so the two never disagree". If the extraction in
-   D2 is done, `doctor` is already right and the *test* is the deliverable: one crate test that hands the same
-   `df` output to the preflight and to the request-path reader and asserts the same GB, and one that asserts a
-   `507`'s numbers are the sentence's.
+1. **Whether the watchdog is a new task or a second pass in the sweeper.** Recommend: a **new module**
+   (`quota.rs`), spawned beside the sweeper, for the reason `compactor` is its own: three policies in one tick
+   would share a period that belongs to only one of them, and the sweeper's `TICK` (5 s) is not item 14's
+   5 minutes. Wiring is `AppState::quota()` → `Option`, spawned in `commands/serve.rs` where the sweeper is.
+2. **The reader.** `du -sk <worktree>` and the third-party rules the preflight's `df` already taught (a program
+   that cannot run is not a pass; `spawn_blocking`; the `Tools`-shaped seam for tests). Recommend a `du` seam on
+   `AppState.tools` (which exists since HS-062, as `preflight::Tools { git, df }` — it would gain a `du`), so a
+   crate test drives one sweep against a shim instead of growing a real 10 GB tree. `du` on a **worktree**, not
+   the data root: `--one-file-system`? Probably not — say why either way.
+3. **Which sessions are candidates.** "each live session's worktree" = `running` and `idle` (`starting` has no
+   worktree yet and `stopped`/`error`/`deleting` are not consuming a turn). Recommend `running` **and** `idle`,
+   with the `idle` arm doing what the sweeper does (row first, then `Stopper`) and the `running` arm going
+   through the ladder.
+4. **How the turn is ended.** Recommend the ladder's `climb` (clear_queue → abort → grace) rather than a raw
+   `stop`, because item 14 says "aborts the turn", and then `running → stopped` with the reason `disk_quota` —
+   *not* `error`, which is the acceptance's third bullet. The `error` **event** is separate and is emitted
+   regardless of which rung ended the turn.
+5. **The event's shape.** A new kind (`error`, one new string in the fixed list) with `code: "disk_quota"` and the
+   measured size and the limit in the payload, **or** the code on `turn.error`. Recommend the new kind: the
+   increment is additive, the client's existing `turn.error` rendering is about an agent failure, and this is a
+   machine policy. Either way the code must be in `GLOSSARY.md` (a code is API — ADR-0008) and `transcript.ts`
+   must have a sentence for it with a node test (`npm test` is the only gate that can see a sentence).
+6. **`session_disk_soft_gb = 0`.** Recommend "off", like `idle_stop_min = 0` — one more decision recorded in the
+   ADR rather than a new config rule (HS-062 just made the same call for `min_free_gb = 0`).
+7. **How a gate case measures a 5-minute tick.** Recommend: the gate measures **one pass** — a `du` stand-in on
+   `PATH` reporting an over-limit size, a session left `running` or made `idle`, and the row/event/stop that
+   follow — plus a crate test that drives `sweep` directly with a `Tools`-shaped `du` shim. A `case_*` that waits
+   five minutes is not a gate, and a case that only sets a small `session_disk_soft_gb` on a real worktree is a
+   case that measures the tick, not the policy.
+8. **Caches (the fifth acceptance bullet).** Recommend a crate test that inspects two sessions'
+   `docker run` vectors (`SessionContainer::run_args`, already unit-tested) and asserts no writable host path
+   outside each session's own worktree/`.git`/pi-home appears — the "asserted by a test that two sessions cannot
+   see each other's caches" line, without a daemon.
 
 ### 1.6 The questions the plan must answer (before code)
 
-1. Exactly where in the create's order, and does an idempotent replay answer 507 or the stored row (the retry rule is
-   `create_locked`'s — idempotency is checked first today, so a replay after the disk filled returns the row).
-2. Whether the resume's 507 comes before or after `cap_reached`, and what it says when both hold.
-3. The exact sentence, and whether it names `min_free_gb`'s current value and the free space (the preflight's do).
-4. Whether the reader is `spawn_blocking` (a `df` subprocess on a request path — every other subprocess on a request
-   path is).
-5. What the create does about the project backup (`back_up`) and the idempotency key when the disk is short.
-6. Which test proves `doctor` and the request path agree, and where it lives (`preflight`'s unit tests, `doctor`'s,
-   or a new `tests/disk.rs`).
-7. What the gate case is called (`case_disk_floor`), what it leaves behind, and whether the `df` shim is on `PATH`
-   for the whole case or only for its boot.
+1. Does the watchdog hold the database mutex across the `du` (slow, a subprocess) or read the ids, drop the lock
+   and re-read each row? (The compactor's per-session step holds it; a `du` of 10 GB is hundreds of
+   milliseconds, so this one must not.)
+2. What happens when a session leaves `running` between the read and the climb — the ladder's own "the row moved"
+   rules, and does the quota make a second attempt next tick or give up?
+3. What does the row's `status_reason` say, and does the event carry the same sentence or a different one?
+4. Is the measurement cached anywhere (the size is only ever needed at the tick), and what does the log say per
+   tick when nothing is over?
+5. Does `session_disk_soft_gb` compare **GiB** or GB, and is the number a whole integer in the config and a
+   kilobyte count in `du` — the arithmetic `min_free_gb`'s `available_gb` already does, and the place a second
+   spelling would hide.
+6. Does the event fire once per crossing or every tick while over the limit? (The stale-quota landmine: a session
+   that is `stopped` is no longer a candidate, so "once" is a consequence of the candidate rule — but say it.)
+7. Which test proves `doctor`/`status` does **not** need to know about this policy, and where the `du` shim lives.
 
 ### 1.7 Acceptance, restated as checks
 
-- *507 on create* — a healthy boot, a `df` that then reports below the floor, and `POST /api/sessions` answering
-  `507` with the envelope's code and a sentence naming the two numbers and the fix.
-- *507 on resume* — the same for a `stopped` row.
-- *Before any work* — no row, no worktree, no network: the assertion is the count of rows and the absence of
-  `.worktrees/<id>`, not the sentence.
-- *`doctor` agrees* — one test compares the two readers' GB for one `df` output; the gate's `case_doctor_quick` keeps
-  printing the same finding.
-- *Turns are not interrupted* — a turn that is already running settles while the floor is crossed.
-- Plus the usual gates, one new `case_*`, and the docs: `docs/build.md`'s case list, `GLOSSARY.md`'s code entry, an
-  ADR only if a decision needs one (**0068** is next).
+- *A watchdog runs `du` every 5 minutes* — one crate test drives one sweep; the gate measures one pass; the
+  constant is named and quoted.
+- *Over the limit: an `error` event with code `disk_quota`* — the event, its kind, its code and its payload, at
+  the wire (`GET …/events/history`) and as a `transcript.ts` sentence with a node test.
+- *…aborts the turn and stops the session* — a running session ends via the ladder (`Ending::Asked`/`Forced`) and
+  the row is `stopped` with the reason; a container is stopped through `Stopper` (so `expected_stop` is written).
+- *The stop is `stopped`, not `error`* — asserted as the row's status, not as the event's.
+- *The cap includes `target/` and `node_modules`* — a `du` of the worktree counts them: a test should make a
+  `target/`-shaped tree and see it counted, because `du` with the wrong flags would not.
+- *No cache directory is shared* — the fifth bullet above, over `run_args`.
+- Plus the usual gates, one new `case_*`, and the docs: `docs/build.md`'s case list, `GLOSSARY.md`'s
+  `disk_quota`/soft-cap entry, an ADR (**0069** is next).
 
 ### 1.8 Non-goals
 
-`session_disk_soft_gb` and the `du` watchdog (HS-063, blocked by this story); Docker storage limits (item 14's
-"optional hardening"); a quota, a `du` of the data root, a periodic disk event, notifications; the preflight's own
-four sentences (they are HS-024's and `doctor`'s; §1.5 D2 keeps them).
+Docker storage limits and project quotas (item 14's "optional hardening"); a *hard* cap or a per-session
+filesystem; anything about the machine's floor (HS-062, done — `disk.rs` is `df` and must stay that way);
+notifications; a UI chart; a `du` of the data root; deleting anything on the operator's behalf.
 
 ### 1.9 The demo
 
-On this machine, over the shipped artifact: boot `serve` with a `df` stand-in on `PATH` that reports a healthy
-number, create one session (the stub backend is enough, or a `_ping` shim if the story needs a worktree), have the
-stand-in start reporting below `min_free_gb`, and show `POST /api/sessions` and `POST …/resume` answering `507` with
-the sentence — plus `GET /api/sessions` unchanged and `holosmith doctor --quick`'s disk line for the same shim. Say
-plainly what was not measured: a *real* full disk (this sandbox has no way to fill one and no root), a real agent
-turn, no hub.
+On this machine, over the shipped artifact: boot `serve` with a `du` stand-in on `PATH` that reports an
+over-limit size for one session's worktree, let one sweep run, and show the row `stopped` with the reason, the
+`disk_quota` event in `GET /api/sessions/{id}/events/history`, and the session resumable afterwards (a resume
+answers 202 and the row walks back). Say plainly what was not measured: a *real* 10 GB build tree (use a real one
+if the budget allows — a `dd`'d file is cheaper than a cargo build and the story's own point is the size), a real
+agent turn ending (the stub is enough for the row, but the *ladder* is about a real abort), and no hub.
 
 ### 1.10 What the next agent needs back
 
 When you write the state back (§5, step 10): §1 becomes the **next** issue — by `PROMPT.md`'s ranking that is
-`PER-95` (HS-063, the per-session disk soft cap) *if* HS-062 ships, and `PER-94` again if it does not — with the same
-shape. Refresh the counts, the ADR number you took (**0068** is next), the last gate run's own numbers (and `web/`'s
-test count, which this story should not change), and replace §9's row with this story's. Anything you learned that is
-**not** state and **not** an ADR goes into `docs/notes.md` under a new `### Landmines: …` heading, never into §1.
-Then kill what you started (§5, step 11).
-
----
+`PER-96` (HS-064, stopped-session expiry) *if* HS-063 ships, and `PER-95` again if it does not — with the same
+shape. Refresh the counts, the ADR number you took (**0069** is next), the last gate run's own numbers (and
+`web/`'s test count, which this story may well change), and replace §9's row with this story's. Anything you
+learned that is **not** state and **not** an ADR goes into `docs/notes.md` under a new `### Landmines: …`
+heading, never into §1. Then kill what you started (§5, step 11).
 
 ## 2. Environment (already repaired — do not redo)
 
@@ -235,7 +266,8 @@ Why outside the repo: `/` is a 3.4 GB tmpfs and `~/.pi` is the only large writab
 
 **Available:** node 24.22.2 / npm 11.19.1 with the npm registry reachable (node 24 strips TypeScript
 types natively, which is what `npm test` relies on); `curl`; `python3` (with stdlib `sqlite3` and
-`http.client`); `sed`, `grep`, `tr`, `cut`, `cmp`, `find`, `timeout`, `git`; **Playwright's Chromium**
+`http.client`); `sed`, `grep`, `tr`, `cut`, `cmp`, `find`, `timeout`, `git`, `du` (GNU coreutils 9.4, which
+HS-063 needs); **Playwright's Chromium**
 (`~/.cache/ms-playwright`, bound read-only by `bwrap.sh`) and the `playwright` npm package at
 `~/.cache/hs-browser/pw/node_modules`. Two quirks, both hit: ESM **ignores `NODE_PATH`**, so a script
 imports the package by its own path — `…/playwright/index.mjs` (the `.js` entry is CJS and its default
@@ -434,7 +466,7 @@ Some cases bring their own boot, and they are the ones a new story is most likel
 | `case_token_budget`, `case_usage_survives_resume`, `case_compaction`, `case_history`, `case_backup`, `case_worktree`, `case_worktree_refusal`, `case_agent_launch`, `case_docker_resume`, `case_docker_turn`, `case_internet_toggle`, `case_doctor_full` | its own `serve`, and (the last five) the daemon and `agent_image` |
 | `case_changes`, `case_changes_diff`, `case_merge`, `case_merge_strategies`, `case_merge_guards`, `case_publish` | `python3` for a `_ping`-only docker socket, a real repository under their own `projects_root`, and (for the three merge cases) their own **data root**, because `<data>/merge` is what they measure. `case_merge_guards` also writes one column (`sessions.status`, with python3's `sqlite3`) because a gate may not run a turn. `case_publish` also makes a **bare repository** under `$WORK` as `origin`, boots **three** times (the ordinary run, one with git's `GIT_CONFIG_*` naming a second `pushurl` repository, one with `remotes = []`), and needs no daemon. No daemon. |
 | `case_verification_table` | no server, no daemon, no image: it reads `HolosmithSpec.md`'s eleven `V<n>` rows (and runs first in `serve_cases`, so a rotted table fails before the Docker cases) |
-| `case_docker_preflight`, `case_doctor_quick` | no server at all (`case_doctor_quick` builds its own `_ping` socket and picks its ports, so it needs `python3` and nothing else) |
+| `case_docker_preflight`, `case_doctor_quick`, `case_disk_floor` | no shared server (`case_doctor_quick` and `case_disk_floor` build their own `_ping` socket and a `PATH` stand-in — `df` for the floor — so they need `python3` and nothing else; `case_disk_floor` also boots its own Docker run and puts the shared boot back) |
 | `case_container_mounts` | no server *and* no daemon — one printed `SKIP` line when there is neither a daemon nor an image |
 | `case_exit_classification` | `python3` (it reads a row's `expected_stop` out of `app.db`), skips without it |
 | `case_egress_proxy` | **no** server, daemon, internet or key: it starts the artifact as `proxy egress` on a loopback port and asks it four questions over a socket |
@@ -641,8 +673,12 @@ crates/holosmith/
                             bad_steer / unsaved_work / unknown_session / cap_without_idle /
                             git_not_directory / submodules_present / worktree_config_enabled /
                             bad_target / bad_strategy / not_fast_forward / target_dirty /
-                            target_checked_out / conflict / dirty_worktree — `unsupported` retired with
-                            its last field in HS-056),
+                            target_checked_out / conflict / dirty_worktree / disk_floor — `unsupported`
+                            retired with its last field in HS-056 — and since HS-062 `ErrorBody.message` is a
+                            `Cow<'static, str>`, so a refusal can carry a measurement;
+                            `http/disk.rs` is the floor's request-path half: `refusal(AppState) ->
+                            Option<ApiError>`, answered before the project's refusals and the cap on both of
+                            the two starts),
                             health.rs, guard.rs (the four checks), sessions.rs (POST+GET
                             /api/sessions, GET /api/sessions/{id}, POST …/prompt, …/abort, …/steer,
                             …/resume, DELETE /api/sessions/{id}[?force=true], TURN_STEER, EVICTED,
@@ -777,7 +813,16 @@ crates/holosmith/
                             both arms) and `check`/`check_with` = its failures via `Complaint::of` (the failing
                             projection, same `String`); `Tools { git, df }` is the tests' shim seam, `Check`
                             is the **one** word table (docker, git, disk, network, systemd, merge, tailscale,
-                            ports, database, proxy, image), `socket_sentence`, `MIN_GIT` (2.38)
+                            ports, database, proxy, image), `socket_sentence`, `MIN_GIT` (2.38). Since HS-062
+                            `disk` is a *caller*: the measurement itself lives in `src/disk.rs`
+  src/disk.rs               the free-space floor's one measurement (HS-062, ADR-0068): `DF` (the program's
+                            name, once), `DiskError { Missing, Refused, Unrunnable, Unprintable }` + its
+                            `Display`, `Verdict { Enough, Short }`, `available_gb(df_output)` (field 4 of line
+                            2, in whole GiB), `verdict(available, min)`, `measure(df, root) -> Result<u64,
+                            DiskError>` (blocking, `df -Pk`), `guarded(backend, role)` = Docker && not Hub,
+                            and the source-walk guard that `disk::measure` is named outside this file only in
+                            `preflight.rs` and `http/disk.rs`; `min_free_gb = 0` is *no floor* (nothing is
+                            measured)
   src/doctor.rs             `holosmith doctor`'s list (HS-045, ADR-0054): `Depth {Quick, Full}`,
                             `Tools { preflight, tailscale, systemd, config_path, admin_dir }` (the last two are the
                             install tree's machine-wide paths, so `perms` reads the *caller's* tree — HS-049),
@@ -804,6 +849,12 @@ crates/holosmith/
   scripts/schema-snapshot.sh  the release step that regenerates it (`<data root>/app.db`, read-only open)
   src/{serve,web,logging,clock,version,pins}.rs
   tests/                    version_cli, config_cli, http_contract, serve_cli, db_migrations, exit, agent,
+                            disk (HS-062: a `df` stand-in the test rewrites — the boot's check and a real
+                            `POST /api/sessions` read one number, 507 on create and on resume with the code and
+                            both numbers, no row and no worktree, a replay answering its own row, a create at
+                            the cap refusing *without* evicting, a turn that settles while the floor is
+                            crossed, `min_free_gb = 0` needing no `df` at all, and a stub run not measured;
+                            a `tokio::sync::Mutex` serialises the bodies because the shims fork),
                             changes (HS-052: the summary over a real repository in a `TempDir` — the two
                             counts against git's own arithmetic, the two-dot file list, a rename, a binary
                             file, an ignored and an untracked file, `touches_ci`, a conflict that moves no
@@ -866,9 +917,9 @@ scripts/verify.sh           the one-command gate (see §3), including the two st
                             --json` from the pairs it was asked for) and `health_responder` (a `python3` that
                             answers `/api/health` for a whole case)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0067          read the recent ones before planning anything (0067 is the Changes sheet)
+docs/adr/0001…0068          read the recent ones before planning anything (0068 is the disk floor)
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-93, PER-90, PER-97, PER-107  each a verbatim review + a `## Resolution` table
+docs/review/PER-33…PER-94, PER-97, PER-107  each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -972,7 +1023,8 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   checkout is refused earlier, with a 422; the demo trick HS-019 used still works for a project that *is*
   one — which is also how HS-019 provoked a real failed snapshot from the shipped artifact.)
 - **`AppState`** is `{ config, runtime, database: Arc<std::sync::Mutex<Database>>, events: EventWriter,
-  streams: StreamRegistry, backend: Backends }`, with **eight** wiring helpers — `provisioner()`,
+  streams: StreamRegistry, backend: Backends, drain: Control, merges: Merges, tools: preflight::Tools }` — the
+  last three since HS-051, HS-054 and HS-062 — with **eight** wiring helpers — `provisioner()`,
   `turner()`, `transitioner()`, `ladder()`, `deleter()`, `sweeper()` (an `Option`, `None` when
   `idle_stop_min` is 0), `compactor()` (always `Some`) and `reconciler()` (HS-044). The mutex is an explicit
   stopgap (ADR-0012/0013; `docs/notes.md`'s *Data and state* landmines).
@@ -1085,14 +1137,14 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 The catalogue lives in **`docs/notes.md`** — read the **cross-cutting** sections before you start anything,
 then the sections below. It is a reference: everything there is a measurement or a review finding.
 
-| Read | Why it bears on HS-062's disk floor |
+| Read | Why it bears on HS-063's per-session soft cap |
 | --- | --- |
-| Cross-cutting: *Tests*, *HTTP and the envelope*, *Config and docs* | The three sections a 507 touches: **Tests** carries the two shapes that matter here (`df` is a subprocess, so a request path must `spawn_blocking` it like every other subprocess; and a test that asserts only a status is how a wrong code ships — assert status **and** `code` **and** `content-type`), **HTTP and the envelope** carries the rule that a code is effectively an API and that "a message must describe its own request" (the boot's sentence and the create's are not the same request), and **Config and docs** carries `min_free_gb`'s golden file (`tests/golden/config-default.toml`) and `KNOWN_KEYS.len()` — no new key is expected, but a *changed* meaning (`0` = no floor) is a doc and glossary line. |
-| *Landmines: startup checks, refusals and the writer's tick (HS-023, HS-024)* | The preflight's own history: **a startup refusal changes what every default-backend boot does**, and the honest fix is never a flag that skips a check. A gate case that needs the floor to fire *while a server is up* therefore needs a `df` stand-in, because the boot refuses below the floor before any request can be made. |
-| *Landmines: the doctor, the ports and a read-only open (HS-045)* | The three-armed finding (`pass`/`fail`/`unknown`), the `Tools { git, df }` test seam, and why `doctor`'s disk check and `serve`'s are one function — the acceptance's third bullet is a *proof* of that, not new code. `preflight::disk`'s "a data root that is not there yet is not a disk problem" is the arm to keep. |
-| *Landmines: the deploy, the ports and what `install` does to a key file (HS-047)* and *the service (HS-049)* | `scripts/verify.sh`'s `deploy_machine_shims` is the precedent for putting a stand-in program on `PATH` and recording what it was asked (`tailscale` there, `df` here) — and `case_server_deploy`/`case_doctor_quick` are the two cases that would notice a `PATH`-lookup seam. |
-| *Landmines: the drain and its socket (HS-051)* | "A machine fact before a session fact" (ADR-0060): a full disk is the machine's, so the create answers it before the row and the cap — the same order `409 draining` and `403 publish_disabled` already use. |
-| *Landmines: the changes view (HS-052)* and *the Changes sheet (HS-058)* | Not the subject, but the two most recent *shape* lessons a small story inherits: a null is not a zero (the floor's numbers must not print `0 GB` for "could not measure"), and every sentence a screen or a refusal shows is a rule with a test. |
+| Cross-cutting: *Tests*, *HTTP and the envelope*, *Config and docs* | **Tests** carries the shapes this story needs: a subprocess is `spawn_blocking`'d, a test that asserts only a status lets a wrong code ship (assert status **and** `code` **and** `content-type`), and a test that cannot fail is worse than no test — the acceptance here is *five claims* and each needs a witness. **HTTP and the envelope** carries "a code is effectively an API" (`disk_quota` is a new constant plus a glossary line) and "a message must describe its own request". **Config and docs** carries `session_disk_soft_gb`'s golden line and `KNOWN_KEYS.len()`: no new key, but a *meaning* (`0` = off) is a doc and glossary line. |
+| *Landmines: the disk floor (HS-062)* | The newest section, and the immediately preceding story: a machine-wide check multiplies by the test suite (this sandbox has 3 GB in `/tmp`), the `Tools`-shaped seam on `AppState` is how a test owns a program, `ErrorBody.message` is a `Cow` since HS-062, and a `case_*` that reboots the shared boot must put it back. The *distinction* matters too: `disk.rs` is `df` and the machine's floor; this story is `du` and one session's worktree. |
+| *Landmines: the idle stop and its tick (HS-021)* and *compaction (HS-060)* | The two periodic policies. `Sweeper::sweep` is public so one pass can be driven; the tick is a **constant** because the spec's config list is exhaustive; the row moves before the container; a refused application is an `info` line; and `AppState::sweeper()` is an `Option` that is `None` when the policy is off. Copy that shape rather than inventing a second one. |
+| *Landmines: the abort ladder (HS-016)* and *the turn timeout (HS-022)* | How a turn is ended: `climb` is rung one, `end_turn` is rung two and returns `Ending::{Asked,Forced}`, the ladder is **spawned** under a deadline while the turn keeps being awaited, and the timeout and the budget share one `fired` so only one climb happens. A quota that ends a turn is the third caller of that shape. |
+| *Landmines: what a delete keeps (HS-043)* and *the startup reconcile (HS-044)* | Not the subject, but the two stories that most recently touched "the row moves, the container follows" and the reason vocabulary (`EVICTED`, `IDLE_STOP`, `SERVER_RESTART`) a new reason joins. |
+| *Landmines: the Changes sheet (HS-058)* | The most recent lesson on sentences: every sentence a client shows is a pure `transcript.ts` function with a node test, because **no gate may need a browser** — which is where a `disk_quota` event's rendering has to live. |
 
 Three rules worth repeating here because they are the most expensive to relearn: **a test that cannot fail
 is worse than no test** (mutate the behaviour and watch it go red); **a gate case that SKIPs on the bug it
@@ -1133,7 +1185,7 @@ cd /home/adamolsson/projects/holosmith
 git status --short                                  # clean apart from log.txt/orchestrate.sh
 . ~/.pi/toolchains/env.sh                           # ALWAYS before cargo/rustc
 python3 /tmp/lin.py issues | grep -v ' Done ' | head # recreate /tmp/lin.py first (§2)
-python3 /tmp/lin.py issue PER-94                    # scoped, Backlog, the issue §1 names
+python3 /tmp/lin.py issue PER-95                    # scoped, Backlog, the issue §1 names
 docker version                                      # the daemon must answer, or a Docker check cannot be measured
 docker image inspect pi-agent:local                 # the image the Docker stories run
 docker network ls | grep -w egress                  # the proxy test's premise (§2); `grep -x` never matches
@@ -1143,7 +1195,7 @@ scripts/verify.sh                                   # baseline green, ~9–12 mi
 
 If the baseline is red before you touch anything, that is the first thing you fix — and say so in Linear.
 
-Then start §5 on **§1's issue** (`PER-94`, HS-062) and stop after step 11.
+Then start §5 on **§1's issue** (`PER-95`, HS-063) and stop after step 11.
 
 Before you begin, check that the last session left nothing behind — `subagent({action:"list"})` should show
 no run in progress, `docker ps` none of its containers, and `git status --short` should look like the line
@@ -1162,31 +1214,32 @@ from those three; do not carry old sessions' ledgers in this file.
 If you stop before the issue ships, say so explicitly, name the next action, and leave the tree clean and the
 gates green — **a half-finished story is worse than an honest stop**.
 
-**The last shipped story** (`PER-90`, HS-058, ADR-0067; commits `39ae044`, `eacb926`, `8902e65`, `31feb2f`): item
-12's last bullet, the Changes sheet, and the first screen since phase 1. It is a **section of the session screen**
-behind one *Changes* toggle, not a third screen (a third path would need ADR-0007's fallback route to learn a shape),
-whose every sentence and branch is a pure `transcript.ts` function with a node test — because **no gate may need a
-browser**, so `npm test` is the only gate that can see one — while `main.ts` keeps the DOM. The Merge button's
-disabled reason is `http::merge`'s own **order** (a `running` row, then `target: null` rendered as the answer's own
-`mergeable_reason` rather than a second spelling, then `dirty` with ADR-0065 D4's prompt behind a shortcut that
-appears only for that reason), and the `409`s stay the backstop because a turn can start between the read and the
-tap. The pickers read **one additive key** `choices: {targets, remotes}` — `targets` is the configured list filtered
-by what exists (`first_target` grew into `existing_targets`), `remotes` is the config's list verbatim — because an
-option `merge` refuses is a button that cannot work while a configured-but-absent remote is the publish route's
-`422 bad_remote` to say; and it is one key, on the changes answer, and not `/api/health`, because the sheet asks one
-question in one fetch. The sheet **re-reads on a `session.status` transition, never on a delta** (a read is five git
-processes), the conflict area is one area from two sources, and item 12's "then retry" is the same Merge button one
-turn later. The gate's `case_changes_screen` measures only what a browser would otherwise be the only witness of —
-the served page is `web/dist/index.html` byte for byte, the served bundle carries the sheet's ids (`id="…"`, because
-the bare words are prefixes of their siblings') and the three ADR sentences, and the answer carries `choices` — and
-`web/test/transcript.test.ts` grew 52 → 72. **The review's three P1s are the lesson**: the CI warning was never
-inside the publish confirm while the ADR claimed it was (so `publishQuestion` now takes the flag and the sentence is
-the confirm's second line, with a test that goes red if the argument stops being passed); a `409 conflict`'s paths
-were wiped by the next render, because clearing them was decided from a `mergeable: true` answer read *before* the
-tap (only a **new answer** retracts a refusal now, and a refused merge re-reads); and three sentences plus the
-`ff-only` preselection were untested, which is exactly the class `npm test` exists for. The gate: **84 cases, 1414
-assertions**, no `SKIP`; `cargo test` 1069; `web` 72. Its full record is Linear, `docs/review/PER-90.md` and
-`git log`; do not carry it forward.
+**The last shipped story** (`PER-94`, HS-062, ADR-0068; commits `35e9507`, `6f52cbe`, `d1a5350`): item 14's
+*first* sentence, "session creation and resume fail with 507 below `min_free_gb`". The story existed because of a
+phrase, not a check — `serve` already refused to boot below the floor (HS-024) and `doctor --quick` already printed
+the same finding (HS-045) from one function, so "the same **measurement**, so the two never disagree" was the
+requirement. So the number moved into a new `disk` module (`available_gb` the parse, `verdict` the comparison,
+`measure` the `df -Pk` subprocess, `guarded` who is measured at all) and `preflight::disk` became one caller that
+kept its four sentences byte for byte; the request paths write **their own** sentence, because the boot's fix
+("install coreutils") is not a create's. The create's refusal joins the `refusal` value it already had, so it is
+raised **after** the idempotency-key lookup (a replay still answers its own row) and **before** the project's
+refusals and the cap (no `git`, no row, no bundle, no eviction — witnessed by a cap test), which is ADR-0060's "a
+machine fact before a session fact"; the resume's is after its state check, before the project's read and the cap.
+Two decisions are worth carrying: **only a container run is measured** (`disk::guarded` = Docker and not a `hub`,
+the preflight's own predicate one level down) — a backend-blind floor would have turned every stub create in
+`cargo test` into a 507, because this sandbox's `/tmp` has 3 GB and the floor defaults to 20 — and **the envelope's
+message may now be owned** (`Cow<'static, str>`) so the refusal can carry both numbers, with every existing caller
+and every serialised byte unchanged and `internal`'s fixed sentence still keeping rusqlite text off the wire. The
+"running turns are not interrupted" bullet is **structural**: a source-walk guard asserts `disk::measure` is named
+outside `disk.rs` only in `preflight.rs` and `http/disk.rs` — which is why the refusal has a module of its own
+rather than living in `http/sessions.rs`, where `prompt`/`abort`/`steer` are — plus a crate test that crosses the
+floor mid-turn and watches it settle. The gate: **85 cases, 1440 assertions**, no `SKIP`; `cargo test` 1083 (55
+binaries); `web` 72 (unchanged). **The review's eleven findings are the lesson**: five were prose that had drifted
+from the code (a sentence saying "no *new* session" for a resume, an ADR counting four decisions and listing five, a
+README still saying sixty-seven), two were scope (the guard exempting the whole file that holds the turn's
+handlers; the cap-order claim with no witness), one was a real hole (`min_free_gb = 0` still forked `df`, so a
+zero-floor machine without it answered 500), and one was hygiene (`case_disk_floor` stopped the shared boot and did
+not put it back). Its full record is Linear, `docs/review/PER-94.md` and `git log`; do not carry it forward.
 
 **One thing this build does not do, recorded rather than discovered:** a resumed session's pi has **no
 memory** of earlier turns (`--no-session`; the transcript is Holosmith's log). Replaying the log into a new pi
