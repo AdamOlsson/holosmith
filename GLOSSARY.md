@@ -882,3 +882,27 @@ is the record: there is no second document, `case_verification_table` fails the 
 deferred to phase 3. A result cell is not a `Finding`: a Finding is one of `doctor`'s checks, while a cell is a
 verification row's verdict *and* the automation that stands behind it.
 _Avoid_: Vertical-slice table, checklist, test matrix, verification report, phase-1 report
+
+### Notifications
+
+**Web Push subscription**:
+One browser's registration, stored in the `push_subscriptions` table as `endpoint`, `p256dh`, `auth` and
+`created_at`: the endpoint it receives on, the two keys RFC 8291 encrypts to, and when this machine first heard from
+it. It is the **browser's** material and not the machine's — `vapid.toml`'s pair signs, a subscription's keys are
+sealed to — so it is rows rather than a file. Machine-wide, not per session: item 11's payload carries the session,
+and a subscription that named one would be a registration no browser makes. Its machine name is
+`push::repository::Stored`.
+_Avoid_: Push target, device, client, subscriber
+
+**Push endpoint**:
+The capability URL a subscription's row is keyed by — `https://host[:port]/…` on a push service. Its **origin** is
+the VAPID token's `aud`, and the URL itself never appears in a log line: anybody holding it can send to that browser.
+_Avoid_: Push URL, push channel, subscription URL
+
+**Notification**:
+The message a subscription earns when a turn ends (spec item 11): a VAPID-signed, sealed body whose plaintext is
+exactly `{host, session_id, kind}`. `host` is **Local**, `session_id` is the row's id and `kind` is one of four
+words — `error`, `turn_timeout`, `budget_exceeded` and `turn_finished` — the first three of which are words this
+build already uses for the same fact. It is not sent while an SSE stream for that session is open, and the envelope
+never carries a message's content. Its machine names are `push::Pusher::announce` and `push::Watcher::observe`.
+_Avoid_: Push notification (the *module* is `push`; the thing a phone shows is a Notification), alert, message

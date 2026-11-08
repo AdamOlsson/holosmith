@@ -34,6 +34,7 @@ use crate::http::health::{self, Health};
 use crate::http::history;
 use crate::http::merge;
 use crate::http::publish;
+use crate::http::push;
 use crate::http::sessions;
 use crate::http::streams;
 use crate::http::tool_image;
@@ -244,6 +245,23 @@ impl AppState {
     /// place, so a test drives the wiring `serve` uses rather than a second one.
     pub fn expiry(&self) -> crate::expiry::Expiry {
         crate::expiry::Expiry::new(self.clone(), self.config.stopped_ttl_days)
+    }
+
+    /// The Web Push notification task, wired to this state (HS-066, spec item 11).
+    ///
+    /// **Always present, unlike [`Self::sweeper`] and [`Self::quota`]**: item 11 names no config key that could turn
+    /// it off (ADR-0071's D13), so a `None` arm would be a second spelling of an answer the spec already gives. It
+    /// reads the machine's VAPID pair itself, at the moment of sending, because a machine that never deployed has no
+    /// pair and that must be one `warn` per notification rather than a task that refuses to start.
+    ///
+    /// The **state** carries the stream registry the rule reads, which is what makes "not sent while an SSE stream
+    /// for that session is open" a fact about this process's real streams rather than about a registry a task
+    /// happened to be built with.
+    ///
+    /// Here for the same reason as the nine above: the handles a background policy needs are cloned in one place, so
+    /// a test drives the wiring `serve` uses rather than a second one.
+    pub fn pusher(&self) -> crate::push::Pusher {
+        crate::push::Pusher::new(self)
     }
 
     /// The startup reconcile, wired to this state's rows, backend, writer, config and this run's backend
@@ -526,6 +544,8 @@ pub fn router(state: AppState) -> Routes {
     let steer_state = Arc::clone(&state);
     let resume_state = Arc::clone(&state);
     let delete_state = Arc::clone(&state);
+    let subscribe_state = Arc::clone(&state);
+    let unsubscribe_state = Arc::clone(&state);
     Routes::new()
         .get("/api/health", move || {
             let state = Arc::clone(&health_state);
@@ -724,6 +744,24 @@ pub fn router(state: AppState) -> Routes {
                 async move { sessions::delete(&state, &id, query).await }
             },
         )
+        // The **first routes in this build whose subject is a browser's subscription rather than a session**
+        // (HS-066, spec item 11). Both are mutating, so every guard applies and the manifest records the kind; the
+        // subscription is the machine's and not a session's, which is why neither path carries an id. The body and
+        // the query are taken the way their neighbours do: `Result<Bytes, BytesRejection>` so a rejection axum
+        // would answer in plain text becomes ADR-0008's envelope, and `RawQuery`, whose rejection is `Infallible`,
+        // because the `DELETE` names its row through `?endpoint=` — an arbitrary URL with slashes and escapes
+        // of its own, which is `?force=true`'s neighbour shape rather than a path segment's.
+        .post(
+            "/api/push/subscribe",
+            move |body: Result<Bytes, BytesRejection>| {
+                let state = Arc::clone(&subscribe_state);
+                async move { push::subscribe(&state, body).await }
+            },
+        )
+        .delete("/api/push/subscribe", move |query: RawQuery| {
+            let state = Arc::clone(&unsubscribe_state);
+            async move { push::unsubscribe(&state, query).await }
+        })
         .fallback(fallback)
 }
 

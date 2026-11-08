@@ -11,6 +11,7 @@ pub mod health;
 mod history;
 mod merge;
 mod publish;
+mod push;
 mod sessions;
 mod streams;
 mod tool_image;

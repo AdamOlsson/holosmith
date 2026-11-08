@@ -2325,3 +2325,46 @@ it rather than adding a caveat beside it.
 - **A `pub(crate)` function in a private module is not reachable, even from the crate.** `http::sessions` is
   private, so `complete_deletion` needed one `pub(crate) use` line in `http/mod.rs`; making the module `pub`
   would have opened the whole handler file to the crate to expose one name.
+
+### Landmines: the push, the pair and the payload (HS-066)
+
+- **`openssl enc` cannot do AEAD on this host.** `enc -aes-128-gcm` answers `AEAD ciphers not supported`
+  (OpenSSL 3.0.13), with `-iv`, `-K` and `-tag` all spelled correctly. That one measurement is why RFC 8291's
+  record is written in Rust; a story that needs a second AEAD mode should re-measure before assuming the CLI is
+  a route.
+- **`openssl kdf … HKDF` answers the wrong bytes for its published vector.** With `hexkey`/`hexsalt`/`hexinfo`
+  set to RFC 5869 case 1's inputs it does not produce that case's OKM — the CLI's "hex" parameters are hex
+  *strings*, not the bytes they spell. A key schedule cannot be a child process this way; that is the second
+  half of why `push::crypto` exists.
+- **`SSL_CERT_FILE` is the trust-store seam, and `-CAfile` would have made `case_push` impossible.** A child
+  inherits the process's environment, so a gate can export `SSL_CERT_FILE` around the boot and `s_client` trusts
+  its own CA; a hard-coded `-CAfile` would have meant the gate could not stand a private CA in front of the
+  sender at all. The key proxy passes `-CAfile` on purpose (it must reach a provider, not this machine's CAs);
+  the sender deliberately does not.
+- **`-verify_hostname` matches a `DNS:` SAN, not a CN.** A certificate made with `-subj /CN=localhost` and no
+  `-extfile subjectAltName=DNS:localhost` fails the handshake, and the failure reads like "the sender cannot
+  verify anything".
+- **`s_client` without `-quiet` prints session and certificate chatter on stdout**, before the response, so a
+  status parser that reads line one gets a certificate's subject. `-quiet` is load-bearing, and `status_of`
+  scans for the first `HTTP/` line anyway.
+- **Closing `s_client`'s stdin makes it send its close-notify before the response arrives.** The key proxy
+  measured this (ADR-0048) and it did not change here: the request is written, the handle is held, and
+  `Connection: close` is what ends the exchange. A "write, close, read" shape looks right and intermittently
+  delivers nothing.
+- **RFC 8291's `Content-Length: 145` is an erratum.** §5's body is 144 octets — 86 of header and 58 of record —
+  and the golden test pins 144. Nothing else in the example is wrong: the body and all five intermediates
+  reproduce byte for byte.
+- **The header's `0x41` is an `idlen`, not a key length to be computed.** `salt(16) ‖ rs(4) ‖ idlen ‖ keyid`,
+  where `idlen` is 65 — `0x41` — and the key id is the application server's 65-octet point. A reader that
+  assumes a fixed 65 gets away with it until a receiver sends something else.
+- **`session.status`'s payload stayed four keys.** `{from, to, step, reason}` is pinned and gains nothing for
+  this story: the pusher reads `to` and `reason` out of it as JSON, and a fifth key ("kind", "elapsed") would
+  have been the second vocabulary this build keeps refusing to add. The duration comes from the `turn.start`
+  frame's *arrival*, which is why a restart mid-turn cannot invent one.
+- **A push endpoint is a capability URL: the log names its host and nothing else.** Anybody holding the URL can
+  send to that browser, so `push`'s every line prints `host = %audience` (the origin) and never the endpoint,
+  and the recorder-based tests assert the endpoint rather than logging it.
+- **A test that writes `<data>/secrets/vapid.toml` must own its data root.** `Config::default()`'s data root is
+  the machine's (`/var/lib/holosmith`), which this sandbox lets an unprivileged user write: two tests sharing it
+  passed until one of them removed the pair for its own negative case, and then a third failed. Every test in
+  `tests/push.rs` builds its config from `TempDir::join`, the same rule every database in the suite follows.

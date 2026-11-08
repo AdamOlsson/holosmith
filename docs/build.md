@@ -447,6 +447,24 @@ without needing a browser. It needs the daemon, an `agent_image` and `python3` a
 them; `tests/expiry.rs` covers the pass, the skip-and-retry, the `error` arm, the six reasons into `stopped` and
 the refused resume without a daemon (ADR-0070).
 
+…and since HS-066, **the Web Push notification**: `case_push` is daemon-free and stands a real TLS receiver in front
+of the sender. It makes a CA and a `localhost` certificate with a `DNS:` SAN, generates the machine's VAPID pair
+with the same `openssl ecparam … -outform DER` the deploy runs (converted to base64url with `python3`, written as
+`<data>/secrets/vapid.toml`), and starts a `node:https` listener on `localhost:0` that **verifies the token's ES256
+signature against that pair** (`crypto.verify` with a `P-256` JWK), **decrypts the body** with the subscription's own
+private key, checks the `aud` claim against its own origin, and appends one JSON line per request. The boot runs with
+`SSL_CERT_FILE` exported and unset immediately after, because that is how a private CA reaches `openssl s_client` —
+the sender passes no `-CAfile` on purpose (ADR-0071). It asserts the store (a subscribe; a re-subscribe of the same
+endpoint as one row with the newer `auth` and the original `created_at`, read out of `app.db` by `python3`'s
+`sqlite3`; the `422` arms; a `DELETE` that removes the row and then answers `404`), the **stream-open pair** (a
+prompt with the session's SSE stream held sends nothing; the same prompt without it sends one message per
+subscription, whose payload is `{host, session_id, kind}` with `kind` `budget_exceeded`, `host` `local`, and
+`jwt_ok`/`aud_ok` true), and
+the **disposition table** at the far end (`/gone/` answers `410` and its row disappears; `/keyed/` answers `403` and
+its row stays). It prints one `SKIP` line and passes without `openssl`, `node` or `python3`. What it cannot reach is
+why the long-turn and `error` triggers are `tests/push.rs`'s: the stub's turn is a fixed 2.4-second script with no
+failure mode over HTTP, and `LONG_TURN` is a constant twenty seconds with no key to shorten it.
+
 …and since HS-047, **`server deploy`**: `case_server_deploy` has two halves that skip independently, because the
 bugs it exists to catch are of two kinds. The **offline** half needs `python3` and nothing else: a `_ping` socket
 it answers stands in for the daemon, and the case asserts that the dry run lists the seven steps in the spec's
@@ -705,6 +723,12 @@ start, rather than a service that refuses to come back up.
   `openssl s_client` to terminate the session's plaintext request and speak TLS to the provider (the artifact is
   static and has no TLS stack, ADR-0048). The image this repository tests with carries it; a missing binary is a
   502 from the proxy, not a silent fallback.
+- **`openssl` on the host** for Web Push notifications (HS-066): `push::Pusher` signs each VAPID token with
+  `openssl dgst -sha256 -sign`, derives each message's secret with `openssl pkeyutl -derive`, generates the
+  application server's key with `openssl ecparam` and delivers with `openssl s_client` — four children per message,
+  all of them the same host program `server deploy` already requires (ADR-0071). A machine without it still serves
+  and still streams every turn: a notification is a channel `doctor --full` reports (`Check::Openssl`) rather than
+  something `serve` refuses to start over.
 - **`tailscale`** and **systemd** for a deployed server — and they **are** prerequisites of a deploy now: `doctor`
   reports a machine without either as `unknown` rather than failing (a LAN-only machine and a hand-run `serve` are
   supported), and `server deploy` runs `doctor --quick` as its step 1 (HS-047), so such a machine still gets through

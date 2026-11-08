@@ -199,7 +199,10 @@ fn path_of(query: Option<&str>) -> Option<String> {
 /// space arrives with the name git printed — and an escape that is not two hex digits stays literal rather than
 /// failing the request, because the value's only use is to be compared with a path git printed, and a literal
 /// `%zz` is simply a name no file has. **Nothing here is a path**: the result is compared, never joined.
-fn decode(value: &str) -> String {
+///
+/// Shared with `http::push` since HS-066, whose `DELETE` names its row through the query: one reader, so two routes
+/// cannot disagree about what a client that escaped its value sent.
+pub(super) fn decode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;

@@ -399,6 +399,20 @@ pub fn run(args: ServeArgs) -> ExitCode {
             "the stopped-session expiry is running"
         );
         let expiry = state.expiry().spawn();
+        // The **Web Push notification task** (HS-066, spec item 11) is the fifth policy and is wired like the four
+        // above: built before the state is handed to the router, spawned after the reconcile, and reported by a
+        // `debug` line rather than a banner line — the startup contract is the eight lines `tests/serve_cli.rs` pins
+        // byte for byte.
+        //
+        // It is **always present**: item 11 names no config key that could turn it off, so there is no `None` arm to
+        // write. The threshold it prints is the spec's twenty seconds and it is a constant, printed rather than
+        // copied — an operator reading this line learns the rule the task applies.
+        tracing::debug!(
+            target: "holosmith::serve",
+            long_turn_s = crate::push::LONG_TURN.as_secs(),
+            "the Web Push notification task is running"
+        );
+        let pusher = state.pusher().spawn();
         // The **admin socket** (HS-051, spec item 10 step 3): the one way to drain this machine, and the one thing
         // in the build that is deliberately *not* an HTTP route — the API table says "not reachable over HTTP",
         // and a second listener outside `App` is what that sentence means. It is bound here, beside the two
@@ -491,6 +505,11 @@ pub fn run(args: ServeArgs) -> ExitCode {
         // its next await point, and the transition it already wrote stays either way (the delete flow's own
         // task, spawned by it, is a separate one and runs to its end).
         expiry.abort();
+        // And the notification task, for the sweeper's reason: it is a reader of the log rather than part of serving,
+        // so its next frame must not hold the process open after the drain is done. Nothing it sends can be taken
+        // back — a message already POSTed is a browser's notification — which is why aborting is the honest end: the
+        // task stops asking, and the messages handed to a push service were never this process's to recall.
+        pusher.abort();
         // And the admin socket (HS-051): a drain that started is finished or abandoned with the process, so its
         // accept loop must not hold the runtime open a moment longer than the listeners do. The socket *file* is
         // not removed here — a `serve` that is killed leaves one behind on purpose, and the next boot probes it

@@ -212,6 +212,20 @@ pub const PUSH_REJECTED: &str = "push_rejected";
 /// differ.
 pub const DISK_FLOOR: &str = "disk_floor";
 
+/// A `push_subscriptions` endpoint is not a URL a notification can be sent to (HS-066, spec item 11).
+///
+/// One code for two facts — not `https`, and no host — because the client's move is one (register again from a
+/// browser that is allowed to push) while the operator's next step is the sentence's (ADR-0008). A third fact has
+/// its own code: a URL that *is* an endpoint but whose keys are the wrong shape is
+/// [`BAD_SUBSCRIPTION_KEY`].
+pub const BAD_ENDPOINT: &str = "bad_endpoint";
+
+/// A subscription's `p256dh` or `auth` is not the key material RFC 8291 asks for (HS-066).
+///
+/// The two keys share one code for [`BAD_TARGET`]'s reason: the client's next step is one — re-read
+/// `pushManager.getSubscription()` and send what the browser holds — while which key was wrong is the sentence's.
+pub const BAD_SUBSCRIPTION_KEY: &str = "bad_subscription_key";
+
 /// The body of every error response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ErrorBody {
@@ -567,6 +581,38 @@ impl ApiError {
     /// name the project's repository has no remote for are one code and two next steps.
     pub fn bad_remote(message: &'static str) -> Self {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, BAD_REMOTE, message)
+    }
+
+    /// What a subscription whose endpoint is not a URL a notification can be sent to answers (HS-066).
+    ///
+    /// The **message** is the caller's, like [`Self::bad_target`]'s: an `http://` endpoint and an `https://` URL
+    /// with no host are one code and two next steps.
+    pub fn bad_endpoint(message: &'static str) -> Self {
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, BAD_ENDPOINT, message)
+    }
+
+    /// What a subscription whose `p256dh` or `auth` is not the key material RFC 8291 asks for answers (HS-066).
+    ///
+    /// The message is the caller's for [`Self::bad_endpoint`]'s reason: which key is wrong, and what shape the
+    /// right one has, is what the sentence is for.
+    pub fn bad_subscription_key(message: &'static str) -> Self {
+        Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            BAD_SUBSCRIPTION_KEY,
+            message,
+        )
+    }
+
+    /// What a subscribe whose body is not `{endpoint, p256dh, auth}` answers (HS-066).
+    ///
+    /// The same code as [`Self::bad_body`] with this request's own fields, for the reason [`Self::bad_prompt`] has
+    /// the prompt's: a client told about a create's fields would be describing the wrong request (ADR-0008).
+    pub fn bad_subscription_body() -> Self {
+        Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            BAD_BODY,
+            "the body must be a JSON object with an `endpoint`, a `p256dh` and an `auth` string",
+        )
     }
 
     /// What a publish naming a protected destination answers (HS-057, item 12's three names).

@@ -228,6 +228,10 @@ pub fn run(config: &Config, depth: Depth, tools: &Tools, machine: &dyn Machine) 
     findings.push(database(config));
     findings.push(perms(config, tools));
     if depth == Depth::Full {
+        // The notification channel is the first `--full` question, and it is **not** asked by `--quick`: `--quick` is
+        // the unit's `ExecStartPre` (item 10 §5), and a machine whose notification channel is missing must still boot.
+        // See [`openssl`].
+        findings.push(openssl(&tools.preflight.openssl));
         let image = config.agent_image.as_str();
         // Why the container questions have no verdict, in the words the report can stand behind: a `hub` is not
         // asked them at all (item 10 §6), and a server whose daemon did not answer is a different fact. Saying
@@ -257,6 +261,55 @@ pub fn run(config: &Config, depth: Depth, tools: &Tools, machine: &dyn Machine) 
 /// `serve` by hand (docs/build.md says so). A `server deploy` (HS-049) is where systemd becomes a prerequisite,
 /// and that step is where the refusal belongs — refusing here would make `doctor` unrunnable on the machine that
 /// runs no systemd and serves perfectly well.
+/// Whether `openssl` runs, which a Web Push notification needs and nothing else in this build's request path does
+/// (HS-066, ADR-0071's D12).
+///
+/// **`--full` only**, and that is a decision rather than an ordering accident: `doctor --quick` is the unit's
+/// `ExecStartPre` (item 10 §5), so a check there refuses a boot. A missing notification channel is not a machine that
+/// cannot run a session — the SSE stream still reports every turn — so refusing a boot over it would trade the whole
+/// product for one feature. `--full` is item 10 §7's post-deploy moment, which is where "is everything an operator
+/// will expect actually there" belongs.
+///
+/// A `Pass` with the version line, because the version is what tells an operator which `openssl` their `PATH`
+/// resolves: `s_client`'s behaviour and the two `ecparam`/`pkeyutl` commands depend on it, and the machine's own
+/// answer is the only honest evidence.
+fn openssl(program: &Path) -> Finding {
+    let output = match Command::new(program).arg("version").output() {
+        Ok(output) => output,
+        Err(error) => {
+            return Finding::fail(
+                Check::Openssl,
+                format!(
+                    "`{} version` is not runnable ({error}): Web Push notifications are signed and delivered \
+                     by `openssl`, so none will be sent until it is installed",
+                    program.display()
+                ),
+            );
+        }
+    };
+    let said = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !output.status.success() {
+        let refused = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let refused = if refused.is_empty() { said } else { refused };
+        return Finding::fail(
+            Check::Openssl,
+            format!(
+                "`{} version` answered a failure ({refused}): Web Push notifications will not be sent until \
+                 it runs",
+                program.display()
+            ),
+        );
+    }
+    Finding::pass(
+        Check::Openssl,
+        if said.is_empty() {
+            format!("`{} version` runs", program.display())
+        } else {
+            said
+        },
+    )
+}
+
 fn systemd(dir: &Path) -> Finding {
     if dir.is_dir() {
         return Finding::pass(

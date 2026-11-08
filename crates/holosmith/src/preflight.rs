@@ -93,6 +93,11 @@ pub enum Check {
     Proxy,
     /// Whether the configured agent image runs the pinned pi.
     Image,
+    /// Whether `openssl` runs, which the Web Push sender needs (HS-066) and nothing on the request path does.
+    ///
+    /// It is in this enum because it is reported like every other machine question and only `doctor` asks it: no
+    /// startup check runs it, because a missing notification channel must not refuse a boot (ADR-0071's D12).
+    Openssl,
 }
 
 impl Check {
@@ -111,6 +116,7 @@ impl Check {
             Self::Perms => "perms",
             Self::Proxy => "proxy",
             Self::Image => "image",
+            Self::Openssl => "openssl",
         }
     }
 }
@@ -245,21 +251,24 @@ impl fmt::Display for Finding {
 ///
 /// `git` and `df` are the startup check's (HS-024) and `df` is the disk floor's, on both request paths
 /// (HS-062); `du` is the per-session soft cap's watchdog (HS-063), which is neither a request path nor a
-/// startup check — so the value rides here because this is the one place a test can own a program.
+/// startup check — so the value rides here because this is the one place a test can own a program. `openssl` is
+/// the Web Push sender's (HS-066), a background task's program like `du`, and it is here for the same reason.
 #[derive(Debug, Clone)]
 pub struct Tools {
     pub git: PathBuf,
     pub df: PathBuf,
     pub du: PathBuf,
+    pub openssl: PathBuf,
 }
 
 impl Default for Tools {
-    /// `git`, `df` and `du` from `PATH`, which is what a machine has.
+    /// `git`, `df`, `du` and `openssl` from `PATH`, which is what a machine has.
     fn default() -> Self {
         Self {
             git: PathBuf::from("git"),
             df: PathBuf::from(crate::disk::DF),
             du: PathBuf::from(crate::quota::DU),
+            openssl: PathBuf::from(crate::push::OPENSSL),
         }
     }
 }

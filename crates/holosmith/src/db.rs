@@ -13,6 +13,7 @@ use std::time::Duration;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 
 use crate::events::repository::EventRepository;
+use crate::push::repository::PushRepository;
 use crate::schema::{self, EmbedError, Migration};
 use crate::sessions::repository::SessionRepository;
 use crate::sql::split_statements;
@@ -118,6 +119,15 @@ impl Database {
     /// one `insert_batch`, and releases it before broadcasting (ADR-0013).
     pub fn events(&self) -> EventRepository<'_> {
         EventRepository::new(&self.connection)
+    }
+
+    /// Every read and write of a `push_subscriptions` row (HS-066).
+    ///
+    /// The same borrow as [`Self::sessions`] and [`Self::events`], and the rule those two already keep: a
+    /// subscription is read under the lock, the guard is dropped, and only then does anything leave the machine.
+    /// A push service that takes seconds to answer must not hold up a request.
+    pub fn push(&self) -> PushRepository<'_> {
+        PushRepository::new(&self.connection)
     }
 }
 

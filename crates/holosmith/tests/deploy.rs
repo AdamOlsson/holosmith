@@ -141,6 +141,7 @@ fn doctor_tools(dir: &TempDir) -> doctor::Tools {
             git: PathBuf::from("git"),
             df: df_shim(dir),
             du: PathBuf::from("du"),
+            openssl: PathBuf::from("openssl"),
         },
         tailscale: tailscale_serve_shim(
             dir,

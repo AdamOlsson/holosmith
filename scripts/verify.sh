@@ -411,6 +411,7 @@ serve_cases=(
   case_delete_session
   case_delete_keeps
   case_stopped_expiry
+  case_push
   case_idle_stop
   case_drain
   case_drain_restart
@@ -3975,6 +3976,542 @@ PY
   docker rm --force "s_$id" >/dev/null 2>&1 || true
   docker network rm "agents_$id" >/dev/null 2>&1 || true
   docker_session_id=""
+  rm -rf "$root"
+  stop_serve
+  start_serve
+}
+
+# HS-066: the Web Push notification (spec item 11). A **daemon-free** case: the stub backend, a real TLS
+# receiver written in `node`, and the artifact's own sender talking to it over TLS.
+#
+# What it measures, and why each half needs the ingredient it uses:
+#
+# - **The request a push service receives.** A `node:https` listener on `localhost` prints its port, answers
+#   `201`/`410`/`403` by path and appends one JSON line per request. It verifies the VAPID token's ES256
+#   signature **against the pair this case generated** (`crypto.verify` with a `P-256` JWK), decrypts the body
+#   per RFC 8291 with the subscription's own private key, and reports whether the `aud` claim is its own origin.
+#   That makes "signed with the machine's pair and encrypted to the subscription" a measurement rather than a
+#   claim: nothing here trusts the sender's word.
+# - **The store, through the API.** A subscribe, a re-subscribe of the same endpoint (one row, new keys, the
+#   original `created_at`), the `422` refusals, and a `DELETE` that removes the row and then answers `404`.
+# - **The stream-open rule** (item 11's "unless an SSE stream for that session is open") and **one trigger the
+#   stub can reach from HTTP**: the token budget. A session whose `max_session_tokens` is one spends its budget
+#   on the stub turn's own `message.end`, so a prompt ends with reason `budget_exceeded` — which is item 11's
+#   fourth named trigger. The stream pair is measured by prompting twice: once with the stream held (no line
+#   arrives) and once without it (exactly one line, with `kind`, `session_id`, `host` and both checks true).
+# - **The disposition table at the far end.** The `/gone/` endpoint answers `410` and its row disappears; the
+#   `/keyed/` endpoint answers `403` and its row stays, because a `403` is a *key* problem rather than a dead
+#   endpoint (ADR-0071's D9).
+#
+# What it does **not** measure, and why: the long-turn and `error` triggers. The stub's turn is a fixed script
+# with no failure mode reachable over HTTP, and `long_turn` is twenty seconds of spec with no config key to
+# shorten it — those two are `tests/push.rs`'s (`three_triggers_and_the_negative_reach_the_recorder`). A real
+# push service and a real browser subscription are nobody's test environment; the receiver stands in for both,
+# and `docs/build.md` says so.
+#
+# `SSL_CERT_FILE` is exported around the boot and unset immediately after: `openssl s_client` honours it for its
+# default trust store, which is what lets a private CA be configured the way every other tool is configured —
+# the reason the sender passes no `-CAfile` (ADR-0071's D2). An exported override must not leak into another
+# case's boot.
+case_push() {
+  local name=case_push
+  local root="$repo_root/target/verify-push-$$"
+  local repo="$root/projects/holosmith"
+  local data="$root/data"
+  local tls="$root/tls"
+  local response body id fresh created_at rows port_line push_port=""
+  local before sent
+  local vapid_public vapid_private subscription_public subscription_private auth_b64
+  local ok_endpoint gone_endpoint keyed_endpoint
+  local line
+  if ! command -v openssl >/dev/null 2>&1; then
+    printf 'SKIP %s: no openssl to sign a token or serve TLS (tests/push.rs covers the JWT and RFC 8291)\n' "$name"
+    return 0
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    printf 'SKIP %s: no node to run the TLS receiver (tests/push.rs covers the sender)\n' "$name"
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to read the SEC1 keys and the database (tests/push.rs covers the rows)\n' "$name"
+    return 0
+  fi
+  stop_serve
+  rm -rf "$root"
+  mkdir -p "$repo" "$tls" "$data/secrets" ||
+    fail "$name/mkdir" "could not create $root"
+  chmod 0700 "$data/secrets"
+  git -C "$repo" init --quiet -b main . || fail "$name/git" "git init did not work in $repo"
+  git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet \
+    --allow-empty -m "the first commit" || fail "$name/git" "git commit did not work"
+
+  # The SEC1 walk, in one place: `openssl ecparam … -outform DER` writes 121 octets and the two strings a
+  # `vapid.toml` holds are its scenic halves. `python3` reads the DER rather than a second hand parser in bash.
+  cat >"$WORK/sec1.py" <<'PY'
+import base64, sys
+der = open(sys.argv[1], "rb").read()
+def element(at):
+    tag = der[at]
+    return tag, at + 2, at + 2 + der[at + 1]
+tag, at, end = element(0)
+assert tag == 0x30, "not a SEQUENCE: %r" % der[:4]
+tag, at, end = element(at)
+assert tag == 0x02, "no version: %r" % der[:4]
+tag, at, end = element(at)
+assert tag == 0x04, "no private scalar: %r" % der[:4]
+scalar = der[at:end]
+at = end
+tag, at, end = element(at)
+assert tag == 0xa0, "no named curve"
+at = end
+tag, at, end = element(at)
+assert tag == 0xa1, "no public key"
+tag, at, end = element(at)
+assert tag == 0x03 and der[at] == 0x00, "no BIT STRING"
+point = der[at + 1:end]
+assert len(point) == 65 and point[0] == 0x04, "not an uncompressed point"
+b64 = lambda value: base64.urlsafe_b64encode(value).rstrip(b"=").decode()
+print(b64(point), b64(scalar))
+PY
+
+  # The machine's own pair, generated the way `server deploy` generates it and written the way `vapid::render`
+  # writes it — header line included, because a file an operator may open should say what it is.
+  openssl ecparam -name prime256v1 -genkey -noout -outform DER -out "$tls/vapid.der" ||
+    fail "$name/ecparam" "openssl ecparam did not write a key"
+  read -r vapid_public vapid_private < <(python3 "$WORK/sec1.py" "$tls/vapid.der")
+  [ -n "$vapid_public" ] && [ -n "$vapid_private" ] ||
+    fail "$name/vapid" "the generated pair did not parse"
+  printf '# The machine'"'"'s Web Push key pair (HS-049). `server deploy` writes this once and never rewrites it.\npublic_key = "%s"\nprivate_key = "%s"\n' \
+    "$vapid_public" "$vapid_private" >"$data/secrets/vapid.toml" ||
+    fail "$name/vapid" "could not write $data/secrets/vapid.toml"
+  chmod 0600 "$data/secrets/vapid.toml"
+
+  # The subscription: its own pair, and sixteen octets of `auth`. Both go to the receiver, because the
+  # receiver is the *browser* in this exchange and only it can read what the machine sealed.
+  openssl ecparam -name prime256v1 -genkey -noout -outform DER -out "$tls/subscription.der" ||
+    fail "$name/ecparam" "openssl ecparam did not write the subscription's key"
+  read -r subscription_public subscription_private < <(python3 "$WORK/sec1.py" "$tls/subscription.der")
+  auth_b64="$(openssl rand 16 | python3 -c \
+    'import base64, sys; print(base64.urlsafe_b64encode(sys.stdin.buffer.read()).rstrip(b"=").decode())')"
+  [ -n "$auth_b64" ] || fail "$name/auth" "openssl rand did not answer 16 octets"
+
+  # The TLS material: a CA and a `localhost` certificate with a `DNS:` SAN, because `-verify_hostname` matches
+  # the name in the certificate and an IP SAN would not do.
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout "$tls/ca.key" -out "$tls/ca.pem" -days 1 \
+    -subj /CN=VerifyPushCA >/dev/null 2>&1 ||
+    fail "$name/ca" "openssl req did not write a CA"
+  openssl req -newkey rsa:2048 -nodes -keyout "$tls/server.key" -out "$tls/server.csr" \
+    -subj /CN=localhost >/dev/null 2>&1 ||
+    fail "$name/cert" "openssl req did not write a CSR"
+  printf 'subjectAltName=DNS:localhost\n' >"$tls/server.ext"
+  openssl x509 -req -in "$tls/server.csr" -CA "$tls/ca.pem" -CAkey "$tls/ca.key" \
+    -CAcreateserial -out "$tls/server.pem" -days 1 -extfile "$tls/server.ext" >/dev/null 2>&1 ||
+    fail "$name/cert" "openssl x509 did not sign the server certificate"
+
+  # The receiver. It is the browser: it verifies the token against the **case's** VAPID public key, decrypts the
+  # record with its own private key, and appends one JSON line per request so the assertions below read what
+  # arrived rather than what the sender said it sent.
+  cat >"$WORK/push-receiver.mjs" <<'JS'
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import https from 'node:https';
+
+const [certFile, keyFile, logFile, vapidPublicB64, uaPrivateB64, uaPublicB64, authB64] = process.argv.slice(2);
+const b64 = (text) => Buffer.from(text.replace(/\s+/g, ''), 'base64url');
+const vapidPublic = b64(vapidPublicB64);
+const uaPrivate = b64(uaPrivateB64);
+const uaPublic = b64(uaPublicB64);
+const auth = b64(authB64);
+const jwk = {
+  kty: 'EC',
+  crv: 'P-256',
+  x: vapidPublic.subarray(1, 33).toString('base64url'),
+  y: vapidPublic.subarray(33, 65).toString('base64url'),
+};
+
+// RFC 8291 §3.4, from the browser's side: the same three HMACs, with the user agent's private key.
+function decrypt(body) {
+  try {
+    const salt = body.subarray(0, 16);
+    const idlen = body[20];
+    const asPublic = body.subarray(21, 21 + idlen);
+    if (asPublic.length !== 65) return null;
+    const tag = body.subarray(body.length - 16);
+    const ciphertext = body.subarray(21 + idlen, body.length - 16);
+    const ecdh = crypto.createECDH('prime256v1');
+    ecdh.setPrivateKey(uaPrivate);
+    const secret = ecdh.computeSecret(asPublic);
+    const prkKey = crypto.createHmac('sha256', auth).update(secret).digest();
+    const keyInfo = Buffer.concat([Buffer.from('WebPush: info\0'), uaPublic, asPublic]);
+    const ikm = crypto
+      .createHmac('sha256', prkKey)
+      .update(Buffer.concat([keyInfo, Buffer.from([1])]))
+      .digest();
+    const prk = crypto.createHmac('sha256', salt).update(ikm).digest();
+    const hk = (info, n) =>
+      crypto
+        .createHmac('sha256', prk)
+        .update(Buffer.concat([Buffer.from(info + '\0'), Buffer.from([1])]))
+        .digest()
+        .subarray(0, n);
+    const decipher = crypto.createDecipheriv(
+      'aes-128-gcm',
+      hk('Content-Encoding: aes128gcm', 16),
+      hk('Content-Encoding: nonce', 12),
+    );
+    decipher.setAuthTag(tag);
+    const record = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    // RFC 8188's padding: zero octets, then the delimiter — `0x02` for the last record.
+    let end = record.length;
+    while (end > 0 && record[end - 1] === 0) end -= 1;
+    if (end === 0 || record[end - 1] !== 0x02) return null;
+    return JSON.parse(record.subarray(0, end - 1).toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
+const server = https.createServer(
+  { cert: fs.readFileSync(certFile), key: fs.readFileSync(keyFile) },
+  (request, response) => {
+    const chunks = [];
+    request.on('data', (chunk) => chunks.push(chunk));
+    request.on('end', () => {
+      const body = Buffer.concat(chunks);
+      const authorization = request.headers.authorization ?? '';
+      // `Authorization: vapid t=<jwt>, k=<key>`
+      const match = /^vapid\s+t=([^,\s]+)\s*,\s*k=(\S+)$/.exec(authorization);
+      let jwtOk = false;
+      let audOk = false;
+      if (match) {
+        const parts = match[1].split('.');
+        if (parts.length === 3) {
+          try {
+            const signature = Buffer.from(parts[2], 'base64url');
+            jwtOk = crypto.verify(
+              'sha256',
+              Buffer.from(`${parts[0]}.${parts[1]}`),
+              { key: jwk, dsaEncoding: 'ieee-p1363' },
+              signature,
+            );
+            const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+            audOk = claims.aud === `https://localhost:${server.address().port}`;
+          } catch {
+            jwtOk = false;
+          }
+        }
+      }
+      const line = {
+        path: request.url,
+        authorized: Boolean(match),
+        ttl: request.headers.ttl ?? null,
+        encoding: request.headers['content-encoding'] ?? null,
+        jwt_ok: jwtOk,
+        aud_ok: audOk,
+        payload: decrypt(body),
+      };
+      fs.appendFileSync(logFile, `${JSON.stringify(line)}\n`);
+      const answer = request.url.startsWith('/gone/') ? 410 : request.url.startsWith('/keyed/') ? 403 : 201;
+      response.writeHead(answer, { 'Content-Length': 0 });
+      response.end();
+    });
+  },
+);
+server.listen(0, '127.0.0.1', () => {
+  console.log(`PORT ${server.address().port}`);
+});
+JS
+
+  rm -f "$WORK/push-received.jsonl"
+  : >"$WORK/push-received.jsonl"
+  node "$WORK/push-receiver.mjs" "$tls/server.pem" "$tls/server.key" "$WORK/push-received.jsonl" \
+    "$vapid_public" "$subscription_private" "$subscription_public" "$auth_b64" \
+    >"$WORK/push-receiver.out" 2>"$WORK/push-receiver.err" &
+  local receiver_pid=$!
+  for _ in $(seq 1 100); do
+    port_line="$(sed -n 's/^PORT \([0-9]*\)$/\1/p' "$WORK/push-receiver.out" | sed -n '1p')"
+    [ -n "$port_line" ] && break
+    kill -0 "$receiver_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  if [ -z "$port_line" ]; then
+    kill "$receiver_pid" 2>/dev/null || true
+    fail "$name/receiver" "the push receiver did not bind: $(cat "$WORK/push-receiver.err")"
+  fi
+  push_port="$port_line"
+  ok_endpoint="https://localhost:$push_port/ok/1"
+  gone_endpoint="https://localhost:$push_port/gone/1"
+  keyed_endpoint="https://localhost:$push_port/keyed/1"
+
+  # The boot: the stub backend, a budget of one token so the stub turn's own `message.end` trips it, no idle
+  # stop, and this case's own roots. `SSL_CERT_FILE` is exported for exactly this `start_serve` and unset at
+  # once.
+  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "stub"\nmax_session_tokens = 1\nidle_stop_min = 0\nprojects_root = "%s"\nmin_free_gb = 1\n' \
+    "$owner" "$root/projects" >"$WORK/config-push.toml"
+  export SSL_CERT_FILE="$tls/ca.pem"
+  start_serve "$WORK/config-push.toml" "$data"
+  unset SSL_CERT_FILE
+
+  # 1. The store, through the API. One subscribe is one row.
+  fetch_body "${name}_sub" POST /api/push/subscribe \
+    "{\"endpoint\":\"$ok_endpoint\",\"p256dh\":\"$subscription_public\",\"auth\":\"$auth_b64\"}" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_sub/no_answer" "POST /api/push/subscribe did not answer"
+  expect_status "${name}_sub" "$(answer "${name}_sub")" 204
+  rows="$(python3 - "$data/app.db" <<'PY'
+import sqlite3, sys
+connection = sqlite3.connect(sys.argv[1])
+for row in connection.execute("SELECT endpoint, p256dh, auth, created_at FROM push_subscriptions ORDER BY endpoint"):
+    print("|".join(str(value) for value in row))
+connection.close()
+PY
+)"
+  [ "$(printf '%s\n' "$rows" | grep -c .)" = 1 ] ||
+    fail "${name}/row" "one subscribe is not one row: $rows"
+  assertions=$((assertions + 1))
+  created_at="$(printf '%s\n' "$rows" | sed -n 's/^.*|\([0-9][0-9]*\)$/\1/p')"
+
+  # A re-subscribe of the same endpoint with a rotated `auth`: still one row, the new secret, the original
+  # `created_at` — a browser re-subscribing does not make itself a second device.
+  local rotated
+  rotated="$(openssl rand 16 | python3 -c \
+    'import base64, sys; print(base64.urlsafe_b64encode(sys.stdin.buffer.read()).rstrip(b"=").decode())')"
+  fetch_body "${name}_resub" POST /api/push/subscribe \
+    "{\"endpoint\":\"$ok_endpoint\",\"p256dh\":\"$subscription_public\",\"auth\":\"$rotated\"}" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_resub/no_answer" "the re-subscribe did not answer"
+  expect_status "${name}_resub" "$(answer "${name}_resub")" 204
+  check "${name}/resub_row" "$ok_endpoint|$subscription_public|$rotated|$created_at" \
+    "$(python3 - "$data/app.db" <<'PY'
+import sqlite3, sys
+connection = sqlite3.connect(sys.argv[1])
+rows = list(connection.execute("SELECT endpoint, p256dh, auth, created_at FROM push_subscriptions"))
+connection.close()
+print("|".join(str(value) for value in rows[0]) if len(rows) == 1 else ", ".join(str(row) for row in rows))
+PY
+)"
+
+  # The other two subscriptions the disposition table needs, plus the `422` arms.
+  fetch_body "${name}_gone" POST /api/push/subscribe \
+    "{\"endpoint\":\"$gone_endpoint\",\"p256dh\":\"$subscription_public\",\"auth\":\"$rotated\"}" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_gone/no_answer" "the second subscribe did not answer"
+  expect_status "${name}_gone" "$(answer "${name}_gone")" 204
+  fetch_body "${name}_keyed" POST /api/push/subscribe \
+    "{\"endpoint\":\"$keyed_endpoint\",\"p256dh\":\"$subscription_public\",\"auth\":\"$rotated\"}" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_keyed/no_answer" "the third subscribe did not answer"
+  expect_status "${name}_keyed" "$(answer "${name}_keyed")" 204
+
+  local short_point short_auth
+  short_point="$(python3 -c 'import base64; print(base64.urlsafe_b64encode(b"\x04"*64).rstrip(b"=").decode())')"
+  short_auth="$(python3 -c 'import base64; print(base64.urlsafe_b64encode(b"\x00"*15).rstrip(b"=").decode())')"
+  local -a refusals=(
+    "http://localhost:$push_port/ok/1|$subscription_public|$rotated|bad_endpoint"
+    "https://|$subscription_public|$rotated|bad_endpoint"
+    "$ok_endpoint|$short_point|$rotated|bad_subscription_key"
+    "$ok_endpoint|$subscription_public|$short_auth|bad_subscription_key"
+  )
+  local arm arm_endpoint arm_point arm_auth arm_code
+  for arm in "${refusals[@]}"; do
+    IFS='|' read -r arm_endpoint arm_point arm_auth arm_code <<<"$arm"
+    fetch_body "${name}_bad" POST /api/push/subscribe \
+      "{\"endpoint\":\"$arm_endpoint\",\"p256dh\":\"$arm_point\",\"auth\":\"$arm_auth\"}" \
+      "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+      "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+      fail "${name}_bad/no_answer" "a refused subscribe did not answer"
+    expect_status "${name}_bad" "$(answer "${name}_bad")" 422
+    body="$(cat "$WORK/responses/${name}_bad.body")"
+    case "$body" in
+      *"\"code\":\"$arm_code\""*) assertions=$((assertions + 1)) ;;
+      *) fail "${name}/refusal" "the refusal is not $arm_code: $body" ;;
+    esac
+  done
+  # A fourth key, and a `DELETE` that names nothing.
+  fetch_body "${name}_extra" POST /api/push/subscribe \
+    "{\"endpoint\":\"$ok_endpoint\",\"p256dh\":\"$subscription_public\",\"auth\":\"$rotated\",\"keys\":{}}" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_extra/no_answer" "a subscribe with a fourth key did not answer"
+  body="$(cat "$WORK/responses/${name}_extra.body")"
+  case "$body" in
+    *'"code":"unknown_field"'*) assertions=$((assertions + 1)) ;;
+    *) fail "${name}/extra" "a fourth body key is not unknown_field: $body" ;;
+  esac
+  fetch "${name}_noendpoint" DELETE /api/push/subscribe \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_noendpoint/no_answer" "DELETE with no endpoint did not answer"
+  expect_status "${name}_noendpoint" "$(answer "${name}_noendpoint")" 422
+  body="$(cat "$WORK/responses/${name}_noendpoint.body")"
+  case "$body" in
+    *'"code":"bad_query"'*) assertions=$((assertions + 1)) ;;
+    *) fail "${name}/noendpoint" "a DELETE with no endpoint is not bad_query: $body" ;;
+  esac
+
+  # 2. The stream pair and the one trigger the stub can reach. A session, prompted twice: once with its stream
+  #    held (item 11's "unless an SSE stream for that session is open") and once without.
+  fetch_body "${name}_create" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-push-1" ||
+    fail "${name}_create/no_answer" "POST /api/sessions did not answer"
+  expect_status "${name}_create" "$(answer "${name}_create")" 202
+  body="$(cat "$WORK/responses/${name}_create.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id" ] || fail "${name}_create/id" "the response names no id: $body"
+  wait_for_idle_id "${name}_create" "$id"
+
+  # The stream is **held open across the turn**, which is the whole of item 11's "unless an SSE stream for that
+  # session is open": `fetch_stream` closes its socket after the header block, so the guard would be released
+  # before the prompt and this arm would measure nothing. The file descriptor therefore stays open here: the
+  # header block is read (which is what proves the handler registered), the prompt runs, the budget fires, and
+  # only then is the socket closed. The frames that arrive meanwhile are not read, which is what a locked phone
+  # looks like from this side.
+  local stream_fd stream_line
+  exec {stream_fd}<> "/dev/tcp/127.0.0.1/$port" || fail "${name}_stream/open" "no connection to the events route"
+  printf 'GET /api/sessions/%s/events HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: %s\r\nX-Holosmith-Client: 1\r\nTailscale-User-Login: %s\r\nConnection: close\r\n\r\n' \
+    "$id" "$control_origin" "$owner" >&"$stream_fd" ||
+    fail "${name}_stream/request" "the events request was not written"
+  : >"$WORK/responses/${name}_stream.http"
+  while IFS= read -r -t 5 stream_line <&"$stream_fd"; do
+    printf '%s\n' "$stream_line" >>"$WORK/responses/${name}_stream.http"
+    [ "$stream_line" != $'\r' ] || break
+  done
+  sed '1,/^\r$/d' "$WORK/responses/${name}_stream.http" >"$WORK/responses/${name}_stream.body"
+  expect_status "${name}_stream" "$(answer "${name}_stream")" 200
+  fetch_body "${name}_prompt" POST "/api/sessions/$id/prompt" '{"prompt":"spend it"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_prompt/no_answer" "POST a prompt did not answer"
+  expect_status "${name}_prompt" "$(answer "${name}_prompt")" 202
+  wait_for_reason_id "${name}_held_row" "$id" budget_exceeded
+  # A moment's grace so a send that raced the guard would land in the receiver's log before it is read.
+  sleep 1
+  exec {stream_fd}<&-
+  # The stream was open for that turn, so nothing may have been sent for this session.
+  if grep -qF "\"session_id\":\"$id\"" "$WORK/push-received.jsonl"; then
+    fail "${name}/stream_suppressed" \
+      "a notification was sent while a stream was open: $(cat "$WORK/push-received.jsonl")"
+  fi
+  assertions=$((assertions + 1))
+
+  # And without a stream: one message **per subscription** arrives — three rows, three sends — and the receiver's
+  # own checks say each is really this machine's. The tail is scoped to the lines this turn added, so the count is
+  # a fact about this prompt rather than about the file.
+  before="$(wc -l <"$WORK/push-received.jsonl")"
+  fetch_body "${name}_prompt2" POST "/api/sessions/$id/prompt" '{"prompt":"spend it again"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_prompt2/no_answer" "POST a second prompt did not answer"
+  expect_status "${name}_prompt2" "$(answer "${name}_prompt2")" 202
+  wait_for_reason_id "${name}_free_row" "$id" budget_exceeded
+  for _ in $(seq 1 200); do
+    [ "$(wc -l <"$WORK/push-received.jsonl")" -ge $((before + 3)) ] && break
+    sleep 0.1
+  done
+  sent="$(sed -n "$((before + 1)),\$p" "$WORK/push-received.jsonl")"
+  [ -n "$sent" ] ||
+    fail "${name}/delivered" \
+      "no notification arrived for $id: $(tail -5 "$WORK/push-received.jsonl" 2>/dev/null)"
+  # One message per row, and the one `/ok/` endpoint's is the line the six payload checks read.
+  check "${name}/count" 3 "$(printf '%s\n' "$sent" | grep -cF "\"session_id\":\"$id\"")"
+  check "${name}/paths" 3 \
+    "$(printf '%s\n' "$sent" | grep -cE '\"path\":\"/(ok|gone|keyed)/1\"')"
+  line="$(printf '%s\n' "$sent" | grep -F '"path":"/ok/1"' | sed -n '1p')"
+  [ -n "$line" ] || fail "${name}/ok_line" "the /ok/ endpoint was not delivered to: $sent"
+  # The payload is `{host, session_id, kind}` — three keys, and the words spec item 11 names.
+  check "${name}/kind" "budget_exceeded" \
+    "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["payload"]["kind"])' "$line")"
+  check "${name}/host" "local" \
+    "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["payload"]["host"])' "$line")"
+  check "${name}/keys" "host,kind,session_id" \
+    "$(python3 -c 'import json,sys; print(",".join(sorted(json.loads(sys.argv[1])["payload"])))' "$line")"
+  # The request's own four facts, as the receiver read them.
+  check "${name}/authorized" "True" \
+    "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["authorized"])' "$line")"
+  check "${name}/jwt_ok" "True" \
+    "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["jwt_ok"])' "$line")"
+  check "${name}/aud_ok" "True" \
+    "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["aud_ok"])' "$line")"
+  check "${name}/ttl" "3600" \
+    "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["ttl"])' "$line")"
+  check "${name}/encoding" "aes128gcm" \
+    "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["encoding"])' "$line")"
+
+  # 3. The disposition table at the far end, which the previous arm already exercised: `/ok/` answered `201` and
+  #    kept its row, `/gone/` answered `410` and lost it, `/keyed/` answered `403` and kept it. The last two
+  #    prompts are asserted here, and the fourth one proves the surviving pair is still delivered to — two rows,
+  #    two more messages, and neither removed.
+  before="$(wc -l <"$WORK/push-received.jsonl")"
+  fetch_body "${name}_prompt3" POST "/api/sessions/$id/prompt" '{"prompt":"one more"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_prompt3/no_answer" "POST a third prompt did not answer"
+  expect_status "${name}_prompt3" "$(answer "${name}_prompt3")" 202
+  wait_for_reason_id "${name}_rows_row" "$id" budget_exceeded
+  # The `410` endpoint's row is removed without a request asking for it (the task's own `forget`), which is
+  # spec item 11's "dead endpoints are removed".
+  for _ in $(seq 1 200); do
+    rows="$(python3 - "$data/app.db" <<'PY'
+import sqlite3, sys
+connection = sqlite3.connect(sys.argv[1])
+for (endpoint,) in connection.execute("SELECT endpoint FROM push_subscriptions ORDER BY endpoint"):
+    print(endpoint)
+connection.close()
+PY
+)"
+    printf '%s\n' "$rows" | grep -qF "$gone_endpoint" || break
+    sleep 0.1
+  done
+  # The dead endpoint's row is gone...
+  if printf '%s\n' "$rows" | grep -qF "$gone_endpoint"; then
+    fail "${name}/gone" "the 410 endpoint's row is still stored: $rows"
+  fi
+  assertions=$((assertions + 1))
+  # ...and the two others are not: a 201 delivered, and a 403 is a key problem rather than a dead endpoint.
+  printf '%s\n' "$rows" | grep -qF "$ok_endpoint" ||
+    fail "${name}/kept_ok" "the delivered endpoint's row was removed: $rows"
+  assertions=$((assertions + 1))
+  printf '%s\n' "$rows" | grep -qF "$keyed_endpoint" ||
+    fail "${name}/kept_keyed" "the 403 endpoint's row was removed: $rows"
+  assertions=$((assertions + 1))
+  # The receiver's own record of those two answers, so "it answered 403" is not the case's opinion — and the
+  # count is scoped to the lines the turn that followed the removal added, which is what makes "the gone row was
+  # not tried again" a measurement.
+  check "${name}/keyed_delivered" 1 \
+    "$(printf '%s\n' "$sent" | grep -cF '\"path\":\"/keyed/1\"')"
+  check "${name}/gone_delivered" 1 \
+    "$(printf '%s\n' "$sent" | grep -cF '\"path\":\"/gone/1\"')"
+  for _ in $(seq 1 200); do
+    [ "$(wc -l <"$WORK/push-received.jsonl")" -ge $((before + 2)) ] && break
+    sleep 0.1
+  done
+  check "${name}/surviving_rows" 2 \
+    "$(sed -n "$((before + 1)),\$p" "$WORK/push-received.jsonl" | grep -cF "\"session_id\":\"$id\"")"
+  check "${name}/gone_untried" 0 \
+    "$(sed -n "$((before + 1)),\$p" "$WORK/push-received.jsonl" | grep -cF '\"path\":\"/gone/1\"')"
+
+  # 4. The `DELETE`, last, because it is the one that removes a subscription the earlier arms need.
+  fetch "${name}_delete" DELETE "/api/push/subscribe?endpoint=$ok_endpoint" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_delete/no_answer" "DELETE /api/push/subscribe did not answer"
+  expect_status "${name}_delete" "$(answer "${name}_delete")" 204
+  fetch "${name}_delete2" DELETE "/api/push/subscribe?endpoint=$ok_endpoint" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_delete2/no_answer" "the second DELETE did not answer"
+  expect_status "${name}_delete2" "$(answer "${name}_delete2")" 404
+
+  # The whole table is the case's: it removes what it made and gives the shared boot back, so the next case's
+  # `stop_serve` finds a pid (`case_disk_quota`'s idiom).
+  kill "$receiver_pid" 2>/dev/null || true
+  wait "$receiver_pid" 2>/dev/null || true
   rm -rf "$root"
   stop_serve
   start_serve

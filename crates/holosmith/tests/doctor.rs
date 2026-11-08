@@ -94,6 +94,7 @@ fn tools(dir: &TempDir, version: &str) -> Tools {
             git: git_shim(dir, version),
             df: df_shim(dir, 480_000_000),
             du: PathBuf::from("du"),
+            openssl: PathBuf::from("openssl"),
         },
         tailscale: tailscale_shim(dir, "echo '{\"BackendState\":\"Running\"}'"),
         systemd: dir.file("no-systemd-here"),
@@ -108,6 +109,7 @@ fn tools_with_real_git(dir: &TempDir) -> Tools {
             git: PathBuf::from("git"),
             df: df_shim(dir, 480_000_000),
             du: PathBuf::from("du"),
+            openssl: PathBuf::from("openssl"),
         },
         ..tools(dir, "2.43.0")
     }
@@ -321,6 +323,7 @@ fn a_held_port_is_a_failure_before_a_start_and_the_machine_serving_after_one() {
             git: PathBuf::from("git"),
             df: df_shim(&dir, 480_000_000),
             du: PathBuf::from("du"),
+            openssl: PathBuf::from("openssl"),
         },
         ..tools(&dir, "2.43.0")
     };

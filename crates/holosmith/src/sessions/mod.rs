@@ -152,7 +152,11 @@ pub enum RepoError {
 impl RepoError {
     /// A SQLite failure during `operation`: the name of the public method whose statement
     /// failed.
-    fn sqlite(operation: &'static str, source: rusqlite::Error) -> Self {
+    ///
+    /// `pub(crate)` since HS-066: `push::repository` reuses this error as its own, the way
+    /// `events::repository` does, so the crate keeps one repository error rather than two shapes of
+    /// "a statement failed".
+    pub(crate) fn sqlite(operation: &'static str, source: rusqlite::Error) -> Self {
         Self::Sqlite { operation, source }
     }
 }

@@ -324,7 +324,11 @@ fn hex(bytes: &[u8]) -> String {
 /// The test vectors at the bottom of this module are the standard's: `""`, `"abc"` and the two-block
 /// `"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"`, which is one block's worth of padding plus a
 /// tail and catches an off-by-one in the length field.
-fn sha256(data: &[u8]) -> [u8; 32] {
+///
+/// **Shared with `push::crypto` since HS-066**, which builds HMAC-SHA-256 on it rather than writing the standard
+/// a second time: a Web Push message's key schedule is three HMACs deep (RFC 8291 §3.4), and two SHA-256s in one
+/// crate would be two things to keep right.
+pub(crate) fn sha256(data: &[u8]) -> [u8; 32] {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
         0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
