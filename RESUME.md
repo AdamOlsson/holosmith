@@ -1,4 +1,4 @@
-# RESUME — one issue per session (next: PER-90 / HS-058, the Changes sheet)
+# RESUME — one issue per session (next: PER-94 / HS-062, the disk floor)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating procedure and
 still governs the cycle; this file is the state of the world, and it adds one rule of its own:
@@ -45,205 +45,170 @@ sandbox-specific incantation (§2).
 
 ---
 
-## 1. The issue this session picks up: `PER-90` — HS-058, the Changes sheet
+## 1. The issue this session picks up: `PER-94` — HS-062, the disk floor
 
-**State when this file was written** (`origin/master` at `1c7c93f`, the tree clean apart from the operator's own
-`orchestrate.sh`/`log.txt`): **62 of 80 stories Done, 18 Backlog**, all in project `Holosmith`. `PER-90` is
-`Backlog`, it is the next in `HS-###` order, and its one blocker (`HS-057`) is `Done` — so it is eligible. The
-stories still Backlog are `PER-90` (HS-058) and then, in order, `PER-94` (HS-062, blocked by the done HS-046),
-`PER-95` (HS-063, blocked by HS-062), `PER-96` (HS-064, blocked by the done HS-043), `PER-98` (HS-066, blocked by
-the done HS-049), `PER-99`, `PER-100` – `PER-106` (phase 3), `PER-108` – `PER-112` (phase 4); check the Linear
-`Blocked by` list rather than this sentence if HS-058 turns out to be a stop.
+**State when this file was written** (`origin/master` at `31feb2f`, the tree clean apart from the operator's own
+`orchestrate.sh`/`log.txt`): **63 of 80 stories Done, 17 Backlog**, all in project `Holosmith`. `PER-94` is
+`Backlog`, it is the next in `HS-###` order, and its one blocker (`HS-046`) is `Done` — so it is eligible. The
+stories still Backlog are `PER-94` (HS-062) and then, in order, `PER-95` (HS-063, blocked by HS-062), `PER-96`
+(HS-064, blocked by the done HS-043), `PER-98` (HS-066, blocked by the done HS-049), `PER-99` (HS-067), `PER-100` –
+`PER-106` (phase 3, HS-068 … HS-074) and `PER-108` – `PER-112` (phase 4, HS-076 … HS-080); check the Linear
+`Blocked by` list rather than this sentence if HS-062 turns out to be a stop.
 
-The last shipped story was `PER-89` (HS-057, the publish, **ADR-0066**) — the last route of item 12: a host `git
-push` of `agent/<id>` to a remote the config names, refusing unlisted remotes, protected names, the merge target,
-a missing `confirm` and a rejected push, with `403 publish_disabled` when `publish.remotes` is empty. Its gate run
-was green: **83 cases, 1373 assertions**, no `SKIP`; `cargo test` is **1068 tests**, and `web/`'s runner is
-**52**. Its §1 material is now Linear, `docs/review/PER-89.md`, `git log` and §9.
+The last shipped story was `PER-90` (HS-058, the Changes sheet, **ADR-0067**) — item 12's last bullet and the first
+screen since phase 1. Its gate run was green: **84 cases, 1414 assertions**, no `SKIP`; `cargo test` is **1069
+tests**, and `web/`'s runner is **72**. Its §1 material is now Linear, `docs/review/PER-90.md`, `git log` and §9.
 
 ### 1.1 The slice (verbatim from `docs/stories/phase-2-deployable-mvp.md`; Linear's body is the same text)
 
-> ### HS-058 — UI: the Changes sheet
+> ### HS-062 — Disk floor
 >
-> **As** the operator **I want** review and merge on the session screen **so that** the phone is enough.
+> **As** the operator **I want** creation refused when the disk is nearly full **so that** I do not corrupt the
+> machine I depend on.
 >
-> - **Size:** M · **Blocked by:** HS-057 · **Spec:** item 12 (UI)
-> - **Demo:** open a session, open Changes, browse files, read a diff, pick a target and strategy, merge, and see
->   the target advance.
+> - **Size:** S · **Blocked by:** HS-046 · **Spec:** item 14
+> - **Demo:** fill the disk below `min_free_gb` and see create and resume return 507 with a clear message.
 >
 > **Acceptance**
-> - [ ] File list with status, additions and deletions; tapping a file shows its diff.
-> - [ ] Ahead and behind counts, plus a `touches_ci` warning where relevant.
-> - [ ] Target and strategy pickers, preselecting the first configured target and `ff-only`.
-> - [ ] Merge button disabled while running or dirty, with the reason shown and the "ask the agent to commit"
->   shortcut offered.
-> - [ ] Publish button visible only when configured, with a confirm step and the CI warning.
-> - [ ] Conflict state shows the paths and the "Resolve with agent" action.
+> - [ ] Session creation and resume return 507 when free space is below `min_free_gb` (default 20).
+> - [ ] The check runs before any worktree or network is created.
+> - [ ] `doctor` reports the same measurement, so the two never disagree.
+> - [ ] Running turns are not interrupted by crossing the floor; only new starts are refused.
 
-`docs/stories/**` is **not edited** (§7). An **M** story, and it is the **first UI story since phase 1's session
-screen**: every route it draws already exists and every refusal it shows already has its sentence — what is new is
-the screen. That is why its "what already exists" list below is unusually long and its "what does not exist" list
-is one file.
+`docs/stories/**` is **not edited** (§7). An **S** story, and it is the *second* use of one number: `serve` already
+refuses to boot below the floor and `doctor` already prints the measurement, so what is missing is the two request
+paths — which makes "the same measurement" the load-bearing phrase, not "a new check".
 
 ### 1.2 The spec it closes
 
-Item 12's UI sentence, in full:
+Item 14, in full (the sentence this story owns is the first):
 
-> UI: the Session screen gets a Changes sheet with the file list, per-file diff, ahead and behind counts, a target
-> and strategy picker with a Merge button, a Publish button when configured, and warnings for uncommitted work and
-> CI files.
+> `min_free_gb` (default 20): session creation and resume fail with 507 below it.
 
-and the six routes beneath it are item 12's bullets, all shipped: `GET …/changes` (HS-052, eleven keys plus the
-additive `mergeable_reason`), `GET …/changes/diff?path=` (HS-053, capped at 256 KB with a marker naming the
-total), `POST …/merge` (HS-054/055/056, the three strategies, rule 1's guards, `delete_session`),
-`POST …/publish` (HS-057). The screen is the only part of item 12 with no code.
+and item 14's neighbours, which are **HS-063's** and not this story's: `session_disk_soft_gb` (default 10), the
+watchdog that runs `du` every 5 minutes, the `error` event with code `disk_quota`, and "Docker storage limits do not
+apply to bind mounts".
 
 ### 1.3 What already exists (read this before planning)
 
-- **Both read routes, and their exact shapes.** `GET /api/sessions/{id}/changes` answers `{branch, base_commit,
-  head, target, ahead, behind, dirty, mergeable, mergeable_reason?, files:[{path, status, additions, deletions}],
-  touches_ci}`; `target` is `null` (with `behind`/`mergeable` null) when the repository has no configured target;
-  `mergeable` is **three** answers (`true`/`false`/`null` + a sentence); `additions`/`deletions` are `null` for a
-  binary file. `GET …/changes/diff[?path=]` answers `text/plain` (the whole branch's patch when no `path`, the
-  cap's marker when it was cut, `charset=utf-8` only for real UTF-8 bytes) and `404 not_found` for a `path` that
-  is not in `files[]`.
-- **Every refusal the screen shows, with its sentence and code**: `409 no_worktree` (four sentences per route),
-  `409 dirty_worktree` ("…ask the agent to commit it, then merge again"), `409 session_running`,
-  `409 not_fast_forward`, `409 target_dirty`, `409 target_checked_out`, `409 conflict` with the additive
-  `conflicts` array, `422 bad_target`, `422 bad_strategy`, `422 bad_body`, and the publish family —
-  `403 publish_disabled`, `422 bad_remote`, `422 protected_branch`, `422 target_not_pushable`,
-  `422 confirm_required`, `409 push_rejected`. The merge's answer is `{merged_commit, target, strategy}` and a
-  publish's is `{remote, branch, commit}`. `docs/review/PER-88.md` and `PER-89.md` record which sentence means
-  what.
-- **Two decisions that name text this screen will use, recorded so they are not re-invented**:
-  ADR-0065 D4 names the prompt the "ask the agent to commit" shortcut sends, and ADR-0064 D10 names the
-  Resolve-with-agent affordance (both were *deferred to HS-058* by their stories); ADR-0066 D11 names the
-  sentence the Publish confirm step shows:
-  `this branch changes CI configuration, so publishing it may run workflows in the remote repository`.
-- **The session screen and its idioms.** `web/src/main.ts` is the DOM (`deleteSection` is the precedent for an
-  **affordance**: a button, a confirm step and the `409 unsaved_work` path that offers the forced retry), and
-  `web/src/transcript.ts` holds every rule that is worth a test (`deletedNotice`/`Kept`, `UNSAVED_WORK_NOTICE`,
-  `FORCED_DELETE_LABEL`, `stateText`/`headline`, `createFailure`, `historyPath`, `budgetNotice`,
-  `stoppedNotice`), with 52 tests in `web/test/transcript.test.ts` on node's own runner. `StreamTarget` carries
-  one `showState` that patches the badge, preview, composer and affordance — a second thing that must react to the
-  row is what that seam exists for.
-- **The gate's UI cases**: `case_session_screen` (the session page's elements over HTTP), `case_app_shell`, and
-  the two read routes' cases (`case_changes`, `case_changes_diff` — the gate asserts the bytes, not the page).
-  **No gate may need a browser**: the screen's *rules* are `web/test/transcript.test.ts`'s, and a rule that only
-  the DOM can show is not a gate case.
-- **The browser is a dev tool, not a test tool** (§2): Playwright's Chromium at `~/.cache/ms-playwright`,
-  `import`ed by path from `~/.cache/hs-browser/pw/node_modules/playwright/index.mjs`, launched `--no-sandbox`,
-  and **`networkidle` never settles** on a page holding an `EventSource` — navigate with `domcontentloaded` and
-  wait for the rows.
-- **The client has no 60-second timeout to add**: rule 6's pair is the hub's (HS-069), and ADR-0065 D8/ADR-0066
-  D12 record that a blanket timeout on the shared `post` helper would cut the delete's own `abort_grace` wait. The
-  Merge and Publish buttons use their own `fetch`, like `deleteSection`.
+- **The measurement, once**: `preflight::disk(&Config, &Path) -> Finding` (`crates/holosmith/src/preflight.rs`, the
+  private `disk` and `parse_df_available`) runs `df -Pk <data_root>`, reads the fourth column of the second line,
+  converts to whole GB and compares with `min_free_gb`. Three outcomes, deliberately: no data root yet → `unknown`
+  (ADR-0054's rule, so a fresh host does not fail a check that has nothing to measure), `df` missing/failing/printing
+  nonsense → `fail` with its own sentence, otherwise `pass`/`fail` naming the two numbers. `Tools { git, df }` is the
+  tests' seam and defaults to `PATH` (`preflight::Tools::default`).
+- **`serve` refuses to boot** when that check fails (HS-024): the preflight's failures are `Complaint`s and the boot
+  stops with their sentences. **`doctor --quick` prints the very same finding** (HS-045 routes the preflight's list
+  through `report_with`), which is why the third acceptance bullet is a *proof* rather than new code: the two can
+  only disagree if a story gives the request path a second measurement.
+- **`min_free_gb` is a config key** (`config/mod.rs:230`, default 20, `Kind::Integer`, `u64_setting` — so `0` is
+  accepted and today means "no floor"; a story that keeps it must say so, and `config show`'s golden file is
+  `tests/golden/config-default.toml`).
+- **The create's refusal order**, in `http::sessions`: the idempotency key → the body → `refuse_project` (the three
+  project refusals) → the cap (`cap_without_idle`, with one eviction attempt) → the row → the provisioner. `507` and
+  a code for it **do not exist** (`http/error.rs` has no `INSUFFICIENT_STORAGE`); the resume answers `cap_reached`
+  (HS-022) and checks the cap *before* the transition.
+- **The app's "a machine fact before a session fact" precedent**: the drain's `409 draining` (ADR-0060) is answered
+  before the row is read, and the publish's `403 publish_disabled` before the row too (ADR-0066 D4). A full disk is
+  that kind of fact.
+- **The gate's two neighbours**: `case_docker_preflight` (no server: it builds a `_ping` socket and measures the
+  checks over shims) and `case_doctor_quick` (no server at all). `scripts/verify.sh`'s `deploy_machine_shims` is the
+  precedent for putting a stand-in program on `PATH` and recording what it was asked (`tailscale` there).
+- **The two paths a 507 has to reach**: `POST /api/sessions` and `POST /api/sessions/{id}/resume`. Nothing else
+  starts work — "running turns are not interrupted" is therefore a *structural* fact (no code path in the turn
+  runner reads the disk), and §1.6 asks how to measure it rather than assert it.
 
 ### 1.4 What does not exist
 
-No Changes sheet: no file list, no diff reader, no ahead/behind display, no `touches_ci` warning, no
-target/strategy pickers, no Merge button, no Publish button or confirm step, no disabled-with-reason state, no
-conflict view, no "ask the agent to commit" and no "Resolve with agent" action, and no `web/test/transcript.test.ts`
-rules for any of them. The phase-2 UI is the session screen as phase 1 left it.
+No `507` answer and no code for it; no disk read in the create's or the resume's path; no sentence for a client
+("free some space, or lower `min_free_gb`" is the preflight's wording and this story needs its own, because the
+request is not the boot); no `df` seam for a *server* (only the preflight's `Tools` for tests and `doctor`); no case
+that makes the floor fire while a server is up; and **nothing that records what `min_free_gb = 0` means**.
 
 ### 1.5 What the plan must decide (and the shape this handoff recommends)
 
-1. **Where the sheet lives.** Recommend: a **section of the session screen** opened by a *Changes* button in the
-   existing header area (`main.ts`'s `deleteSection` is the shape: one section that renders itself from a fetch and
-   is re-rendered on the stream's row updates), not a new route — the app has two screens and item 12 says "the
-   Session screen gets a Changes sheet". Record it either way; a third screen would need `historyPath`'s and the
-   server's fallback route to change too.
-2. **The rules go in `transcript.ts`, the DOM in `main.ts`.** Every string and every branch the sheet shows (the
-   disabled reason, the CI warning, the confirm label, the conflict line, the "ask the agent to commit" prompt) is
-   a tested rule, the way `deletedNotice`/`UNSAVED_WORK_NOTICE` are, because `npm test` is the only gate that can
-   see them. That is what makes the acceptance reviewable without a browser.
-3. **How "disabled with the reason" is known.** The merge route's guards are `session_running` (the row's
-   `status === "running"`) and `dirty_worktree` (`GET …/changes`'s `dirty`). Recommend: the button's disabled
-   state is computed from the **last `GET …/changes`** (`dirty`) plus `StreamTarget`'s `showState` row
-   (`status`), with the reason text naming the same next step the `409`'s sentence does — and the `409` path stays
-   as the backstop, because a turn can start between the read and the tap.
-4. **The two prompts.** ADR-0065 D4 and ADR-0064 D10 name them; read them before writing a third spelling. The
-   "ask the agent to commit" shortcut posts `POST …/prompt` with that text; "Resolve with agent" posts the
-   conflict prompt and then offers a retry (item 12's "then retry").
-5. **Target and strategy pickers.** `target` comes from the *first existing* configured target (`changes`'s
-   `target`, already the config's order); the picker's options are the configured list — which the client does not
-   have. Recommend: derive the options from `merge.targets` via `GET /api/health`'s bag **or** ship the list in the
-   changes answer as an additive key (an ADR decision; the second touches a route a story already closed), and if
-   the answer is "one target", the picker renders `changes.target` alone and the story says so. `strategy` is
-   item 12's three words with `ff-only` preselected.
-6. **The reader's cap and the marker.** The diff already answers a marker naming the **total**; the sheet shows it
-   verbatim rather than re-measuring, and a binary file's `null` counts render as an em dash rather than `0`.
-7. **The conflict state.** `409 conflict`'s additive `conflicts` array is the paths; the sheet shows the list, the
-   sentence, and the Resolve-with-agent action. A `mergeable: false` from the *read* is the same state before the
-   tap: recommend showing the same paths from `mergeable_reason` without offering Resolve twice.
-8. **The Publish half.** Visible only when configured — the client learns that from `403 publish_disabled` (or,
-   better, from `GET /api/health`; decide), a confirm step (`confirm:true` is the request's opt-in), and the CI
-   warning from `touches_ci`, shown **before** confirm, exactly as much as ADR-0066 D11's sentence says.
-9. **The pending states.** Each of the three actions (merge, publish, prompt) disables its own button while its
-   request is in flight and re-enables on an answer; a `request` that fails shows the envelope's sentence alone
-   (the `createFailure` precedent). The stream keeps updating the file list while a turn runs.
-10. **What the gate measures.** One `case_*` is required. Recommend `case_changes_screen`: over the existing
-    `case_changes` fixture shape (own projects root, `_ping` socket, worktree re-made), assert that the page's
-    HTML carries the sheet's element ids and the rule strings (the way `case_session_screen` does), and put the
-    rule tests (disabled reason, CI warning, conflict list, prompts, cap marker) in `web/test/transcript.test.ts`
-    with a `npm test` count that grows.
+1. **Where the check runs.** Recommend: in `http::sessions`, **after** the body and the idempotency key (a malformed
+   request is still the body's) and **before** `refuse_project`, the cap and the row — so a full machine is answered
+   as a machine fact, no git process runs, and no row exists to clean up. The resume's check goes before its
+   transition, next to the cap check, and needs its own code only if the two facts differ (they do not: `507` both).
+2. **Whether the request path re-uses `preflight::disk` or a narrower reader.** Recommend: extract the *pure*
+   arithmetic (`available_gb(df_output) -> Option<u64>`) and a `pub(crate)` reader that returns
+   `Result<u64, DiskError>`; `preflight::disk` then becomes one caller and keeps its four sentences, and the request
+   path composes its own 507 sentence from the same number. Two spellings of the *measurement* is the failure mode
+   this story exists to prevent; two spellings of the *sentence* is correct (the boot's fix is not the create's).
+3. **What the code is called.** `507` is `StatusCode::INSUFFICIENT_STORAGE`; the envelope code should be the thing,
+   not the status — the project's names are words (`cap_without_idle`, `no_worktree`), so something like
+   `disk_floor` or `insufficient_storage`. Check `GLOSSARY.md` first and add the entry; a code is effectively API
+   (ADR-0008).
+4. **`min_free_gb = 0`.** Recommend: keep it legal and document it as **"no floor"** (the preflight's comparison is
+   `available >= min_free_gb`, so `0` always passes) — the alternative, refusing `0`, would be a new config rule for
+   a story that only asked for a refusal.
+5. **How a gate case makes the floor fire while a server is up.** The boot itself refuses below the floor, so a case
+   cannot simply set `min_free_gb` high: `serve` would never start. Recommend a **`df` shim on `PATH`**, the
+   `deploy_machine_shims` shape: a `python3` script that prints a large available column for the boot and a small one
+   once a marker file exists (or reads the marker's value), with the server's disk read going through the same
+   `PATH` lookup the preflight uses. Then the case boots healthy, creates one session, plants the marker, and asserts
+   the create and the resume answer `507` with the code and the sentence — and that the *boot* still reports what it
+   measured.
+6. **What "running turns are not interrupted" is measured by.** Recommend a crate test that starts a turn (the stub
+   backend is enough), crosses the floor through the same reader (the `df` shim or a `Tools` seam), and asserts the
+   turn still settles — plus the gate's own "no request path other than create/resume reads the disk" being
+   structural: the reader has one or two call sites.
+7. **`doctor`.** The acceptance says "reports the same measurement, so the two never disagree". If the extraction in
+   D2 is done, `doctor` is already right and the *test* is the deliverable: one crate test that hands the same
+   `df` output to the preflight and to the request-path reader and asserts the same GB, and one that asserts a
+   `507`'s numbers are the sentence's.
 
 ### 1.6 The questions the plan must answer (before code)
 
-1. The exact DOM: one section with a button, or a sheet with its own overlay? What does the file list show for a
-   binary file, a rename, a delete, and an untracked file that is not in `files[]`?
-2. How `merge`/`publish`/`touches_ci`/`dirty` reach the sheet: re-fetch on every stream frame, on a debounce, or
-   only when the sheet is open (and what the stream's `showState` already gives for free)?
-3. The disabled reason's exact words for `running` and for `dirty`, and whether the `dirty` case's "ask the agent
-   to commit" button is the shortcut ADR-0065 named.
-4. Whether the target picker needs a new key on `changes` or renders one target; if a key, which ADR.
-5. What the Publish confirm step looks like when `touches_ci` is false (the confirm still exists — the spec's
-   `confirm:true` is the opt-in).
-6. What a `409 conflict` shows after Resolve-with-agent has been sent, and what re-enables a retry.
-7. Which `web/test/transcript.test.ts` rules are new, and which of them is the one that could not fail (delete the
-   behaviour, watch it go red).
-8. What `case_changes_screen` measures that no `cargo test` can, and why it needs no browser.
+1. Exactly where in the create's order, and does an idempotent replay answer 507 or the stored row (the retry rule is
+   `create_locked`'s — idempotency is checked first today, so a replay after the disk filled returns the row).
+2. Whether the resume's 507 comes before or after `cap_reached`, and what it says when both hold.
+3. The exact sentence, and whether it names `min_free_gb`'s current value and the free space (the preflight's do).
+4. Whether the reader is `spawn_blocking` (a `df` subprocess on a request path — every other subprocess on a request
+   path is).
+5. What the create does about the project backup (`back_up`) and the idempotency key when the disk is short.
+6. Which test proves `doctor` and the request path agree, and where it lives (`preflight`'s unit tests, `doctor`'s,
+   or a new `tests/disk.rs`).
+7. What the gate case is called (`case_disk_floor`), what it leaves behind, and whether the `df` shim is on `PATH`
+   for the whole case or only for its boot.
 
 ### 1.7 Acceptance, restated as checks
 
-- *The file list* — status, additions and deletions for every entry of `files[]`, and tapping one renders that
-  file's diff from `GET …/changes/diff?path=` (a binary file shows git's summary line, not `0`/`0`).
-- *Ahead/behind* — the two numbers the read answered, and the `touches_ci` warning where the read says `true`.
-- *The pickers* — the first existing configured target preselected and `ff-only` preselected; the strategy words
-  are the contract's three; a `422 bad_strategy` cannot be produced by the UI.
-- *The Merge button* — disabled while the row is `running` or the session `dirty`, with the reason shown and the
-  "ask the agent to commit" shortcut offered (the prompt text ADR-0065 D4 named).
-- *The Publish button* — visible only when configured; a confirm step; the CI warning before confirm
-  (ADR-0066 D11's sentence).
-- *The conflict state* — the paths and the "Resolve with agent" action, whose prompt is ADR-0064 D10's.
-- *Plus* the usual gates, one new `case_*`, `web/test/transcript.test.ts` rules with a real mutation check, and
-  `docs/build.md`/`GLOSSARY.md`/an ADR (**0067** if a decision needs one; a UI story may need none).
+- *507 on create* — a healthy boot, a `df` that then reports below the floor, and `POST /api/sessions` answering
+  `507` with the envelope's code and a sentence naming the two numbers and the fix.
+- *507 on resume* — the same for a `stopped` row.
+- *Before any work* — no row, no worktree, no network: the assertion is the count of rows and the absence of
+  `.worktrees/<id>`, not the sentence.
+- *`doctor` agrees* — one test compares the two readers' GB for one `df` output; the gate's `case_doctor_quick` keeps
+  printing the same finding.
+- *Turns are not interrupted* — a turn that is already running settles while the floor is crossed.
+- Plus the usual gates, one new `case_*`, and the docs: `docs/build.md`'s case list, `GLOSSARY.md`'s code entry, an
+  ADR only if a decision needs one (**0068** is next).
 
 ### 1.8 Non-goals
 
-The routes (all shipped), a new screen or a router, a markdown/file browser (item 12's non-goal), the hub
-(phase 3), notifications (HS-066/067), and any server-side change to the merge/publish contracts beyond a single
-additive key if 1.5 D5 chooses one.
+`session_disk_soft_gb` and the `du` watchdog (HS-063, blocked by this story); Docker storage limits (item 14's
+"optional hardening"); a quota, a `du` of the data root, a periodic disk event, notifications; the preflight's own
+four sentences (they are HS-024's and `doctor`'s; §1.5 D2 keeps them).
 
 ### 1.9 The demo
 
-On this machine, in Chromium (Playwright, `--no-sandbox`, `domcontentloaded` + wait-for-rows): create a session
-over the `_ping` shim, re-make its worktree by hand, commit two files on `agent/<id>`, open the session screen,
-open Changes, see the two files and the ahead count, tap one and read its diff, pick `merge`, merge, and see the
-target advance (`git log --oneline main` and the sheet's own answer); then a session with `publish.remotes`
-configured to show the Publish confirm and the CI warning; then a conflicted branch to show the paths and the
-Resolve-with-agent action, and **paste the prompt it sent** (from `session.log` or the events table). Say plainly
-what was not measured: no real agent turn (no provider key here), no hub, no iOS install.
+On this machine, over the shipped artifact: boot `serve` with a `df` stand-in on `PATH` that reports a healthy
+number, create one session (the stub backend is enough, or a `_ping` shim if the story needs a worktree), have the
+stand-in start reporting below `min_free_gb`, and show `POST /api/sessions` and `POST …/resume` answering `507` with
+the sentence — plus `GET /api/sessions` unchanged and `holosmith doctor --quick`'s disk line for the same shim. Say
+plainly what was not measured: a *real* full disk (this sandbox has no way to fill one and no root), a real agent
+turn, no hub.
 
 ### 1.10 What the next agent needs back
 
 When you write the state back (§5, step 10): §1 becomes the **next** issue — by `PROMPT.md`'s ranking that is
-`PER-94` (HS-062, the disk floor) *if* HS-058 ships, and `PER-90` again if it does not — with the same shape.
-Refresh the counts, the ADR number you took (**0067** is next), the last gate run's own numbers (and `web/`'s
-test count, which this story changes), and replace §9's row with this story's. Anything you learned that is **not**
-state and **not** an ADR goes into `docs/notes.md` under a new `### Landmines: …` heading, never into §1 — and a
-UI story's landmines are worth more than most, because `npm test` is the only gate that sees them. Then kill what
-you started (§5, step 11).
+`PER-95` (HS-063, the per-session disk soft cap) *if* HS-062 ships, and `PER-94` again if it does not — with the same
+shape. Refresh the counts, the ADR number you took (**0068** is next), the last gate run's own numbers (and `web/`'s
+test count, which this story should not change), and replace §9's row with this story's. Anything you learned that is
+**not** state and **not** an ADR goes into `docs/notes.md` under a new `### Landmines: …` heading, never into §1.
+Then kill what you started (§5, step 11).
 
 ---
 
@@ -730,7 +695,7 @@ crates/holosmith/
                             row) → `confirm` → remote listed → `branch`'s alphabet → protected → the target →
                             the row (404) → `base_commit` → `changes::basis` + the push on `spawn_blocking`
   src/changes.rs            the changes view's summary (HS-052, ADR-0061): `Changes::read(&Worktree,
-                            base_commit, targets)` — the *ordered* refusal (`NoRepository` → `Missing` →
+                            base_commit, targets, remotes)` — the *ordered* refusal (`NoRepository` → `Missing` →
                             `Unregistered` → `NoBranch`, then `Git`) and five host reads: `ahead`
                             (reused from `Worktree`), `behind` (`rev-list --count agent/<id>..<target>`),
                             `dirty` (`status --porcelain --untracked-files=normal --no-optional-locks` in the
@@ -738,7 +703,10 @@ crates/holosmith/
                             with `--no-ext-diff --no-textconv --no-renames`, a binary file's counts `None`),
                             and `merge_trial` (`merge-tree --write-tree`, `Merge::{Clean,Conflicted,Unasked}`;
                             `merge_arguments` pins the two-ref order). Also `FileChange`, `Changes` (eleven
-                            keys + `mergeable_reason`), `ChangesError` + `sentence()`, `CI_PATHS`/`touches_ci`
+                            keys + `mergeable_reason` + `choices`), `Choices` (`targets` = the configured
+                            targets that exist, in the config's order, from `existing_targets` — the walk
+                            `first_target` used to make and now returns; `remotes` = the config's list
+                            verbatim — HS-058, ADR-0067), `ChangesError` + `sentence()`, `CI_PATHS`/`touches_ci`
                             (public for HS-058; the two arms are exclusive). Since HS-053 the *diff* too
                             (ADR-0062): `basis` (the four refusals + the tip, shared by both readers), `diff`
                             → `Diff { body: Vec<u8>, truncated, total, utf8 }` and `DiffError { Changes,
@@ -877,9 +845,16 @@ web/                        Vite 7 + TypeScript, two screens (`/` and `/sessions
                             `setTurnBase`, `historyPath`, since HS-030 `stateText`/`headline` — a
                             multi-line reason renders as its last line, clipped at `REASON_MAX` — and since
                             HS-043 `deletedNotice`/`Kept`, `UNSAVED_WORK_NOTICE`, `FORCED_DELETE_LABEL`;
-                            `main.ts`'s `deleteSection` is the delete affordance, and `StreamTarget` carries
-                            one `showState` that patches badge, preview, composer and the affordance)
-web/test/transcript.test.ts 52 tests over synthetic frames, node's own runner (`npm test`)
+                            since HS-058 the Changes sheet's rules — `fileLine`/`countsText`/`statusWord`,
+                            `countsLine`, `ciWarning`, `mergeBlocked`, `targetOptions`/`preselectedTarget`,
+                            `publishVisible`/`publishQuestion` (the CI warning is the confirm paragraph's
+                            second line), `conflictLine`, `mergedNotice`/`publishedNotice`, `diffPath`,
+                            `sheetFailure`, `NOTHING_COMMITTED`, `COMMIT_ASKED`/`RESOLVE_ASKED`,
+                            `STRATEGIES`, `COMMIT_PROMPT`/`RESOLVE_PROMPT`;
+                            `main.ts`'s `deleteSection` is the delete affordance, `changesSection` the
+                            sheet, and `StreamTarget` carries one `showState` that patches badge, preview,
+                            composer, the delete affordance and the sheet)
+web/test/transcript.test.ts 72 tests over synthetic frames, node's own runner (`npm test`)
 scripts/build-web.sh        npm ci + npm test + npm run build, asserts web/dist/index.html
 scripts/build.sh            web first, HOLOSMITH_REQUIRE_WEB=1, both musl targets → dist/<triple>/,
                             atomic copy, then check-static.sh. Uses `cargo build --locked`.
@@ -891,9 +866,9 @@ scripts/verify.sh           the one-command gate (see §3), including the two st
                             --json` from the pairs it was asked for) and `health_responder` (a `python3` that
                             answers `/api/health` for a whole case)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0066          read the recent ones before planning anything (0066 is the publish)
+docs/adr/0001…0067          read the recent ones before planning anything (0067 is the Changes sheet)
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-93, PER-97, PER-107  each a verbatim review + a `## Resolution` table
+docs/review/PER-33…PER-93, PER-90, PER-97, PER-107  each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -1110,15 +1085,14 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 The catalogue lives in **`docs/notes.md`** — read the **cross-cutting** sections before you start anything,
 then the sections below. It is a reference: everything there is a measurement or a review finding.
 
-| Read | Why it bears on HS-058's Changes sheet |
+| Read | Why it bears on HS-062's disk floor |
 | --- | --- |
-| Cross-cutting: *Web*, *Tests*, *Demos*, *Reviews* | This is the first UI story since phase 1, so **Web** and **Tests** are the pair that matters: the screen's *rules* are `web/test/transcript.test.ts`'s (node's runner, 52 today) and `npm test` is the only gate that can see them, while **no gate may need a browser**. **Demos** carries the three Playwright quirks (ESM ignores `NODE_PATH` and the `.js` entry has no `chromium`; `--no-sandbox`; `networkidle` never settles on a page holding an `EventSource`). |
-| Cross-cutting: *HTTP and the envelope* | Every refusal the sheet shows is an envelope with a fixed sentence, and `touches_ci`'s and `conflicts`'/`kept`'s additive keys are the shape any new key must follow. The rule "a message must describe its own request" is why the Merge button's disabled reason and the `409`'s sentence should not be two different stories. |
-| *Landmines: the changes view (HS-052)* and *the unified diff (HS-053)* | The two reads this screen renders, and the two facts that most easily become a UI bug: `mergeable` is **three** answers (`true`/`false`/`null` + `mergeable_reason`), a binary file's counts are `null` and not `0`, and the diff's marker names the **total** rather than what was shown. `touches_ci`'s two arms (a directory prefix vs a file name) are already tested. |
-| *Landmines: the fast-forward merge (HS-054)*, *the two landing strategies (HS-055)* and *the merge's guards (HS-056)* | The prompts this sheet sends are named there — ADR-0065 D4's "ask the agent to commit" and ADR-0064 D10's Resolve-with-agent — and the three refusal sets the buttons must pre-empt: `session_running`, `dirty_worktree`, `conflict` (with its `conflicts` array). The refused-merges-make-no-temporary-worktree fact is the reason a disabled button is worth having. |
-| *Landmines: the publish (HS-057)* | The Publish half: `403 publish_disabled` is how the client learns the endpoint is off, `confirm:true` is the opt-in, and ADR-0066 D11 names the CI warning sentence this sheet shows before confirm. The push's own refusals are `422`/`409` with sentences to render as-is. |
-| *Landmines: the drain and its socket (HS-051)* | Why the buttons must not grow a blanket client timeout: `DELETE` legitimately waits out `abort_grace`, and a merge or publish is a long request whose ceiling is the hub's (HS-069). |
-| *Landmines: the doctor, the ports and a read-only open (HS-045)* | The three-armed fact (`pass`/`fail`/`unknown`) — the shape a fallible question takes, which is what `mergeable: null` and a `null` file count already follow. |
+| Cross-cutting: *Tests*, *HTTP and the envelope*, *Config and docs* | The three sections a 507 touches: **Tests** carries the two shapes that matter here (`df` is a subprocess, so a request path must `spawn_blocking` it like every other subprocess; and a test that asserts only a status is how a wrong code ships — assert status **and** `code` **and** `content-type`), **HTTP and the envelope** carries the rule that a code is effectively an API and that "a message must describe its own request" (the boot's sentence and the create's are not the same request), and **Config and docs** carries `min_free_gb`'s golden file (`tests/golden/config-default.toml`) and `KNOWN_KEYS.len()` — no new key is expected, but a *changed* meaning (`0` = no floor) is a doc and glossary line. |
+| *Landmines: startup checks, refusals and the writer's tick (HS-023, HS-024)* | The preflight's own history: **a startup refusal changes what every default-backend boot does**, and the honest fix is never a flag that skips a check. A gate case that needs the floor to fire *while a server is up* therefore needs a `df` stand-in, because the boot refuses below the floor before any request can be made. |
+| *Landmines: the doctor, the ports and a read-only open (HS-045)* | The three-armed finding (`pass`/`fail`/`unknown`), the `Tools { git, df }` test seam, and why `doctor`'s disk check and `serve`'s are one function — the acceptance's third bullet is a *proof* of that, not new code. `preflight::disk`'s "a data root that is not there yet is not a disk problem" is the arm to keep. |
+| *Landmines: the deploy, the ports and what `install` does to a key file (HS-047)* and *the service (HS-049)* | `scripts/verify.sh`'s `deploy_machine_shims` is the precedent for putting a stand-in program on `PATH` and recording what it was asked (`tailscale` there, `df` here) — and `case_server_deploy`/`case_doctor_quick` are the two cases that would notice a `PATH`-lookup seam. |
+| *Landmines: the drain and its socket (HS-051)* | "A machine fact before a session fact" (ADR-0060): a full disk is the machine's, so the create answers it before the row and the cap — the same order `409 draining` and `403 publish_disabled` already use. |
+| *Landmines: the changes view (HS-052)* and *the Changes sheet (HS-058)* | Not the subject, but the two most recent *shape* lessons a small story inherits: a null is not a zero (the floor's numbers must not print `0 GB` for "could not measure"), and every sentence a screen or a refusal shows is a rule with a test. |
 
 Three rules worth repeating here because they are the most expensive to relearn: **a test that cannot fail
 is worse than no test** (mutate the behaviour and watch it go red); **a gate case that SKIPs on the bug it
@@ -1127,7 +1101,7 @@ three such edits have cost a review finding each.
 
 ## 7. Decisions taken on the operator's behalf (do not silently undo)
 
-Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0065`, one line each in
+Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0067`, one line each in
 `docs/stories/README.md`): read the recent ones before planning, and **amend rather than rewrite** — an ADR
 a later story changes gets a "Superseded by ADR-00xx" note (0012/0013, and 0026 amended 0020). The **ADR index in
 `docs/stories/README.md` is the one part of that directory a story edits** — it is the record of the decisions,
@@ -1159,7 +1133,7 @@ cd /home/adamolsson/projects/holosmith
 git status --short                                  # clean apart from log.txt/orchestrate.sh
 . ~/.pi/toolchains/env.sh                           # ALWAYS before cargo/rustc
 python3 /tmp/lin.py issues | grep -v ' Done ' | head # recreate /tmp/lin.py first (§2)
-python3 /tmp/lin.py issue PER-90                    # scoped, Backlog, the issue §1 names
+python3 /tmp/lin.py issue PER-94                    # scoped, Backlog, the issue §1 names
 docker version                                      # the daemon must answer, or a Docker check cannot be measured
 docker image inspect pi-agent:local                 # the image the Docker stories run
 docker network ls | grep -w egress                  # the proxy test's premise (§2); `grep -x` never matches
@@ -1169,7 +1143,7 @@ scripts/verify.sh                                   # baseline green, ~9–12 mi
 
 If the baseline is red before you touch anything, that is the first thing you fix — and say so in Linear.
 
-Then start §5 on **§1's issue** (`PER-90`, HS-058) and stop after step 11.
+Then start §5 on **§1's issue** (`PER-94`, HS-062) and stop after step 11.
 
 Before you begin, check that the last session left nothing behind — `subagent({action:"list"})` should show
 no run in progress, `docker ps` none of its containers, and `git status --short` should look like the line
@@ -1188,46 +1162,30 @@ from those three; do not carry old sessions' ledgers in this file.
 If you stop before the issue ships, say so explicitly, name the next action, and leave the tree clean and the
 gates green — **a half-finished story is worse than an honest stop**.
 
-**The last shipped story** (`PER-89`, HS-057, ADR-0066; commits `e3c7846`, `1c7c93f`): the publish, and the three
-decisions that shaped it. `branch` is the **destination** ref (the refspec is ours -> theirs), because the spec
-fixes the ref pushed from; the protected names are a constant with `touches_ci`'s two arms and the configured merge
-target is a *second* fact with its own code, because a machine may merge into `trunk` and must still never write
-`main`; an empty `publish.remotes` is `403 publish_disabled` answered **before** the row, because the route exists
-and a `404` would lie about the table. Two pins on the push were measured rather than assumed — `-c
-core.hooksPath=/dev/null` (a real `pre-push` hook fired without it) and `--no-follow-tags` (a repository's
-`push.followTags = true` pushes annotated tags in addition) — and the rejection is read from `git push
---porcelain`'s `!` flag, which is the one place the reason word lives (`fetch first` and `non-fast-forward` are the
-same fact told differently depending on what the local object store knows, so nothing branches on it). The gate's
-`case_publish` publishes into a **bare repository under `$WORK`** — the story's last acceptance bullet made a
-measurement, since a path no container mounts cannot be a container's push. **The review's two findings are the
-lesson**: `config::is_ref_name` was not git's refname alphabet (it accepted `a.lock`, `.hidden`, `a/.b`, which
-`git push` refuses with `fatal: invalid refspec`, so the client's mistake answered a `500`), and the arm for "the
-push uses the host's own git" could not fail — `Command::get_envs` reports only what a command sets, so
-`.env_clear()` would have stayed green. The fix is a boot with git's `GIT_CONFIG_*` naming a second `pushurl`
-repository, mutated in both directions. The gate: **83 cases, 1373 assertions**, no `SKIP`; `cargo test` 1068;
-`web` unchanged at 52. Its full record is Linear, `docs/review/PER-89.md` and `git log`; do not carry it forward. Rule 1's two guards are the **route's** and only the route's — a session row is ADR-0063's "not
-consulted", so `merge::merge` was left alone, and both guards sit **before** the blocking task, which is what makes
-"a refused merge creates no `<data>/merge` at all" true by construction rather than by cleanup. Only `running`
-refuses: the `error` row a failed provision leaves is the session an operator most wants to merge, and an
-`!= Idle` guard (how "not running" gets written by mistake) turns the negative-half test red for four of five
-states. `dirty_worktree` **is** a pre-check and `target_dirty` is not, and the ADR's D3 does the work of saying why
-— an unrelated file in the operator's checkout rides across a fast-forward, while a session's own uncommitted work
-*is* the request's subject — with `changes::basis` asked first so a gone worktree is `409 no_worktree` and not a
-`500` from `git status` in a missing directory.
-
-Rule 5 changed shape twice. The plan had the handler force `Retained { branch: None }` because the request that
-merges is better placed than `merge-base --is-ancestor` to say "this landed" (a squash's commit is nobody's
-ancestor). **The review's P1 showed what that cannot see**: `merge()` writes the commit `basis` read, so an agent's
-commit during the landing is work nothing landed — and the fix is not a cleverer handler but a **different place**:
-`landed` became the *commit*, it travels through `Backends::retained` into `Worktree::retained`, and the rule there
-is a **tip comparison** (a branch whose tip is the landed commit is not kept; one that has moved past it is the
-ordinary ancestry question's). Its second P1 was this repository's oldest lesson wearing a new hat: the assertion
-that the refusal's sentence names a commit used the needle `commit`, which `uncommitted` already contains, so
-deleting the whole next-step half left both the test and the gate's grep green. The `deleting` row is the one state
-where `delete_session` is refused (its removal is already in flight with its own keep-rule answer), and rule 6's
-60 seconds is **recorded, not ticked** — it is HS-069's pair, and a blanket 5 s client timeout would cut the
-delete's own `abort_grace` wait. `422 unsupported` retired with its last field. The gate: **82 cases, 1313
-assertions**, no `SKIP`; `cargo test` 1042; `web` 52. Its full record is Linear, `docs/review/PER-88.md` and
+**The last shipped story** (`PER-90`, HS-058, ADR-0067; commits `39ae044`, `eacb926`, `8902e65`, `31feb2f`): item
+12's last bullet, the Changes sheet, and the first screen since phase 1. It is a **section of the session screen**
+behind one *Changes* toggle, not a third screen (a third path would need ADR-0007's fallback route to learn a shape),
+whose every sentence and branch is a pure `transcript.ts` function with a node test — because **no gate may need a
+browser**, so `npm test` is the only gate that can see one — while `main.ts` keeps the DOM. The Merge button's
+disabled reason is `http::merge`'s own **order** (a `running` row, then `target: null` rendered as the answer's own
+`mergeable_reason` rather than a second spelling, then `dirty` with ADR-0065 D4's prompt behind a shortcut that
+appears only for that reason), and the `409`s stay the backstop because a turn can start between the read and the
+tap. The pickers read **one additive key** `choices: {targets, remotes}` — `targets` is the configured list filtered
+by what exists (`first_target` grew into `existing_targets`), `remotes` is the config's list verbatim — because an
+option `merge` refuses is a button that cannot work while a configured-but-absent remote is the publish route's
+`422 bad_remote` to say; and it is one key, on the changes answer, and not `/api/health`, because the sheet asks one
+question in one fetch. The sheet **re-reads on a `session.status` transition, never on a delta** (a read is five git
+processes), the conflict area is one area from two sources, and item 12's "then retry" is the same Merge button one
+turn later. The gate's `case_changes_screen` measures only what a browser would otherwise be the only witness of —
+the served page is `web/dist/index.html` byte for byte, the served bundle carries the sheet's ids (`id="…"`, because
+the bare words are prefixes of their siblings') and the three ADR sentences, and the answer carries `choices` — and
+`web/test/transcript.test.ts` grew 52 → 72. **The review's three P1s are the lesson**: the CI warning was never
+inside the publish confirm while the ADR claimed it was (so `publishQuestion` now takes the flag and the sentence is
+the confirm's second line, with a test that goes red if the argument stops being passed); a `409 conflict`'s paths
+were wiped by the next render, because clearing them was decided from a `mergeable: true` answer read *before* the
+tap (only a **new answer** retracts a refusal now, and a refused merge re-reads); and three sentences plus the
+`ff-only` preselection were untested, which is exactly the class `npm test` exists for. The gate: **84 cases, 1414
+assertions**, no `SKIP`; `cargo test` 1069; `web` 72. Its full record is Linear, `docs/review/PER-90.md` and
 `git log`; do not carry it forward.
 
 **One thing this build does not do, recorded rather than discovered:** a resumed session's pi has **no

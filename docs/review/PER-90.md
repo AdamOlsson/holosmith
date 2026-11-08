@@ -68,6 +68,8 @@ Nothing goes red if any of these is deleted (the bundle grep checks neither). Sm
 
 Nothing was dismissed without a citation. The three findings that changed behaviour (1, 2, 3) were re-measured
 after the fix — `npm test` went 69 → 72, `npx tsc --noEmit` clean, and the full gate re-ran green
-(**84 cases, 1421 assertions**, no `SKIP`), including `case_changes_screen` with the strengthened needles. The
-demo was re-run on the rebuilt artifact and its publish half now shows the CI sentence inside the confirm
-paragraph.
+(**84 cases, 1414 assertions**, no `SKIP`), including `case_changes_screen` with the strengthened needles. One
+further fix came out of reading the demo's own output: the warning was glued to the ask ("…nothing is forced this
+branch changes CI configuration…"), so it is its own line now (`white-space: pre-line` on the confirm paragraph) and
+the test compares the two lines instead of a substring; the gate was re-run after that (84 cases, 1414 assertions),
+and the demo on the rebuilt artifact shows the sentence on its own line in the confirm step.
