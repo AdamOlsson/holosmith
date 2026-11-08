@@ -461,6 +461,7 @@ impl SessionBackend for StubBackend {
         &self,
         _session: &Session,
         _targets: &[String],
+        _landed: Option<&str>,
     ) -> Result<Retained, BackendError> {
         Ok(Retained::nothing())
     }

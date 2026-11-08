@@ -412,7 +412,7 @@ async fn a_branch_ahead_of_its_base_and_not_merged_survives_a_delete() {
     commit_in(&path, "work.txt");
 
     let retained = backend
-        .retained(&session, &default_targets())
+        .retained(&session, &default_targets(), None)
         .await
         .expect("the repository answers");
     assert_eq!(
@@ -455,7 +455,7 @@ async fn a_branch_merged_into_a_target_does_not_survive_a_delete() {
     support::git(&repo, &["merge", "--ff-only", "agent/0123456789abcdef"]);
 
     let retained = backend
-        .retained(&session, &default_targets())
+        .retained(&session, &default_targets(), None)
         .await
         .expect("the repository answers");
     assert_eq!(
@@ -491,7 +491,7 @@ async fn a_branch_with_nothing_beyond_its_base_does_not_survive_a_delete() {
     let (path, _) = provisioned_worktree(&backend, &mut session).await;
 
     let retained = backend
-        .retained(&session, &default_targets())
+        .retained(&session, &default_targets(), None)
         .await
         .expect("the repository answers");
     assert_eq!(retained, Retained::nothing());
@@ -523,7 +523,7 @@ async fn a_repository_with_only_one_of_the_targets_keeps_an_unmerged_branch() {
     // `main` does not exist here and `master` does not have the branch.
     assert_eq!(
         backend
-            .retained(&session, &default_targets())
+            .retained(&session, &default_targets(), None)
             .await
             .expect("the repository answers"),
         kept,
@@ -532,7 +532,7 @@ async fn a_repository_with_only_one_of_the_targets_keeps_an_unmerged_branch() {
     // A list this repository has none of cannot answer, and an unanswerable question keeps.
     assert_eq!(
         backend
-            .retained(&session, &targets(&["trunk"]))
+            .retained(&session, &targets(&["trunk"]), None)
             .await
             .expect("the repository answers"),
         kept,
@@ -566,7 +566,7 @@ async fn a_snapshot_that_differs_from_the_branch_is_kept_and_named() {
 
     let reference = format!("refs/holosmith/wip/{}", session.id);
     let retained = backend
-        .retained(&session, &default_targets())
+        .retained(&session, &default_targets(), None)
         .await
         .expect("the repository answers");
     assert_eq!(
@@ -621,7 +621,7 @@ async fn a_snapshot_the_branch_already_holds_is_not_named() {
     support::git(&path, &["commit", "--quiet", "-m", "the agent's commit"]);
 
     let retained = backend
-        .retained(&session, &default_targets())
+        .retained(&session, &default_targets(), None)
         .await
         .expect("the repository answers");
     assert_eq!(
@@ -652,7 +652,7 @@ async fn a_repository_that_cannot_answer_keeps_the_branch() {
     assert_eq!(reference.len(), 40, "the provision recorded a commit");
 
     let retained = backend
-        .retained(&session, &default_targets())
+        .retained(&session, &default_targets(), None)
         .await
         .expect("the repository answers");
     assert_eq!(retained, Retained::Unknown);
@@ -686,7 +686,7 @@ async fn a_repository_that_is_not_there_keeps_nothing_and_claims_nothing() {
     );
 
     let retained = backend
-        .retained(&session, &default_targets())
+        .retained(&session, &default_targets(), None)
         .await
         .expect("a missing repository answers");
     assert_eq!(retained, Retained::nothing());

@@ -5952,7 +5952,9 @@ case_merge_guards() {
   assertions=$((assertions + 1))
   # The sentence is what the Changes sheet's offer will render, so it has to name a commit — the affordance HS-058
   # adds is a prompt to the agent, and a refusal that named no next step would leave it inventing one.
-  printf '%s\n' "$body" | grep -qF 'commit' ||
+  # The needle is the offer and not the word "commit": "uncommitted" contains that, so a bare-word guard stays
+  # green when the whole next-step half is deleted (HS-056's review, S1).
+  printf '%s\n' "$body" | grep -qF 'ask the agent to commit' ||
     fail "${name}_dirty/offer" "the sentence names no commit to ask for: $body"
   assertions=$((assertions + 1))
   check "${name}_dirty/ref" "$main" "$(git -C "$repo" rev-parse refs/heads/main)"
@@ -6055,9 +6057,11 @@ case_merge_guards() {
       assertions=$((assertions + 1))
       ;;
   esac
-  # The squash's commit has the old target as its only parent and the branch's tree — the work is in the target
-  # even though the branch's commits are not.
-  check "${name}_squash_delete/tree" "$(git -C "$wt" rev-parse "agent/$id^{tree}")" \
+  # The squash's commit has the old target as its only parent and the tree of the commit this request landed —
+  # the branch's work is in the target even though the branch's own commits are not. `$tip` and not
+  # `agent/<id>^{tree}`: the delete this answer started is already removing the worktree and the branch, so
+  # reading through either is a race (HS-056's review), and a commit object outlives the branch that named it.
+  check "${name}_squash_delete/tree" "$(git -C "$repo" rev-parse "$tip^{tree}")" \
     "$(git -C "$repo" rev-parse "refs/heads/main^{tree}")"
   wait_for_gone "${name}_squash_delete_row" "$id"
   if [ -e "$wt" ]; then
@@ -6066,7 +6070,13 @@ case_merge_guards() {
   assertions=$((assertions + 1))
   check "${name}_squash_delete/branch" "" "$(git -C "$repo" branch --list 'agent/*')"
   # Rule 2's last sentence, again: a landing leaves no temporary worktree behind, and neither does its delete.
-  check "${name}/temporary" "0" "$(find "$data/merge" -mindepth 1 | wc -l | tr -d ' ')"
+  # The `-d` arm is `case_merge_strategies`' and it is load-bearing: a missing directory makes `find` print
+  # nothing, so the count is `0` and this assertion would pass over nothing at all.
+  if [ -d "$data/merge" ]; then
+    check "${name}/temporary" "0" "$(find "$data/merge" -mindepth 1 | wc -l | tr -d ' ')"
+  else
+    fail "${name}/temporary" "the merge never made $data/merge, so this case measured nothing"
+  fi
 
   # 6. **The contrast, in a second session**: the same squash *without* the flag keeps the branch — and the
   # ordinary delete afterwards says so in its `kept`, which is HS-043's answer unchanged by this story. In between,
@@ -6118,6 +6128,14 @@ case_merge_guards() {
   # 6a. **A delete that cannot snapshot does not retract the merge**: the session's own directory cannot be made,
   # so `snapshot::take` fails and the delete answers `unsaved_work` — which the merge route logs rather than
   # answering, because the work landed. The row is still there afterwards.
+  # `snapshot::take` creates `<data>/sessions/<id>` and then its temporary index, so the failure this arm needs is
+  # the first write: the parent exists, the session's own directory must not, and the parent refuses creates. The
+  # assertion is here because the arm is otherwise indirect — a later story whose boot writes `session.log` for
+  # this session would make the chmod a no-op that still passed.
+  if [ -e "$data/sessions/$id2" ]; then
+    fail "${name}/sessions" "$data/sessions/$id2 exists, so the read-only parent would not fail the snapshot"
+  fi
+  assertions=$((assertions + 1))
   mkdir -p "$data/sessions" || fail "${name}/sessions" "$data/sessions is not creatable"
   chmod 0555 "$data/sessions" || fail "${name}/chmod" "$data/sessions is not chmoddable"
   fetch_body "${name}_delete_refused" POST "/api/sessions/$id2/merge" \

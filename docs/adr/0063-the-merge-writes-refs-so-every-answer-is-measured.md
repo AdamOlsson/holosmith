@@ -53,6 +53,10 @@ HS-056's, so both answer **`422 unsupported`** with a sentence each:
 A `strategy` that is not one of the spec's three words at all (`"rebase"`) is `422 bad_strategy` instead — a
 malformed request, not a missing feature, and `unsupported` would promise that HS-055 adds it.
 
+**Both rows above are history now**: HS-055 built the two strategy words and HS-056 built `delete_session`, so
+`unsupported` has no producer left and retired with its last field (ADR-0065 D9). The table is kept as the record
+of why the refusals were the right answer at the time rather than rewritten.
+
 **`message` is accepted, type-unchecked, and read by nothing.** A fast-forward creates no commit, so there is
 nothing for a message to name; the field is in the `FIELDS` allow-list because a client that sends the
 contract's body must not be told it sent a field this endpoint does not accept. HS-055, which makes a merge

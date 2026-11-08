@@ -984,12 +984,14 @@ impl SessionBackend for DockerBackend {
         &self,
         session: &Session,
         targets: &[String],
+        landed: Option<&str>,
     ) -> Result<Retained, BackendError> {
         let worktree = self.worktree(session);
         let base = session.base_commit.clone();
         let targets = targets.to_vec();
+        let landed = landed.map(str::to_string);
         Self::blocking(Step::Worktree, move || {
-            worktree.retained(base.as_deref(), &targets)
+            worktree.retained(base.as_deref(), &targets, landed.as_deref())
         })
         .await
     }

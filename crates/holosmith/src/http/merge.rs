@@ -3,9 +3,11 @@
 //!
 //! The route is a `POST`, so every mutating guard applies and the manifest records it [`Mutating`] — and it is
 //! the first route in this build whose work **writes to the project repository**. It is also the one session
-//! route that is neither the database's nor the backend's: item 12's sentence is "all git work for review and
-//! merge runs on the host in the project repository; containers never merge", so no container is asked anything
-//! and this handler knows no backend.
+//! route whose git work is not the backend's: item 12's sentence is "all git work for review and merge runs on
+//! the host in the project repository; containers never merge", so the **merge** asks no backend anything. The
+//! one exception reads `delete_session` (rule 5): that hands the row to the delete flow, which does ask the
+//! backend for the session's own teardown, and which is the reason this handler cannot claim to be
+//! backend-blind.
 //!
 //! Four scopes, in the order the handler takes them:
 //!
@@ -180,19 +182,26 @@ pub(crate) async fn respond(
     // deleted branch) answers this route's `409 no_worktree` instead of a `500` from `git status` in a directory
     // that is not there. `merge` asks the same four facts again as its own precondition — ADR-0063's shape for a
     // predicate a module will not take on its caller's word — so this route reads the same three paths twice.
+    // The answer is the branch's tip as well as the dirtiness, and the tip is what rule 5's delete is allowed to
+    // act on: a branch that has moved past this commit by the time the delete asks has work nothing landed, so the
+    // keep-rule keeps it (ADR-0065 D6). Reading it here rather than after the merge is what makes the comparison
+    // mean "since the request began" — a commit an agent makes during the landing is one this never saw.
     let unchecked = {
         let worktree = worktree.clone();
-        tokio::task::spawn_blocking(move || -> Result<bool, ChangesError> {
-            changes::basis(&worktree)?;
-            changes::dirty(&worktree.path).map_err(ChangesError::Git)
+        tokio::task::spawn_blocking(move || -> Result<(String, bool), ChangesError> {
+            let tip = changes::basis(&worktree)?;
+            let dirty = changes::dirty(&worktree.path).map_err(ChangesError::Git)?;
+            Ok((tip, dirty))
         })
         .await
     };
-    match unchecked {
-        Ok(Ok(false)) => {}
-        Ok(Ok(true)) => return ApiError::dirty_worktree(DIRTY_WORKTREE).into_response(),
+    let (tip, dirty) = match unchecked {
+        Ok(Ok(answer)) => answer,
         Ok(Err(error)) => return changes_refusal(error).into_response(),
         Err(error) => return internal("merge", error).into_response(),
+    };
+    if dirty {
+        return ApiError::dirty_worktree(DIRTY_WORKTREE).into_response();
     }
     let targets = state.config.merge.targets.clone();
     let merges = state.merges.clone();
@@ -203,14 +212,15 @@ pub(crate) async fn respond(
     .await;
     match merged {
         Ok(Ok(merged)) => {
-            if delete_session {
+            if delete_session && session.status != Status::Deleting {
                 // Rule 5, after a **successful** merge: the delete flow's request half, which moves the row to
                 // `deleting` and hands the removal to a task. `force` is false — this route has no query, and a
-                // request that forced a delete would be a second way to lose work (ADR-0065 D7). A refusal here
-                // is the delete's own and is **logged**: the 200 stands, because the work landed, and an answer
-                // that said otherwise would tell the operator the merge failed.
-                if let Err(error) = sessions::deletion(state, id, false, Some(&merged.target)).await
-                {
+                // request that forced a delete would be a second way to lose work (ADR-0065 D5). A **second**
+                // teardown is not asked for either: a row that is already `deleting` is a removal in progress whose
+                // keep-rule answer belongs to the request that started it (D2's price, stated there). A refusal
+                // here is the delete's own and is **logged**: the 200 stands, because the work landed, and an
+                // answer that said otherwise would tell the operator the merge failed.
+                if let Err(error) = sessions::deletion(state, id, false, Some(&tip)).await {
                     tracing::warn!(
                         target: "holosmith::http::merge",
                         session = id,
@@ -234,7 +244,7 @@ pub(crate) async fn respond(
 ///
 /// `delete_session` is the **route's** fact rather than the merge's, which is why it does not travel in
 /// [`Request`]: `merge::merge` moves a ref and knows nothing about sessions, and a field it was handed and
-/// never read would be a lie in its type (ADR-0065 D5).
+/// never read would be a lie in its type (ADR-0065 D4).
 #[derive(Debug)]
 struct Parsed {
     request: Request,
@@ -434,7 +444,7 @@ mod tests {
     #[test]
     fn delete_session_is_read_as_the_route_s_own_field_and_a_non_bool_is_bad_body() {
         // Rule 5's field, and the last one this build used to refuse: it is a `bool` outside `Request`, because
-        // the merge moves a ref and knows nothing about sessions (ADR-0065 D5). `false` and a missing field are
+        // the merge moves a ref and knows nothing about sessions (ADR-0065 D4). `false` and a missing field are
         // the same request; a string is the body's *shape* and not a value outside a vocabulary, so `bad_body`.
         for (text, expected) in [
             (r#"{"target":"main"}"#, false),

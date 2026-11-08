@@ -977,9 +977,9 @@ pub async fn delete(state: &AppState, id: &str, query: RawQuery) -> Response {
 /// a prompt, an abort or a resume: those are refused with `409 session_deleting`.
 ///
 /// **`landed`** is the one thing that changes the keep-rule's answer, and only for the merge's rule 5
-/// (HS-056): when it is `Some(target)`, the request that is asking is the one that has just put this
-/// session's work in `target`, so the branch is **not** kept — see [`retained_for`]. Every other caller
-/// passes `None`.
+/// (HS-056): when it is `Some(commit)`, the request that is asking is the one that measured that commit and
+/// put it in a target, so a branch whose tip is still that commit is not kept — see [`retained_for`]. Every
+/// other caller passes `None`.
 pub(crate) async fn deletion(
     state: &AppState,
     id: &str,
@@ -1049,17 +1049,15 @@ pub(crate) async fn deletion(
 /// It must not turn into a claim either, so the teardown keeps the branch (`Retained::Unknown`'s own rule)
 /// and the 202 carries `kept: null`.
 ///
-/// **`landed` overrides the branch half and only the branch half** (HS-056, spec item 12's rule 5). When the
-/// merge that is asking has just put this session's work in `target`, the branch is not kept, because this
-/// request *is* the answer to "is it merged?": for `ff-only` and `merge` by ancestry, and for a `squash` by
-/// tree — its commit's tree is the branch's, so the work is in the target even though the commits are not
-/// (ADR-0065 D6 records why the ordinary keep-rule would keep it and why this request must not). The **wip**
-/// half is still the repository's, asked here and after the snapshot for the reason the whole function is
-/// called here; and an `Unknown` answer stays `Unknown`, because "cannot tell" must never mean "delete".
+/// **`landed`** is the merge's own fact handed through, and the rule that uses it is `worktree.rs`'s (HS-056,
+/// spec item 12's rule 5): a branch whose tip *is* the commit that request landed has nothing a target lacks, so
+/// it is not kept — and one that has moved since is the ordinary question's, because the merge never saw that
+/// commit (ADR-0065 D6). It overrides nothing here: the keep-rule lives in the module that already answers "is
+/// this branch in a target?", and a second answer in a handler is how two rules drift apart.
 async fn retained_for(state: &AppState, session: &Session, landed: Option<&str>) -> Retained {
-    let retained = match state
+    match state
         .backend
-        .retained(session, &state.config.merge.targets)
+        .retained(session, &state.config.merge.targets, landed)
         .await
     {
         Ok(retained) => retained,
@@ -1072,18 +1070,6 @@ async fn retained_for(state: &AppState, session: &Session, landed: Option<&str>)
             );
             Retained::Unknown
         }
-    };
-    match (retained, landed) {
-        (Retained::Known { wip, .. }, Some(target)) => {
-            tracing::info!(
-                target: "holosmith::http::sessions",
-                session = %session.id,
-                merged_into = target,
-                "the branch is not kept: the request that is deleting the session is the one that merged it"
-            );
-            Retained::Known { branch: None, wip }
-        }
-        (retained, _) => retained,
     }
 }
 

@@ -258,6 +258,7 @@ the refusal table is still walked end to end — three facts on two codes, which
 ## What this ADR does not decide
 
 Rule 1's two guards (`session_running`, `dirty_worktree`) and `delete_session: true` — still `422 unsupported`
+at the time of writing, and built by HS-056 (ADR-0065) —
 with no new sentence — are HS-056, which also owns the 60-second merge/publish timeout **and, per D11, the
 question of what "the branch is deleted because it is merged" means after a squash**, which it cannot answer by
 re-asking git. Publish is HS-057. The

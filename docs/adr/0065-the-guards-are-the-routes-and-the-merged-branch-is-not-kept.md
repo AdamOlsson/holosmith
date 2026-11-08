@@ -6,9 +6,9 @@ its own module, the changes view's rules by import, every answer measured rather
 English, and one way a ref moves. This ADR decides only what a *session* adds to that: when the route refuses,
 what it does after a landing, and which of the two numbers has no client in this build.
 
-Three of the six decisions had a plausible wrong answer, and each of them has a test that goes red when it is
-taken: the guard's status set (**D2**), the keep-rule's override (**D5**, **D6**), and the answer to a failed
-delete (**D7**).
+Four of the ten decisions had a plausible wrong answer, and each of them has a test that goes red when it is
+taken: the guard's status set (**D2**), the commit a `delete_session` may act on (**D5**, **D6**), and the answer
+to a failed delete (**D7**).
 
 ## D1 — The guards are `http::merge`'s, and `merge()` still knows nothing about a session
 
@@ -44,13 +44,21 @@ Rule 1's words are "while a turn runs". `Status::Running` is exactly that, and t
 | `error` | the provision failed, or the agent exited badly — and this is often the *only* state a session with work ever reaches on a broken machine, so refusing it would hide the merge behind a resume |
 | `stopped` | the container is gone; the worktree and the branch are not |
 | `starting` | no turn exists; a merge of a half-provisioned session fails on git's terms or wins on its own, and a guard for it would be a second rule the spec does not name |
-| `deleting` | the operator asked for the removal; its `Retained` was decided before the removal was spawned, so a merge here can neither lose the branch nor gain one |
+| `deleting` | the operator asked for the removal, and the `Retained` of that request was decided before its removal was spawned; a merge here can neither lose the branch nor gain one — **and `delete_session` is not honoured on such a row** (below) |
 
 `ApiError::not_in_state` already has one code per state, so a guard written over the *other* four would answer
 `session_starting`, `session_error`, … — four codes no sentence in the spec asks for. The test that keeps this
 honest is the negative half: `every_status_but_running_still_merges` drives one fixture per state through the
 table's own `Transitioner`, and an `!= Idle` guard (which is how "not running" gets written by mistake) turns it
 red for four of the five. The gate's `case_merge_guards` merges an `error` row for the same reason.
+
+**The `deleting` row is the one place a merge's second half is refused rather than run.** Such a row already has a
+teardown in flight, holding the keep-rule answer of the request that started it; running another would be two
+teardowns over one worktree and two keep-rule answers over one branch. So `delete_session` is honoured only on a
+row that is not already `deleting`: the merge lands, the answer is the three keys, and the removal the operator
+already asked for continues. That is a hole in rule 5's "runs the delete flow after a successful merge" — a narrow
+one, in a state the operator created by asking for the delete first — and it is recorded rather than papered
+over.
 
 ## D3 — `dirty_worktree` *is* a pre-check, and ADR-0063's "no pre-check" is about a different question
 
@@ -95,7 +103,7 @@ handed and never read would be a lie in its type. The handler parses the body in
 delete_session }`, and `true` is no longer refused — this is the last field the route used to answer `422
 unsupported` for, and **`unsupported` retires with it** (`D9`).
 
-## D5 — The delete flow's request half is one function, and the merge's fact replaces the *branch* half only
+## D5 — The delete flow's request half is one function, and the merge's fact travels into the keep-rule
 
 `DELETE /api/sessions/{id}` was a handler body; it is now `sessions::deletion(state, id, force, landed)`, and the
 route is its wrapper. Copying the sequence into the merge's handler would have re-derived HS-043's rules by hand,
@@ -108,25 +116,26 @@ and ADR-0052's whole point is that the snapshot, the keep-rule and the removal a
    makes `wip` null every time — ADR-0052's measured bug);
 5. the transition, the answer, and the removal off the task.
 
-`landed: Option<&str>` is the one new parameter: `Some(target)` when the request that is deleting is the request
-that just merged this session's work into `target`, `None` for every other caller. It overrides **the branch and
-only the branch**:
+`landed: Option<&str>` is the one new parameter: `Some(commit)` when the request that is deleting is the request
+that measured that commit and put it in a target, `None` for every other caller. It is **not** an override in the
+handler. The first draft did that — a `match` in `retained_for` that forced `branch: None` — and the review found
+what it cost: a `match` there cannot see the branch, so a commit an agent made *during* the merge (the rule-1
+guard is one read of one column, and a prompt arriving after it is a turn) was deleted along with the branch,
+although nothing landed it. The fact travels exactly one layer further instead:
 
 ```text
-match (retained, landed) {
-    (Known { wip, .. }, Some(target)) => Known { branch: None, wip },   // the work is in the target
-    (retained, _)                     => retained,                      // everything else is HS-043's
-}
+sessions::deletion(…, landed) → Backends::retained(session, targets, landed)
+                              → Worktree::retained(base, targets, landed)
 ```
 
-The wip half is still the repository's, asked at the same point for the same reason, and `Retained::Unknown`
-stays `Unknown` — "cannot tell" must never mean "delete", even when the request is confident about the branch.
+so the rule lives where the branch is deleted for ever (ADR-0052) and where the answer *is* a git read. D6 says
+what it does with it.
 
 **`delete_session` passes `force = false`.** The route has no query, and a `?force` on a merge would be a second
 way to lose the work that rule 1 just refused to merge. The price is stated in the tests: a delete that cannot
 snapshot leaves the session (D7), and the operator's next `DELETE` is the retry.
 
-## D6 — After a successful merge the branch is not kept, and that is a fact each strategy supplies
+## D6 — The commit the merge measured is what stops the branch from being kept, and the tip is what makes it safe
 
 Rule 5: "`delete_session: true` runs the delete flow after a successful merge. The branch `agent/<id>` is then
 deleted because it is merged."
@@ -141,22 +150,37 @@ session".
 
 So the request's own knowledge is the warrant, and what it knows is different per strategy:
 
-| Strategy | What this merge measured | Why the branch is separable |
+| Strategy | What this merge measured | Why the branch's work is in the target |
 | --- | --- | --- |
-| `ff-only` | the target moved to the branch's tip (`update-ref`/`merge --ff-only` succeeded) | its commits are in the target |
-| `merge` | the landing commit has the branch's tip as one parent | its commits are in the target |
-| `squash` | the target's tree **is** the branch's tree (`case_merge_strategies` measures the equality) | its *work* is in the target |
-| any, as a no-op | `git diff-index --cached --quiet HEAD` said nothing was staged | the branch holds nothing the target lacks |
+| `ff-only` | the target moved to the commit `basis` read (`update-ref`/`merge --ff-only` succeeded) | that commit, and everything below it, is in the target |
+| `merge` | the landing commit has that commit as one parent | the same, through the parent |
+| `squash` | `merge --squash` applied the branch's changes relative to the base onto the target, then `commit` wrote them (or `diff-index --cached --quiet` said nothing was staged) | the branch's **changes** are in the target; its *commits* are not, by design |
+| any, as a no-op | the target already was the branch's tip, or nothing was staged | the branch holds nothing the target lacks |
+
+The warrant is therefore **one commit, compared against the branch's tip**, not a claim about trees:
+
+```text
+Some(tip) if landed == Some(tip) => None       // this request landed this commit; the branch has not moved
+Some(_) => merged_into(targets)?               // moved since: the ordinary question answers, and it keeps
+```
+
+A `squash`'s landing commit does **not** have the branch's tree when the target had moved on: a three-way merge
+keeps the target's content on the paths it changed, so "the trees are equal" is a coincidence of the gate's
+fixture (where `main` was the branch's parent) and not an invariant — the review caught the ADR asserting it, and
+this is the stronger statement that makes the deletion safe. The tip comparison is what closes the window ADR-0063
+and `docs/notes.md` already knew about: `merge()` writes the commit `basis` read, so an agent's commit after that
+read is a commit nothing landed — and if the branch has moved, the keep-rule keeps it.
 
 The cost is named rather than hidden: after a squash the branch's commit messages and its shape are gone. That is
 the operator's instruction — the request says "delete the session" and this request is what merged it — and the
 alternative (keep a squashed branch after a `delete_session`, so `kept.branch` names it) leaves a branch nobody
 asked to keep, on a session that no longer exists to name it.
 
-The contrast is measured twice: `case_merge_guards` deletes after a squash (branch gone) and then, in a second
-session, squashes **without** the flag (branch kept, and the ordinary `DELETE`'s `kept.branch` names it). Dropping
-the override leaves the first arm green and the second unchanged — so the override is what makes the difference,
-and the gate says so.
+The comparison is measured twice over: a unit-shaped test at the rule
+(`the_commit_a_merge_landed_is_not_a_branch_to_keep_and_one_that_moved_is`, both halves — the squashed tip not
+kept, and a branch that moved past it kept), and `case_merge_guards` on the artifact, which deletes after a squash
+(branch gone) and then, in a second session, squashes **without** the flag (branch kept, and the ordinary
+`DELETE`'s `kept.branch` names it).
 
 ## D7 — A landed merge answers 200, and a failed delete is logged
 
@@ -215,7 +239,11 @@ left, merging; a squash with `delete_session` answering three keys and then taki
 branch; a second session's squash without the flag keeping the branch, with the ordinary delete's `kept.branch`
 naming it; and a `delete_session` whose snapshot cannot be taken answering `200` and leaving the row.
 
-One write in that case is by hand: the row's `status` column, set with `sqlite3` from `python3`, because a gate may
-not run a turn against a `_ping` shim and rule 1's first guard reads one column. `tests/merge.rs` drives the same
-row through the server's own `Transitioner`, which is where the state machine is honoured; the case's shortcut is a
-fixture, like the worktree it re-makes, and the ADR records it so the next reader does not think a route wrote it.
+Three details of that case are deliberate rather than incidental. One write is by hand: the row's `status` column,
+set with `sqlite3` *from `python3`*, because a gate may not run a turn against a `_ping` shim and rule 1's first
+guard reads one column — `tests/merge.rs` drives the same row through the server's own `Transitioner`, so the state
+machine is honoured where it can be, and the case's shortcut is a fixture like the worktree it re-makes. The
+squashed tree is read from the **commit** the request named, not from `agent/<id>`: the answer's 200 has already
+spawned the removal that deletes both, so reading through either is a race, and an object outlives its ref. And the
+`<data>/merge` count is guarded by `[ -d … ]`: a missing directory makes `find` print nothing and the count `0`, so
+an unguarded `check` would pass over nothing at all.

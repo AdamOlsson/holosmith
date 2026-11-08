@@ -1934,9 +1934,10 @@ it rather than adding a caveat beside it.
   `pub(crate)`; the four `no_worktree` messages are the merge's own ("…so there is no branch to merge") because a
   message must describe its own request, which is why `ApiError::no_worktree` takes its message from the caller at
   all. A merge's git failure answers `internal("merge", …)` — a failed *write* logged as "the changes view could
-  not read the repository" is a sentence about the wrong operation. The new codes are `bad_target`,
-  `bad_strategy`, `unsupported` (422) and `not_fast_forward`, `target_dirty`, `target_checked_out` (409), and
-  `bad_body` has a fourth sentence (`ApiError::bad_merge_body`) for the reason it has a third.
+  not read the repository" is a sentence about the wrong operation. The new codes are `bad_target` and
+  `bad_strategy` (422), `not_fast_forward`, `target_dirty` and `target_checked_out` (409), and `bad_body` has a
+  fourth sentence (`ApiError::bad_merge_body`) for the reason it has a third. The fifth, `unsupported` (422),
+  retired with its last field in HS-056 (ADR-0065 D9).
 - **`git worktree list --porcelain` prints `prunable <reason>` for a registration whose directory is gone**, and
   such a registration is **not** a checkout: it has no working tree to move, so counting it turns a merge the
   operator can perform into `409 target_checked_out` with advice ("check out another branch in that worktree")
@@ -1948,8 +1949,12 @@ it rather than adding a caveat beside it.
 - **The ancestry test must be asked about the commit the merge will write, not about the branch's ref.** `head`
   comes from `basis`; asking `merge-base --is-ancestor refs/heads/<target> refs/heads/agent/<id>` instead
   re-reads the branch, and a commit landing between the two reads would advance the target to a commit that is no
-  longer the branch's tip while answering `200` — reachable here because rule 1's `session_running` guard is
-  HS-056's and deliberately absent. The same sha is used for the test, the write and the re-measurement.
+  longer the branch's tip while answering `200` — reachable when this was written because rule 1's
+  `session_running` guard was HS-056's and absent. The guard exists now and does **not** close that window on its
+  own: it is one read of one column, and a prompt arriving after it turns the session `running` again. What closes
+  it for `delete_session` is comparing the branch's **tip** with the commit the merge measured before the branch is
+  dropped (ADR-0065 D6); the read of `head` here is still the one the write uses, and the test, the write and the
+  re-measurement still share it.
 - **The target's membership is checked twice, on purpose, and once of them is early.** The handler asks
   `merge::listed` straight after the body so one bad `target` is one answer whatever the session's shape; the
   first draft asked it after the row's `base_commit` and so answered `409 no_worktree` for a body that would have
@@ -2069,8 +2074,9 @@ it rather than adding a caveat beside it.
   feature.** Rule 6's pair is the *hub's* (HS-069's slice already carries "Default forwarding timeout is 5 s; merge
   and publish use 60 s") and the buttons are HS-058's. `DELETE /api/sessions/{id}` legitimately waits out the
   abort ladder's `abort_grace` — ten seconds by default — before it takes a snapshot, so a 5 s default on
-  `web/src/main.ts`'s `post` helper would cut the delete's own bounded wait and answer a client that its request
-  failed when the removal is running. ADR-0065 D8 records it; this bullet exists so the next agent does not
+  the client's own `fetch` would cut the delete's own bounded wait and answer a client that its request failed
+  when the removal is running — and the delete's call is its own `fetch` (`main.ts`'s `deleteSection`), not the
+  composer's `post` helper, so "one shared timeout" would have to be added twice to break two things. ADR-0065 D8 records it; this bullet exists so the next agent does not
   "complete" the acceptance bullet by adding a timeout to the shared helper.
 - **A gate that needs a `running` row writes one column, and that is a fixture rather than a shortcut in the
   code.** The gate's Docker boots are a `_ping` shim, so a session's network step fails and no agent ever starts —
@@ -2088,6 +2094,20 @@ it rather than adding a caveat beside it.
   requests ADR-0063 could not honour; HS-055 built one and HS-056 the other, so the constant, the constructor and
   the wire-table row went with them — `docs/build.md`'s `case_merge` paragraph included, because a gate description
   that still lists a code nothing sends is a document lying about the artifact.
+- **A rule that "the request knows better" must still compare a commit, and the first draft did not.** The plan
+  was for `delete_session` to force `Retained { branch: None }` in the handler, because the request that merges is
+  better placed than `merge-base --is-ancestor` to say "this landed" (a `squash`'s commit is nobody's ancestor).
+  The review found the window that shape opens: `merge()` writes the commit `basis` read, so an agent's commit
+  between that read and the delete is work nothing landed — and a `match` in the handler cannot see the branch.
+  The fact therefore travels into `Worktree::retained` as `landed: Option<&str>` and the rule is a **tip
+  comparison** (`landed == Some(tip)`), with the ordinary ancestry question answering everything else. Both halves
+  are one test (`the_commit_a_merge_landed_is_not_a_branch_to_keep_and_one_that_moved_is`), because "keep
+  everything" and "delete everything" each pass one of them alone.
+- **An assertion on a sentence's *next step* must not use a word the first half already contains.**
+  `assert!(message.contains("commit"))` over "the session has **uncommitted** work, so nothing was merged; ask the
+  agent to commit it" passes with the whole offer deleted — the review's P1, in both the crate test and the gate.
+  The needle is `ask the agent to commit`, and the way to find this class is to delete the half the comment above
+  the assertion says it measures and watch: it stayed green.
 - **`sessions::deletion` returns `DeleteAnswer`, and the merge ignores it on purpose.** The answer is the 202's body
   and the merge's is rule 6's three keys; making the merge's answer additive would make its shape depend on the
   request (ADR-0065 D7). What the merge does with a *refusal* is log it and keep the `200`, because a `409` after

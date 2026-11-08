@@ -255,8 +255,8 @@ measured with `find … -mindepth 1 | wc -l` after asserting the directory exist
 refused merges are measured by `<data>/merge` not existing at all — and measures six arms of spec item 12's rule 1
 and rule 5: an **untracked** file in the session's worktree is `409 dirty_worktree` with the target, the branch and
 the file untouched and no `<data>/merge`, while the same file **ignored** by a committed `.gitignore` merges; a row
-whose `status` column is set to `running` (with `sqlite3`, because a gate may not run a turn against the `_ping`
-shim) is `409 session_running`, and the same row back in the `error` its failed provision left merges — the negative
+whose `status` column is set to `running` (with python3's `sqlite3`, because a gate may not run a turn against the
+`_ping` shim) is `409 session_running`, and the same row back in the `error` its failed provision left merges — the negative
 half an `!= Idle` guard would refuse; `{"strategy":"squash","delete_session":true}` answers `200` with rule 6's
 three keys and the branch's **tree**, then the row is gone, the worktree is gone and `git branch --list 'agent/*'`
 is empty; a second session's squash **without** the flag keeps the branch, a `delete_session` whose snapshot cannot

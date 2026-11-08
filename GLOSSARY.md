@@ -261,11 +261,12 @@ What a **Delete flow** leaves in the project repository, because deleting a sess
 its work: branch `agent/<id>` when its **Ahead** is greater than zero and it is not merged into a **Target
 branch**, and `refs/holosmith/wip/<id>` when its tree differs from the branch's. The delete's answer names
 them (`kept`), and recovery is `git branch rescue refs/holosmith/wip/<id>`. A repository that cannot answer
-keeps the branch — "cannot tell" is never "delete" — and claims nothing. One request overrides the branch
-half and only that half: a **Merge** whose `delete_session` is true passes the target it landed in, because
-that request *is* the answer to "is it merged?" — for a `squash` by tree, where the keep-rule alone would keep
-the branch. Its machine names are `worktree::Retained`, `Worktree::retained` and `sessions::deletion`'s
-`landed`.
+keeps the branch — "cannot tell" is never "delete" — and claims nothing. One request adds a fact: a **Merge**
+whose `delete_session` is true passes the commit it measured (`landed`), and a branch whose tip **is** that
+commit is not kept, because the work is in the target whatever `git merge-base --is-ancestor` says about a
+`squash`. A branch that has moved since is the ordinary question's, so a commit the merge never saw is never
+deleted. Its machine names are `worktree::Retained`, `Worktree::retained` and the `landed` parameter that
+travels from `sessions::deletion` through `Backends::retained`.
 _Avoid_: Preserved work, residue, leftovers, orphan branch
 
 **Unsaved work**:

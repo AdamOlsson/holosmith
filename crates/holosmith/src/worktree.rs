@@ -174,18 +174,30 @@ impl Worktree {
     ///
     /// Two questions, each answered by the repository itself:
     ///
-    /// - **the branch**, kept when it has commits beyond `base` and the merge question did not answer
-    ///   *yes* for a target. `base` is the row's `base_commit`; a row without one never finished its
-    ///   worktree step, so the question is unanswerable and the answer is [`Retained::Unknown`] — which
-    ///   keeps.
+    /// - **the branch**, kept when it has commits beyond `base` and the work is in no target. `base` is the row's
+    ///   `base_commit`; a row without one never finished its worktree step, so the question is unanswerable and
+    ///   the answer is [`Retained::Unknown`] — which keeps.
     /// - **the snapshot ref**, kept when it exists and its tree differs from the branch's. Nothing here
     ///   deletes that ref; the answer decides whether the operator is *told* about it (and given the
     ///   recovery command), which is why a session that settled with nothing uncommitted names nothing
     ///   (ADR-0049 removes the ref in exactly that case).
     ///
+    /// **`landed`** is a request's own knowledge, not a second question (HS-056, spec item 12's rule 5): the
+    /// commit a **merge** measured and put in a target. A branch whose tip *is* that commit has nothing the
+    /// target lacks, so it is not kept — `git merge-base --is-ancestor` cannot see a `squash` (its commit has
+    /// only the old target as a parent) and the request is better placed than the ref to say so. Comparing the
+    /// **tip** is what makes this safe: a branch that has moved since the merge measured it is a branch with
+    /// commits nothing landed, so the ordinary question answers for it, and an agent's commit during the merge
+    /// cannot be deleted by the request that missed it (ADR-0065 D6).
+    ///
     /// A repository that is not there has none of this session's names in it, and that is not an error:
     /// teardown's job is to leave nothing behind, and [`Retained::nothing`] is the answer (ADR-0023).
-    pub fn retained(&self, base: Option<&str>, targets: &[String]) -> Result<Retained, GitError> {
+    pub fn retained(
+        &self,
+        base: Option<&str>,
+        targets: &[String],
+        landed: Option<&str>,
+    ) -> Result<Retained, GitError> {
         if !self.repository.is_dir() {
             return Ok(Retained::nothing());
         }
@@ -197,6 +209,10 @@ impl Worktree {
             // A branch that is not there is nothing to keep, and there is no merge to ask about.
             None => None,
             Some(_) if self.ahead(base)? == 0 => None,
+            // The commit a request landed, and the branch has not moved since: the work is in the target, whatever
+            // the ancestry question would say (a `squash`'s commit is nobody's ancestor). `landed` is the request's
+            // fact and the tip comparison is what keeps it from covering a commit the merge never saw.
+            Some(tip) if landed == Some(tip) => None,
             Some(_) => match self.merged_into(targets)? {
                 Merged::Yes => None,
                 Merged::No | Merged::Unasked => Some(self.branch.clone()),

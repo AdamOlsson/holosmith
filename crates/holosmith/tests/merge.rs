@@ -940,7 +940,7 @@ fn a_squash_keeps_the_branch_a_merge_does_not() {
     let targets = ["main".to_string(), "master".to_string()];
     match merged
         .worktree()
-        .retained(Some(&merged.base), &targets)
+        .retained(Some(&merged.base), &targets, None)
         .expect("the keep-rule can be asked")
     {
         Retained::Known { branch, .. } => assert_eq!(branch, None),
@@ -954,7 +954,7 @@ fn a_squash_keeps_the_branch_a_merge_does_not() {
         .expect("a squashed commit lands");
     match squashed
         .worktree()
-        .retained(Some(&squashed.base), &targets)
+        .retained(Some(&squashed.base), &targets, None)
         .expect("the keep-rule can be asked")
     {
         Retained::Known { branch, .. } => assert_eq!(
@@ -963,6 +963,62 @@ fn a_squash_keeps_the_branch_a_merge_does_not() {
             "a squashed branch is not an ancestor of the target, so the keep-rule must keep it"
         ),
         other => panic!("a kept branch's keep-rule is not `Known`: {other:?}"),
+    }
+}
+
+#[test]
+fn the_commit_a_merge_landed_is_not_a_branch_to_keep_and_one_that_moved_is() {
+    // Rule 5's rule, at the function that answers it (HS-056, ADR-0065 D6): the commit a request **landed** is
+    // not work to keep, whatever the ancestry question says — and the comparison is against the branch's **tip**,
+    // so a branch that moved after the merge measured it is the ordinary question's and is kept. Both halves are
+    // here because only the pair distinguishes "the request's fact" from "keep everything" and from "delete
+    // everything": a `squash` is the strategy the ancestry question answers wrong, and a moved tip is the case a
+    // `landed: bool` would get wrong.
+    let targets = ["main".to_string(), "master".to_string()];
+    let fixture = Fixture::new("keep-rule-landed");
+    fixture.commit("a.txt", b"a\n", "the session's change");
+    let squashed = fixture
+        .land_by(Strategy::Squash, None)
+        .expect("a squashed commit lands");
+    let tip = fixture.rev(&fixture.branch());
+    assert_ne!(
+        squashed.merged_commit, tip,
+        "the squash wrote the target's commit, not the branch's"
+    );
+    // The branch is a non-ancestor, so the ordinary question keeps it...
+    match fixture
+        .worktree()
+        .retained(Some(&fixture.base), &targets, None)
+        .expect("the keep-rule can be asked")
+    {
+        Retained::Known { branch, .. } => assert_eq!(branch, Some(fixture.branch())),
+        other => panic!("a squashed branch's keep-rule is not `Known`: {other:?}"),
+    }
+    // ... and the request that landed this exact commit is not what keeps it.
+    match fixture
+        .worktree()
+        .retained(Some(&fixture.base), &targets, Some(&tip))
+        .expect("the keep-rule can be asked")
+    {
+        Retained::Known { branch, .. } => assert_eq!(branch, None),
+        other => panic!("a landed branch's keep-rule is not `Known`: {other:?}"),
+    }
+    // A branch that has moved since is work nothing landed, so it is kept even though a commit of its own was
+    // landed once.
+    fixture.commit("b.txt", b"b\n", "a commit the merge never saw");
+    let moved = fixture.rev(&fixture.branch());
+    assert_ne!(moved, tip);
+    match fixture
+        .worktree()
+        .retained(Some(&fixture.base), &targets, Some(&tip))
+        .expect("the keep-rule can be asked")
+    {
+        Retained::Known { branch, .. } => assert_eq!(
+            branch,
+            Some(fixture.branch()),
+            "a branch that moved past the landed commit must be kept"
+        ),
+        other => panic!("a moved branch's keep-rule is not `Known`: {other:?}"),
     }
 }
 
@@ -1807,7 +1863,10 @@ async fn an_uncommitted_file_refuses_the_merge_and_the_offer_is_a_commit() {
     assert_eq!(body["code"], "dirty_worktree");
     let message = body["message"].as_str().expect("a sentence");
     assert!(message.contains("nothing was merged"), "{message}");
-    assert!(message.contains("commit"), "{message}");
+    // The needle is the offer, not the word "commit": "uncommitted" contains it, so a guard on the bare word
+    // stays green when the whole next-step half is deleted — measured, and this assertion's own reason for
+    // existing (review S1).
+    assert!(message.contains("ask the agent to commit"), "{message}");
     assert_eq!(fixture.rev("refs/heads/main"), before, "the target moved");
     assert_eq!(
         std::fs::read(fixture.worktree.join("wip.txt")).expect("the agent's file"),

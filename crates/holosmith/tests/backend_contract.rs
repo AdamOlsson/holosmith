@@ -96,7 +96,7 @@ async fn conformance<B: SessionBackend>(backend: &B, label: &str, failures: Fail
     // none in it — so the delete's answer is three nulls rather than a promise about names that do not exist.
     assert_eq!(
         backend
-            .retained(&session(), &[])
+            .retained(&session(), &[], None)
             .await
             .unwrap_or_else(|error| panic!(
                 "{label}: the keep-rule could not answer for a session with no repository: {error}"

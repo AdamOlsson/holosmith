@@ -336,12 +336,18 @@ pub trait SessionBackend {
     /// branches that answer "is this already merged?". It travels as an argument because the answer is the
     /// repository's (a backend question) and the list is the machine's (a config question).
     ///
+    /// `landed` is a request's own knowledge rather than a question for the repository: the commit a **merge**
+    /// measured and put in a target, when the request that is deleting is the one that landed it (HS-056, spec
+    /// item 12's rule 5). [`Worktree::retained`] decides what it is worth — a branch whose tip is that commit is
+    /// not kept, and one that has moved since is the ordinary question's (ADR-0065 D6).
+    ///
     /// A backend with no repository answers [`Retained::nothing`]: the stub mounts nothing, so it keeps
     /// nothing, and a machine with no project has nothing of this session's to keep either.
     async fn retained(
         &self,
         session: &Session,
         targets: &[String],
+        landed: Option<&str>,
     ) -> Result<Retained, BackendError>;
 
     /// Record uncommitted work without touching the branch or the working tree.
@@ -477,10 +483,11 @@ impl SessionBackend for Backends {
         &self,
         session: &Session,
         targets: &[String],
+        landed: Option<&str>,
     ) -> Result<Retained, BackendError> {
         match self {
-            Self::Stub(backend) => backend.retained(session, targets).await,
-            Self::Docker(backend) => backend.retained(session, targets).await,
+            Self::Stub(backend) => backend.retained(session, targets, landed).await,
+            Self::Docker(backend) => backend.retained(session, targets, landed).await,
         }
     }
 
