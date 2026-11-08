@@ -1,4 +1,4 @@
-# RESUME — one issue per session (next: PER-95 / HS-063, the per-session disk soft cap)
+# RESUME — one issue per session (next: PER-96 / HS-064, stopped-session expiry)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating procedure and
 still governs the cycle; this file is the state of the world, and it adds one rule of its own:
@@ -45,203 +45,202 @@ sandbox-specific incantation (§2).
 
 ---
 
-## 1. The issue this session picks up: `PER-95` — HS-063, the per-session disk soft cap
+## 1. The issue this session picks up: `PER-96` — HS-064, stopped-session expiry
 
-**State when this file was written** (`origin/master` at `d1a5350`, the tree clean apart from the operator's own
-`orchestrate.sh`/`log.txt`): **64 of 80 stories Done, 16 Backlog**, all in project `Holosmith`. `PER-95` is
-`Backlog`, it is the next in `HS-###` order, and its one blocker (`PER-94`, HS-062) is `Done` — so it is eligible.
-The stories still Backlog are `PER-95` (HS-063) and then, in order, `PER-96` (HS-064, blocked by the done
-HS-043), `PER-98` (HS-066, blocked by the done HS-049), `PER-99` (HS-067), `PER-100` – `PER-106` (phase 3,
-HS-068 … HS-074) and `PER-108` – `PER-112` (phase 4, HS-076 … HS-080); check the Linear `Blocked by` list rather
-than this sentence if HS-063 turns out to be a stop.
+**State when this file was written** (`origin/master` at `805734d`, the tree clean apart from the operator's own
+`orchestrate.sh`/`log.txt`): **65 of 80 stories Done, 15 Backlog**, all in project `Holosmith`. `PER-96` is
+`Backlog`, it is the next in `HS-###` order, and its one blocker (HS-043, the delete's keep-rules) is `Done` — so
+it is eligible. The stories still Backlog are `PER-96` (HS-064) and then, in order, `PER-98`
+(HS-066, blocked by the done HS-049), `PER-99` (HS-067), `PER-100` – `PER-106` (phase 3, HS-068 … HS-074) and
+`PER-108` – `PER-112` (phase 4, HS-076 … HS-080); check the Linear `Blocked by` list rather than this sentence if
+HS-064 turns out to be a stop.
 
-The last shipped story was `PER-94` (HS-062, the disk floor, **ADR-0068**) — item 14's *first* sentence, and the
-second story whose subject was a number that already existed. Its gate run was green: **85 cases, 1440
-assertions**, no `SKIP`; `cargo test` is **1083 tests** (55 binaries) and `web/`'s runner is **72** (unchanged —
-that story touched no web code). Its §1 material is now Linear, `docs/review/PER-94.md`, `git log` and §9.
+The last shipped story was `PER-95` (HS-063, the per-session disk soft cap, **ADR-0069**) — item 14's second
+sentence, and the third periodic policy in the build. Its gate run was green: **86 cases, 1469 assertions**, no
+`SKIP`; `cargo test` is **1101 tests** (56 binaries) and `web/`'s runner is **75**. Its §1 material is now Linear,
+`docs/review/PER-95.md`, `git log` and §9.
 
 ### 1.1 The slice (verbatim from `docs/stories/phase-2-deployable-mvp.md`; Linear's body is the same text)
 
-> ### HS-063 — Per-session disk soft cap
+> ### HS-064 — Stopped-session expiry
 >
-> **As** the operator **I want** one session to be stopped when it hoards disk **so that** one bad build does not
-> starve the others.
+> **As** the operator **I want** forgotten stopped sessions cleaned up **so that** I do not prune by hand.
 >
-> - **Size:** M · **Blocked by:** HS-062 · **Spec:** item 14, D2
-> - **Demo:** grow a worktree past `session_disk_soft_gb`; the turn aborts, an `error` event with code
->   `disk_quota` arrives, and the session stops, resumable.
+> - **Size:** M · **Blocked by:** HS-043 · **Spec:** item 15, D3, Data model
+> - **Demo:** backdate `stopped_at` past `stopped_ttl_days` and watch the daily job snapshot then delete the
+>   session.
 >
 > **Acceptance**
-> - [ ] A watchdog runs `du` on each live session's worktree every 5 minutes.
-> - [ ] Over `session_disk_soft_gb` (default 10) it emits an `error` event with code `disk_quota`, aborts the turn,
->   and stops the session.
-> - [ ] The stop is `stopped` (resumable after cleanup), not `error`.
-> - [ ] The soft cap includes `target/` and `node_modules`; the docs say to raise it for large Rust projects.
-> - [ ] No cache directory is shared between sessions (D2), asserted by a test that two sessions cannot see each
->   other's caches.
+> - [ ] `stopped_at` is set when the status becomes `stopped` and cleared on resume.
+> - [ ] A daily job deletes sessions stopped for more than `stopped_ttl_days` (default 7) using the HS-043 delete
+>   flow.
+> - [ ] A snapshot runs first; if it fails the session is skipped and retried the next day.
+> - [ ] Sessions in `error` are never auto-deleted.
+> - [ ] The Sessions screen shows days remaining on each stopped session.
 
-`docs/stories/**` is **not edited** (§7). An **M** story — the third periodic policy in the build (the idle stop,
-the compaction, and now this) and the first that has to *end a turn* rather than just move a row, so §1.5 is
-where the work is.
+`docs/stories/**` is **not edited** (§7). An **M** story — the fourth periodic policy, and the first that *destroys*
+something on a timer, so "what it refuses to delete" is where the work is.
 
 ### 1.2 The spec it closes
 
-Item 14's three remaining sentences and item 14's neighbours in D2:
+Item 15's retention bullet and D3:
 
-> - `session_disk_soft_gb` (default 10): a watchdog runs `du` on each live session's worktree every 5 minutes. Over
->   the limit it emits an `error` event with code `disk_quota`, aborts the turn and stops the session (resumable
->   after cleanup).
-> - Docker storage limits do not apply to bind mounts. Optional hardening: project quotas on the data filesystem.
-> - Build and package caches: per-session and isolated (decided in D2). Each session installs and builds from
->   scratch in its own worktree, and no cache directory is shared between sessions. Expect slow first builds. The
->   soft cap above includes target/ and node_modules, so raise `session_disk_soft_gb` for large Rust projects.
+> - Stopped-session retention (decided in D3): a daily job deletes sessions that have been stopped for more than 7
+>   days (config stopped_ttl_days, default 7), using the delete flow from item 9. A snapshot runs first; if it fails,
+>   the session is skipped and retried the next day. Sessions in error are never auto-deleted. Add stopped_at INTEGER
+>   to sessions, set when the status becomes stopped and cleared on resume. The Sessions screen shows the days
+>   remaining on each stopped session.
+>
+> - **D3. Stopped sessions: auto-delete after 7 days.** Work is snapshotted first (item 15).
 
-The last of those is the one that is *already true by construction* — a session's container mounts only its own
-worktree, `.git`, the two read-only git paths and its own pi-home (`container::Mounts`, spec item 1's five since
-HS-031) — so the acceptance's fifth bullet is a **test**, not code: two sessions' containers must be shown not to
-share a writable cache path. `PER-94` just spent 11 review findings on the difference between "true" and
-"witnessed"; expect the same here.
+Item 8's table and item 9's delete flow are the neighbours: the delete flow's own rules (a snapshot, the keep-rules
+for `agent/<id>` and `refs/holosmith/wip/<id>`, the row and its log removed in one transaction) are what "using the
+delete flow from item 9" means, and ADR-0052/ADR-0065 are the decisions it already carries.
 
 ### 1.3 What already exists (read this before planning)
 
-- **`session_disk_soft_gb` is a config key and nothing reads it**: `config/mod.rs:231` (default `10`),
-  `config/schema.rs:230` (`Kind::Integer`, `u64_setting` — so `0` is accepted today), and
-  `tests/golden/config-default.toml:28`. `grep -rn session_disk_soft_gb crates/` finds only config code and the
-  golden file. There is **no** validation refusing `0`, and `0` should mean "off" by `idle_stop_min`'s precedent
-  (ADR-0025) — a decision, not a given.
-- **The periodic-policy template is `sweeper.rs`** (HS-021, ADR-0025): a `TICK` **constant** (5 s) rather than a
-  config key, `spawn`/`run`/`sweep` where `sweep` is public so a test drives one pass, `AppState::sweeper()`
-  returning an `Option` that is `None` when the policy is off, and the four rules its own doc calls load-bearing:
-  the candidate set **is** the repository query, the row moves before the container (ADR-0020), the stop is
-  `Stopper`'s so `expected_stop` is written first, and a refused application is an `info` line and not a bug.
-  `compactor.rs` (HS-060) is the same shape with a 60 s tick and a per-session step that holds the database mutex.
-- **Ending a *turn* is `ladder.rs`'s job, and it already has two callers with a deadline**: `Turn::run` (HS-022,
-  `turn_timeout_min`, `TURN_TIMEOUT`) and the token budget (HS-060, `budget_exceeded`) both `spawn` the ladder and
-  keep awaiting the turn, sharing **one `fired`** so only one climb happens; `climb` is rung one (clear_queue →
-  abort) and `end_turn` is rung two (`stopped` with the caller's reason → `stop`), returning
-  `Ending::{Asked,Forced}`. `FORCED_ABORT` is the reason the timeout uses. The abort ladder's `running → stopped`
-  is `Trigger::AbortLadder`.
-- **`stop.rs`'s `Stopper`** is the one way a container is stopped (HS-030): it writes `sessions.expected_stop`
-  and *then* calls the backend, so the exit classification reads the stop as ours. The sweeper, the create's
-  eviction and the ladder's forced rung all use it.
-- **The event kinds are a fixed list** (`events/mod.rs:33-63`): `turn.start`, `turn.end`, `turn.error`,
-  `turn.steer`, `message.delta`, `message.snapshot`, `message.end`, `tool.start`, `tool.end`, plus
-  `session.status` and `history.truncated`. **There is no `error` kind** — `TURN_ERROR` is `"turn.error"` and is
-  what a failed turn writes — so item 14's "an `error` event with code `disk_quota`" is a *new* kind (or a code
-  on an existing one) and the client's rules for it are a `transcript.ts` function with a node test.
-- **The floor is the machine's; this is the session's.** `disk.rs` (HS-062) is `du`-free and `df`-based: it
-  measures the **filesystem** before a start and answers `507`. Nothing there reads a session's worktree, and
-  `du` is not spelled anywhere in `crates/` (`grep -rn '"du"'` finds nothing) — but `du` **is** on this machine
-  (GNU coreutils 9.4), so a shim is not needed for the gate, only a `PATH` seam for the crate tests if `du` is
-  the reader. The gate's `deploy_machine_shims` is the precedent for a stand-in.
-- **The worktree's path is on the row**: `Worktree::of` names it and `Session.worktree` records it, so "each live
-  session's worktree" is a column read, and `changes::dirty`/`merge` already run host git processes per session
-  on `spawn_blocking`.
-- **A stop is not an `error`.** The acceptance's third bullet (`stopped`, resumable) is the transition table's:
-  `running → stopped` with a reason, and the `error` **event** is what carries the code. The two are different
-  things and the demo says both words.
-- **The gate's periodic-policy case is `case_idle_stop`**, and it costs the spec's real minute on purpose
-  (`idle_stop_min = 1` rather than a knob). A 5-minute tick has no such escape: item 14 fixes the interval, so a
-  gate case must either drive one sweep with a test-only seam (the crate's `Sweeper::sweep` precedent) or measure
-  something that does not need the tick.
+- **`stopped_at` already moves with the state, and bullet 1 is therefore a test.** `sessions::repository`'s
+  `set_status` writes `stopped_at = (status == Status::Stopped).then_some(now)` (`repository.rs:282`), so every
+  transition into `stopped` sets it and every transition out of it clears it — under ADR-0016's one function, which
+  is why no endpoint can forget. `Session.stopped_at` is read back (`repository.rs:534`) and `tests/idle_stop.rs`
+  already asserts it moves with an idle stop. So the story's first bullet is a **witness**, not code: check that
+  the resume clears it and that every reason into `stopped` (now six: `evicted`, `idle_stop`, `drain`,
+  `forced_abort`/`ladder`, `disk_quota`, `pi_exit`) sets it.
+- **`stopped_ttl_days` is a config key and nothing reads it.** `config/mod.rs:237` (default `7`),
+  `config/schema.rs:236` (`Kind::Integer`), the golden file, and — unlike `session_disk_soft_gb` — a **validation
+  rule that refuses `0`** (`config/mod.rs:597`, "must be at least 1"). So a "no expiry" switch is a *decision* this
+  story has to take (recommendation: keep the refusal; `0` is not an off switch here, and an operator who wants no
+  expiry can raise the number). `grep -rn stopped_ttl_days crates/` finds only config code.
+- **The delete flow exists and is two halves.** `http::sessions::deletion` (ADR-0056) is the *request* half —
+  `retained_for`/`DeleteAnswer`/`Kept` and rule 5 — and `Deleter` (`deleter.rs`) is the removal task: revoke the
+  key, `backend.delete`, remove the row **and its event log** in one transaction, close the session's streams. The
+  snapshot is what the flow does *first*: a failed snapshot is `409 unsaved_work` for a client and `?force=true`
+  forgives it — and **a job must not force**: bullet 3 is "skip and retry the next day", which is the delete flow's
+  refusal read as a *retry* instead of an answer.
+- **The periodic-policy template is now three modules**: `sweeper.rs` (5 s tick, `IDLE_STOP`), `compactor.rs` (60 s,
+  a first pass at startup), and `quota.rs` (HS-063, 5 min, a first pass that **waits for the boot's own
+  re-provisioning**, `SETTLE`). A daily job is the same shape with a 24-hour `TICK`, and its first pass at boot is
+  what makes it observable: `case_compaction` and `case_disk_quota` both use "backdate the row, restart the
+  server" rather than waiting a tick.
+- **The delete flow's spawn is `Deleter::remove`, and the row is `deleting` first.** ADR-0023/0038: the request
+  half moves the row, then a task removes. A job that deletes has to decide whether it writes `deleting` first (and
+  therefore what a *second* tick sees) — the sweeper's "the row moves before the container" rule, with removal in
+  the container's place.
+- **`GET /api/sessions` is the list's answer, and it already carries a config-derived number**:
+  `{"sessions":[…], "network_default": …}` (ADR-0017). That is the place a TTL would ride for bullet 5's "days
+  remaining" — the row itself carries `stopped_at`; the *number* `stopped_ttl_days` is the config's, and the
+  screen has no other way to learn it.
+- **The web row's text is pure functions with node tests**: `stateText`/`headline`/`stoppedNotice`/`stoppedDetail`
+  (HS-030, HS-020, HS-021, HS-063). "Days remaining" is a sentence on a row, so it is a fourth pure function and a
+  node test — and it must be written **both** where the row is drawn and where a `session.status` frame patches it
+  (`docs/notes.md`'s "a row's text is written in two places" landmine).
+- **`stopped_at` is whole seconds**, and `clock::unix_now()` is the only clock. The comparison is `stopped_at <
+  now - ttl*86400`; `clock::minutes` exists, `clock::days` does not — a `u64` multiply by 86 400 can wrap for an
+  absurd config value, which is the overflow lesson `quota::over` and `turn::timeout` already carry.
 
 ### 1.4 What does not exist
 
-No per-session disk read (`du`), no `disk_quota` code, no `error` event kind, no watchdog task or its wiring in
-`serve`/`AppState`, no sentence for the row's reason or for the event, no `transcript.ts` rule for the event, no
-test that two sessions' caches are isolated, and **nothing that records what `session_disk_soft_gb = 0` means**.
+No expiry task or its wiring, nothing that reads `stopped_ttl_days`, no candidate query (`stopped` rows older than
+a cutoff), no "skip when the snapshot fails" path for a job (the delete's refusal is written for a *client*), no
+days-remaining number in the list's answer, no `transcript.ts` sentence for it, and **nothing about what the job
+does with a row whose turn was interrupted or whose branch is kept** — the keep-rules exist, the question of
+whether a kept branch changes the deletion is a decision.
 
 ### 1.5 What the plan must decide (and the shape this handoff recommends)
 
-1. **Whether the watchdog is a new task or a second pass in the sweeper.** Recommend: a **new module**
-   (`quota.rs`), spawned beside the sweeper, for the reason `compactor` is its own: three policies in one tick
-   would share a period that belongs to only one of them, and the sweeper's `TICK` (5 s) is not item 14's
-   5 minutes. Wiring is `AppState::quota()` → `Option`, spawned in `commands/serve.rs` where the sweeper is.
-2. **The reader.** `du -sk <worktree>` and the third-party rules the preflight's `df` already taught (a program
-   that cannot run is not a pass; `spawn_blocking`; the `Tools`-shaped seam for tests). Recommend a `du` seam on
-   `AppState.tools` (which exists since HS-062, as `preflight::Tools { git, df }` — it would gain a `du`), so a
-   crate test drives one sweep against a shim instead of growing a real 10 GB tree. `du` on a **worktree**, not
-   the data root: `--one-file-system`? Probably not — say why either way.
-3. **Which sessions are candidates.** "each live session's worktree" = `running` and `idle` (`starting` has no
-   worktree yet and `stopped`/`error`/`deleting` are not consuming a turn). Recommend `running` **and** `idle`,
-   with the `idle` arm doing what the sweeper does (row first, then `Stopper`) and the `running` arm going
-   through the ladder.
-4. **How the turn is ended.** Recommend the ladder's `climb` (clear_queue → abort → grace) rather than a raw
-   `stop`, because item 14 says "aborts the turn", and then `running → stopped` with the reason `disk_quota` —
-   *not* `error`, which is the acceptance's third bullet. The `error` **event** is separate and is emitted
-   regardless of which rung ended the turn.
-5. **The event's shape.** A new kind (`error`, one new string in the fixed list) with `code: "disk_quota"` and the
-   measured size and the limit in the payload, **or** the code on `turn.error`. Recommend the new kind: the
-   increment is additive, the client's existing `turn.error` rendering is about an agent failure, and this is a
-   machine policy. Either way the code must be in `GLOSSARY.md` (a code is API — ADR-0008) and `transcript.ts`
-   must have a sentence for it with a node test (`npm test` is the only gate that can see a sentence).
-6. **`session_disk_soft_gb = 0`.** Recommend "off", like `idle_stop_min = 0` — one more decision recorded in the
-   ADR rather than a new config rule (HS-062 just made the same call for `min_free_gb = 0`).
-7. **How a gate case measures a 5-minute tick.** Recommend: the gate measures **one pass** — a `du` stand-in on
-   `PATH` reporting an over-limit size, a session left `running` or made `idle`, and the row/event/stop that
-   follow — plus a crate test that drives `sweep` directly with a `Tools`-shaped `du` shim. A `case_*` that waits
-   five minutes is not a gate, and a case that only sets a small `session_disk_soft_gb` on a real worktree is a
-   case that measures the tick, not the policy.
-8. **Caches (the fifth acceptance bullet).** Recommend a crate test that inspects two sessions'
-   `docker run` vectors (`SessionContainer::run_args`, already unit-tested) and asserts no writable host path
-   outside each session's own worktree/`.git`/pi-home appears — the "asserted by a test that two sessions cannot
-   see each other's caches" line, without a daemon.
+1. **A new module (`expiry.rs`) with a `TICK` of 24 hours and a first pass at boot** — the compactor's and the
+   quota's shape, not a second pass in either. `AppState::expiry() -> Option<Expiry>` returning `None` only if a
+   "no expiry" switch is added (recommendation: **don't add one**; the config already refuses `0`). Wiring in
+   `commands/serve.rs` beside the other three, `debug!` for its state (the eight-line banner rule).
+2. **What the pass does, in order.** Read the candidates (a repository query — `stopped` and `stopped_at < cutoff`
+   — with the predicate in SQL, the idle stop's own rule); for each, run the delete flow's *snapshot* first, and on
+   failure log an `info` line and move on (the "skip and retry tomorrow" contract); on success run the rest of the
+   removal. Recommendation: **call the delete flow's halves, not a second implementation** — `sessions::deletion`
+   with the row it read and no force, then `Deleter::remove` on the spawned task — so the keep-rules, the event
+   log's removal and the stream closing are one code path. If `deletion`'s signature is a handler's (it answers an
+   `ApiError`), the honest fix is a `pub(crate)` function it and the job both call, and the ADR says so.
+3. **`error` is never a candidate, and a `deleting` row is not the job's.** The predicate is `status = stopped`;
+   a row caught mid-delete is the flow's. A row that leaves `stopped` between the read and the delete is the
+   ordinary race: the transition refuses, log `info`, don't retry inside the pass.
+4. **No lock across the snapshot, and the mutex discipline the compactor's caveat does not transfer.** The snapshot
+   and the backend's delete are subprocess/daemon work; read the rows, drop the guard, act, and let
+   `Deleter::remove` take its own scope. A pass that holds the mutex across `backend.delete` would stall every
+   request for a container's lifetime.
+5. **What the job emits.** Recommendation: **nothing of its own** — the delete flow already emits the
+   `session.status → deleting` and (usually dropped) frame, and item 9's "a delete is not a state change anyone
+   else performs" holds. A `deleted_by_expiry` reason would be a new vocabulary; the row is gone, so nothing can
+   read it.
+6. **The days-remaining number.** Recommendation: `GET /api/sessions` grows one key beside `network_default` —
+   `stopped_ttl_days` or, better, nothing per row (the client can compute `stopped_at + ttl`) — and
+   `transcript.ts` gains one pure function (`expiryText(stoppedAt, ttlDays, now)`), tested with synthetic clocks.
+   The page draws it in both places (row build and status patch), and the sentence must not claim a session *will*
+   be deleted when the snapshot could keep it (say "expires in N days", not "will be deleted").
+7. **`now` on the client.** The page has no clock in its model: `Date.now()` must be read in `main.ts` and passed
+   in, so the function stays pure and the test can pin it.
+8. **How a gate observes a daily job.** Backdate `stopped_at` with `python3`'s `sqlite3` (precedented in
+   `case_merge_guards` and `case_compaction`), make sure the session has a worktree (a Docker session, or the
+   stub + a written column), restart `serve`, and read the row's disappearance — plus the branch/ref that the
+   delete flow *kept*, which is the "using item 9's delete flow" claim. A visual/worktree-keeping half needs a real
+   repository: the Docker backend, or a stub session with a written `worktree` column if the case only asserts the
+   row's removal.
 
 ### 1.6 The questions the plan must answer (before code)
 
-1. Does the watchdog hold the database mutex across the `du` (slow, a subprocess) or read the ids, drop the lock
-   and re-read each row? (The compactor's per-session step holds it; a `du` of 10 GB is hundreds of
-   milliseconds, so this one must not.)
-2. What happens when a session leaves `running` between the read and the climb — the ladder's own "the row moved"
-   rules, and does the quota make a second attempt next tick or give up?
-3. What does the row's `status_reason` say, and does the event carry the same sentence or a different one?
-4. Is the measurement cached anywhere (the size is only ever needed at the tick), and what does the log say per
-   tick when nothing is over?
-5. Does `session_disk_soft_gb` compare **GiB** or GB, and is the number a whole integer in the config and a
-   kilobyte count in `du` — the arithmetic `min_free_gb`'s `available_gb` already does, and the place a second
-   spelling would hide.
-6. Does the event fire once per crossing or every tick while over the limit? (The stale-quota landmine: a session
-   that is `stopped` is no longer a candidate, so "once" is a consequence of the candidate rule — but say it.)
-7. Which test proves `doctor`/`status` does **not** need to know about this policy, and where the `du` shim lives.
+1. Which function is "the delete flow" for a caller that is not a request — and does `sessions::deletion`'s
+   signature need a `pub(crate)` split, and what does the snapshot failure become (a `bool`? a `Kept`? the
+   `ApiError` it already answers)?
+2. Does the job write `deleting` before it removes, and what does a second tick see while it does?
+3. Does the candidate query need a new repository method (`expired_before(cutoff)`), and what is its
+   `SQL-location` guard story (one statement, in the repository — the idle stop's `idle_before` is the model)?
+4. Is the cutoff `stopped_at < now - ttl*86400` computed in SQL or Rust, and what does `ttl = 0` do (it cannot be
+   configured today)?
+5. Does the *list's* answer need the TTL, and is a raw `stopped_ttl_days` key the right shape (the alternative —
+   `expires_at` per row — needs the row value, and the row has `stopped_at`)?
+6. What happens to a session whose snapshot succeeds but whose removal fails — the row is `deleting`; is the next
+   day's retry the `deleting` re-run the delete flow already supports (`Deleter` re-runs on a repeat request)?
+7. Which test proves `error` is untouched, and which proves a *kept* branch survives (the keep-rules are
+   `worktree::retained`'s, so the witness is a real repository or a backend-contract test).
 
 ### 1.7 Acceptance, restated as checks
 
-- *A watchdog runs `du` every 5 minutes* — one crate test drives one sweep; the gate measures one pass; the
-  constant is named and quoted.
-- *Over the limit: an `error` event with code `disk_quota`* — the event, its kind, its code and its payload, at
-  the wire (`GET …/events/history`) and as a `transcript.ts` sentence with a node test.
-- *…aborts the turn and stops the session* — a running session ends via the ladder (`Ending::Asked`/`Forced`) and
-  the row is `stopped` with the reason; a container is stopped through `Stopper` (so `expected_stop` is written).
-- *The stop is `stopped`, not `error`* — asserted as the row's status, not as the event's.
-- *The cap includes `target/` and `node_modules`* — a `du` of the worktree counts them: a test should make a
-  `target/`-shaped tree and see it counted, because `du` with the wrong flags would not.
-- *No cache directory is shared* — the fifth bullet above, over `run_args`.
-- Plus the usual gates, one new `case_*`, and the docs: `docs/build.md`'s case list, `GLOSSARY.md`'s
-  `disk_quota`/soft-cap entry, an ADR (**0069** is next).
+- *`stopped_at` is set when the status becomes stopped and cleared on resume* — through the transitioner:
+  `tests/quota.rs`/`idle_stop.rs` already assert the set; add the resume-clears half (one `Transitioner::apply`).
+- *A daily job deletes sessions stopped for more than `stopped_ttl_days`* — the module's one pass over a
+  backdated row, and `case_stopped_expiry` over the artifact after a restart; the `TICK` constant asserted (the
+  HS-063 review's SP1 lesson: an interval with no witness is a number nothing can fail on).
+- *A snapshot runs first; a failure skips and retries* — a stub with `fails_snapshot`, one pass, the row still there
+  with its reason and `stopped_at` untouched; a second pass with a working snapshot removes it.
+- *`error` is never auto-deleted* — a backdated `error` row survives a pass (and there is no `stopped_at` on it).
+- *The Sessions screen shows days remaining* — a pure `transcript.ts` function with node tests at the boundaries
+  (0 days, 1 day, a past TTL, a clock exactly on the cutoff), rendered in both the row and the patch path.
+- Plus the usual gates, one new `case_*`, `docs/build.md`'s case list, `GLOSSARY.md` (**Stopped-session expiry**;
+  `stopped_at` and `stopped_ttl_days` are already vocabulary), and an ADR (**0070** is next).
 
 ### 1.8 Non-goals
 
-Docker storage limits and project quotas (item 14's "optional hardening"); a *hard* cap or a per-session
-filesystem; anything about the machine's floor (HS-062, done — `disk.rs` is `df` and must stay that way);
-notifications; a UI chart; a `du` of the data root; deleting anything on the operator's behalf.
+Deleting `error` rows (item 15 says never); a TTL per row or a per-project override; a UI for editing the TTL; any
+purge of `stopped` rows' worktrees before the delete flow's own removal; notifications (HS-066); a "days remaining"
+on the session screen as well as the list (the story says Sessions screen); a hard delete of anything whose
+snapshot failed.
 
 ### 1.9 The demo
 
-On this machine, over the shipped artifact: boot `serve` with a `du` stand-in on `PATH` that reports an
-over-limit size for one session's worktree, let one sweep run, and show the row `stopped` with the reason, the
-`disk_quota` event in `GET /api/sessions/{id}/events/history`, and the session resumable afterwards (a resume
-answers 202 and the row walks back). Say plainly what was not measured: a *real* 10 GB build tree (use a real one
-if the budget allows — a `dd`'d file is cheaper than a cargo build and the story's own point is the size), a real
-agent turn ending (the stub is enough for the row, but the *ladder* is about a real abort), and no hub.
+Over the shipped artifact: create a session (Docker, so the worktree and branch are real), stop it through a
+policy or by hand, backdate `stopped_at` in `app.db` with `python3`'s `sqlite3` past `stopped_ttl_days`, restart
+`serve`, and show the row gone from `GET /api/sessions`, its container and network gone, and the branch `agent/<id>`
+(or `refs/holosmith/wip/<id>`) **kept** — the delete flow's own promise, which is what "using the delete flow" means.
+Say plainly what was not measured: a session that sat stopped for seven real days, and (if the case uses the stub)
+a real `backend.delete` against a container.
 
 ### 1.10 What the next agent needs back
 
 When you write the state back (§5, step 10): §1 becomes the **next** issue — by `PROMPT.md`'s ranking that is
-`PER-96` (HS-064, stopped-session expiry) *if* HS-063 ships, and `PER-95` again if it does not — with the same
-shape. Refresh the counts, the ADR number you took (**0069** is next), the last gate run's own numbers (and
-`web/`'s test count, which this story may well change), and replace §9's row with this story's. Anything you
-learned that is **not** state and **not** an ADR goes into `docs/notes.md` under a new `### Landmines: …`
-heading, never into §1. Then kill what you started (§5, step 11).
+`PER-98` (HS-066, the Web Push backend) *if* HS-064 ships and HS-066's blocker (HS-049) is still Done, and
+`PER-96` again if it does not. (`PER-97` is HS-065, the daily project backup — already `Done`, which is why it is
+not in §1's list.) Take the same shape. Refresh the counts, the ADR number you took (**0070** is next), the last gate run's own numbers (and
+`web/`'s test count, which this story will change), and replace §9's row with this story's. Anything you learned
+that is **not** state and **not** an ADR goes into `docs/notes.md` under a new `### Landmines: …` heading, never
+into §1. Then kill what you started (§5, step 11).
 
 ## 2. Environment (already repaired — do not redo)
 
@@ -267,7 +266,7 @@ Why outside the repo: `/` is a 3.4 GB tmpfs and `~/.pi` is the only large writab
 **Available:** node 24.22.2 / npm 11.19.1 with the npm registry reachable (node 24 strips TypeScript
 types natively, which is what `npm test` relies on); `curl`; `python3` (with stdlib `sqlite3` and
 `http.client`); `sed`, `grep`, `tr`, `cut`, `cmp`, `find`, `timeout`, `git`, `du` (GNU coreutils 9.4, which
-HS-063 needs); **Playwright's Chromium**
+HS-063 used); **Playwright's Chromium**
 (`~/.cache/ms-playwright`, bound read-only by `bwrap.sh`) and the `playwright` npm package at
 `~/.cache/hs-browser/pw/node_modules`. Two quirks, both hit: ESM **ignores `NODE_PATH`**, so a script
 imports the package by its own path — `…/playwright/index.mjs` (the `.js` entry is CJS and its default
@@ -454,10 +453,9 @@ dir, running its cases plus a CORS sweep, then torn down with `SIGTERM` and an a
 prints its own case and assertion counts — quote those, never a number copied out of this file.** Since HS-046
 it also prints one `ok <case>` line per case that measured something: a case that printed `SKIP` withholds that
 line and the run ends with `SKIP n of N cases measured nothing`, so `grep -c '^ok case_'` is the number that
-proved something and a skip can never read as a pass. It takes
-~11–12 min (both musl targets, the Docker cases, `case_idle_stop`'s real minute, `case_preview`'s container
-and `case_doctor_full`'s self-test). `--no-build` skips `build`
-and `embed`; `--keep` keeps the work dir.
+proved something and a skip can never read as a pass. It takes ~13–14 min (both musl targets, the Docker cases,
+`case_idle_stop`'s real minute, `case_disk_quota`'s two boots, `case_preview`'s container and
+`case_doctor_full`'s self-test). `--no-build` skips `build` and `embed`; `--keep` keeps the work dir.
 
 Some cases bring their own boot, and they are the ones a new story is most likely to collide with:
 
@@ -467,6 +465,7 @@ Some cases bring their own boot, and they are the ones a new story is most likel
 | `case_changes`, `case_changes_diff`, `case_merge`, `case_merge_strategies`, `case_merge_guards`, `case_publish` | `python3` for a `_ping`-only docker socket, a real repository under their own `projects_root`, and (for the three merge cases) their own **data root**, because `<data>/merge` is what they measure. `case_merge_guards` also writes one column (`sessions.status`, with python3's `sqlite3`) because a gate may not run a turn. `case_publish` also makes a **bare repository** under `$WORK` as `origin`, boots **three** times (the ordinary run, one with git's `GIT_CONFIG_*` naming a second `pushurl` repository, one with `remotes = []`), and needs no daemon. No daemon. |
 | `case_verification_table` | no server, no daemon, no image: it reads `HolosmithSpec.md`'s eleven `V<n>` rows (and runs first in `serve_cases`, so a rotted table fails before the Docker cases) |
 | `case_docker_preflight`, `case_doctor_quick`, `case_disk_floor` | no shared server (`case_doctor_quick` and `case_disk_floor` build their own `_ping` socket and a `PATH` stand-in — `df` for the floor — so they need `python3` and nothing else; `case_disk_floor` also boots its own Docker run and puts the shared boot back) |
+| `case_disk_quota` | its **own** Docker boot and `agent_image` (the worktree must be real: a stub row has none), and a `du` stand-in on `PATH` that records its argv and answers an over-cap size; it restarts that boot so the watchdog's first (post-reconcile) pass measures, then puts the shared boot back — one `SKIP` line without the daemon or the image |
 | `case_container_mounts` | no server *and* no daemon — one printed `SKIP` line when there is neither a daemon nor an image |
 | `case_exit_classification` | `python3` (it reads a row's `expected_stop` out of `app.db`), skips without it |
 | `case_egress_proxy` | **no** server, daemon, internet or key: it starts the artifact as `proxy egress` on a loopback port and asks it four questions over a socket |
@@ -696,7 +695,8 @@ crates/holosmith/
                             set_status guard), activity.rs (the one `touch`: lock, warn, carry on)
   src/events/               mod.rs (Event, NewEvent, EventWriter, EventStream, and since HS-059
                             `coalesce` + its private `parse_delta`/`Delta`, which HS-060's fold reads
-                            too), writer.rs (`collect` →
+                            too; and since HS-063 the `ERROR` kind — `"error"`, the per-session disk
+                            cap's `{code, message, size_kib, limit_gb}`), writer.rs (`collect` →
                             `coalesce` → `commit`; the failure log names appended events *and* rows),
                             repository.rs (`insert_batch` drops an event whose session has gone;
                             `delete_session_log`; `compact`, the fold into one snapshot; since HS-061
@@ -811,10 +811,20 @@ crates/holosmith/
                             the vocabulary `doctor` prints too: `Finding { check, outcome, sentence }`,
                             `Outcome { Pass, Fail, Unknown }`, `report_with` (each check has one function with
                             both arms) and `check`/`check_with` = its failures via `Complaint::of` (the failing
-                            projection, same `String`); `Tools { git, df }` is the tests' shim seam, `Check`
+                            projection, same `String`); `Tools { git, df, du }` is the tests' shim seam
+                            (`du` since HS-063), `Check`
                             is the **one** word table (docker, git, disk, network, systemd, merge, tailscale,
                             ports, database, proxy, image), `socket_sentence`, `MIN_GIT` (2.38). Since HS-062
                             `disk` is a *caller*: the measurement itself lives in `src/disk.rs`
+  src/quota.rs              the per-session disk soft cap (HS-063, ADR-0069): `DISK_QUOTA` (the reason, the
+                            trigger's word and the event's code — one spelling), `DU`, `TICK` (5 min),
+                            `SETTLE`/`SETTLE_POLL` (the first pass waits for the boot's re-provisioning),
+                            `DuError { Unrunnable, Refused, Unprintable }`, `measure(program, path) ->
+                            Result<u64, DuError>` (`du -sk --`, blocking), `kibibytes`, `over(size_kib,
+                            limit_gb)` (strict, in `u128`), `watchable(&[Session])` (running/idle with a
+                            worktree), `Quota::{new, spawn, run, settle, sweep, stop, stop_idle, announce,
+                            report}`; `tests/quota.rs` drives both ladder rungs, the under-the-cap arm, an
+                            unmeasureable worktree, the argument vector and the wire
   src/disk.rs               the free-space floor's one measurement (HS-062, ADR-0068): `DF` (the program's
                             name, once), `DiskError { Missing, Refused, Unrunnable, Unprintable }` + its
                             `Display`, `Verdict { Enough, Short }`, `available_gb(df_output)` (field 4 of line
@@ -855,6 +865,11 @@ crates/holosmith/
                             the cap refusing *without* evicting, a turn that settles while the floor is
                             crossed, `min_free_gb = 0` needing no `df` at all, and a stub run not measured;
                             a `tokio::sync::Mutex` serialises the bodies because the shims fork),
+                            quota (HS-063: both ladder rungs — a stub told to ignore `abort` so the grace is
+                            spent, and a turn that ends itself while the ladder waits —, the worktree exactly
+                            at its cap, a `du` that cannot run, `session_disk_soft_gb = 0`, the argument
+                            vector through a recording shim, and the event at the wire; one test uses the
+                            machine's own `du` over a tree with `target/` and `node_modules/`),
                             changes (HS-052: the summary over a real repository in a `TempDir` — the two
                             counts against git's own arithmetic, the two-dot file list, a rename, a binary
                             file, an ignored and an untracked file, `touches_ci`, a conflict that moves no
@@ -917,9 +932,10 @@ scripts/verify.sh           the one-command gate (see §3), including the two st
                             --json` from the pairs it was asked for) and `health_responder` (a `python3` that
                             answers `/api/health` for a whole case)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0068          read the recent ones before planning anything (0068 is the disk floor)
+docs/adr/0001…0069          read the recent ones before planning anything (0069 is the disk soft cap)
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-94, PER-97, PER-107  each a verbatim review + a `## Resolution` table
+docs/review/PER-33…PER-97, PER-107  each a verbatim review + a `## Resolution` table
+                            (`PER-95` is this build's newest; `PER-94` the one before it)
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -1024,9 +1040,10 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   one — which is also how HS-019 provoked a real failed snapshot from the shipped artifact.)
 - **`AppState`** is `{ config, runtime, database: Arc<std::sync::Mutex<Database>>, events: EventWriter,
   streams: StreamRegistry, backend: Backends, drain: Control, merges: Merges, tools: preflight::Tools }` — the
-  last three since HS-051, HS-054 and HS-062 — with **eight** wiring helpers — `provisioner()`,
+  last three since HS-051, HS-054 and HS-062 — with **ten** wiring helpers — `provisioner()`,
   `turner()`, `transitioner()`, `ladder()`, `deleter()`, `sweeper()` (an `Option`, `None` when
-  `idle_stop_min` is 0), `compactor()` (always `Some`) and `reconciler()` (HS-044). The mutex is an explicit
+  `idle_stop_min` is 0), `compactor()` (always `Some`), `reconciler()` (HS-044), `stopper()` (HS-030) and
+  `quota()` (an `Option`, `None` when `session_disk_soft_gb` is 0, HS-063). The mutex is an explicit
   stopgap (ADR-0012/0013; `docs/notes.md`'s *Data and state* landmines).
 - **`sessions::state::Transitioner::apply`** is the only way a session's state changes; `apply_logged`
   is the runners' wrapper (log, never return). A provisioning step report is `from == to` with `step`
@@ -1137,14 +1154,15 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 The catalogue lives in **`docs/notes.md`** — read the **cross-cutting** sections before you start anything,
 then the sections below. It is a reference: everything there is a measurement or a review finding.
 
-| Read | Why it bears on HS-063's per-session soft cap |
+| Read | Why it bears on HS-064's stopped-session expiry |
 | --- | --- |
-| Cross-cutting: *Tests*, *HTTP and the envelope*, *Config and docs* | **Tests** carries the shapes this story needs: a subprocess is `spawn_blocking`'d, a test that asserts only a status lets a wrong code ship (assert status **and** `code` **and** `content-type`), and a test that cannot fail is worse than no test — the acceptance here is *five claims* and each needs a witness. **HTTP and the envelope** carries "a code is effectively an API" (`disk_quota` is a new constant plus a glossary line) and "a message must describe its own request". **Config and docs** carries `session_disk_soft_gb`'s golden line and `KNOWN_KEYS.len()`: no new key, but a *meaning* (`0` = off) is a doc and glossary line. |
-| *Landmines: the disk floor (HS-062)* | The newest section, and the immediately preceding story: a machine-wide check multiplies by the test suite (this sandbox has 3 GB in `/tmp`), the `Tools`-shaped seam on `AppState` is how a test owns a program, `ErrorBody.message` is a `Cow` since HS-062, and a `case_*` that reboots the shared boot must put it back. The *distinction* matters too: `disk.rs` is `df` and the machine's floor; this story is `du` and one session's worktree. |
-| *Landmines: the idle stop and its tick (HS-021)* and *compaction (HS-060)* | The two periodic policies. `Sweeper::sweep` is public so one pass can be driven; the tick is a **constant** because the spec's config list is exhaustive; the row moves before the container; a refused application is an `info` line; and `AppState::sweeper()` is an `Option` that is `None` when the policy is off. Copy that shape rather than inventing a second one. |
-| *Landmines: the abort ladder (HS-016)* and *the turn timeout (HS-022)* | How a turn is ended: `climb` is rung one, `end_turn` is rung two and returns `Ending::{Asked,Forced}`, the ladder is **spawned** under a deadline while the turn keeps being awaited, and the timeout and the budget share one `fired` so only one climb happens. A quota that ends a turn is the third caller of that shape. |
-| *Landmines: what a delete keeps (HS-043)* and *the startup reconcile (HS-044)* | Not the subject, but the two stories that most recently touched "the row moves, the container follows" and the reason vocabulary (`EVICTED`, `IDLE_STOP`, `SERVER_RESTART`) a new reason joins. |
-| *Landmines: the Changes sheet (HS-058)* | The most recent lesson on sentences: every sentence a client shows is a pure `transcript.ts` function with a node test, because **no gate may need a browser** — which is where a `disk_quota` event's rendering has to live. |
+| Cross-cutting: *Tests*, *Data and state*, *Config and docs* | **Tests** carries the shapes this story needs: a background call is not there when the answer is (the eviction's lesson), a row can be ahead of its event, and "a test that cannot fail is worse than no test" — the acceptance is five claims and each needs a witness. **Data and state** carries ADR-0016's one writer and the repository's ownership of every statement (a new candidate query is one statement in `repository.rs`, with the idle stop's `idle_before` as the model), and the delete's "the row and its log go in one transaction". **Config and docs** carries `stopped_ttl_days`' golden line: no new key, and *no* `0`-means-off, because this key already refuses `0`. |
+| *Landmines: what a delete keeps (HS-043)* | **The story's core.** The keep-rules (`worktree::retained`, ADR-0052/ADR-0065: the tip comparison against `landed`), the `Kept { branch, wip }` answer, `sessions::deletion`'s rule 5, and the snapshot-before-removal order. "Using the HS-043 delete flow" means these, not a second removal. |
+| *Landmines: the disk floor (HS-062)* and *the per-session disk cap (HS-063)* | The two preceding stories, and the two that share this one's shape: a machine number measured once, a background policy with a constant tick, **a first pass that waits for the boot's re-provisioning** (HS-063's `SETTLE`), and the `Tools`-shaped program seam. The new landmine section also records the "an SSE frame's kind is its `event:` line" lesson and the gate-case-owns-its-state rule. |
+| *Landmines: the idle stop and its tick (HS-021)* and *compaction (HS-060)* | The two older periodic policies: `sweep` is public so one pass can be driven, the tick is a **constant** because the spec's config list is exhaustive, a refused application is an `info` line, and `AppState::sweeper()` is the `Option` that spells "off". A daily job copies that shape with a 24-hour tick. |
+| *Landmines: compaction (HS-060)* and *history windows (HS-061)* | Compaction is the closest thing to a *destructive* background pass (it deletes event rows) and its own landmine — "a `LIMIT` before the already-done filter stalls a pass", "a `warn` not a silent stall" — is the class this story's "skip and retry tomorrow" belongs to. |
+| *Landmines: the Changes sheet (HS-058)* | Every sentence a client shows is a pure `transcript.ts` function with a node test, because **no gate may need a browser** — which is where "days remaining" has to live, with its own clock passed in. The web section's "a row's text is written in two places" is the other half. |
+| *Landmines: the startup reconcile (HS-044)* | Not the subject, but the reason a first pass at boot is a shape this build already trusts: every live row is `starting` when the policies spawn, so a pass that runs then measures nothing. |
 
 Three rules worth repeating here because they are the most expensive to relearn: **a test that cannot fail
 is worse than no test** (mutate the behaviour and watch it go red); **a gate case that SKIPs on the bug it
@@ -1153,7 +1171,7 @@ three such edits have cost a review finding each.
 
 ## 7. Decisions taken on the operator's behalf (do not silently undo)
 
-Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0067`, one line each in
+Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0069`, one line each in
 `docs/stories/README.md`): read the recent ones before planning, and **amend rather than rewrite** — an ADR
 a later story changes gets a "Superseded by ADR-00xx" note (0012/0013, and 0026 amended 0020). The **ADR index in
 `docs/stories/README.md` is the one part of that directory a story edits** — it is the record of the decisions,
@@ -1185,17 +1203,17 @@ cd /home/adamolsson/projects/holosmith
 git status --short                                  # clean apart from log.txt/orchestrate.sh
 . ~/.pi/toolchains/env.sh                           # ALWAYS before cargo/rustc
 python3 /tmp/lin.py issues | grep -v ' Done ' | head # recreate /tmp/lin.py first (§2)
-python3 /tmp/lin.py issue PER-95                    # scoped, Backlog, the issue §1 names
+python3 /tmp/lin.py issue PER-96                    # scoped, Backlog, the issue §1 names
 docker version                                      # the daemon must answer, or a Docker check cannot be measured
 docker image inspect pi-agent:local                 # the image the Docker stories run
 docker network ls | grep -w egress                  # the proxy test's premise (§2); `grep -x` never matches
 docker rm -f hs_egress hs_key 2>/dev/null           # so tests/container.rs runs its real path
-scripts/verify.sh                                   # baseline green, ~9–12 min (it prints its own counts)
+scripts/verify.sh                                   # baseline green, ~13–14 min (it prints its own counts)
 ```
 
 If the baseline is red before you touch anything, that is the first thing you fix — and say so in Linear.
 
-Then start §5 on **§1's issue** (`PER-95`, HS-063) and stop after step 11.
+Then start §5 on **§1's issue** (`PER-96`, HS-064) and stop after step 11.
 
 Before you begin, check that the last session left nothing behind — `subagent({action:"list"})` should show
 no run in progress, `docker ps` none of its containers, and `git status --short` should look like the line
@@ -1214,32 +1232,26 @@ from those three; do not carry old sessions' ledgers in this file.
 If you stop before the issue ships, say so explicitly, name the next action, and leave the tree clean and the
 gates green — **a half-finished story is worse than an honest stop**.
 
-**The last shipped story** (`PER-94`, HS-062, ADR-0068; commits `35e9507`, `6f52cbe`, `d1a5350`): item 14's
-*first* sentence, "session creation and resume fail with 507 below `min_free_gb`". The story existed because of a
-phrase, not a check — `serve` already refused to boot below the floor (HS-024) and `doctor --quick` already printed
-the same finding (HS-045) from one function, so "the same **measurement**, so the two never disagree" was the
-requirement. So the number moved into a new `disk` module (`available_gb` the parse, `verdict` the comparison,
-`measure` the `df -Pk` subprocess, `guarded` who is measured at all) and `preflight::disk` became one caller that
-kept its four sentences byte for byte; the request paths write **their own** sentence, because the boot's fix
-("install coreutils") is not a create's. The create's refusal joins the `refusal` value it already had, so it is
-raised **after** the idempotency-key lookup (a replay still answers its own row) and **before** the project's
-refusals and the cap (no `git`, no row, no bundle, no eviction — witnessed by a cap test), which is ADR-0060's "a
-machine fact before a session fact"; the resume's is after its state check, before the project's read and the cap.
-Two decisions are worth carrying: **only a container run is measured** (`disk::guarded` = Docker and not a `hub`,
-the preflight's own predicate one level down) — a backend-blind floor would have turned every stub create in
-`cargo test` into a 507, because this sandbox's `/tmp` has 3 GB and the floor defaults to 20 — and **the envelope's
-message may now be owned** (`Cow<'static, str>`) so the refusal can carry both numbers, with every existing caller
-and every serialised byte unchanged and `internal`'s fixed sentence still keeping rusqlite text off the wire. The
-"running turns are not interrupted" bullet is **structural**: a source-walk guard asserts `disk::measure` is named
-outside `disk.rs` only in `preflight.rs` and `http/disk.rs` — which is why the refusal has a module of its own
-rather than living in `http/sessions.rs`, where `prompt`/`abort`/`steer` are — plus a crate test that crosses the
-floor mid-turn and watches it settle. The gate: **85 cases, 1440 assertions**, no `SKIP`; `cargo test` 1083 (55
-binaries); `web` 72 (unchanged). **The review's eleven findings are the lesson**: five were prose that had drifted
-from the code (a sentence saying "no *new* session" for a resume, an ADR counting four decisions and listing five, a
-README still saying sixty-seven), two were scope (the guard exempting the whole file that holds the turn's
-handlers; the cap-order claim with no witness), one was a real hole (`min_free_gb = 0` still forked `df`, so a
-zero-floor machine without it answered 500), and one was hygiene (`case_disk_floor` stopped the shared boot and did
-not put it back). Its full record is Linear, `docs/review/PER-94.md` and `git log`; do not carry it forward.
+**The last shipped story** (`PER-95`, HS-063, ADR-0069; commits `28186e1`, `5d52336`, `7e39282`, `ca5b49d`,
+`4bfa646`, `805734d`): item 14's *second* sentence, the per-session soft cap — the third periodic policy in the build
+and the first that had to **end a turn**. The key `session_disk_soft_gb` had existed since HS-034 and nothing read it,
+so the story was a new module (`quota.rs`), a new `AppState::quota()` (`None` at `0`), and a new table row. Three
+decisions are worth carrying: **`Ladder::end_turn`, not `climb`** (a session over its cap must stay `stopped` until
+somebody cleans up, so the "way back" is exactly wrong; when rung 1 works the idle arm's own `disk_quota` row
+finishes the job with the *policy's* reason rather than the abort's); **the measurement is `du -sk -- <worktree>`
+off the request path's threads and outside the database lock**, through a new `du` on `preflight::Tools` — the one
+seam a test can own a program with; and **the first pass waits for the boot's own re-provisioning** (bounded at
+60 s), because the reconcile leaves every live row `starting`, which is why a restart — not a five-minute tick — is
+how the gate and the demo observe a pass. The event is a **new kind `error`** with `{code, message, size_kib,
+limit_gb}`, once per crossing and only after the row is `stopped`; the *stop* is `stopped`, never `error`, and the
+two are different things the demo says out loud. The gate: **86 cases, 1469 assertions**, no `SKIP`; `cargo test`
+1101 (56 binaries); `web` 75. **The review's twelve findings are the lesson**: no P0/P1, and three were witness
+gaps rather than behaviour bugs — the spec's five-minute interval had no test that could fail (assert `TICK`), the
+`--one-file-system` landmine named a test that cannot see a flag (a recording shim pins the argv), and D2's
+isolation test read `Mounts` while the prose claimed the `docker run` vectors (parse the vectors' `-v`). Two were
+real UI defects: a block with no stylesheet rule, and the kind's name colliding with the platform's own
+`EventSource` `error` event (the listener now refuses anything that is not a `MessageEvent`). Its full record is
+Linear, `docs/review/PER-95.md` and `git log`; do not carry it forward.
 
 **One thing this build does not do, recorded rather than discovered:** a resumed session's pi has **no
 memory** of earlier turns (`--no-session`; the transcript is Holosmith's log). Replaying the log into a new pi
