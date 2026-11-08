@@ -716,3 +716,215 @@ export function sessionIdFromPath(pathname: string): string | null {
   const id = segments[2];
   return id === "" ? null : id;
 }
+
+// --- the Changes sheet (HS-058, ADR-0067) --------------------------------------------------------
+//
+// Item 12's screen, and the reason every string below is a function: `npm test` is the only gate that can see a
+// sentence, so the sheet's rules live here rather than in `main.ts`'s event handlers (ADR-0018's rule, applied to
+// the first story since phase 1 that adds a screen's worth of copy).
+
+// One entry of the changes answer's `files[]`: git's own status letter and the two counts, which are `null` for a
+// file git could not count (a binary). `0` here would be a claim about a file nothing measured.
+export type ChangedFile = {
+  path: string;
+  status: string;
+  additions: number | null;
+  deletions: number | null;
+};
+
+// The options the two pickers offer, in the one additive key HS-058 put on the answer: the configured merge
+// targets **that exist**, and the configured publish remotes verbatim (ADR-0067).
+export type Choices = { targets: string[]; remotes: string[] };
+
+// The changes answer as the sheet reads it: item 12's eleven keys, the one sentence a fallible `mergeable` needs,
+// and the pickers' options. `target`, `behind`, `mergeable` and `mergeable_reason` are nullable because they are
+// answers rather than absences — no target is a real state with a sentence of its own.
+export type Changes = {
+  branch: string;
+  base_commit: string;
+  head: string;
+  target: string | null;
+  ahead: number;
+  behind: number | null;
+  dirty: boolean;
+  mergeable: boolean | null;
+  mergeable_reason: string | null;
+  files: ChangedFile[];
+  touches_ci: boolean;
+  choices: Choices;
+};
+
+// What a merge answers: rule 6's three keys.
+export type Merged = { merged_commit: string; target: string; strategy: string };
+
+// What a publish answers: the commit that landed on the remote.
+export type Published = { remote: string; branch: string; commit: string };
+
+// The contract's three strategies, in item 12's order, with `ff-only` first because it is the default and the
+// picker preselects its first entry. Spelled exactly as the route spells them, so the UI cannot produce a
+// `422 bad_strategy`.
+export const STRATEGIES = ["ff-only", "merge", "squash"] as const;
+
+// git's status letter as a word. The letters are `diff --name-status`'s with `--no-renames`, which is one letter
+// per path: A, M, D, T (a mode change). The rest are here because a future flag could emit them and a word is
+// better than a blank; an unknown letter is shown as itself rather than dropped.
+const STATUS_WORDS: Readonly<Record<string, string>> = {
+  A: "added",
+  M: "modified",
+  D: "deleted",
+  T: "type changed",
+  R: "renamed",
+  C: "copied",
+  U: "unmerged",
+};
+
+export function statusWord(status: string): string {
+  return STATUS_WORDS[status] ?? status;
+}
+
+// A file's two counts. A binary file is git's `-`/`-`, which the answer carries as `null`: the em dash says "not
+// counted" and `0` would say "no lines changed" about a file that changed entirely (HS-052's rule, rendered).
+export function countsText(additions: number | null, deletions: number | null): string {
+  const plus = additions === null ? NO_DETAIL : `+${additions}`;
+  const minus = deletions === null ? NO_DETAIL : `−${deletions}`;
+  return `${plus} ${minus}`;
+}
+
+// One row of the file list: the path, git's status as a word, and the counts.
+export function fileLine(file: ChangedFile): string {
+  return `${file.path} · ${statusWord(file.status)} · ${countsText(file.additions, file.deletions)}`;
+}
+
+// The two counts under the list, and the target they are relative to. `behind` is `null` exactly when there is no
+// target (`target: null`), and the line then says so rather than printing a zero for a branch that is not there.
+export function countsLine(changes: Changes): string {
+  const ahead = `${changes.ahead} ahead`;
+  if (changes.target === null) {
+    return `${ahead} · no target`;
+  }
+  return `${ahead} · ${changes.behind ?? 0} behind ${changes.target}`;
+}
+
+// ADR-0066 D11's sentence — the one the publish's confirm step shows, and the one the sheet shows beside the
+// counts. One constant in one function because it is shown in two places and two spellings would be one of them
+// lying about what the operator agreed to.
+export const CI_WARNING =
+  "this branch changes CI configuration, so publishing it may run workflows in the remote repository";
+
+export function ciWarning(touches: boolean): string | null {
+  return touches ? CI_WARNING : null;
+}
+
+// Why the Merge button is disabled, or `null` when it is not.
+//
+// The order is `http::merge`'s: the row's state first (a running turn is `409 session_running`), then the
+// target (a repository with none of the configured targets has nothing to merge into), then the session's own
+// uncommitted work (`409 dirty_worktree`). The no-target sentence is the server's own `mergeable_reason`, so this
+// side does not re-spell it; the two reasons that *are* the client's name the same next step the refusals'
+// sentences do, and the `409` path stays as the backstop because a turn can start between the read and the tap.
+export const RUNNING_MERGE_REASON =
+  "the agent is working in this branch, so a merge waits for the turn to end";
+
+export const DIRTY_MERGE_REASON = "the session has uncommitted work, so only commits can be merged";
+
+// The sentence for a repository whose read carried no reason at all — a shape the server does not send (a
+// `target: null` always comes with a `mergeable_reason`), kept so a missing one cannot disable the button with
+// no explanation.
+export const NO_TARGET_REASON = "this repository has no merge target, so there is nothing to merge into";
+
+export function mergeBlocked(state: SessionState, changes: Changes | null): string | null {
+  // Before the first answer there is nothing to decide: the button is disabled by the sheet's own loading state
+  // and says nothing, rather than naming a reason about a session nothing has read yet.
+  if (changes === null) {
+    return null;
+  }
+  if (state === "running") {
+    return RUNNING_MERGE_REASON;
+  }
+  if (changes.target === null) {
+    return changes.mergeable_reason ?? NO_TARGET_REASON;
+  }
+  if (changes.dirty) {
+    return DIRTY_MERGE_REASON;
+  }
+  return null;
+}
+
+// The target picker's options: the configured targets the repository has, in the config's order. A server that
+// answered the target but no list still gets one option, so the picker is never empty for a mergeable session.
+export function targetOptions(changes: Changes): string[] {
+  if (changes.choices.targets.length > 0) {
+    return changes.choices.targets;
+  }
+  return changes.target === null ? [] : [changes.target];
+}
+
+// What the target picker starts on: the first existing configured target, which is the answer's own `target`.
+export function preselectedTarget(changes: Changes): string | null {
+  return changes.target ?? targetOptions(changes)[0] ?? null;
+}
+
+// Whether the sheet offers Publish at all: the config's remote list is the fact (`403 publish_disabled` is the
+// route's word for the same thing, and a button that has to fail to learn it is not a button).
+export function publishVisible(changes: Changes | null): boolean {
+  return changes !== null && changes.choices.remotes.length > 0;
+}
+
+// The publish's confirm step, before the operator taps the second button: what is pushed where, and the two
+// facts the request cannot change (the machine's own credentials do the push; nothing is forced).
+export function publishQuestion(branch: string, remote: string): string {
+  return `publish ${branch} to ${remote}? this machine's own git credentials do the push, and nothing is forced`;
+}
+
+// The prompt the "ask the agent to commit" shortcut sends. ADR-0065 D4 named this sentence when it built the
+// `409 dirty_worktree` refusal, so the shortcut and the refusal's sentence describe one next step; this side must
+// not write a third spelling.
+export const COMMIT_LABEL = "Ask the agent to commit";
+
+export const COMMIT_PROMPT =
+  "Commit every change in the working tree, with a message that describes it, and tell me the commit's hash.";
+
+// The prompt "Resolve with agent" sends: ADR-0064 D10 left the affordance to this story and item 12 says what it
+// does — "prompts the session to merge the target into its branch and fix the conflicts; then retry". The retry
+// is the same Merge button after the turn, which is why nothing here names a second one.
+export const RESOLVE_LABEL = "Resolve with agent";
+
+export const RESOLVE_PROMPT =
+  "Merge the target branch into your branch and resolve the conflicts, then commit the result and tell me the commit's hash.";
+
+// The paths a `409 conflict` named, in the envelope's additive `conflicts` key. `null` is "this refusal carried no
+// list" (every other error), and an empty list is git's own "no path it could name" — two different sentences.
+export function conflictLine(conflicts: string[] | null): string | null {
+  if (conflicts === null) {
+    return null;
+  }
+  return conflicts.length === 0
+    ? "the merge conflicts, and git named no path it could not merge"
+    : `conflicting: ${conflicts.join(", ")}`;
+}
+
+// What a request that failed says. The `code: message` shape the rest of the page uses, and **not**
+// `createFailure`: its three project codes are the only ones that drop the prefix, and no route this sheet calls
+// answers one of them.
+export function sheetFailure(code: string, message: string): string {
+  return `${code}: ${message}`;
+}
+
+// A commit id as a phone can hold it: git's own default abbreviation length.
+export const SHORT_COMMIT = 12;
+
+// What the sheet says after a merge landed.
+export function mergedNotice(merged: Merged): string {
+  return `merged into ${merged.target} by ${merged.strategy}: ${merged.merged_commit.slice(0, SHORT_COMMIT)}`;
+}
+
+// What the sheet says after a publish landed.
+export function publishedNotice(published: Published): string {
+  return `pushed ${published.branch} to ${published.remote} at ${published.commit.slice(0, SHORT_COMMIT)}`;
+}
+
+// Where one file's diff is: the changes view's second route, with the path percent-encoded exactly once. The route
+// compares the decoded string against `files[]`, so a path with a space, a `?` or a `#` must survive the trip.
+export function diffPath(id: string, path: string): string {
+  return `/api/sessions/${encodeURIComponent(id)}/changes/diff?path=${encodeURIComponent(path)}`;
+}

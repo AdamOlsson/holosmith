@@ -231,7 +231,17 @@ NUL-bearing binary and a `seq`-generated file whose patch is past 256 KB, and th
 whole-branch answer naming its files and capped with a marker, the binary file as git's own summary with no
 NUL byte in the answer, the large file at most 262144 bytes with a marker naming git's own byte count, and
 `..%2Fetc%2Fpasswd`, `%2Fetc%2Fpasswd` and an unchanged path each a `404 not_found` that leaks nothing,
-then the worktree gone for the summary's `409 no_worktree`; see ADR-0062), and the merge (`case_merge`,
+then the worktree gone for the summary's `409 no_worktree`; see ADR-0062), the Changes sheet
+(`case_changes_screen`, which is the one case a **UI** story adds and deliberately uses no browser: it boots its
+own Docker run over a real repository and the `_ping`-only socket, re-makes the worktree, commits a `Jenkinsfile`,
+and asserts the three things a browser would otherwise be the only witness of — `GET /sessions/<id>` is this
+tree's `web/dist/index.html` byte for byte, the **served** bundle (the `<script src>` in that page, fetched from the
+artifact and compared with `web/dist/assets/…` byte for byte) carries the sheet's fifteen element ids and the three
+sentences the ADRs fixed (the CI warning, ADR-0065 D4's commit prompt, ADR-0064 D10's Resolve prompt), and
+`GET …/changes` carries `"choices":{"targets":["main","master"],"remotes":["origin"]}` — both existing
+configured targets in the config's order, and a configured remote no repository here has, because that list is the
+config's and unfiltered — with `touches_ci: true`; the sheet's *behaviour* is `web/test/transcript.test.ts`'s,
+because no gate may need a browser; see ADR-0067), and the merge (`case_merge`,
 which boots its own Docker run over a real repository and the same `_ping`-only socket, re-makes the
 worktree, and walks **one** repository through both of rule 4's update paths: `git checkout --detach` makes
 `main` unchecked-out, so a `POST …/merge {"target":"main"}` moves the ref and *not* the checkout (the agent's

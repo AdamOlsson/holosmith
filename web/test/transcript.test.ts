@@ -40,6 +40,30 @@ import {
   type Change,
   type Frame,
   type SessionState,
+  CI_WARNING,
+  COMMIT_LABEL,
+  COMMIT_PROMPT,
+  DIRTY_MERGE_REASON,
+  NO_TARGET_REASON,
+  RESOLVE_LABEL,
+  RESOLVE_PROMPT,
+  RUNNING_MERGE_REASON,
+  ciWarning,
+  conflictLine,
+  countsLine,
+  countsText,
+  diffPath,
+  fileLine,
+  mergeBlocked,
+  mergedNotice,
+  preselectedTarget,
+  publishQuestion,
+  publishVisible,
+  publishedNotice,
+  sheetFailure,
+  statusWord,
+  targetOptions,
+  type Changes,
 } from "../src/transcript.ts";
 
 // One delta, spelled the way the producer must spell it.
@@ -1015,4 +1039,201 @@ test("the refused-snapshot sentence offers a decision, not a query string", () =
   assert.match(UNSAVED_WORK_NOTICE, /could not be saved/, UNSAVED_WORK_NOTICE);
   assert.doesNotMatch(UNSAVED_WORK_NOTICE, /force|\?/, UNSAVED_WORK_NOTICE);
   assert.equal(FORCED_DELETE_LABEL, "Delete anyway");
+});
+
+// --- the Changes sheet's rules (HS-058) ----------------------------------------------------------
+//
+// The sheet is the first screen since phase 1 with rules of its own, and `npm test` is the only gate that can see
+// them: no `case_*` may need a browser. Every assertion below is a sentence or a branch the screen shows.
+
+// One changes answer, with the two shapes the tests below vary. Written as a function rather than a constant so a
+// test that changes one field cannot be read by the next test.
+function changes(overrides: Partial<Changes> = {}): Changes {
+  return {
+    branch: "agent/0123456789abcdef",
+    base_commit: "0".repeat(40),
+    head: "1".repeat(40),
+    target: "main",
+    ahead: 2,
+    behind: 1,
+    dirty: false,
+    mergeable: true,
+    mergeable_reason: null,
+    files: [],
+    touches_ci: false,
+    choices: { targets: ["main"], remotes: [] },
+    ...overrides,
+  };
+}
+
+test("a file row names the path, the status as a word and both counts", () => {
+  assert.equal(
+    fileLine({ path: "src/a.txt", status: "A", additions: 3, deletions: 0 }),
+    "src/a.txt · added · +3 −0",
+  );
+  assert.equal(
+    fileLine({ path: "b.txt", status: "M", additions: 0, deletions: 7 }),
+    "b.txt · modified · +0 −7",
+  );
+  assert.equal(fileLine({ path: "c.txt", status: "D", additions: 0, deletions: 2 }), "c.txt · deleted · +0 −2");
+  // git's fourth one-letter status, which `--no-renames` can still emit: a mode change.
+  assert.equal(fileLine({ path: "run.sh", status: "T", additions: 0, deletions: 0 }), "run.sh · type changed · +0 −0");
+});
+
+test("a binary file's counts are an em dash and never a zero", () => {
+  // `null` is git's `-` in `--numstat`, and the whole point of the answer carrying `null` rather than `0`: a
+  // binary file changed entirely, and "no lines changed" would be the opposite of the truth.
+  assert.equal(countsText(null, null), `${NO_DETAIL} ${NO_DETAIL}`);
+  assert.equal(fileLine({ path: "b/bin.dat", status: "M", additions: null, deletions: null }), "b/bin.dat · modified · — —");
+  const line = fileLine({ path: "b/bin.dat", status: "A", additions: null, deletions: null });
+  assert.ok(!line.includes("+0") && !line.includes("−0"), `a binary file claims a count: ${line}`);
+});
+
+test("a status letter with no word is shown rather than dropped", () => {
+  // An unknown letter is still git saying *something* changed; a blank cell would read as "unchanged".
+  assert.equal(statusWord("X"), "X");
+  assert.equal(statusWord("M"), "modified");
+});
+
+test("the counts line says there is no target rather than counting behind it", () => {
+  assert.equal(countsLine(changes({ ahead: 2, behind: 1, target: "main" })), "2 ahead · 1 behind main");
+  // `behind: null` is the same fact as `target: null`, so the line must not print a zero for a branch that is not
+  // there — the number would be a claim about nothing.
+  const none = countsLine(changes({ ahead: 2, behind: null, target: null }));
+  assert.equal(none, "2 ahead · no target");
+  assert.ok(!none.includes("0 behind"), `a repository with no target counted a behind: ${none}`);
+});
+
+test("the CI warning is ADR-0066's one sentence, and only when the diff touches CI", () => {
+  assert.equal(ciWarning(false), null);
+  const warning = ciWarning(true);
+  assert.equal(
+    warning,
+    "this branch changes CI configuration, so publishing it may run workflows in the remote repository",
+  );
+  // The sentence the confirm step shows is the same value, so nothing here can drift into a second spelling.
+  assert.equal(warning, CI_WARNING);
+});
+
+test("a running turn blocks the merge before a dirty tree does", () => {
+  // Both facts hold at once (a running agent usually has uncommitted work), and the one worth naming is the turn:
+  // an agent that is working will commit. This is `http::merge`'s order too.
+  const both = changes({ dirty: true });
+  assert.equal(mergeBlocked("running", both), RUNNING_MERGE_REASON);
+  assert.equal(mergeBlocked("idle", both), DIRTY_MERGE_REASON);
+  // The two reasons are different sentences about different facts — a test that passed with one of them deleted
+  // would be the "a sentence in two places" bug wearing a new name.
+  assert.notEqual(RUNNING_MERGE_REASON, DIRTY_MERGE_REASON);
+  assert.ok(RUNNING_MERGE_REASON.includes("turn"), RUNNING_MERGE_REASON);
+  assert.ok(DIRTY_MERGE_REASON.includes("uncommitted"), DIRTY_MERGE_REASON);
+});
+
+test("a repository with no target is blocked by the server's own sentence", () => {
+  // The read already explains it (`mergeable_reason`), so the client renders it rather than writing a second
+  // spelling of the configured list.
+  const reason = "this project has none of the configured merge targets (main, master), so there is nothing to merge into";
+  const none = changes({ target: null, behind: null, mergeable: null, mergeable_reason: reason });
+  assert.equal(mergeBlocked("idle", none), reason);
+  // A reason the server did not send still says something rather than disabling a button in silence.
+  assert.equal(mergeBlocked("idle", changes({ target: null, mergeable_reason: null })), NO_TARGET_REASON);
+});
+
+test("a merge is blocked by running, and by nothing else a row can be", () => {
+  // `409 session_running` is the only state refusal the route has (ADR-0065 D2): a `stopped` or `error` row is the
+  // session an operator most wants to merge, so an `!== idle` guard here would disable the button for four of the
+  // five states and this test is what would go red.
+  const clean = changes();
+  for (const state of ["idle", "stopped", "error", "starting"] as const) {
+    assert.equal(mergeBlocked(state, clean), null, `${state} was blocked`);
+  }
+  assert.equal(mergeBlocked("running", clean), RUNNING_MERGE_REASON);
+  assert.equal(mergeBlocked("deleting", clean), null);
+  // Before the first answer there is no reason to give: the sheet is loading.
+  assert.equal(mergeBlocked("idle", null), null);
+});
+
+test("the target picker offers the existing targets and preselects the answer's own", () => {
+  const two = changes({ target: "develop", choices: { targets: ["develop", "main"], remotes: [] } });
+  assert.deepEqual(targetOptions(two), ["develop", "main"]);
+  assert.equal(preselectedTarget(two), "develop");
+  // An answer with a target but no list (a shape the server does not send) still offers the one it measured.
+  const bare = changes({ target: "main", choices: { targets: [], remotes: [] } });
+  assert.deepEqual(targetOptions(bare), ["main"]);
+  assert.equal(preselectedTarget(bare), "main");
+  // No target and no list: nothing to pick, and the merge is blocked by the read's own sentence.
+  const none = changes({ target: null, choices: { targets: [], remotes: [] } });
+  assert.deepEqual(targetOptions(none), []);
+  assert.equal(preselectedTarget(none), null);
+});
+
+test("the publish button exists exactly when a remote is configured", () => {
+  assert.equal(publishVisible(changes({ choices: { targets: ["main"], remotes: [] } })), false);
+  assert.equal(publishVisible(changes({ choices: { targets: ["main"], remotes: ["origin"] } })), true);
+  // Not "a server is there", not "a session is idle": nothing has been read yet, so there is nothing to show.
+  assert.equal(publishVisible(null), false);
+});
+
+test("the publish confirm names the branch and the remote and promises no force", () => {
+  const question = publishQuestion("agent/0123456789abcdef", "origin");
+  assert.ok(question.includes("agent/0123456789abcdef"), question);
+  assert.ok(question.includes("origin"), question);
+  // Spec item 12: the push is never forced. The confirm step is where the operator is told what they are agreeing
+  // to, so the promise has to be in it.
+  assert.ok(question.includes("never") || question.includes("nothing is forced"), question);
+});
+
+test("a conflict names its paths, and an empty list says git named none", () => {
+  assert.equal(conflictLine(null), null);
+  assert.equal(conflictLine(["a.txt"]), "conflicting: a.txt");
+  assert.equal(conflictLine(["a.txt", "src/b.txt"]), "conflicting: a.txt, src/b.txt");
+  const none = conflictLine([]);
+  assert.ok(none !== null && none.includes("no path"), `${none}`);
+  // The two shapes are different sentences: "git named none" is not "no list came back".
+  assert.notEqual(conflictLine([]), conflictLine(null));
+});
+
+test("the two prompts are the sentences the ADRs fixed, and they are not each other", () => {
+  // ADR-0065 D4 named the commit prompt when it built `409 dirty_worktree`; the shortcut sends that sentence, so a
+  // third spelling is exactly what this test forbids.
+  assert.equal(
+    COMMIT_PROMPT,
+    "Commit every change in the working tree, with a message that describes it, and tell me the commit's hash.",
+  );
+  // ADR-0064 D10 left the Resolve affordance to HS-058; item 12 says what it does, and the prompt says the same.
+  assert.ok(RESOLVE_PROMPT.includes("conflicts"), RESOLVE_PROMPT);
+  assert.ok(RESOLVE_PROMPT.includes("commit"), RESOLVE_PROMPT);
+  assert.notEqual(COMMIT_PROMPT, RESOLVE_PROMPT);
+  assert.notEqual(COMMIT_LABEL, RESOLVE_LABEL);
+});
+
+test("a merge names the target, the strategy and an abbreviated commit", () => {
+  const merged = { merged_commit: "0123456789abcdef0123456789abcdef01234567", target: "main", strategy: "ff-only" };
+  assert.equal(mergedNotice(merged), "merged into main by ff-only: 0123456789ab");
+  // The strategy is the answer's word, not the request's: the route answers what it did.
+  assert.ok(mergedNotice({ ...merged, strategy: "squash" }).includes("by squash"));
+});
+
+test("a publish names the branch, the remote and the commit", () => {
+  const published = { remote: "origin", branch: "agent/0123456789abcdef", commit: "fedcba9876543210fedcba9876543210fedcba98" };
+  assert.equal(publishedNotice(published), "pushed agent/0123456789abcdef to origin at fedcba987654");
+});
+
+test("a file path is encoded once, so a name with a space or a query character survives", () => {
+  assert.equal(
+    diffPath("0123456789abcdef", "src/a.txt"),
+    "/api/sessions/0123456789abcdef/changes/diff?path=src%2Fa.txt",
+  );
+  // A `#` that reached the server unencoded would end the path at the fragment; a `?` would start a query.
+  const odd = diffPath("0123456789abcdef", "a b?c#d&e.txt");
+  assert.ok(odd.endsWith("path=a%20b%3Fc%23d%26e.txt"), odd);
+  // The id is encoded too, because a route segment is not a place to trust the alphabet.
+  assert.ok(diffPath("a/b", "x").startsWith("/api/sessions/a%2Fb/"), diffPath("a/b", "x"));
+});
+
+test("a sheet's failure is the envelope's code and message, even for a project refusal", () => {
+  // `createFailure` drops the prefix for the create's three project codes; no route this sheet calls answers one,
+  // so the sheet keeps the shape every other failure on the page has.
+  assert.equal(sheetFailure("not_found", "no such file"), "not_found: no such file");
+  assert.equal(sheetFailure("dirty_worktree", "the session has uncommitted work"), "dirty_worktree: the session has uncommitted work");
+  assert.notEqual(sheetFailure("git_not_directory", "x"), createFailure("git_not_directory", "x"));
 });

@@ -2164,3 +2164,37 @@ it rather than adding a caveat beside it.
   first: `[publish] remotes = []` in a rewritten config, `start_serve` again over the same data root, and the
   `403` asserted for the existing row *and* for an id the table does not hold (the claim that it is answered
   before the row).
+
+### Landmines: the Changes sheet (HS-058)
+
+- **A gate case cannot see a DOM, so a UI story's case measures *shipping* and its rules are `npm test`'s.** RESUME
+  §3's "no gate may need a browser" is not a preference: `case_changes_screen` asserts the served page is
+  `web/dist/index.html` byte for byte, that the **served bundle** is `web/dist/assets/…` byte for byte, and that the
+  bundle carries the sheet's fifteen element ids and the three ADR sentences. The `cmp` comes first on purpose — a
+  grep alone would pass over a stale `dist/` that happened to carry the strings. The mutation is deleting a rule,
+  rebuilding, and watching the grep go red; the weak half (a string in a bundle is not a rendered element) is why
+  the sentence is written down in the ADR instead of being implied.
+- **`element.id = "changes-merge"` survives minification; a *class* name is not what to grep for.** Vite's minifier
+  keeps string literals, so ids and sentences are stable needles — but a needle chosen from a `className` would also
+  match the CSS bundle's own text, which is a different file, and one needle (`changes`) matches half the others.
+  Pick needles that are unique in the bundle, and count them (the case increments an assertion per needle that found
+  something, so a needle that found nothing cannot read as one that did).
+- **The client's disabled reason must be the route's order, and "only `running` refuses" is a client fact too.**
+  `mergeBlocked` asks the row, then the target, then `dirty` — `http::merge`'s order — and it must not be written as
+  `state !== "idle"`, which is the same shape HS-056's review caught server-side: four of the five states still
+  merge, and the `error` row a failed provision leaves is the one an operator most wants to merge. The
+  `the merge is blocked by running, and by nothing else a row can be` test is what goes red.
+- **A re-render during a request re-enables its own button unless something says otherwise.** The sheet re-renders on
+  its own 202 (`showState` → `update` → `render`), so without a `busy` flag the merge's button was enabled again
+  mid-merge and a second tap was a second merge. Every action sets it, and `render()` is the one place every
+  element's state is decided — the same "two writers of one value" lesson as HS-020's, in a DOM instead of a row.
+- **`check-static.sh`'s empty-root aarch64 `serve` waits 200 × 50 ms and can lose that race under load.** This
+  session's baseline run failed there ("serve printed no control_listen line:" with *empty* stderr) while a `cargo
+  check` and a few large greps were running in the same tree; the same binary booted in well under a second on a
+  bare re-run, and the next full gate was green. So: **nothing else runs while `verify.sh` runs**, not even a read
+  that spawns a compiler, and a failure there is re-measured alone before it is believed.
+- **The target walk no longer stops at the first hit.** `changes::existing_targets` asks git about every configured
+  name (two by default) because the whole list is the picker's options; `first_target` is gone, and a repository
+  with `main` and `master` now costs two `rev-parse --verify` calls instead of one. `choices.targets` is filtered
+  because an option `merge` refuses is a button that cannot work; `choices.remotes` is **not**, because whether the
+  repository has the remote is the publish route's question and its own `422 bad_remote` sentence (ADR-0067 D4).

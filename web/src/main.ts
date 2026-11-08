@@ -9,31 +9,53 @@
 // nodes, which is why every delta is one appended text node and nothing is ever re-rendered.
 
 import {
+  COMMIT_LABEL,
+  COMMIT_PROMPT,
+  DIRTY_MERGE_REASON,
   FORCED_DELETE_LABEL,
   HISTORY_PAGE_LIMIT,
   HISTORY_TRUNCATED,
   NO_DETAIL,
+  RESOLVE_LABEL,
+  RESOLVE_PROMPT,
+  STRATEGIES,
   TRANSCRIPT_EVENTS,
   Transcript,
   UNSAVED_WORK_NOTICE,
   affordances,
   budgetNotice,
+  ciWarning,
+  conflictLine,
+  countsLine,
   createFailure,
   deletedNotice,
+  diffPath,
+  fileLine,
   historyPath,
+  mergeBlocked,
+  mergedNotice,
   networkText,
   parseFrame,
+  preselectedTarget,
   previewOffered,
   previewUrl,
+  publishQuestion,
+  publishVisible,
+  publishedNotice,
   parseTruncated,
   sessionIdFromPath,
+  sheetFailure,
   stateText,
   stoppedDetail,
   streamPath,
+  targetOptions,
   type Change,
+  type Changes,
   type DeltaKind,
   type HistoryPage,
   type Kept,
+  type Merged,
+  type Published,
   type SessionState,
   type Spend,
 } from "./transcript";
@@ -1014,6 +1036,492 @@ function openSessionStream(id: string, target: StreamTarget): void {
   });
 }
 
+// The Changes sheet (HS-058, spec item 12's UI): item 12's screen, folded away behind one button.
+//
+// `deleteSection` is the shape — a section that draws itself from an answer and is patched by the one state
+// callback the screen already has (ADR-0023's precedent) — with three differences the story adds: it re-reads
+// when the row's state changes (a turn ending is what moves a branch), it has three actions rather than one, and
+// every sentence it shows is a rule in `transcript.ts`, because `npm test` is the only gate that can see one.
+//
+// Two closure variables hold what the server said — the last answer and the last row state — so the disabled
+// reason and the pickers are derived from the answer the body rendered rather than read back out of the DOM. They
+// are the same class of value as the composer's `canPrompt`: derived from the last update, with no lifetime of
+// their own (ADR-0017).
+type ChangesSheet = {
+  element: HTMLElement;
+  update: (state: SessionState) => void;
+  // A `session.status` transition happened, so the branch may have moved: re-read if the sheet is open.
+  refresh: () => void;
+};
+
+// The headers every mutating request carries (the guards read the content type as well).
+const JSON_HEADERS = { "content-type": "application/json", "x-holosmith-client": "1" };
+
+// A refusal read from a body that may not be JSON at all — the diff route answers `text/plain` when it answers.
+function envelopeOf(text: string): ErrorEnvelope | null {
+  try {
+    const body = JSON.parse(text) as Partial<ErrorEnvelope>;
+    return typeof body.code === "string" && typeof body.message === "string"
+      ? { code: body.code, message: body.message }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function changesSection(
+  id: string,
+  initial: SessionState,
+  showState: (state: SessionState, reason: string | null) => void,
+): ChangesSheet {
+  const section = make("section", "changes");
+  section.id = "changes";
+  const toggle = make("button", "changes-toggle", "Changes");
+  toggle.type = "button";
+  toggle.id = "changes-toggle";
+
+  const body = make("div", "changes-body");
+  body.id = "changes-body";
+  body.hidden = true;
+
+  const notice = make("p", "notice");
+  notice.id = "changes-notice";
+  notice.hidden = true;
+
+  const counts = make("p", "changes-counts");
+  counts.id = "changes-counts";
+  // ADR-0066 D11's sentence, shown beside the counts whenever the diff touches CI — and again in the confirm
+  // step, from the same constant, because the confirm is what the operator agrees to.
+  const warning = make("p", "warning");
+  warning.id = "changes-warning";
+  warning.hidden = true;
+
+  const files = make("ul", "changes-files");
+  files.id = "changes-files";
+  const diff = make("pre", "changes-diff");
+  diff.id = "changes-diff";
+  diff.hidden = true;
+
+  const targetField = make("label", "field");
+  const target = document.createElement("select");
+  target.id = "changes-target";
+  targetField.append(make("span", "field-name", "Target"), target);
+  const strategyField = make("label", "field");
+  const strategy = document.createElement("select");
+  strategy.id = "changes-strategy";
+  for (const word of STRATEGIES) {
+    const option = document.createElement("option");
+    option.value = word;
+    option.textContent = word;
+    strategy.append(option);
+  }
+  strategy.value = STRATEGIES[0];
+  strategyField.append(make("span", "field-name", "Strategy"), strategy);
+
+  const merge = make("button", "", "Merge");
+  merge.type = "button";
+  merge.id = "changes-merge";
+  // The disabled reason, in the same notice area every other answer on the page uses.
+  const reason = make("p", "notice");
+  reason.id = "changes-reason";
+  reason.hidden = true;
+  // The shortcut a `409 dirty_worktree` earns: the prompt ADR-0065 D4 named, sent to the running agent.
+  const commit = make("button", "secondary", COMMIT_LABEL);
+  commit.type = "button";
+  commit.id = "changes-commit";
+  commit.hidden = true;
+
+  // Rule 3's state: either the read says the merge conflicts (its reason names the paths) or a `409 conflict`
+  // came back with the paths in its additive key. One area, because they are one state.
+  const conflict = make("div", "changes-conflict");
+  conflict.id = "changes-conflict";
+  conflict.hidden = true;
+  const conflictText = make("p", "question");
+  conflictText.id = "changes-conflict-text";
+  const conflictPaths = make("p", "notice");
+  conflictPaths.id = "changes-conflict-paths";
+  const resolve = make("button", "secondary", RESOLVE_LABEL);
+  resolve.type = "button";
+  resolve.id = "changes-resolve";
+  conflict.append(conflictText, conflictPaths, resolve);
+
+  // The publish half: a button only when a remote is configured, a remote picker when several are, and a confirm
+  // step whose paragraph carries the CI warning (ADR-0066 D11). `confirm: true` is the request's own opt-in.
+  const publish = make("div", "changes-publish");
+  publish.id = "changes-publish";
+  publish.hidden = true;
+  const publishStart = make("button", "", "Publish");
+  publishStart.type = "button";
+  publishStart.id = "changes-publish-start";
+  const confirm = make("div", "confirm");
+  confirm.id = "changes-confirm";
+  confirm.hidden = true;
+  const question = make("p", "question");
+  question.id = "changes-question";
+  const remoteField = make("label", "field");
+  const remote = document.createElement("select");
+  remote.id = "changes-remote";
+  remoteField.append(make("span", "field-name", "Remote"), remote);
+  const yes = make("button", "", "Publish");
+  yes.type = "button";
+  yes.id = "changes-publish-yes";
+  const no = make("button", "secondary", "Cancel");
+  no.type = "button";
+  no.id = "changes-publish-cancel";
+  confirm.append(question, remoteField, yes, no);
+  publish.append(publishStart, confirm);
+
+  const actions = make("div", "changes-actions");
+  actions.append(targetField, strategyField, merge, reason, commit);
+
+  body.append(notice, counts, warning, files, diff, actions, conflict, publish);
+  section.append(toggle, body);
+
+  // The last answer, the last row state, and the three transient facts the body's own actions set. All of them
+  // are "what the server said last", never a cache of the repository.
+  let last: Changes | null = null;
+  let state = initial;
+  let selected: string | null = null;
+  let opened = false;
+  // True while one of the sheet's own requests is in flight, so a second tap sends nothing.
+  let busy = false;
+  // A `409 conflict`'s two facts, kept only until the next read says what is true now.
+  let conflictMessage: string | null = null;
+  let conflicts: string[] | null = null;
+
+  const say = (message: string): void => {
+    notice.textContent = message;
+    notice.hidden = false;
+  };
+  const clearNotice = (): void => {
+    notice.hidden = true;
+  };
+
+  // One select's options, rebuilt only when the list changed: a re-render that replaced them would move the
+  // operator's own pick back to the preselection under their finger.
+  const fillOptions = (select: HTMLSelectElement, options: string[]): void => {
+    const have = Array.from(select.options, (option) => option.value);
+    if (have.length !== options.length || have.some((value, index) => value !== options[index])) {
+      select.replaceChildren();
+      for (const value of options) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = value;
+        select.append(option);
+      }
+    }
+  };
+
+  const render = (): void => {
+    const answer = last;
+    // Every shape the body can take is decided here, from `answer`, `state` and `busy`: an element that is not
+    // re-decided keeps last render's state, which is exactly how a button stays enabled after its refusal.
+    merge.disabled = true;
+    reason.hidden = true;
+    commit.disabled = busy;
+    target.disabled = true;
+    conflict.hidden = true;
+    publish.hidden = true;
+    if (answer === null) {
+      counts.textContent = "";
+      warning.hidden = true;
+      files.replaceChildren();
+      diff.hidden = true;
+      return;
+    }
+    counts.textContent = countsLine(answer);
+    const ci = ciWarning(answer.touches_ci);
+    warning.textContent = ci ?? "";
+    warning.hidden = ci === null;
+
+    files.replaceChildren();
+    if (answer.files.length === 0) {
+      files.append(make("li", "empty", "nothing committed on this branch yet"));
+    }
+    for (const file of answer.files) {
+      const item = make("li", "change");
+      const button = make("button", "change-file", fileLine(file));
+      button.type = "button";
+      button.dataset.path = file.path;
+      if (file.path === selected) {
+        button.classList.add("selected");
+      }
+      button.addEventListener("click", () => {
+        selected = file.path;
+        void loadDiff(file.path);
+        render();
+      });
+      item.append(button);
+      files.append(item);
+    }
+
+    const targets = targetOptions(answer);
+    fillOptions(target, targets);
+    const chosen = preselectedTarget(answer);
+    if (!targets.includes(target.value) && chosen !== null) {
+      target.value = chosen;
+    }
+    target.disabled = busy || targets.length === 0;
+    strategy.disabled = busy;
+
+    const blocked = mergeBlocked(state, answer);
+    merge.disabled = busy || blocked !== null;
+    if (blocked !== null) {
+      reason.textContent = blocked;
+      reason.hidden = false;
+    }
+    commit.hidden = blocked !== DIRTY_MERGE_REASON;
+
+    // The conflict area, from the read or from the last `409`, whichever is newer: a read that says the merge is
+    // clean clears the refusal's words, because the agent's commit is what a retry after Resolve looks like.
+    if (answer.mergeable === true) {
+      conflictMessage = null;
+      conflicts = null;
+    }
+    const paths = conflictLine(conflicts);
+    const said =
+      conflictMessage ?? (answer.mergeable === false ? answer.mergeable_reason : null);
+    conflict.hidden = said === null && paths === null;
+    conflictText.textContent = said ?? "";
+    conflictText.hidden = said === null;
+    conflictPaths.textContent = paths ?? "";
+    conflictPaths.hidden = paths === null;
+    resolve.disabled = busy;
+
+    publish.hidden = !publishVisible(answer);
+    if (publish.hidden) {
+      confirm.hidden = true;
+      publishStart.hidden = false;
+    } else {
+      fillOptions(remote, answer.choices.remotes);
+      if (!answer.choices.remotes.includes(remote.value)) {
+        remote.value = answer.choices.remotes[0] ?? "";
+      }
+      publishStart.disabled = busy;
+      yes.disabled = busy;
+      remote.disabled = busy;
+      if (!confirm.hidden) {
+        question.textContent = publishQuestion(answer.branch, remote.value);
+      }
+    }
+  };
+
+  const loadDiff = async (path: string): Promise<void> => {
+    diff.textContent = "";
+    diff.hidden = true;
+    try {
+      const response = await fetch(diffPath(id, path), { headers: { accept: "text/plain" } });
+      const text = await response.text();
+      if (!response.ok) {
+        const envelope = envelopeOf(text);
+        say(
+          envelope === null
+            ? sheetFailure(String(response.status), text)
+            : sheetFailure(envelope.code, envelope.message),
+        );
+        return;
+      }
+      // The body as the route wrote it: a patch, with the cap's marker line already inside it. Never `innerHTML`
+      // with server data, and never re-measured — the marker names what git printed.
+      diff.textContent = text;
+      diff.hidden = false;
+    } catch (failure) {
+      say(`unreachable: ${String(failure)}`);
+    }
+  };
+
+  const load = async (): Promise<void> => {
+    const answer = await getJson<Changes>(`${sessionPath(id)}/changes`);
+    if (!answer.ok) {
+      last = null;
+      render();
+      say(sheetFailure(answer.code, answer.message));
+      return;
+    }
+    last = answer.value;
+    render();
+    if (selected === null) {
+      return;
+    }
+    // A branch that moved has a new patch for the same path, and a path that left the list has no patch at all.
+    if (answer.value.files.some((file) => file.path === selected)) {
+      void loadDiff(selected);
+    } else {
+      selected = null;
+      diff.textContent = "";
+      diff.hidden = true;
+    }
+  };
+
+  // The merge, with its own `fetch`: rule 6's 60 seconds belongs to the hub (HS-069), and a blanket timeout on
+  // the shared helper would cut the delete's own `abort_grace` wait (ADR-0065 D8, ADR-0066 D12).
+  const sendMerge = async (): Promise<void> => {
+    busy = true;
+    clearNotice();
+    render();
+    try {
+      const response = await fetch(`${sessionPath(id)}/merge`, {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ target: target.value, strategy: strategy.value }),
+      });
+      const text = await response.text();
+      const envelope = envelopeOf(text);
+      if (!response.ok) {
+        // The one refusal with a payload: rule 3's paths travel in the envelope's additive `conflicts` key, and a
+        // phone needs the list (ADR-0008's fixed sentence cannot carry it).
+        if (envelope?.code === "conflict") {
+          conflictMessage = envelope.message;
+          const payload = JSON.parse(text) as { conflicts?: unknown };
+          conflicts = Array.isArray(payload.conflicts)
+            ? payload.conflicts.filter((path): path is string => typeof path === "string")
+            : [];
+        }
+        say(
+          envelope === null
+            ? sheetFailure(String(response.status), text)
+            : sheetFailure(envelope.code, envelope.message),
+        );
+        return;
+      }
+      const merged = JSON.parse(text) as Merged;
+      say(mergedNotice(merged));
+      conflicts = null;
+      conflictMessage = null;
+      selected = null;
+      diff.textContent = "";
+      diff.hidden = true;
+      // The target moved, so the counts and the branch's own list have changed: the answer on screen is a
+      // pre-merge one and the sentence above says what landed.
+      await load();
+    } catch (failure) {
+      say(`unreachable: ${String(failure)}`);
+    } finally {
+      busy = false;
+      render();
+    }
+  };
+
+  const sendPublish = async (): Promise<void> => {
+    busy = true;
+    clearNotice();
+    render();
+    try {
+      const response = await fetch(`${sessionPath(id)}/publish`, {
+        method: "POST",
+        headers: JSON_HEADERS,
+        // `confirm` is the request's opt-in, not a second button: the operator's second tap *is* the confirmation.
+        body: JSON.stringify({ remote: remote.value, confirm: true }),
+      });
+      const text = await response.text();
+      const envelope = envelopeOf(text);
+      if (!response.ok) {
+        say(
+          envelope === null
+            ? sheetFailure(String(response.status), text)
+            : sheetFailure(envelope.code, envelope.message),
+        );
+        return;
+      }
+      say(publishedNotice(JSON.parse(text) as Published));
+      confirm.hidden = true;
+      publishStart.hidden = false;
+    } catch (failure) {
+      say(`unreachable: ${String(failure)}`);
+    } finally {
+      busy = false;
+      render();
+    }
+  };
+
+  // The two prompts. Neither resumes the session: the composer owns that ladder (HS-018), and a prompt sent to a
+  // stopped session answers `409 session_stopped`, which is the sentence an operator needs — resume it first.
+  const sendPrompt = async (prompt: string, done: string): Promise<void> => {
+    busy = true;
+    clearNotice();
+    render();
+    try {
+      const response = await fetch(`${sessionPath(id)}/prompt`, {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ prompt }),
+      });
+      const text = await response.text();
+      const envelope = envelopeOf(text);
+      if (!response.ok || envelope !== null) {
+        say(
+          envelope === null
+            ? sheetFailure(String(response.status), text)
+            : sheetFailure(envelope.code, envelope.message),
+        );
+        return;
+      }
+      // The 202 is the row, now `running`: the badge follows it and the merge is disabled by the turn it names.
+      const row = JSON.parse(text) as Session;
+      showState(row.status, row.status_reason);
+      conflicts = null;
+      conflictMessage = null;
+      say(done);
+    } catch (failure) {
+      say(`unreachable: ${String(failure)}`);
+    } finally {
+      busy = false;
+      render();
+    }
+  };
+
+  toggle.addEventListener("click", () => {
+    opened = !opened;
+    body.hidden = !opened;
+    if (opened) {
+      clearNotice();
+      void load();
+    }
+  });
+  merge.addEventListener("click", () => {
+    void sendMerge();
+  });
+  commit.addEventListener("click", () => {
+    void sendPrompt(COMMIT_PROMPT, "asked the agent to commit; merge again when the turn ends");
+  });
+  resolve.addEventListener("click", () => {
+    void sendPrompt(RESOLVE_PROMPT, "asked the agent to resolve the conflicts; merge again when the turn ends");
+  });
+  publishStart.addEventListener("click", () => {
+    publishStart.hidden = true;
+    confirm.hidden = false;
+    if (last !== null) {
+      question.textContent = publishQuestion(last.branch, remote.value);
+    }
+  });
+  remote.addEventListener("change", () => {
+    if (last !== null) {
+      question.textContent = publishQuestion(last.branch, remote.value);
+    }
+  });
+  no.addEventListener("click", () => {
+    confirm.hidden = true;
+    publishStart.hidden = false;
+  });
+  yes.addEventListener("click", () => {
+    void sendPublish();
+  });
+
+  render();
+  return {
+    element: section,
+    update: (next: SessionState) => {
+      state = next;
+      render();
+    },
+    refresh: () => {
+      if (opened) {
+        void load();
+      }
+    },
+  };
+}
+
 // The session screen's destructive affordance (HS-043, spec item 9).
 //
 // ADR-0023 deferred it because a destructive request needs a confirmation step and a way past a refused
@@ -1194,15 +1702,22 @@ function sessionScreen(health: Health, session: SessionDetail): void {
 
   const composer = composerSection(session.id, (state, reason) => showState(state, reason));
   const deleted = deleteSection(session.id, (state, reason) => showState(state, reason));
+  const changes = changesSection(session.id, session.status, (state, reason) =>
+    showState(state, reason),
+  );
 
-  // The one place a state change patches the screen: the badge, the preview link, the composer's actions
-  // and the delete affordance. Two writers of one state is the blocker HS-020's review found, and HS-043's
-  // affordance is the fourth reader — so it is one function, and `session.status` goes through it too.
+  // The one place a state change patches the screen: the badge, the preview link, the composer's actions,
+  // the delete affordance and the Changes sheet. Two writers of one state is the blocker HS-020's review
+  // found, and HS-043's affordance is the fourth reader and HS-058's sheet the fifth — so it is one function,
+  // and `session.status` goes through it too. The sheet is the one reader that *acts* on the transition: a turn
+  // ending is what moves the branch, so it re-reads.
   function showState(state: SessionState, reason: string | null): void {
     badge.textContent = stateText(state, reason);
     preview.hidden = !previewOffered(state);
     composer.update(state);
     deleted.update(state);
+    changes.update(state);
+    changes.refresh();
   }
   composer.update(session.status);
   deleted.update(session.status);
@@ -1210,7 +1725,16 @@ function sessionScreen(health: Health, session: SessionDetail): void {
   const section = make("section", "session-screen");
   section.id = "session";
   section.dataset.session = session.id;
-  section.append(back, head, meta, earlier, transcript, composer.element, deleted.element);
+  section.append(
+    back,
+    head,
+    meta,
+    changes.element,
+    earlier,
+    transcript,
+    composer.element,
+    deleted.element,
+  );
   app.replaceChildren(header(health), section);
   openSessionStream(session.id, {
     transcript,

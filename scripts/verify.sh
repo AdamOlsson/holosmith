@@ -425,6 +425,7 @@ serve_cases=(
   case_worktree
   case_changes
   case_changes_diff
+  case_changes_screen
   case_merge
   case_merge_strategies
   case_merge_guards
@@ -5239,6 +5240,153 @@ case_changes() {
   body="$(cat "$WORK/responses/${name}_pruned.body")"
   printf '%s\n' "$body" | grep -qF 'resume' ||
     fail "${name}_pruned/sentence" "the sentence names no next step: $body"
+  assertions=$((assertions + 1))
+
+  kill "$socket_pid" 2>/dev/null || true
+  wait "$socket_pid" 2>/dev/null || true
+  socket_pid=""
+}
+
+# HS-058: the Changes sheet is **shipped**. No gate may need a browser, so this case measures the three halves a
+# browser would otherwise be the only witness of:
+#
+#   1. the sheet's screen is still the app shell, byte-for-byte (`case_session_screen`'s comparison, on a session
+#      whose changes exist) — a `dist/` built before the sheet fails here;
+#   2. the bundle the artifact **serves** carries the sheet's element ids and the three sentences the ADRs fixed, so
+#      a tree that dropped a rule, or an artifact built before it, is red;
+#   3. the changes answer carries the pickers' options — the one key this story added — with the configured targets
+#      the repository has (in the config's order) and the publish remote passed through verbatim.
+#
+# The sheet's *behaviour* is `web/test/transcript.test.ts`'s: `npm test` is the only gate that can see a sentence,
+# and a rule that only the DOM could show would not be a gate case at all (RESUME §3).
+case_changes_screen() {
+  local name=case_changes_screen response body id base wt asset needle
+  # Two statements, not one, for the reason `case_changes` gives: in a single `local` every right-hand side expands
+  # before either assignment, so `repo="$projects/…"` on the same line reads an unset `projects` and `set -u` stops.
+  local projects="$WORK/projects-screen"
+  local repo="$projects/holosmith"
+  # The guard comes first, before `stop_serve`: a skipped case that stopped the server leaves the phase's own
+  # teardown with no pid to signal.
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to answer the docker preflight (web/test/transcript.test.ts covers the rules)\n' "$name"
+    return 0
+  fi
+  stop_serve
+  mkdir -p "$repo"
+  git -C "$repo" init --quiet -b main || fail "$name/git" "git init did not work in $repo"
+  git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet --allow-empty \
+    -m "the first commit" || fail "$name/git" "git commit did not work in $repo"
+  base="$(git -C "$repo" rev-parse HEAD)" || fail "$name/git" "git rev-parse did not work in $repo"
+  # The default `[merge] targets` is `["main", "master"]`, and a repository has one of them — so the second branch
+  # is what makes the picker's list more than its preselection: both exist here, and the order is the config's.
+  git -C "$repo" branch master || fail "$name/git" "git branch master did not work in $repo"
+
+  socket_pid="$(fake_docker_ping "$WORK/docker-screen.sock")"
+  for _ in $(seq 1 100); do
+    [ -S "$WORK/docker-screen.sock" ] && break
+    sleep 0.05
+  done
+  # A publish remote is configured, and no repository here has a remote by that name: the list is the config's,
+  # unfiltered (ADR-0067), and that is the arm this asserts.
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\ndocker_host = "unix://%s/docker-screen.sock"\nmin_free_gb = 1\nidle_stop_min = 0\n[publish]\nremotes = ["origin"]\n' \
+    "$owner" "$projects" "$WORK" >"$WORK/config-screen.toml"
+  start_serve "$WORK/config-screen.toml" "$WORK/data-screen"
+
+  fetch_body "${name}_create" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-screen-1" ||
+    fail "${name}_create/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "${name}_create")"
+  expect_status "${name}_create" "$response" 202
+  body="$(cat "$WORK/responses/${name}_create.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id" ] || fail "${name}_create/id" "the response names no id: $body"
+
+  body=""
+  for _ in $(seq 1 100); do
+    fetch "${name}_row" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "${name}_row/no_answer" "GET /api/sessions/$id did not answer"
+    body="$(cat "$WORK/responses/${name}_row.body")"
+    case "$body" in
+      *'"status":"starting"'*) sleep 0.1 ;;
+      *) break ;;
+    esac
+  done
+  expect_status "${name}_row" "$(answer "${name}_row")" 200
+  printf '%s\n' "$body" | grep -qF "\"base_commit\":\"$base\"" ||
+    fail "${name}_row/base" "the row does not record the branch's base commit: $body"
+  assertions=$((assertions + 1))
+
+  wt="$projects/.worktrees/$id"
+  # The provisioner took back what its worktree step made (ADR-0029), so the case makes it again with the step's own
+  # command — absolute paths, because `worktree add` resolves a relative one against the repository.
+  git -C "$repo" worktree add --quiet -b "agent/$id" "$wt" "$base" ||
+    fail "${name}/worktree" "git worktree add did not work for $wt"
+  # The file-name arm of `CI_PATHS`, so the answer says `touches_ci: true` and the sheet's warning has something to
+  # show; a `.github/` prefix would measure the other arm.
+  printf 'pipeline {}\n' >"$wt/Jenkinsfile" || fail "${name}/write" "the session's file is not writable"
+  git -C "$wt" add Jenkinsfile || fail "${name}/add" "git add did not work in $wt"
+  git -C "$wt" -c user.name=verify -c user.email=verify@example commit --quiet -m "the session's change" ||
+    fail "${name}/commit" "git commit did not work in $wt"
+
+  # 1. The screen is the shell, byte for byte.
+  fetch "$name" GET "/sessions/$id" "Host: 127.0.0.1" ||
+    fail "$name/no_answer" "GET /sessions/$id did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 200
+  [ -f web/dist/index.html ] ||
+    fail "$name/index_html" "web/dist/index.html is missing: run scripts/build.sh"
+  cmp -s "$WORK/responses/$name.body" web/dist/index.html ||
+    fail "$name/index_html" "the screen path is not this tree's web/dist/index.html"
+  assertions=$((assertions + 1))
+
+  # 2. The bundle the artifact serves: the file the build made, and the sheet's own strings inside it.
+  asset="$(sed -n 's/.*src="\([^"]*\.js\)".*/\1/p' web/dist/index.html | head -1)"
+  [ -n "$asset" ] || fail "$name/asset" "the shell names no script to fetch"
+  fetch "${name}_asset" GET "$asset" "Host: 127.0.0.1" ||
+    fail "${name}_asset/no_answer" "GET $asset did not answer"
+  response="$(answer "${name}_asset")"
+  expect_status "${name}_asset" "$response" 200
+  cmp -s "$WORK/responses/${name}_asset.body" "web/dist$asset" ||
+    fail "${name}_asset/bytes" "the served bundle is not this tree's web/dist$asset"
+  assertions=$((assertions + 1))
+  # One id per element the sheet is made of, and the three sentences a decision already fixed: the CI warning
+  # (ADR-0066 D11), the commit prompt (ADR-0065 D4) and the Resolve prompt (ADR-0064 D10's affordance, spelled by
+  # HS-058). A `for` over needles rather than fourteen `grep`s, and every needle counted so a needle that found
+  # nothing cannot pass as one that did.
+  for needle in \
+    'changes-toggle' 'changes-body' 'changes-counts' 'changes-warning' 'changes-files' 'changes-diff' \
+    'changes-target' 'changes-strategy' 'changes-merge' 'changes-reason' 'changes-commit' 'changes-conflict' \
+    'changes-resolve' 'changes-publish' 'changes-confirm' \
+    'this branch changes CI configuration, so publishing it may run workflows in the remote repository' \
+    "Commit every change in the working tree, with a message that describes it, and tell me the commit's hash." \
+    "Merge the target branch into your branch and resolve the conflicts, then commit the result and tell me the commit's hash."; do
+    grep -qF -- "$needle" "$WORK/responses/${name}_asset.body" ||
+      fail "${name}_asset/sheet" "the served bundle does not carry $needle"
+    assertions=$((assertions + 1))
+  done
+
+  # 3. The answer the sheet draws, including the one key this story added.
+  fetch "${name}_changes" GET "/api/sessions/$id/changes" "Host: 127.0.0.1" ||
+    fail "${name}_changes/no_answer" "GET /api/sessions/$id/changes did not answer"
+  response="$(answer "${name}_changes")"
+  expect_status "${name}_changes" "$response" 200
+  expect_header "${name}_changes" "$response" "Content-Type" "application/json"
+  body="$(cat "$WORK/responses/${name}_changes.body")"
+  # Both existing configured targets, in the config's order, and the remote verbatim: the pickers' options.
+  printf '%s\n' "$body" | grep -qF '"choices":{"targets":["main","master"],"remotes":["origin"]}' ||
+    fail "${name}_changes/choices" "the answer does not carry the pickers' options: $body"
+  assertions=$((assertions + 1))
+  # `target` is the first of that list, which is what the target picker preselects and what the counts are about.
+  printf '%s\n' "$body" | grep -qF '"target":"main"' ||
+    fail "${name}_changes/target" "the preselected target is not the first configured one: $body"
+  assertions=$((assertions + 1))
+  printf '%s\n' "$body" | grep -qF '"touches_ci":true' ||
+    fail "${name}_changes/touches_ci" "a Jenkinsfile did not raise the CI flag: $body"
+  assertions=$((assertions + 1))
+  printf '%s\n' "$body" | grep -qF '"path":"Jenkinsfile"' ||
+    fail "${name}_changes/files" "the file list does not carry the session's file: $body"
   assertions=$((assertions + 1))
 
   kill "$socket_pid" 2>/dev/null || true
