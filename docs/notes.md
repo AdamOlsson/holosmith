@@ -31,10 +31,10 @@ now does, and each names the ADR or the review that owns it.
    `agent_settled` or `abort_completed`; a forced stop has **two owners** and the table decides, which
    is why exactly one `StateError::Illegal` in `turn.rs` is a `debug` line. **Two policies now climb it**
    — HS-022's deadline and HS-023's ceiling — and both sit in the runner's own `select!`, each guarded on
-   one `fired` so the first to fire owns the reason and no second climb is spawned. The six reason words
-   for a climbed stop are `forced_abort`, `deleted`, `evicted`, `idle_stop`, `turn_timeout` and
-   `budget_exceeded`; a seventh, `pi_exit`, is not a climb at all but the *clean exit* HS-030 records on a
-   `stopped` row (fact 17).
+   one `fired` so the first to fire owns the reason and no second climb is spawned. The seven reason words
+   for a climbed stop are `forced_abort`, `deleted`, `evicted`, `idle_stop`, `turn_timeout`,
+   `budget_exceeded` and `disk_quota`; an eighth, `pi_exit`, is not a climb at all but the *clean exit*
+   HS-030 records on a `stopped` row (fact 17).
 2. **A turn that will not end is ended for it, and the reason says which policy asked.** The deadline is
    the turn runner's own (`Turn::run`), not a sweeper's, because the row keeps no per-turn timestamp —
    `last_active_at` is activity, so a steer moves it. It races `start_turn` against a sleep and, when the
@@ -433,6 +433,7 @@ Three things HS-014 and HS-015 settled that later stories inherit:
   | `turn.start` / `turn.end` | `{}` |
   | `turn.steer` | `{"text"}` — **no message id**: one frame, one block, nothing continues it (ADR-0021) |
   | `turn.error` | `{"reason", "method"}` — **no message id**, a steer's shape (HS-035) |
+  | `error` | `{"code", "message", …}` — **no message id**; a machine policy ending the session, first the disk cap (HS-063): `code` is the row's reason word, `size_kib`/`limit_gb` are the measurement |
   | `session.status` | `{"from", "to", "step", "reason"}` (ADR-0016, the transitioner only) |
 
   A message id keys a transcript block; a delta is one appended text node; a snapshot is the only
@@ -622,10 +623,12 @@ it rather than adding a caveat beside it.
 - **A row's text is written in two places, and they must be one function.** A row is drawn once
   (`sessionRow`) and patched per frame (`applyStatus`); HS-020's blocker was a sentence written only in
   the first. Anything the frame path must show belongs in a pure `transcript.ts` function both call.
-  `stoppedNotice` is now **two words wide** (`evicted` "to make room", `idle_stop` "sitting idle"), each
-  with its own test and neither shared with `forced_abort`, `deleted` or `turn_timeout` — a stopped row
-  for those keeps the dash, and `turn_timeout` is resumed at once anyway so it shows as `idle ·
-  turn_timeout`. Adding a third word means a third sentence *and* a test that it is not another's.
+  `stoppedNotice` is now **three words wide** (`evicted` "to make room", `idle_stop` "sitting idle", and
+  `disk_quota` "using too much disk" — HS-063), each with its own test and none shared with `forced_abort`,
+  `deleted` or `turn_timeout` — a stopped row for those keeps the dash, and `turn_timeout` is resumed at once
+  anyway so it shows as `idle · turn_timeout`. Adding a word means a sentence *and* a test that it is not
+  another's. `error` is also the platform's own `EventSource` event name, so the page's one listener guards on
+  `instanceof MessageEvent`: a connection failure is not a frame.
 - **A delta is one appended text node; a snapshot is `replaceChildren`.** Never `textContent +=` (O(n)
   per delta ⇒ O(n²) per turn), never a document query per frame — blocks are a `Map<message id, nodes>`,
   tools a `Map<tool id, nodes>`.
@@ -2252,10 +2255,12 @@ it rather than adding a caveat beside it.
   logs `-sk -- <path>` and answers a fixed size: the size is the stand-in's and the *path* is the story ("each live
   session's worktree"). Assert the path, not the size — a case that only lowered the cap would pass whether or not
   the watchdog measured the right directory.
-- **`--one-file-system` is the flag this policy must not grow.** It would leave a nested mount out of a worktree's
-  size, and it is GNU-only while `du` here must be a POSIX utility. The acceptance's "the cap includes `target/`
-  and `node_modules`" is a claim about *inclusion*, so the one test that uses the machine's own `du` builds a tree
-  with both directories in it and asserts the sum.
+- **`--one-file-system` is the flag this policy must not grow**, and two tests see two different halves of that.
+  It is GNU-only, while `du` here must be a POSIX utility, and it would leave a nested mount out of a worktree's
+  size. The **argument vector** is pinned by a shim that records what it was asked (`-sk -- <path>`, nothing
+  else), which is the half that would catch the flag; the acceptance's "the cap includes `target/` and
+  `node_modules`" is the *inclusion* half, and it needs the machine's own `du` over a tree that has both
+  directories in it — a one-filesystem tree, which is why that test cannot be the one that catches the flag.
 - **An SSE frame's kind is its `event:` line, not a payload key.** `case_disk_quota`'s first draft asserted
   `"type":"error"` against the stream — that field belongs to a history *page*, whose events are objects, while a
   stream frame is `id`/`event`/`data`. The case failed on its own wrong needle, not on the policy; the page keeps

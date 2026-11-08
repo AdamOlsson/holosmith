@@ -7350,13 +7350,11 @@ case_disk_quota() {
   response="$(answer "${name}_history")"
   expect_status "${name}_history" "$response" 200
   body="$(cat "$WORK/responses/${name}_history.body")"
+  # Only the kind: the page's `payload` is an escaped string, so the code and the numbers are asserted on the
+  # stream above, where they are not escaped. (A `"status"` needle would also be a lie here — an event's payload
+  # has `from`/`to`/`step`/`reason`, and `tool.end`'s has its own `status`.)
   printf '%s\n' "$body" | grep -qF '"type":"error"' ||
     fail "${name}_history/kind" "history does not carry the cap's event: $body"
-  assertions=$((assertions + 1))
-  # …and nothing in the log says `error` as a *state*: the row's third bullet is the row's.
-  if printf '%s\n' "$body" | grep -qF '"status":"error"'; then
-    fail "${name}_history/state" "the cap's stop was recorded as a state: $body"
-  fi
   assertions=$((assertions + 1))
 
   # 5. Resumable after cleanup: the operator frees space and asks for the session back.

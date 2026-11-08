@@ -423,8 +423,9 @@ the data root. It creates one session, waits for `idle` (so the worktree is real
 **restarts the server**, and lets the watchdog's first pass — which waits for the boot's own re-provisioning to
 settle (ADR-0069) — measure it. It asserts the row is `stopped` with `"status_reason":"disk_quota"` and not
 `error`; that the stand-in was asked about `<projects>/.worktrees/<id>`; that the `session.status` frame is
-`idle → stopped` with that reason; that `GET …/events/history` carries an `error` frame with
-`"code":"disk_quota"` and the two numbers; and that `POST …/resume` answers `202` and walks the row back to
+`idle → stopped` with that reason; that the stream carries an `error` frame with `"code":"disk_quota"` and the two
+numbers (the page's payload is an escaped string, so the page itself is asserted by kind), that
+`GET …/events/history` carries that `error` frame; and that `POST …/resume` answers `202` and walks the row back to
 `idle` — the acceptance's “resumable after cleanup” measured. It needs the daemon **and** an `agent_image` and
 prints one `SKIP` line without them; `tests/quota.rs` covers both ladder rungs, the under-the-cap case, an
 unmeasurable worktree, `session_disk_soft_gb = 0` and the measurement's arithmetic without a daemon (ADR-0069).

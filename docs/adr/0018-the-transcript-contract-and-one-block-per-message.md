@@ -24,6 +24,12 @@ id** — one frame, one block, nothing continues it, which is the shape ADR-0021
 an extension's dialog, which a session cannot answer and therefore cancels; the sentence it carries is why an
 extension's behaviour is explicable rather than mysterious.
 
+**Amended by ADR-0069:** there is a sixth kind, `error`, carrying `{"code", "message", …}` and **no message
+id** — the same shape again. Its one producer is the per-session disk soft cap (HS-063), whose `code` is
+`disk_quota`; it is the machine ending a session rather than the agent failing at something, which is why it is
+its own kind rather than a `turn.error`. A client that does not render it drops it, exactly as this ADR says of
+any unknown kind.
+
 `session.status` keeps its ADR-0016 payload and drives the screen's badge; these four drive the
 transcript. Two of the four names are the spec's, quoted from item 15: `message.snapshot` "holding
 full text, thinking, message id", and the coalescing rule "consecutive deltas of the same kind and

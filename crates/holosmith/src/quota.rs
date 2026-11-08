@@ -395,7 +395,16 @@ impl Quota {
                     Ok(Some(idle)) if idle.status == Status::Idle => {
                         self.stop_idle(idle, size_kib).await;
                     }
-                    Ok(_) => tracing::info!(
+                    // A `prompt` accepted in the window is the race this sentence must not call "left the row":
+                    // the row is live, with a turn nobody aborted, and the next pass will end it. So the state
+                    // the row actually has is in the line.
+                    Ok(Some(other)) => tracing::info!(
+                        target: "holosmith::quota",
+                        session = %session.id,
+                        state = other.status.as_str(),
+                        "the session was no longer idle after its turn ended, so the cap left it alone"
+                    ),
+                    Ok(None) => tracing::info!(
                         target: "holosmith::quota",
                         session = %session.id,
                         "the session left the row before the cap could stop it"
@@ -601,28 +610,13 @@ mod tests {
     }
 
     #[test]
-    fn a_measurement_that_cannot_run_is_not_a_pass() {
-        // A program that is not there, one that refuses, and one whose answer is not a `du` answer: all three
-        // are errors rather than a size, because a check that cannot run must not read as "under the cap".
-        let missing = measure(Path::new("/nonexistent/du"), Path::new("/tmp"));
-        assert!(matches!(missing, Err(DuError::Unrunnable(_))));
-        let dir = std::env::temp_dir().join(format!("holosmith-quota-du-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("a scratch directory");
-        let refusing = dir.join("refusing");
-        std::fs::write(&refusing, "#!/bin/sh\necho 'du: nope' >&2\nexit 1\n").expect("a shim");
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&refusing, std::fs::Permissions::from_mode(0o755)).expect("exec");
-        let refused = measure(&refusing, &dir);
-        assert!(matches!(refused, Err(DuError::Refused(_))), "{refused:?}");
-        let babbling = dir.join("babbling");
-        std::fs::write(&babbling, "#!/bin/sh\necho 'not a number at all'\n").expect("a shim");
-        std::fs::set_permissions(&babbling, std::fs::Permissions::from_mode(0o755)).expect("exec");
-        let unprintable = measure(&babbling, &dir);
-        assert!(
-            matches!(unprintable, Err(DuError::Unprintable(_))),
-            "{unprintable:?}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
+    fn the_tick_is_the_specs_five_minutes() {
+        // Item 14's own number, and a constant rather than a key: `session_disk_soft_gb` is the *size*, and the
+        // interval is the policy. A test because nothing else can see it — every test drives one pass, so a tick
+        // of five seconds and a tick of five hours would both leave the suite green.
+        assert_eq!(TICK.as_secs(), 5 * 60);
+        // And the first pass's bound is larger than the tick it precedes, so a stuck row cannot make the policy
+        // run less often than the spec says.
+        assert!(SETTLE < TICK);
     }
 }

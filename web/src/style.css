@@ -320,6 +320,26 @@ button:disabled {
   white-space: pre-wrap;
 }
 
+/* A machine policy ending the session (HS-063): the per-session disk cap's `error` frame. Drawn like a turn
+   error's — the machine acted, not the operator — in the same red, because both are the server saying it had
+   to stop something. Its own class so the two can diverge, and so the label can say which policy it was. */
+.session-error {
+  border-left: 2px solid color-mix(in srgb, #b3261e 55%, transparent);
+  padding-left: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.session-error-label {
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.6;
+}
+
+.session-error-text {
+  white-space: pre-wrap;
+}
+
 .turn-boundary {
   font-size: 0.75rem;
   letter-spacing: 0.04em;

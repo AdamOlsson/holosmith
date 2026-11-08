@@ -589,3 +589,71 @@ fn the_measurement_counts_target_and_node_modules() {
     // `over` (`the_key_at_zero_builds_no_watchdog` is that half).
     assert!(quota::over(size, 0));
 }
+
+/// The three ways a measurement fails, and the argument vector it must ask for.
+///
+/// Both belong here rather than in the module's own tests: they write a shim and then exec it, and a *fork*
+/// anywhere in the process inherits the open writing descriptor — which is the `ETXTBSY` race this binary's
+/// `one_at_a_time` lock exists for. Nothing in the module's tests forks.
+#[tokio::test]
+async fn a_measurement_that_cannot_run_stops_nothing_and_asks_for_nothing_extra() {
+    let _one = one_at_a_time().await;
+    let dir = TempDir::new("quota-du-arms");
+    let worktree = dir.path().join("worktree");
+    std::fs::create_dir_all(&worktree).expect("a worktree path");
+
+    // 1. A program that is not there. `Command` fails with `NotFound`, which must be a failure rather than
+    //    "nothing to measure" — a check that cannot run is never a pass.
+    let missing = quota::measure(Path::new("/nonexistent-holosmith-du"), &worktree);
+    assert!(
+        matches!(missing, Err(quota::DuError::Unrunnable(_))),
+        "{missing:?}"
+    );
+
+    // 2. One that runs and refuses: its own words travel, because they are the operator's context.
+    let refused = quota::measure(&failing_shim(&dir), &worktree);
+    match refused {
+        Err(quota::DuError::Refused(said)) => assert!(said.contains("cannot read it"), "{said}"),
+        other => panic!("a refusing du answered {other:?}"),
+    }
+
+    // 3. One whose answer is not a `du -sk` answer: a word, or nothing at all.
+    let babbling = dir.file("du-babbling");
+    std::fs::write(&babbling, "#!/bin/sh\necho 'not a number at all'\n").expect("a shim");
+    std::fs::set_permissions(
+        &babbling,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .expect("executable");
+    let unprintable = quota::measure(&babbling, &worktree);
+    assert!(
+        matches!(unprintable, Err(quota::DuError::Unprintable(_))),
+        "{unprintable:?}"
+    );
+
+    // 4. And the vector itself: one line, in kibibytes, with `--` before the path, and **no
+    //    `--one-file-system`**. The recording shim is the only witness of the arguments — the inclusion test
+    //    below cannot see the flag, because its tree is all on one filesystem.
+    let log = dir.file("args.log");
+    let recording = dir.file("du-recording");
+    std::fs::write(
+        &recording,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf '12\\t/work\\n'\n",
+            log.display()
+        ),
+    )
+    .expect("a shim");
+    std::fs::set_permissions(
+        &recording,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .expect("executable");
+    assert_eq!(quota::measure(&recording, &worktree), Ok(12));
+    let asked = std::fs::read_to_string(&log).expect("the shim recorded its arguments");
+    assert_eq!(
+        asked.trim(),
+        format!("-sk -- {}", worktree.display()),
+        "the measurement asked for something else"
+    );
+}

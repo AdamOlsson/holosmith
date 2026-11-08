@@ -77,6 +77,11 @@ call's text, written by `crate::tool`); and its `output` **changes meaning** fro
 result — a `bash` exit code in `structuredContent`, an image block — is not retained: HS-035 stores images, and
 a `details` blob would need its own decision.
 
+**Amended by ADR-0069:** a sixth kind, `error`, carries `{"code", "message", …}` and no message id — the
+same shape — and its producer is not a backend at all but the per-session disk cap's watchdog (HS-063): the
+machine ending a session is the server's record, not the agent's. A backend still emits only its own turn's
+frames.
+
 **Amended by ADR-0043:** there is a fifth kind, `turn.error`, with `{"reason", "method"}` and **no message
 id** — one frame, one block, nothing continues it, exactly a steer's shape (ADR-0021). Its one producer is an
 extension's dialog, which a session cannot answer and therefore cancels; the cancel itself is a line on the

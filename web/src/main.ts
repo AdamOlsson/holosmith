@@ -1027,7 +1027,14 @@ function openSessionStream(id: string, target: StreamTarget): void {
 
   for (const eventType of TRANSCRIPT_EVENTS) {
     source.addEventListener(eventType, (event) => {
-      const frame = parseFrame(eventType, (event as MessageEvent<string>).data);
+      // `error` is the one name the platform uses as well as the server: an `EventSource` dispatches a plain
+      // `Event` of that type when its own connection fails, and that is not a transcript frame (HS-063's kind is
+      // a stored event, and a stored event always arrives as a `MessageEvent`). One guard here rather than a
+      // special case per kind, because the next server-chosen name may collide too.
+      if (!(event instanceof MessageEvent)) {
+        return;
+      }
+      const frame = parseFrame(eventType, event.data as string);
       if (frame === null) {
         return;
       }

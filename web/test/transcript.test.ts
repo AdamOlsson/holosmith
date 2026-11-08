@@ -439,7 +439,7 @@ test("every other reason is the caller's to show, so no sentence is invented for
 });
 
 test("a badge shows a one-word reason as it is", () => {
-  // The four reason words the machine writes on its own, and the two a client request does. Nothing about a
+  // The five reason words the machine writes on its own, and the two a client request does. Nothing about a
   // single-line reason is the renderer's to change.
   for (const reason of ["evicted", "idle_stop", "disk_quota", "forced_abort", "deleted", "turn_timeout", "pi_exit"]) {
     assert.equal(stateText("stopped", reason), `stopped · ${reason}`);

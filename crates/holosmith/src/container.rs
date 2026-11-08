@@ -766,23 +766,67 @@ mod tests {
         );
     }
 
-    /// D2 (spec item 14, HS-063): two sessions of one project share no writable host path except the
-    /// project's own `.git` directory, so neither can see the other's build and package caches.
+    /// D2 (spec item 14, HS-063): two sessions of one project share no host path except the project's own
+    /// `.git` tree, so neither can see the other's build and package caches.
     ///
     /// The caches D2 names are *inside* the paths a session mounts and nowhere else: `target/` and
-    /// `node_modules/` are directories under the worktree, which is `/work` in the container, and pi's own
-    /// cache is under its `pi-home`. So the claim "no cache directory is shared between sessions" is exactly
-    /// "the worktree and the agent directory are per session, and no second writable mount exists" — which is
-    /// what this reads out of the two `docker run` vectors rather than out of a daemon.
+    /// `node_modules/` are directories under the worktree, which is `/work` in the container, and pi's own cache
+    /// is under its `pi-home`. So "no cache directory is shared between sessions" is exactly "the worktree and
+    /// the agent directory are per session, and the only shared path is the repository's" — and this reads it
+    /// out of the two **`docker run` vectors**, not out of a daemon, so a `-v` added anywhere the vector is built
+    /// is visible to it rather than to a reviewer's eye.
     ///
-    /// The one shared writable path is deliberate and is spec item 1's: a project's `.git` holds the object
-    /// store, the refs and `worktrees/<id>`, so two sessions of one project see one repository — that is the
-    /// design, not a cache, and git's own caches there (`objects/`) are content that is safe to share by
-    /// being immutable. A second project would make even that path different, which the last assertion shows.
+    /// The shared paths are deliberate and are spec item 1's: a project's `.git` holds the object store, the refs
+    /// and `worktrees/<id>`, so two sessions of one project see one repository — that is the design, not a cache,
+    /// and git's own store there (`objects/`) is safe to share by being immutable. Its `hooks` and `config` are
+    /// shared **read-only**, which is what item 1's hardening says. A second project shares nothing at all,
+    /// which the last assertion shows.
     #[test]
-    fn two_sessions_share_no_writable_mount_except_the_projects_own_git_directory() {
+    fn two_sessions_share_nothing_but_the_projects_git_tree() {
+        /// Every `-v host:at[:ro]` of a `docker run` vector, as `(host, read_only)`, in the vector's order.
+        fn volumes(container: &SessionContainer) -> Vec<(PathBuf, bool)> {
+            let arguments = container.run_args();
+            let mut volumes = Vec::new();
+            let mut rest = arguments.iter();
+            while let Some(argument) = rest.next() {
+                if argument != "-v" {
+                    continue;
+                }
+                let Some(spec) = rest.next() else { break };
+                // The three paths this build mounts are absolute and colon-free, so the short form splits on `:`
+                // into host, destination and an optional `ro`. `Mount::argument` is the one producer of it.
+                let mut fields = spec.split(':');
+                let host = fields.next().expect("a -v names a host path");
+                let _at = fields.next().expect("a -v names a destination");
+                let read_only = fields.next() == Some("ro");
+                volumes.push((PathBuf::from(host), read_only));
+            }
+            volumes
+        }
+
         let one = SessionContainer::of(&settings(), &session("holosmith", "0123456789abcdef"));
         let other = SessionContainer::of(&settings(), &session("holosmith", "fedcba9876543210"));
+        let theirs = volumes(&other);
+        let shared: Vec<PathBuf> = volumes(&one)
+            .into_iter()
+            .map(|(host, _)| host)
+            .filter(|host| theirs.iter().any(|(theirs, _)| theirs == host))
+            .collect();
+
+        // The whole sharing, exactly: the repository's `.git` directory and the two read-only paths under it.
+        let git = one.mounts.git_dir.host.clone();
+        assert_eq!(
+            shared,
+            vec![git.clone(), git.join("hooks"), git.join("config")],
+            "the two vectors share more than the project's .git tree"
+        );
+        // …of which only `.git` itself is writable, which is item 1's "objects, refs, logs and worktrees/<id>".
+        for (host, read_only) in volumes(&one) {
+            if host != git {
+                continue;
+            }
+            assert!(!read_only, "the object store must be writable");
+        }
 
         // The two per-session paths really are per session, and neither is inside the other: a worktree named
         // by the other session's id would be a session's files in another's container.
@@ -802,46 +846,17 @@ mod tests {
             );
         }
 
-        // Every writable host path of one session, and the only one it may share with the other.
-        let shared = one.mounts.git_dir.host.clone();
-        let writable = |container: &SessionContainer| -> Vec<PathBuf> {
-            let mut paths: Vec<PathBuf> = container
-                .mounts
-                .all()
-                .iter()
-                .filter(|mount| !mount.read_only)
-                .map(|mount| mount.host.clone())
-                .collect();
-            paths.sort();
-            paths
-        };
-        let theirs = writable(&other);
-        for path in writable(&one) {
-            if path == shared {
-                assert!(
-                    theirs.contains(&path),
-                    "the project's .git is the one shared writable mount"
-                );
-                continue;
-            }
-            assert!(
-                !theirs.contains(&path),
-                "{} is writable in both containers",
-                path.display()
-            );
-        }
-
-        // And the one shared path is the *project's*: a session of another project shares nothing writable at
-        // all, which is what makes the claim about the path rather than about the naming of ids. (Two sessions
-        // never share an id — it is the row's primary key — so the worktree's `.worktrees/<id>` needs no project
-        // in its name.)
+        // And the one shared tree is the *project's*: a session of another project shares nothing at all, which
+        // is what makes the claim about the path rather than about the naming of ids. (Two sessions never share
+        // an id — it is the row's primary key — so the worktree's `.worktrees/<id>` needs no project in its
+        // name.)
         let elsewhere = SessionContainer::of(&settings(), &session("other", "fedcba9876543210"));
-        assert_ne!(one.mounts.git_dir.host, elsewhere.mounts.git_dir.host);
-        for path in writable(&one) {
+        let elsewhere_volumes = volumes(&elsewhere);
+        for (host, _) in volumes(&one) {
             assert!(
-                !writable(&elsewhere).contains(&path),
+                !elsewhere_volumes.iter().any(|(theirs, _)| theirs == &host),
                 "{} is shared across projects",
-                path.display()
+                host.display()
             );
         }
     }
