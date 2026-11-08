@@ -4021,7 +4021,8 @@ case_push() {
   local tls="$root/tls"
   local response body id fresh created_at rows port_line push_port=""
   local before sent
-  local vapid_public vapid_private subscription_public subscription_private auth_b64
+  local vapid_public vapid_private subscription_public subscription_private_hex
+  local subscription_public_hex auth_b64 auth_hex rotated rotated_hex
   local ok_endpoint gone_endpoint keyed_endpoint
   local line
   if ! command -v openssl >/dev/null 2>&1; then
@@ -4050,35 +4051,40 @@ case_push() {
   cat >"$WORK/sec1.py" <<'PY'
 import base64, sys
 der = open(sys.argv[1], "rb").read()
+# One TLV: the tag, the content's first offset and the offset after it. Every length in a 121-octet SEC1 key is
+# short-form (the longest is the 0x77 SEQUENCE), so one length octet is the whole of the rule -- and a long form is
+# refused rather than misread, which is the same rule `vapid::from_der` keeps in Rust.
 def element(at):
     tag = der[at]
-    return tag, at + 2, at + 2 + der[at + 1]
-tag, at, end = element(0)
+    length = der[at + 1]
+    assert length < 0x80, "a long-form length in a 121-octet key"
+    start = at + 2
+    return tag, start, start + length
+tag, body, end = element(0)
 assert tag == 0x30, "not a SEQUENCE: %r" % der[:4]
-tag, at, end = element(at)
+tag, _, after_version = element(body)
 assert tag == 0x02, "no version: %r" % der[:4]
-tag, at, end = element(at)
+tag, start, after_scalar = element(after_version)
 assert tag == 0x04, "no private scalar: %r" % der[:4]
-scalar = der[at:end]
-at = end
-tag, at, end = element(at)
+scalar = der[start:after_scalar]
+tag, _, after_curve = element(after_scalar)
 assert tag == 0xa0, "no named curve"
-at = end
-tag, at, end = element(at)
+tag, start, after_public = element(after_curve)
 assert tag == 0xa1, "no public key"
-tag, at, end = element(at)
-assert tag == 0x03 and der[at] == 0x00, "no BIT STRING"
-point = der[at + 1:end]
+tag, start, after_bits = element(start)
+assert tag == 0x03 and der[start] == 0x00, "no BIT STRING"
+point = der[start + 1:after_bits]
 assert len(point) == 65 and point[0] == 0x04, "not an uncompressed point"
+assert after_bits == end, "trailing octets after the public key"
 b64 = lambda value: base64.urlsafe_b64encode(value).rstrip(b"=").decode()
-print(b64(point), b64(scalar))
+print(b64(point), b64(scalar), scalar.hex(), point.hex())
 PY
 
   # The machine's own pair, generated the way `server deploy` generates it and written the way `vapid::render`
   # writes it — header line included, because a file an operator may open should say what it is.
   openssl ecparam -name prime256v1 -genkey -noout -outform DER -out "$tls/vapid.der" ||
     fail "$name/ecparam" "openssl ecparam did not write a key"
-  read -r vapid_public vapid_private < <(python3 "$WORK/sec1.py" "$tls/vapid.der")
+  read -r vapid_public vapid_private _ _ < <(python3 "$WORK/sec1.py" "$tls/vapid.der")
   [ -n "$vapid_public" ] && [ -n "$vapid_private" ] ||
     fail "$name/vapid" "the generated pair did not parse"
   printf '# The machine'"'"'s Web Push key pair (HS-049). `server deploy` writes this once and never rewrites it.\npublic_key = "%s"\nprivate_key = "%s"\n' \
@@ -4090,10 +4096,17 @@ PY
   # receiver is the *browser* in this exchange and only it can read what the machine sealed.
   openssl ecparam -name prime256v1 -genkey -noout -outform DER -out "$tls/subscription.der" ||
     fail "$name/ecparam" "openssl ecparam did not write the subscription's key"
-  read -r subscription_public subscription_private < <(python3 "$WORK/sec1.py" "$tls/subscription.der")
-  auth_b64="$(openssl rand 16 | python3 -c \
-    'import base64, sys; print(base64.urlsafe_b64encode(sys.stdin.buffer.read()).rstrip(b"=").decode())')"
+  read -r subscription_public _ subscription_private_hex subscription_public_hex \
+    < <(python3 "$WORK/sec1.py" "$tls/subscription.der")
+  auth_hex="$(openssl rand -hex 16)"
+  auth_b64="$(printf '%s' "$auth_hex" | python3 -c \
+    'import base64, sys; print(base64.urlsafe_b64encode(bytes.fromhex(sys.stdin.read())).rstrip(b"=").decode())')"
   [ -n "$auth_b64" ] || fail "$name/auth" "openssl rand did not answer 16 octets"
+  # The secret the *re-subscribe* arm rotates to. The receiver holds this one, because it plays the browser that
+  # re-subscribed: `/ok/`'s body therefore only decrypts if the machine really stored the new secret.
+  rotated_hex="$(openssl rand -hex 16)"
+  rotated="$(printf '%s' "$rotated_hex" | python3 -c \
+    'import base64, sys; print(base64.urlsafe_b64encode(bytes.fromhex(sys.stdin.read())).rstrip(b"=").decode())')"
 
   # The TLS material: a CA and a `localhost` certificate with a `DNS:` SAN, because `-verify_hostname` matches
   # the name in the certificate and an IP SAN would not do.
@@ -4116,20 +4129,35 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import https from 'node:https';
 
-const [certFile, keyFile, logFile, vapidPublicB64, uaPrivateB64, uaPublicB64, authB64] = process.argv.slice(2);
-const b64 = (text) => Buffer.from(text.replace(/\s+/g, ''), 'base64url');
+// The *browser* in this exchange: it verifies the token against the case's own application-server key and
+// decrypts the record with its own subscription keys, using nothing but node's crypto. A receiver written with
+// the sender's arithmetic would agree with any mistake the sender made, which is why this half is separate code
+// in another language.
+const [certFile, keyFile, logFile, vapidPublicB64, uaPrivateHex, uaPublicHex, authHex] = process.argv.slice(2);
+const b64 = (text) => Buffer.from(String(text).replace(/=+/g, ''), 'base64url');
 const vapidPublic = b64(vapidPublicB64);
-const uaPrivate = b64(uaPrivateB64);
-const uaPublic = b64(uaPublicB64);
-const auth = b64(authB64);
-const jwk = {
-  kty: 'EC',
-  crv: 'P-256',
-  x: vapidPublic.subarray(1, 33).toString('base64url'),
-  y: vapidPublic.subarray(33, 65).toString('base64url'),
+const uaPrivate = Buffer.from(uaPrivateHex, 'hex');
+const uaPublic = Buffer.from(uaPublicHex, 'hex');
+const auth = Buffer.from(authHex, 'hex');
+// A KeyObject, not a bare JWK: `crypto.verify` takes a JWK object only with `format: 'jwk'`, and a receiver that
+// passed it bare would report "the machine's signature does not verify" for a signature that does (measured --
+// this is what `case_push`'s first run said).
+const vapidKey = crypto.createPublicKey({
+  key: {
+    kty: 'EC',
+    crv: 'P-256',
+    x: vapidPublic.subarray(1, 33).toString('base64url'),
+    y: vapidPublic.subarray(33, 65).toString('base64url'),
+  },
+  format: 'jwk',
+});
+const hmac = (key, ...parts) => {
+  const h = crypto.createHmac('sha256', key);
+  for (const part of parts) h.update(part);
+  return h.digest();
 };
 
-// RFC 8291 §3.4, from the browser's side: the same three HMACs, with the user agent's private key.
+// RFC 8291 §3.4 from the receiver's side: one ECDH, three HMAC chains and one AES-128-GCM record.
 function decrypt(body) {
   try {
     const salt = body.subarray(0, 16);
@@ -4141,19 +4169,11 @@ function decrypt(body) {
     const ecdh = crypto.createECDH('prime256v1');
     ecdh.setPrivateKey(uaPrivate);
     const secret = ecdh.computeSecret(asPublic);
-    const prkKey = crypto.createHmac('sha256', auth).update(secret).digest();
-    const keyInfo = Buffer.concat([Buffer.from('WebPush: info\0'), uaPublic, asPublic]);
-    const ikm = crypto
-      .createHmac('sha256', prkKey)
-      .update(Buffer.concat([keyInfo, Buffer.from([1])]))
-      .digest();
-    const prk = crypto.createHmac('sha256', salt).update(ikm).digest();
+    const prkKey = hmac(auth, secret);
+    const ikm = hmac(prkKey, Buffer.from('WebPush: info\0'), uaPublic, asPublic, Buffer.from([1]));
+    const prk = hmac(salt, ikm);
     const hk = (info, n) =>
-      crypto
-        .createHmac('sha256', prk)
-        .update(Buffer.concat([Buffer.from(info + '\0'), Buffer.from([1])]))
-        .digest()
-        .subarray(0, n);
+      hmac(prk, Buffer.from(info + '\0'), Buffer.from([1])).subarray(0, n);
     const decipher = crypto.createDecipheriv(
       'aes-128-gcm',
       hk('Content-Encoding: aes128gcm', 16),
@@ -4161,7 +4181,7 @@ function decrypt(body) {
     );
     decipher.setAuthTag(tag);
     const record = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-    // RFC 8188's padding: zero octets, then the delimiter — `0x02` for the last record.
+    // RFC 8188's padding: zero octets, then the delimiter -- `0x02` on the last record.
     let end = record.length;
     while (end > 0 && record[end - 1] === 0) end -= 1;
     if (end === 0 || record[end - 1] !== 0x02) return null;
@@ -4187,14 +4207,13 @@ const server = https.createServer(
         const parts = match[1].split('.');
         if (parts.length === 3) {
           try {
-            const signature = Buffer.from(parts[2], 'base64url');
             jwtOk = crypto.verify(
               'sha256',
               Buffer.from(`${parts[0]}.${parts[1]}`),
-              { key: jwk, dsaEncoding: 'ieee-p1363' },
-              signature,
+              { key: vapidKey, dsaEncoding: 'ieee-p1363' },
+              b64(parts[2]),
             );
-            const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+            const claims = JSON.parse(b64(parts[1]).toString('utf8'));
             audOk = claims.aud === `https://localhost:${server.address().port}`;
           } catch {
             jwtOk = false;
@@ -4225,7 +4244,7 @@ JS
   rm -f "$WORK/push-received.jsonl"
   : >"$WORK/push-received.jsonl"
   node "$WORK/push-receiver.mjs" "$tls/server.pem" "$tls/server.key" "$WORK/push-received.jsonl" \
-    "$vapid_public" "$subscription_private" "$subscription_public" "$auth_b64" \
+    "$vapid_public" "$subscription_private_hex" "$subscription_public_hex" "$rotated_hex" \
     >"$WORK/push-receiver.out" 2>"$WORK/push-receiver.err" &
   local receiver_pid=$!
   for _ in $(seq 1 100); do
@@ -4274,9 +4293,6 @@ PY
 
   # A re-subscribe of the same endpoint with a rotated `auth`: still one row, the new secret, the original
   # `created_at` — a browser re-subscribing does not make itself a second device.
-  local rotated
-  rotated="$(openssl rand 16 | python3 -c \
-    'import base64, sys; print(base64.urlsafe_b64encode(sys.stdin.buffer.read()).rstrip(b"=").decode())')"
   fetch_body "${name}_resub" POST /api/push/subscribe \
     "{\"endpoint\":\"$ok_endpoint\",\"p256dh\":\"$subscription_public\",\"auth\":\"$rotated\"}" \
     "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
@@ -4484,9 +4500,9 @@ PY
   # count is scoped to the lines the turn that followed the removal added, which is what makes "the gone row was
   # not tried again" a measurement.
   check "${name}/keyed_delivered" 1 \
-    "$(printf '%s\n' "$sent" | grep -cF '\"path\":\"/keyed/1\"')"
+    "$(printf '%s\n' "$sent" | grep -cF '"/keyed/1"')"
   check "${name}/gone_delivered" 1 \
-    "$(printf '%s\n' "$sent" | grep -cF '\"path\":\"/gone/1\"')"
+    "$(printf '%s\n' "$sent" | grep -cF '"/gone/1"')"
   for _ in $(seq 1 200); do
     [ "$(wc -l <"$WORK/push-received.jsonl")" -ge $((before + 2)) ] && break
     sleep 0.1
@@ -4494,7 +4510,7 @@ PY
   check "${name}/surviving_rows" 2 \
     "$(sed -n "$((before + 1)),\$p" "$WORK/push-received.jsonl" | grep -cF "\"session_id\":\"$id\"")"
   check "${name}/gone_untried" 0 \
-    "$(sed -n "$((before + 1)),\$p" "$WORK/push-received.jsonl" | grep -cF '\"path\":\"/gone/1\"')"
+    "$(sed -n "$((before + 1)),\$p" "$WORK/push-received.jsonl" | grep -cF '"/gone/1"')"
 
   # 4. The `DELETE`, last, because it is the one that removes a subscription the earlier arms need.
   fetch "${name}_delete" DELETE "/api/push/subscribe?endpoint=$ok_endpoint" \
