@@ -18,6 +18,7 @@ use holosmith::drain::Control;
 use holosmith::events::{self, EventWriter, StreamRegistry, WriterOptions};
 use holosmith::http::{App, AppState, Guards, RequestCounter, Routes};
 use holosmith::merge::Merges;
+use holosmith::preflight;
 use holosmith::runtime::{Backend, Runtime};
 use holosmith::serve::{self, ServeOptions};
 use holosmith::version::VersionInfo;
@@ -101,6 +102,7 @@ pub fn state() -> AppState {
         backend: Backends::Stub(slow_stub()),
         drain: Control::new(),
         merges: Merges::new(),
+        preflight: preflight::Tools::default(),
     }
 }
 
@@ -149,6 +151,7 @@ pub fn state_with_writer(dir: &TempDir, config: Config, options: WriterOptions) 
         backend: Backends::Stub(slow_stub()),
         drain: Control::new(),
         merges: Merges::new(),
+        preflight: preflight::Tools::default(),
     }
 }
 

@@ -226,7 +226,7 @@ pub(crate) async fn respond(
                         session = id,
                         status = error.status.as_u16(),
                         code = error.body.code,
-                        message = error.body.message,
+                        message = %error.body.message,
                         "the work landed but the session was not deleted"
                     );
                 }

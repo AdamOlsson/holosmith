@@ -14,7 +14,7 @@ use tokio::net::TcpListener;
 
 use crate::backend::Backends;
 use crate::clock;
-use crate::config::{Config, LoadError, LoadedConfig, Overrides, Role};
+use crate::config::{Config, LoadError, LoadedConfig, Overrides};
 use crate::db::{self, Database, OpenOptions};
 use crate::docker::{Docker, EGRESS_NETWORK};
 use crate::events::{self, StreamRegistry, WriterOptions};
@@ -105,9 +105,14 @@ pub fn run(args: ServeArgs) -> ExitCode {
     // 1 (without the Docker and git checks), 2 (without the docker group), 5, 6 and 7". A hub without a
     // daemon is the normal hub.
     //
+    // Since HS-062 the predicate is `disk::guarded`, and it is written there rather than here because three
+    // places ask it: this boot, and the two request paths that start work. A create on a full disk answers
+    // 507 with its own sentence, and it must agree with this boot about *whether* the floor applies at all —
+    // the story's "`doctor` reports the same measurement, so the two never disagree", one level down.
+    //
     // It comes after the data root is created because one check is about that filesystem, and before the
     // database is opened because a machine that cannot run sessions should not migrate one.
-    if backend == Backend::Docker && loaded.config.role != Role::Hub {
+    if crate::disk::guarded(backend, loaded.config.role) {
         let mut complaints = crate::preflight::check(&loaded.config);
         if complaints.is_empty() {
             tracing::debug!(
@@ -290,6 +295,9 @@ pub fn run(args: ServeArgs) -> ExitCode {
             // Rule 2's "one merge per project at a time": one map per process, shared by every clone, so two
             // requests cannot merge into one project at once (HS-054).
             merges: crate::merge::Merges::new(),
+            // HS-062's floor measures the data root on the request path, with the same `df` this boot's
+            // preflight used: the machine's own program, resolved through `PATH`, which a test swaps for a shim.
+            preflight: crate::preflight::Tools::default(),
         };
         // The **startup reconcile** (HS-044, V9): what a `kill -9` left behind, put right **before any
         // policy or request can read a row**. It is awaited rather than spawned, and both reasons are

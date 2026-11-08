@@ -13,6 +13,7 @@ pub mod container;
 pub mod db;
 pub mod deleter;
 pub mod deploy;
+pub mod disk;
 pub mod docker;
 pub mod doctor;
 pub mod drain;

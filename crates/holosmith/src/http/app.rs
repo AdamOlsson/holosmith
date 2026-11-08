@@ -78,6 +78,14 @@ pub struct AppState {
     /// reason the state's other handles are: two requests must share the lock, so it must be the state's, and a
     /// clone of the state clones the `Arc` rather than the map.
     pub merges: Merges,
+    /// The external programs this *request path* runs, as opposed to the ones a startup check runs.
+    ///
+    /// Only `df` today, for HS-062's floor: a create and a resume measure the data root's free space before
+    /// they start anything, with the same reader the boot and `doctor` use ([`crate::disk`]). The field is the
+    /// state's for the reason [`Tools`](crate::preflight::Tools) is a parameter at all — this crate denies
+    /// `unsafe`, so a test cannot `set_var` a `PATH`, and a shim it wrote is the only way to put a machine's
+    /// answer under a test's control. The production value is the program's name, which `PATH` resolves.
+    pub preflight: crate::preflight::Tools,
 }
 
 impl AppState {

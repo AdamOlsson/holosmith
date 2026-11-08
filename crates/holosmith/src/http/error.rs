@@ -4,6 +4,7 @@
 //! snake_case name from the spec, never the transport status; the message may be rewritten
 //! without breaking a client.
 
+use std::borrow::Cow;
 use std::fmt::Display;
 
 use axum::Json;
@@ -197,11 +198,28 @@ pub const CONFIRM_REQUIRED: &str = "confirm_required";
 /// and the reason git gave travels in the log.
 pub const PUSH_REJECTED: &str = "push_rejected";
 
+/// A create or a resume was refused because the data root's filesystem is below `min_free_gb` (HS-062, spec
+/// item 14).
+///
+/// The spec names the status — "session creation and resume fail with 507 below it" — and ADR-0008 says a code
+/// is never the transport status, so the code is the *fact*: a floor the machine's `min_free_gb` put there.
+/// It is a word like `cap_without_idle` and `no_worktree`, and it is what a client switches on, because the
+/// sentence names two numbers a client that only wants to show the sentence need not parse.
+///
+/// One code for both requests: a create and a resume are the two things that *start* work, the operator's next
+/// step is the same for both (free some space, or lower `min_free_gb`), and item 14 gives them one sentence.
+/// That is why this is not two codes the way `cap_reached` is two sentences — there the two requests' fixes
+/// differ.
+pub const DISK_FLOOR: &str = "disk_floor";
+
 /// The body of every error response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ErrorBody {
     pub code: &'static str,
-    pub message: &'static str,
+    /// The one human sentence. Borrowed for every code whose words are fixed — which was every code until
+    /// HS-062 — and owned only by a sentence that carries a measurement, so the envelope stays allocation-free
+    /// for the refusals that are one literal (ADR-0068). The serialised bytes are the same either way.
+    pub message: Cow<'static, str>,
     /// The paths a conflict could not merge, and `None` for every other error — skipped on the wire, so every
     /// other error's body is byte-identical to what it was before this key existed.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -216,12 +234,16 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    pub fn new(status: StatusCode, code: &'static str, message: &'static str) -> Self {
+    pub fn new(
+        status: StatusCode,
+        code: &'static str,
+        message: impl Into<Cow<'static, str>>,
+    ) -> Self {
         Self {
             status,
             body: ErrorBody {
                 code,
-                message,
+                message: message.into(),
                 conflicts: None,
             },
         }
@@ -502,8 +524,10 @@ impl ApiError {
             status: StatusCode::CONFLICT,
             body: ErrorBody {
                 code: CONFLICT,
-                message: "the merge conflicts, so nothing was merged; merge the target into the session's \
-                          branch and resolve the conflicts there, then merge again",
+                message: Cow::Borrowed(
+                    "the merge conflicts, so nothing was merged; merge the target into the session's \
+                     branch and resolve the conflicts there, then merge again",
+                ),
                 conflicts: Some(conflicts),
             },
         }
@@ -570,6 +594,32 @@ impl ApiError {
     /// said no, and the operator's next step (fetch and integrate) changes the branch rather than the body.
     pub fn push_rejected(message: &'static str) -> Self {
         Self::new(StatusCode::CONFLICT, PUSH_REJECTED, message)
+    }
+
+    /// What a create or a resume answers on a data root below `min_free_gb` (HS-062, spec item 14).
+    ///
+    /// The **message is this request's own** and it carries both numbers, which is the one place in this
+    /// envelope where the sentence is not a literal: the boot's sentence about the same machine names the same
+    /// two numbers and offers the boot's fix ("install coreutils", "there is no data root yet"), while an
+    /// operator who tapped *create* needs to know how much space to free and nothing about a startup check
+    /// (ADR-0008's "a message must describe its own request", ADR-0068).
+    ///
+    /// `507` rather than `503`: the machine is able to serve everything else, and the thing that is missing is
+    /// storage — the status item 14 names.
+    pub fn disk_floor(available_gb: u64, min_free_gb: u64, data_root: &std::path::Path) -> Self {
+        Self {
+            status: StatusCode::INSUFFICIENT_STORAGE,
+            body: ErrorBody {
+                code: DISK_FLOOR,
+                message: Cow::Owned(format!(
+                    "{} has {available_gb} GB free and min_free_gb is {min_free_gb}, so no new session is \
+                     started: free some space, or lower min_free_gb if this machine really has room for fewer \
+                     sessions",
+                    data_root.display()
+                )),
+                conflicts: None,
+            },
+        }
     }
 
     /// What a resume at the cap answers (HS-018, spec item 8's "or returns 409").
@@ -853,7 +903,7 @@ mod tests {
                 "a message repeats its code: {}",
                 error.body.message
             );
-            sentences.insert(error.body.message);
+            sentences.insert(error.body.message.clone());
             assert_answer(error, StatusCode::UNPROCESSABLE_ENTITY, code);
         }
         assert_eq!(sentences.len(), 3, "two project refusals share a sentence");

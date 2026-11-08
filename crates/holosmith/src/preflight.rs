@@ -254,7 +254,7 @@ impl Default for Tools {
     fn default() -> Self {
         Self {
             git: PathBuf::from("git"),
-            df: PathBuf::from("df"),
+            df: PathBuf::from(crate::disk::DF),
         }
     }
 }
@@ -512,6 +512,11 @@ fn parse_git_version(text: &str) -> Option<(u64, u64)> {
 
 /// `min_free_gb` free on the data root's filesystem.
 ///
+/// The measurement itself lives in [`crate::disk`] since HS-062, because two more readers want the same
+/// number: the two request paths that start work. What stays here is this check's **sentences** — four for the
+/// four ways the measurement can fail to happen, and the two that name the numbers — which are the boot's and
+/// `doctor`'s, not a create's (ADR-0068).
+///
 /// **A data root that is not there yet is not a disk problem**, and that arm is why `doctor` and `serve` can agree
 /// about a fresh machine: `serve` creates the directory before it asks (`commands/serve.rs`), so on `serve`'s path
 /// there is always a filesystem to measure — while `doctor --quick` is item 10 §1, which `server deploy` runs before
@@ -519,34 +524,32 @@ fn parse_git_version(text: &str) -> Option<(u64, u64)> {
 /// would make a fresh host fail the check `serve` passes, and the sentence would name a fix that does not exist.
 /// There is no filesystem to measure, so the outcome is `unknown` and the sentence says so (ADR-0054).
 fn disk(config: &Config, df: &Path) -> Finding {
-    if !config.data_root.exists() {
-        return Finding::unknown(
-            Check::Disk,
-            format!(
-                "there is no data root at {} yet, so there is no filesystem to measure and `serve` creates one at \
-                 startup: this is not a disk problem, and `min_free_gb` is checked from the first boot on",
-                config.data_root.display()
-            ),
-        );
-    }
-    let output = match Command::new(df).arg("-Pk").arg(&config.data_root).output() {
-        Ok(output) if output.status.success() => output,
-        Ok(output) => {
-            // `df` ran and refused: a data root that does not exist, or one under a directory this user
-            // cannot traverse. Its own words are the fix's context, so they are in the sentence — "install
-            // coreutils" would be advice about a program that just answered.
-            let said = String::from_utf8_lossy(&output.stderr);
-            let said = said.trim();
-            return Finding::fail(
+    let root = config.data_root.display();
+    let available_gb = match crate::disk::measure(df, &config.data_root) {
+        Ok(available_gb) => available_gb,
+        Err(crate::disk::DiskError::Missing) => {
+            return Finding::unknown(
                 Check::Disk,
                 format!(
-                    "`df -Pk {}` failed ({said}), so the free space `min_free_gb` guards could not be \
-                     measured: check that the data root exists and that this user can reach it",
-                    config.data_root.display()
+                    "there is no data root at {root} yet, so there is no filesystem to measure and `serve` creates \
+                     one at startup: this is not a disk problem, and `min_free_gb` is checked from the first boot \
+                     on"
                 ),
             );
         }
-        Err(error) => {
+        // `df` ran and refused: a data root that does not exist, or one under a directory this user cannot
+        // traverse. Its own words are the fix's context, so they are in the sentence — "install coreutils"
+        // would be advice about a program that just answered.
+        Err(crate::disk::DiskError::Refused(said)) => {
+            return Finding::fail(
+                Check::Disk,
+                format!(
+                    "`df -Pk {root}` failed ({said}), so the free space `min_free_gb` guards could not be \
+                     measured: check that the data root exists and that this user can reach it"
+                ),
+            );
+        }
+        Err(crate::disk::DiskError::Unrunnable(error)) => {
             return Finding::fail(
                 Check::Disk,
                 format!(
@@ -555,46 +558,32 @@ fn disk(config: &Config, df: &Path) -> Finding {
                 ),
             );
         }
+        Err(crate::disk::DiskError::Unprintable(text)) => {
+            return Finding::fail(
+                Check::Disk,
+                format!(
+                    "`df -Pk {root}` printed {text:?}, which is not a POSIX df answer: install coreutils"
+                ),
+            );
+        }
     };
-    let text = String::from_utf8_lossy(&output.stdout);
-    let Some(available_kb) = parse_df_available(&text) else {
-        return Finding::fail(
+    match crate::disk::verdict(available_gb, config.min_free_gb) {
+        crate::disk::Verdict::Enough => Finding::pass(
             Check::Disk,
             format!(
-                "`df -Pk {}` printed {text:?}, which is not a POSIX df answer: install coreutils",
-                config.data_root.display()
-            ),
-        );
-    };
-    let available_gb = available_kb / (1024 * 1024);
-    if available_gb >= config.min_free_gb {
-        return Finding::pass(
-            Check::Disk,
-            format!(
-                "{} has {available_gb} GB free and min_free_gb is {}",
-                config.data_root.display(),
+                "{root} has {available_gb} GB free and min_free_gb is {}",
                 config.min_free_gb
             ),
-        );
-    }
-    Finding::fail(
-        Check::Disk,
-        format!(
-            "{} has {available_gb} GB free and min_free_gb is {}: free some space, or lower min_free_gb \
-             if this machine really has room for fewer sessions",
-            config.data_root.display(),
-            config.min_free_gb
         ),
-    )
-}
-
-/// The available-kilobytes column of a POSIX `df -Pk` answer: the fourth field of the second line.
-///
-/// `-P` is what makes it one line per filesystem, so the columns are fixed and no header text is read; the
-/// filesystem name is a path and cannot contain a space in the answer `df -P` prints for a plain path.
-fn parse_df_available(text: &str) -> Option<u64> {
-    let line = text.lines().nth(1)?;
-    line.split_whitespace().nth(3)?.parse().ok()
+        crate::disk::Verdict::Short => Finding::fail(
+            Check::Disk,
+            format!(
+                "{root} has {available_gb} GB free and min_free_gb is {}: free some space, or lower min_free_gb \
+                 if this machine really has room for fewer sessions",
+                config.min_free_gb
+            ),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -672,27 +661,6 @@ mod tests {
         assert_eq!(parse_git_version("git version 3"), None);
         assert_eq!(parse_git_version("svn, version 1.14"), None);
         assert_eq!(parse_git_version(""), None);
-    }
-
-    #[test]
-    fn a_posix_df_answer_is_the_fourth_field_of_its_second_line() {
-        // `df -Pk` on Linux, with a long device name and a long path, which is what pushes the columns.
-        let answer = "Filesystem 1024-blocks Used Available Capacity Mounted on\n\
-                      /dev/mapper/vg-root 1000000000 500000000 480000000 52% /\n";
-        assert_eq!(parse_df_available(answer), Some(480_000_000));
-        assert_eq!(
-            parse_df_available("Filesystem 1024-blocks Used Available Capacity Mounted on\n"),
-            None
-        );
-        assert_eq!(parse_df_available(""), None);
-        // A wrapped device name is not a POSIX answer, and reading it as one would report a filesystem that
-        // does not exist: `-P` is what makes the second line the answer's only one.
-        assert_eq!(
-            parse_df_available(
-                "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/mapper/a\n"
-            ),
-            None
-        );
     }
 
     #[test]
