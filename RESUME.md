@@ -1,4 +1,4 @@
-# RESUME — one issue per session (next: PER-89 / HS-057, publish)
+# RESUME — one issue per session (next: PER-90 / HS-058, the Changes sheet)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating procedure and
 still governs the cycle; this file is the state of the world, and it adds one rule of its own:
@@ -45,207 +45,205 @@ sandbox-specific incantation (§2).
 
 ---
 
-## 1. The issue this session picks up: `PER-89` — HS-057, publish
+## 1. The issue this session picks up: `PER-90` — HS-058, the Changes sheet
 
-**State when this file was written** (`origin/master` at `43eaf02`, the tree clean apart from the operator's own
-`orchestrate.sh`/`log.txt`): **61 of 80 stories Done, 19 Backlog**, all in project `Holosmith`. `PER-89` is
-`Backlog`, it is the next in `HS-###` order, and its one blocker (`HS-054`) is `Done` — so it is eligible. `PER-90`
-(HS-058, the Changes sheet) is blocked by HS-057, so it is *not* eligible until this one ships; nothing else in
-phase 2 is unblocked (HS-062 … HS-067 are blocked by HS-061/HS-060/HS-059, which are Done, so check the Linear
-`Blocked by` list rather than this sentence if HS-057 turns out to be a stop).
+**State when this file was written** (`origin/master` at `1c7c93f`, the tree clean apart from the operator's own
+`orchestrate.sh`/`log.txt`): **62 of 80 stories Done, 18 Backlog**, all in project `Holosmith`. `PER-90` is
+`Backlog`, it is the next in `HS-###` order, and its one blocker (`HS-057`) is `Done` — so it is eligible. The
+stories still Backlog are `PER-90` (HS-058) and then, in order, `PER-94` (HS-062, blocked by the done HS-046),
+`PER-95` (HS-063, blocked by HS-062), `PER-96` (HS-064, blocked by the done HS-043), `PER-98` (HS-066, blocked by
+the done HS-049), `PER-99`, `PER-100` – `PER-106` (phase 3), `PER-108` – `PER-112` (phase 4); check the Linear
+`Blocked by` list rather than this sentence if HS-058 turns out to be a stop.
 
-The last shipped story was `PER-88` (HS-056, the merge's guards and `delete_session`, **ADR-0065**) — the last of
-item 12's merge: rule 1's two guards in the route, rule 5's delete after a landing, and rule 6's 60 seconds
-recorded rather than built. Its gate run was green: **82 cases, 1313 assertions**, no `SKIP`; `cargo test` is
-**1042 tests**, and `web/`'s runner is **52**. Its §1 material is now Linear, `docs/review/PER-88.md`, `git log`
-and §9.
+The last shipped story was `PER-89` (HS-057, the publish, **ADR-0066**) — the last route of item 12: a host `git
+push` of `agent/<id>` to a remote the config names, refusing unlisted remotes, protected names, the merge target,
+a missing `confirm` and a rejected push, with `403 publish_disabled` when `publish.remotes` is empty. Its gate run
+was green: **83 cases, 1373 assertions**, no `SKIP`; `cargo test` is **1068 tests**, and `web/`'s runner is
+**52**. Its §1 material is now Linear, `docs/review/PER-89.md`, `git log` and §9.
 
 ### 1.1 The slice (verbatim from `docs/stories/phase-2-deployable-mvp.md`; Linear's body is the same text)
 
-> ### HS-057 — Publish
+> ### HS-058 — UI: the Changes sheet
 >
-> **As** the operator **I want** to push a session branch **so that** I can open a PR without a laptop.
+> **As** the operator **I want** review and merge on the session screen **so that** the phone is enough.
 >
-> - **Size:** M · **Blocked by:** HS-054 · **Spec:** item 12
-> - **Demo:** with `publish.remotes = ["origin"]`, publish pushes `agent/<id>`; with it empty, the endpoint is
->   disabled.
+> - **Size:** M · **Blocked by:** HS-057 · **Spec:** item 12 (UI)
+> - **Demo:** open a session, open Changes, browse files, read a diff, pick a target and strategy, merge, and see
+>   the target advance.
 >
 > **Acceptance**
-> - [ ] `POST /api/sessions/:id/publish` with `{remote, branch?, confirm:true}`; pushes using the host's own git
->   credentials.
-> - [ ] Only remotes named in `publish.remotes` are allowed; empty config disables the endpoint (404 or 403 with a
->   clear code).
-> - [ ] Never force-pushes; refuses protected names (`main`, `master`, `release/*`).
-> - [ ] `touches_ci` is true when the diff changes `.github/`, other CI files or hook directories, and the UI warns
->   before confirm.
-> - [ ] Pushing the merged target branch is not supported and returns a clear refusal.
-> - [ ] Containers never hold a git credential — asserted by a test.
+> - [ ] File list with status, additions and deletions; tapping a file shows its diff.
+> - [ ] Ahead and behind counts, plus a `touches_ci` warning where relevant.
+> - [ ] Target and strategy pickers, preselecting the first configured target and `ff-only`.
+> - [ ] Merge button disabled while running or dirty, with the reason shown and the "ask the agent to commit"
+>   shortcut offered.
+> - [ ] Publish button visible only when configured, with a confirm step and the CI warning.
+> - [ ] Conflict state shows the paths and the "Resolve with agent" action.
 
-`docs/stories/**` is **not edited** (§7). An **M** story, and the last route of item 12: it is the one that reaches
-*out* of the machine, and the one whose subject is not a ref of ours but somebody else's repository.
+`docs/stories/**` is **not edited** (§7). An **M** story, and it is the **first UI story since phase 1's session
+screen**: every route it draws already exists and every refusal it shows already has its sentence — what is new is
+the screen. That is why its "what already exists" list below is unusually long and its "what does not exist" list
+is one file.
 
 ### 1.2 The spec it closes
 
-Item 12's publish paragraph, in full:
+Item 12's UI sentence, in full:
 
-> `POST /api/sessions/:id/publish` with `{remote, branch?, confirm:true}`. The server pushes the session branch
-> `agent/<id>` using the host's own git credentials. Rules: only remotes named in `publish.remotes` config (empty
-> by default, so the endpoint is disabled); never force; refuse protected names (main, master, release/\*);
-> `touches_ci` is true when the diff changes `.github/`, other CI files or hook directories, and the UI shows a
-> warning before confirm. Pushing the merged target branch is not supported from the app; push main from the host.
-> Containers still never hold a git credential.
+> UI: the Session screen gets a Changes sheet with the file list, per-file diff, ahead and behind counts, a target
+> and strategy picker with a Merge button, a Publish button when configured, and warnings for uncommitted work and
+> CI files.
 
-And the UI sentence next to it ("a Publish button when configured, with a confirm step and the CI warning") is
-HS-058's, exactly as the Merge button is.
+and the six routes beneath it are item 12's bullets, all shipped: `GET …/changes` (HS-052, eleven keys plus the
+additive `mergeable_reason`), `GET …/changes/diff?path=` (HS-053, capped at 256 KB with a marker naming the
+total), `POST …/merge` (HS-054/055/056, the three strategies, rule 1's guards, `delete_session`),
+`POST …/publish` (HS-057). The screen is the only part of item 12 with no code.
 
 ### 1.3 What already exists (read this before planning)
 
-- **`config.publish.remotes` is built and validated, and nothing reads it.** `Config.publish: Publish { remotes }`,
-  the `publish.remotes` key in the schema (`KNOWN_KEYS` is 33), `is_remote_name` (letters, digits, `.`, `_`, `-`,
-  not starting with `-`), duplicate detection, the golden file, and `[publish]` in `config::render`. An **empty
-  list is the documented default** — so "empty disables the endpoint" is a decision the config already made and the
-  route has to honour, not a new key.
-- **`changes::touches_ci(&[FileChange]) -> bool` and `changes::CI_PATHS` are `pub` and tested** (HS-052, "public
-  for HS-058"): directory prefixes (`.github/`, `.gitlab/`, `.circleci/`, `.buildkite/`, `.woodpecker/`, `.husky/`,
-  `.githooks/`) matched against the whole path and file names matched against the last segment, the two arms
-  exclusive. `Changes::read` gives `files[]`, `head`, `base_commit`, `dirty`.
-- **`changes::basis(&Worktree) -> Result<String, ChangesError>` is `pub(crate)`** and is the four ordered
-  refusals (no repository, the directory is gone, git does not register it, the branch is gone) plus the branch's
-  tip. `http::changes`' and `http::merge`'s `changes_refusal`-style mapping is the precedent for answering them with
-  a route's own sentences.
-- **`merge.rs` is the shape a second writer takes**, and publish is a writer of somebody else's repository: its own
-  module (`src/publish.rs`) plus a handler (`src/http/publish.rs`), an error enum with **one arm per fact** and a
-  `sentence()` for the log, `git_output`-style runners that never parse English, and `spawn_blocking` for the git
-  work (`ADR-0063`/`ADR-0064` are the two records; `merge::listed` is the "is this name allowed" predicate shape
-  that `publish.remotes` repeats).
-- **The refusal vocabulary is in `http/error.rs`** — `no_worktree` (four sentences, per route), `bad_target`,
-  `not_fast_forward`, `target_dirty`, `target_checked_out`, `conflict`, `dirty_worktree`, `session_running`,
-  `unsaved_work`, `draining` — and `ApiError::not_in_state` gives one code per state. Publish needs its own words:
-  a remote the config does not list, an endpoint the config has turned off, a protected name, a request to push the
-  target, and a `confirm` that is not `true`.
-- **The credentials story is already measured.** Nothing a container has can push: the four mounts are the
-  worktree, the agent directory, the tool output and the key-proxy directory (ADR-0035), the agent's `pi-home` is
-  seeded with a **dummy** `auth.json` (HS-040/ADR-0048), and the session's network is `--internal` — V3, V4 and V5
-  are HS-040's. What is *new* is the assertion the acceptance asks for on the publish path: the push runs on the
-  **host**, as the server's user, through whatever git credential store that user has, and the test must say so
-  while also saying that no session container carries one.
-- **`tests/merge.rs`'s `Fixture` is the harness precedent** (a repository in a `TempDir`, a row, a worktree,
-  `support::git`), and a publish fixture needs one thing more: a **bare repository** as the remote
-  (`git init --bare <dir>`, then `git remote add origin <dir>` in the project) — which makes a real push possible
-  with no network, no credential and no daemon. `git ls-remote <bare>` is then the measurement.
-- **The gate's shape** for a case that owns a repository is `case_merge`/`case_merge_strategies`/
-  `case_merge_guards`: its own projects root, its own data root (they measure `<data>/merge`), a `_ping`-only socket
-  for the Docker preflight, and the worktree re-made with the step's own command because the failed network step
-  takes it back. A publish case needs the same, plus a bare remote under `$WORK`.
-- **`docs/notes.md`'s "the credential path (HS-040)" and "the egress proxy (HS-037)" sections are the two landmines
-  a publish touches**; nothing in the build has yet run a `git push`, so the first one is a measurement.
+- **Both read routes, and their exact shapes.** `GET /api/sessions/{id}/changes` answers `{branch, base_commit,
+  head, target, ahead, behind, dirty, mergeable, mergeable_reason?, files:[{path, status, additions, deletions}],
+  touches_ci}`; `target` is `null` (with `behind`/`mergeable` null) when the repository has no configured target;
+  `mergeable` is **three** answers (`true`/`false`/`null` + a sentence); `additions`/`deletions` are `null` for a
+  binary file. `GET …/changes/diff[?path=]` answers `text/plain` (the whole branch's patch when no `path`, the
+  cap's marker when it was cut, `charset=utf-8` only for real UTF-8 bytes) and `404 not_found` for a `path` that
+  is not in `files[]`.
+- **Every refusal the screen shows, with its sentence and code**: `409 no_worktree` (four sentences per route),
+  `409 dirty_worktree` ("…ask the agent to commit it, then merge again"), `409 session_running`,
+  `409 not_fast_forward`, `409 target_dirty`, `409 target_checked_out`, `409 conflict` with the additive
+  `conflicts` array, `422 bad_target`, `422 bad_strategy`, `422 bad_body`, and the publish family —
+  `403 publish_disabled`, `422 bad_remote`, `422 protected_branch`, `422 target_not_pushable`,
+  `422 confirm_required`, `409 push_rejected`. The merge's answer is `{merged_commit, target, strategy}` and a
+  publish's is `{remote, branch, commit}`. `docs/review/PER-88.md` and `PER-89.md` record which sentence means
+  what.
+- **Two decisions that name text this screen will use, recorded so they are not re-invented**:
+  ADR-0065 D4 names the prompt the "ask the agent to commit" shortcut sends, and ADR-0064 D10 names the
+  Resolve-with-agent affordance (both were *deferred to HS-058* by their stories); ADR-0066 D11 names the
+  sentence the Publish confirm step shows:
+  `this branch changes CI configuration, so publishing it may run workflows in the remote repository`.
+- **The session screen and its idioms.** `web/src/main.ts` is the DOM (`deleteSection` is the precedent for an
+  **affordance**: a button, a confirm step and the `409 unsaved_work` path that offers the forced retry), and
+  `web/src/transcript.ts` holds every rule that is worth a test (`deletedNotice`/`Kept`, `UNSAVED_WORK_NOTICE`,
+  `FORCED_DELETE_LABEL`, `stateText`/`headline`, `createFailure`, `historyPath`, `budgetNotice`,
+  `stoppedNotice`), with 52 tests in `web/test/transcript.test.ts` on node's own runner. `StreamTarget` carries
+  one `showState` that patches the badge, preview, composer and affordance — a second thing that must react to the
+  row is what that seam exists for.
+- **The gate's UI cases**: `case_session_screen` (the session page's elements over HTTP), `case_app_shell`, and
+  the two read routes' cases (`case_changes`, `case_changes_diff` — the gate asserts the bytes, not the page).
+  **No gate may need a browser**: the screen's *rules* are `web/test/transcript.test.ts`'s, and a rule that only
+  the DOM can show is not a gate case.
+- **The browser is a dev tool, not a test tool** (§2): Playwright's Chromium at `~/.cache/ms-playwright`,
+  `import`ed by path from `~/.cache/hs-browser/pw/node_modules/playwright/index.mjs`, launched `--no-sandbox`,
+  and **`networkidle` never settles** on a page holding an `EventSource` — navigate with `domcontentloaded` and
+  wait for the rows.
+- **The client has no 60-second timeout to add**: rule 6's pair is the hub's (HS-069), and ADR-0065 D8/ADR-0066
+  D12 record that a blanket timeout on the shared `post` helper would cut the delete's own `abort_grace` wait. The
+  Merge and Publish buttons use their own `fetch`, like `deleteSection`.
 
 ### 1.4 What does not exist
 
-No `POST /api/sessions/{id}/publish`, no `src/publish.rs`, no route-level refusal for an unlisted remote or a
-protected name, no `confirm` handling, no `case_publish`, and no test that a `git push` from this server works with
-the host's own credentials. `touches_ci` exists and is not wired to anything but the changes view.
+No Changes sheet: no file list, no diff reader, no ahead/behind display, no `touches_ci` warning, no
+target/strategy pickers, no Merge button, no Publish button or confirm step, no disabled-with-reason state, no
+conflict view, no "ask the agent to commit" and no "Resolve with agent" action, and no `web/test/transcript.test.ts`
+rules for any of them. The phase-2 UI is the session screen as phase 1 left it.
 
 ### 1.5 What the plan must decide (and the shape this handoff recommends)
 
-1. **What `branch?` names: the remote's ref, not ours.** The spec's sentence is "pushes the session branch
-   `agent/<id>`", so the ref *pushed from* is ours and `branch` can only name the destination —
-   `git push <remote> refs/heads/agent/<id>:refs/heads/<branch>`. That is the reading in which "refuses protected
-   names" means something (a destination called `main`), and in which "pushing the merged target branch is not
-   supported" is a *second* fact (a destination equal to the configured target). Record it either way: the other
-   reading (push a different local branch) makes `agent/<id>` optional and turns the route into a general push
-   endpoint, which the sentence "the server pushes the session branch" rules out.
-2. **Where the protected names live.** One constant (`publish::PROTECTED`), with `main`, `master` and the
-   `release/*` prefix — and the target branches of `merge.targets` are *not* the same list (a machine may merge
-   into `trunk` and must still refuse a destination named `main`). Recommend: the constant, checked with the same
-   two-arm predicate shape `changes::touches_ci` uses (a trailing `/` is a prefix, everything else is a name), and
-   the `merge.targets` check as its own arm with its own sentence.
-3. **`confirm: true` is required, and `false` is a refusal rather than a no-op.** A missing/non-boolean `confirm`
-   is `bad_body` (the body's shape, ADR-0064 D5's split); `false` is a request that asked *not* to push, so it is a
-   `422`/`409` with a sentence saying nothing was pushed. Recommend `422 confirm_required`, because nothing about
-   the machine or the session is in the way — the client's own form is.
-4. **The disabled endpoint's answer.** The acceptance allows 404 or 403. Recommend **`403 publish_disabled`** with a
-   sentence naming the `publish.remotes` key: a `404` for a route that exists is a lie about the table, and this
-   build's `not_found` is "no such path". Record the choice; the gate asserts whichever you take.
-5. **What the answer is.** The spec does not say. Recommend `{remote, branch, commit}` — the remote as asked, the
-   destination ref's short name, and the **branch's tip read before the push** (never the push's own prose, which
-   git makes no contract about). Record it; a client that wants more reads `GET …/changes`.
-6. **Hooks, and never force.** `git push` runs `pre-push`, which is a program the host runs on an agent-written
-   branch — the same class as `post-merge`, so recommend `-c core.hooksPath=/dev/null` on the push, with the ADR
-   saying why (ADR-0064 D2's rule applied one command further out). And **no `--force`, no `+` refspec**: a
-   non-fast-forward is the remote's answer, so it is a refusal (`409 not_fast_forward_push`? name it) and never a
-   retry with force.
-7. **The 60 seconds, again.** Rule 6's pair covers publish as well as merge, and §1.5 D8 of the previous handoff
-   recorded it as the hub's (HS-069) — so publish records the same sentence and does not invent a server-side
-   ceiling. Say it in the ADR rather than omitting it.
-8. **`touches_ci` and the confirm step are HS-058's UI half.** The route does not warn; the flag is in the changes
-   view and the button is the sheet's. Record it (ADR-0064 D10's precedent) and name the sentence the button will
-   show, so HS-058 inherits a decision.
-9. **The credential assertion the acceptance asks for.** Recommend two tests: `tests/publish.rs` runs a real push
-   into a **bare repository** with no credential of its own (a `file://`-shaped path needs none), and
-   `tests/container.rs` (or a new `tests/publish.rs` case) asserts the container's four mounts and its environment
-   hold no key, no ssh material and no credential helper — the *positive* half being that the push ran on the host.
-   The gate cannot push to a remote it does not own, so `case_publish` publishes into a bare repository under
-   `$WORK` — which is the only honest way to measure a push without a network.
-10. **Refusal order.** The request's facts first (body, `confirm`, `remote` listed, `branch` name, protected
-    names, the target), then the row (`404`), then `changes::basis`' four refusals (`409 no_worktree`, this route's
-    sentences), then the push. That keeps ADR-0012's order (a malformed body is answered the same way whatever the
-    session is) and `merge`'s `listed`-before-the-row shape.
+1. **Where the sheet lives.** Recommend: a **section of the session screen** opened by a *Changes* button in the
+   existing header area (`main.ts`'s `deleteSection` is the shape: one section that renders itself from a fetch and
+   is re-rendered on the stream's row updates), not a new route — the app has two screens and item 12 says "the
+   Session screen gets a Changes sheet". Record it either way; a third screen would need `historyPath`'s and the
+   server's fallback route to change too.
+2. **The rules go in `transcript.ts`, the DOM in `main.ts`.** Every string and every branch the sheet shows (the
+   disabled reason, the CI warning, the confirm label, the conflict line, the "ask the agent to commit" prompt) is
+   a tested rule, the way `deletedNotice`/`UNSAVED_WORK_NOTICE` are, because `npm test` is the only gate that can
+   see them. That is what makes the acceptance reviewable without a browser.
+3. **How "disabled with the reason" is known.** The merge route's guards are `session_running` (the row's
+   `status === "running"`) and `dirty_worktree` (`GET …/changes`'s `dirty`). Recommend: the button's disabled
+   state is computed from the **last `GET …/changes`** (`dirty`) plus `StreamTarget`'s `showState` row
+   (`status`), with the reason text naming the same next step the `409`'s sentence does — and the `409` path stays
+   as the backstop, because a turn can start between the read and the tap.
+4. **The two prompts.** ADR-0065 D4 and ADR-0064 D10 name them; read them before writing a third spelling. The
+   "ask the agent to commit" shortcut posts `POST …/prompt` with that text; "Resolve with agent" posts the
+   conflict prompt and then offers a retry (item 12's "then retry").
+5. **Target and strategy pickers.** `target` comes from the *first existing* configured target (`changes`'s
+   `target`, already the config's order); the picker's options are the configured list — which the client does not
+   have. Recommend: derive the options from `merge.targets` via `GET /api/health`'s bag **or** ship the list in the
+   changes answer as an additive key (an ADR decision; the second touches a route a story already closed), and if
+   the answer is "one target", the picker renders `changes.target` alone and the story says so. `strategy` is
+   item 12's three words with `ff-only` preselected.
+6. **The reader's cap and the marker.** The diff already answers a marker naming the **total**; the sheet shows it
+   verbatim rather than re-measuring, and a binary file's `null` counts render as an em dash rather than `0`.
+7. **The conflict state.** `409 conflict`'s additive `conflicts` array is the paths; the sheet shows the list, the
+   sentence, and the Resolve-with-agent action. A `mergeable: false` from the *read* is the same state before the
+   tap: recommend showing the same paths from `mergeable_reason` without offering Resolve twice.
+8. **The Publish half.** Visible only when configured — the client learns that from `403 publish_disabled` (or,
+   better, from `GET /api/health`; decide), a confirm step (`confirm:true` is the request's opt-in), and the CI
+   warning from `touches_ci`, shown **before** confirm, exactly as much as ADR-0066 D11's sentence says.
+9. **The pending states.** Each of the three actions (merge, publish, prompt) disables its own button while its
+   request is in flight and re-enables on an answer; a `request` that fails shows the envelope's sentence alone
+   (the `createFailure` precedent). The stream keeps updating the file list while a turn runs.
+10. **What the gate measures.** One `case_*` is required. Recommend `case_changes_screen`: over the existing
+    `case_changes` fixture shape (own projects root, `_ping` socket, worktree re-made), assert that the page's
+    HTML carries the sheet's element ids and the rule strings (the way `case_session_screen` does), and put the
+    rule tests (disabled reason, CI warning, conflict list, prompts, cap marker) in `web/test/transcript.test.ts`
+    with a `npm test` count that grows.
 
 ### 1.6 The questions the plan must answer (before code)
 
-1. The exact request/response for: `publish.remotes = []`, an unlisted remote, a protected destination, a
-   destination equal to the target, `confirm` absent/false/true, `branch` absent/empty/protected, a session whose
-   branch has no commits, a worktree that is gone, and a push that the remote refuses as non-fast-forward.
-2. What each refusal's envelope sentence says it did **not** do (nothing was pushed).
-3. Whether `branch` is the destination (recommended) and how an empty string is answered.
-4. What `touches_ci` does on this route (nothing) and where the warning lives.
-5. Whether a `git push` runs with `-c core.hooksPath=/dev/null`, and what measures it (a real `pre-push` hook that
-   must not fire, as `tests/merge.rs` does for `post-merge`).
-6. Which `case_publish` measures what, and how it avoids a remote it does not own (a bare repository under `$WORK`,
-   `git ls-remote` before and after).
-7. Whether the credential assertion belongs in one test or two, and what exactly it reads (the mount vector, the
-   environment, the agent directory's seeded `auth.json`).
+1. The exact DOM: one section with a button, or a sheet with its own overlay? What does the file list show for a
+   binary file, a rename, a delete, and an untracked file that is not in `files[]`?
+2. How `merge`/`publish`/`touches_ci`/`dirty` reach the sheet: re-fetch on every stream frame, on a debounce, or
+   only when the sheet is open (and what the stream's `showState` already gives for free)?
+3. The disabled reason's exact words for `running` and for `dirty`, and whether the `dirty` case's "ask the agent
+   to commit" button is the shortcut ADR-0065 named.
+4. Whether the target picker needs a new key on `changes` or renders one target; if a key, which ADR.
+5. What the Publish confirm step looks like when `touches_ci` is false (the confirm still exists — the spec's
+   `confirm:true` is the opt-in).
+6. What a `409 conflict` shows after Resolve-with-agent has been sent, and what re-enables a retry.
+7. Which `web/test/transcript.test.ts` rules are new, and which of them is the one that could not fail (delete the
+   behaviour, watch it go red).
+8. What `case_changes_screen` measures that no `cargo test` can, and why it needs no browser.
 
 ### 1.7 Acceptance, restated as checks
 
-- *The contract* — `POST …/publish` with `{remote, branch?, confirm:true}` pushes `refs/heads/agent/<id>` to the
-  remote, and `git ls-remote <bare>` on the remote names it afterwards. `confirm` absent/false refuses and pushes
-  nothing.
-- *The config is the authority* — an empty `publish.remotes` is a `403` (or `404`) with a code; an unlisted remote
-  is a `422`; a listed one works.
-- *Never force, never protected* — a destination named `main`, `master` or `release/…` is refused; a non-fast-forward
-  is refused with git's answer and **no** force retry; `git ls-remote` shows the remote unmoved.
-- *`touches_ci`* — the flag is the changes view's and this route reads none of it; the warning is HS-058's, recorded.
-- *The target is not pushable* — a destination naming the configured target is refused with its own sentence.
-- *No container holds a credential* — a test asserts the mount vector and the environment carry none, and that the
-  push used the host's own git.
-- *Plus* the usual gates, one new `case_publish`, and `docs/build.md`/`docs/notes.md`/`GLOSSARY.md`/an ADR
-  (**0066**).
+- *The file list* — status, additions and deletions for every entry of `files[]`, and tapping one renders that
+  file's diff from `GET …/changes/diff?path=` (a binary file shows git's summary line, not `0`/`0`).
+- *Ahead/behind* — the two numbers the read answered, and the `touches_ci` warning where the read says `true`.
+- *The pickers* — the first existing configured target preselected and `ff-only` preselected; the strategy words
+  are the contract's three; a `422 bad_strategy` cannot be produced by the UI.
+- *The Merge button* — disabled while the row is `running` or the session `dirty`, with the reason shown and the
+  "ask the agent to commit" shortcut offered (the prompt text ADR-0065 D4 named).
+- *The Publish button* — visible only when configured; a confirm step; the CI warning before confirm
+  (ADR-0066 D11's sentence).
+- *The conflict state* — the paths and the "Resolve with agent" action, whose prompt is ADR-0064 D10's.
+- *Plus* the usual gates, one new `case_*`, `web/test/transcript.test.ts` rules with a real mutation check, and
+  `docs/build.md`/`GLOSSARY.md`/an ADR (**0067** if a decision needs one; a UI story may need none).
 
 ### 1.8 Non-goals
 
-The Changes sheet, the Publish button and its confirm/CI warning (HS-058), the hub and forwarding (phase 3), any
-credential *management* (`key set` is the provider-key store, not a git credential), and any push of the merged
-target (the spec's own "push main from the host").
+The routes (all shipped), a new screen or a router, a markdown/file browser (item 12's non-goal), the hub
+(phase 3), notifications (HS-066/067), and any server-side change to the merge/publish contracts beyond a single
+additive key if 1.5 D5 chooses one.
 
 ### 1.9 The demo
 
-On this machine: a project with a **bare repository** as `origin` under `/tmp`, `publish.remotes = ["origin"]` in
-the config, a session with a commit on `agent/<id>`; `POST …/publish {"remote":"origin","confirm":true}` → 200 and
-`git ls-remote origin` naming `refs/heads/agent/<id>`; then the same request with `{"remote":"origin","branch":
-"main","confirm":true}` → the protected-name refusal; then a second boot with `publish.remotes = []` → the disabled
-refusal; and `git ls-remote` unchanged after both. **Say plainly what was not measured**: no container, no real
-github credential (the push is to a local bare repository), no hub, no UI.
+On this machine, in Chromium (Playwright, `--no-sandbox`, `domcontentloaded` + wait-for-rows): create a session
+over the `_ping` shim, re-make its worktree by hand, commit two files on `agent/<id>`, open the session screen,
+open Changes, see the two files and the ahead count, tap one and read its diff, pick `merge`, merge, and see the
+target advance (`git log --oneline main` and the sheet's own answer); then a session with `publish.remotes`
+configured to show the Publish confirm and the CI warning; then a conflicted branch to show the paths and the
+Resolve-with-agent action, and **paste the prompt it sent** (from `session.log` or the events table). Say plainly
+what was not measured: no real agent turn (no provider key here), no hub, no iOS install.
 
 ### 1.10 What the next agent needs back
 
 When you write the state back (§5, step 10): §1 becomes the **next** issue — by `PROMPT.md`'s ranking that is
-`PER-90` (HS-058, the Changes sheet) *if* HS-057 ships, and `PER-89` again if it does not (HS-058 is blocked by
-HS-057, so nothing else in phase 2 is eligible until it lands) — with the same shape. Refresh the counts, the ADR
-number you took (**0066** is next), the last gate run's own numbers, and replace §9's row with this story's.
-Anything you learned that is **not** state and **not** an ADR goes into `docs/notes.md` under a new
-`### Landmines: …` heading, never into §1. Then kill what you started (§5, step 11).
+`PER-94` (HS-062, the disk floor) *if* HS-058 ships, and `PER-90` again if it does not — with the same shape.
+Refresh the counts, the ADR number you took (**0067** is next), the last gate run's own numbers (and `web/`'s
+test count, which this story changes), and replace §9's row with this story's. Anything you learned that is **not**
+state and **not** an ADR goes into `docs/notes.md` under a new `### Landmines: …` heading, never into §1 — and a
+UI story's landmines are worth more than most, because `npm test` is the only gate that sees them. Then kill what
+you started (§5, step 11).
 
 ---
 
@@ -469,7 +467,7 @@ Some cases bring their own boot, and they are the ones a new story is most likel
 | Case | What it needs |
 | --- | --- |
 | `case_token_budget`, `case_usage_survives_resume`, `case_compaction`, `case_history`, `case_backup`, `case_worktree`, `case_worktree_refusal`, `case_agent_launch`, `case_docker_resume`, `case_docker_turn`, `case_internet_toggle`, `case_doctor_full` | its own `serve`, and (the last five) the daemon and `agent_image` |
-| `case_changes`, `case_changes_diff`, `case_merge`, `case_merge_strategies`, `case_merge_guards` | `python3` for a `_ping`-only docker socket, a real repository under their own `projects_root`, and (for the three merge cases) their own **data root**, because `<data>/merge` is what they measure. `case_merge_guards` also writes one column (`sessions.status`, with python3's `sqlite3`) because a gate may not run a turn. No daemon. |
+| `case_changes`, `case_changes_diff`, `case_merge`, `case_merge_strategies`, `case_merge_guards`, `case_publish` | `python3` for a `_ping`-only docker socket, a real repository under their own `projects_root`, and (for the three merge cases) their own **data root**, because `<data>/merge` is what they measure. `case_merge_guards` also writes one column (`sessions.status`, with python3's `sqlite3`) because a gate may not run a turn. `case_publish` also makes a **bare repository** under `$WORK` as `origin`, boots **three** times (the ordinary run, one with git's `GIT_CONFIG_*` naming a second `pushurl` repository, one with `remotes = []`), and needs no daemon. No daemon. |
 | `case_verification_table` | no server, no daemon, no image: it reads `HolosmithSpec.md`'s eleven `V<n>` rows (and runs first in `serve_cases`, so a rotted table fails before the Docker cases) |
 | `case_docker_preflight`, `case_doctor_quick` | no server at all (`case_doctor_quick` builds its own `_ping` socket and picks its ports, so it needs `python3` and nothing else) |
 | `case_container_mounts` | no server *and* no daemon — one printed `SKIP` line when there is neither a daemon nor an image |
@@ -524,7 +522,7 @@ crates/holosmith/
                             deploy.rs (the seven steps' command: the config, the tail, the resume command),
                             drain.rs (`holosmith drain [--wait]`: a std UnixStream client, and the exit code
                             is the server's terminal word — 0 only for `drained`)
-  src/config/               mod.rs (typed Config, KeySpec walk, 32 keys), schema.rs, problem.rs,
+  src/config/               mod.rs (typed Config, KeySpec walk, 33 keys), schema.rs, problem.rs,
                             render.rs, duration.rs, editor.rs
   src/backend/              mod.rs (Step, SessionBackend, `ProcessEnd`/`ExitWatcher`/`supervise`,
                             Backends::for_run(backend, ContainerSettings),
@@ -722,6 +720,15 @@ crates/holosmith/
                             since HS-054 `checkouts` → `Checkout { path, branch, prunable }` with
                             `parse_checkouts` (the four block shapes git prints) and `registrations` delegating.
                             Sync and std-only; the backend calls it on `spawn_blocking`
+  src/publish.rs            the publish (HS-057, ADR-0066): `PROTECTED` (main, master, release/), `listed`,
+                            `protected` (the two arms), `destination` (ours -> theirs), `Request`, `Pushed`
+                            (`{remote, branch, commit}`), `PublishError` + `sentence()`, `push_arguments`
+                            (`-c core.hooksPath=/dev/null push --porcelain --no-follow-tags`), `rejected_reason`
+                            (the porcelain `!` flag), `push_command` (the host's env, `GIT_TERMINAL_PROMPT=0`),
+                            `remote_exists` (`remote get-url`, exit 2), `publish`. Sync and std-only
+  src/http/publish.rs       one handler: `POST /api/sessions/{id}/publish` — body → **disabled** (403, before the
+                            row) → `confirm` → remote listed → `branch`'s alphabet → protected → the target →
+                            the row (404) → `base_commit` → `changes::basis` + the push on `spawn_blocking`
   src/changes.rs            the changes view's summary (HS-052, ADR-0061): `Changes::read(&Worktree,
                             base_commit, targets)` — the *ordered* refusal (`NoRepository` → `Missing` →
                             `Unregistered` → `NoBranch`, then `Git`) and five host reads: `ahead`
@@ -884,10 +891,9 @@ scripts/verify.sh           the one-command gate (see §3), including the two st
                             --json` from the pairs it was asked for) and `health_responder` (a `python3` that
                             answers `/api/health` for a whole case)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0065          read the recent ones before planning anything (0065 is the merge's guards and
-                            `delete_session`)
+docs/adr/0001…0066          read the recent ones before planning anything (0066 is the publish)
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-88, PER-91…PER-93, PER-97, PER-107  each a verbatim review + a `## Resolution` table
+docs/review/PER-33…PER-93, PER-97, PER-107  each a verbatim review + a `## Resolution` table
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -899,7 +905,8 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   `POST /api/sessions/{id}/{prompt,abort,steer,resume}`, `DELETE /api/sessions/{id}[?force=true]`,
   `GET /api/sessions/{id}/events`, `…/events/history`, `…/tool-output/{tool_id}`,
   `…/tool-image/{tool_id}/{index}`, `…/changes`, `…/changes/diff[?path=]`, `POST …/merge` with all three of
-  item 12's strategies, rule 1's two guards and rule 5's `delete_session`), SQLite with **four**
+  item 12's strategies, rule 1's two guards and rule 5's `delete_session`, `POST …/publish` with the config's
+  remotes, the protected names, the merge target and a `confirm` that is required), SQLite with **four**
   migrations, the guards, the event writer (which coalesces a commit's deltas), the SSE stream, the stub
   backend and its four-step provisioner, the
   enforced state machine, the abort ladder, the delete flow, the cap with eviction, the create's and the
@@ -1103,16 +1110,15 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 The catalogue lives in **`docs/notes.md`** — read the **cross-cutting** sections before you start anything,
 then the sections below. It is a reference: everything there is a measurement or a review finding.
 
-| Read | Why it bears on HS-057's publish |
+| Read | Why it bears on HS-058's Changes sheet |
 | --- | --- |
-| Cross-cutting: *Build and toolchain*, *Tests*, *Config and docs*, *Demos*, *Reviews* | True of every story. This one's sharpest is **Tests** and **Demos** together: a push is a *remote's* state, so an assertion that only reads this repository proves nothing — `git ls-remote <bare>` before and after is the measurement, and a fixture that never pushed would still show a branch here. The second is *Config and docs*: `publish.remotes` is already a key with a golden file, so nothing here adds one. |
-| *Landmines: the credential path (HS-040)* | The story's fifth bullet ("containers never hold a git credential — asserted by a test") is answered by facts this section measured: the four mounts, the dummy `auth.json` the pi-home is seeded with, the `--internal` network, and the key proxy as the one route out. Read it before writing an assertion about credentials, because the assertion is about **what is not there** and the positive half (the push ran on the host) is the part that can fail. |
-| *Landmines: the egress proxy (HS-037)* | A publish does **not** go through the proxy: the push is the *host's* git, and the host has whatever network it has. Worth reading so the ADR can say plainly that the session's network is irrelevant to a publish, and so `case_publish` does not try to route it. |
-| *Landmines: the two landing strategies (HS-055)* and *the fast-forward merge (HS-054)* | The two writers this one joins: the `-c core.hooksPath=/dev/null` decision (a `pre-push` hook is a program the host runs on an agent's branch, the same class as `post-merge`), the one-arm-per-fact error enum and its `sentence()`, the "never parse English" rule, and the refusal order (the request's facts, then the row, then the repository). |
-| *Landmines: the merge's guards and the delete after a merge (HS-056)* | The most recent section, and the one whose shape a publish repeats: guards in the route, `changes::basis` first, a sentence that says what did **not** happen, and the two changes the review forced (a rule that needs a commit compares a commit; an assertion's needle must not be a word the sentence already contains). |
-| *Landmines: the changes view (HS-052)* | `touches_ci` and `CI_PATHS` are public and tested, and `Changes::read` is where `files[]` comes from; `dirty` is the one definition of work. Read this before deciding that publish needs anything from the working tree (it does not — it needs the branch). |
-| *Landmines: the drain and its socket (HS-051)* | The boot discipline a case that owns a repository must keep (`--admin-dir` and `projects_root` passed, never inherited; a `python3` guard **above** `stop_serve`), and the reason a case that needs a row in a state no request produces writes one column by hand. |
-| *Landmines: the doctor, the ports and a read-only open (HS-045)* | The three-armed fact (`pass`/`fail`/`unknown`) — the shape a fallible question takes, which is what "the remote refused" and "we could not ask the remote" have to be told apart as. |
+| Cross-cutting: *Web*, *Tests*, *Demos*, *Reviews* | This is the first UI story since phase 1, so **Web** and **Tests** are the pair that matters: the screen's *rules* are `web/test/transcript.test.ts`'s (node's runner, 52 today) and `npm test` is the only gate that can see them, while **no gate may need a browser**. **Demos** carries the three Playwright quirks (ESM ignores `NODE_PATH` and the `.js` entry has no `chromium`; `--no-sandbox`; `networkidle` never settles on a page holding an `EventSource`). |
+| Cross-cutting: *HTTP and the envelope* | Every refusal the sheet shows is an envelope with a fixed sentence, and `touches_ci`'s and `conflicts`'/`kept`'s additive keys are the shape any new key must follow. The rule "a message must describe its own request" is why the Merge button's disabled reason and the `409`'s sentence should not be two different stories. |
+| *Landmines: the changes view (HS-052)* and *the unified diff (HS-053)* | The two reads this screen renders, and the two facts that most easily become a UI bug: `mergeable` is **three** answers (`true`/`false`/`null` + `mergeable_reason`), a binary file's counts are `null` and not `0`, and the diff's marker names the **total** rather than what was shown. `touches_ci`'s two arms (a directory prefix vs a file name) are already tested. |
+| *Landmines: the fast-forward merge (HS-054)*, *the two landing strategies (HS-055)* and *the merge's guards (HS-056)* | The prompts this sheet sends are named there — ADR-0065 D4's "ask the agent to commit" and ADR-0064 D10's Resolve-with-agent — and the three refusal sets the buttons must pre-empt: `session_running`, `dirty_worktree`, `conflict` (with its `conflicts` array). The refused-merges-make-no-temporary-worktree fact is the reason a disabled button is worth having. |
+| *Landmines: the publish (HS-057)* | The Publish half: `403 publish_disabled` is how the client learns the endpoint is off, `confirm:true` is the opt-in, and ADR-0066 D11 names the CI warning sentence this sheet shows before confirm. The push's own refusals are `422`/`409` with sentences to render as-is. |
+| *Landmines: the drain and its socket (HS-051)* | Why the buttons must not grow a blanket client timeout: `DELETE` legitimately waits out `abort_grace`, and a merge or publish is a long request whose ceiling is the hub's (HS-069). |
+| *Landmines: the doctor, the ports and a read-only open (HS-045)* | The three-armed fact (`pass`/`fail`/`unknown`) — the shape a fallible question takes, which is what `mergeable: null` and a `null` file count already follow. |
 
 Three rules worth repeating here because they are the most expensive to relearn: **a test that cannot fail
 is worse than no test** (mutate the behaviour and watch it go red); **a gate case that SKIPs on the bug it
@@ -1153,7 +1159,7 @@ cd /home/adamolsson/projects/holosmith
 git status --short                                  # clean apart from log.txt/orchestrate.sh
 . ~/.pi/toolchains/env.sh                           # ALWAYS before cargo/rustc
 python3 /tmp/lin.py issues | grep -v ' Done ' | head # recreate /tmp/lin.py first (§2)
-python3 /tmp/lin.py issue PER-89                    # scoped, Backlog, the issue §1 names
+python3 /tmp/lin.py issue PER-90                    # scoped, Backlog, the issue §1 names
 docker version                                      # the daemon must answer, or a Docker check cannot be measured
 docker image inspect pi-agent:local                 # the image the Docker stories run
 docker network ls | grep -w egress                  # the proxy test's premise (§2); `grep -x` never matches
@@ -1163,7 +1169,7 @@ scripts/verify.sh                                   # baseline green, ~9–12 mi
 
 If the baseline is red before you touch anything, that is the first thing you fix — and say so in Linear.
 
-Then start §5 on **§1's issue** (`PER-89`, HS-057) and stop after step 11.
+Then start §5 on **§1's issue** (`PER-90`, HS-058) and stop after step 11.
 
 Before you begin, check that the last session left nothing behind — `subagent({action:"list"})` should show
 no run in progress, `docker ps` none of its containers, and `git status --short` should look like the line
@@ -1182,9 +1188,24 @@ from those three; do not carry old sessions' ledgers in this file.
 If you stop before the issue ships, say so explicitly, name the next action, and leave the tree clean and the
 gates green — **a half-finished story is worse than an honest stop**.
 
-**The last shipped story** (`PER-88`, HS-056, ADR-0065; commits `7b3fa4b`, `43eaf02`): the merge's guards, rule
-5's `delete_session`, and the decision that rule 6's 60 seconds has no client in this build. The shape is *where a
-fact lives*. Rule 1's two guards are the **route's** and only the route's — a session row is ADR-0063's "not
+**The last shipped story** (`PER-89`, HS-057, ADR-0066; commits `e3c7846`, `1c7c93f`): the publish, and the three
+decisions that shaped it. `branch` is the **destination** ref (the refspec is ours -> theirs), because the spec
+fixes the ref pushed from; the protected names are a constant with `touches_ci`'s two arms and the configured merge
+target is a *second* fact with its own code, because a machine may merge into `trunk` and must still never write
+`main`; an empty `publish.remotes` is `403 publish_disabled` answered **before** the row, because the route exists
+and a `404` would lie about the table. Two pins on the push were measured rather than assumed — `-c
+core.hooksPath=/dev/null` (a real `pre-push` hook fired without it) and `--no-follow-tags` (a repository's
+`push.followTags = true` pushes annotated tags in addition) — and the rejection is read from `git push
+--porcelain`'s `!` flag, which is the one place the reason word lives (`fetch first` and `non-fast-forward` are the
+same fact told differently depending on what the local object store knows, so nothing branches on it). The gate's
+`case_publish` publishes into a **bare repository under `$WORK`** — the story's last acceptance bullet made a
+measurement, since a path no container mounts cannot be a container's push. **The review's two findings are the
+lesson**: `config::is_ref_name` was not git's refname alphabet (it accepted `a.lock`, `.hidden`, `a/.b`, which
+`git push` refuses with `fatal: invalid refspec`, so the client's mistake answered a `500`), and the arm for "the
+push uses the host's own git" could not fail — `Command::get_envs` reports only what a command sets, so
+`.env_clear()` would have stayed green. The fix is a boot with git's `GIT_CONFIG_*` naming a second `pushurl`
+repository, mutated in both directions. The gate: **83 cases, 1373 assertions**, no `SKIP`; `cargo test` 1068;
+`web` unchanged at 52. Its full record is Linear, `docs/review/PER-89.md` and `git log`; do not carry it forward. Rule 1's two guards are the **route's** and only the route's — a session row is ADR-0063's "not
 consulted", so `merge::merge` was left alone, and both guards sit **before** the blocking task, which is what makes
 "a refused merge creates no `<data>/merge` at all" true by construction rather than by cleanup. Only `running`
 refuses: the `error` row a failed provision leaves is the session an operator most wants to merge, and an
