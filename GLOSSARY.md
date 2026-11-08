@@ -276,6 +276,19 @@ reconcile is. Its machine names are `Reconciler`, `Reconciler::run`, the reason 
 `Trigger::CrashRecovery`.
 _Avoid_: Recovery job, crash handler, cleanup, janitor
 
+**Stopped-session expiry**:
+The daily policy that removes a session nobody came back to, so the operator does not prune by hand: a row
+`stopped` for longer than `stopped_ttl_days` (default 7) is handed to the **Delete flow**, which snapshots it
+first and keeps its **Kept work** — which is why an expiry is a delete and never a purge. A **WIP snapshot** that
+fails skips the row instead of forcing it (a policy may not discard work), and nothing about the row moves, so
+the same row is a candidate tomorrow: the retry is the candidate set. An `error` row is never a candidate, and
+neither is one already `deleting`. It is item 15's `stopped_at` clock that decides, and the **Sessions screen**
+shows the days a stopped row has left from that column plus the machine's window. Its machine names are
+`expiry::Expiry` (and `Expiry::sweep`, one pass a test awaits), `expiry::TICK`, `expiry::cutoff`,
+`Trigger::Expire`, `SessionRepository::expired_before` and `sessions::complete_deletion` (the **Delete flow**'s
+second half, which the operator's `DELETE` runs too).
+_Avoid_: Prune, reap, garbage collection, cron, auto-cleanup
+
 **Delete flow**:
 The one way a session is removed, and the only thing here that destroys work. `DELETE
 /api/sessions/:id` ends a running turn first, takes a **WIP snapshot**, moves the row to `deleting` and
@@ -284,9 +297,13 @@ removes the row and its event log. A snapshot that fails answers 409 **unsaved w
 request carried `?force=true`, and the session is left where the delete found it — except that a
 running turn has already been ended by then, which is the order the spec asks for and the price of
 learning that the work could not be saved. Repeating the request while the row exists re-runs the
-removal; once the row is gone the answer is 404. Its **request half** is one function
-(`sessions::deletion`), because a `DELETE` is no longer its only entry: a **Merge** with `delete_session`
-runs the same half with `force` false and the target it just landed in, so the branch is not **Kept work**.
+removal; once the row is gone the answer is 404. It has two **halves and
+two callers**: the request half (`sessions::deletion`) reads the row, answers a `deleting` one by re-running the
+removal and ends a running turn, and the second half (`sessions::complete_deletion`) is the snapshot, the keep
+rules, the transition and the spawned task. A `DELETE` is not its only entry — a **Merge** with
+`delete_session` runs the same request half with `force` false and the target it just landed in, so the branch
+is not **Kept work**, and a **Stopped-session expiry** runs the same second half with `Trigger::Expire` and
+`force` false, which is what "using the delete flow" means.
 Its machine names are `Deleter` (and the task's `Deleter::remove`), `Trigger::Delete` and the state `deleting`.
 _Avoid_: Purge, drop, cleanup, destruction
 

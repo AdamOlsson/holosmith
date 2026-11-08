@@ -2265,3 +2265,47 @@ it rather than adding a caveat beside it.
   `"type":"error"` against the stream — that field belongs to a history *page*, whose events are objects, while a
   stream frame is `id`/`event`/`data`. The case failed on its own wrong needle, not on the policy; the page keeps
   the `type` assertion and the stream asserts `event: error`.
+
+### Landmines: stopped-session expiry (HS-064)
+
+- **The story's destructive decision is a table row, not a comparison in the job.** `Trigger::Expire` admits
+  `stopped` only, so a session the operator resumed between the pass's read and the flow's write is refused by
+  `Transitioner::apply` — ADR-0016's one authority kept. The pass *also* re-reads the row, and that re-read is
+  cosmetic (it keeps the log line honest); the safety is the table. Two guards that agree make a test that
+  cannot tell them apart: `tests/expiry.rs`'s "a row that left `stopped` is not expired" proves the *outcome*,
+  and `tests/state_machine.rs`'s `the_expirys_row_admits_stopped_and_nothing_else` is what isolates the row —
+  change `FromStates::OneOf(&[Status::Stopped])` to `Any` and only that test goes red.
+- **`set_status` is the only way to backdate a stop, and it needs no second statement.** `set_status` writes
+  `stopped_at = now` when the new status is `stopped`, so passing a `now` of eight days ago *is* the backdate.
+  `Database` has no public `connection()`, so a test that reached for `UPDATE sessions SET stopped_at = …`
+  cannot run at all — which is the good result: item 15's one writer is the only door.
+- **A `stopped` session is not reconciled, so the expiry's first pass needs no `SETTLE`.** The startup
+  reconcile moves every **live** row to `starting` and re-provisions it; `stopped`, `error` and `deleting` are
+  untouched. That is why `expiry::run` sweeps immediately where `quota::run` waits — and why the gate and the
+  demo observe a daily policy in seconds (backdate the row, restart, read the disappearance). Copying the
+  quota's settle into a later policy over non-live rows would be a 60-second delay for nothing.
+- **The removal is the delete flow's own task, so "the row is gone" is a fact that arrives after the pass.**
+  `complete_deletion` spawns `Deleter::remove` and answers; a test that asserted the row's absence straight
+  after `Expiry::sweep` is a race (it failed on the first run of `tests/expiry.rs`). Wait for it
+  (`wait_gone`), and note the same is true of the *order* two removals happen in: the repository's
+  `ORDER BY stopped_at` is asserted where that statement lives, never through two concurrent tasks.
+- **"An `error` row is never auto-deleted" has two independent guarantees, and only one is testable in-process.**
+  The candidate query's `status = 'stopped'` predicate and `stopped_at`'s `NULL` in every other state agree on
+  every row this build can write, so a test cannot isolate either. `case_stopped_expiry` writes `status='error'`
+  **with** a stale `stopped_at` — a row no writer produces — which is the only construction where the predicate
+  is load-bearing. A story that reasons about a policy's refuse-list should look for that shape.
+- **The days-remaining sentence is a `transcript.ts` rule with its clock passed in, and two places draw it.**
+  `expiryText(stoppedAt, ttlDays, now)` is pure; `main.ts` reads `Date.now()`. The `session.status` frame
+  carries no `stopped_at`, so the patch path uses the frame's arrival as the stop instant — right to the second,
+  because the transition that emitted it just wrote the clock. The machine's window reaches that path through
+  `<ul id="session-list" data-stopped-ttl-days>`, because `main.ts` keeps no state beyond the DOM and a create's
+  answer carries a row without the setting.
+- **The sentence must not promise a delete.** The job snapshots first and skips a row whose snapshot fails, so a
+  stopped session can outlive its window with its work intact: "expires in N days" is what the answer can
+  stand behind, and a test asserts the word "delete" never appears.
+- **`format!` with no arguments is a `String` allocated for nothing.** The repository's new filter is a `const`
+  where `idle_before_filter` is a `fn`: the latter interpolates `QUIETEST_FIRST`, the former has nothing to
+  interpolate. `clippy::useless_format` would have caught it, but the shape is worth choosing deliberately.
+- **A `pub(crate)` function in a private module is not reachable, even from the crate.** `http::sessions` is
+  private, so `complete_deletion` needed one `pub(crate) use` line in `http/mod.rs`; making the module `pub`
+  would have opened the whole handler file to the crate to expose one name.

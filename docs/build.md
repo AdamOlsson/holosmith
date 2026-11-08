@@ -430,6 +430,23 @@ numbers (the page's payload is an escaped string, so the page itself is asserted
 prints one `SKIP` line without them; `tests/quota.rs` covers both ladder rungs, the under-the-cap case, an
 unmeasurable worktree, `session_disk_soft_gb = 0` and the measurement's arithmetic without a daemon (ADR-0069).
 
+…and since HS-064, **the stopped-session expiry**: `case_stopped_expiry` boots its own Docker run over a real
+repository, because the story's claim is that the daily job runs the **delete flow** — so what survives it has to
+be a real branch and a real `refs/holosmith/wip/<id>`. It creates one session, waits for `idle`, commits once on
+`agent/<id>` and leaves one file uncommitted (so the branch is **kept work** and the snapshot has something to
+write), and creates a second whose row it then writes into a shape no writer of this build produces: `error` with a
+stale `stopped_at`. It **backdates** the first row's `stopped_at` eight days — past the default
+`stopped_ttl_days` of seven — with `python3`'s `sqlite3`, and **restarts the server**, because the job's first
+pass is immediate at boot (ADR-0070) and a gate cannot run a seven-day wall clock. It asserts the session is gone
+from `GET /api/sessions`, its branch is still at the agent's commit and its WIP ref still resolves (the run's own
+`git rev-parse`), its worktree, session directory and `agents_<id>` network are gone, the `error` row is still
+`error` (only the candidate query's status predicate can keep a row that has a stale clock *and* a non-stopped
+status, which is the isolation `tests/expiry.rs` cannot build), the list's answer carries
+`"stopped_ttl_days":7`, and the shipped bundle carries the three days-remaining sentences — the last bullet
+without needing a browser. It needs the daemon, an `agent_image` and `python3` and prints one `SKIP` line without
+them; `tests/expiry.rs` covers the pass, the skip-and-retry, the `error` arm, the six reasons into `stopped` and
+the refused resume without a daemon (ADR-0070).
+
 …and since HS-047, **`server deploy`**: `case_server_deploy` has two halves that skip independently, because the
 bugs it exists to catch are of two kinds. The **offline** half needs `python3` and nothing else: a `_ping` socket
 it answers stands in for the daemon, and the case asserts that the dry run lists the seven steps in the spec's
@@ -528,7 +545,7 @@ that printed `SKIP` withholds it, so a skip can never read as a pass — which i
 it proved instead of only counting it. A case that needs a setting the rest of the run must not carry gets a
 boot of its own (see `case_token_budget`, `case_usage_survives_resume`,
 `case_compaction`, `case_history`, `case_backup`, `case_worktree`, `case_worktree_refusal`,
-`case_changes` and `case_merge`), the
+`case_changes` and `case_merge`, `case_stopped_expiry`), the
 Internet-access checkbox (`case_internet_toggle`, described above), and a database from a newer release
 (`case_schema_newer`, which needs no daemon: it boots the artifact twice over one data root, rewrites the
 recorded `schema_version` to 99 in between with `python3`'s `sqlite3`, and asserts that the second boot's

@@ -410,6 +410,7 @@ serve_cases=(
   case_delete_without_the_client_header
   case_delete_session
   case_delete_keeps
+  case_stopped_expiry
   case_idle_stop
   case_drain
   case_drain_restart
@@ -3798,6 +3799,171 @@ case_delete_keeps() {
       fail "${name}/page" "the shipped page does not carry \"$needle\" in web/dist/assets/*.js"
     assertions=$((assertions + 1))
   done
+}
+
+# HS-064: the stopped-session expiry. A session stopped longer than `stopped_ttl_days` is removed by the
+# artifact's own daily job, through HS-043's delete flow — so this case measures the *removal* and, because a
+# delete's whole promise is what it keeps, the branch and the WIP ref that survive it.
+#
+# It boots its own server over a real repository and the daemon, for `case_disk_quota`'s reason: the worktree
+# and the branch have to be real for "using the delete flow" to mean anything, and a stub session has neither.
+# The staleness is written, not waited for — `stopped_at` into the past with `python3`'s `sqlite3` — because a
+# seven-day wall clock is not something a gate can run, and the column *is* the clock. That is also how the
+# second half is possible: an `error` row with a stale `stopped_at` is a row no writer of this build can make,
+# so only the candidate query's `status = 'stopped'` predicate can keep it — the isolation `tests/expiry.rs`
+# cannot construct.
+case_stopped_expiry() {
+  local name=case_stopped_expiry
+  local image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
+  local root="$repo_root/target/verify-expiry-$$"
+  local repo="$root/projects/holosmith"
+  local data="$root/data"
+  local database="$root/data/app.db"
+  local response body id other head branch ref wt stale needle
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    printf 'SKIP %s: no Docker daemon answers (tests/expiry.rs covers the policy, tests/worktree.rs the keep-rules)\n' "$name"
+    return 0
+  fi
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    printf 'SKIP %s: no image %s (HOLOSMITH_TEST_IMAGE names another)\n' "$name" "$image"
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to backdate the row (tests/expiry.rs covers the policy)\n' "$name"
+    return 0
+  fi
+  stop_serve
+  rm -rf "$root"
+  mkdir -p "$repo" || fail "$name/mkdir" "could not create $repo"
+  git -C "$repo" init --quiet -b main . || fail "$name/git" "git init did not work in $repo"
+  git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet \
+    --allow-empty -m "the first commit" || fail "$name/git" "git commit did not work"
+  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "docker"\nprojects_root = "%s"\nagent_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
+    "$owner" "$root/projects" "$image" >"$WORK/config-expiry.toml"
+  start_serve "$WORK/config-expiry.toml" "$data"
+
+  fetch_body "${name}_create" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-expiry-1" ||
+    fail "${name}_create/no_answer" "POST /api/sessions did not answer"
+  expect_status "${name}_create" "$(answer "${name}_create")" 202
+  body="$(cat "$WORK/responses/${name}_create.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id" ] || fail "${name}_create/id" "the response names no id: $body"
+  docker_session_id="$id"
+  wt="$root/projects/.worktrees/$id"
+  branch="agent/$id"
+  ref="refs/holosmith/wip/$id"
+  wait_for_idle_docker "${name}_create" "$id"
+
+  # The agent's work, simulated — this case is about what the *expiry* keeps, not about what an agent writes:
+  # one commit on the branch (so the branch is ahead of its base and in no target, and is therefore kept) and
+  # one change the flow's own snapshot is what saves (so the WIP ref exists too).
+  printf 'committed\n' >"$wt/work.txt" || fail "${name}/commit" "could not write in the worktree"
+  git -C "$wt" -c user.name=verify -c user.email=verify@example add work.txt ||
+    fail "${name}/commit" "git add did not work in the worktree"
+  git -C "$wt" -c user.name=verify -c user.email=verify@example commit --quiet \
+    -m "the agent's commit" || fail "${name}/commit" "git commit did not work in the worktree"
+  head="$(git -C "$wt" rev-parse HEAD)"
+  printf 'uncommitted\n' >"$wt/notes.txt"
+
+  # A second session, which the case then writes into a shape no writer of this build produces: `error` with a
+  # stale `stopped_at`. Item 15 says an `error` session is never auto-deleted, and the candidate query's status
+  # predicate is the only thing standing between this row and the job.
+  fetch_body "${name}_other" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-expiry-2" ||
+    fail "${name}_other/no_answer" "POST /api/sessions did not answer"
+  expect_status "${name}_other" "$(answer "${name}_other")" 202
+  body="$(cat "$WORK/responses/${name}_other.body")"
+  other="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$other" ] || fail "${name}_other/id" "the response names no id: $body"
+  wait_for_idle_docker "${name}_other" "$other"
+
+  # Eight days ago on the default seven-day window: past it. The restart is the story's own demo — the job's
+  # first pass is immediate at boot, which is what makes a daily policy observable in a gate.
+  stale=$(( $(date +%s) - 8 * 86400 ))
+  python3 - "$database" "$id" "$other" "$stale" <<'PY'
+import sqlite3, sys
+connection = sqlite3.connect(sys.argv[1])
+connection.execute(
+    "UPDATE sessions SET status = 'stopped', status_reason = NULL, stopped_at = ? WHERE id = ?",
+    (int(sys.argv[4]), sys.argv[2]))
+# A row the build cannot write: `error` with a stop clock. Only the candidate query's status predicate can
+# keep this out of the job's hands.
+connection.execute(
+    "UPDATE sessions SET status = 'error', status_reason = 'provisioning_failed', stopped_at = ? WHERE id = ?",
+    (int(sys.argv[4]), sys.argv[3]))
+connection.commit()
+connection.close()
+PY
+  stop_serve
+  start_serve "$WORK/config-expiry.toml" "$data"
+
+  # 1. The removal, and that it is the *delete flow's*: the row is gone from the API and from the table.
+  wait_for_gone "${name}_gone" "$id"
+  fetch "${name}_list" GET /api/sessions "Host: 127.0.0.1" ||
+    fail "${name}_list/no_answer" "GET /api/sessions did not answer"
+  body="$(cat "$WORK/responses/${name}_list.body")"
+  case "$body" in
+    *"\"id\":\"$id\"") fail "${name}/listed" "the expired session is still on the list: $body" ;;
+    *) assertions=$((assertions + 1)) ;;
+  esac
+  # The machine's window rides the list's answer (item 15's "days remaining" needs the number, not the row).
+  printf '%s\n' "$body" | grep -qF '"stopped_ttl_days":7' ||
+    fail "${name}/ttl" "the list does not carry the machine's retention window: $body"
+  assertions=$((assertions + 1))
+
+  # 2. What the delete flow kept: the branch at the commit the agent made, and the WIP ref the snapshot wrote.
+  #    This is the "using the delete flow from item 9" claim, measured rather than asserted.
+  check "${name}/branch" "$head" "$(git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch")"
+  git -C "$repo" rev-parse --verify --quiet "$ref" >"$WORK/responses/$name.ref" ||
+    fail "${name}/ref" "the snapshot ref did not survive the expiry"
+  assertions=$((assertions + 1))
+
+  # 3. What it removed: the worktree, the session's directory and its network. The container was gone already —
+  #    a stopped session's `--rm` run removed it — so the network is the one resource this asserts by name.
+  [ ! -e "$wt" ] || fail "${name}/worktree" "the worktree is still there: $wt"
+  assertions=$((assertions + 1))
+  [ ! -e "$data/sessions/$id" ] || fail "${name}/session_dir" "the session directory is still there"
+  assertions=$((assertions + 1))
+  if docker network inspect "agents_$id" >/dev/null 2>&1; then
+    fail "${name}/network" "the session's network is still there: agents_$id"
+  fi
+  assertions=$((assertions + 1))
+
+  # 4. An `error` row is never auto-deleted, however stale its clock.
+  fetch "${name}_error" GET "/api/sessions/$other" "Host: 127.0.0.1" ||
+    fail "${name}_error/no_answer" "GET /api/sessions/$other did not answer"
+  response="$(answer "${name}_error")"
+  expect_status "${name}_error" "$response" 200
+  body="$(cat "$WORK/responses/${name}_error.body")"
+  printf '%s\n' "$body" | grep -qF '"status":"error"' ||
+    fail "${name}/error_row" "the error row was not left as it was: $body"
+  assertions=$((assertions + 1))
+
+  # 5. The sentence the Sessions screen draws (item 15's last bullet). No gate may need a browser, so the page's
+  #    copy is grepped out of the bundle it ships, and the arithmetic is `expiryText`'s, which `npm test` owns.
+  for needle in "expires in " "expires within a day" "past its retention window"; do
+    grep -qF -- "$needle" web/dist/assets/*.js ||
+      fail "${name}/page" "the shipped page does not carry \"$needle\" in web/dist/assets/*.js"
+    assertions=$((assertions + 1))
+  done
+
+  # The machine as it was found: this case's sessions, container, network and scratch root go, and the shared
+  # boot comes back (`case_disk_quota`'s idiom — a case that stopped it and left `serve_pid` empty fails the
+  # *next* `stop_serve`).
+  remove_session "${name}_cleanup" "$other" force
+  docker rm --force "s_$other" >/dev/null 2>&1 || true
+  docker network rm "agents_$other" >/dev/null 2>&1 || true
+  docker rm --force "s_$id" >/dev/null 2>&1 || true
+  docker network rm "agents_$id" >/dev/null 2>&1 || true
+  docker_session_id=""
+  rm -rf "$root"
+  stop_serve
+  start_serve
 }
 
 # HS-021: the idle stop. A session left alone stops costing money, and it is the artifact's *own*
