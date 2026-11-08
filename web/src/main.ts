@@ -16,18 +16,19 @@ import {
   FORCED_DELETE_LABEL,
   HISTORY_PAGE_LIMIT,
   HISTORY_TRUNCATED,
-  NO_DETAIL,
   NOTHING_COMMITTED,
   RESOLVE_ASKED,
   RESOLVE_LABEL,
   RESOLVE_PROMPT,
   STRATEGIES,
   TRANSCRIPT_EVENTS,
+  DAY,
   Transcript,
   UNSAVED_WORK_NOTICE,
   affordances,
   budgetNotice,
   ciWarning,
+  expiryText,
   conflictLine,
   countsLine,
   createFailure,
@@ -88,6 +89,9 @@ type Session = {
   status: SessionState;
   status_reason: string | null;
   last_active_at: number;
+  // When the state became `stopped`, and `null` in every other state (ADR-0016's one writer keeps the two in
+  // step). The list draws the days it has left from this and the machine's window (HS-064).
+  stopped_at: number | null;
 };
 
 // One session's row as the session screen reads it: the same fifteen columns, of which the list only
@@ -140,6 +144,9 @@ function newKey(): string {
 type SessionList = {
   sessions: Session[];
   network_default: boolean;
+  // The machine's stopped-session window in days (HS-064): the row carries `stopped_at`, this carries the
+  // number, and the page adds them. One clock — the browser's — draws the countdown.
+  stopped_ttl_days: number;
 };
 
 // The payload of a `session.status` event (ADR-0016). `from === to` is a provisioning step report.
@@ -166,11 +173,9 @@ const LIVE_STATES: ReadonlySet<SessionState> = new Set<SessionState>([
 
 const MINUTE = 60;
 const HOUR = 60 * MINUTE;
-const DAY = 24 * HOUR;
 
 // HS-064's placeholder: a stopped row's detail line once auto-delete gives it a number. It is also the
 // title of that span while the span holds a reason's sentence instead.
-const RETAINED = "Days remaining until auto-delete arrives with HS-064";
 
 const app = document.querySelector<HTMLElement>("#app");
 
@@ -224,10 +229,10 @@ function relativeTime(at: number, now: number): string {
 }
 
 // One row: the project and the state with its reason, then the id, the model and the last
-// activity, then the provisioning step (while starting) or the retention placeholder (stopped).
+// activity, then the provisioning step (while starting) or what the stop means (stopped).
 // Every node is built with `createElement` and filled with `textContent`: the payload carries
 // operator- and agent-controlled text and none of it is parsed as markup.
-function sessionRow(session: Session): HTMLLIElement {
+function sessionRow(session: Session, ttlDays: number): HTMLLIElement {
   const row = make("li", "session");
   row.dataset.session = session.id;
 
@@ -247,16 +252,35 @@ function sessionRow(session: Session): HTMLLIElement {
   );
 
   const step = make("span", "step");
-  // The retention placeholder (HS-064's days-remaining line) and, while there is one, the sentence a
-  // stopped session's reason earns: an eviction lost nothing, and the badge alone would read like a
-  // loss (HS-020). One span, because both are "what this row's state means", never both at once.
-  const detail = stoppedDetail(session.status, session.status_reason);
+  // What a stopped row says: the sentence its reason earns (an eviction lost nothing, and the badge alone would
+  // read like a loss — HS-020) and the days it has left before the daily job reaches it (HS-064). One span,
+  // because both are "what this row's state means", and one function, because the frame path writes it too.
+  const detail = stoppedDetail(
+    session.status,
+    session.status_reason,
+    expiryText(session.stopped_at, ttlDays, secondsNow()),
+  );
   const retention = make("span", "retention", detail);
-  retention.title = detail === NO_DETAIL ? RETAINED : detail;
+  retention.title = detail;
   retention.hidden = session.status !== "stopped";
   row.append(head, meta, step, retention);
   syncStream(row, session.status);
   return row;
+}
+
+// The machine's stopped-session window in days, as the list carried it (HS-064).
+//
+// Read from the DOM rather than kept in a module variable, because `main.ts` keeps no state beyond the DOM (the
+// same rule that makes a row's id a `data-` attribute): the list element carries the number, and every reader —
+// a row built at load time, a row a create prepends, a row a frame patches — asks the same element. `0` when the
+// list is not there or the answer carried nothing, and `expiryText` says nothing for a non-positive window.
+function stoppedTtlDays(list: HTMLElement | null): number {
+  const raw = list?.dataset.stoppedTtlDays;
+  if (raw === undefined) {
+    return 0;
+  }
+  const days = Number(raw);
+  return Number.isFinite(days) ? days : 0;
 }
 
 function secondsNow(): number {
@@ -333,23 +357,35 @@ function applyStatus(row: HTMLLIElement, frame: StatusFrame): void {
     // The frame is the only path by which a row *becomes* stopped while the operator is looking at
     // it — an eviction lands exactly this way — so the detail line is written here too, not only
     // where the row was built (HS-020). One function, so the two paths cannot say different things.
-    const detail = stoppedDetail(frame.to, frame.reason);
+    //
+    // A frame carries no `stopped_at`: the transition that produced it just wrote the clock, so this
+    // instant *is* the row's stop as far as the page can tell, and the countdown starts from a number no
+    // fresher answer could improve on (HS-064).
+    const now = secondsNow();
+    const expires =
+      frame.to === "stopped"
+        ? expiryText(now, stoppedTtlDays(row.closest("#session-list")), now)
+        : null;
+    const detail = stoppedDetail(frame.to, frame.reason, expires);
     retention.hidden = frame.to !== "stopped";
     retention.textContent = detail;
-    retention.title = detail === NO_DETAIL ? RETAINED : detail;
+    retention.title = detail;
   }
 }
 
-function sessionList(sessions: Session[]): HTMLElement {
+function sessionList(sessions: Session[], ttlDays: number): HTMLElement {
   const section = make("section", "sessions");
   section.append(make("h2", "", "Sessions"));
   const list = make("ul", "session-list");
   list.id = "session-list";
+  // The one place the window enters the page (HS-064): a row's own columns do not carry the machine's setting,
+  // and the frame path has no request to ask, so the element is the junction.
+  list.dataset.stoppedTtlDays = String(ttlDays);
   if (sessions.length === 0) {
     list.append(make("li", "empty", "No sessions yet."));
   }
   for (const session of sessions) {
-    list.append(sessionRow(session));
+    list.append(sessionRow(session, ttlDays));
   }
   section.append(list);
   return section;
@@ -367,8 +403,9 @@ function addSession(session: Session): void {
     return;
   }
   list.querySelector<HTMLElement>(".empty")?.remove();
-  // Prepended because the repository lists newest activity first and a create is the newest.
-  list.prepend(sessionRow(session));
+  // Prepended because the repository lists newest activity first and a create is the newest. The window comes
+  // off the list's own dataset: a create's answer carries the row and not the machine's setting (HS-064).
+  list.prepend(sessionRow(session, stoppedTtlDays(list)));
 }
 
 // The new-session form. `networkDefault` is the machine setting the list carried: the checkbox
@@ -1777,7 +1814,7 @@ function render(health: Health, list: SessionList): void {
   }
   app.replaceChildren(
     header(health),
-    sessionList(list.sessions),
+    sessionList(list.sessions, list.stopped_ttl_days),
     createSection(list.network_default),
   );
 }

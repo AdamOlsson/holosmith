@@ -560,13 +560,53 @@ export function stoppedNotice(reason: string | null): string | null {
 // a `session.status` frame turns a live row into a stopped one, which is how an eviction (HS-020) or
 // an idle stop (HS-021) arrives — and two spellings there would show the operator different things
 // depending on whether they were watching.
+//
 export const NO_DETAIL = "—";
 
-export function stoppedDetail(state: SessionState, reason: string | null): string {
+// A day, in the whole seconds every timestamp on this wire is in (`stopped_at`, `last_active_at`).
+export const DAY = 86_400;
+
+// What a stopped row says about how long it has left before the daily job reaches it (HS-064, spec item 15).
+//
+// `null` when there is nothing to say: a row that never stopped has no `stopped_at`, and a machine that is not
+// expiring anything has no positive window (`stopped_ttl_days` refuses `0` in the config, so this arm is a
+// defensive one). `now` is passed in rather than read here, because a sentence is a rule and a rule with a
+// clock inside it cannot be tested — `main.ts` reads `Date.now()` and hands it over.
+//
+// **It says "expires", never "will be deleted".** The job snapshots before it removes anything and skips a row
+// whose snapshot fails, so a session on this list may well outlive its window with its work intact; a sentence
+// that promised a delete would be a claim the server refuses to make.
+//
+// The boundaries are a whole number of days because that is what an operator counts. `remaining <= 0` is a row
+// the job has not reached yet (it ran, or will run, on its own tick) and not an error: saying "past its
+// retention window" is the truth and leaves the fix to the operator.
+export function expiryText(stoppedAt: number | null, ttlDays: number, now: number): string | null {
+  if (stoppedAt === null || !Number.isFinite(ttlDays) || ttlDays <= 0) {
+    return null;
+  }
+  const remaining = stoppedAt + ttlDays * DAY - now;
+  if (remaining <= 0) {
+    return "past its retention window";
+  }
+  // Rounded up, so a row with six days and twenty hours left reads "7 days": a countdown that dropped a day
+  // the moment a second passed would tell the operator the window was shorter than it is.
+  const days = Math.ceil(remaining / DAY);
+  return days === 1 ? "expires within a day" : `expires in ${days} days`;
+}
+
+export function stoppedDetail(
+  state: SessionState,
+  reason: string | null,
+  expires: string | null = null,
+): string {
   if (state !== "stopped") {
     return NO_DETAIL;
   }
-  return stoppedNotice(reason) ?? NO_DETAIL;
+  // Two facts, never both at once before HS-064: what the stop was (when its reason earns a sentence) and how
+  // long it has left. A row with neither keeps the dash, because an empty span is the producer's answer and not
+  // this function's to invent.
+  const parts = [stoppedNotice(reason), expires].filter((part): part is string => part !== null);
+  return parts.length === 0 ? NO_DETAIL : parts.join(" · ");
 }
 
 // What a create's refusal says in the form's error area (HS-026).

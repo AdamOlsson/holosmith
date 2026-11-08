@@ -23,6 +23,8 @@ import {
   deletedNotice,
   FORCED_DELETE_LABEL,
   UNSAVED_WORK_NOTICE,
+  DAY,
+  expiryText,
   historyPath,
   LOCAL_HOST,
   networkText,
@@ -491,6 +493,65 @@ test("the detail line says the same thing whether the row was drawn or turned", 
   assert.equal(stoppedDetail("stopped", "forced_abort"), NO_DETAIL);
   for (const state of ["starting", "idle", "running", "error", "deleting"] as SessionState[]) {
     assert.equal(stoppedDetail(state, "evicted"), NO_DETAIL, state);
+  }
+});
+
+test("a stopped row counts the days it has left, in whole days, from the machine's window", () => {
+  // HS-064, spec item 15: the row carries `stopped_at`, the answer carries `stopped_ttl_days`, and the page
+  // adds them. `now` is passed in so these are facts about the arithmetic and not about when the suite ran.
+  const now = 1_700_000_000;
+  // Just stopped: the whole window is left.
+  assert.equal(expiryText(now, 7, now), "expires in 7 days");
+  // Six days in: one day left, and it is not "in 1 days".
+  assert.equal(expiryText(now - 6 * DAY, 7, now), "expires within a day");
+  // A second further, and it is still one day: rounding *up* is what keeps a countdown from dropping a day the
+  // moment a second passes.
+  assert.equal(expiryText(now - 6 * DAY - 1, 7, now), "expires within a day");
+  assert.equal(expiryText(now - 3 * DAY, 7, now), "expires in 4 days");
+  // The cutoff itself, and a row the job has not reached yet: both are past the window, and neither is a claim
+  // that anything was removed.
+  assert.equal(expiryText(now - 7 * DAY, 7, now), "past its retention window");
+  assert.equal(expiryText(now - 8 * DAY, 7, now), "past its retention window");
+  // The window is the machine's, not a constant of the renderer.
+  assert.equal(expiryText(now, 1, now), "expires within a day");
+});
+
+test("a row with no stop and a machine with no window say nothing at all", () => {
+  // `stopped_at` is null in every state but `stopped`, so a row that never stopped has no countdown; and a
+  // non-positive window is the config's `0` (which it refuses) reaching a defensive arm. Neither invents a
+  // sentence — the span keeps its dash, which is the producer's answer and not this function's to make up.
+  const now = 1_700_000_000;
+  assert.equal(expiryText(null, 7, now), null);
+  assert.equal(expiryText(now, 0, now), null);
+  assert.equal(expiryText(now, -1, now), null);
+  assert.equal(expiryText(now, Number.NaN, now), null);
+});
+
+test("the days-remaining sentence never claims the session will be deleted", () => {
+  // The job snapshots first and skips a row whose snapshot fails, so a session can outlive its window with its
+  // work intact. "expires" is what the answer can promise; "will be deleted" is a claim it cannot make.
+  const now = 1_700_000_000;
+  for (const stoppedAt of [now, now - 6 * DAY, now - 8 * DAY]) {
+    const text = expiryText(stoppedAt, 7, now);
+    assert.ok(text !== null);
+    assert.doesNotMatch(text, /delet/i, text);
+  }
+});
+
+test("the detail line carries the stop's sentence and the countdown, and only on a stopped row", () => {
+  // HS-064 joins the two facts a stopped row has. One function, because the span is written by `sessionRow` and
+  // by `applyStatus` — and a row that is not stopped shows neither.
+  const idle = stoppedNotice("idle_stop");
+  assert.ok(idle !== null);
+  assert.equal(stoppedDetail("stopped", "idle_stop", "expires in 3 days"), `${idle} · expires in 3 days`);
+  // A reason with no sentence still gets the countdown, and vice versa.
+  assert.equal(stoppedDetail("stopped", null, "expires in 3 days"), "expires in 3 days");
+  assert.equal(stoppedDetail("stopped", "forced_abort", "expires in 3 days"), "expires in 3 days");
+  assert.equal(stoppedDetail("stopped", "evicted", null), stoppedDetail("stopped", "evicted"));
+  // Neither fact: the dash.
+  assert.equal(stoppedDetail("stopped", "forced_abort", null), NO_DETAIL);
+  for (const state of ["starting", "idle", "running", "error", "deleting"] as SessionState[]) {
+    assert.equal(stoppedDetail(state, "evicted", "expires in 3 days"), NO_DETAIL, state);
   }
 });
 
