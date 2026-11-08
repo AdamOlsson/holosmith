@@ -21,6 +21,7 @@
 //! The encryption itself is `src/push/crypto.rs`'s and `src/push/encrypt.rs`'s, pinned there by RFC 4231, RFC 5869,
 //! FIPS 197, NIST's GCM cases and RFC 8291 §5's complete example. This file does not re-derive a primitive.
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -250,7 +251,47 @@ async fn subscribe_is_an_upsert_and_delete_names_its_row_through_the_query() {
         body["message"],
         "there is no subscription with that endpoint"
     );
+
+    // An endpoint whose own text has a `&` and a `?` in it: the query is split on `&`, so a client that sent the
+    // value raw would have it truncated and be told `404` about a row that exists. Percent-encoding is the
+    // client's contract (RFC 3986) and this is the arm that says the route honours it — `%26` and `%3F` decode
+    // into the endpoint the row is keyed by.
+    let awkward = "https://push.example/a?b=1&c=2/sentinel";
+    let answer = mutate(
+        served.addr,
+        "POST",
+        "/api/push/subscribe",
+        &store_body(awkward, &keys().0, &keys().1),
+    )
+    .await;
+    assert_eq!(answer.status, 204, "{}", answer.body);
+    assert!(
+        rows(&state).iter().any(|row| row.0 == awkward),
+        "the awkward endpoint was not stored: {:?}",
+        rows(&state)
+    );
+    let answer = mutate(
+        served.addr,
+        "DELETE",
+        &format!("/api/push/subscribe?endpoint={}", encode(awkward)),
+        "",
+    )
+    .await;
+    assert_eq!(
+        answer.status, 204,
+        "an escaped `&` did not decode back into the endpoint: {}",
+        answer.body
+    );
+    assert!(
+        !rows(&state).iter().any(|row| row.0 == awkward),
+        "the escaped `&` left the row behind"
+    );
     served.finish().await.expect("a clean shutdown");
+}
+
+/// The subscribe body, for a test that already has a local `body` of its own.
+fn store_body(endpoint: &str, p256dh: &str, auth: &str) -> String {
+    body(endpoint, p256dh, auth)
 }
 
 /// Percent-encode a value the way a browser's `URLSearchParams` does for the characters an endpoint has.
@@ -492,7 +533,7 @@ impl Recorder {
 }
 
 impl Deliver for Recorder {
-    fn deliver(&self, endpoint: &str, request: &[u8]) -> Result<Disposition, String> {
+    fn deliver(&self, endpoint: &str, request: &[u8], _dir: &Path) -> Result<Disposition, String> {
         self.sent
             .lock()
             .expect("the lock")
@@ -803,11 +844,14 @@ fn the_disposition_table_is_one_removal_and_everything_else_kept() {
     }
     for status in [404, 410] {
         assert_eq!(Disposition::of(status), Disposition::Gone, "{status}");
-        assert!(!Disposition::of(status).keeps_row());
     }
+    // The rule the task runs is `Gone` or not, so the second half of each arm is that one comparison.
     for status in [204, 401, 403, 429, 500, 503] {
         assert_eq!(Disposition::of(status), Disposition::Kept, "{status}");
-        assert!(Disposition::of(status).keeps_row());
+        assert!(
+            !matches!(Disposition::of(status), Disposition::Gone),
+            "{status}"
+        );
     }
 }
 

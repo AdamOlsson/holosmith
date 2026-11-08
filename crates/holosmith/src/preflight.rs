@@ -96,7 +96,7 @@ pub enum Check {
     /// Whether `openssl` runs, which the Web Push sender needs (HS-066) and nothing on the request path does.
     ///
     /// It is in this enum because it is reported like every other machine question and only `doctor` asks it: no
-    /// startup check runs it, because a missing notification channel must not refuse a boot (ADR-0071's D12).
+    /// startup check runs it, because a missing notification channel must not refuse a boot (ADR-0071's D9).
     Openssl,
 }
 

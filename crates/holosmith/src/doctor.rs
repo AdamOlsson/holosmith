@@ -255,14 +255,8 @@ pub fn run(config: &Config, depth: Depth, tools: &Tools, machine: &dyn Machine) 
     Report { depth, findings }
 }
 
-/// Whether this machine has systemd, where "not there" is a fact rather than a failure.
-///
-/// `/run/systemd/system` exists exactly while systemd is the init, and its absence is the supported way to run
-/// `serve` by hand (docs/build.md says so). A `server deploy` (HS-049) is where systemd becomes a prerequisite,
-/// and that step is where the refusal belongs — refusing here would make `doctor` unrunnable on the machine that
-/// runs no systemd and serves perfectly well.
 /// Whether `openssl` runs, which a Web Push notification needs and nothing else in this build's request path does
-/// (HS-066, ADR-0071's D12).
+/// (HS-066, ADR-0071's D9).
 ///
 /// **`--full` only**, and that is a decision rather than an ordering accident: `doctor --quick` is the unit's
 /// `ExecStartPre` (item 10 §5), so a check there refuses a boot. A missing notification channel is not a machine that
@@ -310,6 +304,12 @@ fn openssl(program: &Path) -> Finding {
     )
 }
 
+/// Whether this machine has systemd, where "not there" is a fact rather than a failure.
+///
+/// `/run/systemd/system` exists exactly while systemd is the init, and its absence is the supported way to run
+/// `serve` by hand (docs/build.md says so). A `server deploy` (HS-049) is where systemd becomes a prerequisite,
+/// and that step is where the refusal belongs — refusing here would make `doctor` unrunnable on the machine that
+/// runs no systemd and serves perfectly well.
 fn systemd(dir: &Path) -> Finding {
     if dir.is_dir() {
         return Finding::pass(

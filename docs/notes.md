@@ -2364,6 +2364,22 @@ it rather than adding a caveat beside it.
 - **A push endpoint is a capability URL: the log names its host and nothing else.** Anybody holding the URL can
   send to that browser, so `push`'s every line prints `host = %audience` (the origin) and never the endpoint,
   and the recorder-based tests assert the endpoint rather than logging it.
+- **`crypto.verify` takes a bare JWK only with `format: 'jwk'`.** The gate's receiver passed the application
+  server key as `{ key: jwk, dsaEncoding: 'ieee-p1363' }`, where `jwk` is a JWK object; node reads `key` as a
+  `KeyObject` unless `format: 'jwk'` says otherwise, throws, and the `catch` around it reported *"the machine's
+  signature does not verify"* for a signature that did. `crypto.createPublicKey({ key: jwk, format: 'jwk' })` once,
+  then pass that. The demo's receiver had a second, independent bug in the same place (it called `setAuthTag`
+  *after* `final()`), which is why the two must not share code: each found the other's mistake only because the
+  sender was measured by code that did not.
+- **`fetch_stream` closes its socket, so it cannot hold a stream open.** The helper reads the header block and
+  returns, which ends the SSE handler and drops its `StreamGuard` — so a case that opens a stream with it and *then*
+  prompts has no stream open at all, and an assertion that "nothing was pushed" would fail for the right reason and
+  read as the wrong one. Hold the descriptor across the turn (`exec {fd}<>"/dev/tcp/…"`, read the header, prompt,
+  only then close) — which is also what a locked phone looks like from the server's side.
+- **A gate case is code that has never run until it does.** `case_push` was written, reviewed and green-typed by
+  three bugs in a row — a broken DER walker, a receiver that could not verify, a socket that was already closed —
+  and each surfaced only in a real `scripts/verify.sh`, one run at a time. Budget one gate run per non-trivial new
+  case, and read its first failure as the case's bug rather than the feature's until proven otherwise.
 - **A test that writes `<data>/secrets/vapid.toml` must own its data root.** `Config::default()`'s data root is
   the machine's (`/var/lib/holosmith`), which this sandbox lets an unprivileged user write: two tests sharing it
   passed until one of them removed the pair for its own negative case, and then a third failed. Every test in

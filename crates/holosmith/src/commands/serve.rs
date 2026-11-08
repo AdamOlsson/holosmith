@@ -407,12 +407,13 @@ pub fn run(args: ServeArgs) -> ExitCode {
         // It is **always present**: item 11 names no config key that could turn it off, so there is no `None` arm to
         // write. The threshold it prints is the spec's twenty seconds and it is a constant, printed rather than
         // copied — an operator reading this line learns the rule the task applies.
+        let notification = state.pusher();
         tracing::debug!(
             target: "holosmith::serve",
-            long_turn_s = crate::push::LONG_TURN.as_secs(),
+            long_turn_s = notification.threshold().as_secs(),
             "the Web Push notification task is running"
         );
-        let pusher = state.pusher().spawn();
+        let pusher = notification.spawn();
         // The **admin socket** (HS-051, spec item 10 step 3): the one way to drain this machine, and the one thing
         // in the build that is deliberately *not* an HTTP route — the API table says "not reachable over HTTP",
         // and a second listener outside `App` is what that sentence means. It is bound here, beside the two

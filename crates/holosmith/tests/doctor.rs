@@ -82,6 +82,19 @@ fn df_shim(dir: &TempDir, available_kb: u64) -> PathBuf {
     )
 }
 
+/// An `openssl` shim answering `version` with `version` — the one question `doctor --full` asks it (HS-066).
+///
+/// A shim rather than the machine's own binary, for the reason `git` and `df` are shims here: ADR-0071's D9 justifies
+/// the `Tools` field as *this* seam, and a test that ran the host's `openssl` would pass on this machine and fail on
+/// one that serves perfectly well without it.
+fn openssl_shim(dir: &TempDir, version: &str) -> PathBuf {
+    shim(
+        dir,
+        "openssl",
+        &format!("case \"$1\" in\n  version) echo 'OpenSSL {version}' ;;\n  *) exit 1 ;;\nesac"),
+    )
+}
+
 /// A `tailscale` shim answering `body` — one arm of `tailscale status --json`.
 fn tailscale_shim(dir: &TempDir, body: &str) -> PathBuf {
     shim(dir, "tailscale", body)
@@ -94,7 +107,7 @@ fn tools(dir: &TempDir, version: &str) -> Tools {
             git: git_shim(dir, version),
             df: df_shim(dir, 480_000_000),
             du: PathBuf::from("du"),
-            openssl: PathBuf::from("openssl"),
+            openssl: openssl_shim(dir, "3.0.13 30 Jan 2024"),
         },
         tailscale: tailscale_shim(dir, "echo '{\"BackendState\":\"Running\"}'"),
         systemd: dir.file("no-systemd-here"),
@@ -109,7 +122,7 @@ fn tools_with_real_git(dir: &TempDir) -> Tools {
             git: PathBuf::from("git"),
             df: df_shim(dir, 480_000_000),
             du: PathBuf::from("du"),
-            openssl: PathBuf::from("openssl"),
+            openssl: openssl_shim(dir, "3.0.13 30 Jan 2024"),
         },
         ..tools(dir, "2.43.0")
     }
@@ -323,7 +336,7 @@ fn a_held_port_is_a_failure_before_a_start_and_the_machine_serving_after_one() {
             git: PathBuf::from("git"),
             df: df_shim(&dir, 480_000_000),
             du: PathBuf::from("du"),
-            openssl: PathBuf::from("openssl"),
+            openssl: openssl_shim(&dir, "3.0.13 30 Jan 2024"),
         },
         ..tools(&dir, "2.43.0")
     };
@@ -1077,5 +1090,91 @@ fn the_installed_paths_modes_and_owners_are_one_finding() {
         !report.failed(),
         "a machine that has not deployed failed `doctor`:\n{}",
         report.render()
+    );
+}
+
+// --- the openssl finding (HS-066, ADR-0071's D9) ---------------------------------------------------------
+
+/// `--full` reports which `openssl` this machine's `PATH` resolves, and `--quick` does not ask at all.
+///
+/// Both halves are the decision: the check exists because a machine without `openssl` sends no notification, and it
+/// is `--full`'s because `--quick` is the unit's `ExecStartPre` — a missing notification channel must not refuse a
+/// boot. A test for one arm and not the other would let the check move between the two moments in silence.
+#[test]
+fn full_reports_openssl_and_quick_does_not_ask() {
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("doctor-openssl");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let mut config = config(&dir, Some(format!("unix://{}", socket.display())));
+    config.role = Role::Server;
+    deployed_data_root(&config);
+    let tools = tools_with_real_git(&dir);
+
+    let full = doctor::run(&config, Depth::Full, &tools, &FakeMachine::healthy());
+    let openssl = finding(&full, Check::Openssl);
+    assert_eq!(
+        openssl.outcome,
+        Outcome::Pass,
+        "a machine with openssl did not pass: {}",
+        openssl.sentence
+    );
+    assert!(
+        openssl.sentence.contains("3.0.13 30 Jan 2024"),
+        "the pass does not name the version the PATH resolves: {}",
+        openssl.sentence
+    );
+
+    let quick = doctor::run(&config, Depth::Quick, &tools, &FakeMachine::healthy());
+    assert!(
+        !quick
+            .findings
+            .iter()
+            .any(|finding| finding.check == Check::Openssl),
+        "--quick asked the notification channel's question, and that check is a boot's to refuse:\n{}",
+        quick.render()
+    );
+}
+
+/// A machine whose `openssl` cannot run fails that one finding, and the sentence names the program to install.
+#[test]
+fn openssl_that_cannot_run_is_a_failure_that_names_the_program() {
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("doctor-no-openssl");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let mut config = config(&dir, Some(format!("unix://{}", socket.display())));
+    config.role = Role::Server;
+    deployed_data_root(&config);
+    let broken = dir.file("openssl-that-refuses");
+    shim(
+        &dir,
+        "openssl-that-refuses",
+        "case \"$1\" in\n  version) exit 1 ;;\n  *) exit 1 ;;\nesac",
+    );
+    let tools = Tools {
+        preflight: preflight::Tools {
+            openssl: broken.clone(),
+            ..tools_with_real_git(&dir).preflight
+        },
+        ..tools_with_real_git(&dir)
+    };
+
+    let report = doctor::run(&config, Depth::Full, &tools, &FakeMachine::healthy());
+    let openssl = finding(&report, Check::Openssl);
+    assert_eq!(
+        openssl.outcome,
+        Outcome::Fail,
+        "an `openssl` that exits non-zero passed: {}",
+        openssl.sentence
+    );
+    assert!(
+        openssl.sentence.contains(&broken.display().to_string()),
+        "the failure does not name the program: {}",
+        openssl.sentence
+    );
+    assert!(
+        report.failed(),
+        "a machine that cannot send a notification reported no failure at all"
     );
 }

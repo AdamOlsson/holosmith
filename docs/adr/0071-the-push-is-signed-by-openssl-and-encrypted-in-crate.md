@@ -140,7 +140,7 @@ notification channel is not a machine that cannot run a session — the SSE stre
 
 Item 11 names none, and the three numbers it does not name are constants like the sweeper's tick and the cap's
 interval: `LONG_TURN` (20 s), `send::TTL` (one hour — a notification about a turn an hour ago is about a session
-somebody has already looked at) and `JWT_EXP` (12 h). `AppState::pusher()` answers `Pusher` and not `Option<Pusher>`,
+somebody has already looked at) and `jwt::EXP_SECONDS` (12 h). `AppState::pusher()` answers `Pusher` and not `Option<Pusher>`,
 unlike `sweeper()` and `quota()`, whose keys have a `0`-means-off.
 
 ## D11 — what the gate can and cannot measure

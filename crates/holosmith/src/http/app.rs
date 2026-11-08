@@ -250,7 +250,7 @@ impl AppState {
     /// The Web Push notification task, wired to this state (HS-066, spec item 11).
     ///
     /// **Always present, unlike [`Self::sweeper`] and [`Self::quota`]**: item 11 names no config key that could turn
-    /// it off (ADR-0071's D13), so a `None` arm would be a second spelling of an answer the spec already gives. It
+    /// it off (ADR-0071's D10), so a `None` arm would be a second spelling of an answer the spec already gives. It
     /// reads the machine's VAPID pair itself, at the moment of sending, because a machine that never deployed has no
     /// pair and that must be one `warn` per notification rather than a task that refuses to start.
     ///

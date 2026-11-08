@@ -429,6 +429,14 @@ impl Temp {
         Ok(Self { dir })
     }
 
+    /// The directory itself, for a caller that keeps its own scratch files in it.
+    ///
+    /// [`crate::push::send::SslClient`] writes the TLS child's response and stderr here: they are not secret, but
+    /// they belong to one send and must not outlive it either.
+    pub fn path(&self) -> &Path {
+        &self.dir
+    }
+
     /// Write `bytes` as `<name>` inside the directory, at mode 0600, and answer its path.
     ///
     /// The mode is set by the `open` call rather than by a `chmod` afterwards: a `chmod` leaves the file readable for

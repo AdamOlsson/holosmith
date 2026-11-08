@@ -28,7 +28,7 @@
 //!   subscription ([`send::Disposition`]); a `401`/`403` is a *key* problem, so a rotated pair must never delete a
 //!   good subscription.
 //!
-//! There is **no config key**, for the sweeper's reason (ADR-0025, ADR-0071's D13): item 11 names none, and the
+//! There is **no config key**, for the sweeper's reason (ADR-0025, ADR-0071's D10): item 11 names none, and the
 //! three numbers it does not name — the twenty-second threshold, the message TTL and the token's life — are
 //! constants ([`LONG_TURN`], [`send::TTL`], [`jwt::EXP_SECONDS`]), like the sweeper's tick and the cap's interval.
 
@@ -39,7 +39,7 @@ pub mod repository;
 pub mod send;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -115,6 +115,16 @@ impl Watcher {
         }
     }
 
+    /// Forget every recorded start, because an ending was missed.
+    ///
+    /// A subscriber that lagged the broadcast dropped whole frames, so what it still holds may be a start whose
+    /// *ending* it never saw: measuring the next settle from it would announce a `turn_finished` for a turn that
+    /// never ran that long, which is spec item 11's negative inverted. Forgetting everything turns a lag into
+    /// silence — the honest outcome — until the next `turn.start`.
+    pub fn forget_all(&mut self) {
+        self.started.clear();
+    }
+
     /// The same watcher with a test's threshold, so a five-hundred-millisecond turn can prove the long-turn rule
     /// instead of a twenty-second wait.
     pub fn with_threshold(mut self, long_turn: Duration) -> Self {
@@ -182,19 +192,12 @@ impl Default for Watcher {
 fn status_of(payload: &str) -> Option<(&'static str, Option<String>)> {
     let value: serde_json::Value = serde_json::from_str(payload).ok()?;
     let to = value.get("to")?.as_str()?;
-    let to = Status::ALL
+    // `Status::as_str` is `&'static str`, so the arms below compare the words the column holds rather than a
+    // second copy of them — and a sixth state is one line in that one table.
+    let to: &'static str = Status::ALL
         .into_iter()
-        .find(|status| status.as_str() == to)?;
-    // `Status`'s own text is `&'static str`, so the table below compares the words the column holds rather than
-    // a second copy of them.
-    let to: &'static str = match to {
-        Status::Starting => Status::Starting.as_str(),
-        Status::Idle => Status::Idle.as_str(),
-        Status::Running => Status::Running.as_str(),
-        Status::Stopped => Status::Stopped.as_str(),
-        Status::Error => Status::Error.as_str(),
-        Status::Deleting => Status::Deleting.as_str(),
-    };
+        .find(|status| status.as_str() == to)?
+        .as_str();
     let reason = value
         .get("reason")
         .and_then(|reason| reason.as_str())
@@ -212,7 +215,9 @@ pub trait Deliver: Send + Sync {
     ///
     /// `Err` is "this message could not be sent at all" — a child that would not start, a TLS handshake that failed
     /// — and every caller keeps the row for it, because a dead *machine* must not delete a live subscription.
-    fn deliver(&self, endpoint: &str, request: &[u8]) -> Result<Disposition, String>;
+    /// `dir` is the per-send scratch directory the caller owns (it is removed when the send ends): the TLS child's
+    /// response and stderr go there, so the wait for an answer is a deadline rather than a read that blocks on EOF.
+    fn deliver(&self, endpoint: &str, request: &[u8], dir: &Path) -> Result<Disposition, String>;
 }
 
 /// The notification task: the event stream it reads, the table it applies, and the seam it sends through.
@@ -287,11 +292,16 @@ impl Pusher {
                         self.announce(&session, kind).await;
                     }
                 }
-                Err(RecvError::Lagged(missed)) => tracing::warn!(
-                    target: "holosmith::push",
-                    missed,
-                    "the notification task fell behind the event stream, so some notifications were not sent"
-                ),
+                Err(RecvError::Lagged(missed)) => {
+                    tracing::warn!(
+                        target: "holosmith::push",
+                        missed,
+                        "the notification task fell behind the event stream, so some notifications were not sent"
+                    );
+                    // A missed ending makes every recorded start a lie about *some* turn, so none survives: see
+                    // `Watcher::forget_all`.
+                    self.watcher.forget_all();
+                }
                 Err(RecvError::Closed) => return,
             }
         }
@@ -517,7 +527,7 @@ impl Message {
             &tmp,
         )?;
         let request = send::request(&row.endpoint, &token, &self.pair.public_key, &body)?;
-        let disposition = self.deliver.deliver(&row.endpoint, &request)?;
+        let disposition = self.deliver.deliver(&row.endpoint, &request, tmp.path())?;
         // The audience is `https://host[:port]`, so it *is* the host: logging it says which service answered
         // without naming the capability.
         Ok((disposition, audience))

@@ -357,15 +357,12 @@ mod tests {
 
     #[test]
     fn the_payload_is_three_keys_and_the_body_carries_none_of_the_plaintext() {
-        // D10's promise, measured: the plaintext is a struct with exactly these three fields, so "the body says
-        // nothing about a session's content" is structural rather than intended.
-        #[derive(serde::Serialize)]
-        struct Payload<'a> {
-            host: &'a str,
-            session_id: &'a str,
-            kind: &'a str,
-        }
-        let payload = Payload {
+        // D6's promise, measured: the plaintext is a struct with exactly these three fields, so "the body says
+        // nothing about a session's content" is structural rather than intended. It is the **shipped** struct
+        // (`push::Payload`), not a copy of it: a local struct would let a fourth field be added to the real one and
+        // leave this test green, which is the whole failure this assertion exists to prevent (the review of this
+        // story found exactly that).
+        let payload = crate::push::Payload {
             host: crate::preview::HOST,
             session_id: "0123456789abcdef",
             kind: "turn_finished",

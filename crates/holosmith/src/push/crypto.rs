@@ -356,10 +356,16 @@ mod tests {
             hmac_sha256(b"Jefe", &[b"what do ya want ", b"for nothing?"]),
             hmac_sha256(b"Jefe", &[b"what do ya want for nothing?"])
         );
-        // A key longer than the block is hashed first (RFC 2104 §2): 200 octets of 0xff is the shape that a
-        // 64-octet buffer without that rule would read past.
-        let long = hmac_sha256(&[0xff; 200], &[b"Hi There"]);
-        assert_ne!(long, [0_u8; 32]);
+        // §4.6: a 131-octet key of 0xaa over the published message. The arm matters because RFC 2104 §2 hashes a
+        // key longer than the block first, and a 64-octet buffer without that rule would read past it — so this
+        // asserts the *digest*, not merely that nothing panicked.
+        assert_eq!(
+            hex(&hmac_sha256(
+                &[0xaa; 131],
+                &[b"Test Using Larger Than Block-Size Key - Hash Key First"]
+            )),
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        );
     }
 
     #[test]
