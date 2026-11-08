@@ -86,8 +86,13 @@ pub(crate) async fn respond(state: &AppState, id: &str) -> Response {
     };
     let worktree = Worktree::of(&state.config.projects_root, &session.project, &session.id);
     let targets = state.config.merge.targets.clone();
-    let read =
-        tokio::task::spawn_blocking(move || Changes::read(&worktree, &base_commit, &targets)).await;
+    // The publish's list, handed through unchanged: this read does not ask whether the repository *has* each
+    // remote, because that is the publish route's question and its own sentence (HS-058, ADR-0067).
+    let remotes = state.config.publish.remotes.clone();
+    let read = tokio::task::spawn_blocking(move || {
+        Changes::read(&worktree, &base_commit, &targets, &remotes)
+    })
+    .await;
     match read {
         Ok(Ok(changes)) => (StatusCode::OK, Json(changes)).into_response(),
         Ok(Err(error)) => refusal(error).into_response(),

@@ -144,7 +144,13 @@ impl Fixture {
     }
 
     fn read_with(&self, targets: &[String]) -> Changes {
-        Changes::read(&self.worktree(), &self.base, targets).expect("the changes view answers")
+        Changes::read(&self.worktree(), &self.base, targets, &[]).expect("the changes view answers")
+    }
+
+    /// The same answer with the machine's publish remotes, for the tests of the sheet's second picker (HS-058).
+    fn read_with_remotes(&self, targets: &[String], remotes: &[String]) -> Changes {
+        Changes::read(&self.worktree(), &self.base, targets, remotes)
+            .expect("the changes view answers")
     }
 
     fn read_err(&self) -> ChangesError {
@@ -152,6 +158,7 @@ impl Fixture {
             &self.worktree(),
             &self.base,
             &["main".to_string(), "master".to_string()],
+            &[],
         )
         .expect_err("the changes view refuses")
     }
@@ -457,6 +464,41 @@ fn the_first_existing_target_wins() {
     let changes = fixture.read_with(&["master".to_string(), "main".to_string()]);
     assert_eq!(changes.target.as_deref(), Some("main"));
     assert_eq!(changes.behind, Some(0));
+    // The picker's list is the same walk: `master` is configured and not there, so it is not an option, and the
+    // order is the config's — an option the merge would refuse with `422 bad_target` is a button that cannot work.
+    assert_eq!(changes.choices.targets, ["main"]);
+}
+
+#[test]
+fn the_choices_are_the_targets_that_exist_and_the_remotes_as_configured() {
+    // The pickers' one key (HS-058, ADR-0067). Two arms, and each is measurably different from the other:
+    //
+    // - `targets` is filtered by what the repository has, in the **config's** order, so a second existing branch
+    //   appears in the position the config put it in rather than in git's;
+    // - `remotes` is the config's list verbatim, because whether the repository has each remote is the publish
+    //   route's question and its own sentence.
+    let fixture = Fixture::new("changes-choices");
+    // A second branch the config also names — `main` is created by the fixture.
+    git(&fixture.repo, &["branch", "develop"]);
+    let targets = [
+        "develop".to_string(),
+        "main".to_string(),
+        "trunk".to_string(),
+    ];
+    let remotes = ["origin".to_string(), "backup".to_string()];
+    let changes = fixture.read_with_remotes(&targets, &remotes);
+    assert_eq!(changes.choices.targets, ["develop", "main"]);
+    assert_eq!(changes.choices.remotes, ["origin", "backup"]);
+    // `target` is the first of them, which is what a picker preselects: one walk, two answers.
+    assert_eq!(changes.target.as_deref(), Some("develop"));
+    // The remote list is not filtered, and the empty list is the sheet's "not configured" (it hides Publish).
+    assert!(
+        fixture
+            .read_with_remotes(&targets, &[])
+            .choices
+            .remotes
+            .is_empty()
+    );
 }
 
 #[test]
@@ -593,6 +635,7 @@ async fn the_endpoint_answers_the_eleven_keys() {
         "files",
         "touches_ci",
         "mergeable_reason",
+        "choices",
     ] {
         assert!(body.get(key).is_some(), "the answer has no {key}: {body}");
     }

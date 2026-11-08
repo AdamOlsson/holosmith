@@ -146,7 +146,27 @@ pub struct FileChange {
     pub deletions: Option<u64>,
 }
 
-/// The changes view's answer: item 12's eleven keys, plus the one sentence a fallible `mergeable` needs.
+/// The options the Changes sheet's two decisions offer (HS-058), in one key.
+///
+/// One key rather than two because the sheet asks one question — "what may I do with this branch from here?" —
+/// and answers it from one fetch (ADR-0067). The two lists are asked differently on purpose:
+///
+/// - `targets` is the configured `[merge] targets` **that exist as local branches**, in the config's order, so
+///   the picker never offers a branch this project does not have — such an option could only earn `422
+///   bad_target`. It costs one `rev-parse --verify` per configured name (two by default), and `target` is its
+///   first element whenever it is non-empty;
+/// - `remotes` is `[publish] remotes` **verbatim**. Whether the project's repository *has* each remote is the
+///   publish route's question (`git remote get-url`, exit 2, then `422 bad_remote`), and a configured-but-absent
+///   remote is that route's sentence to say — filtering here would make this read fail on a git error about a
+///   question that is not the branch's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Choices {
+    pub targets: Vec<String>,
+    pub remotes: Vec<String>,
+}
+
+/// The changes view's answer: item 12's eleven keys, plus the one sentence a fallible `mergeable` needs and the
+/// options a sheet's pickers need.
 ///
 /// The field order is the spec's, and serialising this value is the endpoint's body. Three fields are
 /// nullable and the nulls are answers rather than absences:
@@ -180,6 +200,9 @@ pub struct Changes {
     pub files: Vec<FileChange>,
     /// Whether the diff touches CI configuration or a hook directory ([`CI_PATHS`]).
     pub touches_ci: bool,
+    /// What a client may merge this branch into and publish it to — [`Choices`], last because it is the one key
+    /// a *view* renders rather than measures (ADR-0067).
+    pub choices: Choices,
 }
 
 impl Changes {
@@ -202,13 +225,17 @@ impl Changes {
         worktree: &Worktree,
         base_commit: &str,
         targets: &[String],
+        remotes: &[String],
     ) -> Result<Self, ChangesError> {
         let head = basis(worktree)?;
         let repository = worktree.repository.as_path();
         let ahead = worktree.ahead(base_commit).map_err(ChangesError::Git)?;
         let files = files(repository, base_commit, &head).map_err(ChangesError::Git)?;
         let dirty = dirty(&worktree.path).map_err(ChangesError::Git)?;
-        let target = first_target(repository, targets).map_err(ChangesError::Git)?;
+        let existing = existing_targets(repository, targets).map_err(ChangesError::Git)?;
+        // The first existing target is the one the summary is *about* and the one a picker preselects; the rest of
+        // the list is the picker's options (HS-058). One walk, two answers.
+        let target = existing.first().cloned();
         let behind = match &target {
             Some(target) => {
                 Some(behind(repository, &worktree.branch, target).map_err(ChangesError::Git)?)
@@ -240,6 +267,10 @@ impl Changes {
             mergeable_reason,
             files,
             touches_ci,
+            choices: Choices {
+                targets: existing,
+                remotes: remotes.to_vec(),
+            },
         })
     }
 }
@@ -742,23 +773,28 @@ pub(crate) fn dirty(worktree: &Path) -> Result<bool, GitError> {
     Ok(!output.stdout.iter().all(u8::is_ascii_whitespace))
 }
 
-/// The first branch of `targets` this repository has, or `None` when it has none of them.
+/// The branches of `targets` this repository has, in the config's order.
 ///
 /// `[merge] targets` defaults to `["main", "master"]` because a machine has one of them (HS-043), and the
-/// order is the answer: "the UI preselects the first" is this function. A name that is not there is not a
-/// target — the same reading the delete's keep-rule makes when it asks whether a branch is merged.
-fn first_target(repository: &Path, targets: &[String]) -> Result<Option<String>, GitError> {
+/// order is the answer: "the UI preselects the first" is `[0]` of this list, and the list itself is the
+/// picker's options (HS-058, ADR-0067). A name that is not there is not a target — the same reading the
+/// delete's keep-rule makes when it asks whether a branch is merged.
+///
+/// The walk does not stop at the first hit any more, and that is the one cost HS-058 added to this read: a
+/// repository with `main` and `master` asks git twice instead of once.
+fn existing_targets(repository: &Path, targets: &[String]) -> Result<Vec<String>, GitError> {
+    let mut existing = Vec::new();
     for target in targets {
         let reference = format!("refs/heads/{target}");
         let args = ["rev-parse", "--verify", "--quiet", reference.as_str()];
         let output = git_output(repository, &args)?;
         match output.status.code() {
-            Some(0) => return Ok(Some(target.clone())),
+            Some(0) => existing.push(target.clone()),
             Some(1) => continue,
             _ => return Err(git_error(repository, &args, &output)),
         }
     }
-    Ok(None)
+    Ok(existing)
 }
 
 /// How many commits the target has that the branch does not: `rev-list --count <branch>..<target>`.
