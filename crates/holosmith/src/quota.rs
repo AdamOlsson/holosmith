@@ -299,6 +299,11 @@ impl Quota {
             limit_gb = self.limit_gb,
             "swept for sessions over the disk cap"
         );
+        // Serial, and therefore bounded: a `running` candidate's ending waits out at most `abort_grace` (the
+        // ladder's own bound), so a pass costs `running candidates × abort_grace` in the worst case. Nothing
+        // anybody waits on is behind it — the tick is five minutes and a stop is the policy's answer, not a
+        // request's — so this is a delay rather than a stall, and awaiting it is what lets a test assert the row
+        // the pass wrote instead of racing a task.
         for session in candidates {
             let Some(size_kib) = self.size_of(&session).await else {
                 continue;
@@ -378,8 +383,9 @@ impl Quota {
             Status::Running => {
                 let ending = self.ladder.end_turn(&current, DISK_QUOTA).await;
                 if ending == Ending::Forced {
-                    // Rung 2 moved the row to `stopped` and stopped the container: the report is all that is
-                    // left, and it happens for a forced stop as much as for an asked one.
+                    // Rung 2 moved the row to `stopped` and stopped the container: the log line and the report
+                    // are all that is left, and they happen for a forced stop as much as for an asked one.
+                    self.announce(&current, size_kib);
                     self.report(&current, size_kib).await;
                     return;
                 }
@@ -412,6 +418,19 @@ impl Quota {
         }
     }
 
+    /// The one log line per stop, which is what an operator reading journald greps for — the sweeper's own
+    /// fourth bullet, kept in one function so both endings (the ladder's forced rung and the idle row) write the
+    /// same words and neither can report a stop the table refused.
+    fn announce(&self, session: &Session, size_kib: u64) {
+        tracing::info!(
+            target: "holosmith::quota",
+            session = %session.id,
+            limit_gb = self.limit_gb,
+            size_kib = size_kib,
+            "the session's worktree is over the disk cap and was stopped"
+        );
+    }
+
     /// The idle arm: the row first, then the container, then the report.
     async fn stop_idle(&self, session: Session, size_kib: u64) {
         match self
@@ -434,13 +453,7 @@ impl Quota {
                 return;
             }
         }
-        tracing::info!(
-            target: "holosmith::quota",
-            session = %session.id,
-            limit_gb = self.limit_gb,
-            size_kib = size_kib,
-            "the session's worktree is over the disk cap and was stopped"
-        );
+        self.announce(&session, size_kib);
         // The row is `stopped`, which is what frees the slot, so the sweep must not wait for the container: one
         // wedged backend then delays nothing but its own stop (ADR-0024's order, the sweeper's shape).
         let stopping = self.stopper.clone();

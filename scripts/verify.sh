@@ -7330,11 +7330,19 @@ case_disk_quota() {
   fetch_sse_until "${name}_event" "/api/sessions/$id/events" '"code":"disk_quota"' "Host: 127.0.0.1" ||
     fail "${name}_event/no_answer" "GET /api/sessions/$id/events did not answer"
   body="$(cat "$WORK/responses/${name}_event.body")"
-  for needle in '"type":"error"' '"code":"disk_quota"' '"size_kib":15728640' '"limit_gb":10'; do
+  # On the stream the kind is the SSE frame's own `event:` line and the payload is the `data:` line, so the four
+  # needles are the frame's shape rather than one JSON object: `type` is a page's field, not the frame's.
+  for needle in 'event: error' '"code":"disk_quota"' '"size_kib":15728640' '"limit_gb":10'; do
     printf '%s\n' "$body" | grep -qF -- "$needle" ||
       fail "${name}_event/payload" "the event does not carry $needle: $body"
     assertions=$((assertions + 1))
   done
+  # …and the one log line per stop an operator reading journald sees (the idle stop's own fourth bullet).
+  grep -q "holosmith::quota: the session's worktree is over the disk cap and was stopped session=$id" \
+    "$serve_err" ||
+    fail "${name}/log" \
+      "the watchdog wrote no line for $id: $(grep 'holosmith::quota' "$serve_err" | sed -n '1,5p')"
+  assertions=$((assertions + 1))
 
   # 4. The same frame in a page of history, which is the durable half: the kind is the page's own field.
   fetch "${name}_history" GET "/api/sessions/$id/events/history?before=1000000" "Host: 127.0.0.1" ||

@@ -2230,3 +2230,33 @@ it rather than adding a caveat beside it.
   earlier constructor still passes a literal and serialises byte-identically, and `internal` still has a fixed
   sentence (no rusqlite text on the wire). A new code that wants numbers passes `Cow::Owned`, and a `tracing`
   field that carried `message` now needs `%error.body.message` — `Cow` is not a `tracing::Value`.
+
+### Landmines: the per-session disk cap (HS-063)
+
+- **A periodic policy that has to end a *turn* cannot use `Ladder::climb`.** `climb` is the two rungs *plus the
+  way back* (ADR-0020): a forced stop is resumed at once, because a killed container is not a session the operator
+  asked to keep stopped. A disk cap is the opposite — the session must stay `stopped` until somebody cleans the
+  worktree up — so the third caller uses `end_turn`, and when rung 1 works (the runner wrote `idle` with
+  `abort_completed`) the idle arm's own table row finishes the job with *its* reason. Two endings, one policy: a
+  test that asserted only the forced arm would never notice the asked arm leaving `abort_completed` on a
+  quota-stopped row.
+- **A boot-time pass sees `starting`, not `idle`.** The reconcile moves every live row and re-provisions it
+  (HS-044), so "sweep at spawn" measures nothing at exactly the moment a restart's stale session is the thing to
+  catch. `Quota::run` waits for no `starting` row (bounded at 60 s) before its first pass. That is also what makes
+  the gate cheap: `case_disk_quota` restarts the server and reads the stop a couple of seconds later instead of
+  waiting the spec's five minutes — a case that waits the interval is not a gate.
+- **`session_disk_soft_gb = 0` must never reach the comparison.** `over(size, 0)` answers `true` for every
+  worktree, so "off" is `AppState::quota()`'s `None` rather than a number the sweep hands to `over`; a test asserts
+  the `None` and another pins the comparison's own answer, so the trap is documented instead of discovered.
+- **A `du` stand-in is the only way a gate can measure a size, and its arguments are the witness.** The case's shim
+  logs `-sk -- <path>` and answers a fixed size: the size is the stand-in's and the *path* is the story ("each live
+  session's worktree"). Assert the path, not the size — a case that only lowered the cap would pass whether or not
+  the watchdog measured the right directory.
+- **`--one-file-system` is the flag this policy must not grow.** It would leave a nested mount out of a worktree's
+  size, and it is GNU-only while `du` here must be a POSIX utility. The acceptance's "the cap includes `target/`
+  and `node_modules`" is a claim about *inclusion*, so the one test that uses the machine's own `du` builds a tree
+  with both directories in it and asserts the sum.
+- **An SSE frame's kind is its `event:` line, not a payload key.** `case_disk_quota`'s first draft asserted
+  `"type":"error"` against the stream — that field belongs to a history *page*, whose events are objects, while a
+  stream frame is `id`/`event`/`data`. The case failed on its own wrong needle, not on the policy; the page keeps
+  the `type` assertion and the stream asserts `event: error`.
