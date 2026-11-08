@@ -427,6 +427,7 @@ serve_cases=(
   case_changes_diff
   case_merge
   case_merge_strategies
+  case_merge_guards
   case_docker_preflight
   case_doctor_quick
   case_server_images
@@ -5546,13 +5547,12 @@ case_merge() {
   assertions=$((assertions + 1))
 
   # 2. **The refusals that move nothing**, with the target compared across all of them. `squash` used to be one of
-  # these (`422 unsupported`) and is a strategy since HS-055, so what remains is three facts on two codes: the
-  # parameter's (`bad_target` twice, for the two different facts), a fourth strategy word (`bad_strategy`), and
-  # the one field this build still cannot honour (`unsupported`).
+  # these (`422 unsupported`) and is a strategy since HS-055, and `delete_session` left the list when HS-056 built
+  # it (its arm is `case_merge_guards`'s, because it needs a repository to delete from). What remains is the
+  # parameter's own facts: two `bad_target`s and a fourth strategy word.
   main="$(git -C "$repo" rev-parse refs/heads/main)"
   for pair in '{"target":"nope"}|bad_target' '{"target":"trunk"}|bad_target' \
-    '{"target":"main","strategy":"rebase"}|bad_strategy' \
-    '{"target":"main","delete_session":true}|unsupported'; do
+    '{"target":"main","strategy":"rebase"}|bad_strategy'; do
     fixture_body="${pair%|*}"
     fixture_code="${pair##*|}"
     label="${name}_refused_$fixture_code"
@@ -5824,6 +5824,339 @@ case_merge_strategies() {
   else
     fail "${name}/temporary" "the merge never made $merge_dir, so this case measured nothing"
   fi
+
+  kill "$socket_pid" 2>/dev/null || true
+  wait "$socket_pid" 2>/dev/null || true
+  socket_pid=""
+}
+
+# `set_row_status <database> <id> <status>`: the one write a case makes by hand (HS-056).
+#
+# Rule 1's first guard is about a row whose turn is running, and this gate cannot run a turn: its Docker boot is a
+# `_ping` shim, so a session's network step fails and no agent is ever launched. What the guard reads is one
+# column, so the column is what the case writes — with `sqlite3` from `python3`, the way `case_exit_classification`
+# reads `expected_stop` out of the same file. The server's connection is in WAL, so a committed write from another
+# process is what its next read sees. `tests/merge.rs` drives the same row through the server's own table, which is
+# why this shortcut is the gate's and not the code's.
+set_row_status() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import sqlite3, sys
+connection = sqlite3.connect(sys.argv[1], timeout=5)
+connection.execute("UPDATE sessions SET status = ?, status_reason = NULL WHERE id = ?",
+                   (sys.argv[3], sys.argv[2]))
+connection.commit()
+connection.close()
+PY
+}
+
+# HS-056's proof from the artifact: rule 1's two guards and rule 5's `delete_session`, over its own repository,
+# projects root and **data root** — `<data>/merge` is what a refused merge must not make and what a landing must
+# leave empty — and its own `_ping` socket. Six arms, in the order each one needs:
+#
+#   * an untracked file in the session's own worktree is `409 dirty_worktree`, with the target, the branch and the
+#     file untouched and no `<data>/merge` at all. The file is *untracked* on purpose: that is `changes::dirty`'s
+#     definition of work, so the guard cannot be a `status --ignored` or an `ls-files --others`;
+#   * the same file **ignored** by a committed `.gitignore` does not refuse — every build writes ignored files;
+#   * a row whose turn is running is `409 session_running` (its one column written by hand), and the same row in
+#     the `error` state its failed provision left **merges**: the negative half, which an `!= Idle` guard would
+#     refuse;
+#   * `delete_session: true` after a **squash** answers `200` with rule 6's three keys and then removes the row,
+#     the worktree and `agent/<id>` — the branch is deleted *because this request merged it*, which the ordinary
+#     keep-rule would not do for a squash (ADR-0064 D11, ADR-0065 D6);
+#   * a second session's squash **without** the flag keeps the branch, and the ordinary `DELETE` afterwards answers
+#     `kept.branch` naming it — so the flag is what deleted the first one;
+#   * a `delete_session` whose delete cannot snapshot (its `sessions` directory made read-only) still answers `200`
+#     with the three keys and leaves the row: a landed merge is not retracted by a failed delete (ADR-0065 D7).
+case_merge_guards() {
+  local name=case_merge_guards response body id id2 base wt wt2 tip main branch2
+  # Two statements, not one, for the reason `case_changes` gives: in a single `local` every right-hand side expands
+  # before either assignment, so `repo="$projects/holosmith"` would read an unset `projects` under `set -u`.
+  local projects="$WORK/projects-guards"
+  local data="$WORK/data-guards"
+  local repo="$projects/holosmith"
+  local db="$data/app.db"
+  # The guard comes first, before `stop_serve`, for the reason `case_worktree` gives.
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 for the `_ping` socket and the row write (tests/merge.rs covers both guards)\n' "$name"
+    return 0
+  fi
+  stop_serve
+  mkdir -p "$repo"
+  git -C "$repo" init --quiet -b main || fail "$name/git" "git init did not work in $repo"
+  git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet --allow-empty \
+    -m "the first commit" || fail "$name/git" "git commit did not work in $repo"
+  base="$(git -C "$repo" rev-parse HEAD)" || fail "$name/git" "git rev-parse did not work in $repo"
+
+  socket_pid="$(fake_docker_ping "$WORK/docker-guards.sock")"
+  for _ in $(seq 1 100); do
+    [ -S "$WORK/docker-guards.sock" ] && break
+    sleep 0.05
+  done
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\ndocker_host = "unix://%s/docker-guards.sock"\nmin_free_gb = 1\nidle_stop_min = 0\n[merge]\ntargets = ["main"]\n' \
+    "$owner" "$projects" "$WORK" >"$WORK/config-guards.toml"
+  start_serve "$WORK/config-guards.toml" "$data"
+
+  fetch_body "${name}_create" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-guards-1" ||
+    fail "${name}_create/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "${name}_create")"
+  expect_status "${name}_create" "$response" 202
+  body="$(cat "$WORK/responses/${name}_create.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id" ] || fail "${name}_create/id" "the response names no id: $body"
+  body=""
+  for _ in $(seq 1 100); do
+    fetch "${name}_row" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "${name}_row/no_answer" "GET /api/sessions/$id did not answer"
+    body="$(cat "$WORK/responses/${name}_row.body")"
+    case "$body" in
+      *'"status":"starting"'*) sleep 0.1 ;;
+      *) break ;;
+    esac
+  done
+  printf '%s\n' "$body" | grep -qF "\"base_commit\":\"$base\"" ||
+    fail "${name}_row/base" "the row does not record the branch's base commit: $body"
+  # The network step failed on the shim, which is what makes this boot possible at all; the row the merge route
+  # reads must therefore not be `idle`. Asserting it here is what makes arm 4 a measurement of `error`.
+  printf '%s\n' "$body" | grep -qF '"status":"error"' ||
+    fail "${name}_row/status" "the failed provision did not leave the row in error: $body"
+  assertions=$((assertions + 1))
+
+  wt="$projects/.worktrees/$id"
+  # The step's own command, absolute paths (HS-025's measurement): the failed network step took the worktree back.
+  git -C "$repo" worktree add --quiet -b "agent/$id" "$wt" "$base" ||
+    fail "$name/worktree" "git worktree add did not work for $wt"
+  printf 'one\n' >"$wt/a.txt" || fail "${name}/write" "a.txt is not writable"
+  git -C "$wt" add a.txt || fail "${name}/add" "git add did not work in $wt"
+  git -C "$wt" -c user.name=verify -c user.email=verify@example commit --quiet -m "the session's change" ||
+    fail "${name}/commit" "git commit did not work in $wt"
+  tip="$(git -C "$wt" rev-parse HEAD)" || fail "${name}/head" "git rev-parse did not work in $wt"
+  main="$(git -C "$repo" rev-parse refs/heads/main)" || fail "${name}/rev" "git rev-parse did not work"
+
+  # 1. **`dirty_worktree`**: an untracked file in the session's own worktree. Nothing moves, the file is untouched,
+  # and the sentence says what did not happen and what to do instead.
+  printf 'still being written\n' >"$wt/wip.txt" || fail "${name}/write" "wip.txt is not writable"
+  fetch_body "${name}_dirty" POST "/api/sessions/$id/merge" '{"target":"main"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_dirty/no_answer" "POST /api/sessions/$id/merge did not answer"
+  response="$(answer "${name}_dirty")"
+  expect_status "${name}_dirty" "$response" 409
+  expect_code "${name}_dirty" "$response" dirty_worktree
+  expect_header "${name}_dirty" "$response" "Content-Type" "application/json"
+  body="$(cat "$WORK/responses/${name}_dirty.body")"
+  printf '%s\n' "$body" | grep -qF 'nothing was merged' ||
+    fail "${name}_dirty/sentence" "the sentence does not say nothing happened: $body"
+  assertions=$((assertions + 1))
+  # The sentence is what the Changes sheet's offer will render, so it has to name a commit — the affordance HS-058
+  # adds is a prompt to the agent, and a refusal that named no next step would leave it inventing one.
+  printf '%s\n' "$body" | grep -qF 'commit' ||
+    fail "${name}_dirty/offer" "the sentence names no commit to ask for: $body"
+  assertions=$((assertions + 1))
+  check "${name}_dirty/ref" "$main" "$(git -C "$repo" rev-parse refs/heads/main)"
+  check "${name}_dirty/branch" "$tip" "$(git -C "$repo" rev-parse "agent/$id")"
+  check "${name}_dirty/file" "still being written" "$(cat "$wt/wip.txt")"
+  if [ -e "$data/merge" ]; then
+    fail "${name}_dirty/temporary" "a refused merge made $data/merge"
+  fi
+  assertions=$((assertions + 1))
+
+  # 2. **An ignored file is not work.** A committed `.gitignore` and a log file: the guard is `changes::dirty`'s,
+  # and dropping to `--ignored` or to `ls-files --others` would refuse here.
+  printf '*.log\n' >"$wt/.gitignore" || fail "${name}/write" ".gitignore is not writable"
+  git -C "$wt" add .gitignore || fail "${name}/add" "git add did not work in $wt"
+  git -C "$wt" -c user.name=verify -c user.email=verify@example commit --quiet -m "ignore the logs" ||
+    fail "${name}/commit" "git commit did not work in $wt"
+  printf 'noise\n' >"$wt/build.log" || fail "${name}/write" "build.log is not writable"
+  rm -f "$wt/wip.txt" || fail "${name}/rm" "wip.txt is not removable"
+  fetch_body "${name}_ignored" POST "/api/sessions/$id/merge" '{"target":"main"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_ignored/no_answer" "the merge of an ignored file did not answer"
+  response="$(answer "${name}_ignored")"
+  expect_status "${name}_ignored" "$response" 200
+  tip="$(git -C "$wt" rev-parse HEAD)" || fail "${name}/head" "git rev-parse did not work in $wt"
+  check "${name}_ignored/ref" "$tip" "$(git -C "$repo" rev-parse refs/heads/main)"
+
+  # 3. **`session_running`**: the row's one column, written by hand, because a gate may not run a turn.
+  set_row_status "$db" "$id" running || fail "${name}/row" "the row's status was not writable"
+  fetch "${name}_running_row" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+    fail "${name}_running_row/no_answer" "GET /api/sessions/$id did not answer"
+  body="$(cat "$WORK/responses/${name}_running_row.body")"
+  printf '%s\n' "$body" | grep -qF '"status":"running"' ||
+    fail "${name}_running_row/status" "the row is not running: $body"
+  assertions=$((assertions + 1))
+  fetch_body "${name}_running" POST "/api/sessions/$id/merge" '{"target":"main"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_running/no_answer" "the merge of a running session did not answer"
+  response="$(answer "${name}_running")"
+  expect_status "${name}_running" "$response" 409
+  expect_code "${name}_running" "$response" session_running
+  expect_header "${name}_running" "$response" "Content-Type" "application/json"
+  body="$(cat "$WORK/responses/${name}_running.body")"
+  printf '%s\n' "$body" | grep -qF 'nothing was merged' ||
+    fail "${name}_running/sentence" "the sentence does not say nothing happened: $body"
+  assertions=$((assertions + 1))
+  check "${name}_running/ref" "$tip" "$(git -C "$repo" rev-parse refs/heads/main)"
+  if [ -e "$data/merge" ]; then
+    fail "${name}_running/temporary" "a refused merge made $data/merge"
+  fi
+  assertions=$((assertions + 1))
+
+  # 4. **The negative half**: the row back to the `error` its failed provision left, and the same request lands.
+  # An `!= Idle` guard — which is how "not running" gets written by mistake — refuses exactly this row.
+  set_row_status "$db" "$id" error || fail "${name}/row" "the row's status was not writable"
+  printf 'two\n' >"$wt/extra.txt" || fail "${name}/write" "extra.txt is not writable"
+  git -C "$wt" add extra.txt || fail "${name}/add" "git add did not work in $wt"
+  git -C "$wt" -c user.name=verify -c user.email=verify@example commit --quiet -m "one more change" ||
+    fail "${name}/commit" "git commit did not work in $wt"
+  tip="$(git -C "$wt" rev-parse HEAD)" || fail "${name}/head" "git rev-parse did not work in $wt"
+  fetch_body "${name}_error_row" POST "/api/sessions/$id/merge" '{"target":"main"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_error_row/no_answer" "the merge of an error row did not answer"
+  response="$(answer "${name}_error_row")"
+  expect_status "${name}_error_row" "$response" 200
+  check "${name}_error_row/ref" "$tip" "$(git -C "$repo" rev-parse refs/heads/main)"
+
+  # 5. **`delete_session: true` after a squash**: the work lands, the row goes, the worktree goes, and
+  # `agent/<id>` goes — a squash leaves the branch a non-ancestor of the target, so this is the rule HS-043's
+  # keep-rule would *not* delete on its own (ADR-0064 D11, ADR-0065 D6).
+  printf 'three\n' >"$wt/third.txt" || fail "${name}/write" "third.txt is not writable"
+  git -C "$wt" add third.txt || fail "${name}/add" "git add did not work in $wt"
+  git -C "$wt" -c user.name=verify -c user.email=verify@example commit --quiet -m "a third change" ||
+    fail "${name}/commit" "git commit did not work in $wt"
+  tip="$(git -C "$wt" rev-parse HEAD)" || fail "${name}/head" "git rev-parse did not work in $wt"
+  fetch_body "${name}_squash_delete" POST "/api/sessions/$id/merge" \
+    '{"target":"main","strategy":"squash","delete_session":true}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_squash_delete/no_answer" "the squash-and-delete did not answer"
+  response="$(answer "${name}_squash_delete")"
+  expect_status "${name}_squash_delete" "$response" 200
+  expect_header "${name}_squash_delete" "$response" "Content-Type" "application/json"
+  body="$(cat "$WORK/responses/${name}_squash_delete.body")"
+  main="$(git -C "$repo" rev-parse refs/heads/main)" || fail "${name}/rev" "git rev-parse did not work"
+  printf '%s\n' "$body" | grep -qF "\"merged_commit\":\"$main\"" ||
+    fail "${name}_squash_delete/commit" "the answer does not name where the target is: $body"
+  assertions=$((assertions + 1))
+  printf '%s\n' "$body" | grep -qF '"strategy":"squash"' ||
+    fail "${name}_squash_delete/strategy" "the answer does not name the strategy that ran: $body"
+  assertions=$((assertions + 1))
+  # Rule 6's answer, exactly: the delete is not a fourth key.
+  case "$body" in
+    *'"merged_commit"'*'"target"'*'"strategy"'*'"kept"'*)
+      fail "${name}_squash_delete/keys" "the answer gained a key: $body"
+      ;;
+    *)
+      assertions=$((assertions + 1))
+      ;;
+  esac
+  # The squash's commit has the old target as its only parent and the branch's tree — the work is in the target
+  # even though the branch's commits are not.
+  check "${name}_squash_delete/tree" "$(git -C "$wt" rev-parse "agent/$id^{tree}")" \
+    "$(git -C "$repo" rev-parse "refs/heads/main^{tree}")"
+  wait_for_gone "${name}_squash_delete_row" "$id"
+  if [ -e "$wt" ]; then
+    fail "${name}_squash_delete/worktree" "the worktree is still there after the delete"
+  fi
+  assertions=$((assertions + 1))
+  check "${name}_squash_delete/branch" "" "$(git -C "$repo" branch --list 'agent/*')"
+  # Rule 2's last sentence, again: a landing leaves no temporary worktree behind, and neither does its delete.
+  check "${name}/temporary" "0" "$(find "$data/merge" -mindepth 1 | wc -l | tr -d ' ')"
+
+  # 6. **The contrast, in a second session**: the same squash *without* the flag keeps the branch — and the
+  # ordinary delete afterwards says so in its `kept`, which is HS-043's answer unchanged by this story. In between,
+  # a `delete_session` whose delete cannot snapshot answers `200` with the three keys and leaves the row: a landed
+  # merge is not retracted by a failed delete (ADR-0065 D7).
+  fetch_body "${name}_create2" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-guards-2" ||
+    fail "${name}_create2/no_answer" "the second create did not answer"
+  response="$(answer "${name}_create2")"
+  expect_status "${name}_create2" "$response" 202
+  body="$(cat "$WORK/responses/${name}_create2.body")"
+  id2="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id2" ] || fail "${name}_create2/id" "the second response names no id: $body"
+  body=""
+  for _ in $(seq 1 100); do
+    fetch "${name}_row2" GET "/api/sessions/$id2" "Host: 127.0.0.1" ||
+      fail "${name}_row2/no_answer" "GET /api/sessions/$id2 did not answer"
+    body="$(cat "$WORK/responses/${name}_row2.body")"
+    case "$body" in
+      *'"status":"starting"'*) sleep 0.1 ;;
+      *) break ;;
+    esac
+  done
+  printf '%s\n' "$body" | grep -qF "\"base_commit\":\"$main\"" ||
+    fail "${name}_row2/base" "the second row does not record the branch's base commit: $body"
+  wt2="$projects/.worktrees/$id2"
+  git -C "$repo" worktree add --quiet -b "agent/$id2" "$wt2" "$main" ||
+    fail "${name}/worktree2" "git worktree add did not work for $wt2"
+  printf 'four\n' >"$wt2/four.txt" || fail "${name}/write" "four.txt is not writable"
+  git -C "$wt2" add four.txt || fail "${name}/add" "git add did not work in $wt2"
+  git -C "$wt2" -c user.name=verify -c user.email=verify@example commit --quiet -m "the fourth change" ||
+    fail "${name}/commit" "git commit did not work in $wt2"
+  fetch_body "${name}_squash_keep" POST "/api/sessions/$id2/merge" '{"target":"main","strategy":"squash"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_squash_keep/no_answer" "the keeping squash did not answer"
+  response="$(answer "${name}_squash_keep")"
+  expect_status "${name}_squash_keep" "$response" 200
+  branch2="$(git -C "$repo" rev-parse --verify --quiet "refs/heads/agent/$id2" || true)"
+  [ -n "$branch2" ] || fail "${name}_squash_keep/branch" "a squash with no delete_session deleted the branch"
+  assertions=$((assertions + 1))
+  # ... and the row is still there, which is the other half of "the flag is what deletes".
+  fetch "${name}_kept_row" GET "/api/sessions/$id2" "Host: 127.0.0.1" ||
+    fail "${name}_kept_row/no_answer" "GET /api/sessions/$id2 did not answer"
+  expect_status "${name}_kept_row" "$(answer "${name}_kept_row")" 200
+
+  # 6a. **A delete that cannot snapshot does not retract the merge**: the session's own directory cannot be made,
+  # so `snapshot::take` fails and the delete answers `unsaved_work` — which the merge route logs rather than
+  # answering, because the work landed. The row is still there afterwards.
+  mkdir -p "$data/sessions" || fail "${name}/sessions" "$data/sessions is not creatable"
+  chmod 0555 "$data/sessions" || fail "${name}/chmod" "$data/sessions is not chmoddable"
+  fetch_body "${name}_delete_refused" POST "/api/sessions/$id2/merge" \
+    '{"target":"main","strategy":"squash","delete_session":true}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_delete_refused/no_answer" "the refused-delete merge did not answer"
+  response="$(answer "${name}_delete_refused")"
+  expect_status "${name}_delete_refused" "$response" 200
+  body="$(cat "$WORK/responses/${name}_delete_refused.body")"
+  printf '%s\n' "$body" | grep -qF '"merged_commit"' ||
+    fail "${name}_delete_refused/keys" "the landed merge's answer does not name the commit: $body"
+  assertions=$((assertions + 1))
+  fetch "${name}_after_refused" GET "/api/sessions/$id2" "Host: 127.0.0.1" ||
+    fail "${name}_after_refused/no_answer" "GET /api/sessions/$id2 did not answer"
+  response="$(answer "${name}_after_refused")"
+  expect_status "${name}_after_refused" "$response" 200
+  body="$(cat "$WORK/responses/${name}_after_refused.body")"
+  case "$body" in
+    *'"status":"deleting"'*) fail "${name}_after_refused/status" "the row is deleting after a failed delete: $body" ;;
+    *) assertions=$((assertions + 1)) ;;
+  esac
+  chmod 0755 "$data/sessions" || fail "${name}/chmod" "$data/sessions is not chmoddable"
+
+  # 6b. **The ordinary delete keeps the squashed branch**, which is HS-043's rule unchanged by this story.
+  fetch "${name}_deleted" DELETE "/api/sessions/$id2" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_deleted/no_answer" "DELETE /api/sessions/$id2 did not answer"
+  response="$(answer "${name}_deleted")"
+  expect_status "${name}_deleted" "$response" 202
+  body="$(cat "$WORK/responses/${name}_deleted.body")"
+  printf '%s\n' "$body" | grep -qF "\"kept\":{\"branch\":\"agent/$id2\"" ||
+    fail "${name}_deleted/kept" "the 202 does not name the branch it keeps: $body"
+  assertions=$((assertions + 1))
+  wait_for_gone "${name}_deleted_row" "$id2"
+  branch2="$(git -C "$repo" rev-parse --verify --quiet "refs/heads/agent/$id2" || true)"
+  [ -n "$branch2" ] || fail "${name}_deleted/branch" "the ordinary delete took a branch it said it kept"
+  assertions=$((assertions + 1))
 
   kill "$socket_pid" 2>/dev/null || true
   wait "$socket_pid" 2>/dev/null || true

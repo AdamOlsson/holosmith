@@ -29,6 +29,7 @@
 //! [identity]: holosmith::snapshot::IDENTITY
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::Method;
@@ -38,6 +39,8 @@ use holosmith::config::Config;
 use holosmith::http::{self, AppState};
 use holosmith::merge::{FF_ONLY, MergeError, Merged, Request, Strategy, merge};
 use holosmith::sessions::NewSession;
+use holosmith::sessions::Status;
+use holosmith::sessions::state::{Transitioner, Trigger};
 use holosmith::worktree::{Retained, Worktree};
 use serde_json::Value;
 
@@ -1287,8 +1290,10 @@ async fn an_explicit_ff_only_is_the_same_request_as_no_strategy() {
 
 #[tokio::test]
 async fn every_bad_request_moves_no_ref() {
-    // The acceptance's first two bullets and the two `unsupported`s, at the wire: the codes are the machine's and
-    // the refs are the repository's, and neither a refused strategy nor a bad target moves anything.
+    // The acceptance's first two bullets and the request's own refusals, at the wire: the codes are the machine's
+    // and the refs are the repository's, and neither a refused strategy nor a bad target moves anything.
+    // `delete_session: true` used to be one of these (`422 unsupported`) and is rule 5 now, so it left this table
+    // for `delete_session_runs_the_delete_flow_and_the_answer_keeps_three_keys`.
     let fixture = Fixture::new("merge-wire-refusals");
     fixture.commit("a.txt", b"a\n", "the session's change");
     git(&fixture.repo, &["branch", "trunk"]);
@@ -1307,7 +1312,6 @@ async fn every_bad_request_moves_no_ref() {
         // `bad_strategy` under HS-054, where every strategy check was a string comparison; the change is
         // deliberate and ADR-0064 records it.
         (r#"{"target":"main","strategy":3}"#, "bad_body"),
-        (r#"{"target":"main","delete_session":true}"#, "unsupported"),
         (r#"{"target":"main","message":""}"#, "bad_body"),
         (r#"{"target":"main","force":true}"#, "unknown_field"),
         (r#"{"strategy":"ff-only"}"#, "bad_body"),
@@ -1656,6 +1660,242 @@ async fn a_target_checked_out_in_another_worktree_is_a_409_at_the_wire() {
     assert!(
         !other.join("a.txt").exists(),
         "the refusal wrote into the working tree it said it would not touch"
+    );
+    served.finish().await.expect("the server stops");
+}
+
+// --- rule 1's two guards, and rule 5's `delete_session` (HS-056) -------------------------------------------
+
+/// One state change through the table's own function, the way `tests/delete.rs` drives a row it must hold in a
+/// state no request of its own would produce: a running turn and a `deleting` row are both things the API
+/// cannot be *asked* for without a container or a task.
+async fn drive(state: &AppState, id: &str, trigger: Trigger, reason: Option<&str>) {
+    Transitioner::new(Arc::clone(&state.database), state.events.clone())
+        .apply(id, trigger, reason)
+        .await
+        .expect("the move is in the table");
+}
+
+/// The row's status, read under the one lock the repository is read with.
+fn status_of(state: &AppState, id: &str) -> Status {
+    state
+        .database
+        .lock()
+        .expect("the lock is not poisoned")
+        .sessions()
+        .get(id)
+        .expect("the row reads")
+        .expect("the row is there")
+        .status
+}
+
+/// Wait (bounded) until the row is gone, which is what a delete's removal off the request's task reaches.
+async fn wait_gone(served: &Served, id: &str) -> bool {
+    for _ in 0..100 {
+        let response = request(
+            served.addr,
+            &format!(
+                "GET /api/sessions/{id} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        if response.status == 404 {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    false
+}
+
+/// Whether the merge's temporary directory exists at all — the measure of "a refused merge costs no directory",
+/// which is stronger than "the directory is empty": `land` is what makes it, and a refusal must not reach it.
+fn temporary_exists(fixture: &Fixture) -> bool {
+    fixture.state.config.data_root.join("merge").exists()
+}
+
+#[tokio::test]
+async fn a_running_turn_refuses_the_merge_and_moves_nothing() {
+    // Rule 1's first bullet. The row is `running` through the table's own function rather than by a raw write,
+    // and what the refusal is measured by is the repository: the target and the branch where they were, the
+    // agent's file untouched, and no temporary directory at all.
+    let fixture = Fixture::new("merge-guard-running");
+    fixture.commit("a.txt", b"a\n", "the session's change");
+    let tip = fixture.rev(&fixture.branch());
+    let before = fixture.rev("refs/heads/main");
+    drive(&fixture.state, &fixture.id, Trigger::PiReady, None).await;
+    drive(&fixture.state, &fixture.id, Trigger::Prompt, None).await;
+    assert_eq!(status_of(&fixture.state, &fixture.id), Status::Running);
+
+    let served = fixture.served().await;
+    let response = post_merge(served.addr, &fixture.id, r#"{"target":"main"}"#).await;
+    assert_eq!(response.status, 409, "{}", response.body);
+    assert_eq!(response.header("content-type"), Some("application/json"));
+    let body = envelope(&response);
+    assert_eq!(body["code"], "session_running");
+    assert!(
+        body["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("nothing was merged")),
+        "the sentence does not say nothing happened: {body}"
+    );
+    assert_eq!(fixture.rev("refs/heads/main"), before, "the target moved");
+    assert_eq!(fixture.rev(&fixture.branch()), tip, "the branch moved");
+    assert_eq!(
+        std::fs::read(fixture.worktree.join("a.txt")).expect("the agent's file"),
+        b"a\n"
+    );
+    assert!(
+        !temporary_exists(&fixture),
+        "a refused merge made <data>/merge"
+    );
+    served.finish().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn every_status_but_running_still_merges() {
+    // Rule 1's **negative half**, and the reason it exists: `while a turn runs` is `== Running`, and a guard
+    // written `!= Idle` would refuse four of these five. One of them is not hypothetical — a provision that
+    // fails leaves the row `error`, which is exactly the session whose branch an operator wants to merge — and
+    // `deleting` is the operator's own request rather than a turn.
+    let cases: [(&str, &[Trigger]); 5] = [
+        ("starting", &[]),
+        ("idle", &[Trigger::PiReady]),
+        ("stopped", &[Trigger::PiReady, Trigger::IdleStop]),
+        ("error", &[Trigger::ProvisioningFailed]),
+        ("deleting", &[Trigger::Delete]),
+    ];
+    for (label, moves) in cases {
+        let fixture = Fixture::new(&format!("merge-guard-{label}"));
+        fixture.commit("a.txt", b"a\n", "the session's change");
+        for trigger in moves {
+            drive(&fixture.state, &fixture.id, *trigger, None).await;
+        }
+        assert_ne!(
+            status_of(&fixture.state, &fixture.id),
+            Status::Running,
+            "{label}"
+        );
+        let tip = fixture.rev(&fixture.branch());
+        let served = fixture.served().await;
+        let response = post_merge(served.addr, &fixture.id, r#"{"target":"main"}"#).await;
+        assert_eq!(response.status, 200, "{label}: {}", response.body);
+        assert_eq!(
+            fixture.rev("refs/heads/main"),
+            tip,
+            "{label}: the merge did not move the target"
+        );
+        served.finish().await.expect("the server stops");
+    }
+}
+
+#[tokio::test]
+async fn an_uncommitted_file_refuses_the_merge_and_the_offer_is_a_commit() {
+    // Rule 1's second bullet. The file is *untracked* and in the session's own worktree — the definition of
+    // work `changes::dirty` uses, and the subject rule 1 names — so the refusal is a pre-check on this request's
+    // own facts rather than the `target_dirty` shape (ADR-0065 D3). The commit halves are what the Changes
+    // sheet's offer will send; the sentence has to name one, or the UI would be inventing it.
+    let fixture = Fixture::new("merge-guard-dirty");
+    fixture.commit("a.txt", b"a\n", "the session's change");
+    let before = fixture.rev("refs/heads/main");
+    write(&fixture.worktree, "wip.txt", b"still being written\n");
+
+    let served = fixture.served().await;
+    let response = post_merge(served.addr, &fixture.id, r#"{"target":"main"}"#).await;
+    assert_eq!(response.status, 409, "{}", response.body);
+    assert_eq!(response.header("content-type"), Some("application/json"));
+    let body = envelope(&response);
+    assert_eq!(body["code"], "dirty_worktree");
+    let message = body["message"].as_str().expect("a sentence");
+    assert!(message.contains("nothing was merged"), "{message}");
+    assert!(message.contains("commit"), "{message}");
+    assert_eq!(fixture.rev("refs/heads/main"), before, "the target moved");
+    assert_eq!(
+        std::fs::read(fixture.worktree.join("wip.txt")).expect("the agent's file"),
+        b"still being written\n",
+        "the refusal touched the work it refused to merge"
+    );
+    assert!(
+        !temporary_exists(&fixture),
+        "a refused merge made <data>/merge"
+    );
+    served.finish().await.expect("the server stops");
+
+    // ... and the same request lands once the work is a commit, which is what makes the refusal the file's.
+    git(&fixture.worktree, &["add", "wip.txt"]);
+    git(&fixture.worktree, &["commit", "--quiet", "-m", "the work"]);
+    let served = fixture.served().await;
+    let response = post_merge(served.addr, &fixture.id, r#"{"target":"main"}"#).await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    served.finish().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn an_ignored_file_does_not_refuse_the_merge() {
+    // `changes::dirty` is the one definition of work (`--untracked-files=normal`), so an ignored file is not
+    // work. A guard that asked `git status --short --ignored` or `ls-files --others` would refuse here, which is
+    // why the case exists: every build writes ignored files.
+    let fixture = Fixture::new("merge-guard-ignored");
+    fixture.commit(".gitignore", b"*.log\n", "ignore the logs");
+    write(&fixture.worktree, "build.log", b"noise\n");
+    let tip = fixture.rev(&fixture.branch());
+
+    let served = fixture.served().await;
+    let response = post_merge(served.addr, &fixture.id, r#"{"target":"main"}"#).await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    assert_eq!(fixture.rev("refs/heads/main"), tip);
+    served.finish().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn a_session_with_no_worktree_is_refused_before_the_dirty_check() {
+    // The guard order, measured: `changes::basis` is asked before `changes::dirty`, so a worktree that is gone
+    // answers this route's `409 no_worktree` rather than a `500` from `git status` in a directory that is not
+    // there. The row keeps its `base_commit` and loses only the directory, which is a `rm -rf` or a teardown's
+    // leftovers.
+    let fixture = Fixture::new("merge-guard-gone");
+    fixture.commit("a.txt", b"a\n", "the session's change");
+    std::fs::remove_dir_all(&fixture.worktree).expect("the worktree is removable");
+
+    let served = fixture.served().await;
+    let response = post_merge(served.addr, &fixture.id, r#"{"target":"main"}"#).await;
+    assert_eq!(response.status, 409, "{}", response.body);
+    assert_eq!(envelope(&response)["code"], "no_worktree");
+    served.finish().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn delete_session_runs_the_delete_flow_and_the_answer_keeps_three_keys() {
+    // Rule 5's field, at the wire: the row is gone afterwards, and the answer is still exactly rule 6's three
+    // keys — a merge that also deleted the session says nothing additive (ADR-0065 D7). This fixture's backend
+    // keeps no repository, so what the *branch* becomes after a landing is `case_merge_guards`' to measure; what
+    // this asserts is that the field reaches the delete flow and that the delete flow runs.
+    let fixture = Fixture::new("merge-wire-delete");
+    fixture.commit("a.txt", b"a\n", "the session's change");
+    let tip = fixture.rev(&fixture.branch());
+
+    let served = fixture.served().await;
+    let response = post_merge(
+        served.addr,
+        &fixture.id,
+        r#"{"target":"main","strategy":"merge","delete_session":true}"#,
+    )
+    .await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    let body: Value = serde_json::from_str(&response.body).expect("the answer is JSON");
+    // A `merge` writes a commit, so what the answer names is the target's *new* commit — the same commit the
+    // target points at, read by the test — and the branch's tip is one of its parents.
+    assert_eq!(body["merged_commit"], fixture.rev("refs/heads/main"));
+    assert!(fixture.parents("refs/heads/main").contains(&tip));
+    assert_eq!(body["target"], "main");
+    assert_eq!(body["strategy"], "merge");
+    assert_eq!(
+        body.as_object().expect("an object").len(),
+        3,
+        "the answer gained a key: {body}"
+    );
+    assert!(
+        wait_gone(&served, &fixture.id).await,
+        "the session was not deleted"
     );
     served.finish().await.expect("the server stops");
 }

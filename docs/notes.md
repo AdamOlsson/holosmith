@@ -2049,3 +2049,48 @@ it rather than adding a caveat beside it.
   the latter). It is the body's *shape* rather than a value outside the vocabulary — the create's split for a
   numeric `model` — and the wire table asserts it rather than leaving the reclassification to a reader of
   ADR-0008.
+
+### Landmines: the merge's guards and the delete after a merge (HS-056)
+
+- **The keep-rule's override is only observable where the backend owns a repository, so the gate is its proof and
+  the crate tests are not.** `tests/merge.rs`'s `Fixture` uses the stub backend, whose `retained` answers
+  `Retained::nothing()` and whose `delete` removes nothing — so `delete_session` there can assert the row goes and
+  the answer keeps three keys, and it cannot assert anything about a branch. `case_merge_guards` is where the
+  branch/worktree half is measured, and it is measured by *deleting a squashed session and reading
+  `git branch --list 'agent/*'`*: with the override, empty; without it, `  agent/<id>` — the mutation was run and
+  the case fails on exactly that line. A story that adds a `delete_session` assertion at the crate level with a
+  stub fixture is asserting the stub's shape, not the rule.
+- **`changes::dirty` in a directory that is not there is a `500`, so the guard asks `changes::basis` first.** The
+  changes view's four ordered refusals are what turn an `rm -rf`'d worktree into `409 no_worktree`; asking `dirty`
+  alone answers `internal`. `a_session_with_no_worktree_is_refused_before_the_dirty_check` is the test, and
+  deleting the `basis` line turns it red while every other merge test stays green — which is why the line needs a
+  test of its own rather than a comment.
+- **The 60-second pair has no client in this build, and a blanket `fetch` timeout would be a bug rather than a
+  feature.** Rule 6's pair is the *hub's* (HS-069's slice already carries "Default forwarding timeout is 5 s; merge
+  and publish use 60 s") and the buttons are HS-058's. `DELETE /api/sessions/{id}` legitimately waits out the
+  abort ladder's `abort_grace` — ten seconds by default — before it takes a snapshot, so a 5 s default on
+  `web/src/main.ts`'s `post` helper would cut the delete's own bounded wait and answer a client that its request
+  failed when the removal is running. ADR-0065 D8 records it; this bullet exists so the next agent does not
+  "complete" the acceptance bullet by adding a timeout to the shared helper.
+- **A gate that needs a `running` row writes one column, and that is a fixture rather than a shortcut in the
+  code.** The gate's Docker boots are a `_ping` shim, so a session's network step fails and no agent ever starts —
+  there is no way to make a real turn. `case_merge_guards` sets `sessions.status = 'running'` with `sqlite3` from
+  `python3` (the file is in WAL, so a committed write from another process is what the server's next read sees) and
+  then sets it back to the `error` its failed provision left, which is also the *negative* half: the row an
+  `!= Idle` guard would refuse. `tests/merge.rs` drives the same row through the server's own `Transitioner`, so
+  the state machine is honoured where it can be.
+- **Building a field a previous `case_*` asserted was refused changes the gate, and it is invisible in
+  `cargo test`.** `case_merge`'s refusal table listed `{"delete_session":true}` → `422 unsupported`; it now merges
+  (and deletes), so the entry left the table, and the two entries that remain are the two `bad_target`s and
+  `bad_strategy`. `delete_session`'s own arm is a case of its own, because it needs a repository. ADR-0064 recorded
+  the same obligation for `strategy:"squash"`, and it will happen again.
+- **`unsupported` is gone, and the code is edited where it is named rather than left behind.** It existed for two
+  requests ADR-0063 could not honour; HS-055 built one and HS-056 the other, so the constant, the constructor and
+  the wire-table row went with them — `docs/build.md`'s `case_merge` paragraph included, because a gate description
+  that still lists a code nothing sends is a document lying about the artifact.
+- **`sessions::deletion` returns `DeleteAnswer`, and the merge ignores it on purpose.** The answer is the 202's body
+  and the merge's is rule 6's three keys; making the merge's answer additive would make its shape depend on the
+  request (ADR-0065 D7). What the merge does with a *refusal* is log it and keep the `200`, because a `409` after
+  the target moved would tell the operator the work did not land. The test for that arm is the gate's: the
+  session's `sessions` directory made read-only makes `snapshot::take` fail, and the merge still answers `200`, the
+  row still exists, and its status is not `deleting`.

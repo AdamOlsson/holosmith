@@ -44,10 +44,11 @@
 //!   hands it to rule 4's two paths, unchanged: the commit descends from the target, so the target's move is
 //!   still a fast-forward and this module does not learn a second write.
 //!
-//! What this module does not do: no `delete_session` and none of rule 1's guards (HS-056), no publish
-//! (HS-057), and no UI (HS-058 owns the Changes sheet and the Resolve-with-agent affordance — ADR-0064). It
-//! also does not touch the database: a merge is neither a state transition nor an event, and the changes view
-//! is **unchanged** by one — `ahead` counts the branch's commits and the branch did not move.
+//! What this module does not do: none of rule 1's guards and no `delete_session` — both are the *route's*
+//! (HS-056, ADR-0065: a session row is not this module's to read), no publish (HS-057), and no UI (HS-058 owns
+//! the Changes sheet and the Resolve-with-agent affordance — ADR-0064). It also does not touch the database: a
+//! merge is neither a state transition nor an event, and the changes view is **unchanged** by one — `ahead`
+//! counts the branch's commits and the branch did not move.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -443,8 +444,9 @@ impl MergeError {
 ///    commit descends from the target and is therefore itself a fast-forward of it.
 ///
 /// A session row is *not* consulted and *not* written: this function knows a worktree, a request and the
-/// config's list. Whether the session may be merged at all (a running turn, uncommitted work) is HS-056's
-/// rule 1, and this story deliberately does not pre-empt it.
+/// config's list. Rule 1's two guards — a running turn and the session's own uncommitted work — are the
+/// **route's**, because they are facts about a row and this module is handed none (HS-056, ADR-0065 D1); the
+/// route asks them before calling this, which is also why a refused merge makes no temporary directory at all.
 pub fn merge(
     worktree: &Worktree,
     request: &Request,

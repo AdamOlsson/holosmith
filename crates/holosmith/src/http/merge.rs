@@ -1,5 +1,5 @@
-//! `POST /api/sessions/:id/merge`: land a session's branch on a target (HS-054 and HS-055, spec item 12's rules
-//! 2, 3 and 4).
+//! `POST /api/sessions/:id/merge`: land a session's branch on a target (HS-054, HS-055 and HS-056, spec item
+//! 12's rules 1–6).
 //!
 //! The route is a `POST`, so every mutating guard applies and the manifest records it [`Mutating`] — and it is
 //! the first route in this build whose work **writes to the project repository**. It is also the one session
@@ -7,16 +7,22 @@
 //! merge runs on the host in the project repository; containers never merge", so no container is asked anything
 //! and this handler knows no backend.
 //!
-//! Three scopes, in the order the handler takes them:
+//! Four scopes, in the order the handler takes them:
 //!
 //! 1. **the body** — taken as a `Result<Bytes, BytesRejection>` for the reason the create's is, and parsed by
-//!    hand so `unknown_field` and the one `unsupported` sentence are decisions rather than serde's error text;
-//! 2. **the row** — one lock, no `.await` inside it; an unknown id is the envelope's `404 not_found`, and a row
-//!    with no `base_commit` never reaches git at all, because a session with no worktree has no branch to merge
-//!    and answers `409 no_worktree` with **this route's** sentence (the code is the changes view's, the sentence
-//!    describes the request — ADR-0063 D1);
-//! 3. **the merge** — [`crate::merge::merge`] on a blocking task (the whole operation is synchronous git, and a
-//!    request path must not park a runtime worker on it), then the three keys, or one of the refusals.
+//!    hand so `unknown_field` and `bad_strategy` are decisions rather than serde's error text;
+//! 2. **the row** — one lock, no `.await` inside it; an unknown id is the envelope's `404 not_found`. Rule 1's
+//!    **first guard** is the row's own fact: a `running` turn is `409 session_running`, and every other state is
+//!    merged (ADR-0065 D2). A row with no `base_commit` never reaches git at all, because a session with no
+//!    worktree has no branch to merge and answers `409 no_worktree` with **this route's** sentence (the code is
+//!    the changes view's, the sentence describes the request — ADR-0063 D1);
+//! 3. **rule 1's second guard** — the session's own worktree, read with the changes view's definition of work
+//!    (`changes::dirty`, after `changes::basis`' four refusals). Uncommitted work is `409 dirty_worktree`, and
+//!    the answer is a *pre*check on purpose: unlike `409 target_dirty`, whose checkout is the operator's and may
+//!    hold work git carries across, this dirtiness is the request's own subject (ADR-0065 D3);
+//! 4. **the merge** — [`crate::merge::merge`] on a blocking task (the whole operation is synchronous git, and a
+//!    request path must not park a runtime worker on it), then the three keys, or one of the refusals. Both
+//!    guards sit **before** this task, so a refused merge cannot have made `<data>/merge` at all.
 //!
 //! The worktree is built from the naming rule ([`Worktree::of`]) rather than from the row's recorded path, for
 //! the reason `http::changes` gives: the rule derives the branch, the repository and the directory from the same
@@ -26,12 +32,16 @@
 //! read, so the same bad request is answered the same way whatever the session's state is; the module asks it
 //! again as its own precondition (`merge::listed`).
 //!
-//! **Nothing about the row changes.** A merge is not a state transition and not an event: the session stays
-//! whatever it was and the branch is merged. `GET …/changes` is **unchanged** by a merge: `ahead` counts the
-//! branch's commits and the branch did not move, `dirty` is the working tree's, and `behind`/`mergeable` were
-//! already what they are — a fast-forward requires the target to be an ancestor of the branch, so `behind` was
-//! `0`; after a `merge` or a `squash` the target has gained a commit the branch does not, and `behind` is the
-//! `1` that says so. Those fields were never *this route's* claim to keep.
+//! **A merge changes nothing about the row** — it is neither a state transition nor an event, so the session
+//! stays whatever it was and the branch is merged — **except** for `delete_session: true`, which runs the delete
+//! flow's request half after the landing (rule 5). That row is `deleting` before this handler answers, so a
+//! client cannot prompt a session whose work has just landed, and the removal itself runs off this task: a
+//! `docker rm` is not a merge's business. The answer is the three keys either way (ADR-0065 D7). `GET …/changes`
+//! is **unchanged** by a merge: `ahead` counts the branch's commits and the branch did not move, `dirty` is the
+//! working tree's, and `behind`/`mergeable` were already what they are — a fast-forward requires the target to be
+//! an ancestor of the branch, so `behind` was `0`; after a `merge` or a `squash` the target has gained a commit
+//! the branch does not, and `behind` is the `1` that says so. Those fields were never *this route's* claim to
+//! keep.
 
 use std::sync::PoisonError;
 
@@ -42,16 +52,18 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::Value;
 
-use crate::changes::ChangesError;
+use crate::changes::{self, ChangesError};
 use crate::http::app::AppState;
 use crate::http::error::{ApiError, internal};
+use crate::http::sessions;
 use crate::merge::{MergeError, Request, Strategy, listed, merge};
+use crate::sessions::Status;
 use crate::worktree::Worktree;
 
 /// The body's fields, exactly: any other key is `unknown_field`, the create's own rule.
 ///
-/// All four are read: `message` names a commit for the two strategies that make one, and `delete_session` is
-/// the one field this build still refuses (HS-056 builds it).
+/// All four are read: `message` names a commit for the two strategies that make one, and `delete_session` runs
+/// the delete flow after a landing (HS-056 built it; it was the last field this build refused).
 const FIELDS: [&str; 4] = ["target", "strategy", "message", "delete_session"];
 
 /// `target` is not one of the configured `[merge] targets`: the config, not the repository, is what refused.
@@ -65,13 +77,19 @@ const MISSING_TARGET: &str = "`target` must be a branch this repository has: tha
 /// `strategy` is not one of the spec's three words at all — a malformed request rather than a missing feature.
 const BAD_STRATEGY: &str = "`strategy` must be `ff-only`, `merge` or `squash`";
 
-/// `delete_session` was true and the delete flow is HS-056's.
+/// A merge of a session whose turn is running (HS-056, spec item 12's rule 1).
 ///
-/// The refusal comes *before* the merge, so the sentence has to say that nothing was merged either: a client
-/// that read "the session was not deleted" might reasonably think its work had landed. It is the last
-/// `unsupported` this route answers — the two strategy words this sentence used to name are built.
-const UNBUILT_DELETE: &str = "`delete_session` is not built yet, so nothing was merged and the session was not deleted; merge with \
-     `delete_session` absent, then delete the session";
+/// The same `session_running` code a prompt gets while a turn runs, and a sentence that describes **this**
+/// request: nothing was merged, and the operator's move is to wait or to abort.
+const RUNNING: &str = "a turn is running in this session, so nothing was merged; wait for it to end, or abort it, and merge again";
+
+/// A merge of a session whose worktree holds uncommitted work (HS-056, rule 1).
+///
+/// "Only commits are merged", so the refusal names the two things that are true: nothing was merged, and the
+/// next step is a commit. The offer to *make* that commit is HS-058's Changes-sheet affordance; ADR-0065 names
+/// the prompt it sends, because a sentence the operator reads and a prompt the agent gets should not be two
+/// guesses.
+const DIRTY_WORKTREE: &str = "the session has uncommitted work, so nothing was merged; ask the agent to commit it, then merge again";
 
 /// The four `no_worktree` facts, in this route's words.
 ///
@@ -117,15 +135,18 @@ pub(crate) async fn respond(
         // request's `bad_body`, for the reason the create maps its own.
         Err(_) => return ApiError::bad_merge_body().into_response(),
     };
-    let target = match parse_body(&body) {
-        Ok(request) => request,
+    let Parsed {
+        request,
+        delete_session,
+    } = match parse_body(&body) {
+        Ok(parsed) => parsed,
         Err(error) => return error.into_response(),
     };
     // The target's first fact is asked here and not later, because it is the **request's**: a body naming a
     // branch this machine will not merge into is malformed whatever the session's state is, so it must not be
     // answered differently for a session with no worktree than for one with (ADR-0012's order). `merge` asks
     // the same predicate again as its own precondition.
-    if !listed(&target.target, &state.config.merge.targets) {
+    if !listed(&request.target, &state.config.merge.targets) {
         return ApiError::bad_target(UNLISTED_TARGET).into_response();
     }
     let session = {
@@ -140,21 +161,68 @@ pub(crate) async fn respond(
         Ok(None) => return ApiError::unknown_session().into_response(),
         Err(error) => return internal("get", error).into_response(),
     };
+    // Rule 1's first guard, and the only state it refuses: a turn is in flight. `starting`, `stopped`, `error`
+    // and `deleting` are merged — the table has one code per state, and a guard over any of them would be a rule
+    // the spec does not name (ADR-0065 D2). A `!running` written as `!= Idle` would refuse the `error` row a
+    // failed provision leaves behind, which is exactly the session an operator wants to merge.
+    if session.status == Status::Running {
+        return ApiError::not_in_state(Status::Running, RUNNING).into_response();
+    }
     // The recorded base commit is the row's own witness that a worktree step completed, which is the same fact
     // `GET …/changes` refuses on and the same sentence: a merge has no branch to move without it.
     if session.base_commit.is_none() {
         return ApiError::no_worktree(NO_WORKTREE).into_response();
     }
     let worktree = Worktree::of(&state.config.projects_root, &session.project, &session.id);
+    // Rule 1's second guard, and the one pre-check this route makes on purpose (ADR-0065 D3): the session's own
+    // uncommitted work is the request's subject, so it is asked **before** git is asked to move anything. The
+    // changes view's `basis` comes first so a worktree that is gone (a `rm -rf`, a pruned registration, a
+    // deleted branch) answers this route's `409 no_worktree` instead of a `500` from `git status` in a directory
+    // that is not there. `merge` asks the same four facts again as its own precondition — ADR-0063's shape for a
+    // predicate a module will not take on its caller's word — so this route reads the same three paths twice.
+    let unchecked = {
+        let worktree = worktree.clone();
+        tokio::task::spawn_blocking(move || -> Result<bool, ChangesError> {
+            changes::basis(&worktree)?;
+            changes::dirty(&worktree.path).map_err(ChangesError::Git)
+        })
+        .await
+    };
+    match unchecked {
+        Ok(Ok(false)) => {}
+        Ok(Ok(true)) => return ApiError::dirty_worktree(DIRTY_WORKTREE).into_response(),
+        Ok(Err(error)) => return changes_refusal(error).into_response(),
+        Err(error) => return internal("merge", error).into_response(),
+    }
     let targets = state.config.merge.targets.clone();
     let merges = state.merges.clone();
     let data_root = state.config.data_root.clone();
     let merged = tokio::task::spawn_blocking(move || {
-        merge(&worktree, &target, &targets, &merges, &data_root)
+        merge(&worktree, &request, &targets, &merges, &data_root)
     })
     .await;
     match merged {
-        Ok(Ok(merged)) => (StatusCode::OK, Json(merged)).into_response(),
+        Ok(Ok(merged)) => {
+            if delete_session {
+                // Rule 5, after a **successful** merge: the delete flow's request half, which moves the row to
+                // `deleting` and hands the removal to a task. `force` is false — this route has no query, and a
+                // request that forced a delete would be a second way to lose work (ADR-0065 D7). A refusal here
+                // is the delete's own and is **logged**: the 200 stands, because the work landed, and an answer
+                // that said otherwise would tell the operator the merge failed.
+                if let Err(error) = sessions::deletion(state, id, false, Some(&merged.target)).await
+                {
+                    tracing::warn!(
+                        target: "holosmith::http::merge",
+                        session = id,
+                        status = error.status.as_u16(),
+                        code = error.body.code,
+                        message = error.body.message,
+                        "the work landed but the session was not deleted"
+                    );
+                }
+            }
+            (StatusCode::OK, Json(merged)).into_response()
+        }
         Ok(Err(error)) => refusal_of(error).into_response(),
         // A task that panicked or was cancelled has said nothing about the repository: `internal` logs the
         // operation and the error once, and the client gets the one fixed sentence.
@@ -162,18 +230,28 @@ pub(crate) async fn respond(
     }
 }
 
-/// Read the body as JSON, refuse an unknown field, then the field this build cannot honour.
+/// One accepted body: the merge's request and the one field the merge itself is not told about.
+///
+/// `delete_session` is the **route's** fact rather than the merge's, which is why it does not travel in
+/// [`Request`]: `merge::merge` moves a ref and knows nothing about sessions, and a field it was handed and
+/// never read would be a lie in its type (ADR-0065 D5).
+#[derive(Debug)]
+struct Parsed {
+    request: Request,
+    delete_session: bool,
+}
+
+/// Read the body as JSON, refuse an unknown field, then the fields this route cannot honour.
 ///
 /// The order is the request's: shape, then unknown key, then `strategy`, then `message`'s type, then
-/// `delete_session`. A strategy this build does not know comes before a delete it does not have because the
-/// strategy is the field that would change the *repository*; a request that mentions both has already asked for
-/// something that cannot run.
+/// `delete_session`'s type. A strategy this build does not know comes before the rest because the strategy is
+/// the field that would change the *repository*.
 ///
 /// `target` is not validated here beyond being a string: `merge.targets` is where a branch name is checked
 /// (`config`'s `is_ref_name`), so membership in that list *is* the validation, and a second alphabet would be a
 /// second answer to "what is a branch name". `message` has no length of its own — the create's `prompt` has
 /// none either — and it reaches git as one argument of a `std::process::Command`, never through a shell.
-fn parse_body(bytes: &[u8]) -> Result<Request, ApiError> {
+fn parse_body(bytes: &[u8]) -> Result<Parsed, ApiError> {
     let value: Value = serde_json::from_slice(bytes).map_err(|_| ApiError::bad_merge_body())?;
     let object = value.as_object().ok_or_else(ApiError::bad_merge_body)?;
     if object.keys().any(|field| !FIELDS.contains(&field.as_str())) {
@@ -200,16 +278,20 @@ fn parse_body(bytes: &[u8]) -> Result<Request, ApiError> {
         Some(Value::String(_)) => return Err(ApiError::bad_merge_body()),
         Some(_) => return Err(ApiError::bad_merge_body()),
     };
-    match object.get("delete_session") {
-        None | Some(Value::Null) => {}
-        Some(Value::Bool(false)) => {}
-        Some(Value::Bool(true)) => return Err(ApiError::unsupported(UNBUILT_DELETE)),
+    // Rule 5's field: `true` runs the delete flow after a landing, `false`/absent/null is a merge only, and
+    // anything that is not a boolean is the body's *shape* — `bad_body`, like a numeric `strategy`.
+    let delete_session = match object.get("delete_session") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(asked)) => *asked,
         Some(_) => return Err(ApiError::bad_merge_body()),
-    }
-    Ok(Request {
-        target,
-        strategy,
-        message,
+    };
+    Ok(Parsed {
+        request: Request {
+            target,
+            strategy,
+            message,
+        },
+        delete_session,
     })
 }
 
@@ -266,13 +348,13 @@ mod tests {
         BAD_BODY, BAD_STRATEGY as BAD_STRATEGY_CODE, BAD_TARGET, UNKNOWN_FIELD,
     };
 
-    fn parse(text: &str) -> Result<Request, ApiError> {
+    fn parse(text: &str) -> Result<Parsed, ApiError> {
         parse_body(text.as_bytes())
     }
 
     /// The target of a body that is accepted, for the tests that are about `target` and not about the rest.
     fn target(text: &str) -> Option<String> {
-        parse(text).ok().map(|request| request.target)
+        parse(text).ok().map(|parsed| parsed.request.target)
     }
 
     #[test]
@@ -297,7 +379,10 @@ mod tests {
         // is the contract's request. What `parse_body` must get right is the **word to variant** mapping — the
         // rest of the story is what `merge::merge` does with it.
         assert_eq!(
-            parse(r#"{"target":"main"}"#).expect("a body").strategy,
+            parse(r#"{"target":"main"}"#)
+                .expect("a body")
+                .request
+                .strategy,
             Strategy::FastForward
         );
         for (text, expected) in [
@@ -308,7 +393,11 @@ mod tests {
             (r#"{"target":"main","strategy":"merge"}"#, Strategy::Merge),
             (r#"{"target":"main","strategy":"squash"}"#, Strategy::Squash),
         ] {
-            assert_eq!(parse(text).expect(text).strategy, expected, "{text}");
+            assert_eq!(
+                parse(text).expect(text).request.strategy,
+                expected,
+                "{text}"
+            );
         }
     }
 
@@ -320,6 +409,7 @@ mod tests {
         assert_eq!(
             parse(r#"{"target":"main","strategy":"merge","message":"a story"}"#)
                 .expect("a body")
+                .request
                 .message
                 .as_deref(),
             Some("a story")
@@ -327,6 +417,7 @@ mod tests {
         assert_eq!(
             parse(r#"{"target":"main","strategy":"squash","message":null}"#)
                 .expect("a body")
+                .request
                 .message,
             None
         );
@@ -341,13 +432,26 @@ mod tests {
     }
 
     #[test]
-    fn the_one_field_this_build_cannot_honour_is_refused_before_anything_runs() {
-        // The decision ADR-0063 records, reduced to its last standing arm: refusing loudly beats ignoring a
-        // request that says "delete the session". It is `422 unsupported` with its own sentence, and not
-        // `bad_body`, because the body is the contract's.
-        let error = parse(r#"{"target":"main","delete_session":true}"#).expect_err("a delete");
-        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(error.body.code, "unsupported");
+    fn delete_session_is_read_as_the_route_s_own_field_and_a_non_bool_is_bad_body() {
+        // Rule 5's field, and the last one this build used to refuse: it is a `bool` outside `Request`, because
+        // the merge moves a ref and knows nothing about sessions (ADR-0065 D5). `false` and a missing field are
+        // the same request; a string is the body's *shape* and not a value outside a vocabulary, so `bad_body`.
+        for (text, expected) in [
+            (r#"{"target":"main"}"#, false),
+            (r#"{"target":"main","delete_session":false}"#, false),
+            (r#"{"target":"main","delete_session":null}"#, false),
+            (r#"{"target":"main","delete_session":true}"#, true),
+        ] {
+            assert_eq!(parse(text).expect(text).delete_session, expected, "{text}");
+        }
+        for text in [
+            r#"{"target":"main","delete_session":"yes"}"#,
+            r#"{"target":"main","delete_session":1}"#,
+        ] {
+            let error = parse(text).expect_err(text);
+            assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY, "{text}");
+            assert_eq!(error.body.code, BAD_BODY, "{text}");
+        }
     }
 
     #[test]
@@ -391,7 +495,8 @@ mod tests {
         // contract's optional fields are optional. A null for `delete_session` is likewise "no".
         let request =
             parse(r#"{"target":"main","strategy":null,"delete_session":null}"#).expect("a body");
-        assert_eq!(request.target, "main");
-        assert_eq!(request.strategy, Strategy::FastForward);
+        assert_eq!(request.request.target, "main");
+        assert_eq!(request.request.strategy, Strategy::FastForward);
+        assert!(!request.delete_session);
     }
 }

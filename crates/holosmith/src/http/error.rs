@@ -120,13 +120,12 @@ pub const BAD_TARGET: &str = "bad_target";
 /// malformed request, not a state and not a machine problem.
 pub const BAD_STRATEGY: &str = "bad_strategy";
 
-/// A merge asked for a field this build does not implement yet (HS-054).
+/// A merge was refused because the session has uncommitted work (HS-056, spec item 12's rule 1).
 ///
-/// One field is left: `delete_session` (HS-056). It is in the contract and not in this build, so a request that
-/// names it is refused with a sentence saying so rather than accepted and quietly not done — the one thing an
-/// endpoint must never do to a request that says "delete the session". HS-055 built the two `strategy` words
-/// that used to share this code, and their arm and sentence went with it.
-pub const UNSUPPORTED: &str = "unsupported";
+/// The spec's own word, and **not** `target_dirty`: that one is the operator's checkout, whose next step is to
+/// commit or stash there, while this is the session's own worktree, whose next step is to ask the agent to
+/// commit. Both are `409` and both say nothing was merged, which is what the client shows.
+pub const DIRTY_WORKTREE: &str = "dirty_worktree";
 
 /// A merge could not fast-forward because the target has moved (HS-054, spec item 12's rule 2).
 ///
@@ -427,13 +426,12 @@ impl ApiError {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, BAD_STRATEGY, message)
     }
 
-    /// What a merge naming a field this build does not implement answers (HS-054).
+    /// What a merge whose session has uncommitted work answers (HS-056, rule 1).
     ///
-    /// The **message** is the caller's for [`Self::not_in_state`]'s reason, and it still is even though only one
-    /// field is left: `delete_session`'s next step is a second request, and the sentence has to say that nothing
-    /// was merged either or a client would think its work had landed.
-    pub fn unsupported(message: &'static str) -> Self {
-        Self::new(StatusCode::UNPROCESSABLE_ENTITY, UNSUPPORTED, message)
+    /// `409` and, like [`Self::target_dirty`], a sentence that says nothing was merged: the client's next step is
+    /// a prompt to the agent (HS-058's affordance), so the refusal must not read like a machine failure.
+    pub fn dirty_worktree(message: &'static str) -> Self {
+        Self::new(StatusCode::CONFLICT, DIRTY_WORKTREE, message)
     }
 
     /// What a merge that cannot fast-forward answers (HS-054, rule 2).

@@ -237,11 +237,11 @@ worktree, and walks **one** repository through both of rule 4's update paths: `g
 `main` unchecked-out, so a `POST …/merge {"target":"main"}` moves the ref and *not* the checkout (the agent's
 file never appears there), and `git checkout main` then makes the same merge move the working tree as well —
 with `git rev-parse` run by the case on both sides. In between it asserts the refused requests
-(`bad_target` twice, `bad_strategy` for `strategy:"rebase"`, `unsupported` for `delete_session:true`) as status
-**and** code with the target unmoved across them, and it ends with `target_dirty` (an untracked file the branch
-adds, untouched by the refusal and merged once it is out of the way) and `not_fast_forward` (a commit on the
-target, with both refs and the checkout unchanged); the default `strategy` is asserted to be `ff-only` on a body
-that names none. No daemon is used — "all git work for review and merge runs on the host", which is the story's
+(`bad_target` twice and `bad_strategy` for `strategy:"rebase"`) as status **and** code with the target unmoved
+across them, and it ends with `target_dirty` (an untracked file the branch adds, untouched by the refusal and
+merged once it is out of the way) and `not_fast_forward` (a commit on the target, with both refs and the checkout
+unchanged); the default `strategy` is asserted to be `ff-only` on a body that names none. (`unsupported` for
+`delete_session:true` was one of these until HS-056 built it.) No daemon is used — "all git work for review and merge runs on the host", which is the story's
 own sentence; see ADR-0063), the two landing strategies (`case_merge_strategies`, which boots its own Docker run
 over its own projects root **and its own data root** — `<data>/merge` is what it measures — re-makes the worktree
 with the step's own command, and walks one session's history through all three: a **`squash`** of three commits
@@ -250,8 +250,18 @@ is `200` with `strategy:"squash"`, `git rev-list --count <base>..main` is `1`, `
 more commits then a **`merge`** is `200` with `rev-list --parents -n 1 main` exactly `<new> <squashed> <tip>`; a
 planted conflict on `f.txt` is `409 conflict` with `"conflicts":["f.txt"]`, the target unmoved, the checkout's
 `status --porcelain` empty and the operator's file untouched; and `<data>/merge` is `0` entries at the end,
-measured with `find … -mindepth 1 | wc -l` after asserting the directory exists; see ADR-0064), and the hardened
-mounts
+measured with `find … -mindepth 1 | wc -l` after asserting the directory exists; see ADR-0064), the merge's guards
+(`case_merge_guards`, which boots its own Docker run over its own projects root **and its own data root** — the
+refused merges are measured by `<data>/merge` not existing at all — and measures six arms of spec item 12's rule 1
+and rule 5: an **untracked** file in the session's worktree is `409 dirty_worktree` with the target, the branch and
+the file untouched and no `<data>/merge`, while the same file **ignored** by a committed `.gitignore` merges; a row
+whose `status` column is set to `running` (with `sqlite3`, because a gate may not run a turn against the `_ping`
+shim) is `409 session_running`, and the same row back in the `error` its failed provision left merges — the negative
+half an `!= Idle` guard would refuse; `{"strategy":"squash","delete_session":true}` answers `200` with rule 6's
+three keys and the branch's **tree**, then the row is gone, the worktree is gone and `git branch --list 'agent/*'`
+is empty; a second session's squash **without** the flag keeps the branch, a `delete_session` whose snapshot cannot
+be taken (its `sessions` directory made read-only) still answers `200` and leaves the row, and the ordinary `DELETE`
+afterwards answers `kept.branch` naming the branch it keeps; see ADR-0065), and the hardened mounts
 (`case_container_mounts`,
 which needs no server at all: it builds a real repository and worktree under `target/`, runs one real
 container with the spec's four mounts and `--cap-drop ALL`, and asserts the three writes fail on the host

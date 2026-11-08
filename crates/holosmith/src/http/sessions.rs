@@ -944,6 +944,17 @@ fn live_at_cap(state: &AppState) -> Result<bool, ApiError> {
 
 /// Answer `DELETE /api/sessions/{id}`: 202 and the row, now `deleting`, or ADR-0008's envelope.
 ///
+/// The query's `force` and [`deletion`], which is the flow itself: the merge's `delete_session` runs the same
+/// half with `force` false and the fact that it has just landed the branch (HS-056, spec item 12's rule 5).
+pub async fn delete(state: &AppState, id: &str, query: RawQuery) -> Response {
+    // Read before anything else, so a typo in the query cannot delete work it was not forced to.
+    let force = force_requested(query.0.as_deref());
+    match deletion(state, id, force, None).await {
+        Ok(answer) => (StatusCode::ACCEPTED, Json(answer)).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
 /// The delete flow's request half, in four steps, and the order is the decision (ADR-0023):
 ///
 /// 1. **The row** (`not_found`), and whether it is already `deleting`. A repeat request for a row in
@@ -964,25 +975,29 @@ fn live_at_cap(state: &AppState) -> Result<bool, ApiError> {
 ///
 /// A `deleting` row is the one state no other request in this file accepts, so a delete cannot race
 /// a prompt, an abort or a resume: those are refused with `409 session_deleting`.
-pub async fn delete(state: &AppState, id: &str, query: RawQuery) -> Response {
-    // Read before anything else, so a typo in the query cannot delete work it was not forced to.
-    let force = force_requested(query.0.as_deref());
+///
+/// **`landed`** is the one thing that changes the keep-rule's answer, and only for the merge's rule 5
+/// (HS-056): when it is `Some(target)`, the request that is asking is the one that has just put this
+/// session's work in `target`, so the branch is **not** kept — see [`retained_for`]. Every other caller
+/// passes `None`.
+pub(crate) async fn deletion(
+    state: &AppState,
+    id: &str,
+    force: bool,
+    landed: Option<&str>,
+) -> Result<DeleteAnswer, ApiError> {
     let mut current = match one_locked(state, id) {
         Ok(Some(session)) => session,
-        Ok(None) => return ApiError::unknown_session().into_response(),
-        Err(error) => return error.into_response(),
+        Ok(None) => return Err(ApiError::unknown_session()),
+        Err(error) => return Err(error),
     };
     if current.status == Status::Deleting {
         // Already asked, not yet removed: answer the row the client can see and give the removal
         // another run. No snapshot and no second event — the point of no return was crossed by the
         // request that moved the row here.
-        let retained = retained_for(state, &current).await;
+        let retained = retained_for(state, &current, landed).await;
         state.deleter().spawn(current.clone(), retained.clone());
-        return (
-            StatusCode::ACCEPTED,
-            Json(DeleteAnswer::of(current, &retained)),
-        )
-            .into_response();
+        return Ok(DeleteAnswer::of(current, &retained));
     }
     if current.status == Status::Running {
         let ending = state.ladder().end_turn(&current, deleter::DELETED).await;
@@ -1000,7 +1015,7 @@ pub async fn delete(state: &AppState, id: &str, query: RawQuery) -> Response {
     }
     if let Err(error) = state.backend.snapshot(&current).await {
         if !force {
-            return ApiError::unsaved_work().into_response();
+            return Err(ApiError::unsaved_work());
         }
         // Forced: the operator asked for the work to go anyway. The failure is still the log's,
         // because a snapshot that fails every time is a broken image rather than a decision.
@@ -1013,10 +1028,8 @@ pub async fn delete(state: &AppState, id: &str, query: RawQuery) -> Response {
     }
     // HS-043: *after* the snapshot, because the snapshot is what writes or removes the ref this answers
     // about, and *before* the transition, so a refusal there leaves the row where the operator found it.
-    let retained = retained_for(state, &current).await;
-    if let Err(error) = apply_trigger(state, id, Trigger::Delete, NOT_DELETABLE, "delete").await {
-        return error.into_response();
-    }
+    let retained = retained_for(state, &current, landed).await;
+    apply_trigger(state, id, Trigger::Delete, NOT_DELETABLE, "delete").await?;
     // `deleting` now, and the removal runs off this task: the answer is the row as the table has
     // just written it, and the refetch only makes sure nothing about it is stale.
     let mut deleting = current.clone();
@@ -1026,11 +1039,7 @@ pub async fn delete(state: &AppState, id: &str, query: RawQuery) -> Response {
         deleting = row;
     }
     state.deleter().spawn(deleting.clone(), retained.clone());
-    (
-        StatusCode::ACCEPTED,
-        Json(DeleteAnswer::of(deleting, &retained)),
-    )
-        .into_response()
+    Ok(DeleteAnswer::of(deleting, &retained))
 }
 
 /// The keep-rule's answer for `session`, or [`Retained::Unknown`] with the reason in the log (HS-043).
@@ -1039,8 +1048,16 @@ pub async fn delete(state: &AppState, id: &str, query: RawQuery) -> Response {
 /// block a delete: the request's job is to remove a session, and the operator's next `DELETE` is the retry.
 /// It must not turn into a claim either, so the teardown keeps the branch (`Retained::Unknown`'s own rule)
 /// and the 202 carries `kept: null`.
-async fn retained_for(state: &AppState, session: &Session) -> Retained {
-    match state
+///
+/// **`landed` overrides the branch half and only the branch half** (HS-056, spec item 12's rule 5). When the
+/// merge that is asking has just put this session's work in `target`, the branch is not kept, because this
+/// request *is* the answer to "is it merged?": for `ff-only` and `merge` by ancestry, and for a `squash` by
+/// tree — its commit's tree is the branch's, so the work is in the target even though the commits are not
+/// (ADR-0065 D6 records why the ordinary keep-rule would keep it and why this request must not). The **wip**
+/// half is still the repository's, asked here and after the snapshot for the reason the whole function is
+/// called here; and an `Unknown` answer stays `Unknown`, because "cannot tell" must never mean "delete".
+async fn retained_for(state: &AppState, session: &Session, landed: Option<&str>) -> Retained {
+    let retained = match state
         .backend
         .retained(session, &state.config.merge.targets)
         .await
@@ -1055,6 +1072,18 @@ async fn retained_for(state: &AppState, session: &Session) -> Retained {
             );
             Retained::Unknown
         }
+    };
+    match (retained, landed) {
+        (Retained::Known { wip, .. }, Some(target)) => {
+            tracing::info!(
+                target: "holosmith::http::sessions",
+                session = %session.id,
+                merged_into = target,
+                "the branch is not kept: the request that is deleting the session is the one that merged it"
+            );
+            Retained::Known { branch: None, wip }
+        }
+        (retained, _) => retained,
     }
 }
 
@@ -1065,7 +1094,7 @@ async fn retained_for(state: &AppState, session: &Session) -> Retained {
 /// also why `kept` is a field of this struct rather than of `Session` — no other route has anything to say
 /// about it.
 #[derive(Debug, Serialize)]
-struct DeleteAnswer {
+pub(crate) struct DeleteAnswer {
     #[serde(flatten)]
     session: Session,
     /// `null` when the keep-rule had no answer (an unreadable repository, a row with no base commit): a claim
@@ -1089,7 +1118,7 @@ impl DeleteAnswer {
 /// command built once (`Retained::recovery`), so the page shows what the answer carried instead of
 /// spelling it a second time.
 #[derive(Debug, Serialize)]
-struct Kept {
+pub(crate) struct Kept {
     branch: Option<String>,
     wip: Option<String>,
     recovery: Option<String>,

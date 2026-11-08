@@ -250,8 +250,10 @@ removes the row and its event log. A snapshot that fails answers 409 **unsaved w
 request carried `?force=true`, and the session is left where the delete found it — except that a
 running turn has already been ended by then, which is the order the spec asks for and the price of
 learning that the work could not be saved. Repeating the request while the row exists re-runs the
-removal; once the row is gone the answer is 404. Its machine names are `Deleter` (and the task's
-`Deleter::remove`), `Trigger::Delete` and the state `deleting`.
+removal; once the row is gone the answer is 404. Its **request half** is one function
+(`sessions::deletion`), because a `DELETE` is no longer its only entry: a **Merge** with `delete_session`
+runs the same half with `force` false and the target it just landed in, so the branch is not **Kept work**.
+Its machine names are `Deleter` (and the task's `Deleter::remove`), `Trigger::Delete` and the state `deleting`.
 _Avoid_: Purge, drop, cleanup, destruction
 
 **Kept work**:
@@ -259,8 +261,11 @@ What a **Delete flow** leaves in the project repository, because deleting a sess
 its work: branch `agent/<id>` when its **Ahead** is greater than zero and it is not merged into a **Target
 branch**, and `refs/holosmith/wip/<id>` when its tree differs from the branch's. The delete's answer names
 them (`kept`), and recovery is `git branch rescue refs/holosmith/wip/<id>`. A repository that cannot answer
-keeps the branch — "cannot tell" is never "delete" — and claims nothing. Its machine names are
-`worktree::Retained` and `Worktree::retained`.
+keeps the branch — "cannot tell" is never "delete" — and claims nothing. One request overrides the branch
+half and only that half: a **Merge** whose `delete_session` is true passes the target it landed in, because
+that request *is* the answer to "is it merged?" — for a `squash` by tree, where the keep-rule alone would keep
+the branch. Its machine names are `worktree::Retained`, `Worktree::retained` and `sessions::deletion`'s
+`landed`.
 _Avoid_: Preserved work, residue, leftovers, orphan branch
 
 **Unsaved work**:
@@ -543,7 +548,7 @@ Whether a session branch would merge into its target without a conflict, asked w
 _Avoid_: Conflicts, rebase, apply
 
 **Merge**:
-Landing a session branch on a **Target branch**, on the server, never in a container. `POST /api/sessions/{id}/merge` with `{target, strategy?, message?, delete_session?}`; the answer is `{merged_commit, target, strategy}` and nothing about the session row changes, because a merge is neither a transition nor an event. Item 12's five rules; this build has rules 2, 3 and 4 — all three **Merge strategy** values — and refuses rule 5's `delete_session` (`422 unsupported`) rather than ignoring it. Rule 1's two guards and the 60-second timeout are HS-056's. Its machine names are `merge::merge`, `merge::Merged` and `http::merge`.
+Landing a session branch on a **Target branch**, on the server, never in a container. `POST /api/sessions/{id}/merge` with `{target, strategy?, message?, delete_session?}`; the answer is `{merged_commit, target, strategy}` and nothing about the session row changes, because a merge is neither a transition nor an event — except that `delete_session: true` runs the **Delete flow** afterwards, and then the row is `deleting` before the answer. Item 12's rules; all six are built. **Rule 1**'s two guards are the route's and refuse a `running` turn (`409 session_running`) and the session's own uncommitted work (`409 dirty_worktree`, the definition of work the **Changes view** calls `dirty`); every other row state is merged. **Rule 5** is the Delete flow entered with the fact that this request landed the branch. **Rule 6**'s 60-second timeout belongs to the hub's forwarding client (HS-069), which this build does not have. Its machine names are `merge::merge`, `merge::Merged`, `http::merge` and `sessions::deletion`.
 _Avoid_: Apply, integrate, land
 
 **Merge strategy**:
