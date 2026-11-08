@@ -1,4 +1,4 @@
-# RESUME — one issue per session (next: PER-99 / HS-067, installable app and notification permission)
+# RESUME — one issue per session (next: PER-100 / HS-068, host registry, `POST /api/hosts` and the hosts seed)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating procedure and
 still governs the cycle; this file is the state of the world, and it adds one rule of its own:
@@ -45,207 +45,214 @@ sandbox-specific incantation (§2).
 
 ---
 
-## 1. The issue this session picks up: `PER-99` — HS-067, installable app and notification permission
+## 1. The issue this session picks up: `PER-100` — HS-068, host registry, `POST /api/hosts` and the hosts seed
 
-**State when this file was written** (`origin/master` at `5eef3bd`, the tree clean apart from the operator's own
-`orchestrate.sh`/`log.txt`): **67 of 80 stories Done, 13 Backlog**, all in project `Holosmith`. `PER-99` is
-`Backlog`, it is the next in `HS-###` order, and its one blocker (HS-066, the Web Push backend) is `Done` — so it
-is eligible. Check Linear's `Blocked by` list rather than this sentence if HS-067 turns out to be a stop.
+**State when this file was written** (`origin/master` at `7acedbb`, the tree clean apart from the operator's own
+`orchestrate.sh`/`log.txt`): **68 of 80 stories Done, 12 Backlog**, all in project `Holosmith`. `PER-100` is
+`Backlog`, it is the next in `HS-###` order, and its one blocker (HS-046, the phase-1 verification run) is `Done` — so
+it is eligible. Check Linear's `Blocked by` list rather than this sentence if HS-068 turns out to be a stop.
 
-The last shipped story was `PER-98` (HS-066, the Web Push backend, **ADR-0071**) — the wire and the rows, and
-deliberately **not** the browser half. Its §1 material is now Linear, `docs/review/PER-98.md`, `git log` and §9.
+The last shipped story was `PER-99` (HS-067, the installable app, **ADR-0072**) — the manifest, the icons, the
+`/settings` screen and the service worker built from `web/src/sw.ts`, plus the application server key as
+`/api/health`'s **sixth** key. Its §1 material is now Linear, `docs/review/PER-99.md`, `git log` and §9.
 
-### 1.1 The slice (verbatim from `docs/stories/phase-2-deployable-mvp.md`; Linear's body is the same text)
+**This is the first phase-3 story**: it is where the build stops being one machine. Everything before it assumes
+"the machine" is the one you are talking to.
 
-> ### HS-067 — Installable app and notification permission
+### 1.1 The slice (verbatim from `docs/stories/phase-3-multiple-machines.md`; Linear's body is the same text)
+
+> ### HS-068 — Host registry, `POST /api/hosts` and the hosts seed
 >
-> **As** the operator **I want** the app on my home screen with notifications enabled **so that** iOS actually
-> delivers them.
+> **As** the operator **I want** to register machines once and have them agree **so that** my phone sees every
+> machine without manual sync.
 >
-> - **Size:** S · **Blocked by:** HS-066 · **Spec:** item 11
-> - **Demo:** add to home screen on iOS, grant notifications, receive a push.
+> - **Size:** M · **Blocked by:** HS-046 · **Spec:** item 4 (host registration), item 16 (hosts seed)
+> - **Demo:** add a host over the API; copy one `hosts.toml` to every machine and restart; every machine lists the
+>   same hosts.
 >
 > **Acceptance**
-> - [ ] The web app is a valid installable PWA (manifest, icons, service worker) served from the control origin.
-> - [ ] A settings screen subscribes and unsubscribes, and shows the current state per machine.
-> - [ ] The iOS "must be installed to home screen" requirement is stated in the UI, not just in docs.
-> - [ ] Tapping a notification opens the named session.
-> - [ ] Each machine's keys are independent, so the app subscribes per machine it uses.
+> - [ ] `POST /api/hosts` validates: URL is http(s), host is a MagicDNS name or an address in 100.64.0.0/10, port is
+>   in the allowed range, redirects are not followed.
+> - [ ] The `/api/health` reply must carry the Holosmith name and version fields; anything else is rejected with a
+>   distinct code.
+> - [ ] `hosts.toml` is read at startup and merged into the hosts table, the file winning on conflicts.
+> - [ ] A host that fails health is marked unreachable with the last error, not removed.
+> - [ ] Removing a host is refused while it has live sessions, unless forced.
 
-`docs/stories/**` is **not** edited (§7). An **S** story — and its difficulty is that everything it needs is in
-`web/`, which the previous stories have deliberately not touched for anything but screens, and that **no gate may
-need a browser**.
+`docs/stories/**` is **not** edited (§7). An **M** story. Its difficulty is not size: it is the **first outbound
+request this build makes to another machine**, and the crate has no HTTP client and no TLS client — see 1.3 and 1.5.
 
 ### 1.2 The spec it closes
 
-Item 11, in full:
+Item 4's host-registration paragraph, in full (`HolosmithSpec.md` §A, under the control listener's checks):
 
-> - Web Push with VAPID keys generated at first start. Requires HTTPS (`tailscale serve`) and, on iOS, the app
->   installed to the home screen.
-> - Endpoints: `POST /api/push/subscribe` and `DELETE /api/push/subscribe`, table `push_subscriptions`.
-> - Triggers: a turn finished after running longer than 20 seconds; `session.status` error; a budget or timeout
->   stop. Not sent while an SSE stream for that session is open.
-> - Payload carries only `{host, session_id, kind}`, never content. Tapping opens that session.
-> - Each machine has its own keys, so the web app subscribes on every machine it uses (through the hub). The
->   server, not the containers, needs outbound access to the push services.
+> Host registration (`POST /api/hosts`): the URL must be http(s), the host a MagicDNS name or an address in
+> 100.64.0.0/10, the port in an allowed range; redirects are not followed; and the `/api/health` reply must carry the
+> Holosmith name and version fields.
 
-The neighbours: **HS-066/ADR-0071** built the wire — the two routes, the table, the four `kind` words
-(`turn_finished`, `error`, `turn_timeout`, `budget_exceeded`), the 20-second threshold, the stream rule, and the
-payload `{"host":"local","session_id":"<id>","kind":"…"}` sealed to each subscription's `p256dh`/`auth`. **HS-069**
-(the hub's forwarding) and **HS-074** (cross-machine notifications) come later, so "per machine" in this story is
-"per origin the app is served from".
+Item 16's registry divergence (`HolosmithSpec.md` §Risks, "the risk table"):
+
+> Registry divergence: each machine reads an optional `hosts.toml` at startup and merges it into its hosts table (the
+> file wins on conflicts), so one file copied to every machine keeps the lists aligned. Later option: discover
+> machines by Tailscale tag instead of a registry.
+
+The neighbours, and what each owns instead of this story: **HS-069** (`PER-101`) forwards a request and a preview to a
+host; **HS-070** (`PER-102`) is `allowed_hubs` and the Tailscale LocalAPI whois (V11); **HS-071** (`PER-103`) is the
+Computers screen; **HS-072** (`PER-104`) is `hub deploy` and `hub host`. So this story is **the table, the two routes,
+the seed file and the health probe** — nothing forwards anything yet, and nothing authenticates a peer yet.
 
 ### 1.3 What already exists (read this before planning)
 
-- **The backend is complete and its API is small.** `POST /api/push/subscribe` takes exactly
-  `{endpoint, p256dh, auth}` and answers `204` (a re-subscribe of one endpoint is an upsert);
-  `DELETE /api/push/subscribe?endpoint=<percent-encoded>` answers `204`, or `404` for a row that is not stored, or
-  `422 bad_query`. Refusals: `422 bad_endpoint` (not `https://`, no host, whitespace, a fragment) and
-  `422 bad_subscription_key` (`p256dh` not a base64url 65-byte point starting `0x04`; `auth` not 16 bytes). Both
-  are mutating, so every guard applies: `Content-Type` **and** `X-Holosmith-Client`, plus the Host allow-list and
-  the owner.
-- **The subtype the browser must send is the browser's own.** `pushManager.subscribe()` returns
-  `{endpoint, keys: {p256dh, auth}}` — the app has to flatten `keys` into the two top-level fields, and the
-  endpoint is a capability URL that must never be logged or shown.
-- **The application server key is NOT reachable from the browser today.** `pushManager.subscribe({applicationServerKey})`
-  needs this machine's VAPID **public** key, and nothing serves it: the pair is in `<data>/secrets/vapid.toml`
-  (written once by `server deploy`, `vapid::{store, parse}`), the JWT carries `k=<public key>` on every send, and the
-  server reads it per send (`push::Pusher::pair`). **This is the story's one new server-side decision** — see 1.5.
-- **The web app is Vite 7 + TypeScript with no framework.** `web/src/main.ts` is the DOM, `web/src/transcript.ts`
-  is every rule (a pure function with a node test in `web/test/transcript.test.ts`, run by `npm test`), `web/
-  index.html` is a static shell, and `scripts/build-web.sh` runs `npm ci`, `npm test` and `vite build` into
-  `web/dist`, which `src/web.rs` embeds with `include_dir!` (a placeholder when the build is absent). The shell is
-  served for every non-`/api` path, so `/sessions/<id>` survives a reload (ADR-0007's fallback).
-- **The page already reads machine facts from `/api/health`.** `main.ts` sets
-  `session-list.dataset.stoppedTtlDays` from the health answer (HS-064's countdown), and `Health` is
-  `{name, version, role, uptime_s, preview_origin}` (`src/http/health.rs`) — so an additive key there is the
-  established shape for "a machine fact the page needs".
-- **`web/` has no manifest, no icons, no service worker and no `pushManager` call.** `web/index.html` links
-  `favicon.svg` and `/src/style.css`; there is no `public/` directory and no binary asset in the repository.
-- **A demo may use a browser; a gate may not** (ADR-0046's rule, and `docs/build.md`'s). Playwright's Chromium and
-  the `playwright` npm package are on this machine (§2), with two quirks recorded there: ESM ignores `NODE_PATH`
-  (import `…/playwright/index.mjs`), and Chromium needs `--no-sandbox`. `networkidle` never settles on the sessions
-  list, because a live row holds an `EventSource` open.
-- **The gate's model for a screen is `case_changes_screen`**: it asserts the screen is `web/dist/index.html` byte
-  for byte, that the **served bundle** carries the sheet's element ids and the three ADR sentences, and that the
-  answer carries the keys the sheet reads. That is how a story that changes the page proves it without a browser.
+- **`config.hosts_seed` and `config.allowed_hubs` are config keys already** (`src/config/schema.rs`'s
+  `set_hosts_seed`/`set_allowed_hubs`, in `Config`: `hosts_seed: Option<PathBuf>`, `allowed_hubs: Vec<String>`), and
+  **nothing reads either one**. `config show` prints them, `tests/golden/config-default.toml` pins them, and
+  `KNOWN_KEYS.len()` is 32. So "the seed path" is a value, not a mechanism — the reader is this story's.
+- **`http::health::ask(listen) -> Answer` is the build's only client, and it is hand-written and plain-TCP**
+  (`src/http/health.rs`): one `GET /api/health`, `Connection: close`, a 3-second bound, an 8 KiB cap, and a status
+  check — no TLS, no redirect handling (there are none to handle: it speaks to loopback), and `Answer` is
+  **three** fields (`version`, `role`, `uptime_s`), **not `name`**. Item 4 wants the *name* too, so either `Answer`
+  grows a field (its two callers are `holosmith status` and `doctor`'s port check, and `tests/doctor.rs`'s payload
+  fixtures move with it) or the probe parses its own body. `serde_json` is already a dependency.
+- **There is no HTTP client crate and no TLS client.** `Cargo.lock` is registry-only and `check-static.sh` fails on a
+  `git+` source; ADR-0001's "no dependency unless it earns it" is the house rule. What the build *does* have is
+  **`openssl s_client`** as a child process: ADR-0071's sender is one bounded `s_client -quiet` whose streams go to
+  files so the wait is a deadline rather than a read that blocks on EOF, `SSL_CERT_FILE` is the trust-store seam
+  (`-CAfile` deliberately not passed), and `-verify_hostname` matches a `DNS:` SAN rather than a CN. Every one of
+  those is in `docs/notes.md`'s "the push, the pair and the payload (HS-066)" landing section, and they are the
+  landmines this story will hit next.
+- **A mutating route is one `Routes::post` call and every guard applies** (`Content-Type` **and**
+  `X-Holosmith-Client`, the `Host` allow-list, `Origin`, the owner), the manifest records `Mutating`, and the two
+  push routes are the shape to copy — they are the only existing routes whose subject is not a session.
+- **The database is schema 5 with five migrations** (`0001`–`0005`), `SCHEMA_VERSION` is a literal that must be bumped
+  in the same commit, and the **expand/contract rule has two halves**: `schema::contract_violations` refuses an
+  unmarked destructive statement (`cargo test`), and `tests/schema_previous.rs` (the gate's `migrations` phase)
+  refuses a drop or a rename against `docs/schema/previous.sql`. A new table is a plain additive migration — the
+  fifth was `0005_push_subscriptions.sql` and is the shape to copy — and refreshing the snapshot is a **release
+  step** (`scripts/schema-snapshot.sh`), not a story's.
+- **The repository owns every SQL statement** (a walk over `src/**` enforces it), `sessions::repository` is the model,
+  and a *reader* goes through `select()`/`one()` rather than a hand-copied column list.
+- **`vapid::parse` is the precedent for a tiny strict TOML reader**: the file is ours, its shape is a few strings,
+  and **any** line that is not blank, a comment or one of the known assignments is a refusal. `hosts.toml` is a list
+  of hosts, so it will need a real (if small) parser — decide whether it is hand-written in the same spirit or
+  whether `toml` earns its place (it is **not** a dependency today; check `Cargo.toml` before promising anything).
+- **The 100.64.0.0/10 test already exists, in a different module with a different job**: `egress::address_problem`
+  refuses that range (and loopback, link-local, RFC 1918, the IPv6 spellings, `embedded_v4`). Reusing it wholesale
+  would import the egress proxy's policy (which exists to *refuse* the tailnet) into a rule that exists to *require*
+  it — so this story needs its own small predicate, and ADR-0056/`docs/notes.md` will want the reason written down.
+- **`doctor` already asks Tailscale** (`status --json`'s `BackendState`, three arms: pass/fail/unknown) and this
+  machine answers `unknown` — no `tailscaled`. So a probe of a MagicDNS name **cannot resolve on this machine**, and
+  a case that needs one must stand something in (as `deploy_machine_shims`' `tailscale` and `health_responder` in
+  `scripts/verify.sh` already do — those two stand-ins are the model).
+- **`server deploy` is what writes a machine's files** (`src/deploy.rs`, seven steps, `--root` for a tree under a
+  prefix) and `ADMIN_DIR`/`/etc/holosmith/config.toml` are its machine-wide paths. If `hosts.toml` is a *deployed*
+  file rather than a hand-copied one, step 2 is where it would land; the acceptance says "copy one `hosts.toml` to
+  every machine", which is the hand-copied reading and the cheaper one.
 
 ### 1.4 What does not exist
 
-No `manifest.webmanifest`, no icon of any size, no service worker (`sw.js`), no `pushManager.subscribe`, no
-`pushsubscriptionchange` handling, no notification click handler, no settings screen, no JS route, no `/api/push/key`
-or health key carrying the application-server key, no `display-mode` detection for the iOS sentence, and no browser
-test of any kind (`web/test/` is node-only).
+No `hosts` table, no migration `0006`, no `/api/hosts` (neither `POST` nor `GET`), no `hosts.toml` reader, no probe
+that leaves the machine, no column or table holding "unreachable" or "last error", no `hosts` entry on the manifest,
+no `case_*` for any of it, and no vocabulary in `GLOSSARY.md` beyond the two seed entries (**Host registry**, **Hosts
+seed**) that phase 0 wrote when it sliced this.
 
-### 1.5 What the plan must decide (and the shape this handoff recommends)
+### 1.5 What the plan must decide (and the arms each one has)
 
-1. **How the browser learns the application-server key.** Three arms:
-   - **an additive key on `GET /api/health`** (`application_server_key`, base64url or `null` when the machine has no
-     pair), read once by `main.ts` — the recommendation: one request, the machine's facts, and `preview_origin` +
-     `stopped_ttl_days` are the precedent for "a config-derived value the page needs". The cost is that
-     `tests/http_contract.rs`/`health` pin the payload's keys and `docs/` names "the machine's five keys";
-   - a new `GET /api/push/key` — a route the spec's API table does not list, which is the argument against it;
-   - served into the shell by `web.rs` — the shell is an embedded static file, so this means templating, which
-     nothing in the build does today.
-   Whichever arm, **the key is public** (it is the `k=` of every JWT, by design) and the **private** half never
-   leaves `<data>/secrets`.
-2. **What the service worker is, and where it lives.** It must be a real asset at `/sw.js` (scope `/`), not a
-   fallback-served shell; a Vite `public/` file lands at the root of `web/dist`, so that is the cheap shape. It
-   handles three events: `push` (decrypt is the browser's job — the payload arrives as JSON in `event.data`),
-   `notificationclick` (open or focus `/sessions/<session_id>`) and `pushsubscriptionchange` (re-subscribe and
-   `POST` the new endpoint; a browser rotates a subscription without asking).
-3. **What the notification says, given the payload is content-free.** `{host, session_id, kind}` is all there is:
-   the SW maps `kind` to one sentence per word (`turn_finished` → "a turn finished", `error` → "a session failed",
-   `turn_timeout` → "a turn timed out", `budget_exceeded` → "a turn ran out of its budget"), with the host as the
-   title and the session id in the tag so two sessions do not replace each other. **One rule**: a `kind` this build
-   does not know is a notification that still opens the session, never an exception in a worker (a throw in a `push`
-   handler ends that subscription's delivery silently).
-4. **The settings screen.** The app has two screens today (`/` and `/sessions/<id>`), both read from the address by
-   `main.ts` and not by a router. A third screen is a third path in that dispatch, or a section on the Sessions
-   screen (ADR-0067's precedent: the Changes sheet is a *section* with one toggle, and the spec says the Session
-   screen "gets" it). Item 11 says the app "subscribes on every machine it uses", and today there is one origin, so
-   the screen's "state per machine" is one row — with the sentence that each machine has its own keys, so the
-   operator understands why a second machine is a second subscription.
-5. **The iOS sentence, in the UI.** `navigator.standalone` (iOS Safari) and `matchMedia("(display-mode: standalone)")`
-   are the two detections; the sentence belongs next to the Subscribe control, not only in docs. It is a **pure
-   function with a node test** (the rule "which sentence does this browser earn"), like every other sentence the
-   page draws.
-6. **The manifest and the icons.** `display: "standalone"`, `start_url: "/"`, `scope: "/"`, `name`/`short_name`,
-   `theme_color`/`background_color`, and at least 192/512 `any` plus a maskable — **in a repository with no binary
-   assets**. Three arms: hand-written SVG only (Chrome accepts an SVG icon; **iOS does not**, and it needs an
-   `apple-touch-icon` PNG to look right on the home screen), a checked-in PNG pair (a small binary in `git`, which
-   is what every PWA does), or a generated-at-build PNG (needs a rasteriser, which is not on the machine). The
-   recommendation is **SVG + a checked-in 180/192/512 PNG pair made once with a tool outside the repo**, and the
-   ADR says where they came from.
-7. **No gate may need a browser, so what does `case_*` assert?** The served shell carries
-   `<link rel="manifest">`; `/manifest.webmanifest` is a real asset with the fields its own test parses (a JSON
-   parse of the *served bytes*); `/sw.js` is served with a JavaScript content type and is not the shell; the
-   **bundle** carries the settings screen's element ids and the four `kind` sentences and the iOS sentence; and
-   `/api/health` (or whichever arm) carries the application-server key **byte-identical to `vapid.toml`'s
-   `public_key`** — that last one is the measurement that the browser could actually subscribe.
-8. **The tap.** `notificationclick` → `clients.matchAll` then `clients.openWindow("/sessions/<id>")`, and the
-   session id comes from the payload, so **the SW must not trust it either**: an id that is not 16 hex characters is
-   an id that opens `/` rather than a path built from arbitrary text.
+1. **How the health probe reaches a tailnet host.** (a) `openssl s_client -quiet` with the request on stdin —
+   ADR-0071's sender, one bounded child, streams to files, `-verify_hostname` against the URL's host, **no
+   `-CAfile`** so `SSL_CERT_FILE` works; costs a child process per probe and inherits every `s_client` landmine.
+   (b) `http://` only — the request is an `http(s)` URL, and refusing `https` would fail the acceptance's first
+   bullet. (c) a TLS/HTTP-client crate — against ADR-0001 and `check-static.sh`'s registry-only rule unless it
+   clearly earns it. **The recommendation is (a)**, because the machinery, its deadline and its tests already exist
+   and the push's sender is the proof; a second HTTP path would be a second spelling.
+2. **Whether `name` joins `http::health::Answer`.** It has two callers (`status`, `doctor`'s ports check) and one
+   documented reason for three fields ("a client struct that carried them would be a second reading of a shape it
+   does not use"). A probe that is *about* the name is a third caller that does use it — so either `Answer` grows a
+   fourth field (and the three payload fixtures in `tests/deploy.rs`, `tests/doctor.rs`, `src/doctor.rs` move) or
+   the probe answers its own type. Whichever, "anything else is rejected with a distinct code" means the refusal
+   needs a **code of its own** in `http/error.rs`'s table, not `bad_body`.
+3. **The `hosts` table's shape**, and whether a machine's own row is in it. Columns the acceptance implies: a name,
+   a base URL, the port, and something for "unreachable" + "the last error". A `hosts` row that names *itself*
+   ("Local" is GLOSSARY's word for the host name a server uses for its own sessions) is what HS-069's forwarding
+   will need to avoid forwarding to itself — decide it here, with a test, rather than discovering it there.
+4. **What "refused while it has live sessions" means for a hub.** This machine owns no sessions; a *server* does.
+   Either the refusal is about rows this machine's own project has (nonsense for a hub), or it is about a host
+   naming **this** machine (read the sessions table), or it is recorded as needing HS-069's forwarding to answer
+   honestly. Pick one, say why in the ADR, and make the test's shape match — a `409` with a sentence is the house
+   form, and `?force=true` already has a spelling in `spawned`'s delete route.
+5. **What "the allowed port range" is.** No key exists. Arms: a constant (a module's `PORTS`, `1024..=65535`, like
+   `publish::PROTECTED`), or a config key (a 33rd key means the golden file, `KNOWN_KEYS.len()`, and item 16's prose
+   moving). The spec never names one, so a constant with a sentence is the cheaper and the honest one — item 11's
+   `LONG_TURN` is the precedent for "a policy the spec names and no key spells".
+6. **`hosts.toml`'s reader and merge rule.** "The file wins on conflicts" needs a conflict *definition*: the same
+   name with a different URL, the same URL under another name, or both. And a merge that runs at startup only means
+   a row the operator added over the API and the file does not mention **survives** — decide, and test both arms.
+   The file's shape is this story's to invent (`[[hosts]]`-style tables, or `name = "url"` pairs); `vapid::parse`'s
+   strictness is the taste to copy.
+7. **What "unreachable with the last error" stores.** A `status` column plus `last_error` on the row (one row, two
+   facts), or a second table (a probe history). One row is the honest reading of "marked unreachable … not
+   removed", and the harness's `tests/doctor.rs` proves the pattern of a stand-in answering a health payload.
+8. **How the case stands a tailnet in.** `doctor`'s and `deploy`'s stand-ins (`deploy_machine_shims`' `tailscale`,
+   `health_responder`) are two existing `python3` shims; a probe that shells out to `openssl` can be stood in front
+   of by a private CA + `SSL_CERT_FILE` exactly as `case_push` does (that case owns that trick and its landmines),
+   or the case can use an `http://127.0.0.1:<port>` URL — **the 100.64/10 rule is about the host, and 127.0.0.1 is
+   not in it**, so a loopback URL may be refused before the probe is ever reached. Decide which arm the case can
+   actually take before writing the probe.
 
 ### 1.6 The questions the plan must answer (before code)
 
-1. Is the application-server key an additive `/api/health` key, and what is it called? (Whichever, `Health`'s
-   tests and the docs' "the machine's keys" sentence move with it.)
-2. Is the settings screen a third path or a section of the Sessions screen — and what is its toggle called?
-3. Icons: checked-in PNGs or SVG only, and what does iOS's home screen get?
-4. Does the SW live in `web/public/sw.js` (a plain file, no bundling) or as a built module (needing a second Rollup
-   entry, which Vite does not do without config)? The recommendation is the plain file: a worker needs no imports
-   and a bundled chunk would be a build shape this project does not otherwise have.
-5. What does `pushsubscriptionchange` do when the server refuses the new endpoint — retry, or drop it and let the
-   settings screen say "not subscribed"?
-6. What does the settings screen show when `Notification.permission === "denied"`, and when the browser has no
-   `PushManager` at all (a desktop Safari, an insecure origin)?
-7. Does the page's own `npm test` reach every new sentence, and what is the one browser-shaped thing left to the
-   demo (the tap, which needs a real `clients.openWindow`)?
+1. Does the probe use `s_client`, and does `Answer` grow `name`?
+2. What is the `hosts` table — migration `0006`, which columns, and does this machine's own row appear in it?
+3. What is the delete's "live sessions" refusal about, and is it `?force=true`'s shape?
+4. The port range: a constant, and which one?
+5. `hosts.toml`'s shape, and what "the file wins" means when the names and the URLs disagree.
+6. Does a probe failure write `unreachable` **and** keep the row (the acceptance's word "not removed") — and does
+   the API's answer carry the status and the error, or only the row?
+7. Which `case_*` proves the probe without a tailnet, and what does it leave behind (a config's seed path is a
+   machine fact, so the case needs its own data root and its own config, like `case_pwa`).
 
 ### 1.7 Acceptance, restated as checks
 
-- *Valid installable PWA served from the control origin* — `case_pwa` (or the name the plan picks): the shell is
-  `web/dist/index.html` byte for byte and links the manifest; `/manifest.webmanifest` parses as JSON with
-  `display: standalone`, a `start_url` and both icon sizes; `/sw.js` is served as JavaScript and is not the shell;
-  and the icons are the bytes in `web/dist` (a `cmp` against the file).
-- *A settings screen that subscribes, unsubscribes and shows the state* — the **bundle** carries the screen's ids
-  (`case_*`'s shape, no browser), and the node tests cover the pure rules: which control is offered per
-  `permission`/`PushManager`/installed state, and what the "subscribed/unsubscribed/denied" sentence is.
-- *The iOS requirement is in the UI* — one pure function decides the sentence, one node test per arm, and the
-  bundle contains it.
-- *Tapping opens the session* — the SW's `notificationclick` handler is one function whose "which path does this id
-  open" half is a pure function with a node test (16 hex characters → `/sessions/<id>`, anything else → `/`), and
-  the **demo** drives the real `clients.openWindow` in Chromium.
-- *Keys are independent per machine* — the sentence, and the fact that the subscribe request sends *this* origin's
-  key: a `tests/push.rs`-style assertion that the key the health answer carries is the one `vapid.toml` holds, so
-  two machines cannot agree by accident.
-- Plus the usual gates, `docs/build.md`'s case list, `GLOSSARY.md`, and an ADR (**0072** is next).
+- *`POST /api/hosts` validates URL, host, port, redirects* — a `case_hosts`-shaped case over a stand-in: `422` with
+  its own code for a non-http(s) scheme, a host outside 100.64/10 and not a MagicDNS name, a port out of range, and a
+  `3xx` answer from the stand-in (the probe must **not** follow it — the stand-in records that it was asked once).
+- *the health reply must carry the name and version* — the stand-in answers `{"name":"holosmith",…}` and the case
+  asserts a `201`; a second arm answers a payload with no name and asserts the distinct code; a third answers
+  something that is not JSON at all and asserts the same code or its sibling.
+- *`hosts.toml` is read at startup and merged, the file winning* — two boots on one data root: the first writes a
+  row over the API, the second has a seed file that disagrees, and the row after the second boot is the file's — plus
+  the row the file does not mention still there.
+- *a host that fails health is marked unreachable with the last error, not removed* — the stand-in refuses on the
+  second boot; the row is still there, `unreachable`, and the answer carries the sentence.
+- *removing a host is refused while it has live sessions, unless forced* — the row that names this machine with a
+  live session (or whatever 1.5(4) decides), `409` then `?force=true`.
+- Plus the usual gates, a migration (`0006`, `SCHEMA_VERSION` 6), `docs/build.md`'s case paragraph, `GLOSSARY.md`,
+  and an ADR (**0073** is next).
 
 ### 1.8 Non-goals
 
-The hub forwarding a push or a subscription (HS-074); per-session subscriptions; a notification's content; a
-service worker that caches the app (a cache is a second source of truth for a page that must show live state);
-push delivery itself (HS-066's, done); any change to the wire format.
+Forwarding a request or a preview (HS-069); `allowed_hubs`/whois (HS-070, V11); the Computers screen (HS-071);
+`hub deploy`/`hub host` (HS-072); discovery by Tailscale tag (item 16's "later option"); a probe *schedule* (the
+acceptance says a host that fails health is marked, which is a probe at registration and at startup — a periodic
+sweeper is not asked for).
 
 ### 1.9 The demo
 
-There is no phone here, so the honest demo is Chromium: serve the artifact, load the sessions screen, show the
-manifest link and the served manifest, subscribe through `pushManager` against a **stand-in push service** (the
-node TLS receiver `case_push` and `/tmp/holosmith/demo/push-receiver.mjs` already are one — it decrypts and can be
-asked to POST a payload back to the page), fire a `push` event at the service worker with
-`{host:"local",session_id:"<id>",kind:"turn_finished"}`, and show the notification appearing and the click handler
-opening `/sessions/<id>`. Say plainly what was **not** measured: a real push service, a real iOS device, the
-home-screen install itself, and iOS's own delivery rules.
+No tailnet here (`tailscale status` answers `failed to connect to local tailscaled`, and `doctor` renders that as
+`unknown`). The honest demo: boot the artifact on its own data root with a `python3` stand-in answering a health
+payload on loopback (which is **not** a `100.64/10` host — so the demo must use the seed file *or* a stand-in that
+the acceptance's own predicate accepts; state which and why), `POST /api/hosts`, show the row and the code the
+payload earned, write a `hosts.toml`, restart, show the merged list, then a standing-down stand-in and the same host
+`unreachable` with its sentence. Say plainly what was **not** measured: a real MagicDNS name, a real tailnet host, and
+Tailscale's own certificate.
 
 ### 1.10 What the next agent needs back
 
 When you write the state back (§5, step 10): §1 becomes the **next** issue — by `PROMPT.md`'s ranking that is
-`PER-100` (HS-068, the host registry and `POST /api/hosts`, the first phase-3 story) *if* HS-067 ships and HS-068's
-blockers are `Done`, and `PER-99` again if it does not; check Linear's `Blocked by` list. Take the same shape.
-Refresh the counts, the ADR number you took (**0072** is next), the last gate run's own numbers (and `web/`'s test
-count), and replace §9's row with this story's. Anything you learned that is **not** state and **not** an ADR goes
-into `docs/notes.md` under a new `### Landmines: …` heading, never into §1. Then kill what you started (§5, step 11).
+`PER-101` (HS-069, hub request and preview forwarding) *if* HS-068 ships and HS-069's blockers are `Done`, and
+`PER-100` again if it does not; check Linear's `Blocked by` list. Take the same shape. Refresh the counts, the ADR
+number you took (**0073** is next), the last gate run's own numbers (and `web/`'s test count), and replace §9's row
+with this story's. Anything you learned that is **not** state and **not** an ADR goes into `docs/notes.md` under a
+new `### Landmines: …` heading, never into §1. Then kill what you started (§5, step 11).
 
 ## 2. Environment (already repaired — do not redo)
 
@@ -478,6 +485,7 @@ Some cases bring their own boot, and they are the ones a new story is most likel
 | `case_key_proxy_request` | a stand-in `openssl` on `PATH`; asserts the bytes the key proxy really sends |
 | `case_server_deploy`, `case_server_service` | two halves each: an **offline** one (`python3` for a `_ping` socket / a `/api/health` responder) and an **online** one (the daemon and an image) that drives a `--root` deploy with `deploy_machine_shims`' `tailscale` on `PATH`; they remove `hs_egress`/`hs_key` before and after, and `case_server_images` must have run first |
 | `case_preview` | **its own boot** (stub backend, own data root, `preview_listen = "127.0.0.1:0"`) and, for its second half, the daemon and `agent_image` — it makes its own `s_<id>` container on an `--internal` `agents_<id>` and prints one `SKIP` line without them; the first half always runs and puts the shared boot back |
+| `case_pwa` | **nothing** — no daemon, no image, no `openssl`, no `node`, no `python3`: its own stub boot and its own data root with a hand-written VAPID pair written into `secrets/`, then the health answer's sixth key compared with that string and `null` after the file goes. It has **no `SKIP` arm at all**, on purpose. It restores the shared boot (`stop_serve`/`start_serve`), so it sits right after `case_push` |
 | `case_push` | **no daemon, no image**: its own stub boot, a `node:https` receiver on `127.0.0.1:0` (so `node`), a CA and a `localhost` certificate plus the machine's VAPID pair (so `openssl`), and `python3` for the SEC1 walk and `app.db`. It exports `SSL_CERT_FILE` around `start_serve` and unsets it at once — the sender passes no `-CAfile` on purpose (ADR-0071), which is what lets a private CA stand in front of it. It holds an SSE stream open **across** a turn (a raw `/dev/tcp` descriptor, because `fetch_stream` closes its socket and releases the guard) |
 
 A story is not done until the gates are green on a clean tree, and then you run the story's own demo
@@ -906,7 +914,8 @@ crates/holosmith/
                             triggers through the real Pusher with a recorder, the stream-open pair on the real
                             registry, the disposition table, the payload's three keys, a token signed by a real
                             `ecparam` pair and verified by a second `openssl` child, and the containers holding
-                            nothing),
+                            nothing; since HS-067 the health answer's sixth key is the pair's `public_key` byte
+                            for byte, and `null` once the file is gone),
                             disk (HS-062: a `df` stand-in the test rewrites — the boot's check and a real
                             `POST /api/sessions` read one number, 507 on create and on resume with the code and
                             both numbers, no row and no worktree, a replay answering its own row, a create at
@@ -956,7 +965,7 @@ crates/holosmith/
                             default `pi-agent:local`, and skips otherwise**), support/mod.rs
                             (the shared harness, which also has `repository`/`git`/`head`/
                             `branch_exists`/`worktrees` helpers for a real git repo in a `TempDir`)
-web/                        Vite 7 + TypeScript, two screens (`/` and `/sessions/<id>`)
+web/                        Vite 7 + TypeScript, three screens (`/`, `/sessions/<id>`, `/settings`)
                             package-lock COMMITTED; main.ts is the DOM, transcript.ts the renderer's
                             rules (frame parsing, block model, affordances, `stoppedNotice` /
                             `stoppedDetail`, `budgetNotice`, `createFailure`, `parseTruncated`,
@@ -971,7 +980,11 @@ web/                        Vite 7 + TypeScript, two screens (`/` and `/sessions
                             `STRATEGIES`, `COMMIT_PROMPT`/`RESOLVE_PROMPT`;
                             `main.ts`'s `deleteSection` is the delete affordance, `changesSection` the
                             sheet, and `StreamTarget` carries one `showState` that patches badge, preview,
-                            composer, the delete affordance and the sheet)
+                            composer, the delete affordance and the sheet; since HS-067 `push.ts` (the
+                            notification sentences, the id→path rule, `pushState`'s five arms, the two install
+                            sentences, `navLink`, `subscriptionBody`) with `test/push.test.ts`, and
+                            `sw.ts` — the service worker, bundled by `vite.sw.config.ts` into `web/dist/sw.js` —
+                            plus `public/manifest.webmanifest` and four PNGs under `public/icons/`)
 web/test/transcript.test.ts 72 tests over synthetic frames, node's own runner (`npm test`)
 scripts/build-web.sh        npm ci + npm test + npm run build, asserts web/dist/index.html
 scripts/build.sh            web first, HOLOSMITH_REQUIRE_WEB=1, both musl targets → dist/<triple>/,
@@ -984,11 +997,11 @@ scripts/verify.sh           the one-command gate (see §3), including the two st
                             --json` from the pairs it was asked for) and `health_responder` (a `python3` that
                             answers `/api/health` for a whole case)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0070          read the recent ones before planning anything (0070 is the stopped-session expiry;
-                            0071 is the next free number)
+docs/adr/0001…0072          read the recent ones before planning anything (0072 is the installable app;
+                            0073 is the next free number)
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-97, PER-107  each a verbatim review + a `## Resolution` table
-                            (`PER-96` is this build's newest; `PER-95` the one before it)
+docs/review/PER-33…PER-99, PER-107  each a verbatim review + a `## Resolution` table
+                            (`PER-99` is this build's newest; `PER-98` the one before it)
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -1258,7 +1271,7 @@ cd /home/adamolsson/projects/holosmith
 git status --short                                  # clean apart from log.txt/orchestrate.sh
 . ~/.pi/toolchains/env.sh                           # ALWAYS before cargo/rustc
 python3 /tmp/lin.py issues | grep -v ' Done ' | head # recreate /tmp/lin.py first (§2)
-python3 /tmp/lin.py issue PER-99                    # scoped, Backlog, the issue §1 names
+python3 /tmp/lin.py issue PER-100                   # scoped, Backlog, the issue §1 names
 docker version                                      # the daemon must answer, or a Docker check cannot be measured
 docker image inspect pi-agent:local                 # the image the Docker stories run
 docker network ls | grep -w egress                  # the proxy test's premise (§2); `grep -x` never matches
@@ -1268,7 +1281,7 @@ scripts/verify.sh                                   # baseline green, ~13–14 m
 
 If the baseline is red before you touch anything, that is the first thing you fix — and say so in Linear.
 
-Then start §5 on **§1's issue** (`PER-99`, HS-067) and stop after step 11.
+Then start §5 on **§1's issue** (`PER-100`, HS-068) and stop after step 11.
 
 Before you begin, check that the last session left nothing behind — `subagent({action:"list"})` should show
 no run in progress, `docker ps` none of its containers, and `git status --short` should look like the line
@@ -1287,28 +1300,28 @@ from those three; do not carry old sessions' ledgers in this file.
 If you stop before the issue ships, say so explicitly, name the next action, and leave the tree clean and the
 gates green — **a half-finished story is worse than an honest stop**.
 
-**The last shipped story** (`PER-98`, HS-066, ADR-0071; commits `09f862f`, `848eb65`, `5eef3bd`): item 11's wire
-— the two routes, the `push_subscriptions` table, the trigger table over the event stream, the stream rule, and a
-VAPID-signed RFC 8291 message with no HTTP client and no crypto dependency to build it from. Three decisions are
-worth carrying: **the child-process arms were measured and both fail**, which is what made the encryption in-crate
-rather than a fifth subprocess (`openssl enc` refuses AEAD; `openssl kdf` answers the wrong bytes for RFC 5869's own
-first case), and each primitive is pinned by the document that defines it plus RFC 8291 §5's example byte for byte,
-with the RFC's five intermediates as separate witnesses — the stake being bounded by the payload's own rule, that it
-carries `{host, session_id, kind}` and never content; **the trigger reads the event stream**, because a poll of a
-column cannot tell one long turn from two short ones and `session.status` is pinned at four keys, so a turn's
-duration is `turn.start`'s arrival — and a lagged broadcast forgets every recorded start rather than measuring one
-whose ending it missed; and **the server holds the outbound access**, one bounded `openssl s_client` per message
-whose streams go to files so the wait is a deadline (`try_wait` against 60 s) rather than a read that blocks on EOF —
-which the review found, because an endpoint that accepts a connection and goes quiet would otherwise have silenced
-every later notification for the process's life. `401`/`403` keeps a row: a rotated pair must not silently
-unsubscribe a phone. The gate: **88 cases, 1565 assertions**, no `SKIP`; `cargo test` **1160** (58 binaries); `web/`
-**79**. The review's eleven findings had no blocker beyond that deadline: the rest were accuracy (ADR decisions
-cited by the plan's numbers rather than the ADR's, a doc block that had drifted onto the wrong function, a dead
-accessor whose doc claimed a caller) and four tests that claimed more than they measured — RFC 4231's long-key
-vector instead of "did not panic", the shipped `Payload` instead of a copy, the `openssl` finding on both arms and
-its `--quick` absence, and an endpoint with `&` in it deleted through its escape. Its full record is Linear,
-`docs/review/PER-98.md` and `git log`; do not carry it forward.
+**The last shipped story** (`PER-99`, HS-067, ADR-0072; commits `163afc1`, `b7b095b`, `811749a`, `13ef8ae`,
+`7d23561`, `7acedbb`): item 11's browser half — a manifest, four checked-in PNG icons, a `/settings` screen, and a
+service worker built from `web/src/sw.ts` by a second library-mode Vite config, plus the machine's application server
+key as `/api/health`'s **sixth** key. Three decisions are worth carrying: **the key rides on the payload the page
+already fetches**, read from `vapid.toml` at the moment of asking rather than cached, so a `server deploy` between
+two page loads is answered truthfully by the second (a `null` is the other arm, and the reader answers both) — the
+rejected arms being a route item 11's table does not list and a templated shell, which `case_app_shell` compares
+byte for byte; **the worker is built, not copied**, so the four `kind` sentences and the sixteen-hex id rule have one
+home in `web/src/push.ts` that `npm test` can see, and it deliberately has **no `fetch` handler** — which looked
+expensive until Chromium's own `Page.getInstallabilityErrors` answered `[in-incognito]` and nothing about the app,
+so a cache-less worker still installs; and **a `kind` this build does not know is a notification, never an
+exception**, because a throw in a `push` handler ends that subscription's delivery silently. The gate: **89 cases,
+1643 assertions**, no `SKIP` (`case_pwa` has none at all, by design — its pair is hand-written, so it needs no
+`openssl`, `node` or `python3`); `cargo test` **1167** (59 binaries); `web/` **104**. The review's nine findings had
+no blocker: the one real dead end was `pushState` testing `denied` before `subscribed` (a browser that blocked
+notifications could not then remove its own subscription — a row the machine would keep delivering to), and the
+first was a disagreement settled by measurement. The demo found two things the gate could not: the worker was never
+*registered*, and Playwright's headless **shell** reports `Notification.permission` as `denied` for every origin —
+the full `channel: "chromium"` is the only build that can be granted it. Its full record is Linear,
+`docs/review/PER-99.md` and `git log`; do not carry it forward.
 
 **Two things this build does not do, recorded rather than discovered:** a resumed session's pi has **no memory** of
 earlier turns (`--no-session`; the transcript is Holosmith's log), and a notification's payload is deliberately
-content-free, so the browser half (HS-067) has four `kind` words and a session id and nothing else to draw with.
+content-free, so the browser has four `kind` words and a session id and nothing else to draw with — the four
+sentences are `web/src/push.ts`'s, and the worker never asks for more.
