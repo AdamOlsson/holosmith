@@ -5355,10 +5355,15 @@ case_changes_screen() {
   # (ADR-0066 D11), the commit prompt (ADR-0065 D4) and the Resolve prompt (ADR-0064 D10's affordance, spelled by
   # HS-058). A `for` over needles rather than fourteen `grep`s, and every needle counted so a needle that found
   # nothing cannot pass as one that did.
+  # Each needle names the assignment's own quotes (`id="changes-conflict"`), not the bare word: `changes-conflict`
+  # is a prefix of `changes-conflict-text` and `changes-publish` one of `changes-publish-start`, so a bare word
+  # would still pass with the container element deleted — the opposite of what this loop is for.
   for needle in \
-    'changes-toggle' 'changes-body' 'changes-counts' 'changes-warning' 'changes-files' 'changes-diff' \
-    'changes-target' 'changes-strategy' 'changes-merge' 'changes-reason' 'changes-commit' 'changes-conflict' \
-    'changes-resolve' 'changes-publish' 'changes-confirm' \
+    'id="changes-toggle"' 'id="changes-body"' 'id="changes-counts"' 'id="changes-warning"' 'id="changes-files"' \
+    'id="changes-diff"' 'id="changes-target"' 'id="changes-strategy"' 'id="changes-merge"' 'id="changes-reason"' \
+    'id="changes-commit"' 'id="changes-conflict"' 'id="changes-resolve"' 'id="changes-publish"' \
+    'id="changes-confirm"' 'id="changes-conflict-text"' 'id="changes-conflict-paths"' 'id="changes-remote"' \
+    'id="changes-question"' \
     'this branch changes CI configuration, so publishing it may run workflows in the remote repository' \
     "Commit every change in the working tree, with a message that describes it, and tell me the commit's hash." \
     "Merge the target branch into your branch and resolve the conflicts, then commit the result and tell me the commit's hash."; do

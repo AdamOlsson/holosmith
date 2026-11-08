@@ -2177,8 +2177,11 @@ it rather than adding a caveat beside it.
 - **`element.id = "changes-merge"` survives minification; a *class* name is not what to grep for.** Vite's minifier
   keeps string literals, so ids and sentences are stable needles — but a needle chosen from a `className` would also
   match the CSS bundle's own text, which is a different file, and one needle (`changes`) matches half the others.
-  Pick needles that are unique in the bundle, and count them (the case increments an assertion per needle that found
-  something, so a needle that found nothing cannot read as one that did).
+  The first draft of `case_changes_screen` grepped bare ids, so `changes-conflict` still matched
+  `changes-conflict-text` and `changes-publish` matched `changes-publish-start`: deleting the container element
+  would have left the case green. The needles are now `id="changes-conflict"` — the assignment's own quotes, which
+  no sibling's id contains — and the case counts every needle that found something, so a needle that found nothing
+  cannot read as one that did.
 - **The client's disabled reason must be the route's order, and "only `running` refuses" is a client fact too.**
   `mergeBlocked` asks the row, then the target, then `dirty` — `http::merge`'s order — and it must not be written as
   `state !== "idle"`, which is the same shape HS-056's review caught server-side: four of the five states still

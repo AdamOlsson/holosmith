@@ -28,9 +28,10 @@ one `showState` — see D6.
 Every sentence and every branch the sheet shows is a pure function in `web/src/transcript.ts` with a test in
 `web/test/transcript.test.ts`: `fileLine`/`countsText`/`statusWord`, `countsLine`, `ciWarning`, `mergeBlocked`,
 `targetOptions`/`preselectedTarget`, `publishVisible`/`publishQuestion`, `conflictLine`, `mergedNotice`/
-`publishedNotice`, `diffPath`, `sheetFailure`, and the four constants (`CI_WARNING`, `COMMIT_PROMPT`,
-`RESOLVE_PROMPT`, `COMMIT_LABEL`/`RESOLVE_LABEL`). `main.ts` keeps only the DOM: which node, which event, which
-request.
+`publishedNotice`, `diffPath`, `sheetFailure`, and the constants (`CI_WARNING`, `COMMIT_PROMPT`/`COMMIT_ASKED`,
+`RESOLVE_PROMPT`/`RESOLVE_ASKED`, `NOTHING_COMMITTED`, `COMMIT_LABEL`/`RESOLVE_LABEL`). `main.ts` keeps only the DOM:
+which node, which event, which request — and the labels of its own buttons, which is `deleteSection`'s existing
+split (an affordance's button text is inline there too).
 
 That split is ADR-0018's rule applied to the first story since phase 1 that adds a screen's worth of copy, and it
 has a second consequence the gate depends on: **no `case_*` may need a browser** (RESUME §3), so `npm test` is the
@@ -123,9 +124,14 @@ agent** button sits under both — there is one conflict, so there is one afford
 
 The button posts `RESOLVE_PROMPT` (D8). The 202 makes the row `running`, so the merge is disabled by D3's first
 reason until the turn ends, and **that** is item 12's "then retry": the same Merge button, one turn later. Nothing
-invents a second "Retry" button that would have to re-read the branch to know whether it is worth pressing. A
-successful read that says `mergeable: true` clears the refusal's words, because the agent's commit is what a fixed
-conflict looks like.
+invents a second "Retry" button that would have to re-read the branch to know whether it is worth pressing.
+
+**The precedence is "a new answer wins", and only `load()` acts on it.** A read that says `mergeable: true` clears
+the refusal's words, because the agent's commit is what a fixed conflict looks like — but `render()` never clears
+them, and that is a correction the first draft needed: a render also happens on a state frame and in a request's
+`finally`, where the answer on screen is the one from *before* the tap, so a stale `mergeable: true` would wipe the
+paths the `409` had just named, leaving the operator with the fixed envelope sentence, no paths and no affordance
+(the review's P1).
 
 ## D8 — the two prompts, one reused and one written here
 
@@ -139,8 +145,11 @@ to merge the target into its branch and fix the conflicts, then retry"), so this
 Both carry "tell me the commit's hash" for the same reason: the retry is a merge of *commits*, and the operator has
 nothing to merge until the agent has made one.
 
-The CI warning (ADR-0066 D11's sentence) is one constant shown in two places — beside the counts, and inside the
-confirm step before the second tap — because the confirm is the moment the operator agrees to it.
+The CI warning (ADR-0066 D11's sentence) is one constant shown in two places — beside the counts, and **inside the
+confirm paragraph**, which is `publishQuestion(branch, remote, touchesCi)`'s third argument — because the confirm is
+the moment the operator agrees to it, and a warning above the list is not inside the step that asks. (The first
+draft had it only beside the counts while this ADR claimed otherwise; the review found the gap and the fix made the
+claim testable.)
 
 ## D9 — the sheet's only state is what the server said last
 
@@ -168,7 +177,9 @@ three things:
    — a `dist/` built before the sheet fails here;
 2. the **served** bundle (the `<script src>` in that page, fetched from the running server and compared with
    `web/dist/assets/…` byte for byte) contains the sheet's fifteen element ids and the three ADR sentences
-   verbatim — a tree that dropped a rule, or an artifact built before it, is red;
+   verbatim — a tree that dropped a rule, or an artifact built before it, is red. Each id is grepped **with its
+   assignment's quotes** (`id="changes-conflict"`), because the bare word is a prefix of a sibling's id and would
+   still match with the container element deleted;
 3. the changes answer carries `"choices":{"targets":["main","master"],"remotes":["origin"]}` — both existing
    configured targets in the config's order, and the configured remote though no repository here has one — with
    `touches_ci: true` from a `Jenkinsfile`.

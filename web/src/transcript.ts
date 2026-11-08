@@ -765,17 +765,14 @@ export type Published = { remote: string; branch: string; commit: string };
 // `422 bad_strategy`.
 export const STRATEGIES = ["ff-only", "merge", "squash"] as const;
 
-// git's status letter as a word. The letters are `diff --name-status`'s with `--no-renames`, which is one letter
-// per path: A, M, D, T (a mode change). The rest are here because a future flag could emit them and a word is
-// better than a blank; an unknown letter is shown as itself rather than dropped.
+// git's status letter as a word. The four letters are exactly the ones `diff --name-status` emits with
+// `--no-renames --no-ext-diff` (A, M, D and T, a mode change), and the map stops there on purpose: a letter this
+// build cannot produce has no word here, and `statusWord` shows it as itself rather than inventing one.
 const STATUS_WORDS: Readonly<Record<string, string>> = {
   A: "added",
   M: "modified",
   D: "deleted",
   T: "type changed",
-  R: "renamed",
-  C: "copied",
-  U: "unmerged",
 };
 
 export function statusWord(status: string): string {
@@ -870,10 +867,14 @@ export function publishVisible(changes: Changes | null): boolean {
   return changes !== null && changes.choices.remotes.length > 0;
 }
 
-// The publish's confirm step, before the operator taps the second button: what is pushed where, and the two
-// facts the request cannot change (the machine's own credentials do the push; nothing is forced).
-export function publishQuestion(branch: string, remote: string): string {
-  return `publish ${branch} to ${remote}? this machine's own git credentials do the push, and nothing is forced`;
+// The publish's confirm step, before the operator taps the second button: what is pushed where, the two facts the
+// request cannot change (the machine's own credentials do the push; nothing is forced), and — when the diff touches
+// CI — the warning, **inside the confirm paragraph**, because item 12 says "the UI shows a warning before confirm"
+// and a warning above the list is not inside the step that asks.
+export function publishQuestion(branch: string, remote: string, touchesCi: boolean): string {
+  const ask = `publish ${branch} to ${remote}? this machine's own git credentials do the push, and nothing is forced`;
+  const warning = ciWarning(touchesCi);
+  return warning === null ? ask : `${ask} ${warning}`;
 }
 
 // The prompt the "ask the agent to commit" shortcut sends. ADR-0065 D4 named this sentence when it built the
@@ -891,6 +892,18 @@ export const RESOLVE_LABEL = "Resolve with agent";
 
 export const RESOLVE_PROMPT =
   "Merge the target branch into your branch and resolve the conflicts, then commit the result and tell me the commit's hash.";
+
+// What the sheet says after one of those prompts was accepted (a 202, so the row is `running`). Two sentences rather
+// than one, because the operator has to know which thing the agent was asked to do — and each names the retry,
+// which is the Merge button the row's own state now disables.
+export const COMMIT_ASKED = "asked the agent to commit; merge again when the turn ends";
+
+export const RESOLVE_ASKED = "asked the agent to resolve the conflicts; merge again when the turn ends";
+
+// What an empty `files[]` says. It is a real state (a session that has committed nothing yet) and not an error, so
+// it is a sentence and not a blank list: a branch with no commits merges as a no-op, and the line says why there is
+// nothing to browse.
+export const NOTHING_COMMITTED = "nothing committed on this branch yet";
 
 // The paths a `409 conflict` named, in the envelope's additive `conflicts` key. `null` is "this refusal carried no
 // list" (every other error), and an empty list is git's own "no path it could name" — two different sentences.

@@ -41,10 +41,13 @@ import {
   type Frame,
   type SessionState,
   CI_WARNING,
+  COMMIT_ASKED,
   COMMIT_LABEL,
   COMMIT_PROMPT,
   DIRTY_MERGE_REASON,
   NO_TARGET_REASON,
+  NOTHING_COMMITTED,
+  RESOLVE_ASKED,
   RESOLVE_LABEL,
   RESOLVE_PROMPT,
   RUNNING_MERGE_REASON,
@@ -62,6 +65,7 @@ import {
   publishedNotice,
   sheetFailure,
   statusWord,
+  STRATEGIES as STRATEGY_WORDS,
   targetOptions,
   type Changes,
 } from "../src/transcript.ts";
@@ -1090,8 +1094,10 @@ test("a binary file's counts are an em dash and never a zero", () => {
 });
 
 test("a status letter with no word is shown rather than dropped", () => {
-  // An unknown letter is still git saying *something* changed; a blank cell would read as "unchanged".
+  // Four letters are the ones this build's flags emit; every other letter is git saying *something* changed, and a
+  // blank cell would read as "unchanged". The map is not padded with words for letters nothing can produce.
   assert.equal(statusWord("X"), "X");
+  assert.equal(statusWord("R"), "R");
   assert.equal(statusWord("M"), "modified");
 });
 
@@ -1174,12 +1180,42 @@ test("the publish button exists exactly when a remote is configured", () => {
 });
 
 test("the publish confirm names the branch and the remote and promises no force", () => {
-  const question = publishQuestion("agent/0123456789abcdef", "origin");
+  const question = publishQuestion("agent/0123456789abcdef", "origin", false);
   assert.ok(question.includes("agent/0123456789abcdef"), question);
   assert.ok(question.includes("origin"), question);
   // Spec item 12: the push is never forced. The confirm step is where the operator is told what they are agreeing
   // to, so the promise has to be in it.
   assert.ok(question.includes("never") || question.includes("nothing is forced"), question);
+});
+
+test("the CI warning is inside the publish confirm, not only above the list", () => {
+  // Item 12: "`touches_ci` is true … and the UI shows a warning **before confirm**". A warning above the file list
+  // is before the *button*; the confirm step is the paragraph the operator reads as they tap, so the sentence goes
+  // in it — and this is the test that goes red if the flag stops being passed.
+  const question = publishQuestion("agent/0123456789abcdef", "origin", true);
+  assert.ok(question.includes(CI_WARNING), question);
+  assert.ok(!publishQuestion("agent/0123456789abcdef", "origin", false).includes(CI_WARNING));
+});
+
+test("the strategy picker defaults to ff-only, and its words are the contract's", () => {
+  // `strategy.value = STRATEGIES[0]` is the preselection the acceptance names, and it is only right while
+  // `ff-only` is first — reordering the array would make every merge a `merge` commit and nothing else would notice.
+  assert.equal(STRATEGY_WORDS[0], "ff-only");
+  assert.deepEqual([...STRATEGY_WORDS], ["ff-only", "merge", "squash"]);
+});
+
+test("the sheet's two prompt notices and its empty list are sentences with tests", () => {
+  // Every sentence the sheet shows is a rule in this file (D2), including the three that used to be literals in
+  // `main.ts`: a notice after each prompt, and the line an empty `files[]` shows.
+  assert.ok(COMMIT_ASKED.includes("commit"), COMMIT_ASKED);
+  assert.ok(COMMIT_ASKED.includes("turn"), COMMIT_ASKED);
+  assert.ok(RESOLVE_ASKED.includes("conflicts"), RESOLVE_ASKED);
+  assert.notEqual(COMMIT_ASKED, RESOLVE_ASKED);
+  // Both name the retry, because the Merge button is disabled by the `running` row the 202 produced.
+  assert.ok(COMMIT_ASKED.includes("merge again") && RESOLVE_ASKED.includes("merge again"));
+  assert.ok(NOTHING_COMMITTED.includes("committed"), NOTHING_COMMITTED);
+  // The empty-list line is not an error: an empty branch is a state, and the merge of it is a no-op.
+  assert.ok(!NOTHING_COMMITTED.includes("error"));
 });
 
 test("a conflict names its paths, and an empty list says git named none", () => {

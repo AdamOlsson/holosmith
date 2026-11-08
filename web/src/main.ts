@@ -9,6 +9,7 @@
 // nodes, which is why every delta is one appended text node and nothing is ever re-rendered.
 
 import {
+  COMMIT_ASKED,
   COMMIT_LABEL,
   COMMIT_PROMPT,
   DIRTY_MERGE_REASON,
@@ -16,6 +17,8 @@ import {
   HISTORY_PAGE_LIMIT,
   HISTORY_TRUNCATED,
   NO_DETAIL,
+  NOTHING_COMMITTED,
+  RESOLVE_ASKED,
   RESOLVE_LABEL,
   RESOLVE_PROMPT,
   STRATEGIES,
@@ -1069,6 +1072,14 @@ function envelopeOf(text: string): ErrorEnvelope | null {
   }
 }
 
+// One refusal as the notice area renders it, whichever shape the body has: an envelope, or the plain text a route
+// that failed before it could answer JSON left behind. Four requests below need exactly this, which is why it is a
+// function rather than four copies of the same three lines.
+function refusalLine(status: number, text: string): string {
+  const envelope = envelopeOf(text);
+  return envelope === null ? sheetFailure(String(status), text) : sheetFailure(envelope.code, envelope.message);
+}
+
 function changesSection(
   id: string,
   initial: SessionState,
@@ -1236,7 +1247,7 @@ function changesSection(
 
     files.replaceChildren();
     if (answer.files.length === 0) {
-      files.append(make("li", "empty", "nothing committed on this branch yet"));
+      files.append(make("li", "empty", NOTHING_COMMITTED));
     }
     for (const file of answer.files) {
       const item = make("li", "change");
@@ -1272,12 +1283,10 @@ function changesSection(
     }
     commit.hidden = blocked !== DIRTY_MERGE_REASON;
 
-    // The conflict area, from the read or from the last `409`, whichever is newer: a read that says the merge is
-    // clean clears the refusal's words, because the agent's commit is what a retry after Resolve looks like.
-    if (answer.mergeable === true) {
-      conflictMessage = null;
-      conflicts = null;
-    }
+    // The conflict area is drawn from the read or from the last `409 conflict`. `render()` never *clears* the
+    // refusal: a render also happens on a state frame and in a request's `finally`, where the answer on screen is
+    // still the one from before the tap — and a stale `mergeable: true` would then wipe the paths the refusal just
+    // named. A fresh answer clears it in `load()`, because the agent's commit is what a fixed conflict looks like.
     const paths = conflictLine(conflicts);
     const said =
       conflictMessage ?? (answer.mergeable === false ? answer.mergeable_reason : null);
@@ -1301,7 +1310,7 @@ function changesSection(
       yes.disabled = busy;
       remote.disabled = busy;
       if (!confirm.hidden) {
-        question.textContent = publishQuestion(answer.branch, remote.value);
+        question.textContent = publishQuestion(answer.branch, remote.value, answer.touches_ci);
       }
     }
   };
@@ -1313,12 +1322,7 @@ function changesSection(
       const response = await fetch(diffPath(id, path), { headers: { accept: "text/plain" } });
       const text = await response.text();
       if (!response.ok) {
-        const envelope = envelopeOf(text);
-        say(
-          envelope === null
-            ? sheetFailure(String(response.status), text)
-            : sheetFailure(envelope.code, envelope.message),
-        );
+        say(refusalLine(response.status, text));
         return;
       }
       // The body as the route wrote it: a patch, with the cap's marker line already inside it. Never `innerHTML`
@@ -1337,6 +1341,12 @@ function changesSection(
       render();
       say(sheetFailure(answer.code, answer.message));
       return;
+    }
+    // A new answer is the authority, and a clean one clears a refusal's words: the agent's commit is what a fixed
+    // conflict looks like, and this is the only place that can tell.
+    if (answer.value.mergeable === true) {
+      conflicts = null;
+      conflictMessage = null;
     }
     last = answer.value;
     render();
@@ -1366,10 +1376,10 @@ function changesSection(
         body: JSON.stringify({ target: target.value, strategy: strategy.value }),
       });
       const text = await response.text();
-      const envelope = envelopeOf(text);
       if (!response.ok) {
         // The one refusal with a payload: rule 3's paths travel in the envelope's additive `conflicts` key, and a
         // phone needs the list (ADR-0008's fixed sentence cannot carry it).
+        const envelope = envelopeOf(text);
         if (envelope?.code === "conflict") {
           conflictMessage = envelope.message;
           const payload = JSON.parse(text) as { conflicts?: unknown };
@@ -1377,11 +1387,11 @@ function changesSection(
             ? payload.conflicts.filter((path): path is string => typeof path === "string")
             : [];
         }
-        say(
-          envelope === null
-            ? sheetFailure(String(response.status), text)
-            : sheetFailure(envelope.code, envelope.message),
-        );
+        say(refusalLine(response.status, text));
+        // A refusal is also news about the branch: `dirty_worktree` means the answer on screen is stale, and
+        // `session_running` means a turn just started. Re-read so the disabled reason converges on what the
+        // refusal named rather than staying a button that would refuse again.
+        await load();
         return;
       }
       const merged = JSON.parse(text) as Merged;
@@ -1414,13 +1424,8 @@ function changesSection(
         body: JSON.stringify({ remote: remote.value, confirm: true }),
       });
       const text = await response.text();
-      const envelope = envelopeOf(text);
       if (!response.ok) {
-        say(
-          envelope === null
-            ? sheetFailure(String(response.status), text)
-            : sheetFailure(envelope.code, envelope.message),
-        );
+        say(refusalLine(response.status, text));
         return;
       }
       say(publishedNotice(JSON.parse(text) as Published));
@@ -1449,11 +1454,7 @@ function changesSection(
       const text = await response.text();
       const envelope = envelopeOf(text);
       if (!response.ok || envelope !== null) {
-        say(
-          envelope === null
-            ? sheetFailure(String(response.status), text)
-            : sheetFailure(envelope.code, envelope.message),
-        );
+        say(refusalLine(response.status, text));
         return;
       }
       // The 202 is the row, now `running`: the badge follows it and the merge is disabled by the turn it names.
@@ -1482,21 +1483,21 @@ function changesSection(
     void sendMerge();
   });
   commit.addEventListener("click", () => {
-    void sendPrompt(COMMIT_PROMPT, "asked the agent to commit; merge again when the turn ends");
+    void sendPrompt(COMMIT_PROMPT, COMMIT_ASKED);
   });
   resolve.addEventListener("click", () => {
-    void sendPrompt(RESOLVE_PROMPT, "asked the agent to resolve the conflicts; merge again when the turn ends");
+    void sendPrompt(RESOLVE_PROMPT, RESOLVE_ASKED);
   });
   publishStart.addEventListener("click", () => {
     publishStart.hidden = true;
     confirm.hidden = false;
     if (last !== null) {
-      question.textContent = publishQuestion(last.branch, remote.value);
+      question.textContent = publishQuestion(last.branch, remote.value, last.touches_ci);
     }
   });
   remote.addEventListener("change", () => {
     if (last !== null) {
-      question.textContent = publishQuestion(last.branch, remote.value);
+      question.textContent = publishQuestion(last.branch, remote.value, last.touches_ci);
     }
   });
   no.addEventListener("click", () => {
