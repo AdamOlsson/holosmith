@@ -1,4 +1,4 @@
-# RESUME — one issue per session (next: PER-96 / HS-064, stopped-session expiry)
+# RESUME — one issue per session (next: PER-98 / HS-066, Web Push backend)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating procedure and
 still governs the cycle; this file is the state of the world, and it adds one rule of its own:
@@ -45,202 +45,254 @@ sandbox-specific incantation (§2).
 
 ---
 
-## 1. The issue this session picks up: `PER-96` — HS-064, stopped-session expiry
+## 1. The issue this session picks up: `PER-98` — HS-066, Web Push backend
 
-**State when this file was written** (`origin/master` at `805734d`, the tree clean apart from the operator's own
-`orchestrate.sh`/`log.txt`): **65 of 80 stories Done, 15 Backlog**, all in project `Holosmith`. `PER-96` is
-`Backlog`, it is the next in `HS-###` order, and its one blocker (HS-043, the delete's keep-rules) is `Done` — so
-it is eligible. The stories still Backlog are `PER-96` (HS-064) and then, in order, `PER-98`
-(HS-066, blocked by the done HS-049), `PER-99` (HS-067), `PER-100` – `PER-106` (phase 3, HS-068 … HS-074) and
-`PER-108` – `PER-112` (phase 4, HS-076 … HS-080); check the Linear `Blocked by` list rather than this sentence if
-HS-064 turns out to be a stop.
+**State when this file was written** (`origin/master` at `df7a34d`, the tree clean apart from the operator's own
+`orchestrate.sh`/`log.txt`): **66 of 80 stories Done, 14 Backlog**, all in project `Holosmith`. `PER-98` is
+`Backlog`, it is the next in `HS-###` order, and its one blocker (HS-049, the VAPID pair) is `Done` — so it is
+eligible. The stories still Backlog are `PER-98` (HS-066) and then, in order, `PER-99` (HS-067, blocked by this
+one), `PER-100` – `PER-106` (phase 3, HS-068 … HS-074) and `PER-108` – `PER-112` (phase 4, HS-076 … HS-080);
+check the Linear `Blocked by` list rather than this sentence if HS-066 turns out to be a stop.
 
-The last shipped story was `PER-95` (HS-063, the per-session disk soft cap, **ADR-0069**) — item 14's second
-sentence, and the third periodic policy in the build. Its gate run was green: **86 cases, 1469 assertions**, no
-`SKIP`; `cargo test` is **1101 tests** (56 binaries) and `web/`'s runner is **75**. Its §1 material is now Linear,
-`docs/review/PER-95.md`, `git log` and §9.
+The last shipped story was `PER-96` (HS-064, the stopped-session expiry, **ADR-0070**) — item 15's retention
+bullet and its last sentence: the build's fourth periodic policy, and the first that *destroys* something on a
+timer. Its gate run was green: **87 cases, 1500 assertions**, no `SKIP`; `cargo test` is **1117 tests** (57
+binaries) and `web/`'s runner is **79**. Its §1 material is now Linear, `docs/review/PER-96.md`, `git log` and §9.
 
 ### 1.1 The slice (verbatim from `docs/stories/phase-2-deployable-mvp.md`; Linear's body is the same text)
 
-> ### HS-064 — Stopped-session expiry
+> ### HS-066 — Web Push backend
 >
-> **As** the operator **I want** forgotten stopped sessions cleaned up **so that** I do not prune by hand.
+> **As** the operator **I want** a notification when a long turn finishes **so that** I can put my phone down.
 >
-> - **Size:** M · **Blocked by:** HS-043 · **Spec:** item 15, D3, Data model
-> - **Demo:** backdate `stopped_at` past `stopped_ttl_days` and watch the daily job snapshot then delete the
->   session.
+> - **Size:** M · **Blocked by:** HS-049 · **Spec:** item 11
+> - **Demo:** subscribe from a phone, start a turn that runs 30 s, lock the phone, get a notification that opens
+>   that session.
 >
 > **Acceptance**
-> - [ ] `stopped_at` is set when the status becomes `stopped` and cleared on resume.
-> - [ ] A daily job deletes sessions stopped for more than `stopped_ttl_days` (default 7) using the HS-043 delete
->   flow.
-> - [ ] A snapshot runs first; if it fails the session is skipped and retried the next day.
-> - [ ] Sessions in `error` are never auto-deleted.
-> - [ ] The Sessions screen shows days remaining on each stopped session.
+> - [ ] `POST /api/push/subscribe` and `DELETE /api/push/subscribe` manage rows in `push_subscriptions`
+>   (`endpoint` PK, `p256dh`, `auth`, `created_at`).
+> - [ ] VAPID keys from HS-049 sign every send; dead endpoints (404/410) are removed.
+> - [ ] Triggers: a turn that ran longer than 20 s, `session.status` error, and a budget or timeout stop.
+> - [ ] No notification is sent while an SSE stream for that session is open.
+> - [ ] Payload carries only `{host, session_id, kind}` — never content.
+> - [ ] The server, not the containers, holds the outbound access to the push services.
 
-`docs/stories/**` is **not edited** (§7). An **M** story — the fourth periodic policy, and the first that *destroys*
-something on a timer, so "what it refuses to delete" is where the work is.
+`docs/stories/**` is **not edited** (§7). An **M** story — and this one's difficulty is not the triggers or the
+table: it is that this build has **no dependencies and no HTTP client**, so "sign with the VAPID pair and POST to
+an endpoint" is a decision about *how*, and that decision is the story.
 
 ### 1.2 The spec it closes
 
-Item 15's retention bullet and D3:
+Item 11, in full:
 
-> - Stopped-session retention (decided in D3): a daily job deletes sessions that have been stopped for more than 7
->   days (config stopped_ttl_days, default 7), using the delete flow from item 9. A snapshot runs first; if it fails,
->   the session is skipped and retried the next day. Sessions in error are never auto-deleted. Add stopped_at INTEGER
->   to sessions, set when the status becomes stopped and cleared on resume. The Sessions screen shows the days
->   remaining on each stopped session.
->
-> - **D3. Stopped sessions: auto-delete after 7 days.** Work is snapshotted first (item 15).
+> - Web Push with VAPID keys generated at first start. Requires HTTPS (`tailscale serve`) and, on iOS, the app
+>   installed to the home screen.
+> - Endpoints: `POST /api/push/subscribe` and `DELETE /api/push/subscribe`, table `push_subscriptions`.
+> - Triggers: a turn finished after running longer than 20 seconds; `session.status` error; a budget or timeout
+>   stop. Not sent while an SSE stream for that session is open.
+> - Payload carries only `{host, session_id, kind}`, never content. Tapping opens that session.
+> - Each machine has its own keys, so the web app subscribes on every machine it uses (through the hub). The
+>   server, not the containers, needs outbound access to the push services.
 
-Item 8's table and item 9's delete flow are the neighbours: the delete flow's own rules (a snapshot, the keep-rules
-for `agent/<id>` and `refs/holosmith/wip/<id>`, the row and its log removed in one transaction) are what "using the
-delete flow from item 9" means, and ADR-0052/ADR-0065 are the decisions it already carries.
+The neighbours: **HS-049/ADR-0058** wrote the VAPID pair (`<data>/secrets/vapid.toml`, 0600, generated once,
+never rewritten, mode-checked by `doctor`'s `perms`) and deliberately stored **no `sub` claim** — "a JWT subject
+is a claim rather than key material and HS-066 decides it". **HS-067** (the next story, blocked by this one) owns
+the PWA, the service worker, the settings screen and the tap-to-open; this story owns the wire and the rows.
 
 ### 1.3 What already exists (read this before planning)
 
-- **`stopped_at` already moves with the state, and bullet 1 is therefore a test.** `sessions::repository`'s
-  `set_status` writes `stopped_at = (status == Status::Stopped).then_some(now)` (`repository.rs:282`), so every
-  transition into `stopped` sets it and every transition out of it clears it — under ADR-0016's one function, which
-  is why no endpoint can forget. `Session.stopped_at` is read back (`repository.rs:534`) and `tests/idle_stop.rs`
-  already asserts it moves with an idle stop. So the story's first bullet is a **witness**, not code: check that
-  the resume clears it and that every reason into `stopped` (now six: `evicted`, `idle_stop`, `drain`,
-  `forced_abort`/`ladder`, `disk_quota`, `pi_exit`) sets it.
-- **`stopped_ttl_days` is a config key and nothing reads it.** `config/mod.rs:237` (default `7`),
-  `config/schema.rs:236` (`Kind::Integer`), the golden file, and — unlike `session_disk_soft_gb` — a **validation
-  rule that refuses `0`** (`config/mod.rs:597`, "must be at least 1"). So a "no expiry" switch is a *decision* this
-  story has to take (recommendation: keep the refusal; `0` is not an off switch here, and an operator who wants no
-  expiry can raise the number). `grep -rn stopped_ttl_days crates/` finds only config code.
-- **The delete flow exists and is two halves.** `http::sessions::deletion` (ADR-0056) is the *request* half —
-  `retained_for`/`DeleteAnswer`/`Kept` and rule 5 — and `Deleter` (`deleter.rs`) is the removal task: revoke the
-  key, `backend.delete`, remove the row **and its event log** in one transaction, close the session's streams. The
-  snapshot is what the flow does *first*: a failed snapshot is `409 unsaved_work` for a client and `?force=true`
-  forgives it — and **a job must not force**: bullet 3 is "skip and retry the next day", which is the delete flow's
-  refusal read as a *retry* instead of an answer.
-- **The periodic-policy template is now three modules**: `sweeper.rs` (5 s tick, `IDLE_STOP`), `compactor.rs` (60 s,
-  a first pass at startup), and `quota.rs` (HS-063, 5 min, a first pass that **waits for the boot's own
-  re-provisioning**, `SETTLE`). A daily job is the same shape with a 24-hour `TICK`, and its first pass at boot is
-  what makes it observable: `case_compaction` and `case_disk_quota` both use "backdate the row, restart the
-  server" rather than waiting a tick.
-- **The delete flow's spawn is `Deleter::remove`, and the row is `deleting` first.** ADR-0023/0038: the request
-  half moves the row, then a task removes. A job that deletes has to decide whether it writes `deleting` first (and
-  therefore what a *second* tick sees) — the sweeper's "the row moves before the container" rule, with removal in
-  the container's place.
-- **`GET /api/sessions` is the list's answer, and it already carries a config-derived number**:
-  `{"sessions":[…], "network_default": …}` (ADR-0017). That is the place a TTL would ride for bullet 5's "days
-  remaining" — the row itself carries `stopped_at`; the *number* `stopped_ttl_days` is the config's, and the
-  screen has no other way to learn it.
-- **The web row's text is pure functions with node tests**: `stateText`/`headline`/`stoppedNotice`/`stoppedDetail`
-  (HS-030, HS-020, HS-021, HS-063). "Days remaining" is a sentence on a row, so it is a fourth pure function and a
-  node test — and it must be written **both** where the row is drawn and where a `session.status` frame patches it
-  (`docs/notes.md`'s "a row's text is written in two places" landmine).
-- **`stopped_at` is whole seconds**, and `clock::unix_now()` is the only clock. The comparison is `stopped_at <
-  now - ttl*86400`; `clock::minutes` exists, `clock::days` does not — a `u64` multiply by 86 400 can wrap for an
-  absurd config value, which is the overflow lesson `quota::over` and `turn::timeout` already carry.
+- **The key pair, and its one reader.** `src/vapid.rs`: `Pair` (base64url, unpadded, the 65-byte uncompressed
+  P-256 point and the 32-byte scalar), `store(root)` → `<data>/secrets/vapid.toml`, `render`, `parse`, `is_pair`,
+  `from_der` (the SEC1 walk), `base64url`/`unbase64url` (both unit-tested against RFC 4648's vectors). **There is
+  no signer and no `sub`**: `parse` gives the two scalars; turning them into an ES256 JWT is this story's.
+- **The stream count already exists and is public.** `events::StreamRegistry::count(session) -> usize` — and
+  `AppState::streams` is that registry. `app.rs`'s own doc comment on the field says "HS-066 reads the count".
+  That is item 11's "not sent while an SSE stream for that session is open", already half-built.
+- **`AppState`** is `{ config, runtime, database, events, streams, backend, drain, merges, tools }` with
+  **eleven** wiring helpers — `provisioner()`, `turner()`, `transitioner()`, `ladder()`, `deleter()`,
+  `sweeper()` (`Option`), `compactor()`, `reconciler()`, `stopper()`, `quota()` (`Option`) and since HS-064
+  `expiry()`. Every policy and every spawned task is built here, so a new one has an obvious place.
+- **The three triggers are three different producers, and two of them already have a reason word.**
+  `turn::TURN_TIMEOUT` (`turn_timeout`) and `turn::BUDGET_EXCEEDED` (`budget_exceeded`) are the turn runner's
+  (`src/turn.rs`'s `Turn::run`, which already knows how long the turn took because it sets a deadline);
+  `session.status → error` is the *transitioner's*, written by `set_status` under
+  `Transitioner::apply` — and a notification is not a state change, so the trigger must read the event, not
+  write one.
+- **The event writer is the one place every frame already passes through** (`events/writer.rs`'s
+  `collect` → `coalesce` → `commit`), which is where a `session.status` listener could hang without a second
+  broadcast channel. `EventStream` (the reader half) is what a task can subscribe to; `events::spawn` returns it.
+- **Migrations are four files and `SCHEMA_VERSION` is `4`.** `push_subscriptions` is a **new table**, so this
+  story is the first *additive* migration since `0004_expected_stop.sql`: `0005_push_subscriptions.sql`,
+  `SCHEMA_VERSION = 5`, and `tests/db_migrations.rs`/`tests/schema_previous.rs` are the two halves of the rule
+  (`contract_violations` refuses an unmarked destructive statement; the subset test refuses a drop or a rename
+  against `docs/schema/previous.sql`, which a new table does not touch — refreshing that snapshot is a
+  **release** step, `scripts/schema-snapshot.sh`, not a story's).
+- **No config key is needed.** Item 11 names no key, the 20-second threshold is a constant for the sweeper's,
+  compactor's and expiry's reason (the spec's config list is exhaustive; DP: `sweeper::TICK`, `compactor::TICK`,
+  `quota::TICK`, `expiry::TICK`). If a key is added, the golden file and `KNOWN_KEYS.len()` (**33**) move.
+- **`openssl` is a dependency the build already leans on, per process, never as a crate.** `src/keyproxy.rs`
+  forwards by spawning `openssl s_client`; `server deploy`'s step 2 generates the VAPID pair with one `openssl
+  ecparam` child and walks its DER in Rust. `holosmith-proxy:<version>`'s image exists precisely because
+  `hs_key` spawns `openssl` (ADR-0057). **Nothing in this build makes an outbound HTTPS POST today.**
+- **The route table and the guard shape**: a mutating route needs `Content-Type` and `X-Holosmith-Client` and
+  passes the four guards (`http/guard.rs`); errors are ADR-0008's one envelope; `Routes`'s manifest records
+  read-only vs mutating and `tests/guards.rs` pins it.
 
 ### 1.4 What does not exist
 
-No expiry task or its wiring, nothing that reads `stopped_ttl_days`, no candidate query (`stopped` rows older than
-a cutoff), no "skip when the snapshot fails" path for a job (the delete's refusal is written for a *client*), no
-days-remaining number in the list's answer, no `transcript.ts` sentence for it, and **nothing about what the job
-does with a row whose turn was interrupted or whose branch is kept** — the keep-rules exist, the question of
-whether a kept branch changes the deletion is a decision.
+No `push.rs` and no push module of any kind; no `push_subscriptions` table or migration; no `POST`/`DELETE
+/api/push/subscribe` route and no `push` row in the API table's implementation; no JWT signer (ES256), no
+`sub` claim, no VAPID `Authorization` header, no HTTP client, no outbound POST anywhere in the crate, no
+"turn ran longer than 20 s" notion (`Turn::run` knows a deadline, not a duration it reports), and no subscriber
+side: `web/` has no service worker, no `pushManager` call and no notification handling — that is HS-067's, so
+this story's own demo cannot be "subscribe from a phone" end to end, which is a fact the plan has to say out
+loud and answer with a stand-in.
 
 ### 1.5 What the plan must decide (and the shape this handoff recommends)
 
-1. **A new module (`expiry.rs`) with a `TICK` of 24 hours and a first pass at boot** — the compactor's and the
-   quota's shape, not a second pass in either. `AppState::expiry() -> Option<Expiry>` returning `None` only if a
-   "no expiry" switch is added (recommendation: **don't add one**; the config already refuses `0`). Wiring in
-   `commands/serve.rs` beside the other three, `debug!` for its state (the eight-line banner rule).
-2. **What the pass does, in order.** Read the candidates (a repository query — `stopped` and `stopped_at < cutoff`
-   — with the predicate in SQL, the idle stop's own rule); for each, run the delete flow's *snapshot* first, and on
-   failure log an `info` line and move on (the "skip and retry tomorrow" contract); on success run the rest of the
-   removal. Recommendation: **call the delete flow's halves, not a second implementation** — `sessions::deletion`
-   with the row it read and no force, then `Deleter::remove` on the spawned task — so the keep-rules, the event
-   log's removal and the stream closing are one code path. If `deletion`'s signature is a handler's (it answers an
-   `ApiError`), the honest fix is a `pub(crate)` function it and the job both call, and the ADR says so.
-3. **`error` is never a candidate, and a `deleting` row is not the job's.** The predicate is `status = stopped`;
-   a row caught mid-delete is the flow's. A row that leaves `stopped` between the read and the delete is the
-   ordinary race: the transition refuses, log `info`, don't retry inside the pass.
-4. **No lock across the snapshot, and the mutex discipline the compactor's caveat does not transfer.** The snapshot
-   and the backend's delete are subprocess/daemon work; read the rows, drop the guard, act, and let
-   `Deleter::remove` take its own scope. A pass that holds the mutex across `backend.delete` would stall every
-   request for a container's lifetime.
-5. **What the job emits.** Recommendation: **nothing of its own** — the delete flow already emits the
-   `session.status → deleting` and (usually dropped) frame, and item 9's "a delete is not a state change anyone
-   else performs" holds. A `deleted_by_expiry` reason would be a new vocabulary; the row is gone, so nothing can
-   read it.
-6. **The days-remaining number.** Recommendation: `GET /api/sessions` grows one key beside `network_default` —
-   `stopped_ttl_days` or, better, nothing per row (the client can compute `stopped_at + ttl`) — and
-   `transcript.ts` gains one pure function (`expiryText(stoppedAt, ttlDays, now)`), tested with synthetic clocks.
-   The page draws it in both places (row build and status patch), and the sentence must not claim a session *will*
-   be deleted when the snapshot could keep it (say "expires in N days", not "will be deleted").
-7. **`now` on the client.** The page has no clock in its model: `Date.now()` must be read in `main.ts` and passed
-   in, so the function stays pure and the test can pin it.
-8. **How a gate observes a daily job.** Backdate `stopped_at` with `python3`'s `sqlite3` (precedented in
-   `case_merge_guards` and `case_compaction`), make sure the session has a worktree (a Docker session, or the
-   stub + a written column), restart `serve`, and read the row's disappearance — plus the branch/ref that the
-   delete flow *kept*, which is the "using item 9's delete flow" claim. A visual/worktree-keeping half needs a real
-   repository: the Docker backend, or a stub session with a written `worktree` column if the case only asserts the
-   row's removal.
+1. **How a VAPID JWT is signed with no crypto dependency.** The pair is two base64url scalars in a file. ES256 is
+   ECDSA over P-256 with SHA-256, and a Web Push `Authorization` is
+   `vapid t=<jwt>, k=<base64url public key>`, the JWT carrying `{aud, exp, sub}` with `aud` = the endpoint's
+   origin. Three shapes, and the recommendation is the **second**:
+   - hand-roll P-256 (point arithmetic, a nonce, DER→raw `r‖s`): ~400 lines of arithmetic nothing else in the
+     build needs, and the one place a subtle bug is silent (a bad signature is a 401/403 from the push service,
+     which looks like a config mistake);
+   - **`openssl` as a program**, like `keyproxy` and the deploy: write the scalar to a `0600` temporary file in
+     the data root, `openssl dgst -sha256 -sign <key>`, and convert the DER `SEQUENCE { r, s }` to the 64-byte
+     raw form Web Push wants (a small, testable parser — `vapid::from_der` is the precedent for hand-walking a
+     DER shape in-crate). The cost is that the host must have `openssl`, which `doctor` can say;
+   - a new dependency: **no**. Every ADR since 0001 has kept the crate dependency-free, `Cargo.lock` is
+     registry-only and `check-static.sh` guards it.
+   Either arm needs an ADR, and whichever it is, the **signature is verifiable in a test** without a push
+   service: a `tests/push.rs` can verify the ES256 signature with a second `openssl dgst -verify` child, which
+   makes "we signed with the machine's pair" a measurement rather than a claim.
+2. **How the POST goes out, with no HTTP client.** Same three choices, same recommendation (spawn
+   `openssl s_client`-style or `curl`): `curl` is present on this machine but is **not** something the build may
+   assume on a deployment host, whereas `openssl` already is (ADR-0057's proxy image, `keyproxy`'s forward, the
+   deploy's step 2). A `POST` with `TTL`, `Content-Encoding: aes128gcm`, `Authorization: vapid …` and a body is
+   ~20 lines of request writing over `openssl s_client`; the encryption of the *payload* is where item 11's
+   "never content" matters — see 3.
+3. **What is actually sent, given the payload is content-free.** `{host, session_id, kind}` is the **plaintext
+   after decryption** in a real Web Push message (the body is `aes128gcm`-encrypted to the subscription's
+   `p256dh`/`auth`), and implementing RFC 8291 encryption is a second crypto problem. Two honest routes:
+   **encrypt properly** (HKDF + AES-128-GCM from the subscription's keys — hand-rolling AES is unacceptable, so
+   this pulls the openssl arm in again: `openssl enc`/`openssl pkeyutl` cannot do ECDH+HKDF+AES-GCM in one call
+   cleanly) or **record the decision that the payload is content-free by construction and send it in a form the
+   push service will accept** — an unencrypted push is refused by the real services, so this is not a shortcut
+   that survives contact. Recommended: treat RFC 8291 encryption as *the* hard part, scope it explicitly, and if
+   it cannot be done honestly without a dependency, **say so in the ADR and in the ship comment** rather than
+   shipping a `push` endpoint that always 400s. A legitimate smaller shape: encrypt with `openssl`'s
+   `pkeyutl -derive` for ECDH, `openssl kdf`/`dgst` for the HKDF and `openssl enc -aes-128-gcm`… all of which
+   exist, and each of which must be **measured** by a test that decrypts the body back with the subscription's
+   private key. That is the story's real cost and the plan should budget it.
+4. **A row per subscription, and a `DELETE` that names one.** `push_subscriptions(endpoint PRIMARY KEY, p256dh,
+   auth, created_at)` — the endpoint is the natural key (a browser gives one per subscription), so `DELETE
+   /api/push/subscribe` takes the endpoint in the body or the query, and a `POST` of an endpoint already stored
+   is an upsert (a browser can re-subscribe with the same endpoint and new keys). The repository pattern is
+   `sessions/repository.rs`'s: **one file owns every statement** and a `src/**` walk enforces it, so a new
+   `src/push/repository.rs` (or a `push` module with the repository inside) with its own SQL-location guard.
+   `created_at` is `clock::unix_now()`.
+5. **Where the three triggers are read, and why not in the transitioner.** `session.status → error` already
+   exists as an event; `turn_timeout` and `budget_exceeded` are reasons the turn runner records. The cheapest
+   honest shape is a **subscriber on the event stream** — `events::spawn`'s `EventStream` is a broadcast reader,
+   so a `Pusher` task can watch `session.status` frames, spot `to == "error"` and the two reason words, and know
+   the turn's duration from the `turn.start`…`agent_settled` pair (or from a new key on the settle frame, which
+   would be an API change — the frame is pinned at `{from, to, step, reason}`, so **do not** add one; read
+   `turn.start`'s arrival instead, which is what "ran longer than 20 s" means for a phone). The alternative —
+   calling the pusher from `Turn::run` — puts a network call on the turn's path and gives the error arm no home.
+   One rule to keep: **the pusher must not need the database lock across a send**, and it must never be able to
+   block the writer.
+6. **"Not while an SSE stream is open"** is `StreamRegistry::count(session) > 0` read at the moment of sending
+   (not at the moment of the trigger), because a client that connected during the turn is watching. The
+   registry is the state's own, so a `Pusher` built by `AppState::pusher()` gets the same one. Add the inverse
+   test: a session with an open stream produces zero sends, and the same session with the stream closed produces
+   one — the pair, not the single arm.
+7. **Dead endpoints are removed**: a `404`/`410` answer deletes the row (and `401`/`403` is a *key* problem, not a
+   dead endpoint — do not delete a good subscription because the machine's VAPID pair was rotated). The
+   distinction belongs in one `fn` with a test per arm.
+8. **`{host, session_id, kind}` and `host`.** `host` is this machine's identity — the config's `owner`? No: the
+   spec's "each machine has its own keys" implies a machine name, and `docs/stories/README.md`/GLOSSARY's
+   **Machine** entry is the vocabulary to check first. Whatever it is, it must already exist in the config
+   (`docs/notes.md`'s *Config and docs*: no new key without the golden file, `KNOWN_KEYS.len()` and a validation
+   rule).
+9. **The gate case.** No push service exists in the gate, so `case_push` must own a **stand-in receiver**: a
+   local TLS or plain listener the case points the subscription at (a `python3` HTTP responder, like
+   `health_responder`) and asserts the request it *received* — the `Authorization: vapid t=…, k=…` shape, the
+   `TTL`, the `Content-Encoding`, the encrypted body, and the `{host, session_id, kind}` recovered by decrypting
+   it with the subscription's own private key (generated by the case with `openssl`, which is the same tool the
+   sender used, so the case proves the exchange rather than agreeing with the sender's arithmetic). Plus the
+   `404`/`410` deletion and the "stream open, nothing sent" pair. A `SKIP` line when `openssl` is absent, and the
+   `tests/push.rs` unit half for everything that does not need a socket.
+10. **A subscriber's row is a browser's secret.** `p256dh` and `auth` are the subscription's public key and its
+    auth secret; they are not provider keys and not `keys.toml`'s, and they belong in the **database** (the
+    spec's table), not `secrets/`. Nothing logs them: `tracing` lines name the endpoint's *host*, never the full
+    URL (a push endpoint is a capability URL — anyone with it can push).
 
 ### 1.6 The questions the plan must answer (before code)
 
-1. Which function is "the delete flow" for a caller that is not a request — and does `sessions::deletion`'s
-   signature need a `pub(crate)` split, and what does the snapshot failure become (a `bool`? a `Kept`? the
-   `ApiError` it already answers)?
-2. Does the job write `deleting` before it removes, and what does a second tick see while it does?
-3. Does the candidate query need a new repository method (`expired_before(cutoff)`), and what is its
-   `SQL-location` guard story (one statement, in the repository — the idle stop's `idle_before` is the model)?
-4. Is the cutoff `stopped_at < now - ttl*86400` computed in SQL or Rust, and what does `ttl = 0` do (it cannot be
-   configured today)?
-5. Does the *list's* answer need the TTL, and is a raw `stopped_ttl_days` key the right shape (the alternative —
-   `expires_at` per row — needs the row value, and the row has `stopped_at`)?
-6. What happens to a session whose snapshot succeeds but whose removal fails — the row is `deleting`; is the next
-   day's retry the `deleting` re-run the delete flow already supports (`Deleter` re-runs on a repeat request)?
-7. Which test proves `error` is untouched, and which proves a *kept* branch survives (the keep-rules are
-   `worktree::retained`'s, so the witness is a real repository or a backend-contract test).
+1. Which arm signs (openssl child vs hand-rolled P-256), and where the temporary key file lives and is removed?
+2. Which arm sends (openssl `s_client` vs `curl`), and what happens when the program is missing — a `doctor`
+   finding, a `warn` per attempt, or a refusal at subscribe time?
+3. Is RFC 8291 payload encryption in scope? If yes, with which programs, and how does a test decrypt the body
+   back without trusting the sender's own code? If no, what does the endpoint answer, and is a route that cannot
+   deliver honest to keep?
+4. Does the trigger read the event stream or hook the turn runner — and how does it know the turn's duration
+   without adding a key to the pinned `session.status` payload?
+5. Does the new table need a migration number bump *and* a `docs/schema/previous.sql` refresh? (It should not: an
+   added table is additive. Confirm against `tests/schema_previous.rs`'s subset rule.)
+6. What is `host`, and is it already in the config?
+7. What does `POST /api/push/subscribe` refuse (a body with no `endpoint`, a non-https endpoint, a second
+   subscription for the same endpoint), and which code carries each?
+8. What is the *scope* of a subscription — the whole machine (one row per browser, no session) or per session?
+   The payload carries `session_id`, so the row is machine-wide; confirm and record it.
 
 ### 1.7 Acceptance, restated as checks
 
-- *`stopped_at` is set when the status becomes stopped and cleared on resume* — through the transitioner:
-  `tests/quota.rs`/`idle_stop.rs` already assert the set; add the resume-clears half (one `Transitioner::apply`).
-- *A daily job deletes sessions stopped for more than `stopped_ttl_days`* — the module's one pass over a
-  backdated row, and `case_stopped_expiry` over the artifact after a restart; the `TICK` constant asserted (the
-  HS-063 review's SP1 lesson: an interval with no witness is a number nothing can fail on).
-- *A snapshot runs first; a failure skips and retries* — a stub with `fails_snapshot`, one pass, the row still there
-  with its reason and `stopped_at` untouched; a second pass with a working snapshot removes it.
-- *`error` is never auto-deleted* — a backdated `error` row survives a pass (and there is no `stopped_at` on it).
-- *The Sessions screen shows days remaining* — a pure `transcript.ts` function with node tests at the boundaries
-  (0 days, 1 day, a past TTL, a clock exactly on the cutoff), rendered in both the row and the patch path.
-- Plus the usual gates, one new `case_*`, `docs/build.md`'s case list, `GLOSSARY.md` (**Stopped-session expiry**;
-  `stopped_at` and `stopped_ttl_days` are already vocabulary), and an ADR (**0070** is next).
+- *The two endpoints manage rows in `push_subscriptions`* — a `tests/push.rs` over a real database and the route
+  table: `POST` twice with one endpoint upserts (one row, new keys), `DELETE` removes it, a second `DELETE` is
+  `404`, and the table's four columns are asserted by name (the `sessions` repository's own habit).
+- *VAPID keys from HS-049 sign every send; dead endpoints are removed* — the signature verified by a **second**
+  `openssl` child in `tests/push.rs` (`dgst -verify` against the pair's public key), and the four answers
+  (`404`/`410` delete; `401`/`403`/`429` keep) as one table-driven test.
+- *Three triggers* — a `tests/push.rs` that drives each: a turn that runs past 20 s (the stub's pacing makes it
+  cheap), `session.status → error`, and each of the two stop reasons. Plus the negative: a 5-second turn sends
+  nothing.
+- *No notification while a stream is open* — the pair: `StreamRegistry::open(…)` held → no send; dropped → one
+  send. The `StreamGuard` is the state's, so the test uses the real registry.
+- *Payload is `{host, session_id, kind}` and nothing else* — the decrypted body parsed and its key set asserted
+  exactly, plus a grep-free guarantee: the sentence never carries a message, a prompt or a path.
+- *The server, not the containers* — a test over the two `docker run` vectors (the shape `tests/quota.rs`'s D2
+  test already uses): no container gains a credential, an endpoint or a route to the push services; the sender is
+  a host process.
+- Plus the usual gates, one new `case_Push`, `docs/build.md`'s case list, `GLOSSARY.md` (**Web Push
+  subscription**; check whether **Notification** is already there), and an ADR (**0071** is next).
 
 ### 1.8 Non-goals
 
-Deleting `error` rows (item 15 says never); a TTL per row or a per-project override; a UI for editing the TTL; any
-purge of `stopped` rows' worktrees before the delete flow's own removal; notifications (HS-066); a "days remaining"
-on the session screen as well as the list (the story says Sessions screen); a hard delete of anything whose
-snapshot failed.
+The PWA, the manifest, the icons, the service worker and the settings screen (HS-067); tapping a notification to
+open a session (HS-067's acceptance, though the payload must make it possible); per-session subscriptions;
+notification content of any kind; a push for anything other than item 11's three triggers; the hub forwarding a
+push (that is phase 3, HS-074); retries or a send queue (a dead endpoint is deleted, a live one is not retried).
 
 ### 1.9 The demo
 
-Over the shipped artifact: create a session (Docker, so the worktree and branch are real), stop it through a
-policy or by hand, backdate `stopped_at` in `app.db` with `python3`'s `sqlite3` past `stopped_ttl_days`, restart
-`serve`, and show the row gone from `GET /api/sessions`, its container and network gone, and the branch `agent/<id>`
-(or `refs/holosmith/wip/<id>`) **kept** — the delete flow's own promise, which is what "using the delete flow" means.
-Say plainly what was not measured: a session that sat stopped for seven real days, and (if the case uses the stub)
-a real `backend.delete` against a container.
+There is no phone here and no push service. The honest demo is **two halves**: (1) over the shipped artifact,
+subscribe with a subscription whose endpoint points at a **local stand-in receiver** and show the request that
+arrives — the `vapid` header with its JWT, the `TTL`, the body decrypted with the subscription's own private key,
+carrying `{host, session_id, kind}` and nothing else; and (2) the three triggers and the two refusals (stream
+open; `404`/`410` deleting the row) driven from the same script. Say plainly what was **not** measured: a real
+push service, a real browser subscription, iOS's installed-to-home-screen requirement, and the tap that opens a
+session — all of which are HS-067's or a by-hand procedure.
 
 ### 1.10 What the next agent needs back
 
 When you write the state back (§5, step 10): §1 becomes the **next** issue — by `PROMPT.md`'s ranking that is
-`PER-98` (HS-066, the Web Push backend) *if* HS-064 ships and HS-066's blocker (HS-049) is still Done, and
-`PER-96` again if it does not. (`PER-97` is HS-065, the daily project backup — already `Done`, which is why it is
-not in §1's list.) Take the same shape. Refresh the counts, the ADR number you took (**0070** is next), the last gate run's own numbers (and
-`web/`'s test count, which this story will change), and replace §9's row with this story's. Anything you learned
-that is **not** state and **not** an ADR goes into `docs/notes.md` under a new `### Landmines: …` heading, never
-into §1. Then kill what you started (§5, step 11).
+`PER-99` (HS-067, the installable app and notification permission) *if* HS-066 ships and HS-067's blocker is
+still `Done`, and `PER-98` again if it does not. Take the same shape. Refresh the counts, the ADR number you took
+(**0071** is next; **0072** if you write two), the last gate run's own numbers (and `web/`'s test count), and
+replace §9's row with this story's. Anything you learned that is **not** state and **not** an ADR goes into
+`docs/notes.md` under a new `### Landmines: …` heading, never into §1. Then kill what you started (§5, step 11).
 
 ## 2. Environment (already repaired — do not redo)
 
@@ -665,7 +717,8 @@ crates/holosmith/
                             be a filename, a non-numeric index and a missing file; the file's own type otherwise
   src/runtime.rs            runtime::Backend {Stub,Docker} — which backend this run uses
   src/http/                 mod.rs, app.rs (Routes/App seam, AppState + provisioner()/turner()/
-                            transitioner()/ladder()/deleter()/sweeper()/compactor(), edge layer,
+                            transitioner()/ladder()/deleter()/sweeper()/compactor()/reconciler()/
+                            stopper()/quota()/expiry(), edge layer,
                             is_guard_exempt), error.rs
                             (the one envelope — `{code, message}`, plus `conflicts` when and only when a
                             merge conflicted — every code, ApiError::not_in_state / bad_prompt /
@@ -685,8 +738,11 @@ crates/holosmith/
                             refusals: `refuse_project` + `refusal_error`, and since HS-056 `deletion` —
                             the delete flow's request half, `delete()`'s body and the merge's rule 5 —
                             with `retained_for(state, session, landed)` and its `pub(crate)` answer
-                            `DeleteAnswer`/`Kept`), streams.rs (the SSE
-                            handler)
+                            `DeleteAnswer`/`Kept`, and since HS-064 `complete_deletion(state, current,
+                            trigger, force, landed)` — the flow's **second half** (snapshot → keep-rule →
+                            transition → `Deleter::spawn`), re-exported from `http/mod.rs` so
+                            `expiry.rs` runs one code path with the operator's `DELETE`), streams.rs (the
+                            SSE handler)
   src/sessions/             mod.rs (Status, Session, NewSession, RepoError, `is_id`), repository.rs (every
                             `sessions` statement + its SQL-location guard; includes touch,
                             `oldest_idle`, `last_seq` (HS-044's reader), and `remove` — the row and its log in
@@ -825,6 +881,16 @@ crates/holosmith/
                             worktree), `Quota::{new, spawn, run, settle, sweep, stop, stop_idle, announce,
                             report}`; `tests/quota.rs` drives both ladder rungs, the under-the-cap arm, an
                             unmeasureable worktree, the argument vector and the wire
+  src/expiry.rs             the stopped-session expiry (HS-064, ADR-0070): `TICK` (24 h, asserted), the pure
+                            `cutoff(now, ttl_days)` (saturating twice), `Expiry { state: AppState, ttl_days }`
+                            — it holds the *state* because it calls the delete flow's own half — and
+                            `Expiry::{new, spawn, run, sweep, candidates, expire, row}`. The first pass is
+                            immediate (the reconcile only touches live rows) and there is **no off switch**
+                            (`stopped_ttl_days` already refuses `0`). It calls `http::complete_deletion` with
+                            `Trigger::Expire` and `force: false`, logs a skip at `info` and any other ending at
+                            `warn`, and emits nothing of its own. Its `#[cfg(test)]` interleaving test is where
+                            the pass's status re-read is isolated (it drives the *table*, because
+                            `no_status_write_outside_the_one_function` walks `src/**`)
   src/disk.rs               the free-space floor's one measurement (HS-062, ADR-0068): `DF` (the program's
                             name, once), `DiskError { Missing, Refused, Unrunnable, Unprintable }` + its
                             `Display`, `Verdict { Enough, Short }`, `available_gb(df_output)` (field 4 of line
@@ -865,6 +931,10 @@ crates/holosmith/
                             the cap refusing *without* evicting, a turn that settles while the floor is
                             crossed, `min_free_gb = 0` needing no `df` at all, and a stub run not measured;
                             a `tokio::sync::Mutex` serialises the bodies because the shims fork),
+                            expiry (HS-064: the pass over a backdated row, the stub's `Snapshot`-before-
+                            `Delete` order, a failed snapshot skipping *and* staying a candidate, the
+                            `error` row, the six reasons into `stopped` with the resume's clear, the
+                            window from the config, and the resumed row),
                             quota (HS-063: both ladder rungs — a stub told to ignore `abort` so the grace is
                             spent, and a turn that ends itself while the ladder waits —, the worktree exactly
                             at its cap, a `du` that cannot run, `session_disk_soft_gb = 0`, the argument
@@ -932,10 +1002,11 @@ scripts/verify.sh           the one-command gate (see §3), including the two st
                             --json` from the pairs it was asked for) and `health_responder` (a `python3` that
                             answers `/api/health` for a whole case)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0069          read the recent ones before planning anything (0069 is the disk soft cap)
+docs/adr/0001…0070          read the recent ones before planning anything (0070 is the stopped-session expiry;
+                            0071 is the next free number)
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
 docs/review/PER-33…PER-97, PER-107  each a verbatim review + a `## Resolution` table
-                            (`PER-95` is this build's newest; `PER-94` the one before it)
+                            (`PER-96` is this build's newest; `PER-95` the one before it)
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -1154,15 +1225,15 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 The catalogue lives in **`docs/notes.md`** — read the **cross-cutting** sections before you start anything,
 then the sections below. It is a reference: everything there is a measurement or a review finding.
 
-| Read | Why it bears on HS-064's stopped-session expiry |
+| Read | Why it bears on HS-066's Web Push backend |
 | --- | --- |
-| Cross-cutting: *Tests*, *Data and state*, *Config and docs* | **Tests** carries the shapes this story needs: a background call is not there when the answer is (the eviction's lesson), a row can be ahead of its event, and "a test that cannot fail is worse than no test" — the acceptance is five claims and each needs a witness. **Data and state** carries ADR-0016's one writer and the repository's ownership of every statement (a new candidate query is one statement in `repository.rs`, with the idle stop's `idle_before` as the model), and the delete's "the row and its log go in one transaction". **Config and docs** carries `stopped_ttl_days`' golden line: no new key, and *no* `0`-means-off, because this key already refuses `0`. |
-| *Landmines: what a delete keeps (HS-043)* | **The story's core.** The keep-rules (`worktree::retained`, ADR-0052/ADR-0065: the tip comparison against `landed`), the `Kept { branch, wip }` answer, `sessions::deletion`'s rule 5, and the snapshot-before-removal order. "Using the HS-043 delete flow" means these, not a second removal. |
-| *Landmines: the disk floor (HS-062)* and *the per-session disk cap (HS-063)* | The two preceding stories, and the two that share this one's shape: a machine number measured once, a background policy with a constant tick, **a first pass that waits for the boot's re-provisioning** (HS-063's `SETTLE`), and the `Tools`-shaped program seam. The new landmine section also records the "an SSE frame's kind is its `event:` line" lesson and the gate-case-owns-its-state rule. |
-| *Landmines: the idle stop and its tick (HS-021)* and *compaction (HS-060)* | The two older periodic policies: `sweep` is public so one pass can be driven, the tick is a **constant** because the spec's config list is exhaustive, a refused application is an `info` line, and `AppState::sweeper()` is the `Option` that spells "off". A daily job copies that shape with a 24-hour tick. |
-| *Landmines: compaction (HS-060)* and *history windows (HS-061)* | Compaction is the closest thing to a *destructive* background pass (it deletes event rows) and its own landmine — "a `LIMIT` before the already-done filter stalls a pass", "a `warn` not a silent stall" — is the class this story's "skip and retry tomorrow" belongs to. |
-| *Landmines: the Changes sheet (HS-058)* | Every sentence a client shows is a pure `transcript.ts` function with a node test, because **no gate may need a browser** — which is where "days remaining" has to live, with its own clock passed in. The web section's "a row's text is written in two places" is the other half. |
-| *Landmines: the startup reconcile (HS-044)* | Not the subject, but the reason a first pass at boot is a shape this build already trusts: every live row is `starting` when the policies spawn, so a pass that runs then measures nothing. |
+| Cross-cutting: *HTTP and the envelope*, *Data and state*, *Config and docs*, *Web* | **HTTP and the envelope** is the two new routes' shape: every fallible extractor answers `text/plain` unless you map it, a mutating route needs `Content-Type` **and** `X-Holosmith-Client` or it is `403 bad_client`, `is_guard_exempt` is the only exemption list, and codes are constants in `http/error.rs` (two requests may share a code and differ in sentence). **Data and state**: ADR-0016's one writer (a notification is *not* a state change, so read events and write nothing), the repository owning every statement with a `src/**` walk enforcing it, and `SCHEMA_VERSION` moving in the same commit as its migration. **Config and docs**: no new key without the golden file and `KNOWN_KEYS.len()` (**33**). **Web**: `web/` is HS-067's, so this story adds no page code. |
+| *Landmines: the credential path (HS-040)* and *the service, the keys and the origins (HS-049)* | The two stories that own secrets. `keys.toml` is the provider store and `vapid.toml` is the machine's push pair — **not** the same file, not the same reader, and the subscription's `p256dh`/`auth` belong in neither (they are rows). `perms` is `doctor`'s check on the secrets directory's modes, and HS-049's ADR-0058 records why no `sub` claim was stored: **this story decides it.** |
+| *Landmines: the per-session disk cap (HS-063)* | The nearest neighbour in shape: a task with a constant `TICK`, a `Tools`-shaped program seam (which is how a test owns a program this crate spawns — `preflight::Tools { git, df, du }` is where a new `openssl` seam goes), the rule that a subprocess call is never under the database lock, and the event-kind lesson: a frame's kind is its `event:` line, and a `code` is API. |
+| *Landmines: the turn runner and the turn timeout (HS-015, HS-022)* and *the abort ladder (HS-016)* | The two triggers that are the *runner's* (`turn_timeout`, `budget_exceeded`) and the pinned `session.status` payload (`{from, to, step, reason}` — **four keys; do not add a fifth**). "A turn ran longer than 20 s" has to be derived from `turn.start`'s arrival, not from a new field, and the ladder's `Ending::{Asked,Forced}` is why a forced stop is a different event from an asked one. |
+| *Landmines: the egress proxy (HS-037)* and *the key proxy (HS-039)* | The build's two existing answers to "talk to somebody else's service with no HTTP client": `keyproxy::forward` spawns **`openssl s_client`** and counts the bytes, and `egress` tunnels TCP. That is the pattern item 11's "the server, not the containers, holds the outbound access" is asking to reuse — plus `hs_egress`'s presence on the host, which a boot already starts. |
+| *Landmines: a gate's scripts and stand-ins (HS-033, HS-034, HS-049)* | `scripts/verify.sh`'s `health_responder` and `deploy_machine_shims` are the two existing `python3`/`sh` stand-ins for a service that is not there — the model for a **push receiver** the case owns, and the reason a case may not need a browser. Also: a case must own its state and its `SKIP` may not fire on the feature it checks. |
+| *Landmines: the per-session disk cap's review (PER-95)* and *this story's predecessor (PER-96)* | Two reviews' worth of lessons that recur here: an interval with no witness is a number nothing can fail on (assert the constant), a test that agrees with the code it tests proves nothing (the gate's receiver must decrypt with the **case's own** key material), and a broken intra-doc link is only ever a review finding because `cargo doc` is not in the gate. |
 
 Three rules worth repeating here because they are the most expensive to relearn: **a test that cannot fail
 is worse than no test** (mutate the behaviour and watch it go red); **a gate case that SKIPs on the bug it
@@ -1203,7 +1274,7 @@ cd /home/adamolsson/projects/holosmith
 git status --short                                  # clean apart from log.txt/orchestrate.sh
 . ~/.pi/toolchains/env.sh                           # ALWAYS before cargo/rustc
 python3 /tmp/lin.py issues | grep -v ' Done ' | head # recreate /tmp/lin.py first (§2)
-python3 /tmp/lin.py issue PER-96                    # scoped, Backlog, the issue §1 names
+python3 /tmp/lin.py issue PER-98                    # scoped, Backlog, the issue §1 names
 docker version                                      # the daemon must answer, or a Docker check cannot be measured
 docker image inspect pi-agent:local                 # the image the Docker stories run
 docker network ls | grep -w egress                  # the proxy test's premise (§2); `grep -x` never matches
@@ -1213,7 +1284,7 @@ scripts/verify.sh                                   # baseline green, ~13–14 m
 
 If the baseline is red before you touch anything, that is the first thing you fix — and say so in Linear.
 
-Then start §5 on **§1's issue** (`PER-96`, HS-064) and stop after step 11.
+Then start §5 on **§1's issue** (`PER-98`, HS-066) and stop after step 11.
 
 Before you begin, check that the last session left nothing behind — `subagent({action:"list"})` should show
 no run in progress, `docker ps` none of its containers, and `git status --short` should look like the line
@@ -1232,26 +1303,27 @@ from those three; do not carry old sessions' ledgers in this file.
 If you stop before the issue ships, say so explicitly, name the next action, and leave the tree clean and the
 gates green — **a half-finished story is worse than an honest stop**.
 
-**The last shipped story** (`PER-95`, HS-063, ADR-0069; commits `28186e1`, `5d52336`, `7e39282`, `ca5b49d`,
-`4bfa646`, `805734d`): item 14's *second* sentence, the per-session soft cap — the third periodic policy in the build
-and the first that had to **end a turn**. The key `session_disk_soft_gb` had existed since HS-034 and nothing read it,
-so the story was a new module (`quota.rs`), a new `AppState::quota()` (`None` at `0`), and a new table row. Three
-decisions are worth carrying: **`Ladder::end_turn`, not `climb`** (a session over its cap must stay `stopped` until
-somebody cleans up, so the "way back" is exactly wrong; when rung 1 works the idle arm's own `disk_quota` row
-finishes the job with the *policy's* reason rather than the abort's); **the measurement is `du -sk -- <worktree>`
-off the request path's threads and outside the database lock**, through a new `du` on `preflight::Tools` — the one
-seam a test can own a program with; and **the first pass waits for the boot's own re-provisioning** (bounded at
-60 s), because the reconcile leaves every live row `starting`, which is why a restart — not a five-minute tick — is
-how the gate and the demo observe a pass. The event is a **new kind `error`** with `{code, message, size_kib,
-limit_gb}`, once per crossing and only after the row is `stopped`; the *stop* is `stopped`, never `error`, and the
-two are different things the demo says out loud. The gate: **86 cases, 1469 assertions**, no `SKIP`; `cargo test`
-1101 (56 binaries); `web` 75. **The review's twelve findings are the lesson**: no P0/P1, and three were witness
-gaps rather than behaviour bugs — the spec's five-minute interval had no test that could fail (assert `TICK`), the
-`--one-file-system` landmine named a test that cannot see a flag (a recording shim pins the argv), and D2's
-isolation test read `Mounts` while the prose claimed the `docker run` vectors (parse the vectors' `-v`). Two were
-real UI defects: a block with no stylesheet rule, and the kind's name colliding with the platform's own
-`EventSource` `error` event (the listener now refuses anything that is not a `MessageEvent`). Its full record is
-Linear, `docs/review/PER-95.md` and `git log`; do not carry it forward.
+**The last shipped story** (`PER-96`, HS-064, ADR-0070; commits `36923f9`, `f90ca2f`, `98485a4`, `5cd6a72`,
+`df7a34d`): item 15's retention bullet and its last sentence — the fourth periodic policy, and the first that
+*destroys* something on a timer. `stopped_ttl_days` had existed since HS-034 and nothing read it, so the story was
+a new module, a new `AppState::expiry()`, a new table row and **one extracted function**. Three decisions are worth
+carrying: **the policy runs the delete flow's own second half** (`http::complete_deletion`, extracted out of the
+request handler) rather than a copy, so the snapshot order, the keep-rules, the one-transaction row-plus-log
+removal and the stream closing stay one code path — "using the delete flow from item 9" is that function and not a
+rewrite; **the destructive decision is a table row** (`Trigger::Expire`, `stopped → deleting` only), so a session
+the operator resumed between the pass's read and the flow's write is refused by `Transitioner::apply` and not by a
+comparison in the job — and the pass's status re-read is a *courtesy* that keeps the log honest, isolated by an
+in-crate test that asserts the stub took no snapshot; and **a policy must not force**, so the snapshot's
+`409 unsaved_work` becomes "skip and retry tomorrow", where the retry is literally the candidate set (nothing
+about the row moves). Two more worth knowing: the first pass is **immediate with no `SETTLE`**, because the
+reconcile only touches live rows and a `stopped` one is not live — that is what makes a daily policy observable in
+a gate and a demo; and the days-remaining sentence is a pure `transcript.ts` function whose clock is passed in,
+saying "expires in N days" and never "will be deleted", because the snapshot can keep the work. The gate: **87
+cases, 1500 assertions**, no `SKIP`; `cargo test` 1117 (57 binaries); `web` 79. **The review's eleven findings had
+no blocker**: the two that mattered were a stale phrase in `GLOSSARY.md`'s trigger list and a test named for a race
+it did not build — the interleaving is only constructible inside the crate, so that guard got a `#[cfg(test)]` test
+beside `expire` that asserts the *work* was not done, which is the assertion a "we did not do a delete we were about
+to refuse" guard needs. Its full record is Linear, `docs/review/PER-96.md` and `git log`; do not carry it forward.
 
 **One thing this build does not do, recorded rather than discovered:** a resumed session's pi has **no
 memory** of earlier turns (`--no-session`; the transcript is Holosmith's log). Replaying the log into a new pi
