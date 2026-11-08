@@ -2170,7 +2170,7 @@ it rather than adding a caveat beside it.
 - **A gate case cannot see a DOM, so a UI story's case measures *shipping* and its rules are `npm test`'s.** RESUME
   §3's "no gate may need a browser" is not a preference: `case_changes_screen` asserts the served page is
   `web/dist/index.html` byte for byte, that the **served bundle** is `web/dist/assets/…` byte for byte, and that the
-  bundle carries the sheet's fifteen element ids and the three ADR sentences. The `cmp` comes first on purpose — a
+  bundle carries the sheet's nineteen `id="…"` needles and the three ADR sentences. The `cmp` comes first on purpose — a
   grep alone would pass over a stale `dist/` that happened to carry the strings. The mutation is deleting a rule,
   rebuilding, and watching the grep go red; the weak half (a string in a bundle is not a rendered element) is why
   the sentence is written down in the ADR instead of being implied.

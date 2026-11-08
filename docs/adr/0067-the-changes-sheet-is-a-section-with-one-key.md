@@ -176,10 +176,11 @@ three things:
 1. `GET /sessions/<id>` is `web/dist/index.html` byte for byte, the comparison `case_session_screen` already makes
    — a `dist/` built before the sheet fails here;
 2. the **served** bundle (the `<script src>` in that page, fetched from the running server and compared with
-   `web/dist/assets/…` byte for byte) contains the sheet's fifteen element ids and the three ADR sentences
-   verbatim — a tree that dropped a rule, or an artifact built before it, is red. Each id is grepped **with its
-   assignment's quotes** (`id="changes-conflict"`), because the bare word is a prefix of a sibling's id and would
-   still match with the container element deleted;
+   `web/dist/assets/…` byte for byte) contains the sheet's nineteen id needles — fifteen containers, plus the four
+   elements whose id would otherwise be a substring of a sibling's — and the three ADR sentences verbatim. A tree
+   that dropped a rule, or an artifact built before it, is red. Each id is grepped **with its assignment's quotes**
+   (`id="changes-conflict"`), because the bare word is a prefix of a sibling's id and would still match with the
+   container element deleted;
 3. the changes answer carries `"choices":{"targets":["main","master"],"remotes":["origin"]}` — both existing
    configured targets in the config's order, and the configured remote though no repository here has one — with
    `touches_ci: true` from a `Jenkinsfile`.

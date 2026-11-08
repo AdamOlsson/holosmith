@@ -236,7 +236,7 @@ then the worktree gone for the summary's `409 no_worktree`; see ADR-0062), the C
 own Docker run over a real repository and the `_ping`-only socket, re-makes the worktree, commits a `Jenkinsfile`,
 and asserts the three things a browser would otherwise be the only witness of — `GET /sessions/<id>` is this
 tree's `web/dist/index.html` byte for byte, the **served** bundle (the `<script src>` in that page, fetched from the
-artifact and compared with `web/dist/assets/…` byte for byte) carries the sheet's fifteen element ids and the three
+artifact and compared with `web/dist/assets/…` byte for byte) carries the sheet's nineteen id needles and the three
 sentences the ADRs fixed (the CI warning, ADR-0065 D4's commit prompt, ADR-0064 D10's Resolve prompt), and
 `GET …/changes` carries `"choices":{"targets":["main","master"],"remotes":["origin"]}` — both existing
 configured targets in the config's order, and a configured remote no repository here has, because that list is the
