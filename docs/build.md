@@ -261,7 +261,23 @@ half an `!= Idle` guard would refuse; `{"strategy":"squash","delete_session":tru
 three keys and the branch's **tree**, then the row is gone, the worktree is gone and `git branch --list 'agent/*'`
 is empty; a second session's squash **without** the flag keeps the branch, a `delete_session` whose snapshot cannot
 be taken (its `sessions` directory made read-only) still answers `200` and leaves the row, and the ordinary `DELETE`
-afterwards answers `kept.branch` naming the branch it keeps; see ADR-0065), and the hardened mounts
+afterwards answers `kept.branch` naming the branch it keeps; see ADR-0065), the publish (`case_publish`, which
+boots its own Docker run over its own projects root **and its own data root**, re-makes the worktree the failed
+network step took back, and publishes into a **bare repository under `$WORK`** — `git init --bare` plus a
+`git remote add origin` pointing at it, so a real push happens with no network, no daemon and no credential, and
+the remote is on a path no container's mount vector names, which is what makes a `200` evidence that the **host**
+pushed: `{"remote":"origin","confirm":true}` is `200` with exactly three keys (`remote`, `branch`, `commit` —
+no `touches_ci`, which is the changes view's) and the branch's tip as the case read it with `git rev-parse`, then
+`git rev-parse refs/heads/agent/<id>` **in the bare repository** names that commit and the local branch has not
+moved; `branch:"pr/one"` creates *that* ref at the same tip and no local branch; the four request refusals —
+protected `main`, the configured target `trunk` (`[merge] targets = ["trunk"]` is what makes the second fact
+reachable at all), an unlisted remote and `confirm:false` — are `422` with `protected_branch`,
+`target_not_pushable`, `bad_remote` and `confirm_required` and the remote's `for-each-ref` output unchanged across
+every one of them; a second commit published and the branch then rewound is `409 push_rejected` with the remote's
+refs still unchanged, which is "never force-pushes" as a fact about a ref; and a **second boot** with
+`[publish] remotes = []` answers `403 publish_disabled` for the row *and* for an id the table does not hold, with
+the remote untouched — the disabled endpoint is the process's config, so it is a boot and not a request; see
+ADR-0066), and the hardened mounts
 (`case_container_mounts`,
 which needs no server at all: it builds a real repository and worktree under `target/`, runs one real
 container with the spec's four mounts and `--cap-drop ALL`, and asserts the three writes fail on the host

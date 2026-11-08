@@ -2114,3 +2114,39 @@ it rather than adding a caveat beside it.
   the target moved would tell the operator the work did not land. The test for that arm is the gate's: the
   session's `sessions` directory made read-only makes `snapshot::take` fail, and the merge still answers `200`, the
   row still exists, and its status is not `deleting`.
+
+### Landmines: the publish, and a push into somebody else's repository (HS-057)
+
+- **`git push --porcelain` puts the rejection on *stdout*, in a documented machine format, and the reason word
+  changes with what the local repository happens to know.** A non-fast-forward whose remote tip is not in the
+  local object store is `!	<from>:<to>	[rejected] (fetch first)`; the same fact with the object present is
+  `(non-fast-forward)`. So the classification is the **`!` flag**, and the reason is kept verbatim for the log
+  only — a build that matched on `non-fast-forward` would report a `500` for the ordinary case. The prose on
+  stderr (`error: failed to push some refs …`, the `hint:` block) is not read at all.
+- **A repository's `push.followTags = true` makes `git push <remote> <refspec>` carry annotated tags in
+  addition** (measured: `refs/tags/v1` landed on the remote without the flag, and not with `--no-follow-tags`).
+  Same class as ADR-0062's `diff.external`, and the same fix: pin the flag, then make a repository config set
+  the thing and watch the test go red. `push.gpgSign` is the same class and *cannot* be measured here (no key,
+  no signing program) — recorded in ADR-0066 rather than pinned blindly.
+- **`-c core.hooksPath=/dev/null` on a push is load-bearing for the same reason it is on a merge**, and the
+  measurement is identical: a real `.git/hooks/pre-push` that `touch`es a marker and exits 1 fired without the
+  flag and never with it. Hooks live in the **common** git directory, so the project's hooks are reachable from a
+  push that never enters the worktree — `-C <repo>` is not a defence.
+- **A server has no terminal, so a credential prompt is a wedged request, not a slow one.** `GIT_TERMINAL_PROMPT=0`
+  on the child turns it into git's own error. It does not remove the host's credentials: helpers,
+  `~/.git-credentials` and an `ssh-agent` are still consulted, which is what "the host's own git" means.
+- **A bare repository under the test's own `TempDir`/`$WORK` is the only honest way to measure a push without a
+  network — and it is also the measurement of "the host did it".** The remote is on a path no container's mount
+  vector names, so a `200` plus `git rev-parse` in the bare repository cannot be a container's work; and
+  `git remote get-url <name>` exits **2** for a remote the repository does not have (0 with the URL), which is
+  what turns "configured but absent" into a `422` instead of a `500` carrying `fatal: 'origin' does not appear to
+  be a git repository`.
+- **A gate case whose second refusal is unreachable under the default config measures nothing.** With
+  `[merge] targets = ["main","master"]`, a destination called `main` is *protected* first, so
+  `target_not_pushable` could never be reached — `case_publish` sets `targets = ["trunk"]` and asserts both orders,
+  and `tests/publish.rs` asserts the precedence separately (`main` on a machine whose target is `main` is
+  `protected_branch`).
+- **The disabled endpoint is the process's config, so its gate arm is a second boot**, not a request against the
+  first: `[publish] remotes = []` in a rewritten config, `start_serve` again over the same data root, and the
+  `403` asserted for the existing row *and* for an id the table does not hold (the claim that it is answered
+  before the row).

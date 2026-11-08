@@ -154,6 +154,49 @@ pub const TARGET_CHECKED_OUT: &str = "target_checked_out";
 /// same shape one route over.
 pub const CONFLICT: &str = "conflict";
 
+/// A publish was refused because this machine's `publish.remotes` names no remote (HS-057, spec item 12).
+///
+/// The spec's own "empty by default, so the endpoint is disabled", answered as a `403` rather than a `404`: the
+/// route exists, and a `404` for a path in the table would be a lie about the table. The next step is the
+/// operator's — a config key and a restart — which is exactly what a `403` says and what `not_found` cannot.
+pub const PUBLISH_DISABLED: &str = "publish_disabled";
+
+/// A publish named a remote this machine does not push to (HS-057).
+///
+/// Two facts share it — a name `publish.remotes` does not list, and a listed name this project's repository has
+/// no remote for — for the reason `bad_target` has two sentences: the client's move is one (send a remote this
+/// whole machine and project agree on) while the operator's next step is the sentence's.
+pub const BAD_REMOTE: &str = "bad_remote";
+
+/// A publish named a destination git would never be allowed to write (HS-057, item 12's protected names).
+///
+/// Item 12's own list — `main`, `master`, `release/*` — on the **destination** ref. Its own code rather than a
+/// sentence on `bad_remote`, because the request's `remote` is fine and a client that showed "unknown remote"
+/// for `branch: "main"` would be describing the wrong field.
+pub const PROTECTED_BRANCH: &str = "protected_branch";
+
+/// A publish named the branch this machine merges into (HS-057, item 12's "pushing the merged target branch is
+/// not supported").
+///
+/// A second fact with its own code for the reason above: on a machine whose `[merge] targets` is `["trunk"]`, a
+/// destination called `trunk` is not a protected name and is still not something the app pushes — "push it from
+/// the host" is the spec's own sentence.
+pub const TARGET_NOT_PUSHABLE: &str = "target_not_pushable";
+
+/// A publish whose request did not carry `confirm: true` (HS-057, item 12's `{remote, branch?, confirm:true}`).
+///
+/// `false` is a request that asked *not* to push, so it is a refusal rather than a no-op: a `200` for a body that
+/// said no would be the one answer an operator cannot recover from. A `422` and not a `409`, because nothing
+/// about the machine or the session is in the way — the client's own form is.
+pub const CONFIRM_REQUIRED: &str = "confirm_required";
+
+/// A publish the remote refused (HS-057).
+///
+/// The remote's answer, not this build's opinion: a non-fast-forward, a stale lease, a server-side rule. This
+/// build never force-pushes, so the refusal names the operator's next step (fetch, integrate, publish again)
+/// and the reason git gave travels in the log.
+pub const PUSH_REJECTED: &str = "push_rejected";
+
 /// The body of every error response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ErrorBody {
@@ -464,6 +507,69 @@ impl ApiError {
                 conflicts: Some(conflicts),
             },
         }
+    }
+
+    /// What a publish whose body is not `{remote, branch?, confirm}` answers (HS-057).
+    ///
+    /// The same code as [`Self::bad_body`] with this request's own fields, for the reason [`Self::bad_merge_body`]
+    /// has the merge's. `branch` is named as optional because a publish without one pushes `agent/<id>` under its
+    /// own name, which is item 12's ordinary request.
+    pub fn bad_publish_body() -> Self {
+        Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            BAD_BODY,
+            "the body must be a JSON object with a `remote` string, `confirm: true`, and optionally a `branch` \
+             string",
+        )
+    }
+
+    /// What a publish on a machine whose `publish.remotes` names no remote answers (HS-057, item 12).
+    ///
+    /// A `403` with a sentence naming the config key and the next step, because the operator's move is a config
+    /// edit and a restart — not a different request. Answered **before** the session is read: an endpoint the
+    /// config turned off answers for no id at all.
+    pub fn publish_disabled() -> Self {
+        Self::new(
+            StatusCode::FORBIDDEN,
+            PUBLISH_DISABLED,
+            "this machine's `publish.remotes` config key names no remote, so publishing is disabled; add a \
+             remote's name to `publish.remotes` and restart the server",
+        )
+    }
+
+    /// What a publish naming a remote this machine does not push to answers (HS-057).
+    ///
+    /// The **message** is the caller's, like [`Self::bad_target`]'s: a name the config does not list and a listed
+    /// name the project's repository has no remote for are one code and two next steps.
+    pub fn bad_remote(message: &'static str) -> Self {
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, BAD_REMOTE, message)
+    }
+
+    /// What a publish naming a protected destination answers (HS-057, item 12's three names).
+    pub fn protected_branch(message: &'static str) -> Self {
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, PROTECTED_BRANCH, message)
+    }
+
+    /// What a publish naming this machine's merge target answers (HS-057).
+    pub fn target_not_pushable(message: &'static str) -> Self {
+        Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            TARGET_NOT_PUSHABLE,
+            message,
+        )
+    }
+
+    /// What a publish without `confirm: true` answers (HS-057).
+    pub fn confirm_required(message: &'static str) -> Self {
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, CONFIRM_REQUIRED, message)
+    }
+
+    /// What a push the remote refused answers (HS-057).
+    ///
+    /// `409` rather than `422`: the request was well formed and this machine was willing; the **remote** is what
+    /// said no, and the operator's next step (fetch and integrate) changes the branch rather than the body.
+    pub fn push_rejected(message: &'static str) -> Self {
+        Self::new(StatusCode::CONFLICT, PUSH_REJECTED, message)
     }
 
     /// What a resume at the cap answers (HS-018, spec item 8's "or returns 409").

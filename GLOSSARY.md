@@ -569,11 +569,28 @@ A landing git could not reconcile, which is rule 3's `409 conflict`: the merge i
 _Avoid_: Clash, unmerged state, half-merge
 
 **Publish**:
-Pushing a session branch to a configured remote.
-_Avoid_: Deploy, release, ship
+Pushing a session's branch to a configured remote, on the server, as **the host's own git**. `POST
+/api/sessions/{id}/publish` with `{remote, branch?, confirm:true}`; the answer is `{remote, branch, commit}`, and
+`commit` is the branch's tip **read before** the push. `branch` names the **destination** ref — the ref pushed
+from is always the session branch, so the refspec is `refs/heads/agent/<id>:refs/heads/<branch>` — and an absent
+`branch` means both are `agent/<id>`. The push runs in the project repository with the server user's environment
+inherited, so the host's credential store is the only credential there is; containers never hold one. It carries
+`-c core.hooksPath=/dev/null`, `--no-follow-tags` and `--porcelain`, and it **never force-pushes**: the refspec
+has no `+`, and a remote that refused is `409 push_rejected` rather than a retry. An empty `publish.remotes`
+disables the endpoint (`403 publish_disabled`). Its machine names are `publish::publish`, `publish::Pushed`,
+`http::publish` and `config::Publish`.
+_Avoid_: Deploy, release, ship, push (a push is git's verb; the route is a **Publish**)
+
+**Protected name**:
+A destination a **Publish** never writes, whatever the config says: `main`, `master`, and anything under
+`release/` — one constant (`publish::PROTECTED`) and one two-arm predicate, so `release-notes` is an ordinary
+branch name and `release/1.0` is not. `422 protected_branch`. It is not the same list as a **Target branch**: a
+machine may merge into `trunk` and must still never push `main`, which is why a destination naming a configured
+target is its own refusal (`422 target_not_pushable`, item 12's "push it from the host").
+_Avoid_: Forbidden branch, reserved ref
 
 **`touches_ci`**:
-Whether a session's diff changes CI configuration or a hook directory, which warrants a warning before publish. One constant (`changes::CI_PATHS`) and one predicate (`changes::touches_ci`, which **Publish** reads): directory prefixes (`.github/`, `.gitlab/`, `.circleci/`, `.buildkite/`, `.woodpecker/`, `.husky/`, `.githooks/`) and file names matched on the last path segment (`.gitlab-ci.yml`, `.travis.yml`, `Jenkinsfile`, …). An **added** file counts like a modified one; `.git/hooks` is not in the set because a diff can never contain it.
+Whether a session's diff changes CI configuration or a hook directory, which warrants a warning before publish. One constant (`changes::CI_PATHS`) and one predicate (`changes::touches_ci`, which the Changes sheet's publish warning reads — the **Publish** route itself reads none of it, because a route that carried a flag it never computed would be claiming a diff it did not look at): directory prefixes (`.github/`, `.gitlab/`, `.circleci/`, `.buildkite/`, `.woodpecker/`, `.husky/`, `.githooks/`) and file names matched on the last path segment (`.gitlab-ci.yml`, `.travis.yml`, `Jenkinsfile`, …). An **added** file counts like a modified one; `.git/hooks` is not in the set because a diff can never contain it.
 _Avoid_: CI flag, risk flag
 
 ### Network and credentials

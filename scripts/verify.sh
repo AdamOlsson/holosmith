@@ -428,6 +428,7 @@ serve_cases=(
   case_merge
   case_merge_strategies
   case_merge_guards
+  case_publish
   case_docker_preflight
   case_doctor_quick
   case_server_images
@@ -6175,6 +6176,223 @@ case_merge_guards() {
   branch2="$(git -C "$repo" rev-parse --verify --quiet "refs/heads/agent/$id2" || true)"
   [ -n "$branch2" ] || fail "${name}_deleted/branch" "the ordinary delete took a branch it said it kept"
   assertions=$((assertions + 1))
+
+  kill "$socket_pid" 2>/dev/null || true
+  wait "$socket_pid" 2>/dev/null || true
+  socket_pid=""
+}
+
+# HS-057's proof from the artifact: a real push into a **bare repository under `$WORK`**, and every refusal
+# around it. The remote is the story's own constraint made a measurement — it is on the host's filesystem and in
+# no container's mount vector, so a `200` and a `git ls-remote` that names the branch is evidence that the
+# **host** pushed, not a container and not a stub. `publish.remotes = []` is a second boot, because the disabled
+# endpoint is a property of the process's config and not of a request.
+#
+# Its own projects root **and** its own data root, like the merge cases: two boots over one data root are the
+# second arm, and `<data>` is where the session's own directory lives. The `[merge] targets` list is `["trunk"]`
+# so the target refusal is reachable and distinct from the protected names — with the default list, `main` is
+# protected first and the second fact could not be measured at all.
+case_publish() {
+  local name=case_publish response body id base wt tip first refs_before
+  # Two statements, not one, for the reason `case_changes` gives: in a single `local` every right-hand side
+  # expands before either assignment, so `repo="$projects/holosmith"` would read an unset `projects` under
+  # `set -u`.
+  local projects="$WORK/projects-publish"
+  local data="$WORK/data-publish"
+  local repo="$projects/holosmith"
+  local bare="$WORK/publish-remote.git"
+  local config="$WORK/config-publish.toml"
+  # The guard comes first, before `stop_serve`, for the reason `case_worktree` gives.
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 for the `_ping` socket (tests/publish.rs covers the push and every refusal)\n' "$name"
+    return 0
+  fi
+  stop_serve
+  mkdir -p "$repo" || fail "$name/mkdir" "$repo is not creatable"
+  git -C "$repo" init --quiet -b main || fail "$name/git" "git init did not work in $repo"
+  git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet --allow-empty \
+    -m "the first commit" || fail "$name/git" "git commit did not work in $repo"
+  base="$(git -C "$repo" rev-parse HEAD)" || fail "$name/git" "git rev-parse did not work in $repo"
+  # The remote: a bare repository with no network, no daemon and no credential. `origin` is added by URL, so the
+  # push is a real one and the refs git writes are the measurement.
+  mkdir -p "$bare" || fail "$name/mkdir" "$bare is not creatable"
+  git -C "$bare" init --quiet --bare || fail "$name/git" "git init --bare did not work in $bare"
+  git -C "$repo" remote add origin "$bare" || fail "$name/git" "git remote add did not work in $repo"
+
+  socket_pid="$(fake_docker_ping "$WORK/docker-publish.sock")"
+  for _ in $(seq 1 100); do
+    [ -S "$WORK/docker-publish.sock" ] && break
+    sleep 0.05
+  done
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\ndocker_host = "unix://%s/docker-publish.sock"\nmin_free_gb = 1\nidle_stop_min = 0\n[merge]\ntargets = ["trunk"]\n[publish]\nremotes = ["origin"]\n' \
+    "$owner" "$projects" "$WORK" >"$config"
+  start_serve "$config" "$data"
+
+  fetch_body "${name}_create" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-publish-1" ||
+    fail "${name}_create/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "${name}_create")"
+  expect_status "${name}_create" "$response" 202
+  body="$(cat "$WORK/responses/${name}_create.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id" ] || fail "${name}_create/id" "the response names no id: $body"
+  body=""
+  for _ in $(seq 1 100); do
+    fetch "${name}_row" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "${name}_row/no_answer" "GET /api/sessions/$id did not answer"
+    body="$(cat "$WORK/responses/${name}_row.body")"
+    case "$body" in
+      *'"status":"starting"'*) sleep 0.1 ;;
+      *) break ;;
+    esac
+  done
+  printf '%s\n' "$body" | grep -qF "\"base_commit\":\"$base\"" ||
+    fail "${name}_row/base" "the row does not record the branch's base commit: $body"
+  assertions=$((assertions + 1))
+
+  wt="$projects/.worktrees/$id"
+  # The step's own command, absolute paths (HS-025's measurement): the failed network step took the worktree back.
+  git -C "$repo" worktree add --quiet -b "agent/$id" "$wt" "$base" ||
+    fail "$name/worktree" "git worktree add did not work for $wt"
+  printf 'one\n' >"$wt/a.txt" || fail "${name}/write" "a.txt is not writable"
+  git -C "$wt" add a.txt || fail "${name}/add" "git add did not work in $wt"
+  git -C "$wt" -c user.name=verify -c user.email=verify@example commit --quiet -m "the session's change" ||
+    fail "${name}/commit" "git commit did not work in $wt"
+  tip="$(git -C "$wt" rev-parse HEAD)" || fail "${name}/head" "git rev-parse did not work in $wt"
+  first="$tip"
+  # The remote starts with no branch at all, which is what makes the first assertion a creation.
+  check "${name}/empty" "" "$(git -C "$bare" for-each-ref --format='%(refname)' refs/heads)"
+
+  # 1. **The push.** Item 12's ordinary request: our branch, under its own name, on the remote. The answer is
+  # exactly three keys — `touches_ci` is the changes view's and the warning is HS-058's, so a flag the route
+  # never computed must not appear — and the commit it names is the branch's tip.
+  fetch_body "${name}_push" POST "/api/sessions/$id/publish" '{"remote":"origin","confirm":true}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_push/no_answer" "POST /api/sessions/$id/publish did not answer"
+  response="$(answer "${name}_push")"
+  expect_status "${name}_push" "$response" 200
+  expect_header "${name}_push" "$response" "Content-Type" "application/json"
+  body="$(cat "$WORK/responses/${name}_push.body")"
+  printf '%s\n' "$body" | grep -qF '"remote":"origin"' ||
+    fail "${name}_push/remote" "the answer does not name the remote: $body"
+  assertions=$((assertions + 1))
+  printf '%s\n' "$body" | grep -qF "\"branch\":\"agent/$id\"" ||
+    fail "${name}_push/branch" "the answer does not name the destination: $body"
+  assertions=$((assertions + 1))
+  printf '%s\n' "$body" | grep -qF "\"commit\":\"$tip\"" ||
+    fail "${name}_push/commit" "the answer does not name the commit that was read: $body"
+  assertions=$((assertions + 1))
+  case "$body" in
+    *touches_ci*) fail "${name}_push/keys" "the answer carries the changes view's flag: $body" ;;
+    *) assertions=$((assertions + 1)) ;;
+  esac
+  check "${name}_push/ref" "$tip" "$(git -C "$bare" rev-parse "refs/heads/agent/$id")"
+  # ... and the local branch did not move: a publish pushes and lands nothing.
+  check "${name}_push/local" "$tip" "$(git -C "$repo" rev-parse "agent/$id")"
+
+  # 2. **The destination is the remote's ref.** `branch:"pr/one"` creates *that* ref at the branch's tip and
+  # leaves `agent/<id>` where it was; a build that read `branch` as a second local branch would push nothing.
+  fetch_body "${name}_destination" POST "/api/sessions/$id/publish" \
+    '{"remote":"origin","branch":"pr/one","confirm":true}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_destination/no_answer" "the destination publish did not answer"
+  response="$(answer "${name}_destination")"
+  expect_status "${name}_destination" "$response" 200
+  body="$(cat "$WORK/responses/${name}_destination.body")"
+  printf '%s\n' "$body" | grep -qF '"branch":"pr/one"' ||
+    fail "${name}_destination/branch" "the answer does not name the destination ref: $body"
+  assertions=$((assertions + 1))
+  check "${name}_destination/ref" "$tip" "$(git -C "$bare" rev-parse refs/heads/pr/one)"
+  if git -C "$repo" rev-parse --verify --quiet refs/heads/pr/one >/dev/null; then
+    fail "${name}_destination/local" "the publish made a local branch called pr/one"
+  fi
+  assertions=$((assertions + 1))
+  check "${name}_destination/ours" "$tip" "$(git -C "$bare" rev-parse "refs/heads/agent/$id")"
+
+  # 3. **The request's refusals**, each with the remote's refs read before and after: a refused publish touches
+  # nothing. `main` is protected; `trunk` is this machine's merge target (the config's list is `["trunk"]`, which
+  # is what makes the second fact reachable at all); `upstream` is not configured; and `confirm:false` is a
+  # request that said no.
+  refs_before="$(git -C "$bare" for-each-ref --format='%(refname) %(objectname)' refs/heads | sort)"
+  for arm in 'protected|{"remote":"origin","branch":"main","confirm":true}' \
+    'target|{"remote":"origin","branch":"trunk","confirm":true}' \
+    'remote|{"remote":"upstream","confirm":true}' \
+    'confirm|{"remote":"origin","confirm":false}'; do
+    refusals="${arm%%|*}"
+    fetch_body "${name}_$refusals" POST "/api/sessions/$id/publish" "${arm#*|}" \
+      "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+      "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+      fail "${name}_$refusals/no_answer" "the $refusals publish did not answer"
+    response="$(answer "${name}_$refusals")"
+    expect_status "${name}_$refusals" "$response" 422
+    body="$(cat "$WORK/responses/${name}_$refusals.body")"
+    printf '%s\n' "$body" | grep -qF 'nothing was pushed' ||
+      fail "${name}_$refusals/sentence" "the sentence does not say nothing happened: $body"
+    assertions=$((assertions + 1))
+  done
+  expect_code "${name}_protected" "$(answer "${name}_protected")" protected_branch
+  expect_code "${name}_target" "$(answer "${name}_target")" target_not_pushable
+  expect_code "${name}_remote" "$(answer "${name}_remote")" bad_remote
+  expect_code "${name}_confirm" "$(answer "${name}_confirm")" confirm_required
+  check "${name}/refusals" "$refs_before" \
+    "$(git -C "$bare" for-each-ref --format='%(refname) %(objectname)' refs/heads | sort)"
+
+  # 4. **The remote's own refusal.** A second commit is published (the remote moves), the branch is then rewound,
+  # and the same request is `409 push_rejected` — the remote has a commit this branch does not, which is exactly
+  # what a force-push would overwrite. The remote's refs are unchanged afterwards, which is the whole of "never
+  # force-pushes".
+  printf 'two\n' >"$wt/b.txt" || fail "${name}/write" "b.txt is not writable"
+  git -C "$wt" add b.txt || fail "${name}/add" "git add did not work in $wt"
+  git -C "$wt" -c user.name=verify -c user.email=verify@example commit --quiet -m "a second change" ||
+    fail "${name}/commit" "git commit did not work in $wt"
+  tip="$(git -C "$wt" rev-parse HEAD)" || fail "${name}/head" "git rev-parse did not work in $wt"
+  fetch_body "${name}_second" POST "/api/sessions/$id/publish" '{"remote":"origin","confirm":true}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_second/no_answer" "the second publish did not answer"
+  response="$(answer "${name}_second")"
+  expect_status "${name}_second" "$response" 200
+  check "${name}_second/ref" "$tip" "$(git -C "$bare" rev-parse "refs/heads/agent/$id")"
+  git -C "$wt" reset --hard --quiet "$first" || fail "${name}/reset" "git reset did not work in $wt"
+  refs_before="$(git -C "$bare" for-each-ref --format='%(refname) %(objectname)' refs/heads | sort)"
+  fetch_body "${name}_moved_on" POST "/api/sessions/$id/publish" '{"remote":"origin","confirm":true}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_moved_on/no_answer" "the rejected publish did not answer"
+  response="$(answer "${name}_moved_on")"
+  expect_status "${name}_moved_on" "$response" 409
+  expect_code "${name}_moved_on" "$response" push_rejected
+  body="$(cat "$WORK/responses/${name}_moved_on.body")"
+  printf '%s\n' "$body" | grep -qF 'never force-pushes' ||
+    fail "${name}_moved_on/sentence" "the sentence does not name the next step: $body"
+  assertions=$((assertions + 1))
+  check "${name}_moved_on/remote" "$refs_before" \
+    "$(git -C "$bare" for-each-ref --format='%(refname) %(objectname)' refs/heads | sort)"
+  check "${name}_moved_on/ref" "$tip" "$(git -C "$bare" rev-parse "refs/heads/agent/$id")"
+
+  # 5. **The disabled endpoint is the process's config**, so it is a second boot over the same data root: the key
+  # names no remote, and the answer is `403 publish_disabled` — for the row that exists and for an id the table
+  # does not hold, because an endpoint the config turned off answers before it reads a session.
+  stop_serve
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\ndocker_host = "unix://%s/docker-publish.sock"\nmin_free_gb = 1\nidle_stop_min = 0\n[merge]\ntargets = ["trunk"]\n[publish]\nremotes = []\n' \
+    "$owner" "$projects" "$WORK" >"$config"
+  start_serve "$config" "$data"
+  for disabled_id in "$id" 0123456789abcdef; do
+    fetch_body "${name}_disabled_$disabled_id" POST "/api/sessions/$disabled_id/publish" \
+      '{"remote":"origin","confirm":true}' \
+      "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+      "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+      fail "${name}_disabled/no_answer" "the disabled publish did not answer"
+    response="$(answer "${name}_disabled_$disabled_id")"
+    expect_status "${name}_disabled_$disabled_id" "$response" 403
+    expect_code "${name}_disabled_$disabled_id" "$response" publish_disabled
+  done
+  check "${name}_disabled/remote" "$refs_before" \
+    "$(git -C "$bare" for-each-ref --format='%(refname) %(objectname)' refs/heads | sort)"
 
   kill "$socket_pid" 2>/dev/null || true
   wait "$socket_pid" 2>/dev/null || true

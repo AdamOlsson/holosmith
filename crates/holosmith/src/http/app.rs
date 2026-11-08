@@ -33,6 +33,7 @@ use crate::http::guard::{self, Guards};
 use crate::http::health::{self, Health};
 use crate::http::history;
 use crate::http::merge;
+use crate::http::publish;
 use crate::http::sessions;
 use crate::http::streams;
 use crate::http::tool_image;
@@ -468,6 +469,7 @@ pub fn router(state: AppState) -> Routes {
     let changes_state = Arc::clone(&state);
     let changes_diff_state = Arc::clone(&state);
     let merge_state = Arc::clone(&state);
+    let publish_state = Arc::clone(&state);
     let prompt_state = Arc::clone(&state);
     let abort_state = Arc::clone(&state);
     let steer_state = Arc::clone(&state);
@@ -602,6 +604,19 @@ pub fn router(state: AppState) -> Routes {
                 let state = Arc::clone(&merge_state);
                 let id = id.map(|Path(id)| id).unwrap_or_default();
                 async move { merge::respond(&state, &id, body).await }
+            },
+        )
+        // The publish (HS-057): item 12's last route, and the first in this build whose work reaches **out** of
+        // the machine. Mutating, so every guard applies and a `ReadOnly` kind is unexpressible; host git like the
+        // merge beside it — the push is the server user's own git, and no container is asked anything — and the
+        // path and the body are `Result`s for the reason the prompt's are. The manifest's kind is what keeps a
+        // route that writes somebody else's repository behind ADR-0010's three headers.
+        .post(
+            "/api/sessions/{id}/publish",
+            move |id: Result<Path<String>, PathRejection>, body: Result<Bytes, BytesRejection>| {
+                let state = Arc::clone(&publish_state);
+                let id = id.map(|Path(id)| id).unwrap_or_default();
+                async move { publish::respond(&state, &id, body).await }
             },
         )
         // The prompt: a mutating route, so every guard applies and the manifest records it (HS-015).

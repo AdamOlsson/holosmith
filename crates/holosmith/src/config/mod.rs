@@ -893,7 +893,11 @@ fn is_host_name(name: &str) -> bool {
 }
 
 /// A branch name `merge` may write, kept conservative on purpose (item 12).
-fn is_ref_name(name: &str) -> bool {
+///
+/// `pub(crate)` since HS-057: a publish's `branch` names a ref too, and this is the machine's one alphabet for
+/// "a name git will accept as a branch" — a second predicate would be a second answer to that question
+/// (ADR-0063's import-not-copy rule, which is why `changes::basis` is `pub(crate)` for the merge).
+pub(crate) fn is_ref_name(name: &str) -> bool {
     !name.is_empty()
         && name != "@"
         && !name.starts_with('-')

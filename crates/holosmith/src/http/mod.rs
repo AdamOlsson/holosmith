@@ -9,6 +9,7 @@ pub mod guard;
 pub mod health;
 mod history;
 mod merge;
+mod publish;
 mod sessions;
 mod streams;
 mod tool_image;
