@@ -904,5 +904,46 @@ The message a subscription earns when a turn ends (spec item 11): a VAPID-signed
 exactly `{host, session_id, kind}`. `host` is **Local**, `session_id` is the row's id and `kind` is one of four
 words — `error`, `turn_timeout`, `budget_exceeded` and `turn_finished` — the first three of which are words this
 build already uses for the same fact. It is not sent while an SSE stream for that session is open, and the envelope
-never carries a message's content. Its machine names are `push::Pusher::announce` and `push::Watcher::observe`.
+never carries a message's content. Its machine names are `push::Pusher::announce` and `push::Watcher::observe`
+for the sender, and `web/src/sw.ts`'s `push` handler for the four sentences a phone shows.
 _Avoid_: Push notification (the *module* is `push`; the thing a phone shows is a Notification), alert, message
+
+**Application server key**:
+The Web Push pair's **public** half, base64url, 87 characters — the `k=` of every VAPID token this machine signs and
+the value a browser hands to `pushManager.subscribe`. It is public by design; the private half never leaves
+`<data>/secrets/vapid.toml`. HS-067 serves it as `GET /api/health`'s sixth key (`application_server_key`), read at
+the moment of asking, `null` on a machine with no pair; `vapid::public_key` is the reader.
+_Avoid_: VAPID public key, push key (a **Push subscription**'s `p256dh` is the browser's, not this)
+
+**Installed app**:
+Holosmith running from a home-screen icon rather than a browser tab: `display: standalone` from the **app manifest**,
+or iOS's own `navigator.standalone`. It is not a second build — the same shell, served from the same origin — and
+iOS delivers a **Notification** only to it, which is why the **Settings screen** says so.
+_Avoid_: Native app, wrapper, home-screen shortcut
+
+**App manifest**:
+`/manifest.webmanifest`, shipped in the app and served as `application/manifest+json`: name, `start_url` and `scope`
+`/`, `display: standalone`, the theme and background colours, and the **app icons**. Its shape is a node test's
+(`web/test/push.test.ts`) and its served bytes are `case_pwa`'s.
+_Avoid_: PWA config, web app config
+
+**App icons**:
+The four checked-in PNGs the app ships — 192 and 512 `any`, 512 `maskable`, and 180 for iOS's `apple-touch-icon`
+link — because iOS will not take an SVG home-screen icon and Chrome will not offer an install without both `any`
+sizes. Generated once, outside the build, and committed as bytes.
+_Avoid_: Favicon (that is the separate SVG the tab shows), logo
+
+**Service worker**:
+The one script the app registers at `/sw.js` (scope `/`), built from `web/src/sw.ts` so its rules — the four
+`kind` sentences, the sixteen-hex id rule, the flattened subscription body — are `web/src/push.ts`'s, typechecked and
+node-tested like every other sentence. It handles `push`, `notificationclick` and `pushsubscriptionchange`, takes
+over at once, and has **no `fetch` handler**: it caches nothing, because a cache is a second source of truth for a
+page whose every value came from a response or a frame.
+_Avoid_: Worker thread, background page, PWA script
+
+**Settings screen**:
+The app's third screen, at `/settings`: this machine's **Web Push subscription** state (one row, because there is one
+control origin), the one control the browser's state allows, and the iOS home-screen sentence. It is a path of its
+own rather than a section of the **Sessions screen** because a subscription belongs to the machine — and a machine
+just installed has no sessions. Its every word is a `web/src/push.ts` function with a node test.
+_Avoid_: Preferences, config screen (the **Config** is the machine's TOML file, and this screen edits nothing in it)
