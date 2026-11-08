@@ -600,6 +600,20 @@ function applyChange(
     container.append(block);
     return;
   }
+  // A machine policy ended the session (HS-063): the per-session disk soft cap is the first, and the block says
+  // what the server measured. One block per frame, no id, nothing a later frame updates — and the code is kept
+  // as a data attribute rather than shown, because `disk_quota` is a word for a client and the sentence is for
+  // the operator (the same split the create form's refusal makes).
+  if (change.op === "session-error") {
+    const block = make("article", "session-error");
+    block.dataset.code = change.code;
+    block.append(
+      make("div", "session-error-label", "Stopped by the machine"),
+      make("div", "session-error-text", change.message),
+    );
+    container.append(block);
+    return;
+  }
   if (change.op === "tool-start" || change.op === "tool-end") {
     const block = tools.get(change.toolId);
     if (block === undefined) {

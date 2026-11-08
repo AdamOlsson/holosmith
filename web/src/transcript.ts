@@ -56,7 +56,12 @@ export type Frame =
   // Something a turn could not do (HS-035): an extension asked for a dialog a session cannot answer, so it was
   // cancelled. Drawn like a steer — one frame, one block, no message id — because it belongs where in the turn
   // it happened and nothing continues it.
-  | { type: "error"; reason: string; method: string };
+  | { type: "error"; reason: string; method: string }
+  // The machine ended this session for a policy of its own (HS-063): the per-session disk soft cap reaching
+  // `session_disk_soft_gb` is the first. One frame, one block, nothing continues it — and unlike `error` above
+  // it is not the agent failing at something, so `code` is the API's word (`disk_quota`) and `message` the
+  // sentence the server composed from the measurement.
+  | { type: "session-error"; code: string; message: string };
 
 // What the page must do for one frame, in this order. `message` and `tool` come first when the
 // block is not on screen yet, so a consumer can create the nodes the next change names.
@@ -78,7 +83,8 @@ export type Change =
     }
   | { op: "boundary"; boundary: "start" | "end"; turn: number }
   | { op: "steer"; text: string }
-  | { op: "error"; reason: string; method: string };
+  | { op: "error"; reason: string; method: string }
+  | { op: "session-error"; code: string; message: string };
 
 // The SSE event names. Four are pinned by ADR-0018; `message.end`, `tool.start` and `tool.end` are
 // HS-015's, and the payloads are the plan's D8.
@@ -97,6 +103,12 @@ const TURN_STEER = "turn.steer";
 // extension's dialog, which a session has no way to answer and therefore cancels. Like a steer it has no
 // message id — one frame, one block, nothing that continues it.
 const TURN_ERROR = "turn.error";
+// A machine policy ending the session (HS-063): `{code, message, …}`. Its one producer is the per-session disk
+// soft cap, whose `code` is `disk_quota`. A new kind rather than a `turn.error` because the two are different
+// failures — the agent could not do something, versus the machine deciding the session must stop — and an
+// unknown kind is dropped rather than refused (ADR-0018), so adding one costs a client nothing until it
+// renders it.
+const ERROR = "error";
 
 // The stream's own frame announcing that the replay it is about to send does not reach the beginning of
 // the log (HS-061). Not a transcript block: it is a cursor, and it is the only frame on this stream that
@@ -120,6 +132,7 @@ export const TRANSCRIPT_EVENTS: readonly string[] = [
   TURN_END,
   TURN_STEER,
   TURN_ERROR,
+  ERROR,
 ];
 
 // The one id a block is keyed by. A frame that cannot name a message is not a frame: it is
@@ -207,6 +220,7 @@ export function parseFrame(eventType: string, data: string): Frame | null {
   if (
     eventType !== TURN_STEER &&
     eventType !== TURN_ERROR &&
+    eventType !== ERROR &&
     eventType !== DELTA &&
     eventType !== SNAPSHOT &&
     eventType !== MESSAGE_END &&
@@ -239,6 +253,16 @@ export function parseFrame(eventType: string, data: string): Frame | null {
       return null;
     }
     return { type: "error", reason, method: text(fields["method"]) ?? "" };
+  }
+  if (eventType === ERROR) {
+    // A code and a sentence are the whole frame: a `disk_quota` without either has nothing to tell the
+    // operator, so it is dropped like any other malformed frame rather than drawn as a blank block.
+    const code = text(fields["code"]);
+    const message = text(fields["message"]);
+    if (code === null || code === "" || message === null || message === "") {
+      return null;
+    }
+    return { type: "session-error", code, message };
   }
   if (eventType === TOOL_START || eventType === TOOL_END) {
     const tool = toolId(fields);
@@ -344,6 +368,11 @@ export class Transcript {
       // The same shape, for the same reason (HS-035): one frame, one block, and nothing a later frame
       // updates — not even the message id a turn's other blocks are keyed by.
       return [{ op: "error", reason: frame.reason, method: frame.method }];
+    }
+    if (frame.type === "session-error") {
+      // A machine policy's frame (HS-063): one block, no message id, nothing that continues it — the same
+      // shape as the two above, and drawn beside the turn it ended rather than inside a message.
+      return [{ op: "session-error", code: frame.code, message: frame.message }];
     }
     if (frame.type === "tool-start" || frame.type === "tool-end") {
       const changes: Change[] = [];
@@ -503,21 +532,25 @@ export function stateText(state: SessionState, reason: string | null): string {
 
 // What a stopped session's row says beyond its state, or `null` when its reason needs no sentence.
 //
-// Two reasons earn one, and they are the two the machine writes without being asked: `evicted` is a
-// create stopping the least recently active idle session to take its slot (HS-020), and `idle_stop` is
-// a session left alone for longer than `idle_stop_min` (HS-021). Spec item 9 is emphatic that neither
-// costs anything — "history, worktree, events and images are kept. Nothing is deleted by the cap." — so
-// the row says so, because a badge reading `stopped · evicted` alone reads like a loss. The two
-// sentences differ in *why* (making room, or sitting idle) and share the promise that matters, which
-// is why they stay in one function. Every other reason is the caller's to show as it is: a forced
-// abort and a delete's own word are not this sentence, and inventing a reassuring line for them would
-// be a claim about work nobody preserved.
+// Three reasons earn one, and they are the three the machine writes without being asked: `evicted` is a
+// create stopping the least recently active idle session to take its slot (HS-020), `idle_stop` is a
+// session left alone for longer than `idle_stop_min` (HS-021), and `disk_quota` is a session whose worktree
+// went over `session_disk_soft_gb` (HS-063, spec item 14). Spec item 9 is emphatic about the first two —
+// "history, worktree, events and images are kept. Nothing is deleted by the cap." — and the third is the
+// same promise with a different cause, which is why the three stay in one function: the operator reads
+// whether anything was lost the same way in all three, and the *fix* is what differs (make room, or sit idle
+// less, or clean the worktree up). Every other reason is the caller's to show as it is: a forced abort and a
+// delete's own word are not this sentence, and inventing a reassuring line for them would be a claim about
+// work nobody preserved.
 export function stoppedNotice(reason: string | null): string | null {
   if (reason === "evicted") {
     return "stopped to make room — nothing was deleted, resume it to continue";
   }
   if (reason === "idle_stop") {
     return "stopped after sitting idle — nothing was deleted, resume it to continue";
+  }
+  if (reason === "disk_quota") {
+    return "stopped for using too much disk — nothing was deleted, clean it up and resume it";
   }
   return null;
 }

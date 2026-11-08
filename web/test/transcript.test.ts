@@ -406,8 +406,23 @@ test("a session stopped for sitting idle says so, and says nothing was deleted",
   assert.notEqual(notice, stoppedNotice("evicted"), "two reasons, one sentence");
 });
 
+test("a session stopped by the disk cap says so, and promises the same nothing", () => {
+  // HS-063's reason word, which is also the event's code (spec item 14). It is the third machine-written
+  // reason, so it gets the third sentence: the cause differs from the other two (the worktree's size, not a
+  // slot and not quiet), the promise does not, and the fix is the one an operator can actually take — clean
+  // the worktree up — rather than "resume it" alone, which would trip the same cap again.
+  const notice = stoppedNotice("disk_quota");
+  assert.ok(notice !== null, "a quota-stopped row said nothing");
+  assert.match(notice, /nothing was deleted/);
+  assert.match(notice, /disk/, "the sentence does not say what it was for");
+  assert.match(notice, /resume/);
+  assert.notEqual(notice, stoppedNotice("evicted"), "two reasons, one sentence");
+  assert.notEqual(notice, stoppedNotice("idle_stop"), "three reasons, one sentence");
+  assert.equal(stoppedDetail("stopped", "disk_quota"), notice);
+});
+
 test("every other reason is the caller's to show, so no sentence is invented for it", () => {
-  // The map is two words wide: a forced abort is not data loss and a delete's own reason must not be
+  // The map is three words wide: a forced abort is not data loss and a delete's own reason must not be
   // softened, so both get `null` and the badge's `state · reason` stands alone.
   for (const reason of [
     null,
@@ -426,7 +441,7 @@ test("every other reason is the caller's to show, so no sentence is invented for
 test("a badge shows a one-word reason as it is", () => {
   // The four reason words the machine writes on its own, and the two a client request does. Nothing about a
   // single-line reason is the renderer's to change.
-  for (const reason of ["evicted", "idle_stop", "forced_abort", "deleted", "turn_timeout", "pi_exit"]) {
+  for (const reason of ["evicted", "idle_stop", "disk_quota", "forced_abort", "deleted", "turn_timeout", "pi_exit"]) {
     assert.equal(stateText("stopped", reason), `stopped · ${reason}`);
   }
   assert.equal(stateText("idle", null), "idle", "a reasonless row is its state alone");
@@ -575,6 +590,64 @@ test("a turn error with no reason is dropped, and one that is not an object with
     reason: "why",
     method: "",
   });
+});
+
+test("a machine policy's event is one block, and it is not a turn error", () => {
+  // HS-063's frame: the `error` kind with the API's code and the sentence the server composed from the
+  // measurement. It has no message id for a steer's reason — one frame, one block, nothing that continues it —
+  // and it must not be mistaken for `turn.error`, which is about the agent failing at something the turn asked
+  // for. The two are distinct frame kinds on purpose, so a client can render one without guessing at the other.
+  const frame = parseFrame(
+    "error",
+    JSON.stringify({
+      code: "disk_quota",
+      message: "the session's worktree holds 15.0 GB, over the 10 GB soft cap",
+      size_kib: 15728640,
+      limit_gb: 10,
+    }),
+  );
+  assert.deepEqual(frame, {
+    type: "session-error",
+    code: "disk_quota",
+    message: "the session's worktree holds 15.0 GB, over the 10 GB soft cap",
+  });
+  // The two extra keys are the server's own record of the measurement; a screen shows the sentence, so they
+  // are not carried into the frame at all.
+  assert.deepEqual(
+    Object.keys(frame as object).sort(),
+    ["code", "message", "type"],
+    "the frame carries what the block draws and nothing else",
+  );
+
+  const transcript = new Transcript();
+  assert.deepEqual(transcript.apply(frame as Frame), [
+    {
+      op: "session-error",
+      code: "disk_quota",
+      message: "the session's worktree holds 15.0 GB, over the 10 GB soft cap",
+    },
+  ]);
+  // No message block and no tool block: it is not part of a message, and a turn that was ended has nothing to
+  // fold it into.
+  assert.deepEqual(transcript.order(), []);
+  assert.deepEqual(transcript.toolOrder(), []);
+});
+
+test("a machine policy's event with no code or no sentence is dropped", () => {
+  // The code is what a client groups by and the sentence is what the operator reads; a frame missing either has
+  // nothing to draw, so it is dropped like any other malformed frame rather than shown as a blank block.
+  for (const payload of [
+    JSON.stringify({}),
+    JSON.stringify({ code: "disk_quota" }),
+    JSON.stringify({ message: "it was too big" }),
+    JSON.stringify({ code: "", message: "it was too big" }),
+    JSON.stringify({ code: "disk_quota", message: "" }),
+    JSON.stringify({ code: 7, message: "it was too big" }),
+  ]) {
+    assert.equal(parseFrame("error", payload), null, payload);
+  }
+  assert.equal(parseFrame("error", "not json"), null);
+  assert.equal(parseFrame("error", "[]"), null);
 });
 
 test("10k deltas are 10k appends into one block, never a re-render", () => {

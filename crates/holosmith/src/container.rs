@@ -766,6 +766,86 @@ mod tests {
         );
     }
 
+    /// D2 (spec item 14, HS-063): two sessions of one project share no writable host path except the
+    /// project's own `.git` directory, so neither can see the other's build and package caches.
+    ///
+    /// The caches D2 names are *inside* the paths a session mounts and nowhere else: `target/` and
+    /// `node_modules/` are directories under the worktree, which is `/work` in the container, and pi's own
+    /// cache is under its `pi-home`. So the claim "no cache directory is shared between sessions" is exactly
+    /// "the worktree and the agent directory are per session, and no second writable mount exists" — which is
+    /// what this reads out of the two `docker run` vectors rather than out of a daemon.
+    ///
+    /// The one shared writable path is deliberate and is spec item 1's: a project's `.git` holds the object
+    /// store, the refs and `worktrees/<id>`, so two sessions of one project see one repository — that is the
+    /// design, not a cache, and git's own caches there (`objects/`) are content that is safe to share by
+    /// being immutable. A second project would make even that path different, which the last assertion shows.
+    #[test]
+    fn two_sessions_share_no_writable_mount_except_the_projects_own_git_directory() {
+        let one = SessionContainer::of(&settings(), &session("holosmith", "0123456789abcdef"));
+        let other = SessionContainer::of(&settings(), &session("holosmith", "fedcba9876543210"));
+
+        // The two per-session paths really are per session, and neither is inside the other: a worktree named
+        // by the other session's id would be a session's files in another's container.
+        assert_ne!(one.mounts.worktree.host, other.mounts.worktree.host);
+        assert_ne!(one.mounts.agent.host, other.mounts.agent.host);
+        for (left, right) in [
+            (&one.mounts.worktree.host, &other.mounts.worktree.host),
+            (&one.mounts.worktree.host, &other.mounts.agent.host),
+            (&one.mounts.agent.host, &other.mounts.worktree.host),
+            (&one.mounts.agent.host, &other.mounts.agent.host),
+        ] {
+            assert!(
+                !right.starts_with(left),
+                "{} holds {}'s files",
+                left.display(),
+                right.display()
+            );
+        }
+
+        // Every writable host path of one session, and the only one it may share with the other.
+        let shared = one.mounts.git_dir.host.clone();
+        let writable = |container: &SessionContainer| -> Vec<PathBuf> {
+            let mut paths: Vec<PathBuf> = container
+                .mounts
+                .all()
+                .iter()
+                .filter(|mount| !mount.read_only)
+                .map(|mount| mount.host.clone())
+                .collect();
+            paths.sort();
+            paths
+        };
+        let theirs = writable(&other);
+        for path in writable(&one) {
+            if path == shared {
+                assert!(
+                    theirs.contains(&path),
+                    "the project's .git is the one shared writable mount"
+                );
+                continue;
+            }
+            assert!(
+                !theirs.contains(&path),
+                "{} is writable in both containers",
+                path.display()
+            );
+        }
+
+        // And the one shared path is the *project's*: a session of another project shares nothing writable at
+        // all, which is what makes the claim about the path rather than about the naming of ids. (Two sessions
+        // never share an id — it is the row's primary key — so the worktree's `.worktrees/<id>` needs no project
+        // in its name.)
+        let elsewhere = SessionContainer::of(&settings(), &session("other", "fedcba9876543210"));
+        assert_ne!(one.mounts.git_dir.host, elsewhere.mounts.git_dir.host);
+        for path in writable(&one) {
+            assert!(
+                !writable(&elsewhere).contains(&path),
+                "{} is shared across projects",
+                path.display()
+            );
+        }
+    }
+
     #[test]
     fn every_mount_but_the_worktree_keeps_its_host_path_inside_the_container() {
         // The worktree's `.git` file holds an absolute `gitdir:` under the project's repository, so a
