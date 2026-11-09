@@ -2538,6 +2538,7 @@ it rather than adding a caveat beside it.
   one that does not answer `403`, so the arm could not fail.
 - **One whois per request on the tailnet path, and no cache.** A dev-server page is thirty children. That is recorded
   as a cost (ADR-0075 D8) rather than fixed: a cached admission outlives the tailnet's own membership change.
+
 ### Landmines: the Computers screen, and a page that knows whose session it is (HS-071)
 
 - **`node --test` resolves `src` imports without an extension, so a module the tests import may not import an
@@ -2567,9 +2568,11 @@ it rather than adding a caveat beside it.
   each other (`SessionsNotifications`) once it had two links, because `.machine-nav` had no layout. A `display: flex;
   gap: 0 0.75rem` is the whole fix, and the screenshot is what found it — no gate can.
 - **A version skew cannot be manufactured on one box by writing a row.** The card shows the version the *hop* reports,
-  so `UPDATE hosts SET version = …` changes nothing on screen (that is ADR-0076 D1's point). The demo stands a
-  `python3` listener in that answers an older health payload and one stopped session — `/tmp/holosmith/demo/standin-peer.py`
-  — which is also the cheapest way to measure the `0.0.1` arm of `skewNote` end to end.
+  so `UPDATE hosts SET version = …` changes nothing on screen (that is ADR-0076 D1's point). What measures the arm end
+  to end is a **stand-in**: a thirty-line `python3` socket that answers `/api/health` with `"version":"0.0.1"` and
+  `/api/sessions` with one `stopped` row, seeded as a registry row like any other machine. Two facts make it work —
+  the seed is not filtered by the host predicate, so the stand-in may be `http://127.0.0.1:<port>` (ADR-0073 D9), and
+  the probe asks only `/api/health`, so nothing else has to be truthful.
 - **The frame path's `closest("#session-list")` became a class.** The stopped-session window reaches `applyStatus`
   through the list element's `data-stopped-ttl-days`, and there is now one list **per machine** — so the id became
   `class="session-list"` plus `data-host`, and `addSession` finds the local group by

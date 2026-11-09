@@ -757,7 +757,7 @@ export function previewPath(host: string, id: string): string {
 // configured `https://host/` and `https://host` cannot make two different links.
 //
 // The origin is always **this** machine's: the hub's preview listener is the front door, and the row's measured
-// `preview` origin is where the *hub* forwards to, never where a browser goes (ADR-0076 D5).
+// `preview` origin is where the *hub* forwards to, never where a browser goes (ADR-0076 D4).
 export function previewUrl(origin: string, host: string, id: string): string {
   return `${origin.replace(/\/+$/, "")}${previewPath(host, id)}`;
 }
@@ -1241,6 +1241,32 @@ export function hostFailure(code: string, message: string): string {
 export function hostLabel(host: string): string {
   return host === LOCAL_HOST ? "local · this machine" : host;
 }
+
+// One sentence for a machine whose role forwards nothing. A `server` still keeps a registry — the seed is copied to
+// every machine so the lists stay aligned — but the forwarding route exists only where a machine forwards
+// (ADR-0074), so a hop out of a `server` is its own `404 not_found`, a sentence about no endpoint rather than about
+// the machine that was asked. Drawn where the other machines' rows would be, so the screen says why they are absent
+// instead of offering a control whose only answer is a refusal (`createOffered`'s rule, one screen over).
+export function forwardingNote(role: string): string | null {
+  return forwards(role) ? null : `a ${role} machine forwards nothing, so it can read only its own sessions`;
+}
+
+// What the Computers screen says about itself, above its cards.
+export const COMPUTERS_INTRO =
+  "Every machine this one may send a request to. A session lives on exactly one of them.";
+
+// The Add form's one button, and the Remove affordance's question and button.
+export const HOST_ADD_LABEL = "Add machine";
+export const HOST_REMOVE_LABEL = "Remove";
+
+export function hostRemoveQuestion(host: string): string {
+  return `Remove ${host}? Its row is forgotten here; the machine itself is not changed.`;
+}
+
+// What a machine's section says while its own answer is still in flight. The list is drawn with this machine's rows
+// at once and each machine's group filled as its answer arrives, so one machine that is away cannot hold the whole
+// screen back for the hop's bound.
+export const GROUP_WAITING = "reading…";
 
 // Whether a refused removal can be retried with `?force=true`: `409 host_busy` is the only code that says the
 // request would work if the operator meant it, and its own message names the sessions that are still live.

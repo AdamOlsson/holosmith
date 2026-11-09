@@ -183,9 +183,9 @@ _Avoid_: Client key, request id, dedupe token, idempotency token
 The page the operator works from, at `/`: the machine's health, the sessions held **by each machine** with each one's
 state and last activity, and — where this machine runs sessions — the form that creates one. Its groups are one
 answer per machine (`GET /api/sessions` for this one, `GET /api/hosts/<name>/sessions` for every **host registry**
-row), so a session's owner is the heading above it and the machine a machine that answered nothing is a group whose
-body is the refusal's sentence, never an empty list. Its states arrive as `session.status` frames, so the page holds
-no state of its own.
+row), so a session's owner is the heading above it, and a machine that answered nothing is a group whose body is the
+refusal's sentence — never an empty list. A machine whose **role** forwards nothing has one group, its own, and one
+sentence saying so. Its states arrive as `session.status` frames, so the page holds no state of its own.
 _Avoid_: Dashboard, home page, console, session list page
 
 **Session screen**:
@@ -200,12 +200,16 @@ _Avoid_: Detail page, viewer, session viewer
 **Computers screen**:
 The page that lists the machines, at `/computers`: one card per machine with its name, origin, **role**, version,
 **reach**, when anything last asked, and its live and stopped session counts; the form that registers a machine
-(`POST /api/hosts`, its own sentence shown verbatim when it refuses) and the remove affordance (`?force=true` for a
-`409 host_busy`). Nothing on it is stored: role, version and uptime come from one forwarded `GET
-/api/hosts/<name>/health` per machine and the counts from one forwarded `/sessions`, folded by `status` — `live` is
-`starting`/`running`/`idle` and `stopped` is every other state. A machine that does not answer is a card with the
-refusal's sentence and a `—` count, never a zero; a version that differs from this build's is one sentence, never a
-refusal. This machine is always the first card, and its own start form appears only where `role` is not `hub`. Its
+(`POST /api/hosts`, whose refusal is shown as the API's own sentence — without its code for `bad_host_name`,
+`bad_host_url` and `not_holosmith`, because those are sentences about a value the operator typed) and the remove
+affordance (`?force=true` for a `409 host_busy`). Nothing on it is stored: for every machine but this one, role,
+version and uptime come from one forwarded `GET /api/hosts/<name>/health` and the counts from one forwarded
+`/sessions`, folded by `status` — `live` is `starting`/`running`/`idle` and `stopped` is every other state. This
+machine's own card is drawn from the health answer the page was served by and one local `/sessions`. A machine that
+does not answer is a card with the refusal's sentence and a `—` count, never a zero; a version that differs from this
+build's is one sentence, never a refusal; and where this machine's **role** forwards nothing, every other card says
+that instead of asking. This machine is always the first card, and its own start form appears only where `role` is not
+`hub`. Its
 rules are `web/src/transcript.ts`'s functions — among them `apiPath`, `hostRef`, `sessionCounts`, `skewNote`,
 `reachText`, `lastCheckText`, `hostFailure` and `createOffered` — with tests in `web/test/transcript.test.ts`, and its
 DOM is `main.ts`'s `computersSection`.

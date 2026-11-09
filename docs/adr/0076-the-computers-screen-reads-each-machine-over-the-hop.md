@@ -88,8 +88,12 @@ registry names it. A machine's own row is a row like any other, but the page is 
 a row to describe it. A registry row whose `url` is the origin this page was served from *is* this machine and is not
 drawn twice — a text comparison after one trailing slash, which is all a page can do: the server's `hosts::is_local`
 also folds a scheme's default port, and a page that invented a second copy of that folding would be a second
-authority on what "here" means. A row registered with the port spelled out is a second machine, forwarded to over
-the network — exactly as ADR-0074 says the server treats it.
+authority on what "here" means. A row registered with the port spelled out is a second machine **for the hop**, and
+forwarded to over the network, exactly as ADR-0074 says the server treats it — but a `DELETE` of that row is refused
+as this machine's own (`409 host_busy`), because `hosts::is_local` folds a scheme's default port and the page does
+not. The asymmetry is the server's and it is recorded here rather than papered over: the page's comparison answers
+"is this card this machine", and the registry's answers "may this row be forgotten while this machine has live
+sessions".
 
 ## D4 — the preview link is this machine's listener with the peer's name in the first segment
 
@@ -151,7 +155,10 @@ hop, before and after a session is created on it (so the fold has a row to count
 answering `502 upstream_unreachable` with a sentence naming the machine and its origin, for both of the reads a card
 makes; the two registration refusals with their codes and their sentences; an add and a remove from the registry;
 that `/computers` is this tree's `web/dist/index.html` byte for byte; and that the **served bundle** carries the
-screen's seven ids, the three classes its grouping and its cards are built from, and the sentences a decision fixed.
+screen's seven ids, the three classes its grouping and its cards are built from, and the seven sentences a
+decision fixed. One arm measures the fact behind D3's second paragraph: the **peer** — a `server`, seeded with a row
+naming the hub — is asked for that row's sessions through its own listener and answers `404 not_found`, which is the
+sentence the page would otherwise have drawn as a group.
 
 What it cannot measure is the DOM. A needle in a bundle is not a rendered element — the weak half is why each of
 those sentences is a `transcript.ts` function with its own test in `web/test/transcript.test.ts`, and why the demo

@@ -5685,12 +5685,14 @@ PYWS
 #   4. the peer's **sessions through the hub's hop**, before and after a session is created on it: the list the
 #      group is drawn from, and the row a count folds over;
 #   5. a machine that is not there: its hop answers `502 upstream_unreachable` with a sentence naming it, which is
-#      what the card degrades to rather than an empty list (ADR-0076 D7);
+#      what the card degrades to rather than an empty list (ADR-0076 D3);
 #   6. the registration's refusals, at the API the form posts to, with the code **and** the sentence the screen
 #      prints verbatim (`bad_host_name`, `bad_host_url`); `not_holosmith` is `case_hosts`' pin against a live
 #      listener and `tests/hosts.rs`' otherwise;
 #   7. adding and removing a row from the registry: `POST /api/hosts` then `DELETE /api/hosts/{name}`;
-#   8. `/computers` is this tree's app shell byte for byte, and the **served bundle** carries the screen's ids, its
+#   8. a machine that forwards **nothing** — the peer, a `server` with a registry row of its own — answers its own
+#      `404 not_found` for that row's sessions, which is the fact the page's role guard rests on (ADR-0076 D3);
+#   9. `/computers` is this tree's app shell byte for byte, and the **served bundle** carries the screen's ids, its
 #      classes and its sentences.
 #
 # What it cannot measure, and does not pretend to: the DOM. A needle in a bundle is not a rendered element — the
@@ -5701,7 +5703,7 @@ case_computers() {
   local hub_root="$root/hub" peer_root="$root/peer"
   local hub_config="$hub_root/config.toml" peer_config="$peer_root/config.toml"
   local hub_data="$hub_root/data" peer_data="$peer_root/data"
-  local seed="$hub_root/hosts.toml"
+  local seed="$hub_root/hosts.toml" peer_seed="$peer_root/hosts.toml"
   local hub_control hub_preview peer_control peer_preview gone_port
   local response body id asset version want needle
 
@@ -5725,12 +5727,22 @@ case_computers() {
   peer_preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
   gone_port="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
 
+  # The peer is a `server` with a registry of its own named by a seed, because a seed is copied to **every** machine
+  # so the lists stay aligned — and that row is what makes the last arm measurable: a machine that forwards nothing
+  # answers its own `404 not_found` for another machine's sessions (ADR-0076 D3). The hub is not up yet when the peer
+  # probes, so the row is born unreachable, which is a fact about this case's order and not about the code.
+  cat >"$peer_seed" <<EOF
+[[hosts]]
+name = "hub"
+url = "http://127.0.0.1:$hub_control"
+EOF
   cat >"$peer_config" <<EOF
 role = "server"
 backend = "stub"
 control_origin = "http://127.0.0.1:$peer_control"
 preview_listen = "127.0.0.1:$peer_preview"
 preview_origin = "http://127.0.0.1:$peer_preview"
+hosts_seed = "$peer_seed"
 EOF
 
   # The hub's registry: the peer under the name the screen will show it as, and a machine that is not there. Both
@@ -5870,13 +5882,13 @@ EOF
 
   # ---- 5. a machine that is not there -------------------------------------------------------------
   # The hub answers for a peer it cannot reach: `502` and a sentence naming the machine and its origin. That is what
-  # the card degrades to — never an empty list, which would read as a machine with nothing on it (ADR-0076 D7).
+  # the card degrades to — never an empty list, which would read as a machine with nothing on it (ADR-0076 D3).
   fetch "$name-gone" GET /api/hosts/gone/health "Host: 127.0.0.1" ||
     fail "$name/gone" "GET /api/hosts/gone/health did not answer"
   expect_status "$name/gone" "$(answer "$name-gone")" 502
   expect_code "$name/gone" "$(answer "$name-gone")" upstream_unreachable
   body="$(cat "$WORK/responses/$name-gone.body")"
-  for needle in gone "http://127.0.0.1:$gone_port"; do
+  for needle in "gone could not be reached at" "http://127.0.0.1:$gone_port"; do
     case "$body" in
       *"$needle"*) assertions=$((assertions + 1)) ;;
       *) fail "$name/gone/sentence" "the refusal names neither the machine nor its origin: $body" ;;
@@ -5898,8 +5910,10 @@ EOF
   # The message is the sentence the form shows verbatim: a code in front of it would be a word to act on that is
   # not one (`hostFailure`). It names what to change.
   body="$(cat "$WORK/responses/$name-bad-name.body")"
+  # The sentence as the body really spells it: the reserved word in quotes, escaped by JSON. A bare `local` would also
+  # be satisfied by the word appearing in prose, which is the mistake `case_changes_screen` warns about.
   case "$body" in
-    *'local'*) assertions=$((assertions + 1)) ;;
+    *'must not be \"local\"'*) assertions=$((assertions + 1)) ;;
     *) fail "$name/bad_name/sentence" "the refusal does not name the reserved word: $body" ;;
   esac
   # A port below the allowed range on a host the rule accepts: the URL's *port* arm, which the CLI in HS-072 must
@@ -5952,7 +5966,25 @@ EOF
     esac
   done
 
-  # ---- 8. the screen: this tree's shell, and the bundle's own words -------------------------------
+  # ---- 8. a machine that forwards nothing cannot read another's rows -------------------------------
+  # The peer is a `server` and its own registry names the hub, so the page on that machine would draw a group for the
+  # hub — except that the forwarding route is registered only where a machine forwards (ADR-0074), so the read is the
+  # peer's `404 not_found`, a sentence about an endpoint rather than about a machine. That is the fact behind
+  # `forwards(role)`'s guard (ADR-0076 D3), and it is measured here rather than assumed.
+  forward_fetch "$peer_port" "$name-peer-hosts" GET /api/hosts "Host: 127.0.0.1" ||
+    fail "$name/peer_hosts" "GET /api/hosts on the peer did not answer"
+  expect_status "$name/peer_hosts" "$(answer "$name-peer-hosts")" 200
+  body="$(cat "$WORK/responses/$name-peer-hosts.body")"
+  case "$body" in
+    *'"name":"hub"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/peer_hosts/row" "the server's registry lost the row its seed names: $body" ;;
+  esac
+  forward_fetch "$peer_port" "$name-peer-forward" GET /api/hosts/hub/sessions "Host: 127.0.0.1" ||
+    fail "$name/peer_forward" "GET /api/hosts/hub/sessions on the peer did not answer"
+  expect_status "$name/peer_forward" "$(answer "$name-peer-forward")" 404
+  expect_code "$name/peer_forward" "$(answer "$name-peer-forward")" not_found
+
+  # ---- 9. the screen: this tree's shell, and the bundle's own words -------------------------------
   fetch "$name" GET /computers "Host: 127.0.0.1" || fail "$name/no_answer" "GET /computers did not answer"
   response="$(answer "$name")"
   expect_status "$name" "$response" 200
@@ -5973,17 +6005,19 @@ EOF
     fail "$name/asset/bytes" "the served bundle is not this tree's web/dist$asset"
   assertions=$((assertions + 1))
   # One id per element the screen is made of — the assignment's own quotes, so deleting a container cannot leave a
-  # sibling's id matching — plus the classes the grouping and the card are built from, plus the four sentences a
-  # decision already fixed: the two reach words (as old as the check), the skew (ADR-0076 D8), the forced retry's
-  # label (D9) and the page's own machine (D6). Every needle is counted, so one that found nothing cannot pass as
-  # one that did.
+  # sibling's id matching — plus the classes the grouping and the card are built from, plus the **seven** sentences a
+  # decision already fixed: the two reach words (as old as the check, D1/D3), the skew (D5), the forced retry's label
+  # and the Remove question (D6), the page's own machine (D3), the intro, and what a machine that forwards nothing can
+  # read (D3). Every needle is counted, so one that found nothing cannot pass as one that did.
   for needle in \
     'id="computers"' 'id="computer-list"' 'id="computers-add"' 'id="computers-name"' \
     'id="computers-url"' 'id="computers-submit"' 'id="computers-error"' \
     'machine-group' 'computer-counts' 'computer-sentence' \
     'reachable at the last check' 'unreachable at the last check' \
     'a call one of them does not know answers 404' 'Remove anyway' 'local · this machine' \
-    'Every machine this one may send a request to. A session lives on exactly one of them.'; do
+    'Every machine this one may send a request to. A session lives on exactly one of them.' \
+    'forwards nothing, so it can read only its own sessions' \
+    'Its row is forgotten here; the machine itself is not changed.'; do
     grep -qF -- "$needle" "$WORK/responses/${name}_asset.body" ||
       fail "$name/asset/screen" "the served bundle does not carry $needle"
     assertions=$((assertions + 1))

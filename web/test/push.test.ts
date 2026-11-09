@@ -316,11 +316,15 @@ test("the header offers every other screen and never itself", () => {
       }
     }
   }
-  // The list's page keeps its own path, and a session's page is not a screen of its own in this list.
-  assert.deepEqual(
-    navLinks(`/sessions/${ID}`).map((link) => link.href),
-    ["/", COMPUTERS_PATH, SETTINGS_PATH].filter((href) => href !== `/sessions/${ID}`),
-  );
+  // A session's page is not a screen of this list, so it is offered every screen there is — and a path that is not a
+  // screen at all gets the same answer, because the rule compares against `SCREENS` and never against the path.
+  for (const pathname of [`/sessions/${ID}`, `/hosts/workshop/sessions/${ID}`, "/nonsense"]) {
+    assert.deepEqual(
+      navLinks(pathname).map((link) => link.href),
+      ["/", COMPUTERS_PATH, SETTINGS_PATH],
+      pathname,
+    );
+  }
   assert.deepEqual(navLinks("/"), [
     { href: COMPUTERS_PATH, label: "Computers" },
     { href: SETTINGS_PATH, label: "Notifications" },

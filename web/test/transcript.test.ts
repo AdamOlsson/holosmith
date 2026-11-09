@@ -12,10 +12,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  COMPUTERS_INTRO,
   COUNTS_UNKNOWN,
+  GROUP_WAITING,
   HISTORY_PAGE_LIMIT,
+  HOST_ADD_LABEL,
   HOST_FORCE_LABEL,
   HOST_REFUSALS,
+  HOST_REMOVE_LABEL,
   LIVE_STATES,
   NEVER_CHECKED,
   NO_DETAIL,
@@ -33,11 +37,13 @@ import {
   apiPath,
   createOffered,
   forwards,
+  forwardingNote,
   historyPath,
   hostFailure,
   hostForceOffered,
   hostLabel,
   hostRef,
+  hostRemoveQuestion,
   isLocalRow,
   lastCheckText,
   LOCAL_HOST,
@@ -47,6 +53,7 @@ import {
   previewPath,
   previewUrl,
   parseTruncated,
+  sessionActionPath,
   sessionCounts,
   sessionCountsText,
   sessionHref,
@@ -1135,7 +1142,7 @@ test("a preview path spells the host segment the listener parses", () => {
   assert.equal(LOCAL_HOST, "local");
   assert.equal(previewPath(LOCAL_HOST, "0123456789abcdef").startsWith(`/${LOCAL_HOST}/`), true);
   // Another machine's preview: the first segment is the **row's** name, because the listener that serves it is
-  // this machine's and it is the one that forwards (ADR-0076 D5).
+  // this machine's and it is the one that forwards (ADR-0076 D4).
   assert.equal(previewPath("workshop", "0123456789abcdef"), "/workshop/0123456789abcdef/");
 });
 
@@ -1636,4 +1643,45 @@ test("this machine's host name is labelled as the page's own", () => {
   assert.ok(hostLabel(LOCAL_HOST).includes(LOCAL_HOST));
   assert.ok(hostLabel(LOCAL_HOST).includes("this machine"));
   assert.equal(hostLabel("workshop"), "workshop");
+});
+
+test("a machine that forwards nothing says so, and a forwarding one has nothing to say", () => {
+  assert.equal(forwards("server"), false);
+  const note = forwardingNote("server") ?? "";
+  // It names the role, because "why is this empty" is the question the sentence answers, and it says what the limit
+  // is rather than apologising for it.
+  assert.ok(note.includes("server"), note);
+  assert.ok(note.includes("forwards nothing"), note);
+  assert.equal(forwardingNote("hub"), null);
+  assert.equal(forwardingNote("both"), null);
+  // The waiting word is not a sentence about a machine: nothing is known yet, and a zero would be a claim.
+  assert.notEqual(GROUP_WAITING, "");
+});
+
+test("the Computers screen's own words are rules too", () => {
+  assert.ok(COMPUTERS_INTRO.includes("A session lives on exactly one of them."), COMPUTERS_INTRO);
+  // The question names the machine, and it says the one thing an operator has to know: a row is not a machine.
+  const question = hostRemoveQuestion("workshop");
+  assert.ok(question.startsWith("Remove workshop?"), question);
+  assert.ok(question.includes("the machine itself is not changed"), question);
+  assert.notEqual(hostRemoveQuestion("workshop"), hostRemoveQuestion("attic"));
+  assert.equal(HOST_REMOVE_LABEL, "Remove");
+  assert.equal(HOST_ADD_LABEL, "Add machine");
+});
+
+test("a session's action is spelled on the machine that owns it", () => {
+  const id = "0123456789abcdef";
+  assert.equal(sessionActionPath(LOCAL_HOST, id, "prompt"), `/api/sessions/${id}/prompt`);
+  assert.equal(
+    sessionActionPath("workshop", id, "merge"),
+    `/api/hosts/workshop/sessions/${id}/merge`,
+  );
+  // Every action is one shape, so the six callers cannot disagree about the separator.
+  for (const action of ["prompt", "abort", "steer", "resume", "changes", "merge", "publish"]) {
+    assert.equal(
+      sessionActionPath("workshop", id, action),
+      `${sessionPath("workshop", id)}/${action}`,
+      action,
+    );
+  }
 });
