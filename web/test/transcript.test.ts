@@ -12,7 +12,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  COUNTS_UNKNOWN,
   HISTORY_PAGE_LIMIT,
+  HOST_FORCE_LABEL,
+  HOST_REFUSALS,
+  LIVE_STATES,
+  NEVER_CHECKED,
   NO_DETAIL,
   REASON_MAX,
   Transcript,
@@ -25,7 +30,16 @@ import {
   UNSAVED_WORK_NOTICE,
   DAY,
   expiryText,
+  apiPath,
+  createOffered,
+  forwards,
   historyPath,
+  hostFailure,
+  hostForceOffered,
+  hostLabel,
+  hostRef,
+  isLocalRow,
+  lastCheckText,
   LOCAL_HOST,
   networkText,
   parseFrame,
@@ -33,12 +47,21 @@ import {
   previewPath,
   previewUrl,
   parseTruncated,
+  sessionCounts,
+  sessionCountsText,
+  sessionHref,
   sessionIdFromPath,
+  sessionPath,
+  skewNote,
   stateText,
   stoppedDetail,
   stoppedNotice,
   type Kept,
   streamPath,
+  uptimeText,
+  relativeTime,
+  reachText,
+  previewShown,
   type Change,
   type Frame,
   type SessionState,
@@ -384,8 +407,11 @@ test("Resume exists in exactly the two states the transition table resumes from"
 });
 
 test("the stream is the ADR-0014 path and no resume parameter is invented", () => {
-  assert.equal(streamPath("0123456789abcdef"), "/api/sessions/0123456789abcdef/events");
-  assert.ok(!streamPath("abc").includes("since="), "the browser sends Last-Event-ID, not the page");
+  assert.equal(streamPath(LOCAL_HOST, "0123456789abcdef"), "/api/sessions/0123456789abcdef/events");
+  assert.ok(
+    !streamPath(LOCAL_HOST, "abc").includes("since="),
+    "the browser sends Last-Event-ID, not the page",
+  );
 });
 
 test("an evicted session's row says nothing was deleted", () => {
@@ -555,9 +581,29 @@ test("the detail line carries the stop's sentence and the countdown, and only on
   }
 });
 
-test("the screen reads its id from /sessions/<id> and from nowhere else", () => {
-  assert.equal(sessionIdFromPath("/sessions/0123456789abcdef"), "0123456789abcdef");
-  for (const path of ["/", "/sessions", "/sessions/", "/sessions/a/b", "/api/sessions/abc", ""]) {
+test("the screen reads which machine's session it is from the address", () => {
+  assert.deepEqual(sessionIdFromPath("/sessions/0123456789abcdef"), {
+    host: LOCAL_HOST,
+    id: "0123456789abcdef",
+  });
+  // The hub's own shape for another machine's session, which is the API's prefix one level out.
+  assert.deepEqual(sessionIdFromPath("/hosts/workshop/sessions/0123456789abcdef"), {
+    host: "workshop",
+    id: "0123456789abcdef",
+  });
+  for (const path of [
+    "/",
+    "/sessions",
+    "/sessions/",
+    "/sessions/a/b",
+    "/api/sessions/abc",
+    "/hosts/workshop/sessions",
+    "/hosts/workshop/sessions/",
+    "/hosts//sessions/abc",
+    "/hosts/workshop/sessions/abc/diff",
+    "/computers",
+    "",
+  ]) {
     assert.equal(sessionIdFromPath(path), null, path);
   }
 });
@@ -910,7 +956,7 @@ test("a truncation frame names a cursor and how many turns it skipped", () => {
 
 test("a history path carries the cursor and the page size", () => {
   assert.equal(
-    historyPath("0123456789abcdef", 41),
+    historyPath(LOCAL_HOST, "0123456789abcdef", 41),
     `/api/sessions/0123456789abcdef/events/history?before=41&limit=${HISTORY_PAGE_LIMIT}`,
   );
   // The page size the button sends is the server's own default, so the two cannot drift.
@@ -1085,21 +1131,27 @@ test("the Internet-access phrase is two words, and neither promises a route", ()
 // listener parses. Two rules, because either half can be wrong on its own: the host segment (that is the
 // listener's, not the page's) and which states offer a link at all.
 test("a preview path spells the host segment the listener parses", () => {
-  assert.equal(previewPath("0123456789abcdef"), "/local/0123456789abcdef/");
+  assert.equal(previewPath(LOCAL_HOST, "0123456789abcdef"), "/local/0123456789abcdef/");
   assert.equal(LOCAL_HOST, "local");
-  assert.equal(previewPath("0123456789abcdef").startsWith(`/${LOCAL_HOST}/`), true);
+  assert.equal(previewPath(LOCAL_HOST, "0123456789abcdef").startsWith(`/${LOCAL_HOST}/`), true);
+  // Another machine's preview: the first segment is the **row's** name, because the listener that serves it is
+  // this machine's and it is the one that forwards (ADR-0076 D5).
+  assert.equal(previewPath("workshop", "0123456789abcdef"), "/workshop/0123456789abcdef/");
 });
 
 test("a preview URL is the origin and the path, with one slash between them", () => {
   const id = "0123456789abcdef";
   for (const origin of ["https://machine.tailnet.ts.net:8444", "https://machine.tailnet.ts.net:8444/"]) {
     assert.equal(
-      previewUrl(origin, id),
+      previewUrl(origin, LOCAL_HOST, id),
       `https://machine.tailnet.ts.net:8444/local/${id}/`,
       origin,
     );
   }
-  assert.equal(previewUrl("http://localhost:8081", id), `http://localhost:8081/local/${id}/`);
+  assert.equal(
+    previewUrl("http://localhost:8081", LOCAL_HOST, id),
+    `http://localhost:8081/local/${id}/`,
+  );
 });
 
 test("a preview is offered exactly by the states that have a container", () => {
@@ -1394,14 +1446,17 @@ test("a publish names the branch, the remote and the commit", () => {
 
 test("a file path is encoded once, so a name with a space or a query character survives", () => {
   assert.equal(
-    diffPath("0123456789abcdef", "src/a.txt"),
+    diffPath(LOCAL_HOST, "0123456789abcdef", "src/a.txt"),
     "/api/sessions/0123456789abcdef/changes/diff?path=src%2Fa.txt",
   );
   // A `#` that reached the server unencoded would end the path at the fragment; a `?` would start a query.
-  const odd = diffPath("0123456789abcdef", "a b?c#d&e.txt");
+  const odd = diffPath(LOCAL_HOST, "0123456789abcdef", "a b?c#d&e.txt");
   assert.ok(odd.endsWith("path=a%20b%3Fc%23d%26e.txt"), odd);
   // The id is encoded too, because a route segment is not a place to trust the alphabet.
-  assert.ok(diffPath("a/b", "x").startsWith("/api/sessions/a%2Fb/"), diffPath("a/b", "x"));
+  assert.ok(
+    diffPath(LOCAL_HOST, "a/b", "x").startsWith("/api/sessions/a%2Fb/"),
+    diffPath(LOCAL_HOST, "a/b", "x"),
+  );
 });
 
 test("a sheet's failure is the envelope's code and message, even for a project refusal", () => {
@@ -1410,4 +1465,175 @@ test("a sheet's failure is the envelope's code and message, even for a project r
   assert.equal(sheetFailure("not_found", "no such file"), "not_found: no such file");
   assert.equal(sheetFailure("dirty_worktree", "the session has uncommitted work"), "dirty_worktree: the session has uncommitted work");
   assert.notEqual(sheetFailure("git_not_directory", "x"), createFailure("git_not_directory", "x"));
+});
+
+// ---- the machine a request is for (HS-071, ADR-0076) -----------------------------------------
+//
+// A hub serves one page and every machine's data, so every path the page spells takes the host it is for. These
+// are the rules `main.ts` cannot get wrong silently: a path with the wrong prefix is a 404 on a machine that never
+// had the session, and an un-re-rooted `output_ref` is the same 404 one click deeper.
+
+test("an API path is this machine's, or the hub's forwarding prefix", () => {
+  assert.equal(apiPath(LOCAL_HOST, "sessions/abc"), "/api/sessions/abc");
+  assert.equal(apiPath("workshop", "sessions/abc"), "/api/hosts/workshop/sessions/abc");
+  // A leading slash is the same path: one rule, so a caller cannot make a doubled separator.
+  assert.equal(apiPath("workshop", "/sessions/abc"), "/api/hosts/workshop/sessions/abc");
+  // The registry is **each machine's own** and is never forwarded (ADR-0074), so this is the only route the page
+  // spells for the machine that serves it.
+  assert.equal(apiPath(LOCAL_HOST, "hosts"), "/api/hosts");
+  assert.equal(apiPath(LOCAL_HOST, "health"), "/api/health");
+});
+
+test("one session's routes are spelled once, for the machine that owns it", () => {
+  const id = "0123456789abcdef";
+  assert.equal(sessionPath(LOCAL_HOST, id), `/api/sessions/${id}`);
+  assert.equal(sessionPath("workshop", id), `/api/hosts/workshop/sessions/${id}`);
+  assert.equal(streamPath("workshop", id), `/api/hosts/workshop/sessions/${id}/events`);
+  assert.equal(
+    historyPath("workshop", id, 41),
+    `/api/hosts/workshop/sessions/${id}/events/history?before=41&limit=${HISTORY_PAGE_LIMIT}`,
+  );
+});
+
+test("a path the server computed is re-rooted at the machine that wrote it", () => {
+  const ref = "/api/sessions/0123456789abcdef/tool-output/tool-1";
+  // This machine's own: byte for byte, because that is the path the server already made.
+  assert.equal(hostRef(LOCAL_HOST, ref), ref);
+  assert.equal(
+    hostRef("workshop", ref),
+    "/api/hosts/workshop/sessions/0123456789abcdef/tool-output/tool-1",
+  );
+  // Something that is not an `/api/` path is not a reference this page can re-root, and guessing would invent a
+  // route: it is left alone.
+  assert.equal(hostRef("workshop", "https://example.invalid/x"), "https://example.invalid/x");
+});
+
+test("a session's page names its machine, and the address reads back", () => {
+  const id = "0123456789abcdef";
+  assert.equal(sessionHref(LOCAL_HOST, id), `/sessions/${id}`);
+  assert.equal(sessionHref("workshop", id), `/hosts/workshop/sessions/${id}`);
+  // The pair round-trips, which is what makes a reload land on the same machine's transcript.
+  for (const host of [LOCAL_HOST, "workshop"]) {
+    assert.deepEqual(sessionIdFromPath(sessionHref(host, id)), { host, id });
+  }
+});
+
+test("the two counts are live work and everything else, and they add up", () => {
+  const rows: { status: SessionState }[] = [
+    { status: "starting" },
+    { status: "running" },
+    { status: "idle" },
+    { status: "stopped" },
+    { status: "error" },
+    { status: "deleting" },
+  ];
+  assert.deepEqual(sessionCounts(rows), { live: 3, stopped: 3 });
+  // The rule that makes the card's arithmetic the operator's: the two numbers are the machine's row count.
+  for (const row of rows) {
+    const counts = sessionCounts([row]);
+    assert.equal(counts.live + counts.stopped, 1, row.status);
+  }
+  assert.deepEqual(sessionCounts([]), { live: 0, stopped: 0 });
+  // `live` is the three states a container can be in, and that set is the one the row's stream reads too.
+  assert.deepEqual([...LIVE_STATES].sort(), ["idle", "running", "starting"]);
+  assert.equal(sessionCountsText({ live: 2, stopped: 0 }), "2 live · 0 stopped");
+  assert.equal(sessionCountsText({ live: 0, stopped: 1 }), "0 live · 1 stopped");
+  // A count nothing measured is not a zero.
+  assert.notEqual(COUNTS_UNKNOWN, "0");
+});
+
+test("a version skew is one sentence, and the same version is no sentence", () => {
+  assert.equal(skewNote("0.1.0", "0.1.0"), null);
+  const note = skewNote("0.0.1", "0.1.0");
+  assert.ok(note !== null);
+  // Both versions are in it: an operator has to be able to say which machine is behind.
+  assert.ok(note.includes("0.0.1"), note);
+  assert.ok(note.includes("0.1.0"), note);
+  // It is about the API, not about a machine being wrong: the acceptance says skew "affects which API a call can
+  // use", and 404 is what a call the older build does not know answers.
+  assert.ok(note.includes("404"), note);
+});
+
+test("a machine's reach is as old as the last check, and says so", () => {
+  assert.equal(reachText("reachable"), "reachable at the last check");
+  assert.equal(reachText("unreachable"), "unreachable at the last check");
+  // Any other word is not a pass: the column holds two words and a third is a corrupt row, which reads as not
+  // reachable rather than as reachable.
+  assert.equal(reachText("something else"), "unreachable at the last check");
+  const now = 1_700_000_000;
+  assert.equal(lastCheckText(now - 120, now), "checked 2 min ago");
+  assert.equal(lastCheckText(0, now), NEVER_CHECKED);
+  assert.equal(lastCheckText(now, now), "checked just now");
+});
+
+test("relative time is coarse, and it reads a time it is given", () => {
+  const now = 1_700_000_000;
+  assert.equal(relativeTime(now, now), "just now");
+  assert.equal(relativeTime(now - 59, now), "just now");
+  assert.equal(relativeTime(now - 60, now), "1 min ago");
+  assert.equal(relativeTime(now - 3599, now), "59 min ago");
+  assert.equal(relativeTime(now - 3600, now), "1 h ago");
+  assert.equal(relativeTime(now - 2 * DAY, now), "2 d ago");
+});
+
+test("uptime reads as hours and minutes", () => {
+  assert.equal(uptimeText(0), "up 0m");
+  assert.equal(uptimeText(90), "up 1m");
+  assert.equal(uptimeText(3600), "up 1h 0m");
+  assert.equal(uptimeText(3660), "up 1h 1m");
+});
+
+test("a registration's refusal is the API's sentence, not a code in front of it", () => {
+  for (const code of HOST_REFUSALS) {
+    assert.equal(hostFailure(code, "the sentence"), "the sentence", code);
+  }
+  // Every other code keeps its word: it names something the operator cannot see in the form.
+  assert.equal(hostFailure("upstream_unreachable", "went away"), "upstream_unreachable: went away");
+  assert.equal(hostFailure("bad_body", "no"), "bad_body: no");
+  // The three the acceptance names, spelled the way `http::error` spells them (ADR-0073).
+  assert.deepEqual([...HOST_REFUSALS], ["bad_host_name", "bad_host_url", "not_holosmith"]);
+});
+
+test("only a busy row earns the forced retry", () => {
+  assert.equal(hostForceOffered("host_busy"), true);
+  for (const code of ["not_found", "bad_host_url", "internal", "upstream_unreachable"]) {
+    assert.equal(hostForceOffered(code), false, code);
+  }
+  // The label is the operator's word for "yes, I know", and it is not the plain Delete's.
+  assert.notEqual(HOST_FORCE_LABEL, "Remove");
+});
+
+test("which roles forward, and therefore which offer a remote preview", () => {
+  assert.equal(forwards("hub"), true);
+  assert.equal(forwards("both"), true);
+  assert.equal(forwards("server"), false);
+  for (const state of ["starting", "idle", "running"] as SessionState[]) {
+    assert.equal(previewShown(state, LOCAL_HOST, "server"), true, state);
+    assert.equal(previewShown(state, "workshop", "server"), false, state);
+    assert.equal(previewShown(state, "workshop", "hub"), true, state);
+  }
+  for (const state of ["stopped", "error", "deleting"] as SessionState[]) {
+    assert.equal(previewShown(state, LOCAL_HOST, "hub"), false, state);
+  }
+});
+
+test("a hub-only machine offers no new-session affordance for itself", () => {
+  assert.equal(createOffered("hub"), false);
+  assert.equal(createOffered("server"), true);
+  assert.equal(createOffered("both"), true);
+});
+
+test("a registry row naming this machine is this machine", () => {
+  assert.equal(isLocalRow("http://localhost:8080", "http://localhost:8080"), true);
+  // One trailing slash is a spelling, not a machine.
+  assert.equal(isLocalRow("http://localhost:8080/", "http://localhost:8080"), true);
+  assert.equal(isLocalRow("http://localhost:8080", "http://127.0.0.1:8080"), false);
+  assert.equal(isLocalRow("https://workshop.tail1a2b.ts.net", "http://localhost:8080"), false);
+});
+
+test("this machine's host name is labelled as the page's own", () => {
+  assert.notEqual(hostLabel(LOCAL_HOST), hostLabel("workshop"));
+  assert.ok(hostLabel(LOCAL_HOST).includes(LOCAL_HOST));
+  assert.ok(hostLabel(LOCAL_HOST).includes("this machine"));
+  assert.equal(hostLabel("workshop"), "workshop");
 });

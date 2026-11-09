@@ -180,12 +180,36 @@ The `Idempotency-Key` header a create carries, stored verbatim in the unique col
 _Avoid_: Client key, request id, dedupe token, idempotency token
 
 **Sessions screen**:
-The page the operator works from: the machine's health, the sessions it holds with each one's state and last activity, and the form that creates a session. Its list is `GET /api/sessions` and its states arrive as `session.status` frames, so the page holds no state of its own.
+The page the operator works from, at `/`: the machine's health, the sessions held **by each machine** with each one's
+state and last activity, and — where this machine runs sessions — the form that creates one. Its groups are one
+answer per machine (`GET /api/sessions` for this one, `GET /api/hosts/<name>/sessions` for every **host registry**
+row), so a session's owner is the heading above it and the machine a machine that answered nothing is a group whose
+body is the refusal's sentence, never an empty list. Its states arrive as `session.status` frames, so the page holds
+no state of its own.
 _Avoid_: Dashboard, home page, console, session list page
 
 **Session screen**:
-The page for one session, at the path `/sessions/<id>`: its state badge and reason, its transcript, and the composer. Its first answer is `GET /api/sessions/:id` and everything after that arrives on the session's stream; the path is read from the address, not from a router.
+The page for one session: its state badge and reason, its transcript, the composer, the **Changes sheet** and the
+delete affordance. Its path names the **machine that owns the session** — `/sessions/<id>` for this one and
+`/hosts/<host>/sessions/<id>` for another's — so a reload lands on the same machine's transcript and every request the
+screen makes is made against that name. Its first answer is `GET /api/sessions/:id` (through the hub's prefix when the
+session is a peer's) and everything after that arrives on the session's stream; the path is read from the address, not
+from a router.
 _Avoid_: Detail page, viewer, session viewer
+
+**Computers screen**:
+The page that lists the machines, at `/computers`: one card per machine with its name, origin, **role**, version,
+**reach**, when anything last asked, and its live and stopped session counts; the form that registers a machine
+(`POST /api/hosts`, its own sentence shown verbatim when it refuses) and the remove affordance (`?force=true` for a
+`409 host_busy`). Nothing on it is stored: role, version and uptime come from one forwarded `GET
+/api/hosts/<name>/health` per machine and the counts from one forwarded `/sessions`, folded by `status` — `live` is
+`starting`/`running`/`idle` and `stopped` is every other state. A machine that does not answer is a card with the
+refusal's sentence and a `—` count, never a zero; a version that differs from this build's is one sentence, never a
+refusal. This machine is always the first card, and its own start form appears only where `role` is not `hub`. Its
+rules are `web/src/transcript.ts`'s functions — among them `apiPath`, `hostRef`, `sessionCounts`, `skewNote`,
+`reachText`, `lastCheckText`, `hostFailure` and `createOffered` — with tests in `web/test/transcript.test.ts`, and its
+DOM is `main.ts`'s `computersSection`.
+_Avoid_: Machines page, hosts page, fleet view, nodes
 
 **Composer**:
 The session screen's box of guidance and the four actions it offers: prompt, steer, abort and resume. Which of the four exist is the state's (`affordances`): prompt on `idle`, steer and abort on `running`, resume on `stopped` and `error`, and none on `starting` or `deleting`.

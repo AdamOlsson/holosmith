@@ -457,6 +457,7 @@ serve_cases=(
   case_hosts
   case_forward
   case_machine_trust
+  case_computers
   case_idle_stop
   case_drain
   case_drain_restart
@@ -4734,10 +4735,13 @@ case_pwa() {
   # Vite minifies the app bundle by default, which strips the spaces. That is the opposite of the **worker**'s
   # config, which turns minification off on purpose (ADR-0072 D4) — so turning it off for the app too would red
   # this loop with a message pointing at the wrong thing.
+  #
+  # `nav-link` is a **class** and no longer an id: since HS-071 the header draws one link per other screen, and an
+  # id two elements share is not an id.
   for needle in \
     'id="settings"' 'id="settings-machine"' 'id="settings-state"' 'id="settings-action"' \
     'id="settings-detail"' 'id="settings-install"' 'id="settings-per-machine"' 'id="settings-notice"' \
-    'id="nav"' 'id="nav-link"' 'serviceWorker.register("/sw.js")' \
+    'id="nav"' 'nav-link' 'serviceWorker.register("/sw.js")' \
     'iOS delivers notifications only to an app on the home screen: tap Share, then Add to Home Screen, and open Holosmith from the icon' \
     'each machine has its own Web Push key pair, so a phone subscribes on every machine it uses' \
     'notifications are blocked for this app' \
@@ -5663,6 +5667,335 @@ PYWS
   extra_pid=""
   # Two data roots, two configs, the seed, the two python helpers and the event dumps: this case's, and every other
   # boot-owning case removes what it made (HS-068's lesson was a *passing* case leaving a container behind).
+  rm -rf "$root"
+  start_serve
+}
+
+
+# HS-071: the Computers screen (spec Roles, item 4, ADR-0076). The screen is a page, and no gate may run a browser
+# — so this case measures **the data the page draws** and **the bytes the artifact ships**, which is the same split
+# `case_changes_screen` makes. Two boots on one box (`case_forward`'s shape, and its reason: a row naming a machine
+# has to spell the port the boot will bind, so both ports are pinned before either config is written):
+#
+#   1. the hub's own answer: its role is `hub`, its session list is empty, and a create on it is refused — the three
+#      facts `createOffered` rests on ("a hub-only machine shows no new-session affordance for itself");
+#   2. `GET /api/hosts` lists both machines, the peer `reachable` and the machine that is not there `unreachable`;
+#   3. the peer's **health through the hub's hop** — the role, the version and the uptime the card shows, which no
+#      registry row carries (ADR-0076 D1);
+#   4. the peer's **sessions through the hub's hop**, before and after a session is created on it: the list the
+#      group is drawn from, and the row a count folds over;
+#   5. a machine that is not there: its hop answers `502 upstream_unreachable` with a sentence naming it, which is
+#      what the card degrades to rather than an empty list (ADR-0076 D7);
+#   6. the registration's refusals, at the API the form posts to, with the code **and** the sentence the screen
+#      prints verbatim (`bad_host_name`, `bad_host_url`); `not_holosmith` is `case_hosts`' pin against a live
+#      listener and `tests/hosts.rs`' otherwise;
+#   7. adding and removing a row from the registry: `POST /api/hosts` then `DELETE /api/hosts/{name}`;
+#   8. `/computers` is this tree's app shell byte for byte, and the **served bundle** carries the screen's ids, its
+#      classes and its sentences.
+#
+# What it cannot measure, and does not pretend to: the DOM. A needle in a bundle is not a rendered element — the
+# weak half is why each sentence is a `web/test/transcript.test.ts` function with its own test — and the demo is
+# what watches the page draw.
+case_computers() {
+  local name=case_computers root="$repo_root/target/verify-computers-$$"
+  local hub_root="$root/hub" peer_root="$root/peer"
+  local hub_config="$hub_root/config.toml" peer_config="$peer_root/config.toml"
+  local hub_data="$hub_root/data" peer_data="$peer_root/data"
+  local seed="$hub_root/hosts.toml"
+  local hub_control hub_preview peer_control peer_preview gone_port
+  local response body id asset version want needle
+
+  # The guard comes first, before `stop_serve`: a skipped case that stopped the run's server leaves the phase's own
+  # teardown with no pid to signal. `free_port` is `python3`'s, and pinned ports are the whole reason this case can
+  # name one machine from another machine's config.
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to ask the kernel for the four pinned ports this case needs (web/test/transcript.test.ts covers the screen'"'"'s rules)\n' "$name"
+    return 0
+  fi
+
+  stop_serve
+  rm -rf "$root"
+  mkdir -p "$peer_root/projects/proj" "$peer_data" "$hub_data" || fail "$name/mkdir" "could not create $root"
+
+  # Four pinned ports and one nothing listens on: two machines, each with a control and a preview listener, and the
+  # row that stands in for a machine that is away.
+  hub_control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  hub_preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  peer_control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  peer_preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  gone_port="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+
+  cat >"$peer_config" <<EOF
+role = "server"
+backend = "stub"
+control_origin = "http://127.0.0.1:$peer_control"
+preview_listen = "127.0.0.1:$peer_preview"
+preview_origin = "http://127.0.0.1:$peer_preview"
+EOF
+
+  # The hub's registry: the peer under the name the screen will show it as, and a machine that is not there. Both
+  # are `http://127.0.0.1`, which `POST /api/hosts` would refuse and the seed does not filter — the one asymmetry
+  # that lets two machines be measured on one box (ADR-0073 D9).
+  cat >"$seed" <<EOF
+[[hosts]]
+name = "workshop"
+url = "http://127.0.0.1:$peer_control"
+
+[[hosts]]
+name = "gone"
+url = "http://127.0.0.1:$gone_port"
+EOF
+
+  cat >"$hub_config" <<EOF
+role = "hub"
+backend = "stub"
+control_origin = "http://127.0.0.1:$hub_control"
+preview_listen = "127.0.0.1:$hub_preview"
+preview_origin = "http://127.0.0.1:$hub_preview"
+hosts_seed = "$seed"
+EOF
+
+  start_peer "$peer_config" "$peer_data" "$peer_control"
+  # The hub last, because its merge probes the rows (ADR-0073): a hub booted first would learn no preview origin.
+  start_serve "$hub_config" "$hub_data" "$hub_control"
+
+  # ---- 1. the hub's own answer: role, no sessions, and a refused create ---------------------------
+  fetch "$name-health" GET /api/health "Host: 127.0.0.1" || fail "$name/health" "GET /api/health did not answer"
+  expect_status "$name/health" "$(answer "$name-health")" 200
+  body="$(cat "$WORK/responses/$name-health.body")"
+  case "$body" in
+    *'"role":"hub"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/health/role" "the hub does not report its own role: $body" ;;
+  esac
+  # The version every card compares against, read from the hub's own answer rather than from `version --json`: both
+  # machines run this build, so a skew here would be a test that could not fail.
+  version="$(printf '%s\n' "$body" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')"
+  [ -n "$version" ] || fail "$name/health/version" "the health answer names no version: $body"
+
+  fetch "$name-own" GET /api/sessions "Host: 127.0.0.1" || fail "$name/own" "GET /api/sessions did not answer"
+  expect_status "$name/own" "$(answer "$name-own")" 200
+  body="$(cat "$WORK/responses/$name-own.body")"
+  case "$body" in
+    *'"sessions":[]'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/own/empty" "a hub holds no sessions of its own: $body" ;;
+  esac
+  # The fact the affordance rule rests on: a hub refuses a create, so a Start button on one is a button whose only
+  # answer is this refusal (ADR-0074).
+  fetch_body "$name-hub-create" POST /api/sessions \
+    '{"project":"proj","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Idempotency-Key: verify-computers-hub" ||
+    fail "$name/hub_create" "POST /api/sessions on the hub did not answer"
+  expect_status "$name/hub_create" "$(answer "$name-hub-create")" 403
+  expect_code "$name/hub_create" "$(answer "$name-hub-create")" sessions_disabled
+
+  # ---- 2. the registry: two machines, one of them away -------------------------------------------
+  fetch "$name-hosts" GET /api/hosts "Host: 127.0.0.1" || fail "$name/hosts" "GET /api/hosts did not answer"
+  expect_status "$name/hosts" "$(answer "$name-hosts")" 200
+  body="$(cat "$WORK/responses/$name-hosts.body")"
+  # One needle per row, assembled in a variable because a `case` pattern of the form `*"a":"b"*` is ambiguous to a
+  # reader. The field order is the struct's, so a needle can stop before the varying `last_checked_at`.
+  want='"name":"workshop","url":"http://127.0.0.1:'"$peer_control"'","preview":"http://127.0.0.1:'"$peer_preview"'","reach":"reachable"'
+  case "$body" in
+    *"$want"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/hosts/peer" "the peer's row is not reachable with its measured preview origin: $body" ;;
+  esac
+  want='"name":"gone","url":"http://127.0.0.1:'"$gone_port"'","preview":null,"reach":"unreachable"'
+  case "$body" in
+    *"$want"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/hosts/gone" "a machine that is not there is one unreachable row: $body" ;;
+  esac
+
+  # ---- 3. the peer's health, through the hub's hop -----------------------------------------------
+  # What the card's role, version and uptime are read from: the *health payload*, because a registry row carries
+  # none of the three (ADR-0076 D1).
+  fetch "$name-peer-health" GET /api/hosts/workshop/health "Host: 127.0.0.1" ||
+    fail "$name/peer_health" "GET /api/hosts/workshop/health did not answer"
+  expect_status "$name/peer_health" "$(answer "$name-peer-health")" 200
+  body="$(cat "$WORK/responses/$name-peer-health.body")"
+  for needle in '"role":"server"' "\"version\":\"$version\"" '"uptime_s":'; do
+    case "$body" in
+      *"$needle"*) assertions=$((assertions + 1)) ;;
+      *) fail "$name/peer_health/fact" "the peer's health answer does not carry $needle: $body" ;;
+    esac
+  done
+
+  # ---- 4. the peer's sessions, before and after one exists ---------------------------------------
+  # A machine with no sessions still answers: an empty list is a fact, and the card's counts fold over it.
+  fetch "$name-peer-empty" GET /api/hosts/workshop/sessions "Host: 127.0.0.1" ||
+    fail "$name/peer_empty" "GET /api/hosts/workshop/sessions did not answer"
+  expect_status "$name/peer_empty" "$(answer "$name-peer-empty")" 200
+  body="$(cat "$WORK/responses/$name-peer-empty.body")"
+  case "$body" in
+    *'"sessions":[]'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/peer_empty/list" "the peer starts with no sessions: $body" ;;
+  esac
+
+  # A session created **on the peer, through the hub**: the group the Sessions screen draws for that machine, and
+  # the row whose `status` the count is a fold over.
+  fetch_body "$name-create" POST /api/hosts/workshop/sessions \
+    '{"project":"proj","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Idempotency-Key: verify-computers-1" ||
+    fail "$name/create" "POST /api/hosts/workshop/sessions did not answer"
+  expect_status "$name/create" "$(answer "$name-create")" 202
+  id="$(sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p' "$WORK/responses/$name-create.body" | sed -n '1p')"
+  [ -n "$id" ] || fail "$name/create" "the forwarded create names no id: $(cat "$WORK/responses/$name-create.body")"
+
+  # The stub walks its four steps in the background, so the list is read until it says `idle` — through the hub, which
+  # is the route the screen itself reads.
+  for _ in $(seq 1 100); do
+    fetch "$name-peer-list" GET /api/hosts/workshop/sessions "Host: 127.0.0.1" ||
+      fail "$name/peer_list" "GET /api/hosts/workshop/sessions did not answer"
+    body="$(cat "$WORK/responses/$name-peer-list.body")"
+    case "$body" in
+      *'"status":"idle"'*) break ;;
+    esac
+    sleep 0.1
+  done
+  expect_status "$name/peer_list" "$(answer "$name-peer-list")" 200
+  case "$body" in
+    *"\"id\":\"$id\""*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/peer_list/row" "the session created on the peer is not in the peer's list: $body" ;;
+  esac
+  case "$body" in
+    *'"status":"idle"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/peer_list/idle" "the peer's session never reached idle: $body" ;;
+  esac
+  # The machine's own window, not the hub's: the group's rows count down against the answer that carried them.
+  case "$body" in
+    *'"stopped_ttl_days":'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/peer_list/ttl" "the peer's list carries no stopped window: $body" ;;
+  esac
+
+  # ---- 5. a machine that is not there -------------------------------------------------------------
+  # The hub answers for a peer it cannot reach: `502` and a sentence naming the machine and its origin. That is what
+  # the card degrades to — never an empty list, which would read as a machine with nothing on it (ADR-0076 D7).
+  fetch "$name-gone" GET /api/hosts/gone/health "Host: 127.0.0.1" ||
+    fail "$name/gone" "GET /api/hosts/gone/health did not answer"
+  expect_status "$name/gone" "$(answer "$name-gone")" 502
+  expect_code "$name/gone" "$(answer "$name-gone")" upstream_unreachable
+  body="$(cat "$WORK/responses/$name-gone.body")"
+  for needle in gone "http://127.0.0.1:$gone_port"; do
+    case "$body" in
+      *"$needle"*) assertions=$((assertions + 1)) ;;
+      *) fail "$name/gone/sentence" "the refusal names neither the machine nor its origin: $body" ;;
+    esac
+  done
+  # The same sentence for the list the card would have drawn: one refusal, two reads the page makes.
+  fetch "$name-gone-list" GET /api/hosts/gone/sessions "Host: 127.0.0.1" ||
+    fail "$name/gone_list" "GET /api/hosts/gone/sessions did not answer"
+  expect_status "$name/gone_list" "$(answer "$name-gone-list")" 502
+  expect_code "$name/gone_list" "$(answer "$name-gone-list")" upstream_unreachable
+
+  # ---- 6. the registration's refusals, and the sentence the form prints ---------------------------
+  # The name this machine's own sessions are reached by is reserved, so a row may not take it (ADR-0073).
+  fetch_body "$name-bad-name" POST /api/hosts '{"name":"local","url":"http://127.0.0.1:9000"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" || fail "$name/bad_name" "POST /api/hosts did not answer"
+  expect_status "$name/bad_name" "$(answer "$name-bad-name")" 422
+  expect_code "$name/bad_name" "$(answer "$name-bad-name")" bad_host_name
+  # The message is the sentence the form shows verbatim: a code in front of it would be a word to act on that is
+  # not one (`hostFailure`). It names what to change.
+  body="$(cat "$WORK/responses/$name-bad-name.body")"
+  case "$body" in
+    *'local'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/bad_name/sentence" "the refusal does not name the reserved word: $body" ;;
+  esac
+  # A port below the allowed range on a host the rule accepts: the URL's *port* arm, which the CLI in HS-072 must
+  # state with the same sentence. (A loopback URL would be refused for its host instead, which is the arm below.)
+  fetch_body "$name-bad-url" POST /api/hosts '{"name":"spare","url":"https://box.tail1a2b.ts.net:80"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" || fail "$name/bad_url" "POST /api/hosts did not answer"
+  expect_status "$name/bad_url" "$(answer "$name-bad-url")" 422
+  expect_code "$name/bad_url" "$(answer "$name-bad-url")" bad_host_url
+
+  # ---- 7. adding and removing a row ---------------------------------------------------------------
+  # A machine that is not there is **registered**, not refused: the row is stored `unreachable` with the sentence the
+  # probe gave (item 16's "not removed"), which is the outcome the Add form redraws from. The URL is a MagicDNS shape
+  # that resolves nowhere — the one a `POST` may name and a machine here cannot answer, since the API refuses loopback
+  # where the seed does not (ADR-0073 D9, and `case_hosts` measures the same arm).
+  fetch_body "$name-add" POST /api/hosts '{"name":"spare","url":"https://spare.tail1a2b.ts.net"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" || fail "$name/add" "POST /api/hosts did not answer"
+  expect_status "$name/add" "$(answer "$name-add")" 201
+  body="$(cat "$WORK/responses/$name-add.body")"
+  case "$body" in
+    *'"name":"spare"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/add/row" "the registered row is not the one asked for: $body" ;;
+  esac
+  case "$body" in
+    *'"reach":"unreachable"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/add/reach" "a machine that answered nothing must be stored unreachable: $body" ;;
+  esac
+  fetch "$name-added" GET /api/hosts "Host: 127.0.0.1" || fail "$name/added" "GET /api/hosts did not answer"
+  case "$(cat "$WORK/responses/$name-added.body")" in
+    *'"name":"spare"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/added" "the row the form just added is not in the list" ;;
+  esac
+  # Removing it is a request to **this** machine's registry, never a forwarded one (ADR-0074).
+  fetch "$name-remove" DELETE /api/hosts/spare \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" || fail "$name/remove" "DELETE /api/hosts/spare did not answer"
+  expect_status "$name/remove" "$(answer "$name-remove")" 204
+  fetch "$name-removed" GET /api/hosts "Host: 127.0.0.1" || fail "$name/removed" "GET /api/hosts did not answer"
+  body="$(cat "$WORK/responses/$name-removed.body")"
+  case "$body" in
+    *'"name":"spare"'*) fail "$name/removed" "the removed row is still in the list: $body" ;;
+    *) assertions=$((assertions + 1)) ;;
+  esac
+  # A removal is one row's, not the list's: both the machines that were there before are still there.
+  for needle in '"name":"workshop"' '"name":"gone"'; do
+    case "$body" in
+      *"$needle"*) assertions=$((assertions + 1)) ;;
+      *) fail "$name/removed/sibling" "removing one row lost $needle: $body" ;;
+    esac
+  done
+
+  # ---- 8. the screen: this tree's shell, and the bundle's own words -------------------------------
+  fetch "$name" GET /computers "Host: 127.0.0.1" || fail "$name/no_answer" "GET /computers did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 200
+  [ -f web/dist/index.html ] ||
+    fail "$name/index_html" "web/dist/index.html is missing: run scripts/build.sh"
+  # The `cmp` comes first on purpose: a grep alone would pass over a stale `dist/` that happened to carry the
+  # strings (ADR-0067).
+  cmp -s "$WORK/responses/$name.body" web/dist/index.html ||
+    fail "$name/index_html" "/computers is not this tree's web/dist/index.html"
+  assertions=$((assertions + 1))
+
+  asset="$(sed -n 's/.*src="\([^"]*\.js\)".*/\1/p' web/dist/index.html | head -1)"
+  [ -n "$asset" ] || fail "$name/asset" "the shell names no script to fetch"
+  fetch "${name}_asset" GET "$asset" "Host: 127.0.0.1" || fail "$name/asset" "GET $asset did not answer"
+  response="$(answer "${name}_asset")"
+  expect_status "$name/asset" "$response" 200
+  cmp -s "$WORK/responses/${name}_asset.body" "web/dist$asset" ||
+    fail "$name/asset/bytes" "the served bundle is not this tree's web/dist$asset"
+  assertions=$((assertions + 1))
+  # One id per element the screen is made of — the assignment's own quotes, so deleting a container cannot leave a
+  # sibling's id matching — plus the classes the grouping and the card are built from, plus the four sentences a
+  # decision already fixed: the two reach words (as old as the check), the skew (ADR-0076 D8), the forced retry's
+  # label (D9) and the page's own machine (D6). Every needle is counted, so one that found nothing cannot pass as
+  # one that did.
+  for needle in \
+    'id="computers"' 'id="computer-list"' 'id="computers-add"' 'id="computers-name"' \
+    'id="computers-url"' 'id="computers-submit"' 'id="computers-error"' \
+    'machine-group' 'computer-counts' 'computer-sentence' \
+    'reachable at the last check' 'unreachable at the last check' \
+    'a call one of them does not know answers 404' 'Remove anyway' 'local · this machine' \
+    'Every machine this one may send a request to. A session lives on exactly one of them.'; do
+    grep -qF -- "$needle" "$WORK/responses/${name}_asset.body" ||
+      fail "$name/asset/screen" "the served bundle does not carry $needle"
+    assertions=$((assertions + 1))
+  done
+  # The page's path rule: the hub's forwarding prefix, spelled once for every request that crosses a machine.
+  grep -qF -- '/api/hosts/' "$WORK/responses/${name}_asset.body" ||
+    fail "$name/asset/api" "the served bundle never spells a forwarded path, so no request can cross machines"
+  assertions=$((assertions + 1))
+
+  # What this case made of the machine, it takes back, and the shared boot is put back for every case after it.
+  stop_serve
+  stop_peer
   rm -rf "$root"
   start_serve
 }

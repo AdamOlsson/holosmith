@@ -12,47 +12,66 @@ import {
   COMMIT_ASKED,
   COMMIT_LABEL,
   COMMIT_PROMPT,
+  COUNTS_UNKNOWN,
   DIRTY_MERGE_REASON,
   FORCED_DELETE_LABEL,
   HISTORY_PAGE_LIMIT,
   HISTORY_TRUNCATED,
+  HOST_FORCE_LABEL,
+  LIVE_STATES,
+  LOCAL_HOST,
   NOTHING_COMMITTED,
   RESOLVE_ASKED,
   RESOLVE_LABEL,
   RESOLVE_PROMPT,
   STRATEGIES,
   TRANSCRIPT_EVENTS,
-  DAY,
   Transcript,
   UNSAVED_WORK_NOTICE,
   affordances,
+  apiPath,
   budgetNotice,
   ciWarning,
+  createFailure,
+  createOffered,
   expiryText,
   conflictLine,
   countsLine,
-  createFailure,
   deletedNotice,
   diffPath,
   fileLine,
   historyPath,
+  hostFailure,
+  hostForceOffered,
+  hostLabel,
+  hostRef,
+  isLocalRow,
+  lastCheckText,
   mergeBlocked,
   mergedNotice,
   networkText,
   parseFrame,
   preselectedTarget,
-  previewOffered,
+  previewShown,
   previewUrl,
   publishQuestion,
   publishVisible,
   publishedNotice,
   parseTruncated,
+  reachText,
+  relativeTime,
+  sessionCounts,
+  sessionCountsText,
+  sessionHref,
   sessionIdFromPath,
+  sessionPath,
   sheetFailure,
+  skewNote,
   stateText,
   stoppedDetail,
   streamPath,
   targetOptions,
+  uptimeText,
   type Change,
   type Changes,
   type DeltaKind,
@@ -64,13 +83,14 @@ import {
   type Spend,
 } from "./transcript";
 import {
+  COMPUTERS_PATH,
   PER_MACHINE_SENTENCE,
   SETTINGS_PATH,
   SUBSCRIBE_PATH,
   installSentence,
   isIos,
   machineState,
-  navLink,
+  navLinks,
   pushActionLabel,
   pushActionable,
   pushState,
@@ -184,15 +204,7 @@ type Answer<T> =
   | { ok: true; value: T }
   | { ok: false; code: string; message: string };
 
-const LIVE_STATES: ReadonlySet<SessionState> = new Set<SessionState>([
-  "starting",
-  "idle",
-  "running",
-]);
-
-const MINUTE = 60;
-const HOUR = 60 * MINUTE;
-
+// The app shell's one node, and the only element every render starts from.
 const app = document.querySelector<HTMLElement>("#app");
 
 // The open stream per row, and every open stream: a row that leaves a live state lets go of its
@@ -228,33 +240,25 @@ function field(label: string, input: HTMLInputElement): HTMLLabelElement {
   return element;
 }
 
-// "3 min ago", coarse on purpose. It reads `last_active_at` from the row and never from a frame:
-// no frame carries a time, so the text is as fresh as the answer that drew it.
-function relativeTime(at: number, now: number): string {
-  const elapsed = now - at;
-  if (elapsed < MINUTE) {
-    return "just now";
-  }
-  if (elapsed < HOUR) {
-    return `${Math.floor(elapsed / MINUTE)} min ago`;
-  }
-  if (elapsed < DAY) {
-    return `${Math.floor(elapsed / HOUR)} h ago`;
-  }
-  return `${Math.floor(elapsed / DAY)} d ago`;
-}
+// "3 min ago", coarse on purpose, is `transcript.ts`'s `relativeTime`: the Computers screen's last-check line
+// asked for it too (HS-071), and a sentence written twice is the pair that drifts.
 
 // One row: the project and the state with its reason, then the id, the model and the last
 // activity, then the provisioning step (while starting) or what the stop means (stopped).
 // Every node is built with `createElement` and filled with `textContent`: the payload carries
 // operator- and agent-controlled text and none of it is parsed as markup.
-function sessionRow(session: Session, ttlDays: number): HTMLLIElement {
+//
+// `host` is the machine that owns the row (HS-071): it is the row's link's first segment, the machine every request
+// for this row is made against, and the stream's own path. A row is the *peer's* row, forwarded byte for byte
+// (ADR-0074), so the machine it lives on is the page's fact and not a column of the answer.
+function sessionRow(session: Session, ttlDays: number, host: string): HTMLLIElement {
   const row = make("li", "session");
   row.dataset.session = session.id;
+  row.dataset.host = host;
 
   const head = document.createElement("a");
   head.className = "session-head session-link";
-  head.href = `/sessions/${session.id}`;
+  head.href = sessionHref(host, session.id);
   head.append(
     make("span", "project", session.project),
     make("span", "state", stateText(session.status, session.status_reason)),
@@ -324,12 +328,15 @@ function syncStream(row: HTMLLIElement, state: SessionState): void {
 
 function openSource(row: HTMLLIElement): void {
   const id = row.dataset.session;
-  if (id === undefined) {
+  const host = row.dataset.host;
+  if (id === undefined || host === undefined) {
     return;
   }
   // The create's answer carries `events` and a list element does not; both spell this path, so one
-  // rule opens a stream for a row however it arrived.
-  const source = new EventSource(streamPath(id));
+  // rule opens a stream for a row however it arrived. The row's own machine is where the stream is (HS-071):
+  // a remote row's frames come through the hub's forwarding route, which relays the peer's stream event for
+  // event (ADR-0074).
+  const source = new EventSource(streamPath(host, id));
   rowSources.set(row, source);
   openSources.add(source);
   source.addEventListener("session.status", (event) => {
@@ -384,7 +391,7 @@ function applyStatus(row: HTMLLIElement, frame: StatusFrame): void {
     const now = stoppedAt;
     const expires =
       frame.to === "stopped"
-        ? expiryText(stoppedAt, stoppedTtlDays(row.closest("#session-list")), now)
+        ? expiryText(stoppedAt, stoppedTtlDays(row.closest(".session-list")), now)
         : null;
     const detail = stoppedDetail(frame.to, frame.reason, expires);
     retention.hidden = frame.to !== "stopped";
@@ -393,26 +400,60 @@ function applyStatus(row: HTMLLIElement, frame: StatusFrame): void {
   }
 }
 
-function sessionList(sessions: Session[], ttlDays: number): HTMLElement {
+// One machine's sessions, in the payload the sessions list answers with: a group is one machine's answer, or the
+// refusal that stood in for it (HS-071). The `host` is the machine's registry name, whose own answer carries the
+// stopped window the rows count down against — the **peer's** `stopped_ttl_days` and not this machine's, which is
+// what makes a countdown a fact about the machine that owns the row.
+type SessionGroup = {
+  host: string;
+  // The machine's own answer, or the envelope that refused it. Never `null`: a machine that did not answer is a
+  // group with a sentence, not a group that vanished (ADR-0076 D7).
+  answer: Answer<SessionList>;
+};
+
+function sessionList(groups: SessionGroup[]): HTMLElement {
   const section = make("section", "sessions");
   section.append(make("h2", "", "Sessions"));
-  const list = make("ul", "session-list");
-  list.id = "session-list";
-  // The one place the window enters the page (HS-064): a row's own columns do not carry the machine's setting,
-  // and the frame path has no request to ask, so the element is the junction.
-  list.dataset.stoppedTtlDays = String(ttlDays);
-  if (sessions.length === 0) {
-    list.append(make("li", "empty", "No sessions yet."));
+  for (const group of groups) {
+    const machine = make("section", "machine-group");
+    machine.dataset.host = group.host;
+    machine.append(make("h3", "machine-name", hostLabel(group.host)));
+    if (!group.answer.ok) {
+      // The refusal's own sentence, in the place the rows would have been: an empty list would read as a machine
+      // with no sessions, which is a claim nothing measured (ADR-0076 D7). The sentence alone and not through
+      // `hostFailure`: it already names the machine and what went wrong, and the code in front of it would be a word
+      // to look up about a machine that is simply away.
+      machine.append(make("p", "notice", group.answer.message));
+      section.append(machine);
+      continue;
+    }
+    const rows = group.answer.value.sessions;
+    const ttlDays = group.answer.value.stopped_ttl_days;
+    const list = make("ul", "session-list");
+    // The one place the window enters the page (HS-064): a row's own columns do not carry the machine's setting,
+    // and the frame path has no request to ask, so the element is the junction. Since HS-071 there is one such
+    // element per machine, and the row's `.closest()` finds its own — which is why the selector is a class and
+    // not the single `#session-list` id it was.
+    list.dataset.stoppedTtlDays = String(ttlDays);
+    list.dataset.host = group.host;
+    if (rows.length === 0) {
+      list.append(make("li", "empty", "No sessions yet."));
+    }
+    for (const session of rows) {
+      list.append(sessionRow(session, ttlDays, group.host));
+    }
+    machine.append(list);
+    section.append(machine);
   }
-  for (const session of sessions) {
-    list.append(sessionRow(session, ttlDays));
-  }
-  section.append(list);
   return section;
 }
 
 function addSession(session: Session): void {
-  const list = document.querySelector<HTMLUListElement>("#session-list");
+  // A session a create just made is **this** machine's: the form posts to the machine that serves the page and to
+  // no other (HS-071; a create on a peer is HS-074's).
+  const list = document.querySelector<HTMLUListElement>(
+    `.session-list[data-host="${LOCAL_HOST}"]`,
+  );
   if (list === null) {
     return;
   }
@@ -425,7 +466,7 @@ function addSession(session: Session): void {
   list.querySelector<HTMLElement>(".empty")?.remove();
   // Prepended because the repository lists newest activity first and a create is the newest. The window comes
   // off the list's own dataset: a create's answer carries the row and not the machine's setting (HS-064).
-  list.prepend(sessionRow(session, stoppedTtlDays(list)));
+  list.prepend(sessionRow(session, stoppedTtlDays(list), LOCAL_HOST));
 }
 
 // The new-session form. `networkDefault` is the machine setting the list carried: the checkbox
@@ -463,7 +504,7 @@ function createSection(networkDefault: boolean): HTMLElement {
     button.disabled = true;
     error.hidden = true;
     try {
-      const response = await fetch("/api/sessions", {
+      const response = await fetch(apiPath(LOCAL_HOST, "sessions"), {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -524,23 +565,315 @@ function createSection(networkDefault: boolean): HTMLElement {
   return section;
 }
 
-// The header every screen shares: the machine's own facts, and the one link between the screens. The link's
-// href and label are `push.ts`'s `navLink` rule, so `/settings` returns to the list and every other path offers
-// the settings — one place decides, and `case_pwa` sees the ids in the served bundle.
-function header(health: Health, nav: NavLink): HTMLElement {
+// The header every screen shares: the machine's own facts, and the links between the screens. Which links exist is
+// `push.ts`'s `navLinks` rule — one per screen other than this one — so a fourth screen is a row in `SCREENS` and
+// not a branch here, and `case_pwa` sees the class in the served bundle. The links carry a **class** and no id
+// since HS-071: three screens mean two links on every page, and an id two elements share is not an id.
+function header(health: Health, navs: NavLink[]): HTMLElement {
   const element = make("header", "machine");
-  const link = make("a", "nav-link", nav.label);
-  link.id = "nav-link";
-  link.href = nav.href;
   const nav_ = make("nav", "machine-nav");
   nav_.id = "nav";
-  nav_.append(link);
+  for (const nav of navs) {
+    const link = make("a", "nav-link", nav.label);
+    link.href = nav.href;
+    nav_.append(link);
+  }
   element.append(
     make("h1", "", health.name),
     make("p", "meta", `${health.version} · ${health.role} · up ${health.uptime_s}s`),
     nav_,
   );
   return element;
+}
+
+// ---- the Computers screen (HS-071, ADR-0076) -------------------------------------------------
+
+// One registry row as `GET /api/hosts` answers it: the struct's field order, with `preview`, `version` and
+// `last_error` nullable because a machine that never answered has none of them.
+type HostRow = {
+  name: string;
+  url: string;
+  preview: string | null;
+  reach: string;
+  version: string | null;
+  last_error: string | null;
+  last_checked_at: number;
+};
+
+type HostList = { hosts: HostRow[] };
+
+// The two facts a card cannot read out of the registry: what the machine is running **now** and what it holds
+// **now**. Both are one forwarded read each (ADR-0074), and both are fetched together so N machines cost two
+// hops each rather than four.
+//
+// This machine's own health is the answer the page already made, so its card costs one read and not two: asking
+// itself `/api/health` over loopback to learn a value it holds would be the round trip that adds nothing.
+async function readMachine(
+  host: string,
+  own: Health,
+): Promise<[Answer<Health>, Answer<SessionList>]> {
+  const health =
+    host === LOCAL_HOST
+      ? Promise.resolve<Answer<Health>>({ ok: true, value: own })
+      : getJson<Health>(apiPath(host, "health"));
+  return Promise.all([health, getJson<SessionList>(apiPath(host, "sessions"))]);
+}
+
+// One machine's card: what the registry knows (its name, its origin, its last check, and what that check found)
+// and what it answers now (its role, its version, its uptime, and how many sessions it holds).
+//
+// `row` is `null` for this page's own machine when the registry does not name it — a machine's own row is a row
+// like any other, but the page is served by it and does not need one to describe it (ADR-0076 D1).
+function machineCard(
+  own: Health,
+  host: string,
+  url: string,
+  row: HostRow | null,
+  refresh: () => void,
+): HTMLLIElement {
+  const card = make("li", "computer");
+  card.dataset.host = host;
+
+  const head = make("div", "computer-head");
+  head.append(
+    make("span", "computer-name", hostLabel(host)),
+    make("span", "computer-url", url),
+  );
+
+  const facts = make("div", "computer-facts");
+  const role = make("span", "computer-role");
+  const version = make("span", "computer-version");
+  const uptime = make("span", "computer-uptime");
+  const reach = make("span", "computer-reach", row === null ? "" : reachText(row.reach));
+  const checked = make("span", "computer-checked");
+  const counts = make("span", "computer-counts", COUNTS_UNKNOWN);
+  facts.append(role, version, uptime, reach, checked, counts);
+  if (row === null) {
+    // A machine the registry does not name has no probe behind it, so it has no `reach` — but it *was* just asked:
+    // this page's own health answer is that check, and "checked just now" is the same word the rows use rather than
+    // a second way of saying "the page is being served by it".
+    reach.hidden = true;
+    checked.textContent = lastCheckText(secondsNow(), secondsNow());
+  } else {
+    checked.textContent = lastCheckText(row.last_checked_at, secondsNow());
+    // The probe's own sentence, on hover: the row's `reach` is as old as the boot (ADR-0073), and the fresh answer
+    // is the read below. A title is where a stale fact belongs — beside the word, not instead of the current one.
+    if (row.last_error !== null) {
+      reach.title = row.last_error;
+    }
+  }
+
+  // The one sentence area: the skew about a version that differs, or the reason a read was refused. One area
+  // because they are one question — "is there something about this machine I have to act on" — and two lines of
+  // refusal for one unreachable machine is noise (the health hop and the sessions hop fail together).
+  const sentence = make("p", "computer-sentence");
+  sentence.hidden = true;
+  const say = (text: string | null): void => {
+    sentence.textContent = text ?? "";
+    sentence.hidden = text === null;
+  };
+
+  const section = document.createDocumentFragment();
+  section.append(head, facts, sentence);
+
+  // Removal is a request to **this** machine's registry, never a forwarded one: a registry is each machine's own
+  // and the hub's route refuses to relay `hosts/…` (ADR-0074). It exists only when there is a row to delete.
+  if (row !== null) {
+    const start = make("button", "secondary", "Remove");
+    start.type = "button";
+    const confirm = make("div", "confirm");
+    confirm.hidden = true;
+    const question = make(
+      "p",
+      "question",
+      `Remove ${host}? Its row is forgotten here; the machine itself is not changed.`,
+    );
+    const yes = make("button", "danger", "Remove");
+    yes.type = "button";
+    const cancel = make("button", "secondary", "Cancel");
+    cancel.type = "button";
+    // The retry a `409 host_busy` earns: the row names live sessions, and `?force=true` is the operator saying
+    // they meant it (`deleteSection`'s `unsaved_work` arm, one registry out).
+    const forced = make("button", "danger", HOST_FORCE_LABEL);
+    forced.type = "button";
+    forced.hidden = true;
+    confirm.append(question, yes, cancel);
+    const notice = make("p", "notice");
+    notice.hidden = true;
+
+    const send = async (force: boolean): Promise<void> => {
+      yes.disabled = true;
+      forced.disabled = true;
+      try {
+        const path = apiPath(LOCAL_HOST, `hosts/${encodeURIComponent(host)}`);
+        const response = await fetch(`${path}${force ? "?force=true" : ""}`, {
+          method: "DELETE",
+          headers: { "content-type": "application/json", "x-holosmith-client": "1" },
+        });
+        if (response.ok) {
+          refresh();
+          return;
+        }
+        const envelope = (await response.json()) as ErrorEnvelope;
+        // The API's own sentence, verbatim: it is the one HS-072's CLI will show too (ADR-0076 D9).
+        notice.textContent = hostFailure(envelope.code, envelope.message);
+        notice.hidden = false;
+        if (hostForceOffered(envelope.code)) {
+          confirm.hidden = true;
+          forced.hidden = false;
+        }
+      } catch (failure) {
+        notice.textContent = `unreachable: ${String(failure)}`;
+        notice.hidden = false;
+      } finally {
+        yes.disabled = false;
+        forced.disabled = false;
+      }
+    };
+
+    start.addEventListener("click", () => {
+      confirm.hidden = false;
+      start.hidden = true;
+      notice.hidden = true;
+    });
+    cancel.addEventListener("click", () => {
+      confirm.hidden = true;
+      start.hidden = false;
+    });
+    yes.addEventListener("click", () => {
+      void send(false);
+    });
+    forced.addEventListener("click", () => {
+      void send(true);
+    });
+    section.append(start, confirm, forced, notice);
+  }
+
+  card.append(section);
+
+  // This machine's own facts are the ones the page already fetched, so its card is complete before it is drawn —
+  // except for its session count, which is one local read.
+  if (row === null || host === LOCAL_HOST) {
+    role.textContent = own.role;
+    version.textContent = own.version;
+    uptime.textContent = uptimeText(own.uptime_s);
+  }
+
+  void (async () => {
+    const [health, sessions] = await readMachine(host, own);
+    if (health.ok) {
+      role.textContent = health.value.role;
+      version.textContent = health.value.version;
+      uptime.textContent = uptimeText(health.value.uptime_s);
+      // The skew is about the API a call can use, and it is about the machine we just asked — never the registry's
+      // boot-time `version`, which a redeploy makes stale (ADR-0076 D8).
+      say(skewNote(health.value.version, own.version));
+    } else {
+      // The machine did not answer: the registry's boot-time version is the only one there is (a redeploy makes it
+      // stale, which is why it is the fallback and not the first answer), and the sentence is about this read
+      // rather than about a skew nothing measured.
+      if (row !== null && row.version !== null) {
+        version.textContent = row.version;
+      }
+      // The hop's `message` alone, not through `hostFailure`: that function keeps a code in front of a sentence the
+      // operator has to act on (`bad_body`, `unsupported`), and this sentence already says which machine was asked
+      // and what went wrong. A code here would be a word to look up about a machine that is simply away.
+      say(health.message);
+    }
+    if (sessions.ok) {
+      counts.textContent = sessionCountsText(sessionCounts(sessions.value.sessions));
+    } else if (health.ok) {
+      // One sentence per failed machine, and the count says that nothing measured it rather than `0`.
+      say(sessions.message);
+    }
+  })();
+
+  return card;
+}
+
+// The screen: this machine first, then every registry row that is not this machine, then the form that registers
+// one. `refresh` redraws the whole screen, which is what an add or a remove means — the page holds no state, so a
+// fresh answer is the whole of updating it (ADR-0017).
+function computersSection(health: Health, rows: HostRow[]): HTMLElement {
+  const section = make("section", "computers");
+  section.id = "computers";
+  section.append(
+    make("h2", "", "Computers"),
+    make(
+      "p",
+      "computers-intro",
+      "Every machine this one may send a request to. A session lives on exactly one of them.",
+    ),
+  );
+
+  const list = make("ul", "computer-list");
+  list.id = "computer-list";
+  const refresh = (): void => {
+    void show();
+  };
+  const local = rows.find((row) => isLocalRow(row.url, location.origin)) ?? null;
+  list.append(machineCard(health, LOCAL_HOST, location.origin, local, refresh));
+  for (const row of rows) {
+    if (isLocalRow(row.url, location.origin)) {
+      continue;
+    }
+    list.append(machineCard(health, row.name, row.url, row, refresh));
+  }
+  section.append(list);
+
+  // The registration form: the two fields `POST /api/hosts` takes, and its own refusal area. The API owns every rule
+  // — the name's alphabet, the URL's host and port, and whether the machine answers as a Holosmith — so this form
+  // validates nothing and prints the sentence it is given (ADR-0076 D9).
+  const form = document.createElement("form");
+  form.id = "computers-add";
+  const name = textInput("name", "");
+  name.id = "computers-name";
+  name.placeholder = "workshop";
+  const url = textInput("url", "");
+  url.id = "computers-url";
+  url.placeholder = "https://workshop.tail1a2b.ts.net";
+  const submit = make("button", "", "Add machine");
+  submit.type = "submit";
+  submit.id = "computers-submit";
+  const error = make("p", "error");
+  error.id = "computers-error";
+  error.hidden = true;
+  form.append(field("name", name), field("url", url), submit);
+  form.addEventListener("submit", (event) => {
+    // A form with no action is a GET of this path with the fields in the query string: a reload that throws away
+    // the screen (HS-014's review). The submit is swallowed whether or not there is anything to send.
+    event.preventDefault();
+    if (submit.disabled) {
+      return;
+    }
+    submit.disabled = true;
+    error.hidden = true;
+    void (async () => {
+      try {
+        const response = await fetch(apiPath(LOCAL_HOST, "hosts"), {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-holosmith-client": "1" },
+          body: JSON.stringify({ name: name.value, url: url.value }),
+        });
+        if (!response.ok) {
+          const envelope = (await response.json()) as ErrorEnvelope;
+          error.textContent = hostFailure(envelope.code, envelope.message);
+          error.hidden = false;
+          return;
+        }
+        // Registered: the row (and the probe's verdict on it) is an answer the server already has, so the whole
+        // screen is redrawn rather than the new card being drawn from a guess.
+        refresh();
+      } catch (failure) {
+        error.textContent = `unreachable: ${String(failure)}`;
+        error.hidden = false;
+      } finally {
+        submit.disabled = false;
+      }
+    })();
+  });
+  section.append(make("h2", "", "Add a machine"), form, error);
+  return section;
 }
 
 // ---- the session screen (HS-014) ----------------------------------------------------------
@@ -618,6 +951,7 @@ function applyChange(
   container: ParentNode,
   blocks: Map<string, MessageBlock>,
   tools: Map<string, ToolBlock>,
+  host: string,
 ): void {
   if (change.op === "boundary") {
     // A turn's number comes from the `turn.start` events seen so far. A `turn.end` with no start
@@ -708,7 +1042,10 @@ function applyChange(
     }
     block.meta.textContent = parts.join(" · ");
     if (change.outputRef !== null) {
-      block.full.setAttribute("href", change.outputRef);
+      // The peer computed this path for itself (`/api/sessions/<id>/tool-output/<tool>`), so it is re-rooted at the
+      // machine that wrote it: a forwarded frame is the peer's bytes and the hub's own route for that path is a 404
+      // (HS-071, ADR-0076 D3).
+      block.full.setAttribute("href", hostRef(host, change.outputRef));
       block.full.hidden = false;
     }
     // The pictures: one `<a>` per image, labelled with the block's index and its mime, so an operator can
@@ -717,7 +1054,7 @@ function applyChange(
     block.images.replaceChildren(
       ...change.images.map((image) => {
         const link = make("a", "tool-image", `image ${image.index} · ${image.mime}`);
-        link.setAttribute("href", image.outputRef);
+        link.setAttribute("href", hostRef(host, image.outputRef));
         return link;
       }),
     );
@@ -750,7 +1087,13 @@ type Composer = { element: HTMLElement; update: (state: SessionState) => void };
 
 // `showState` patches the screen's badge from a row the prompt's answer carried, so a 202 says
 // `running` before the stream has said anything.
-function composerSection(id: string, showState: (state: SessionState, reason: string | null) => void): Composer {
+// `host` is the machine the session lives on: every request below is made against it (HS-071), so one closure
+// carries it rather than each of the six `fetch` calls spelling the prefix.
+function composerSection(
+  host: string,
+  id: string,
+  showState: (state: SessionState, reason: string | null) => void,
+): Composer {
   const section = make("section", "composer");
   const form = document.createElement("form");
   const guidance = document.createElement("textarea");
@@ -787,7 +1130,7 @@ function composerSection(id: string, showState: (state: SessionState, reason: st
   // a session that never comes back leaves the retry unsent instead of looping.
   const waitIdle = async (): Promise<boolean> => {
     for (let attempt = 0; attempt < 40; attempt += 1) {
-      const response = await fetch(sessionPath(id), { headers: { accept: "application/json" } });
+      const response = await fetch(sessionPath(host, id), { headers: { accept: "application/json" } });
       if (response.ok) {
         const row = (await response.json()) as Session;
         showState(row.status, row.status_reason);
@@ -812,7 +1155,7 @@ function composerSection(id: string, showState: (state: SessionState, reason: st
     mayResume = true,
     retried = false,
   ): Promise<PostResult> => {
-    const response = await fetch(`${sessionPath(id)}${path}`, {
+    const response = await fetch(`${sessionPath(host, id)}${path}`, {
       method: "POST",
       headers: { "content-type": "application/json", "x-holosmith-client": "1" },
       body,
@@ -826,7 +1169,7 @@ function composerSection(id: string, showState: (state: SessionState, reason: st
     if (!mayResume || retried || !RESUMABLE.has(envelope.code)) {
       return { envelope, row: null };
     }
-    const resumed = await fetch(`${sessionPath(id)}/resume`, {
+    const resumed = await fetch(`${sessionPath(host, id)}/resume`, {
       method: "POST",
       headers: { "content-type": "application/json", "x-holosmith-client": "1" },
     });
@@ -1026,12 +1369,12 @@ type StreamTarget = {
   showSpend: (spend: Spend) => void;
 };
 
-function openSessionStream(id: string, target: StreamTarget): void {
+function openSessionStream(host: string, id: string, target: StreamTarget): void {
   const { transcript, placeholder, earlier, showState, showSpend } = target;
   const model = new Transcript();
   const blocks = new Map<string, MessageBlock>();
   const tools = new Map<string, ToolBlock>();
-  const source = new EventSource(streamPath(id));
+  const source = new EventSource(streamPath(host, id));
   openSources.add(source);
   // Where the next older page ends, or `null` while the replay reaches the beginning of the log.
   let cursor: number | null = null;
@@ -1060,7 +1403,7 @@ function openSessionStream(id: string, target: StreamTarget): void {
     earlier.disabled = true;
     void (async () => {
       try {
-        const answer = await getJson<HistoryPage>(historyPath(id, before, HISTORY_PAGE_LIMIT));
+        const answer = await getJson<HistoryPage>(historyPath(host, id, before, HISTORY_PAGE_LIMIT));
         if (!answer.ok) {
           // The button stays, and stays enabled: a page that failed is worth another try, and the
           // cursor has not moved.
@@ -1077,7 +1420,7 @@ function openSessionStream(id: string, target: StreamTarget): void {
             continue;
           }
           for (const change of older.apply(frame)) {
-            applyChange(change, fragment, olderBlocks, olderTools);
+            applyChange(change, fragment, olderBlocks, olderTools, host);
           }
         }
         transcript.prepend(fragment);
@@ -1109,7 +1452,7 @@ function openSessionStream(id: string, target: StreamTarget): void {
         placeholder.remove();
       }
       for (const change of model.apply(frame)) {
-        applyChange(change, transcript, blocks, tools);
+        applyChange(change, transcript, blocks, tools, host);
       }
       // One pure rule over what the stream has said about cost, applied after every frame: the
       // sentence is the same one the screen builds with (HS-023).
@@ -1169,6 +1512,7 @@ function refusalLine(status: number, text: string): string {
 }
 
 function changesSection(
+  host: string,
   id: string,
   initial: SessionState,
   showState: (state: SessionState, reason: string | null) => void,
@@ -1407,7 +1751,7 @@ function changesSection(
     diff.textContent = "";
     diff.hidden = true;
     try {
-      const response = await fetch(diffPath(id, path), { headers: { accept: "text/plain" } });
+      const response = await fetch(diffPath(host, id, path), { headers: { accept: "text/plain" } });
       const text = await response.text();
       if (!response.ok) {
         say(refusalLine(response.status, text));
@@ -1423,7 +1767,7 @@ function changesSection(
   };
 
   const load = async (): Promise<void> => {
-    const answer = await getJson<Changes>(`${sessionPath(id)}/changes`);
+    const answer = await getJson<Changes>(`${sessionPath(host, id)}/changes`);
     if (!answer.ok) {
       last = null;
       render();
@@ -1458,7 +1802,7 @@ function changesSection(
     clearNotice();
     render();
     try {
-      const response = await fetch(`${sessionPath(id)}/merge`, {
+      const response = await fetch(`${sessionPath(host, id)}/merge`, {
         method: "POST",
         headers: JSON_HEADERS,
         body: JSON.stringify({ target: target.value, strategy: strategy.value }),
@@ -1505,7 +1849,7 @@ function changesSection(
     clearNotice();
     render();
     try {
-      const response = await fetch(`${sessionPath(id)}/publish`, {
+      const response = await fetch(`${sessionPath(host, id)}/publish`, {
         method: "POST",
         headers: JSON_HEADERS,
         // `confirm` is the request's opt-in, not a second button: the operator's second tap *is* the confirmation.
@@ -1534,7 +1878,7 @@ function changesSection(
     clearNotice();
     render();
     try {
-      const response = await fetch(`${sessionPath(id)}/prompt`, {
+      const response = await fetch(`${sessionPath(host, id)}/prompt`, {
         method: "POST",
         headers: JSON_HEADERS,
         body: JSON.stringify({ prompt }),
@@ -1621,6 +1965,7 @@ function changesSection(
 type DeleteSection = { element: HTMLElement; update: (state: SessionState) => void };
 
 function deleteSection(
+  host: string,
   id: string,
   showState: (state: SessionState, reason: string | null) => void,
 ): DeleteSection {
@@ -1662,7 +2007,7 @@ function deleteSection(
     yes.disabled = true;
     forced.disabled = true;
     try {
-      const response = await fetch(`${sessionPath(id)}${force ? "?force=true" : ""}`, {
+      const response = await fetch(`${sessionPath(host, id)}${force ? "?force=true" : ""}`, {
         method: "DELETE",
         headers: { "content-type": "application/json", "x-holosmith-client": "1" },
       });
@@ -1728,7 +2073,10 @@ function deleteSection(
 // is drawn from the answer and then patched by `session.status`, so a reconnect has nothing to
 // reconcile; the row that is not live still opens a stream, because this is the screen the operator
 // asked for by name.
-function sessionScreen(health: Health, session: SessionDetail): void {
+// `host` is the machine the session lives on, from the address (HS-071): the preview link's first segment names
+// it, every request the screen makes is made against it, and the meta line says whose session this is — the list's
+// grouping is gone on a screen that shows one row.
+function sessionScreen(health: Health, host: string, session: SessionDetail): void {
   if (app === null) {
     return;
   }
@@ -1756,13 +2104,14 @@ function sessionScreen(health: Health, session: SessionDetail): void {
   // patched by the same callback that patches the badge, so a session that stops stops offering it.
   const preview = document.createElement("a");
   preview.className = "preview";
-  preview.href = previewUrl(health.preview_origin, session.id);
+  preview.href = previewUrl(health.preview_origin, host, session.id);
   preview.textContent = "preview ↗";
   preview.rel = "noreferrer";
   preview.target = "_blank";
 
   const meta = make("div", "session-meta");
   meta.append(
+    make("span", "host", hostLabel(host)),
     make("span", "id", session.id),
     make("span", "model", session.model),
     make("span", "level", `thinking ${session.thinking}`),
@@ -1771,7 +2120,7 @@ function sessionScreen(health: Health, session: SessionDetail): void {
     budget,
     preview,
   );
-  preview.hidden = !previewOffered(session.status);
+  preview.hidden = !previewShown(session.status, host, health.role);
   showSpend({ settled: 0, usage: false });
 
   const transcript = make("div", "transcript");
@@ -1789,9 +2138,9 @@ function sessionScreen(health: Health, session: SessionDetail): void {
   earlier.type = "button";
   earlier.hidden = true;
 
-  const composer = composerSection(session.id, (state, reason) => showState(state, reason));
-  const deleted = deleteSection(session.id, (state, reason) => showState(state, reason));
-  const changes = changesSection(session.id, session.status, (state, reason) =>
+  const composer = composerSection(host, session.id, (state, reason) => showState(state, reason));
+  const deleted = deleteSection(host, session.id, (state, reason) => showState(state, reason));
+  const changes = changesSection(host, session.id, session.status, (state, reason) =>
     showState(state, reason),
   );
 
@@ -1802,7 +2151,7 @@ function sessionScreen(health: Health, session: SessionDetail): void {
   // ending is what moves the branch, so it re-reads.
   function showState(state: SessionState, reason: string | null): void {
     badge.textContent = stateText(state, reason);
-    preview.hidden = !previewOffered(state);
+    preview.hidden = !previewShown(state, host, health.role);
     composer.update(state);
     deleted.update(state);
     changes.update(state);
@@ -1824,18 +2173,14 @@ function sessionScreen(health: Health, session: SessionDetail): void {
     composer.element,
     deleted.element,
   );
-  app.replaceChildren(header(health, navLink(location.pathname)), section);
-  openSessionStream(session.id, {
+  app.replaceChildren(header(health, navLinks(location.pathname)), section);
+  openSessionStream(host, session.id, {
     transcript,
     placeholder,
     earlier,
     showState,
     showSpend,
   });
-}
-
-function sessionPath(id: string): string {
-  return `/api/sessions/${encodeURIComponent(id)}`;
 }
 
 // ---- the settings screen (HS-067, ADR-0072 D2/D6) -------------------------------------------
@@ -2071,15 +2416,22 @@ function settingsSection(health: Health): HTMLElement {
   return section;
 }
 
-function render(health: Health, list: SessionList): void {
+// The sessions list: one group per machine, and the create form only where this machine can create.
+//
+// `own` is this machine's answer, which is also where the form's `network_default` comes from and the only place a
+// create can post to (HS-071). `groups` carries every machine's rows; `health.role` decides the affordance.
+function render(health: Health, own: SessionList, groups: SessionGroup[]): void {
   if (app === null) {
     return;
   }
-  app.replaceChildren(
-    header(health, navLink(location.pathname)),
-    sessionList(list.sessions, list.stopped_ttl_days),
-    createSection(list.network_default),
-  );
+  const sections: HTMLElement[] = [
+    header(health, navLinks(location.pathname)),
+    sessionList(groups),
+  ];
+  if (createOffered(health.role)) {
+    sections.push(createSection(own.network_default));
+  }
+  app.replaceChildren(...sections);
 }
 
 function renderFailure(code: string, message: string): void {
@@ -2104,41 +2456,74 @@ async function getJson<T>(path: string): Promise<Answer<T>> {
 }
 
 async function show(): Promise<void> {
-  const health = await getJson<Health>("/api/health");
+  const health = await getJson<Health>(apiPath(LOCAL_HOST, "health"));
   if (!health.ok) {
     renderFailure(health.code, health.message);
     return;
   }
   // The path decides the screen. `/sessions/<id>` is read from the address rather than from a
   // router: the server already answers the app shell for every non-`/api/` path (ADR-0007), so a
-  // reload of one session's screen lands here with nothing installed (ADR-0017).
-  const id = sessionIdFromPath(location.pathname);
-  if (id !== null) {
-    const session = await getJson<SessionDetail>(sessionPath(id));
+  // reload of one session's screen lands here with nothing installed (ADR-0017). Since HS-071 the address also
+  // names **whose** session it is — `/hosts/<host>/sessions/<id>` — and every request below is made against it.
+  const address = sessionIdFromPath(location.pathname);
+  if (address !== null) {
+    const session = await getJson<SessionDetail>(sessionPath(address.host, address.id));
     if (!session.ok) {
       renderFailure(session.code, session.message);
       return;
     }
-    sessionScreen(health.value, session.value);
+    sessionScreen(health.value, address.host, session.value);
     return;
   }
   // `/settings` is the third screen and the machine's own (HS-067, ADR-0072): it needs no request but the health
   // this function already made, and it draws one row per machine the app is served from — one today.
   if (location.pathname === SETTINGS_PATH) {
     app?.replaceChildren(
-      header(health.value, navLink(location.pathname)),
+      header(health.value, navLinks(location.pathname)),
       settingsSection(health.value),
+    );
+    return;
+  }
+  // `/computers` is the fourth (HS-071): the machines this one may send a request to, and their state. It reads the
+  // registry and then one health and one session list per machine, so it is a screen of its own rather than a
+  // section of the list — a machine with no sessions still has a state, and a hub has no sessions at all.
+  if (location.pathname === COMPUTERS_PATH) {
+    const hosts = await getJson<HostList>(apiPath(LOCAL_HOST, "hosts"));
+    if (!hosts.ok) {
+      renderFailure(hosts.code, hosts.message);
+      return;
+    }
+    app?.replaceChildren(
+      header(health.value, navLinks(location.pathname)),
+      computersSection(health.value, hosts.value.hosts),
     );
     return;
   }
   // The list after the health: a machine whose database is not open answers 500 here, and that
   // envelope is what the operator needs to see rather than a page that half drew.
-  const list = await getJson<SessionList>("/api/sessions");
-  if (!list.ok) {
-    renderFailure(list.code, list.message);
+  //
+  // One request per machine (HS-071): this machine's own list, then each registry row's own — the peer's rows are the
+  // peer's, forwarded byte for byte, so the page gets a `host` for each group rather than adding one to somebody
+  // else's row (ADR-0074). A machine that cannot be reached is a group with its refusal's sentence, not a group
+  // that vanished (ADR-0076 D7).
+  const own = await getJson<SessionList>(apiPath(LOCAL_HOST, "sessions"));
+  if (!own.ok) {
+    renderFailure(own.code, own.message);
     return;
   }
-  render(health.value, list.value);
+  const hosts = await getJson<HostList>(apiPath(LOCAL_HOST, "hosts"));
+  if (!hosts.ok) {
+    renderFailure(hosts.code, hosts.message);
+    return;
+  }
+  const remote = hosts.value.hosts.filter((row) => !isLocalRow(row.url, location.origin));
+  const groups = await Promise.all(
+    remote.map(async (row): Promise<SessionGroup> => ({
+      host: row.name,
+      answer: await getJson<SessionList>(apiPath(row.name, "sessions")),
+    })),
+  );
+  render(health.value, own.value, [{ host: LOCAL_HOST, answer: own }, ...groups]);
 }
 
 // Navigating away ends the streams: the server counts them (HS-066), and a source the page forgets

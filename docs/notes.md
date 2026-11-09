@@ -2538,3 +2538,40 @@ it rather than adding a caveat beside it.
   one that does not answer `403`, so the arm could not fail.
 - **One whois per request on the tailnet path, and no cache.** A dev-server page is thirty children. That is recorded
   as a cost (ADR-0075 D8) rather than fixed: a cached admission outlives the tailnet's own membership change.
+### Landmines: the Computers screen, and a page that knows whose session it is (HS-071)
+
+- **`node --test` resolves `src` imports without an extension, so a module the tests import may not import an
+  extensionless sibling.** Adding `COMPUTERS_PATH` to `transcript.ts` and importing it from `push.ts` was the obvious
+  shape and it broke `npm test` with `ERR_MODULE_NOT_FOUND: …/src/transcript`: `test/push.test.ts` imports
+  `../src/push.ts` **with** the extension, and node's ESM resolver then wants one on every hop. Vite and `tsc` accept
+  the extensionless form, so `tsc --noEmit` was green and only `npm test` went red. The fix is not
+  `allowImportingTsExtensions` (a build-wide semantic change for one import): the constant went to `push.ts`, beside
+  `SETTINGS_PATH`, because the header's list of screens is the only thing that has to know all of them. **A shared
+  constant belongs in the module both node and Vite already load first**, and `main.ts` (which nothing imports) is the
+  only file that may import freely.
+- **A card for a machine with no registry row still needs its "checked" fact.** The local card is drawn from
+  `/api/health` and `/api/sessions` and has no `hosts` row behind it, so `reach` and `last_checked_at` have nothing to
+  say — the first draft hid both, and the acceptance's "last health check" then had a hole in the one card that is
+  always on screen. It is filled with `lastCheckText(secondsNow(), secondsNow())`: the page's own health answer *is*
+  that check, and "checked just now" is the same word the rows use. `reach` stays hidden, because there is no probe.
+- **An envelope's code belongs in front of a sentence only where the operator acts differently.** `hostFailure`
+  keeps the code for a refusal about something the operator typed and drops it for the three registration codes
+  (ADR-0076 D6) — but a **failed read** on a card (`upstream_unreachable`, `upstream_timeout`) shows the `message`
+  alone: it already names the machine and the origin, and `upstream_unreachable: gone could not be reached at …`
+  reads as a word to look up about a machine that is simply away. The demo caught the code before the review did.
+- **`span:empty` in a flex row still costs a gap.** A machine that is not there has no role, version or uptime, and
+  three empty spans with `gap: 0 0.75rem` pushed `unreachable at the last check` sideways — visible in the first
+  screenshot. `.computer-facts > span:empty { display: none }` is the rule; `hidden` on each span is the same fix
+  written nine times.
+- **Two link texts with no separator read as one word.** The header drew `Sessions` and `Notifications` flush against
+  each other (`SessionsNotifications`) once it had two links, because `.machine-nav` had no layout. A `display: flex;
+  gap: 0 0.75rem` is the whole fix, and the screenshot is what found it — no gate can.
+- **A version skew cannot be manufactured on one box by writing a row.** The card shows the version the *hop* reports,
+  so `UPDATE hosts SET version = …` changes nothing on screen (that is ADR-0076 D1's point). The demo stands a
+  `python3` listener in that answers an older health payload and one stopped session — `/tmp/holosmith/demo/standin-peer.py`
+  — which is also the cheapest way to measure the `0.0.1` arm of `skewNote` end to end.
+- **The frame path's `closest("#session-list")` became a class.** The stopped-session window reaches `applyStatus`
+  through the list element's `data-stopped-ttl-days`, and there is now one list **per machine** — so the id became
+  `class="session-list"` plus `data-host`, and `addSession` finds the local group by
+  `.session-list[data-host="local"]`. An id would have had to be duplicated per group, and `querySelector` would then
+  answer the first machine's window for a row on another machine.

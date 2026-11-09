@@ -17,6 +17,7 @@ import {
   INSTALL_HINT,
   IOS_INSTALL_SENTENCE,
   PER_MACHINE_SENTENCE,
+  COMPUTERS_PATH,
   SETTINGS_PATH,
   SUBSCRIBE_PATH,
   UNKNOWN_KIND,
@@ -24,7 +25,8 @@ import {
   isIos,
   isSessionId,
   machineState,
-  navLink,
+  navLinks,
+  SCREENS,
   notificationPath,
   notificationPayload,
   notificationTag,
@@ -297,17 +299,43 @@ test("the machine's row names the origin and whether it is subscribed", () => {
   assert.match(PER_MACHINE_SENTENCE, /each machine has its own/);
 });
 
-test("the header offers the other screen and never itself", () => {
-  assert.deepEqual(navLink("/"), { href: SETTINGS_PATH, label: "Notifications" });
-  assert.deepEqual(navLink(`/sessions/${ID}`), { href: SETTINGS_PATH, label: "Notifications" });
-  assert.deepEqual(navLink(SETTINGS_PATH), { href: "/", label: "Sessions" });
-  // A link to the page you are on is a no-op the operator has to read before ignoring it.
-  assert.notEqual(navLink(SETTINGS_PATH).href, SETTINGS_PATH);
+test("the header offers every other screen and never itself", () => {
+  // Three screens since HS-071, so two links on every page — and one fewer than the screens on each.
+  for (const screen of SCREENS) {
+    const links = navLinks(screen.href);
+    assert.equal(links.length, SCREENS.length - 1, screen.href);
+    // A link to the page you are on is a no-op the operator has to read before ignoring it.
+    assert.ok(!links.some((link) => link.href === screen.href), screen.href);
+    // Every screen is reachable from every other one: no page is a dead end.
+    for (const other of SCREENS) {
+      if (other.href !== screen.href) {
+        assert.ok(
+          links.some((link) => link.href === other.href),
+          `${other.href} is not linked from ${screen.href}`,
+        );
+      }
+    }
+  }
+  // The list's page keeps its own path, and a session's page is not a screen of its own in this list.
+  assert.deepEqual(
+    navLinks(`/sessions/${ID}`).map((link) => link.href),
+    ["/", COMPUTERS_PATH, SETTINGS_PATH].filter((href) => href !== `/sessions/${ID}`),
+  );
+  assert.deepEqual(navLinks("/"), [
+    { href: COMPUTERS_PATH, label: "Computers" },
+    { href: SETTINGS_PATH, label: "Notifications" },
+  ]);
 });
 
 test("the routes the page spells are the ones the server serves", () => {
   assert.equal(SETTINGS_PATH, "/settings");
   assert.equal(SUBSCRIBE_PATH, "/api/push/subscribe");
+  // The Computers screen is the fourth, and it is a path the fallback answers with the app shell like the rest
+  // (ADR-0007) — a route nothing registered, so the page's own path is all that names it.
+  assert.equal(COMPUTERS_PATH, "/computers");
+  assert.equal(SCREENS.length, 3);
+  // No two screens share a path: two links to one page is one link too many, and `navLinks` filters by value.
+  assert.equal(new Set(SCREENS.map((screen) => screen.href)).size, SCREENS.length);
 });
 
 // ---- the files -------------------------------------------------------------------------------------

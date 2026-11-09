@@ -9,11 +9,17 @@
 // No state, no I/O, no DOM: every function here takes plain values, which is also what makes the worker (which
 // has no DOM) and the page (which has no worker scope) able to share them.
 
+
 // The control origin's own paths. `SETTINGS_PATH` is a **third screen**, not a section of one: the subscription
 // belongs to the machine, and a section of the session screen would be unreachable on a machine with no sessions
 // (ADR-0072 D2). The server needs no route for it — the app shell is answered for every non-`/api/` path
 // (ADR-0007) — so this is the page's own path and nothing else's.
 export const SETTINGS_PATH = "/settings";
+
+// The Computers screen (HS-071): the fourth screen, and the one that is not about this machine alone. Its path is
+// here for `SETTINGS_PATH`'s reason — the header's list of screens is the only thing that has to know all of them,
+// and a path spelled in two places is a link that 404s on one of them.
+export const COMPUTERS_PATH = "/computers";
 
 // The two push routes HS-066 built. The page never spells either anywhere else.
 export const SUBSCRIBE_PATH = "/api/push/subscribe";
@@ -243,15 +249,24 @@ export function machineState(origin: string, subscribed: boolean): string {
 export const PER_MACHINE_SENTENCE =
   "each machine has its own Web Push key pair, so a phone subscribes on every machine it uses";
 
-// ---- the header's one link -------------------------------------------------------------------------
+// ---- the header's links -------------------------------------------------------------------------
 
-// Which screen the header's link goes to, and what it says. `main.ts` draws it on all three screens, so the rule
-// is here rather than in the DOM: `/settings` returns to the list, and every other path offers the settings.
+// Where the header's links go, and what they say. `main.ts` draws them on every screen, so the rule is here
+// rather than in the DOM.
+//
+// One link per **other** screen, and never one to the page you are on: a link to the page you are reading is a
+// no-op the operator has to read before ignoring it (HS-067's rule). Since HS-071 there are three screens — the
+// sessions list at `/`, the Computers screen at `COMPUTERS_PATH`, and this one — so the header carries two links
+// where it carried one, and this is the reason `case_pwa`'s `id="nav-link"` needle became a class name.
 export type NavLink = { href: string; label: string };
 
-export function navLink(pathname: string): NavLink {
-  if (pathname === SETTINGS_PATH) {
-    return { href: "/", label: "Sessions" };
-  }
-  return { href: SETTINGS_PATH, label: "Notifications" };
+// Every screen the app serves, in the order the header lists them.
+export const SCREENS: readonly NavLink[] = [
+  { href: "/", label: "Sessions" },
+  { href: COMPUTERS_PATH, label: "Computers" },
+  { href: SETTINGS_PATH, label: "Notifications" },
+];
+
+export function navLinks(pathname: string): NavLink[] {
+  return SCREENS.filter((screen) => screen.href !== pathname);
 }

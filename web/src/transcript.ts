@@ -691,18 +691,75 @@ export function networkText(network: boolean): string {
 // screen has to spell the segment the way the listener parses it. That is why the name and the shape are
 // rules in this file rather than two strings in `main.ts`: a link and a listener that disagree are a 404 a
 // browser shows and nothing explains (HS-041).
+//
+// Since HS-071 the segment is also *whose* session it is: a hub's preview listener forwards `/<peer>/<id>/…` to
+// the machine that owns the session (ADR-0074), so one word is both "which machine" and "which listener".
 export const LOCAL_HOST = "local";
 
+// --- the machine a request is for (HS-071, ADR-0076) ---------------------------------------------
+//
+// One page, every machine's data. A session lives on exactly one machine, and the hub reaches it at
+// `/api/hosts/<host>/<rest>` where the peer serves it at `/api/<rest>` (ADR-0074) — so **every** path the page
+// spells takes the host it is for, and `local` is the one name that means *this* machine. The API agrees about
+// that word: `/api/hosts/local/<rest>` is a `308` to `/api/<rest>`, so the two spellings of "here" are the same
+// request.
+//
+// Why a function rather than a `${host}` in each caller: a path the page spells is a string a `web/test/` case
+// pins (ADR-0067's lesson), and seven call sites spelling one prefix is how the eighth forgets it.
+
+export function apiPath(host: string, rest: string): string {
+  const tail = rest.replace(/^\/+/, "");
+  return host === LOCAL_HOST ? `/api/${tail}` : `/api/hosts/${encodeURIComponent(host)}/${tail}`;
+}
+
+// One session's route on the machine that owns it.
+export function sessionPath(host: string, id: string): string {
+  return apiPath(host, `sessions/${encodeURIComponent(id)}`);
+}
+
+// One of a session's four actions, on the machine that owns it.
+export function sessionActionPath(host: string, id: string, action: string): string {
+  return `${sessionPath(host, id)}/${action}`;
+}
+
+// A path the **server** computed — `tool.end`'s `output_ref` and `images[].output_ref` — re-rooted at the machine
+// that wrote it. The peer spells those for itself (`/api/sessions/<id>/tool-output/<tool>`), and a forwarded frame
+// is the peer's bytes, so the hub's own route for that path is the 404 an operator sees as "not found" rather than
+// as "wrong machine". `local` keeps the path byte for byte, because that is the path the server already made.
+export function hostRef(host: string, ref: string): string {
+  if (host === LOCAL_HOST) {
+    return ref;
+  }
+  const match = /^\/api\/(.*)$/.exec(ref);
+  return match === null ? ref : apiPath(host, match[1]);
+}
+
+// Where a session's page is. `/sessions/<id>` is this machine's, and `/hosts/<host>/sessions/<id>` is another
+// machine's — the API's own prefix, one level out: the address bar names whose session the operator is looking at,
+// a reload lands on the same machine's transcript, and HS-074's host-aware notification has a path to link to.
+export function sessionHref(host: string, id: string): string {
+  return host === LOCAL_HOST
+    ? `/sessions/${encodeURIComponent(id)}`
+    : `/hosts/${encodeURIComponent(host)}/sessions/${encodeURIComponent(id)}`;
+}
+
 // The path a session's preview is served at, on the preview origin.
-export function previewPath(id: string): string {
-  return `/${LOCAL_HOST}/${encodeURIComponent(id)}/`;
+//
+// The first segment is the **row's** name, not always `local`: this machine's preview listener is the one the
+// browser talks to, and it is the listener that forwards a peer's previews (ADR-0074). A machine that forwards
+// nothing offers no remote preview at all — see `previewShown`.
+export function previewPath(host: string, id: string): string {
+  return `/${encodeURIComponent(host)}/${encodeURIComponent(id)}/`;
 }
 
 // The whole URL the session screen links to: the preview origin — which only the server knows, and which it
 // publishes as `GET /api/health`'s fifth key — and then the path. A trailing slash on the origin is folded so a
 // configured `https://host/` and `https://host` cannot make two different links.
-export function previewUrl(origin: string, id: string): string {
-  return `${origin.replace(/\/+$/, "")}${previewPath(id)}`;
+//
+// The origin is always **this** machine's: the hub's preview listener is the front door, and the row's measured
+// `preview` origin is where the *hub* forwards to, never where a browser goes (ADR-0076 D5).
+export function previewUrl(origin: string, host: string, id: string): string {
+  return `${origin.replace(/\/+$/, "")}${previewPath(host, id)}`;
 }
 
 // Whether the session screen offers a preview: a session that has (or is getting) a container may have a dev
@@ -713,11 +770,24 @@ export function previewOffered(state: SessionState): boolean {
   return state === "starting" || state === "running" || state === "idle";
 }
 
+// Which roles forward another machine's requests and previews (spec Roles, `Role` in the config).
+export function forwards(role: string): boolean {
+  return role === "hub" || role === "both";
+}
+
+// Whether the session screen offers the preview link at all: this machine's own session always does, and another
+// machine's only where this machine is a front door for it. A `server` role forwards nothing (ADR-0074), so a
+// link from it into a peer's preview would be a page nobody serves — and the peer's own preview listener would
+// refuse the browser's address anyway (ADR-0075).
+export function previewShown(state: SessionState, host: string, role: string): boolean {
+  return previewOffered(state) && (host === LOCAL_HOST || forwards(role));
+}
+
 // Where the stream is. One spelling, so the list and the screen cannot ask for different paths,
 // and no `since=` parameter is invented: the browser resends the last SSE `id` (a seq) as
 // `Last-Event-ID` and the server replays after it (ADR-0014).
-export function streamPath(id: string): string {
-  return `/api/sessions/${encodeURIComponent(id)}/events`;
+export function streamPath(host: string, id: string): string {
+  return sessionActionPath(host, id, "events");
 }
 
 // The `history.truncated` frame's payload: where the replay starts, and how many turns it skipped.
@@ -772,22 +842,39 @@ export type HistoryPage = {
 
 // Where one older page lives. `before` is exclusive and is the cursor the truncation frame or the previous
 // page named, so a client never computes a seq of its own.
-export function historyPath(id: string, before: number, limit: number = HISTORY_PAGE_LIMIT): string {
+export function historyPath(
+  host: string,
+  id: string,
+  before: number,
+  limit: number = HISTORY_PAGE_LIMIT,
+): string {
   const query = `before=${before}&limit=${limit}`;
-  return `/api/sessions/${encodeURIComponent(id)}/events/history?${query}`;
+  return `${sessionPath(host, id)}/events/history?${query}`;
 }
 
-// The session a path names, or `null` for every other path. `/sessions/<id>` and nothing deeper:
-// the app shell is served for any non-`/api/` path (ADR-0007), so the screen reads its own id from
-// the address rather than from a router that would add a dependency.
-export function sessionIdFromPath(pathname: string): string | null {
+// Whose session a path names, or `null` for every other path. Two shapes and nothing deeper:
+// `/sessions/<id>` is this machine's and `/hosts/<host>/sessions/<id>` is another's — the app shell is served for
+// any non-`/api/` path (ADR-0007), so the screen reads its own address rather than a router that would add a
+// dependency, and the host in it is what every request the screen makes is made against (HS-071).
+export type SessionAddress = { host: string; id: string };
+
+export function sessionIdFromPath(pathname: string): SessionAddress | null {
   const segments = pathname.split("/");
   // A leading slash gives an empty first segment: ["", "sessions", "<id>"].
-  if (segments.length !== 3 || segments[0] !== "" || segments[1] !== "sessions") {
+  if (segments[0] !== "") {
     return null;
   }
-  const id = segments[2];
-  return id === "" ? null : id;
+  // ["", "hosts", "<host>", "sessions", "<id>"]
+  if (segments.length === 5 && segments[1] === "hosts" && segments[3] === "sessions") {
+    const host = segments[2];
+    const id = segments[4];
+    return host === "" || id === "" ? null : { host, id };
+  }
+  if (segments.length === 3 && segments[1] === "sessions") {
+    const id = segments[2];
+    return id === "" ? null : { host: LOCAL_HOST, id };
+  }
+  return null;
 }
 
 // --- the Changes sheet (HS-058, ADR-0067) --------------------------------------------------------
@@ -1014,6 +1101,161 @@ export function publishedNotice(published: Published): string {
 
 // Where one file's diff is: the changes view's second route, with the path percent-encoded exactly once. The route
 // compares the decoded string against `files[]`, so a path with a space, a `?` or a `#` must survive the trip.
-export function diffPath(id: string, path: string): string {
-  return `/api/sessions/${encodeURIComponent(id)}/changes/diff?path=${encodeURIComponent(path)}`;
+export function diffPath(host: string, id: string, path: string): string {
+  return `${sessionPath(host, id)}/changes/diff?path=${encodeURIComponent(path)}`;
+}
+
+// ---- the Computers screen (HS-071, ADR-0076) ----------------------------------------------------
+//
+// Item 4's screen as a hub draws it: one section per machine, and every word on it a function here. The data
+// comes from three answers this build already serves and nothing new — `GET /api/hosts` (the registry's rows),
+// and for each row one forwarded `GET /api/hosts/<name>/health` and one `GET /api/hosts/<name>/sessions`
+// (ADR-0074). So there is no second reader of a machine's facts and no new route; what is new is that one page
+// asks several machines the same two questions.
+
+// Where one session's owner is *not* this machine. The one comparison the page can make: a row whose origin is
+// the origin this page was served from is this machine. The server's own `hosts::is_local` also folds a scheme's
+// default port, which a page cannot do without inventing a second copy of the folding — so a row registered with
+// the port spelled out is drawn as a second machine, forwarded to over the network, exactly as ADR-0074 says the
+// server treats it.
+export function isLocalRow(url: string, origin: string): boolean {
+  return stripOriginSlash(url) === stripOriginSlash(origin);
+}
+
+function stripOriginSlash(origin: string): string {
+  return origin.replace(/\/+$/, "");
+}
+
+// The two numbers beside a machine's name: how many of its sessions could be working, and how many are parked.
+//
+// `live` is the three states a container can be in — `starting`, `running`, `idle` — and `stopped` is **every
+// other state a row can hold**: `stopped`, `error` and the transient `deleting`. That is not a shortcut, it is
+// the rule that keeps the two numbers equal to the machine's row count: a `deleting` row counted in neither would
+// make a card's arithmetic something the operator has to reconcile, and a machine's own list is the authority on
+// what it holds. `error` is a parked session an operator can resume, so it belongs with `stopped` and not with
+// the work in flight.
+export type SessionCounts = { live: number; stopped: number };
+
+// The states in which a session has (or is getting) a running container. One spelling, shared by the row's
+// stream (a live row holds one open) and the count above.
+export const LIVE_STATES: ReadonlySet<SessionState> = new Set<SessionState>([
+  "starting",
+  "idle",
+  "running",
+]);
+
+export function sessionCounts(rows: readonly { status: SessionState }[]): SessionCounts {
+  let live = 0;
+  for (const row of rows) {
+    if (LIVE_STATES.has(row.status)) {
+      live += 1;
+    }
+  }
+  return { live, stopped: rows.length - live };
+}
+
+// One machine's two numbers, as the card draws them.
+export function sessionCountsText(counts: SessionCounts): string {
+  return `${counts.live} live · ${counts.stopped} stopped`;
+}
+
+// What a session count could not be read means. Never "0": a machine that did not answer has not told us it holds
+// no sessions, and a zero would be a claim about a machine nothing measured.
+export const COUNTS_UNKNOWN = "—";
+
+// How a registry row's reach reads beside the time it was measured.
+//
+// The registry's `reach` is as old as the boot's probe (ADR-0073/0074), so the word says *when* it was measured
+// and the card puts the time beside it. The row's own `last_error` is that probe's sentence, and the forwarded
+// read's refusal is now's sentence — two moments, two sentences, and the card shows the fresh one when there is
+// one.
+export function reachText(reach: string): string {
+  return reach === "reachable" ? "reachable at the last check" : "unreachable at the last check";
+}
+
+// When anything last asked a machine its health, in the same coarse words a session's activity uses.
+export const NEVER_CHECKED = "never checked";
+
+export function lastCheckText(at: number, now: number): string {
+  return at > 0 ? `checked ${relativeTime(at, now)}` : NEVER_CHECKED;
+}
+
+// "3 min ago", coarse on purpose. It reads a time from an answer and never from a frame: no frame carries one,
+// so the text is as fresh as the answer that drew it. Moved here from `main.ts` in HS-071 because the Computers
+// screen's last-check line is a second caller, and a sentence written twice is the pair that drifts.
+const MINUTE = 60;
+const HOUR = 60 * MINUTE;
+
+export function relativeTime(at: number, now: number): string {
+  const elapsed = now - at;
+  if (elapsed < MINUTE) {
+    return "just now";
+  }
+  if (elapsed < HOUR) {
+    return `${Math.floor(elapsed / MINUTE)} min ago`;
+  }
+  if (elapsed < DAY) {
+    return `${Math.floor(elapsed / HOUR)} h ago`;
+  }
+  return `${Math.floor(elapsed / DAY)} d ago`;
+}
+
+// What a machine runs, beside its version: the health answer's third and second keys.
+export function uptimeText(uptimeS: number): string {
+  const hours = Math.floor(uptimeS / HOUR);
+  const minutes = Math.floor((uptimeS % HOUR) / MINUTE);
+  if (hours > 0) {
+    return `up ${hours}h ${minutes}m`;
+  }
+  return `up ${minutes}m`;
+}
+
+// The sentence a version skew earns (item 4's "version skew is visible, since it affects which API a call can
+// use"). `null` when the machine runs this build's version — which is the common case and needs no sentence at
+// all, where a "same version" note would be one more line to read.
+//
+// Not a refusal, and never one: ADR-0074 forwards to a peer whatever version it reports, because refusing to
+// would make an upgrade a flag day. What the operator needs is that a call the older build does not know answers
+// `404` — a fact about an API, not about a machine being wrong.
+export function skewNote(version: string, own: string): string | null {
+  return version === own
+    ? null
+    : `version ${version} · this machine runs ${own}, so a call one of them does not know answers 404`;
+}
+
+// The three refusals a registration can give, by ADR-0008's codes (ADR-0073): the name, the URL, and a machine
+// that answered and is not a Holosmith.
+//
+// A refusal from this list is a **sentence about the value the operator typed**, and the code in front of it
+// would be a word to act on that is not one (`createFailure`'s rule for a project's refusals, HS-026). Every
+// other code keeps its word, because it names something the operator cannot see in the form.
+export const HOST_REFUSALS: readonly string[] = ["bad_host_name", "bad_host_url", "not_holosmith"];
+
+export function hostFailure(code: string, message: string): string {
+  return HOST_REFUSALS.includes(code) ? message : `${code}: ${message}`;
+}
+
+// What a session's machine is called on the screen. `local` is the name this machine's own sessions are reached
+// by (GLOSSARY's **Local**), and on a page that shows several machines the operator needs to know that this one is
+// the page's own host rather than another row in the registry.
+export function hostLabel(host: string): string {
+  return host === LOCAL_HOST ? "local · this machine" : host;
+}
+
+// Whether a refused removal can be retried with `?force=true`: `409 host_busy` is the only code that says the
+// request would work if the operator meant it, and its own message names the sessions that are still live.
+export function hostForceOffered(code: string): boolean {
+  return code === "host_busy";
+}
+
+export const HOST_FORCE_LABEL = "Remove anyway";
+
+// Whether this machine offers the new-session form at all (item 5's "a hub-only machine shows no new-session
+// affordance for itself").
+//
+// From `/api/health`'s `role`, which the page already fetches — no new field and no probe. A `hub` runs no
+// sessions and refuses `POST /api/sessions` with `403 sessions_disabled` (ADR-0074), so a button there is a button
+// whose only answer is that refusal. Creating a session on *another* machine is HS-074's, not this form's.
+export function createOffered(role: string): boolean {
+  return role !== "hub";
 }
