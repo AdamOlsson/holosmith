@@ -71,24 +71,34 @@ fn main() -> ExitCode {
             commands::drain::run(commands::drain::DrainArgs { wait, admin_dir })
         }
         Cmd::Server { action } => match action {
-            ServerAction::Deploy { dry_run, root } => {
-                commands::deploy::run(commands::deploy::DeployArgs {
-                    config: cli.config,
-                    kind: holosmith::deploy::Kind::Server,
-                    dry_run,
-                    root,
-                })
-            }
+            ServerAction::Deploy {
+                dry_run,
+                root,
+                ssh,
+                binary,
+            } => commands::deploy::run(commands::deploy::DeployArgs {
+                config: cli.config,
+                kind: holosmith::deploy::Kind::Server,
+                dry_run,
+                root,
+                ssh,
+                binary,
+            }),
         },
         Cmd::Hub { action } => match action {
-            HubAction::Deploy { dry_run, root } => {
-                commands::deploy::run(commands::deploy::DeployArgs {
-                    config: cli.config,
-                    kind: holosmith::deploy::Kind::Hub,
-                    dry_run,
-                    root,
-                })
-            }
+            HubAction::Deploy {
+                dry_run,
+                root,
+                ssh,
+                binary,
+            } => commands::deploy::run(commands::deploy::DeployArgs {
+                config: cli.config,
+                kind: holosmith::deploy::Kind::Hub,
+                dry_run,
+                root,
+                ssh,
+                binary,
+            }),
             HubAction::Host { action } => commands::hub::run_host(action, cli.config),
         },
     }

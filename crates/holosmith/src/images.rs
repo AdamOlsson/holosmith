@@ -310,7 +310,10 @@ pub fn own_digest() -> Result<String, String> {
 }
 
 /// Lowercase hex, two characters per byte.
-fn hex(bytes: &[u8]) -> String {
+///
+/// `pub(crate)` since HS-073, so `remote`'s digest of the file it sends is written by the same two functions
+/// [`digest`] and [`own_digest`] use rather than by a third hex writer beside them.
+pub(crate) fn hex(bytes: &[u8]) -> String {
     let mut text = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         use std::fmt::Write as _;

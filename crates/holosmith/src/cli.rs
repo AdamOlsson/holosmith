@@ -134,6 +134,15 @@ pub enum ServerAction {
         /// Install into this directory instead of the system paths, as the invoking user (no sudo).
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
+        /// Install on another machine: copy this binary there over ssh, verify the copy, and run the same deploy
+        /// there with sudo (`user@host`).
+        #[arg(long, value_name = "USER@HOST")]
+        ssh: Option<String>,
+        /// Send this file instead of the binary this command is running. It must be built for the target's
+        /// architecture: a mismatch is refused before anything is copied, and this flag is how a matching build is
+        /// supplied.
+        #[arg(long, requires = "ssh", value_name = "PATH")]
+        binary: Option<PathBuf>,
     },
 }
 
@@ -155,6 +164,15 @@ pub enum HubAction {
         /// user, and it is how this story's own acceptance is measured.
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
+        /// Install on another machine: copy this binary there over ssh, verify the copy, and run the same deploy
+        /// there with sudo (`user@host`).
+        #[arg(long, value_name = "USER@HOST")]
+        ssh: Option<String>,
+        /// Send this file instead of the binary this command is running. It must be built for the target's
+        /// architecture: a mismatch is refused before anything is copied, and this flag is how a matching build is
+        /// supplied.
+        #[arg(long, requires = "ssh", value_name = "PATH")]
+        binary: Option<PathBuf>,
     },
     /// Manage this machine's host registry — the machines it forwards to — with the API's own checks.
     Host {

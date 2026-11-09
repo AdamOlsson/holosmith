@@ -29,18 +29,28 @@ use std::process::ExitCode;
 use crate::config::{Config, LoadError, Role};
 use crate::deploy::{self, Kind, Target};
 use crate::docker::Docker;
+use crate::remote::{self, Binary, Plan, Remote};
 
 /// What the command line asked for: the config every command reads, which half to install, whether to apply
 /// anything, and the install tree.
+///
+/// `ssh`/`binary` are the two flags that move the run to another machine ([`run_over_ssh`]). Over ssh, `config` and
+/// `root` name **the target's** paths: they travel verbatim into the command the target runs, and this command does
+/// not read the config at all.
 #[derive(Debug)]
 pub struct DeployArgs {
     pub config: Option<PathBuf>,
     pub kind: Kind,
     pub dry_run: bool,
     pub root: Option<PathBuf>,
+    pub ssh: Option<String>,
+    pub binary: Option<PathBuf>,
 }
 
 pub fn run(args: DeployArgs) -> ExitCode {
+    if let Some(host) = args.ssh.clone() {
+        return run_over_ssh(&args, &host);
+    }
     let loaded = match Config::load(args.config.clone()) {
         Ok(loaded) => loaded,
         Err(LoadError::Invalid(problems)) => {
@@ -144,6 +154,101 @@ fn resume(args: &DeployArgs) -> String {
     }
     if let Some(root) = &args.root {
         command.push_str(&format!(" --root {}", deploy::absolute(root).display()));
+    }
+    if args.dry_run {
+        command.push_str(" --dry-run");
+    }
+    command
+}
+
+/// The run that happens on another machine: send this binary there, verify the copy, and let the target's own
+/// binary run the same command (HS-073, ADR-0078).
+///
+/// **The target's binary is the one that runs `deploy::run_as`**, with this run's `Kind`, `--root` and `--dry-run` —
+/// so a `hub deploy --ssh` installs the hub's five steps and builds nothing, and there is no second step plan
+/// anywhere in this file. This half owns the four `ssh` children ([`crate::remote`]), the three lines that say what
+/// was sent where, and the exit code.
+///
+/// **The config is not loaded here, and the tail is not printed here.** Over ssh a config path names a file on the
+/// target (a laptop with none can deploy), and `deploy: role:`/`url:`/`next:` are the target's own lines, printed by
+/// the target's binary because the target measured them — a `deploy: url:` from this process would name a URL it
+/// never asked about.
+///
+/// A child that exits non-zero is the target's answer rather than this command's failure to ask, so its code is
+/// this command's exit code, and one line says so. A failure **before** the run child (an illegal host, a binary
+/// that cannot be read, an architecture mismatch, a copy that does not verify) is refused with a sentence, and no
+/// deploy has run on the target: the file to re-run is [`ssh_resume`]'s line.
+fn run_over_ssh(args: &DeployArgs, host: &str) -> ExitCode {
+    let remote = match Remote::parse(host) {
+        Ok(remote) => remote,
+        Err(sentence) => return refused(args, host, &sentence),
+    };
+    let binary = match Binary::read(args.binary.as_deref()) {
+        Ok(binary) => binary,
+        Err(sentence) => return refused(args, host, &sentence),
+    };
+    let tools = remote::Tools::default();
+    let sent = match remote.send(&tools, &binary) {
+        Ok(sent) => sent,
+        Err(sentence) => return refused(args, host, &sentence),
+    };
+    for line in [sent.sent_line(), sent.verified_line()] {
+        println!("{line}");
+    }
+    let plan = Plan {
+        kind: args.kind,
+        dry_run: args.dry_run,
+        config: args.config.clone(),
+        root: args.root.clone(),
+    };
+    println!("{}", sent.command_line(&plan));
+    match remote.run(&tools, &sent, &plan) {
+        Ok(status) if status.success() => ExitCode::SUCCESS,
+        Ok(status) => {
+            println!(
+                "{}`holosmith {} deploy` on {host} exited {}",
+                remote::LINE_PREFIX,
+                args.kind,
+                status.code().unwrap_or(-1)
+            );
+            println!("{}", ssh_resume(args, host));
+            status
+                .code()
+                .and_then(|code| u8::try_from(code).ok())
+                .map_or(ExitCode::FAILURE, ExitCode::from)
+        }
+        Err(sentence) => refused(args, host, &sentence),
+    }
+}
+
+/// One refusal before anything ran on the target: the sentence on stderr, and the command to re-run as the last
+/// line on stdout — the local deploy's shape for a failed run, one hop out.
+fn refused(args: &DeployArgs, host: &str, sentence: &str) -> ExitCode {
+    eprintln!("{}{sentence}", remote::LINE_PREFIX);
+    println!("{}", ssh_resume(args, host));
+    ExitCode::FAILURE
+}
+
+/// The resume command for a run that went over ssh: the flags that named the transport, and the two paths
+/// **verbatim**.
+///
+/// It is a different sentence from [`resume`]'s, and the difference is the point rather than an oversight: over ssh
+/// `--config` and `--root` name **the target's** paths, so making them absolute here would name this machine's, and
+/// a resume must name the same tree the failed run named. `--binary` travels only when the operator gave one, for
+/// [`resume`]'s reason: a flag nobody typed would suggest this command chose it.
+fn ssh_resume(args: &DeployArgs, host: &str) -> String {
+    let mut command = format!(
+        "deploy: resume: holosmith {} deploy --ssh {host}",
+        args.kind
+    );
+    if let Some(binary) = &args.binary {
+        command.push_str(&format!(" --binary {}", binary.display()));
+    }
+    if let Some(config) = &args.config {
+        command.push_str(&format!(" --config {}", config.display()));
+    }
+    if let Some(root) = &args.root {
+        command.push_str(&format!(" --root {}", root.display()));
     }
     if args.dry_run {
         command.push_str(" --dry-run");
