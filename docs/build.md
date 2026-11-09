@@ -565,6 +565,30 @@ before the boot, so the case pins it, `case_hosts`' idiom); and `status`'s `mach
 `tests/deploy.rs`'s, not this case's: a tag from an earlier case is not this case's fact, and the test's `Fake` records
 every build and every daemon call so both lists can be asserted empty.
 
+…and since HS-073, **`--ssh` deploys**: `case_deploy_ssh` measures the transport that carries a deploy to another
+machine, and it is built the only way this sandbox can build one — there is **no ssh key on this machine and no second
+machine**, so `ssh` is an `sh` stand-in on `PATH` that records every argv and runs the words after the host through
+`sh -c` (which is ssh's own contract, not an approximation of it) with `$HOME` pointed at a tree the case owns. The
+copy, the check and the deploy are then all real: the shipped artifact's bytes, the machine's own `sha256sum`, and the
+artifact's own seven steps in a `--root` tree. It needs `python3` (three ports, a `_ping` socket and one
+`/api/health` responder), the artifact, and the machine's `install`/`chmod`/`df`/`openssl`; it needs **no daemon and
+no image**, because the server arm is a dry run over a `_ping` socket and a hub builds and starts nothing. It measures
+the story's demo in one arm — `server deploy --ssh me@box --dry-run` prints this side's three measured lines and then
+the **target's** seven, in the spec's order, streamed through the fourth child's inherited stdout, with the copy on
+disk carrying the artifact's bytes, mode 0755 and a name derived from the digest in the first line and in the
+shim's log; a real hub install over the same transport (steps 2, 5, 6 and 7 applied, 3 and 4 `skipped` — the `Kind`
+travelled) and a second run whose tally is `5 satisfied, 0 changed, 2 skipped, 0 failed` and whose copy overwrote the
+same digest-named file rather than adding a second; the architecture refusal with **one** child in the log, no copy
+on the target and a resume line naming `--binary`, and the same target accepting `--binary` when it matches (the two
+musl artifacts `scripts/build.sh` leaves behind are the two builds it can be given, and the arm prints one `SKIP` line
+under `--no-build` if the other one is absent); a `cat` stand-in that appends one byte, refused *after* the check with
+**no** run child in the log — the acceptance's "aborts before executing anything"; `--binary` without `--ssh` as
+`clap`'s usage error and `--ssh=-oProxyCommand=…` as the host rule's refusal, neither of which runs a child; and a
+`curl`/`wget` recorder that must never fire, which is the spec's "the CLI itself downloads nothing" in the only form a
+gate can measure. What it cannot measure — a real ssh, a key, a second machine, a real `sudo` (there is none on this
+machine) and the target's `sudo`-prefixed children — is `tests/remote.rs`'s (the four argvs, every refusal, the `-t`
+rule) and `tests/deploy.rs`'s (ADR-0078 D8).
+
 …and since HS-047, **`server deploy`**: `case_server_deploy` has two halves that skip independently, because the
 bugs it exists to catch are of two kinds. The **offline** half needs `python3` and nothing else: a `_ping` socket
 it answers stands in for the daemon, and the case asserts that the dry run lists the seven steps in the spec's

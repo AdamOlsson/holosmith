@@ -486,6 +486,7 @@ serve_cases=(
   case_server_images
   case_server_deploy
   case_server_service
+  case_deploy_ssh
   case_status
   case_logs
   case_uninstall
@@ -9701,6 +9702,54 @@ SHIM
   chmod 0755 "$dir/tailscale"
 }
 
+# The gate's `ssh`, which is the other half of `case_deploy_ssh` (HS-073).
+#
+# It does exactly what ssh does with a command — joins the words after the host and hands them to the target's login
+# shell — and adds one thing of its own: `$HOME` points into the case's own tree, so the copy lands where the case can
+# read it rather than in this operator's home. The three captured children carry `-o BatchMode=yes` (they have no
+# terminal, and one of them has the binary on stdin) and the run child may carry `-t`; ssh's own option grammar is
+# `-o` with a value and `-t` without, and a stand-in that skipped only single-word options would take `BatchMode=yes`
+# for a host name.
+deploy_ssh_shim() {
+  local dir="$1"
+  cat >"$dir/ssh" <<'SHIM'
+#!/bin/sh
+# Record every argv first: the log is the only place the four children are measurable.
+set -eu
+{
+  printf 'ssh'
+  for arg in "$@"; do
+    printf ' %s' "$arg"
+  done
+  printf '\n'
+} >>"$HS_SSH_LOG"
+HOME="$HS_SSH_HOME"
+export HOME
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o | -p | -l | -i)
+      shift
+      if [ "$#" -gt 0 ]; then
+        shift
+      fi
+      ;;
+    -*)
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+[ "$#" -gt 0 ] || exit 255
+# The host.
+shift
+[ "$#" -gt 0 ] || exit 255
+exec sh -c "$*"
+SHIM
+  chmod 0755 "$dir/ssh"
+}
+
 # One background `python3` answering `200` to every `GET` on 127.0.0.1:<port> for the rest of the run, printing the
 # pid it left behind (HS-049).
 #
@@ -10840,6 +10889,309 @@ AGAIN
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
   holder_pid=""
+  rm -rf "$root"
+}
+
+# HS-073's transport: the four `ssh` children, the two refusals that happen before anything is copied, and the
+# target's own deploy report streaming back onto this command's stdout.
+#
+# **There is no ssh key on this machine and no second machine**, so "the target" is a stand-in plus a `--root` tree.
+# The `ssh` here is a `sh` script that records every argv and runs the words after the host through `sh -c` — which
+# is ssh's own contract rather than an approximation of it — with `$HOME` pointed at a directory this case owns, so
+# the copy lands where the case can read it. Everything after that is real: the bytes are the shipped artifact's,
+# the check is the machine's own `sha256sum`, and the deploy that follows is the artifact's own seven steps.
+#
+# What no arm here can measure is a real ssh, a key, a second machine and a real `sudo` (there is none on this
+# machine): `tests/remote.rs` covers all four argvs, every refusal and the `-t` rule, and `tests/deploy.rs` the
+# `sudo`-prefixed children. This case measures the transport's *inside*: the copy, the digest, the arch refusal, a
+# copy that does not verify, and that the target's lines really are this command's output.
+#
+# It needs `python3` (three ports, a `_ping` socket and one `/api/health` responder), the artifact, and the machine's
+# `install`/`chmod`/`df`/`openssl`. It needs **no daemon and no image**: the server arm is a dry run over a `_ping`
+# socket, and a hub builds and starts nothing.
+case_deploy_ssh() {
+  local name=case_deploy_ssh root="$repo_root/target/verify-ssh-$$"
+  # `socket_pid`/`holder_pid` are assigned up front on purpose: a `local` with no value is **unset** in bash, and
+  # the EXIT trap that runs after a `fail` in this function still sees its locals — so an unset `holder_pid` here
+  # turns any failure into `line N: holder_pid: unbound variable` and buries the sentence that mattered.
+  local control preview status line got shims sshlog log state home
+  local socket_pid="" holder_pid=""
+  local digest copy short hostarch other corrupt downloader
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to pick the ports, answer `_ping` and hold the control port (tests/remote.rs covers the four argvs and every refusal)\n' "$name"
+    return 0
+  fi
+  rm -rf "$root"
+  mkdir -p "$root"
+  control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a second port"
+  socket_pid="$(fake_docker_ping "$root/docker.sock")"
+  for _ in $(seq 1 100); do
+    [ -S "$root/docker.sock" ] && break
+    sleep 0.05
+  done
+  [ -S "$root/docker.sock" ] || fail "$name/socket" "the fake daemon socket never appeared"
+  hostarch="$(uname -m)"
+  case "$hostarch" in
+    x86_64|amd64) hostarch=x86_64; other="$repo_root/dist/aarch64-unknown-linux-musl/holosmith" ;;
+    aarch64|arm64) hostarch=aarch64; other="$repo_root/dist/x86_64-unknown-linux-musl/holosmith" ;;
+    *) fail "$name/arch" "this machine answers uname -m as $hostarch, which the deploy cannot name" ;;
+  esac
+  digest="$(sha256sum "$artifact" | cut -d' ' -f1)"
+  [ -n "$digest" ] || fail "$name/digest" "the artifact has no digest"
+  shims="$WORK/$name.shims"
+  sshlog="$WORK/$name.ssh.log"
+  log="$WORK/$name.tailscale.log"
+  state="$WORK/$name.tailscale.state"
+  home="$root/home"
+  rm -f "$sshlog" "$log" "$state"
+  mkdir -p "$home"
+  deploy_machine_shims "$shims" "$log" "$state"
+  deploy_ssh_shim "$shims"
+  # The spec's "the CLI itself downloads nothing from the internet", as a program that must never be asked: if the
+  # command fetched anything at all, one of these recorded the argv before it failed.
+  mkdir -p "$WORK/$name.nodl"
+  for downloader in curl wget; do
+    printf '#!/bin/sh\nprintf "%%s\\n" "$0 $*" >>"%s"\nexit 1\n' "$WORK/$name.downloads.log" \
+      >"$WORK/$name.nodl/$downloader"
+    chmod 0755 "$WORK/$name.nodl/$downloader"
+  done
+  export HS_SSH_LOG="$sshlog" HS_SSH_HOME="$home"
+
+  # ---- 1. the demo: a server deploy's dry run, executed on the target ------------------------------
+  # Step 1 is a read, so the dry run performs it — against a `_ping` socket, which is what a machine with no daemon
+  # can answer — and steps 2–7 plan. The seven lines below are the **target's own**: they arrive through the fourth
+  # child's inherited stdout, which is the acceptance's "streaming the output" and the demo's "lists steps
+  # remotely" in one measurement.
+  deploy_config "$WORK/config-deploy-ssh.toml" "$control" "$preview" "unix://$root/docker.sock" "pi-agent:local"
+  status=0
+  PATH="$WORK/$name.nodl:$shims:$PATH" "$artifact" server deploy --ssh me@box --dry-run --root "$root/tree" \
+    --config "$WORK/config-deploy-ssh.toml" >"$WORK/$name.dry.out" 2>&1 || status=$?
+  check "$name/dry/exit" 0 "$status"
+  line="$(sed -n '1p' "$WORK/$name.dry.out")"
+  case "$line" in
+    "deploy: ssh: me@box is $hostarch; copied "*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/dry/sent" "the first line is not what was sent where: $line" ;;
+  esac
+  case "$line" in
+    *"$digest"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/dry/digest" "the line does not carry the artifact's digest: $line" ;;
+  esac
+  grep -q 'answered the same digest, so ~/.cache/holosmith/deploy-' "$WORK/$name.dry.out" ||
+    fail "$name/dry/verified" "the copy was not reported as verified: $(cat "$WORK/$name.dry.out")"
+  assertions=$((assertions + 1))
+  grep -q '^deploy: ssh: the target runs: ~/.cache/holosmith/deploy-' "$WORK/$name.dry.out" ||
+    fail "$name/dry/command" "the command the target runs is not printed: $(cat "$WORK/$name.dry.out")"
+  assertions=$((assertions + 1))
+  grep -qx 'deploy: dry run' "$WORK/$name.dry.out" ||
+    fail "$name/dry/header" "the target's report does not call itself a dry run: $(cat "$WORK/$name.dry.out")"
+  assertions=$((assertions + 1))
+  got="$(sed -n 's/^\([1-7]\)\. .*/\1/p' "$WORK/$name.dry.out" | tr -d '\n')"
+  check "$name/dry/order" "1234567" "$got"
+  grep -q '^deploy: into ' "$WORK/$name.dry.out" ||
+    fail "$name/dry/into" "the target's report does not name its install tree: $(cat "$WORK/$name.dry.out")"
+  assertions=$((assertions + 1))
+  grep -q '^deploy: 7 steps: ' "$WORK/$name.dry.out" ||
+    fail "$name/dry/tally" "the target's report has no tally: $(cat "$WORK/$name.dry.out")"
+  assertions=$((assertions + 1))
+  grep -qx "deploy: url: http://localhost:$control" "$WORK/$name.dry.out" ||
+    fail "$name/dry/url" "the target's tail names no URL: $(cat "$WORK/$name.dry.out")"
+  assertions=$((assertions + 1))
+  [ ! -e "$root/tree" ] || fail "$name/dry/root" "the dry run created $root/tree on the target"
+  assertions=$((assertions + 1))
+  # The four children, as the argv the transport really built: the read, the copy, the check and the run.
+  check "$name/dry/children" 4 "$(grep -c '' "$sshlog")"
+  grep -q 'uname -m' "$sshlog" || fail "$name/dry/uname" "no architecture was read: $(cat "$sshlog")"
+  assertions=$((assertions + 1))
+  grep -q 'cat >' "$sshlog" || fail "$name/dry/copy" "no copy child ran: $(cat "$sshlog")"
+  assertions=$((assertions + 1))
+  grep -q 'sha256sum' "$sshlog" || fail "$name/dry/check" "no digest was taken on the target: $(cat "$sshlog")"
+  assertions=$((assertions + 1))
+  grep -q 'server deploy --config .* --root .*--dry-run' "$sshlog" ||
+    fail "$name/dry/run" "the run child does not carry the operator's own flags: $(cat "$sshlog")"
+  assertions=$((assertions + 1))
+  # The copy is the artifact's bytes, executable, and named by the digest it was verified against.
+  copy="$(find "$home/.cache/holosmith" -name 'deploy-*' -type f | head -n 1)"
+  [ -n "$copy" ] || fail "$name/dry/copy/file" "the copy is not on the target"
+  cmp -s "$copy" "$artifact" || fail "$name/dry/copy/bytes" "the copy is not the artifact's bytes"
+  assertions=$((assertions + 1))
+  check "$name/dry/copy/mode" 755 "$(stat -c '%a' "$copy")"
+  short="${digest:0:12}"
+  case "$copy" in
+    *"/deploy-$short") assertions=$((assertions + 1)) ;;
+    *) fail "$name/dry/copy/name" "the copy is not named by its digest's first twelve characters: $copy" ;;
+  esac
+  [ ! -s "$WORK/$name.downloads.log" ] || fail "$name/dry/download" "the command ran a downloader: $(cat "$WORK/$name.downloads.log")"
+  assertions=$((assertions + 1))
+
+  # ---- 2. a real install over the same transport: the hub's five steps, and a second run -------------
+  # A hub is the half that needs no daemon and no image, so this arm applies steps 2, 5, 6 and 7 for real in a
+  # `--root` tree the case owns — and the two skips prove the `Kind` travelled rather than being decided here.
+  deploy_config "$WORK/config-deploy-ssh-hub.toml" "$control" "$preview" "unix:///var/run/docker.sock" "pi-agent:local" hub
+  holder_pid="$(health_responder "$control")"
+  for _ in $(seq 1 100); do
+    if (exec 3<>/dev/tcp/127.0.0.1/"$control") 2>/dev/null; then break; fi
+    sleep 0.05
+  done
+  : >"$sshlog"
+  status=0
+  PATH="$WORK/$name.nodl:$shims:$PATH" "$artifact" hub deploy --ssh me@box --root "$root/hub" \
+    --config "$WORK/config-deploy-ssh-hub.toml" >"$WORK/$name.run.out" 2>&1 || status=$?
+  check "$name/run/exit" 0 "$status"
+  grep -q '^2\. files: changed: ' "$WORK/$name.run.out" ||
+    fail "$name/run/files" "the target did not create the install tree: $(cat "$WORK/$name.run.out")"
+  assertions=$((assertions + 1))
+  for entry in images proxies; do
+    grep -q "^[0-9]\. $entry: skipped: " "$WORK/$name.run.out" ||
+      fail "$name/run/$entry" "step $entry is not a skip on the target, so the kind did not travel: $(cat "$WORK/$name.run.out")"
+    assertions=$((assertions + 1))
+  done
+  for entry in service origins; do
+    grep -q "^[0-9]\. $entry: changed: " "$WORK/$name.run.out" ||
+      fail "$name/run/$entry" "step $entry was not applied on the target: $(cat "$WORK/$name.run.out")"
+    assertions=$((assertions + 1))
+  done
+  # Step 7's word depends on whether the target's own `doctor --full` had anything to say *before* the run, so both
+  # words are read: it waited and then measured, or it found the machine already serving.
+  grep -q '^7\. health: \(changed\|satisfied\): ' "$WORK/$name.run.out" ||
+    fail "$name/run/health" "step 7 is neither changed nor satisfied on the target: $(cat "$WORK/$name.run.out")"
+  assertions=$((assertions + 1))
+  # The target's own tail, streamed: its role, its URL and its next step. A hub has no key proxy, so `key set` is
+  # not one of them.
+  grep -qx 'deploy: role: hub' "$WORK/$name.run.out" ||
+    fail "$name/run/role" "the target does not say it is a hub: $(cat "$WORK/$name.run.out")"
+  assertions=$((assertions + 1))
+  grep -qx 'deploy: next: holosmith hub host add <name> <url>' "$WORK/$name.run.out" ||
+    fail "$name/run/next" "the target does not name a hub's next step: $(cat "$WORK/$name.run.out")"
+  assertions=$((assertions + 1))
+  # Exactly one URL line: the target's. This side prints no `deploy: url:` of its own, because it measured none.
+  check "$name/run/url/once" 1 "$(grep -c '^deploy: url: ' "$WORK/$name.run.out")"
+  grep -qx "role = \"hub\"" "$root/hub/etc/holosmith/config.toml" ||
+    fail "$name/run/config/role" "the target's config is not the half that was installed: $(cat "$root/hub/etc/holosmith/config.toml")"
+  assertions=$((assertions + 1))
+  [ -f "$root/hub/etc/systemd/system/holosmith.service" ] ||
+    fail "$name/run/unit" "the target wrote no unit"
+  assertions=$((assertions + 1))
+  check "$name/run/children" 4 "$(grep -c '' "$sshlog")"
+  status=0
+  PATH="$WORK/$name.nodl:$shims:$PATH" "$artifact" hub deploy --ssh me@box --root "$root/hub" \
+    --config "$WORK/config-deploy-ssh-hub.toml" >"$WORK/$name.again.out" 2>&1 || status=$?
+  check "$name/again/exit" 0 "$status"
+  grep -qx 'deploy: 7 steps: 5 satisfied, 0 changed, 2 skipped, 0 failed' "$WORK/$name.again.out" ||
+    fail "$name/again/tally" "the second run on the target is not idempotent: $(cat "$WORK/$name.again.out")"
+  assertions=$((assertions + 1))
+  # The second run is the same four children, and it copied again — the transport is stateless — but the name is the
+  # digest, so it overwrote the same file rather than leaving a second one behind.
+  check "$name/again/children" 8 "$(grep -c '' "$sshlog")"
+  check "$name/again/copies" 2 "$(grep -c 'cat >' "$sshlog")"
+  check "$name/again/names" 1 "$(grep -o 'deploy-[0-9a-f]\{12\}' "$sshlog" | sort -u | grep -c '')"
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  holder_pid=""
+
+  # ---- 3. the architecture: refused before anything is copied, accepted when --binary matches ---------
+  # The two musl artifacts `scripts/build.sh` leaves behind are the two builds this command can be given, so the
+  # "other" one is a real ELF for a machine this one is not.
+  home="$root/home-arch"
+  mkdir -p "$home"
+  export HS_SSH_HOME="$home"
+  : >"$sshlog"
+  if [ ! -x "$other" ]; then
+    printf 'SKIP %s/arch: no %s artifact to offer as a mismatch (scripts/build.sh builds both; --no-build skips it)\n' \
+      "$name" "$other"
+  else
+    status=0
+    PATH="$WORK/$name.nodl:$shims:$PATH" "$artifact" server deploy --ssh me@box --binary "$other" --dry-run \
+      --root "$root/arch" --config "$WORK/config-deploy-ssh.toml" >"$WORK/$name.arch.out" 2>&1 || status=$?
+    check "$name/arch/exit" 1 "$status"
+    grep -q 'cannot run there' "$WORK/$name.arch.out" ||
+      fail "$name/arch/sentence" "the refusal does not say why: $(cat "$WORK/$name.arch.out")"
+    assertions=$((assertions + 1))
+    grep -q 'deploy: ssh: .*--binary.*' "$WORK/$name.arch.out" ||
+      fail "$name/arch/advice" "the refusal names no way forward: $(cat "$WORK/$name.arch.out")"
+    assertions=$((assertions + 1))
+    # "before anything is copied": the read ran and nothing else did.
+    check "$name/arch/children" 1 "$(grep -c '' "$sshlog")"
+    [ ! -e "$home/.cache" ] || fail "$name/arch/copied" "an architecture mismatch copied the binary anyway"
+    assertions=$((assertions + 1))
+    grep -q '^deploy: resume: holosmith server deploy --ssh me@box --binary ' "$WORK/$name.arch.out" ||
+      fail "$name/arch/resume" "the refusal prints no resume command: $(cat "$WORK/$name.arch.out")"
+    assertions=$((assertions + 1))
+  fi
+  # …and the same target accepts a build for it, which is the acceptance's "unless `--binary` supplies a matching
+  # build": the digest-named copy is this artifact, and the dry run runs from it.
+  : >"$sshlog"
+  status=0
+  PATH="$WORK/$name.nodl:$shims:$PATH" "$artifact" server deploy --ssh me@box --binary "$artifact" --dry-run \
+    --root "$root/arch-ok" --config "$WORK/config-deploy-ssh.toml" >"$WORK/$name.archok.out" 2>&1 || status=$?
+  check "$name/archok/exit" 0 "$status"
+  grep -q '^deploy: 7 steps: ' "$WORK/$name.archok.out" ||
+    fail "$name/archok/report" "a matching --binary did not run the deploy: $(cat "$WORK/$name.archok.out")"
+  assertions=$((assertions + 1))
+  check "$name/archok/children" 4 "$(grep -c '' "$sshlog")"
+
+  # ---- 4. a copy that does not verify aborts before anything executes ------------------------------
+  # One byte more than was sent: the check is still the machine's own `sha256sum`, so the *bytes* are what is
+  # measured rather than the transport's opinion of them.
+  home="$root/home-corrupt"
+  corrupt="$WORK/$name.corrupt"
+  mkdir -p "$home" "$corrupt"
+  export HS_SSH_HOME="$home"
+  cat >"$corrupt/cat" <<CAT
+#!$(command -v sh)
+"$(command -v cat)" || exit 1
+printf x
+CAT
+  chmod 0755 "$corrupt/cat"
+  : >"$sshlog"
+  status=0
+  PATH="$corrupt:$shims:$PATH" "$artifact" server deploy --ssh me@box --dry-run --root "$root/corrupt" \
+    --config "$WORK/config-deploy-ssh.toml" >"$WORK/$name.corrupt.out" 2>&1 || status=$?
+  check "$name/corrupt/exit" 1 "$status"
+  grep -q 'not the bytes that were sent' "$WORK/$name.corrupt.out" ||
+    fail "$name/corrupt/sentence" "the refusal does not say the copy differs: $(cat "$WORK/$name.corrupt.out")"
+  assertions=$((assertions + 1))
+  grep -qF "$digest" "$WORK/$name.corrupt.out" ||
+    fail "$name/corrupt/digest" "the refusal does not name the digest it wanted: $(cat "$WORK/$name.corrupt.out")"
+  assertions=$((assertions + 1))
+  # The copy and the check ran; the run did not. That is the acceptance's "aborts before executing anything".
+  check "$name/corrupt/children" 3 "$(grep -c '' "$sshlog")"
+  if grep -q 'server deploy' "$sshlog"; then
+    fail "$name/corrupt/ran" "the deploy ran on the target over a copy that did not verify: $(cat "$sshlog")"
+  fi
+  assertions=$((assertions + 1))
+  copy="$(find "$home/.cache/holosmith" -name 'deploy-*' -type f | head -n 1)"
+  [ -n "$copy" ] || fail "$name/corrupt/file" "the corrupted copy is not on the target"
+  check "$name/corrupt/size" "$(( $(stat -c '%s' "$artifact") + 1 ))" "$(stat -c '%s' "$copy")"
+  # A failed transport line is an error, so the sentence is on stderr and the resume command on stdout — the local
+  # deploy's shape for a failed run, one hop out.
+  grep -q '^deploy: resume: holosmith server deploy --ssh me@box --config .* --root .*--dry-run' \
+    "$WORK/$name.corrupt.out" ||
+    fail "$name/corrupt/resume" "a failed remote run prints no local resume: $(cat "$WORK/$name.corrupt.out")"
+  assertions=$((assertions + 1))
+
+  # ---- 5. what clap and the host rule refuse, and what never ran ------------------------------------
+  : >"$sshlog"
+  status=0
+  "$artifact" server deploy --binary "$artifact" >"$WORK/$name.nossh.out" 2>&1 || status=$?
+  check "$name/nossh/exit" 2 "$status"
+  grep -q -- '--ssh' "$WORK/$name.nossh.out" || fail "$name/nossh/sentence" "--binary without --ssh names no flag: $(cat "$WORK/$name.nossh.out")"
+  assertions=$((assertions + 1))
+  status=0
+  "$artifact" server deploy --ssh=-oProxyCommand=curl --dry-run >"$WORK/$name.host.out" 2>&1 || status=$?
+  check "$name/host/exit" 1 "$status"
+  grep -q 'starts with `-`' "$WORK/$name.host.out" ||
+    fail "$name/host/sentence" "an option smuggled through --ssh is not refused: $(cat "$WORK/$name.host.out")"
+  assertions=$((assertions + 1))
+  check "$name/host/children" 0 "$(grep -c '' "$sshlog")"
+  [ ! -s "$WORK/$name.downloads.log" ] ||
+    fail "$name/download" "the command ran a downloader: $(cat "$WORK/$name.downloads.log")"
+  assertions=$((assertions + 1))
+
+  kill "$socket_pid" 2>/dev/null || true
+  wait "$socket_pid" 2>/dev/null || true
+  socket_pid=""
+  unset HS_SSH_LOG HS_SSH_HOME
   rm -rf "$root"
 }
 
