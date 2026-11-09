@@ -59,9 +59,16 @@ pub const LINE_PREFIX: &str = "deploy: ssh: ";
 /// hang on a machine that is asleep.
 pub const CONNECT_TIMEOUT: u32 = 20;
 
-/// The remote directory the copy lands in, relative to the target's `$HOME` — written as a shell token, because
+/// The remote directory the copy lands in, relative to the target's `$HOME` — written as a shell **token**, because
 /// that is what it is: the remote side expands it, and this side never learns (or needs) the absolute path.
+///
+/// The expansion is quoted ([`COPY_TOKEN_DIR`]): ssh hands the target's login shell one string, so an unquoted
+/// `$HOME` would split a home directory with a space in it into two words.
 pub const COPY_DIR: &str = "$HOME/.cache/holosmith";
+
+/// [`COPY_DIR`] as the shell word that names it: `"$HOME"/.cache/holosmith`, which expands `HOME` without letting
+/// the expansion split.
+pub const COPY_TOKEN_DIR: &str = "\"$HOME\"/.cache/holosmith";
 
 /// The ssh flags every captured child carries.
 ///
@@ -157,7 +164,7 @@ impl Remote {
         let (path, shown) = binary.remote_path();
         // One child, one shell string: what ssh does with its arguments is hand them to the target's login shell,
         // so the directory, the copy and the mode are one round trip rather than three.
-        let copy = format!("mkdir -p {COPY_DIR} && cat > {path} && chmod 0755 {path}");
+        let copy = format!("mkdir -p {COPY_TOKEN_DIR} && cat > {path} && chmod 0755 {path}");
         let mut arguments = batch();
         arguments.push(self.host.clone());
         arguments.push(copy);
@@ -296,6 +303,31 @@ pub fn host_problem(text: &str) -> Option<String> {
     None
 }
 
+/// Shell-quote one word, so a path an operator typed reaches the target as **one argument** with its own text.
+///
+/// ssh's command is one string handed to the target's login shell: whatever is not quoted there is re-parsed, so
+/// `/srv/a b` becomes two words, `/srv/*` becomes whatever matched, and `;` becomes a second command. A word made
+/// only of characters no shell acts on is returned unchanged — a plain path must read like a plain path in the
+/// report — and anything else is wrapped in single quotes with every `'` written as `'\''`, which is the one form
+/// POSIX `sh` reads back byte for byte.
+///
+/// `~` is deliberately **not** in the safe set: unquoted, the target's shell would expand it, and this function
+/// promises the word the operator wrote.
+pub fn quote(text: &str) -> String {
+    let safe = !text.is_empty()
+        && text.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(
+                    character,
+                    '.' | '_' | '/' | '-' | '+' | ':' | '@' | '%' | '=' | ','
+                )
+        });
+    if safe {
+        return text.to_string();
+    }
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
 /// The CPU a Linux binary is built for, which is the only thing the architecture check compares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Machine {
@@ -308,7 +340,7 @@ impl Machine {
     /// name: two architectures are what `scripts/build.sh` makes artifacts for.
     pub fn parse(word: &str) -> Option<Self> {
         match word.trim().to_ascii_lowercase().as_str() {
-            "x86_64" | "amd64" | "x86-64" => Some(Self::X86_64),
+            "x86_64" | "amd64" => Some(Self::X86_64),
             "aarch64" | "arm64" => Some(Self::Aarch64),
             _ => None,
         }
@@ -380,7 +412,7 @@ impl Binary {
     fn remote_path(&self) -> (String, String) {
         let short = &self.digest[..12.min(self.digest.len())];
         (
-            format!("{COPY_DIR}/deploy-{short}"),
+            format!("{COPY_TOKEN_DIR}/deploy-{short}"),
             format!("~/.cache/holosmith/deploy-{short}"),
         )
     }
@@ -433,13 +465,13 @@ impl Sent {
         )
     }
 
-    /// The line that says which command the target runs, in the target's own vocabulary.
+    /// The line that says which command the target is about to run, in the target's own vocabulary.
     ///
     /// It is printed because the two flags that travel — `--config` and `--root` — name **the target's** paths, so
     /// the line is where an operator sees which tree and which file will be read over there.
     pub fn command_line(&self, plan: &Plan) -> String {
         format!(
-            "{LINE_PREFIX}the target runs: {} {}",
+            "{LINE_PREFIX}the target will run: {} {}",
             self.shown,
             plan.arguments().join(" ")
         )
@@ -462,15 +494,21 @@ pub struct Plan {
 
 impl Plan {
     /// The remote command line after the binary's path: `server deploy --config … --root … --dry-run`.
+    ///
+    /// **Both values are shell-quoted, and that is what makes them verbatim.** ssh joins the words after the host
+    /// with single spaces and hands the result to the target's login shell, so a value with a space in it would
+    /// arrive as two arguments, a glob as whatever it matched, and a `;` as a command — while the *same* command run
+    /// locally needs no such care, because a local `Command` is argv all the way down. [`quote`] leaves a plain path
+    /// alone, so the common case reads exactly as the operator typed it.
     pub fn arguments(&self) -> Vec<String> {
         let mut arguments = vec![self.kind.word().to_string(), "deploy".to_string()];
         if let Some(config) = &self.config {
             arguments.push("--config".to_string());
-            arguments.push(config.display().to_string());
+            arguments.push(quote(&config.display().to_string()));
         }
         if let Some(root) = &self.root {
             arguments.push("--root".to_string());
-            arguments.push(root.display().to_string());
+            arguments.push(quote(&root.display().to_string()));
         }
         if self.dry_run {
             arguments.push("--dry-run".to_string());
@@ -615,13 +653,13 @@ mod tests {
 
     #[test]
     fn the_uname_words_this_build_may_hear_are_four_and_nothing_else() {
-        for word in ["x86_64", "amd64", "x86-64", "X86_64\n"] {
+        for word in ["x86_64", "amd64", "X86_64\n"] {
             assert_eq!(Machine::parse(word), Some(Machine::X86_64), "{word:?}");
         }
         for word in ["aarch64", "arm64", " arm64 "] {
             assert_eq!(Machine::parse(word), Some(Machine::Aarch64), "{word:?}");
         }
-        for word in ["", "riscv64", "i686", "armv7l"] {
+        for word in ["", "riscv64", "i686", "armv7l", "x86-64"] {
             assert_eq!(Machine::parse(word), None, "{word:?}");
         }
     }
@@ -653,10 +691,12 @@ mod tests {
             digest: "0123456789abcdef".repeat(4),
         };
         let (token, shown) = binary.remote_path();
-        assert_eq!(token, "$HOME/.cache/holosmith/deploy-0123456789ab");
+        assert_eq!(token, "\"$HOME\"/.cache/holosmith/deploy-0123456789ab");
         assert_eq!(shown, "~/.cache/holosmith/deploy-0123456789ab");
         // `$HOME`, not `/tmp`: a temporary directory is routinely `noexec` on the machines this deploys to.
         assert!(!token.contains("/tmp"), "{token}");
+        // And the expansion is quoted, so a home directory with a space in it arrives as one word.
+        assert!(token.starts_with('\"'), "{token}");
     }
 
     #[test]
@@ -706,7 +746,9 @@ mod tests {
     }
 
     #[test]
-    fn the_captured_children_are_batched_and_the_run_child_is_not() {
+    fn the_captured_children_are_batched() {
+        // The run child's half of this claim — that it carries no `-o` and that `-t` follows the terminal — is
+        // `tests/remote.rs`'s, because that argv only exists once `run` has built it.
         let flags = batch();
         assert!(flags.iter().any(|flag| flag == "BatchMode=yes"));
         assert!(
@@ -714,13 +756,23 @@ mod tests {
                 .iter()
                 .any(|flag| flag == &format!("ConnectTimeout={CONNECT_TIMEOUT}"))
         );
-        // The run child's argv is built in `run`; what matters here is that nothing in it is a `-o`.
-        let tools = Tools {
-            ssh: PathBuf::from("ssh"),
-            uname: PathBuf::from("uname"),
-            sha256sum: PathBuf::from("sha256sum"),
-            interactive: true,
-        };
-        assert!(tools.interactive);
+    }
+
+    #[test]
+    fn a_plain_path_is_left_alone_and_anything_else_is_quoted() {
+        for plain in ["/etc/holosmith/config.toml", "tree", "/srv/in-7_tree", ""] {
+            if plain.is_empty() {
+                continue;
+            }
+            assert_eq!(quote(plain), plain, "{plain:?}");
+        }
+        assert_eq!(quote("/srv/My Tree"), "'/srv/My Tree'");
+        assert_eq!(quote("/srv/a*"), "'/srv/a*'");
+        assert_eq!(quote("~/x"), "'~/x'");
+        assert_eq!(quote("/srv/x;id"), "'/srv/x;id'");
+        assert_eq!(quote("$HOME/x"), "'$HOME/x'");
+        assert_eq!(quote("it's"), "'it'\\''s'");
+        // The empty word is quoted rather than dropped: a flag with no value must not become the next flag's.
+        assert_eq!(quote(""), "''");
     }
 }

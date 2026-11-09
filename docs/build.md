@@ -570,7 +570,7 @@ machine, and it is built the only way this sandbox can build one — there is **
 machine**, so `ssh` is an `sh` stand-in on `PATH` that records every argv and runs the words after the host through
 `sh -c` (which is ssh's own contract, not an approximation of it) with `$HOME` pointed at a tree the case owns. The
 copy, the check and the deploy are then all real: the shipped artifact's bytes, the machine's own `sha256sum`, and the
-artifact's own seven steps in a `--root` tree. It needs `python3` (three ports, a `_ping` socket and one
+artifact's own seven steps in a `--root` tree. It needs `python3` (two ports, a `_ping` socket and one
 `/api/health` responder), the artifact, and the machine's `install`/`chmod`/`df`/`openssl`; it needs **no daemon and
 no image**, because the server arm is a dry run over a `_ping` socket and a hub builds and starts nothing. It measures
 the story's demo in one arm — `server deploy --ssh me@box --dry-run` prints this side's three measured lines and then
@@ -583,9 +583,11 @@ on the target and a resume line naming `--binary`, and the same target accepting
 musl artifacts `scripts/build.sh` leaves behind are the two builds it can be given, and the arm prints one `SKIP` line
 under `--no-build` if the other one is absent); a `cat` stand-in that appends one byte, refused *after* the check with
 **no** run child in the log — the acceptance's "aborts before executing anything"; `--binary` without `--ssh` as
-`clap`'s usage error and `--ssh=-oProxyCommand=…` as the host rule's refusal, neither of which runs a child; and a
-`curl`/`wget` recorder that must never fire, which is the spec's "the CLI itself downloads nothing" in the only form a
-gate can measure. What it cannot measure — a real ssh, a key, a second machine, a real `sudo` (there is none on this
+`clap`'s usage error and `--ssh=-oProxyCommand=…` as the host rule's refusal, neither of which runs a child; a run the
+*target* refuses (a config path that exists here and not there), which is what measures that a child's non-zero status
+becomes this command's exit code, that the target's sentence is on stderr and the local resume line is the last line on
+stdout; and a `curl`/`wget` recorder that must never fire, which is the spec's "the CLI itself downloads nothing" in
+the only form a gate can measure. What it cannot measure — a real ssh, a key, a second machine, a real `sudo` (there is none on this
 machine) and the target's `sudo`-prefixed children — is `tests/remote.rs`'s (the four argvs, every refusal, the `-t`
 rule) and `tests/deploy.rs`'s (ADR-0078 D8).
 

@@ -206,10 +206,10 @@ fn run_over_ssh(args: &DeployArgs, host: &str) -> ExitCode {
         Ok(status) if status.success() => ExitCode::SUCCESS,
         Ok(status) => {
             println!(
-                "{}`holosmith {} deploy` on {host} exited {}",
+                "{}`holosmith {} deploy` on {host} {}",
                 remote::LINE_PREFIX,
                 args.kind,
-                status.code().unwrap_or(-1)
+                ended(status)
             );
             println!("{}", ssh_resume(args, host));
             status
@@ -218,6 +218,20 @@ fn run_over_ssh(args: &DeployArgs, host: &str) -> ExitCode {
                 .map_or(ExitCode::FAILURE, ExitCode::from)
         }
         Err(sentence) => refused(args, host, &sentence),
+    }
+}
+
+/// How the target's run ended, as one phrase.
+///
+/// A child that exits says `exited <n>`; one that a signal killed says so and names it, because `exited -1` is an
+/// exit code that does not exist and this report's whole discipline is that a word means what it measured. A child
+/// with neither (which a `wait` cannot produce today) is described rather than guessed at.
+fn ended(status: std::process::ExitStatus) -> String {
+    use std::os::unix::process::ExitStatusExt as _;
+    match (status.code(), status.signal()) {
+        (Some(code), _) => format!("exited {code}"),
+        (None, Some(signal)) => format!("was killed by signal {signal}"),
+        (None, None) => "ended without an exit code".to_string(),
     }
 }
 
@@ -234,8 +248,10 @@ fn refused(args: &DeployArgs, host: &str, sentence: &str) -> ExitCode {
 ///
 /// It is a different sentence from [`resume`]'s, and the difference is the point rather than an oversight: over ssh
 /// `--config` and `--root` name **the target's** paths, so making them absolute here would name this machine's, and
-/// a resume must name the same tree the failed run named. `--binary` travels only when the operator gave one, for
-/// [`resume`]'s reason: a flag nobody typed would suggest this command chose it.
+/// a resume must name the same tree the failed run named. Both values are shell-quoted ([`remote::quote`]), because
+/// this line is pasted into a shell and then travels through a second one: a path with a space in it must survive
+/// both. `--binary` travels only when the operator gave one, for [`resume`]'s reason: a flag nobody typed would
+/// suggest this command chose it.
 fn ssh_resume(args: &DeployArgs, host: &str) -> String {
     let mut command = format!(
         "deploy: resume: holosmith {} deploy --ssh {host}",
@@ -245,10 +261,16 @@ fn ssh_resume(args: &DeployArgs, host: &str) -> String {
         command.push_str(&format!(" --binary {}", binary.display()));
     }
     if let Some(config) = &args.config {
-        command.push_str(&format!(" --config {}", config.display()));
+        command.push_str(&format!(
+            " --config {}",
+            remote::quote(&config.display().to_string())
+        ));
     }
     if let Some(root) = &args.root {
-        command.push_str(&format!(" --root {}", root.display()));
+        command.push_str(&format!(
+            " --root {}",
+            remote::quote(&root.display().to_string())
+        ));
     }
     if args.dry_run {
         command.push_str(" --dry-run");

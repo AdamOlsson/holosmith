@@ -17,7 +17,7 @@
 
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use holosmith::deploy::Kind;
@@ -153,7 +153,7 @@ esac
 # The text ssh would hand the login shell, before it expands anything: the copy's first word is the unexpanded
 # `$HOME/.cache/holosmith/...` token, which is what makes this stand-in's "remote shell" the same one.
 case "$*" in
-  '$HOME'/.cache/holosmith/*)
+  '"$HOME"'/.cache/holosmith/*)
     printf 'deploy: run\n'
     exit {run_exit}
     ;;
@@ -244,7 +244,7 @@ fn the_children_are_one_read_a_copy_a_check_and_the_run() {
     // side that resolves it.
     assert_eq!(
         sent.token,
-        format!("$HOME/.cache/holosmith/deploy-{}", &binary.digest[..12])
+        format!("\"$HOME\"/.cache/holosmith/deploy-{}", &binary.digest[..12])
     );
     assert!(sent.sent_line().contains("me@box"), "{}", sent.sent_line());
     assert!(
@@ -520,7 +520,8 @@ fn the_captured_children_name_the_host_and_the_tools_they_use() {
         );
     }
     assert!(calls[0].ends_with("uname -m"), "{}", calls[0]);
-    assert!(calls[1].contains(remote::COPY_DIR), "{}", calls[1]);
+    // The expansion is quoted, so a home directory with a space in it stays one word.
+    assert!(calls[1].contains(remote::COPY_TOKEN_DIR), "{}", calls[1]);
 }
 
 #[test]
@@ -545,28 +546,22 @@ fn a_plan_carries_a_hub_and_its_own_paths_verbatim() {
             "tree"
         ]
     );
-}
-
-#[test]
-fn the_path_the_copy_lands_in_is_a_home_relative_shell_token() {
-    let _guard = one_at_a_time();
-    let dir = TempDir::new("remote-path");
-    let path = binary_file(&dir, 62);
-    let binary = Binary::read(Some(&path)).expect("the fixture has an ELF header");
-    let (token, shown) = (
-        format!("{}/deploy-{}", remote::COPY_DIR, &binary.digest[..12]),
-        format!("~/.cache/holosmith/deploy-{}", &binary.digest[..12]),
-    );
+    // And a value the target's shell would otherwise re-parse travels as one word.
+    let spaced = Plan {
+        kind: Kind::Server,
+        dry_run: false,
+        config: Some(PathBuf::from("/srv/My Tree/holosmith.toml")),
+        root: Some(PathBuf::from("/srv/tree")),
+    };
     assert_eq!(
-        token,
-        "$HOME/.cache/holosmith/deploy-".to_string() + &binary.digest[..12]
+        spaced.arguments(),
+        vec![
+            "server",
+            "deploy",
+            "--config",
+            "'/srv/My Tree/holosmith.toml'",
+            "--root",
+            "/srv/tree"
+        ]
     );
-    assert_eq!(
-        shown,
-        "~/.cache/holosmith/deploy-".to_string() + &binary.digest[..12]
-    );
-    // A real path, not a name: the digest's first twelve characters are hex, so the file name cannot collide with
-    // the shell's own metacharacters.
-    assert!(binary.digest[..12].chars().all(|c| c.is_ascii_hexdigit()));
-    let _: &Path = &path;
 }

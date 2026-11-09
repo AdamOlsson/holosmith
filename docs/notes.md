@@ -2698,3 +2698,15 @@ it rather than adding a caveat beside it.
   The gate puts stand-ins for both first on `PATH` that record and fail; the assertion is that the record file does
   not exist afterwards. Grepping the source for a downloader would assert what the text says rather than what the run
   did.
+- **ssh hands the target's login shell *one string*, so a path is re-parsed there.** `--config` and `--root` are argv
+  elements of `Command::arg`, but ssh joins the words after the host with spaces and the target's shell reads the
+  result: `--root /srv/a b` arrives as `--root /srv/a` plus `b`, `/srv/*` arrives as whatever it matched, and `;`
+  arrives as a second command — while the *same* command run locally needs no such care, so nothing shows it until a
+  path has a space in it. `remote::quote` wraps a value in single quotes when it contains anything a shell acts on
+  (`~` included, because the *target* would expand it), and the copy token is the same rule applied to an expansion:
+  `"$HOME"/.cache/holosmith`. The resume line quotes both values too, because it is pasted into a local shell and then
+  travels through a second one. This was the review's one P1, and the shape is worth keeping: **"verbatim" across a
+  shell is a claim that needs a quoting function to be true.**
+- **A child a signal killed has no exit code, and `unwrap_or(-1)` prints one that does not exist.** The remote run's
+  line says `exited <n>` when there is a code and `was killed by signal <n>` when there is not; a report whose whole
+  discipline is "a word means what it measured" cannot print `exited -1`.

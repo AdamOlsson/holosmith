@@ -42,7 +42,10 @@ copy and surface as a mangled authentication error. Batched, ssh refuses with it
 child is deliberately **not** batched — it keeps the operator's stdin — and it gets `-t` exactly when both of this
 command's ends are terminals, because a pty is what gives the target's `sudo` a tty to ask its password on
 (ADR-0056's landmine, one hop out), while *not* allocating one on a piped run is what keeps the deploy's lines
-LF-terminated and greppable.
+LF-terminated and greppable. The cost of that rule is recorded rather than discovered: `… deploy --ssh me@box | tee
+log` typed at a terminal has a terminal stdin and a piped stdout, so it allocates **no** pty and a system-path
+deploy's `sudo` there has no tty to ask on. The two pulls are real — a pty for `sudo` against LF output for a pipe —
+and the answer is "both ends or neither", which the operator can see before it matters.
 
 The check is the **target's** `sha256sum`: coreutils is on every systemd Linux this spec targets (and in busybox),
 and the alternatives are worse — `openssl dgst` is a second program a minimal target may not have, and trusting the
@@ -80,6 +83,14 @@ Over ssh, `--root DIR` is the same flag with the same meaning on the other machi
   laptop with no `config.toml` can deploy. `--config` travels verbatim and names the target's file (HS-050's
   two-configs rule, one hop out); making it absolute here would name this machine's.
 
+**"Verbatim" costs one quoting helper, and it is not optional.** ssh hands the target's login shell *one string*, so
+an unquoted `--root /srv/a b` arrives as two words, `/srv/*` arrives as whatever it matched, and a `;` arrives as a
+second command — while the identical local command needs no such care, because a local `Child` is argv all the way
+down. [`remote::quote`] therefore wraps a value in single quotes whenever it contains anything a shell acts on (`~`
+included: unquoted, the *target* would expand it, and the word the operator wrote is what must arrive), and returns a
+plain path unchanged so the report still reads like the command the operator typed. The same function renders the two
+values in the resume line, because that line is pasted into a local shell and then travels through a second one.
+
 `--binary` without `--ssh` is a `clap` usage error (`requires = "ssh"`): without `--ssh` the binary a deploy installs
 is the one it is running, so the flag would be a lie about which file was used.
 
@@ -91,9 +102,10 @@ Every line **this** side writes carries `deploy: ssh: ` in front ([`remote::LINE
 tell which machine spoke, and a gate can grep for one author or the other.
 
 The three lines this side prints before the run are the three facts it measured: what was sent where and what it is
-(machine, size, digest), that the target's `sha256sum` answered the same digest, and **which command the target
-runs** — the last because the two flags that travel name the target's paths, and the operator has no other place to
-see them.
+(machine, size, digest), that the target's `sha256sum` answered the same digest, and **which command the target will
+run** — the last because the two flags that travel name the target's paths, and the operator has no other place to see
+them. It says `will run`, not `runs`: the child has not been spawned when the line is written, and this report's rule
+is that a word means what it measured.
 
 ## D5 — a remote `--dry-run` runs the deploy's dry run there
 
@@ -140,11 +152,13 @@ the machine's own `sha256sum`, and the artifact's own seven steps in a `--root` 
 
 It measures: the server arm's **seven lines streamed from the target** with the copy and the check in the shim's log
 and the copy on disk with the artifact's bytes, mode 0755 and a digest-derived name; a hub install over the same
-transport (steps 2/5/6 applied, 3 and 4 `skipped` — the `Kind` travelled) and a second run that is idempotent, with
-the same digest-named copy overwritten rather than duplicated; the architecture refusal with **one** child in the log
-and no copy on the target, and the same target accepting `--binary` when it matches; a `cat` that corrupts one byte
-refused after the check with **no run child**; `--binary` without `--ssh` and an option smuggled through `--ssh` both
-refused before any child; and a `curl`/`wget` recorder that must never fire ("the CLI downloads nothing").
+transport (steps 2, 5, 6 and 7 applied, 3 and 4 `skipped` — the `Kind` travelled) and a second run that is idempotent,
+with the same digest-named copy overwritten rather than duplicated; the architecture refusal with **one** child in the
+log and no copy on the target, and the same target accepting `--binary` when it matches; a `cat` that corrupts one
+byte refused after the check with **no run child**; `--binary` without `--ssh` and an option smuggled through `--ssh`
+both refused before any child; a run the *target* refuses, which is what measures that its exit code becomes this
+command's, that the target's sentence arrives on stderr and the local resume is the last line on stdout; and a
+`curl`/`wget` recorder that must never fire ("the CLI downloads nothing").
 
 What it cannot measure is recorded in the case's own comment: a real ssh, a key, a second machine, and a real `sudo`
 (there is none on this machine). `tests/remote.rs` covers the four argvs, every refusal, the `-t` rule and the

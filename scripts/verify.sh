@@ -10906,7 +10906,7 @@ AGAIN
 # `sudo`-prefixed children. This case measures the transport's *inside*: the copy, the digest, the arch refusal, a
 # copy that does not verify, and that the target's lines really are this command's output.
 #
-# It needs `python3` (three ports, a `_ping` socket and one `/api/health` responder), the artifact, and the machine's
+# It needs `python3` (two ports, a `_ping` socket and one `/api/health` responder), the artifact, and the machine's
 # `install`/`chmod`/`df`/`openssl`. It needs **no daemon and no image**: the server arm is a dry run over a `_ping`
 # socket, and a hub builds and starts nothing.
 case_deploy_ssh() {
@@ -10918,7 +10918,7 @@ case_deploy_ssh() {
   local socket_pid="" holder_pid=""
   local digest copy short hostarch other corrupt downloader
   if ! command -v python3 >/dev/null 2>&1; then
-    printf 'SKIP %s: no python3 to pick the ports, answer `_ping` and hold the control port (tests/remote.rs covers the four argvs and every refusal)\n' "$name"
+    printf 'SKIP %s: no python3 to pick the two ports, answer `_ping` and hold the control port (tests/remote.rs covers the four argvs and every refusal)\n' "$name"
     return 0
   fi
   rm -rf "$root"
@@ -10980,7 +10980,7 @@ case_deploy_ssh() {
   grep -q 'answered the same digest, so ~/.cache/holosmith/deploy-' "$WORK/$name.dry.out" ||
     fail "$name/dry/verified" "the copy was not reported as verified: $(cat "$WORK/$name.dry.out")"
   assertions=$((assertions + 1))
-  grep -q '^deploy: ssh: the target runs: ~/.cache/holosmith/deploy-' "$WORK/$name.dry.out" ||
+  grep -q '^deploy: ssh: the target will run: ~/.cache/holosmith/deploy-' "$WORK/$name.dry.out" ||
     fail "$name/dry/command" "the command the target runs is not printed: $(cat "$WORK/$name.dry.out")"
   assertions=$((assertions + 1))
   grep -qx 'deploy: dry run' "$WORK/$name.dry.out" ||
@@ -11186,6 +11186,32 @@ CAT
   check "$name/host/children" 0 "$(grep -c '' "$sshlog")"
   [ ! -s "$WORK/$name.downloads.log" ] ||
     fail "$name/download" "the command ran a downloader: $(cat "$WORK/$name.downloads.log")"
+  assertions=$((assertions + 1))
+
+  # ---- 6. a run that fails on the target: its exit code, and the two streams kept apart --------------
+  # The local side never reads the config (`--config` names the *target's* file), so a path that does not exist there
+  # is the target's own refusal with its own exit code — which is the only way to measure that a child's non-zero
+  # status becomes this command's, that the sentence it earns is on stderr, and that the local resume is the last
+  # line on stdout. Its report has no step line, because the target's config load refuses before step 1.
+  : >"$sshlog"
+  status=0
+  PATH="$WORK/$name.nodl:$shims:$PATH" "$artifact" server deploy --ssh me@box --dry-run \
+    --config "$WORK/$name.no-such-config.toml" >"$WORK/$name.failed.out" 2>"$WORK/$name.failed.err" || status=$?
+  check "$name/failed/exit" 1 "$status"
+  # Four children ran, and the last of them was the deploy itself: the transport did its work and the target said no.
+  check "$name/failed/children" 4 "$(grep -c '' "$sshlog")"
+  grep -qx 'deploy: ssh: `holosmith server deploy` on me@box exited 1' "$WORK/$name.failed.out" ||
+    fail "$name/failed/line" "the local side does not say how the target's run ended: $(cat "$WORK/$name.failed.out")"
+  assertions=$((assertions + 1))
+  check "$name/failed/resume" 1 "$(grep -c '^deploy: resume: holosmith server deploy --ssh me@box' "$WORK/$name.failed.out")"
+  check "$name/failed/stderr" 0 "$(grep -c 'deploy: resume: ' "$WORK/$name.failed.err" || true)"
+  # The target's own refusal arrived on stderr — the stream the run child inherited — and not on stdout.
+  grep -q 'holosmith: server deploy:' "$WORK/$name.failed.err" ||
+    fail "$name/failed/err" "the target's refusal is not on stderr: $(cat "$WORK/$name.failed.err")"
+  assertions=$((assertions + 1))
+  if grep -q '^1\. preflight' "$WORK/$name.failed.out"; then
+    fail "$name/failed/report" "a run the target refused printed a step line: $(cat "$WORK/$name.failed.out")"
+  fi
   assertions=$((assertions + 1))
 
   kill "$socket_pid" 2>/dev/null || true
