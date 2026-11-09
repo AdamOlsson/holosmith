@@ -5108,26 +5108,6 @@ PY
   stop_serve
   start_serve
 }
-
-# HS-021: the idle stop. A session left alone stops costing money, and it is the artifact's *own*
-# timer that does it — no request asks for this — so the case creates one session, waits out the
-# one-minute `idle_stop_min` the config sets, and asserts four things: the row is `stopped` with the
-# reason, the transition is in the transcript a client replays, the sweeper wrote its one log line, and
-# the slot the session held is free.
-#
-# "Frees a slot" is asserted *without* a second policy in the way: a `stopped` row holds no slot, so the
-# next create at the cap of one simply inserts. If the sweep had not run, that row would still be `idle`,
-# the create would evict it with reason `evicted`, and the re-read below would say so — which is why the
-# re-read is the assertion.
-#
-# `idle_stop_min = 1` is the *process's* setting, so every case in this run has a sweeper behind it: no
-# case may leave a session idle for a minute (ADR-0025). This one waits a minute on purpose, which is
-# why it runs where the table is otherwise empty.
-#
-# It costs about a minute: `idle_stop_min` is whole minutes and there is deliberately no shorter lever
-# (ADR-0025). It runs right after `case_delete_session`, which is the first moment the table is empty,
-# because the cap is one; it removes what it made, so the cap cases that follow still find the free
-# slot they assume.
 # HS-069: one origin that reaches every machine (spec item 3, item 16 and `Roles`; ADR-0074).
 #
 # Two artifacts on one box is what "two machines" means here: a `role = "server"` boot on a pinned control port and a
@@ -5147,7 +5127,7 @@ PY
 #    and one row's body compared with the peer's own answer **byte for byte** (`cmp`: `Content-Length` is kept);
 # 3. the event stream: the hub's frames decoded and compared with the peer's own, `... | cmp`, plus a
 #    `Last-Event-ID` round trip that starts at the next seq;
-# 4. the five refusals with five codes: `local`'s `308`, an unknown name, the registry not relayed, a peer that is
+# 4. six answers in five codes: `local`'s `308`, an unknown name, the registry not relayed, a peer that is
 #    gone (`502`), a peer that accepts and never answers (`504`), and a peer whose row is a different spelling of the
 #    right origin (the peer's own `403 bad_origin`, relayed — the forwarded refusal surviving the trip);
 # 5. a hub-only machine serving its reads and refusing the create (`403 sessions_disabled`, no row);
@@ -5171,10 +5151,11 @@ case_forward() {
   elif ! docker image inspect "$image" >/dev/null 2>&1; then
     preview_arms=0
   fi
-  if ! command -v python3 >/dev/null 2>&1; then
-    printf 'SKIP %s: no python3 to stand a silent peer in and decode two streams (tests/forward.rs covers the API hop, and the preview hop needs its own two machines)\n' "$name"
-    return 0
-  fi
+  # `python3` is needed by three arms — the silent peer, the two decoded streams and the WebSocket handshake — and by
+  # nothing else, so it is a flag rather than an early return: the create, the replay, the byte-for-byte row, four of
+  # the refusals and the whole of the mid-stream death have no business skipping because one tool is missing.
+  local have_python3=1
+  command -v python3 >/dev/null 2>&1 || have_python3=0
 
   stop_serve
   rm -rf "$root"
@@ -5228,16 +5209,18 @@ while True:
         # Accepted, read, and **never answered**: the socket stays open, so the hub's bound is what ends the wait.
         held.append(connection)
 PY
-  python3 "$root/silent.py" "$silent_port" >"$root/silent.out" 2>"$root/silent.err" &
-  standin_pid=$!
-  extra_pid=$standin_pid
-  for _ in $(seq 1 200); do
-    grep -q '^PORT ' "$root/silent.out" 2>/dev/null && break
-    kill -0 "$standin_pid" 2>/dev/null || break
-    sleep 0.05
-  done
-  [ "$(sed -n 's/^PORT \([0-9]*\)$/\1/p' "$root/silent.out")" = "$silent_port" ] ||
-    fail "$name/silent" "the silent peer did not bind $silent_port: $(cat "$root/silent.err")"
+  if [ "$have_python3" -eq 1 ]; then
+    python3 "$root/silent.py" "$silent_port" >"$root/silent.out" 2>"$root/silent.err" &
+    standin_pid=$!
+    extra_pid=$standin_pid
+    for _ in $(seq 1 200); do
+      grep -q '^PORT ' "$root/silent.out" 2>/dev/null && break
+      kill -0 "$standin_pid" 2>/dev/null || break
+      sleep 0.05
+    done
+    [ "$(sed -n 's/^PORT \([0-9]*\)$/\1/p' "$root/silent.out")" = "$silent_port" ] ||
+      fail "$name/silent" "the silent peer did not bind $silent_port: $(cat "$root/silent.err")"
+  fi
 
   # The hub's registry: the peer under its registered name, the same peer under a **different spelling** of the same
   # origin (a forwarded mutating call to that row must come back as the peer's own `403 bad_origin`), the silent
@@ -5272,20 +5255,6 @@ EOF
   # The hub last, because its merge probes the rows: a hub booted before its server learns no preview origin.
   start_serve "$hub_config" "$hub_data" "$hub_control"
 
-  # One machine's field out of the registry answer, read with `python3` (this case needs it anyway): a `sed` over a
-  # four-row list would assert the wrong row the first time the order changed.
-  hosts_field() {
-    python3 - "$1" "$2" "$3" <<'PY'
-import json, sys
-row = next((row for row in json.load(open(sys.argv[3]))["hosts"] if row["name"] == sys.argv[1]), None)
-if row is None:
-    print("<absent>")
-else:
-    value = row[sys.argv[2]]
-    print("null" if value is None else value)
-PY
-  }
-
   # Wait for the forwarded session to be `idle`, read through the hub: a create (and a prompt) is answered from the
   # row and provisions in the background, and every stub step costs a fraction of a second.
   forward_wait_idle() {
@@ -5308,14 +5277,26 @@ PY
   # ---- 1. the registry measured the peer's second listener --------------------------------------
   fetch "$name-hosts" GET /api/hosts "Host: 127.0.0.1" || fail "$name/hosts" "GET /api/hosts did not answer"
   expect_status "$name/hosts" "$(answer "$name-hosts")" 200
-  check "$name/hosts/preview" "http://127.0.0.1:$peer_preview" \
-    "$(hosts_field workshop preview "$WORK/responses/$name-hosts.body")"
-  check "$name/hosts/reach" reachable \
-    "$(hosts_field workshop reach "$WORK/responses/$name-hosts.body")"
-  check "$name/hosts/silent" "http://127.0.0.1:1" \
-    "$(hosts_field silent preview "$WORK/responses/$name-hosts.body")"
-  check "$name/hosts/gone" unreachable \
-    "$(hosts_field gone reach "$WORK/responses/$name-hosts.body")"
+  # One row's facts, as the JSON the struct writes: the field order is the struct's (name, url, preview, reach), so
+  # one needle per row is one assertion per row and no `python3` is needed to find it. The needles are assembled in
+  # one variable each because a `case` pattern of the form `*"a":"b"*` is a word shellcheck rightly calls ambiguous.
+  body="$(cat "$WORK/responses/$name-hosts.body")"
+  local want
+  want='"name":"workshop","url":"http://127.0.0.1:'"$peer_control"'","preview":"http://127.0.0.1:'"$peer_preview"'","reach":"reachable"'
+  case "$body" in
+    *"$want"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/hosts/preview" "the peer's row carries no measured preview origin: $body" ;;
+  esac
+  want='"name":"silent","url":"http://127.0.0.1:'"$silent_port"'","preview":"http://127.0.0.1:1"'
+  case "$body" in
+    *"$want"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/hosts/silent" "the silent peer's row lost its preview origin: $body" ;;
+  esac
+  want='"name":"gone","url":"http://127.0.0.1:'"$gone_port"'","preview":null,"reach":"unreachable"'
+  case "$body" in
+    *"$want"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/hosts/gone" "a peer that is not there is not one unreachable row: $body" ;;
+  esac
 
   # ---- 2. one session API, two machines ----------------------------------------------------------
   fetch "$name-list-empty" GET /api/hosts/workshop/sessions "Host: 127.0.0.1" ||
@@ -5342,7 +5323,11 @@ PY
 
   # One row, fetched through the hub and from the peer directly, compared **byte for byte**: the strongest form of
   # "the hub relays the peer's answer" the API offers, and the reason the forwarding route keeps `Content-Length`.
-  forward_fetch "$peer_port" "$name-direct" GET "/api/sessions/$id" "Host: 127.0.0.1"
+  # Once it has settled: a `starting` row transitions in the background, and two reads either side of that flip are
+  # legitimately different documents.
+  forward_wait_idle
+  forward_fetch "$peer_port" "$name-direct" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+    fail "$name/direct" "GET /api/sessions/$id from the peer's own listener did not answer"
   fetch "$name-row" GET "/api/hosts/workshop/sessions/$id" "Host: 127.0.0.1" || fail "$name/row" "did not answer"
   expect_status "$name/row" "$(answer "$name-row")" 200
   if ! cmp -s "$WORK/responses/$name-direct.body" "$WORK/responses/$name-row.body"; then
@@ -5415,6 +5400,9 @@ ids = [line for frame in frames for line in frame.split(b"\n") if line.startswit
 print("frames %d" % len(frames))
 print("first_id %s" % (ids[0].decode().split(" ", 1)[1] if ids else "-"))
 PY
+  if [ "$have_python3" -eq 0 ]; then
+    printf 'SKIP %s/stream: no python3 to decode the two streams and their chunk framing (tests/forward.rs compares one stream'"'"'s event bytes)\n' "$name"
+  else
   python3 "$root/stream.py" "$peer_port" "/api/sessions/$id/events" "$WORK/forward-peer.events" "" \
     >"$WORK/forward-peer.txt" 2>&1 || fail "$name/stream" "the peer's own stream failed: $(cat "$WORK/forward-peer.txt")"
   python3 "$root/stream.py" "$port" "/api/hosts/workshop/sessions/$id/events" "$WORK/forward-hub.events" "" \
@@ -5434,6 +5422,7 @@ PY
     >"$WORK/forward-resume.txt" 2>&1 || fail "$name/stream/resume" "the resumed stream failed: $(cat "$WORK/forward-resume.txt")"
   resumed="$(sed -n 's/^first_id //p' "$WORK/forward-resume.txt")"
   check "$name/stream/resume_at" "$((first + 1))" "$resumed"
+  fi
 
   # ---- 4. the refusals, one code each ------------------------------------------------------------
   fetch "$name-local" GET /api/hosts/local/sessions "Host: 127.0.0.1" || fail "$name/local" "did not answer"
@@ -5460,10 +5449,14 @@ PY
 
   # The forwarding timeout: five seconds against a peer that took the request and never answers. This is the one
   # wait in the case, and it is the rule's own number rather than a shortened stand-in.
-  label="$name-timeout"
-  fetch "$label" GET /api/hosts/silent/sessions "Host: 127.0.0.1" || fail "$label" "did not answer"
-  expect_status "$name/timeout" "$(answer "$label")" 504
-  expect_code "$name/timeout" "$(answer "$label")" upstream_timeout
+  if [ "$have_python3" -eq 0 ]; then
+    printf 'SKIP %s/timeout: no python3 to stand a peer in that accepts and never answers\n' "$name"
+  else
+    label="$name-timeout"
+    fetch "$label" GET /api/hosts/silent/sessions "Host: 127.0.0.1" || fail "$label" "did not answer"
+    expect_status "$name/timeout" "$(answer "$label")" 504
+    expect_code "$name/timeout" "$(answer "$label")" upstream_timeout
+  fi
 
   # A row naming the peer by **another spelling** of the same origin: the probe reaches it, and every mutating call
   # comes back as the peer's own `403 bad_origin`, because its guard compares the header as text against its
@@ -5495,6 +5488,8 @@ PY
   # ---- 6. the preview hop: a container's dev server, and an upgrade, through the hub --------------
   if [ "$preview_arms" -eq 0 ]; then
     printf 'SKIP %s/preview: no Docker daemon or no image %s, so the preview hop is not measured here (the API half ran)\n' "$name" "$image"
+  elif [ "$have_python3" -eq 0 ]; then
+    printf 'SKIP %s/preview: no python3 for the WebSocket handshake or the container readiness probe (tests/forward.rs drives the peer hop against a stand-in)\n' "$name"
   else
     # The port the *peer's* listener dials inside a container, read from the peer's own config.
     upstream_port="$("$artifact" config show --config "$peer_config" |
@@ -5639,9 +5634,12 @@ PYWS
   timeout 2 cat <&"$fd" >/dev/null 2>&1 || true
   kill -9 "$peer_pid" 2>/dev/null || fail "$name/death" "could not kill the peer"
   # Waited here so the shell reaps it (and so its "Killed" line is this `wait`'s, silenced, rather than the case's
-  # output): a machine that went away gets no graceful shutdown, which is the point of the arm.
-  wait "$peer_pid" 2>/dev/null || true
+  # output), and so the peer's own ending is asserted: 137 is SIGKILL, which is what "the machine went away" means
+  # here. `stop_peer`'s graceful arm is not this case's — the peer is already gone by the time it would run.
+  local died=0
+  wait "$peer_pid" 2>/dev/null || died=$?
   peer_pid=""
+  check "$name/death/peer_exit" 137 "$died"
   rc=0
   IFS= read -r -t 8 line <&"$fd" || rc=$?
   exec {fd}<&-
@@ -5659,12 +5657,39 @@ PYWS
   docker_session_id=""
   stop_serve
   stop_peer
-  [ -z "$standin_pid" ] || kill "$standin_pid" 2>/dev/null || true
+  if [ -n "$standin_pid" ]; then
+    kill "$standin_pid" 2>/dev/null || true
+    wait "$standin_pid" 2>/dev/null || true
+  fi
   standin_pid=""
   extra_pid=""
+  # Two data roots, two configs, the seed, the two python helpers and the event dumps: this case's, and every other
+  # boot-owning case removes what it made (HS-068's lesson was a *passing* case leaving a container behind).
+  rm -rf "$root"
   start_serve
 }
 
+
+
+# HS-021: the idle stop. A session left alone stops costing money, and it is the artifact's *own*
+# timer that does it — no request asks for this — so the case creates one session, waits out the
+# one-minute `idle_stop_min` the config sets, and asserts four things: the row is `stopped` with the
+# reason, the transition is in the transcript a client replays, the sweeper wrote its one log line, and
+# the slot the session held is free.
+#
+# "Frees a slot" is asserted *without* a second policy in the way: a `stopped` row holds no slot, so the
+# next create at the cap of one simply inserts. If the sweep had not run, that row would still be `idle`,
+# the create would evict it with reason `evicted`, and the re-read below would say so — which is why the
+# re-read is the assertion.
+#
+# `idle_stop_min = 1` is the *process's* setting, so every case in this run has a sweeper behind it: no
+# case may leave a session idle for a minute (ADR-0025). This one waits a minute on purpose, which is
+# why it runs where the table is otherwise empty.
+#
+# It costs about a minute: `idle_stop_min` is whole minutes and there is deliberately no shorter lever
+# (ADR-0025). It runs right after `case_delete_session`, which is the first moment the table is empty,
+# because the cap is one; it removes what it made, so the cap cases that follow still find the free
+# slot they assume.
 case_idle_stop() {
   local name=case_idle_stop response body idle fresh
   local create_body='{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}'
@@ -10790,14 +10815,16 @@ start_peer() {
     "$peer_control_listen" "$peer_control_origin" "$peer_preview_listen"
 }
 
-# stop_peer: the second machine's `SIGTERM`, and its exit code, so a hub's peer is as well-behaved as a hub.
+# stop_peer: the second machine's `SIGTERM`, for a case that stops its peer itself rather than watching it die.
+#
+# No exit-code assertion here: the one case that runs a peer kills it, and *its* arm asserts what that ending is
+# (`case_forward`'s 137). A check here would be a `check` nothing can reach, which is the shape this gate's own
+# review rule calls a test that cannot fail.
 stop_peer() {
   [ -n "${peer_pid:-}" ] || return 0
   kill -TERM "$peer_pid" 2>/dev/null || true
-  local status=0
-  wait "$peer_pid" 2>/dev/null || status=$?
+  wait "$peer_pid" 2>/dev/null || true
   peer_pid=""
-  check "peer/exit" 0 "$status"
 }
 
 phase_serve() {

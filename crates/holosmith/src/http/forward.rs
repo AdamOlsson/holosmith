@@ -56,9 +56,20 @@ pub(crate) async fn respond(
 ) -> Response {
     // A path segment that is not UTF-8 is a name this machine cannot look up, which is `not_found` and not a
     // `text/plain` rejection: the house rule for every `{id}` in this table.
-    let Ok(Path((name, rest))) = path else {
+    let Ok(Path((name, _))) = path else {
         return ApiError::not_found().into_response();
     };
+    // **The tail is taken raw.** `Path` percent-decodes, so the decoded `rest` could carry a CRLF or a space that
+    // this machine would write into the peer's request line — a caller authoring the head the module claims the hub
+    // authors. The bytes the client sent, positioned past `/api/hosts/<name>/`, are the ones the peer should see.
+    let Some(rest) = forward::raw_rest(request.uri().path()).map(str::to_string) else {
+        return ApiError::not_found().into_response();
+    };
+    // Defence in depth for that rule rather than a second rule: a request target cannot legally contain a control
+    // byte, and one that arrived somehow never becomes part of a head this machine writes.
+    if rest.bytes().any(|byte| byte < 0x21 || byte == 0x7f) {
+        return ApiError::not_found().into_response();
+    }
     if name == hosts::LOCAL {
         return redirect(&rest, request.uri().query());
     }
@@ -77,7 +88,9 @@ pub(crate) async fn respond(
     let (parts, body) = request.into_parts();
     let body = match axum::body::to_bytes(body, BODY_LIMIT).await {
         Ok(bytes) => bytes,
-        Err(_) => return ApiError::bad_body().into_response(),
+        // The same code as the create's refusal and **this** request's sentence: a client told about a create's four
+        // fields would be describing the wrong request (ADR-0008, `bad_prompt`'s precedent).
+        Err(_) => return ApiError::bad_forward_body().into_response(),
     };
     let method = parts.method.as_str().to_string();
     let head = match forward::request_head(&forward::Request {
@@ -120,6 +133,15 @@ pub(crate) async fn respond(
     *response.status_mut() = StatusCode::from_u16(reply.status).unwrap_or(StatusCode::BAD_GATEWAY);
     for (name, value) in reply.headers {
         if !forward::keep_header(&name) {
+            continue;
+        }
+        // A peer that sends **both** `Content-Length` and `Transfer-Encoding: chunked` is a peer this build's own
+        // hyper never is, and the decoded body's length is not the one that header names: copying it would make
+        // hyper promise octets the answer does not have. The framing wins, and a length is copied only when it is
+        // the framing.
+        if name.eq_ignore_ascii_case("content-length")
+            && !matches!(reply.framing, forward::Framing::Length(length) if value.trim().parse::<u64>().ok() == Some(length))
+        {
             continue;
         }
         let (Ok(name), Ok(value)) = (

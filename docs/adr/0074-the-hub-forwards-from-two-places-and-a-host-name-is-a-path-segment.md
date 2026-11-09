@@ -90,8 +90,8 @@ That is exactly the hole **HS-070/V11** closes (`allowed_hubs` and the whois), a
 
 - **the row's origin must be the exact `control_origin` the machine reports**, ports included, because the guard
   compares the header as text while `hosts::is_local` folds ports. Another spelling is `403 bad_origin` at the peer —
-  `tests/forward.rs` and the gate's `case_forward` both measure that, and it doubles as "a peer's own refusal survives
-  the trip";
+  the gate's `case_forward` measures that (a `wrongspelling` row naming the peer's `localhost` while its origin is
+  `127.0.0.1`), and it doubles as "a peer's own refusal survives the trip";
 - `tailscale-user-login` is dropped, so the peer's `owner` check is vacuous for a forwarded call (its
   `(None, _) => true` arm). That is HS-070's to change, not this story's.
 
@@ -130,6 +130,11 @@ The slow arm is chosen by the **method and the path**: the last segment is `merg
 delete asks the peer's agent to stop and waits out its `abort_grace` — ten seconds by default — before it snapshots
 the worktree, so a blanket five seconds would answer `504` for a delete the peer is executing.
 
+**Item 3 names two routes and this story gives three.** The delete's arm is a deviation from the letter of the
+acceptance, argued from the peer's own worst case: a bound that answered `504` for a delete the peer is executing would
+break the bullet it is meant to serve ("the hub forwards API calls"), and the alternative is a five-second lie. It is
+recorded here rather than discovered later, and `forward`'s unit test pins all four numbers.
+
 The numbers are **this machine's constants, not the peer's config**: a peer configured with a longer `abort_grace` can
 still outlast its arm and get a `504`. That is recorded, not fixed — deriving a bound from a peer's config would make
 one request's deadline depend on another machine's file.
@@ -165,8 +170,13 @@ machine's.
 
 ## D9 — a hub-only machine serves, lists and refuses
 
-`POST /api/sessions` on `role == hub` answers `403 sessions_disabled` **before** the idempotency lookup and before the
-disk floor: it is the machine fact that makes the other two questions unnecessary, and no row is written.
+`POST /api/sessions` on `role == hub` answers `403 sessions_disabled` **first of the machine's refusals** — before the
+drain and before the disk floor, which is the family it belongs to and the fact that makes those two questions
+unnecessary. It is *not* before the request's shape: the body's fields and the `Idempotency-Key` header are read
+first (`request_parts`), and `create_locked` raises the refusal after the key's own lookup, so a retry keeps the
+retry rule. On a hub that has never held a row the difference is invisible; on a machine whose role was changed from
+`both` to `hub` with rows behind it, a replay answers its old row rather than `403` — the retry rule winning, which is
+the same choice the drain and the floor make. No row is written either way.
 `GET /api/hosts` and `GET /api/sessions` answer on every role (the registry is every machine's, item 16), and the
 forwarding route exists only where a machine forwards — so a `server` answers `/api/hosts/<name>/…` with the
 fallback's `404 not_found`, which is what makes "a server serves the session API" true of its **path space**.
@@ -179,6 +189,13 @@ the hub could not rewrite it — it relays bytes, and the answer is not its own 
 port would be a key per host, which is what the registry already is.
 
 `preview::HOST` becomes an alias of `hosts::LOCAL`, so the one word has one spelling.
+
+**The page does not change, and that is a limitation rather than a design.** The embedded app still fetches
+`/api/sessions/<id>` and its stream, so a hub's *sessions screen* shows only the hub's own (none, on a hub-only
+machine) and opening a remote session needs HS-071's host-aware helper — `apiPath(host, rest)`, one function that
+returns `/api/<rest>` for `local` and `/api/hosts/<host>/<rest>` otherwise, plus the `host` each row was listed under.
+This story's demo is therefore the API (a script) and a browser opened at `/workshop/<id>/` on the hub's preview
+listener, which needs no page change at all.
 
 **One rule for a row, even this machine's own.** A `both` machine whose `hosts.toml` names itself (item 16's "one file
 copied to every machine" says it will) forwards `/api/hosts/<its own name>/…` over the network into its own process:

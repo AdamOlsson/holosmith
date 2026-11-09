@@ -723,6 +723,20 @@ impl ApiError {
         )
     }
 
+    /// What a forwarded request whose body is too large answers (HS-069).
+    ///
+    /// The create's code with **this** route's sentence, for [`Self::bad_prompt`]'s reason: a body over the bound is
+    /// the same fact wherever it arrives, and a client told about the create's four fields would be describing the
+    /// wrong request.
+    pub fn bad_forward_body() -> Self {
+        Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            BAD_BODY,
+            "a forwarded request's body must be at most 2 MiB: this machine relays it whole, so a larger one is \
+             refused here rather than buffered",
+        )
+    }
+
     /// What a registration whose `name` is not one a registry row may have answers (HS-068).
     ///
     /// The **message** is the caller's, like [`Self::bad_endpoint`]'s: an uppercase name, a name too long for a path

@@ -517,7 +517,8 @@ Docker question at all, and the seed naming loopback is legal where `POST /api/h
 It measures the probe's new fact (the peer's **preview** origin, read out of its own health answer), a create through
 the hub, the same create again answering the *same row* (the `Idempotency-Key` travelled), one row `cmp`ed **byte for
 byte** with the server's own answer, and the event stream decoded on both sides and `cmp`ed — plus a `Last-Event-ID`
-round trip that starts at the next seq. Then the five refusals with five codes: `local`'s `308`, an unknown name's
+round trip that starts at the next seq. Then six answers in five codes: `local`'s `308` (a redirect, not a refusal), an
+unknown name's
 `404 unknown_host`, the registry's `403 not_forwarded`, a peer that is gone (`502 upstream_unreachable`, on a row the
 boot marked `unreachable` — reach is not consulted), a peer that accepts and never answers (`504 upstream_timeout`,
 five real seconds against a `python3` socket that holds the connection), and a row naming the peer by a **different

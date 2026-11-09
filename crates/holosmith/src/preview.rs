@@ -154,7 +154,9 @@ impl Route {
 pub enum Refusal {
     /// The request line is not a path this listener serves.
     NotAPath { path: String },
-    /// `/<host>/…` names another machine; this one serves only its own sessions (HS-069 forwards the rest).
+    /// The first segment names no host this machine's registry holds — so it is not a preview this machine serves,
+    /// on any role (HS-069: a name that *is* a row is forwarded, and a machine that forwards nothing says so with
+    /// [`Refusal::NotForwarded`] instead).
     UnknownHost(String),
     /// The second segment is not a session id, or no row holds it.
     UnknownSession(String),
@@ -631,10 +633,10 @@ pub enum Plan {
 ///
 /// 1. **`local` is this machine**, always and on every role — the one name item 3 spells this machine's sessions
 ///    with, and the one a registry row may not take (ADR-0073).
-/// 2. **Only a machine that forwards forwards.** `Roles` gives request and preview forwarding to a `hub`; a
-///    `server`'s answer to another machine's name is that it does not serve it, not that the name is unknown.
-/// 3. **The name must be a row.** Anything else is [`Refusal::UnknownHost`], which is what a browser that opened an
-///    old link sees.
+/// 2. **The name must be a row.** Anything else is [`Refusal::UnknownHost`], which is what a browser that opened an
+///    old link sees — on every role, so a `server` answers an unknown name and a known one differently.
+/// 3. **Only a machine that forwards forwards.** `Roles` gives request and preview forwarding to a `hub`; a
+///    `server`'s answer to a name it *does* hold is that it does not serve it rather than that it is unknown.
 /// 4. **The row must know where that machine's previews answer** (ADR-0074): a peer's preview origin is a second
 ///    listener on a second port, only the peer can say what it is, and until its health has answered with one there
 ///    is nothing to dial. The refusal names the probe rather than guessing a port.
@@ -646,14 +648,16 @@ pub fn plan(
     if host == HOST {
         return Ok(Plan::Local);
     }
+    // The name first, the role second: an unknown name is the same answer on every machine (it is a fact about the
+    // registry), while "this machine forwards nothing" is only meaningful about a machine that could have.
+    let Some(row) = row else {
+        return Err(Refusal::UnknownHost(host.to_string()));
+    };
     if role == crate::config::Role::Server {
         return Err(Refusal::NotForwarded {
             host: host.to_string(),
         });
     }
-    let Some(row) = row else {
-        return Err(Refusal::UnknownHost(host.to_string()));
-    };
     match row.preview.clone() {
         Some(preview) => Ok(Plan::Peer(preview)),
         None => Err(Refusal::NoPreview {
@@ -1125,10 +1129,10 @@ mod tests {
         ] {
             assert_eq!(plan(HOST, role, None), Ok(Plan::Local), "{role:?}");
         }
-        // 2. Another machine's name on a machine that forwards nothing.
+        // 2. A name no row holds is the same answer on every role ...
         let refusal = plan("workshop", crate::config::Role::Server, None).expect_err("a server");
-        assert_eq!(refusal.code(), "preview_not_forwarded");
-        assert_eq!(refusal.status(), 403);
+        assert_eq!(refusal.code(), "preview_unknown_host");
+        assert_eq!(refusal.status(), 404);
         // 4. A row with no preview origin: the peer said nothing about where its previews answer.
         let row = crate::hosts::Host {
             name: "workshop".to_string(),
@@ -1163,6 +1167,11 @@ mod tests {
                 crate::config::Origin::parse("https://workshop.example:8444").expect("an origin")
             ))
         );
+        // 3. ... and a name a `server` **does** hold is the machine that forwards nothing, not an unknown name.
+        let refusal =
+            plan("workshop", crate::config::Role::Server, Some(&row)).expect_err("a server");
+        assert_eq!(refusal.code(), "preview_not_forwarded");
+        assert_eq!(refusal.status(), 403);
     }
 
     #[test]

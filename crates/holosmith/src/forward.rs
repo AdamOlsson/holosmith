@@ -144,6 +144,23 @@ impl Failure {
     }
 }
 
+/// The raw tail of `/api/hosts/<name>/<rest>`: the bytes the client wrote, **not** a decoded capture.
+///
+/// `axum`'s `Path` percent-decodes every parameter before a handler sees it, which is right for a name and wrong for
+/// a path this machine writes into another machine's request line: a `%0d%0a` in `rest` would let a caller author a
+/// header on the forwarded request — the exact thing [`request_head`] exists to prevent (the review of HS-069 found
+/// it). Positional, so an encoded host segment cannot shift it, and `None` for anything that is not that shape.
+pub fn raw_rest(path: &str) -> Option<&str> {
+    let mut rest = path;
+    // Three separators before the tail: `/api`, `/hosts`, `/<name>`, then what the peer is asked for.
+    for _ in 0..3 {
+        let tail = rest.strip_prefix('/')?;
+        let at = tail.find('/')?;
+        rest = &tail[at..];
+    }
+    rest.strip_prefix('/').filter(|rest| !rest.is_empty())
+}
+
 /// The authority of an origin: everything after `scheme://`.
 pub fn authority(origin: &Origin) -> Option<&str> {
     origin.as_str().split_once("://").map(|(_, rest)| rest)
@@ -871,6 +888,35 @@ mod tests {
             "cookie",
         ] {
             assert!(!head.contains(absent), "{absent} survived: {head}");
+        }
+    }
+
+    #[test]
+    fn the_forwarded_tail_is_the_clients_own_encoding() {
+        assert_eq!(
+            raw_rest("/api/hosts/workshop/sessions/0123/prompt"),
+            Some("sessions/0123/prompt")
+        );
+        assert_eq!(raw_rest("/api/hosts/workshop/sessions"), Some("sessions"));
+        // The client's spelling, not a decoded one: a `%2F` stays a `%2F`, which is what the peer would have seen.
+        assert_eq!(
+            raw_rest("/api/hosts/w%6frkshop/sessions/a%2Fb"),
+            Some("sessions/a%2Fb")
+        );
+        // A CRLF the router let through cannot reach a request line, because nothing here decodes.
+        assert_eq!(
+            raw_rest("/api/hosts/workshop/sessions%0d%0aX-Injected:%201"),
+            Some("sessions%0d%0aX-Injected:%201")
+        );
+        for path in [
+            "/api/hosts",
+            "/api/hosts/",
+            "/api/hosts/workshop",
+            "/api/hosts/workshop/",
+            "/api/health",
+            "/",
+        ] {
+            assert_eq!(raw_rest(path), None, "{path}");
         }
     }
 

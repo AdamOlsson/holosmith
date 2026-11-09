@@ -196,6 +196,32 @@ async fn hub(dir: &TempDir, config: Config, rows: &[Host]) -> (Served, AppState)
     (served, state)
 }
 
+/// A body with its chunk framing removed, so a test can compare what a client would *see*.
+///
+/// `support::parse` keeps the bytes as they arrived (the harness reads a stream's raw answer), and hyper frames a
+/// length-less answer as chunked — so a comparison of event bytes has to decode first, or it compares framing.
+fn dechunk(body: &[u8]) -> Vec<u8> {
+    let mut decoded = Vec::new();
+    let mut rest = body;
+    while let Some(end) = rest.windows(2).position(|window| window == b"\r\n") {
+        let Ok(line) = std::str::from_utf8(&rest[..end]) else {
+            break;
+        };
+        let Ok(size) = usize::from_str_radix(line.split(';').next().unwrap_or("").trim(), 16)
+        else {
+            break;
+        };
+        let data = &rest[end + 2..];
+        let take = size.min(data.len());
+        decoded.extend_from_slice(&data[..take]);
+        if size == 0 || take < size || rest.len() < end + 2 + size + 2 {
+            break;
+        }
+        rest = &rest[end + 2 + size + 2..];
+    }
+    decoded
+}
+
 fn row(name: &str, origin: &str, preview: Option<&str>) -> Host {
     Host {
         name: name.to_string(),
@@ -372,20 +398,81 @@ async fn a_stream_is_relayed_by_its_event_bytes() {
     .await;
     assert_eq!(answer.status, 200, "{}", answer.body);
     assert_eq!(answer.header("content-type"), Some("text/event-stream"));
-    assert!(
-        answer.body.contains(EVENTS),
-        "the event bytes must travel unchanged: {:?}",
-        answer.body
-    );
-    assert!(
-        answer.header("transfer-encoding").is_none() || answer.body.contains(EVENTS),
-        "the answer is framed by this machine, not by the peer"
+    // The peer framed its body in one chunk; the hub decoded it and `hyper` framed the answer again. What must be
+    // equal is the **event bytes**, which is why the body is decoded first: a `contains` over the raw bytes would
+    // pass just as happily over a peer's framing copied through verbatim.
+    assert_eq!(
+        String::from_utf8_lossy(&dechunk(&answer.bytes)),
+        EVENTS,
+        "the event bytes must travel unchanged"
     );
     assert!(
         peer.asked().contains("Last-Event-ID: 40\r\n"),
         "{}",
         peer.asked()
     );
+    served.finish().await.expect("a clean shutdown");
+}
+
+#[tokio::test]
+async fn a_percent_encoded_tail_cannot_author_the_forwarded_head() {
+    // `axum`'s `Path` percent-decodes, so a CRLF in the capture would be written into the request line this machine
+    // sends a peer — a caller authoring the head the hub claims to author. The tail is taken raw.
+    let dir = TempDir::new("forward-injected");
+    let peer =
+        Peer::answering("HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
+    let (served, _state) = hub(
+        &dir,
+        Config::default(),
+        &[row(PEER, &peer.origin(), Some("http://127.0.0.1:1"))],
+    )
+    .await;
+    let answer = get(
+        served.addr,
+        &format!("/api/hosts/{PEER}/sessions%0d%0aX-Injected:%201"),
+    )
+    .await;
+    let _ = answer;
+    let asked = peer.asked();
+    assert!(
+        !asked
+            .lines()
+            .any(|line| line.to_ascii_lowercase().starts_with("x-injected")),
+        "the injected header became a line of the forwarded head: {asked:?}"
+    );
+    assert!(
+        asked.contains("%0d%0aX-Injected:%201"),
+        "the tail lost the client's own encoding: {asked:?}"
+    );
+    served.finish().await.expect("a clean shutdown");
+}
+
+#[tokio::test]
+async fn a_reply_that_says_chunked_and_carries_a_length_keeps_the_chunks() {
+    // A peer that sends both headers is not this build's hyper, and the decoded body's length is not the one that
+    // header names: the framing wins, so the length is not copied and the answer is whole.
+    const BODY: &str = "abc";
+    let dir = TempDir::new("forward-both-framings");
+    let peer = Peer::answering(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ntransfer-encoding: chunked\r\n\
+         content-length: 3\r\nconnection: close\r\n\r\n3\r\nabc\r\n0\r\n\r\n",
+    )
+    .await;
+    let (served, _state) = hub(
+        &dir,
+        Config::default(),
+        &[row(PEER, &peer.origin(), Some("http://127.0.0.1:1"))],
+    )
+    .await;
+    let answer = get(served.addr, &format!("/api/hosts/{PEER}/sessions")).await;
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    assert_eq!(
+        answer.header("content-length"),
+        None,
+        "the peer's length was copied onto a body it does not describe: {}",
+        answer.body
+    );
+    assert_eq!(String::from_utf8_lossy(&dechunk(&answer.bytes)), BODY);
     served.finish().await.expect("a clean shutdown");
 }
 
@@ -644,7 +731,8 @@ async fn a_forwarded_preview_asks_the_peer_in_its_own_words() {
     assert!(answer.starts_with("HTTP/1.1 200 OK"), "{answer}");
     assert!(answer.ends_with("hello"), "{answer}");
     let asked = peer.asked();
-    // The peer's own spelling of its own session, its own preview origin in `Host`, and no `Origin` on a plain GET.
+    // The peer's own spelling of its own session, and its own preview origin in `Host` (and in `Origin`, which this
+    // machine always authors — a `GET` is not refused for carrying one).
     assert!(
         asked.starts_with(&format!("GET /local/{ID}/js/app.js?x=1 HTTP/1.1\r\n")),
         "{asked}"
