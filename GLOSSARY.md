@@ -943,6 +943,17 @@ _Avoid_: Deploy, upgrade, rollout
 Pointing `current` back at the previous release.
 _Avoid_: Revert, downgrade
 
+**Remote deploy**:
+A deploy that runs on **another machine**: `holosmith server deploy --ssh user@host` (or `hub deploy`) sends the
+binary this command is running — or the file `--binary` names — to the target over ssh, verifies the copy's SHA-256
+on that side, and runs the same command there, so the seven steps, the `kind` and the flags are the target's own and
+nothing about *what* is installed is decided here. The copy lands at
+`$HOME/.cache/holosmith/deploy-<first 12 hex of the digest>`; the architecture is compared **before** it is sent (the
+file's ELF header against the target's `uname -m`), and a run that fails before the fourth child has executed
+nothing on the target. It is not a second kind of deploy: `--binary` names the file to send, never a second binary to
+run. Its machine names are `remote::Remote`, `remote::Plan`, `Binary`, `Sent`, `Machine` and `Tools`.
+_Avoid_: Remote install, push, upload, scp
+
 **Deploy step**:
 One of the seven parts of a `deploy` run — `holosmith server deploy` or `holosmith hub deploy` — in the spec's
 order: `preflight`, `files`, `images`,

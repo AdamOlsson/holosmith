@@ -2660,3 +2660,41 @@ it rather than adding a caveat beside it.
   `HubAction::Deploy` straight to `commands::deploy::run`, and `commands::hub` keeps only the registry half. Worth the
   reflex — *does this function choose anything?* — because a doc comment that describes a decision nobody makes is
   worse than no wrapper at all.
+
+### Landmines: the ssh transport, and what a copy needs (HS-073)
+
+- **A `local` with no assignment is *unset*, and the EXIT trap still sees the failing function's locals.** `verify.sh`'s
+  `cleanup` reads `$holder_pid` under `set -u`, so a case that declares `local … holder_pid` and then calls `fail`
+  turns its own assertion into `line N: holder_pid: unbound variable` — the real `FAIL` line is *above* that in the
+  log, which is the only reason it is findable. `case_deploy_ssh` assigns `local socket_pid="" holder_pid=""`; do the
+  same in any new case, because every case that holds a port declares one of them.
+- **An `ssh` stand-in must consume `-o` *and its value*.** A skip loop that only drops arguments starting with `-`
+  takes `BatchMode=yes` for the host and hands the target's shell a command beginning with `-o`; dash answers
+  `sh: 0: Illegal option -`, which reads like a broken stand-in rather than a broken parse. ssh's grammar is `-o X`,
+  `-p X`, `-i X` and `-l X` with a value, and `-t`, `-T` and `-v` without.
+- **`$HOME` is expanded by the *target's* shell, and the display form is not the token.** `remote::Sent` carries both:
+  `token` (`$HOME/.cache/holosmith/deploy-…`, the word the copy, the check and the run all use) and `shown`
+  (`~/.cache/…`, what the report prints). One field holding the display form made the run child's first word a `~`
+  that the stand-in could not match — while a real target *would* have expanded it, so the bug was invisible outside
+  a test. Two spellings of one path is the correct shape here, and the doc comment says which is which.
+- **`/tmp` is often `noexec`, and a copy is not executable until someone chmods it.** The copy lands under the
+  target's `$HOME/.cache/holosmith/`, and its shell string ends with `chmod 0755`: `cat >` creates 0644, so without
+  that word the run child fails with `Permission denied` one step later, which names the wrong thing entirely.
+- **`e_machine` is at offset 18, so a fixture header needs `e_type` first.** The ELF header is `e_ident` (16 bytes),
+  `e_type` (2), then `e_machine` (2); a test helper that put the machine word at 16 makes the reader answer
+  `ELF machine 0` — a failure that reads like a reader bug. `remote::elf_machine` also refuses a big-endian header
+  rather than reading it backwards.
+- **`Command::output()` gives the child `/dev/null` on stdin.** The copy child is `.stdin(Stdio::from(file))` —
+  explicit, and it wins over `output()`'s default — while the run child inherits all three channels, which is what
+  makes "streaming the output" literal rather than re-printed.
+- **`--ssh`'s value cannot start with `-` on a command line anyway.** `clap` refuses `--ssh -oProxyCommand=…` as an
+  unknown argument (exit 2), so `remote::host_problem`'s leading-`-` rule is reachable only through the `=` form
+  (`--ssh=-oProxyCommand=…`, exit 1). The rule still earns its keep there, and the gate's arm spells it that way.
+- **`grep -o 'deploy-[0-9a-f]*'` matches the bare prefix.** `*` allows zero characters, so counting unique copy
+  names over the stand-in's log counted two (`deploy-` and the real name). The pattern needs `\{12\}`; a counting
+  assertion over an `-o` grep is worth reading twice, because it fails as "the name is not stable" rather than as
+  what it is.
+- **`curl`/`wget` are not on any path this deploy builds, and that is the only honest form of "downloads nothing".**
+  The gate puts stand-ins for both first on `PATH` that record and fail; the assertion is that the record file does
+  not exist afterwards. Grepping the source for a downloader would assert what the text says rather than what the run
+  did.
