@@ -2499,3 +2499,10 @@ it rather than adding a caveat beside it.
   `cmp` of a forwarded row against the server's own row a real measurement; the second would be a second framing
   under hyper's. A response that loses its length is a truncation the client can see, and `hyper` aborts the
   connection — which is D7's "a close, then a sentence", not a hang.
+- **A bound-and-dropped ephemeral port is a race, and it hangs rather than fails.** `egress`'s "a tunnel nothing
+  answers" test used `bind(0)`, `local_addr()`, `drop`, then connected — and another test in the same binary binding
+  that port in the window made the connect *succeed* against a listener that never answers, so `read_to_string` waited
+  forever (`wchan` was `skb_wait_for_more_packets`) and HS-069's gate sat in `cargo test` for fourteen minutes with no
+  output. The fix is the one the test has now: **port 0 is the port nothing can listen on** (a bind with 0 is an
+  ephemeral port, so no process holds 0) and a connect to it is refused at once — plus a bounded read, so the next
+  surprise is a failure with a sentence rather than a gate that cannot finish.

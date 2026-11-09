@@ -1038,9 +1038,14 @@ mod tests {
         let client_address = proxy.local_addr().expect("an address");
         // A port nothing listens on: the tunnel is refused *after* the policy said yes, which is the "reachable
         // name, nothing behind it" case a container meets when its allow-listed host is down.
-        let dead = TcpListener::bind("127.0.0.1:0").await.expect("a port");
-        let dead_address = dead.local_addr().expect("an address");
-        drop(dead);
+        //
+        // **Port 0, because nothing can ever listen on it** — a `bind` with 0 asks the kernel for an ephemeral port,
+        // so no process holds port 0 — and a connect to it is refused at once. This was a bound-and-dropped ephemeral
+        // port first, which is a race: another test in this binary binding that port between the drop and the
+        // connect makes the connect *succeed* against a listener that never answers, and the read below waits
+        // forever. It cost HS-069's gate run fourteen minutes of a hung lib-test binary (`wchan` was
+        // `skb_wait_for_more_packets`), so the port is deterministic now and the read is bounded.
+        let dead_address = SocketAddr::from(([127, 0, 0, 1], 0));
         let tunnel = tokio::spawn(async move {
             let (stream, _) = proxy.accept().await.expect("a connection");
             Record::tunnel(
@@ -1053,7 +1058,10 @@ mod tests {
         });
         let mut client = TcpStream::connect(client_address).await.expect("the proxy");
         let mut answer = String::new();
-        client.read_to_string(&mut answer).await.expect("a read");
+        tokio::time::timeout(Duration::from_secs(10), client.read_to_string(&mut answer))
+            .await
+            .expect("the refused tunnel is answered and closed; a hang here is a gate that cannot finish")
+            .expect("a read");
         assert!(answer.starts_with("HTTP/1.1 502"), "{answer}");
         let record = tunnel.await.expect("the tunnel ends");
         assert_eq!(record.status, "unreachable");
