@@ -386,6 +386,7 @@ async fn the_file_wins_on_a_name_and_a_row_it_does_not_mention_survives() {
                 name: "api-made".to_string(),
                 url: holosmith::config::Origin::parse("https://api.tail1234.ts.net")
                     .expect("an origin"),
+                preview: None,
                 reach: Reach::Unreachable,
                 version: None,
                 last_error: Some("unreachable earlier".to_string()),
@@ -432,6 +433,7 @@ async fn a_seed_that_does_not_parse_merges_nothing_and_leaves_the_table_alone() 
                 name: "kept".to_string(),
                 url: holosmith::config::Origin::parse("https://kept.tail1234.ts.net")
                     .expect("an origin"),
+                preview: None,
                 reach: Reach::Unreachable,
                 version: None,
                 last_error: Some("earlier".to_string()),
@@ -467,6 +469,7 @@ async fn a_seed_that_does_not_parse_merges_nothing_and_leaves_the_table_alone() 
                 name: "unasked".to_string(),
                 url: holosmith::config::Origin::parse("https://unasked.tail1234.ts.net")
                     .expect("an origin"),
+                preview: None,
                 reach: Reach::Reachable,
                 version: Some("an older answer".to_string()),
                 last_error: None,

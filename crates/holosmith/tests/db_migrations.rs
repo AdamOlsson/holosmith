@@ -143,6 +143,7 @@ fn the_first_start_creates_wal_and_records_the_migration() {
             (4, "0004_expected_stop.sql".to_string(), NOW),
             (5, "0005_push_subscriptions.sql".to_string(), NOW),
             (6, "0006_hosts.sql".to_string(), NOW),
+            (7, "0007_hosts_preview.sql".to_string(), NOW),
         ],
         "the first start did not record every migration"
     );
@@ -165,6 +166,7 @@ fn a_second_start_applies_nothing_and_records_nothing() {
             (4, "0004_expected_stop.sql".to_string(), NOW),
             (5, "0005_push_subscriptions.sql".to_string(), NOW),
             (6, "0006_hosts.sql".to_string(), NOW),
+            (7, "0007_hosts_preview.sql".to_string(), NOW),
         ],
         "the second start rewrote the applied set"
     );
@@ -356,6 +358,7 @@ fn two_processes_starting_at_once_end_at_one_schema() {
             (4, "0004_expected_stop.sql"),
             (5, "0005_push_subscriptions.sql"),
             (6, "0006_hosts.sql"),
+            (7, "0007_hosts_preview.sql"),
         ],
         "the migrations were not applied exactly once: {rows:?}"
     );

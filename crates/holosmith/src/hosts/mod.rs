@@ -117,6 +117,10 @@ impl serde::Serialize for Reach {
 pub struct Host {
     pub name: String,
     pub url: Origin,
+    /// The machine's **preview** origin (HS-069, ADR-0074): where its preview listener answers, learned from its
+    /// own health payload and never supplied by a caller. `None` until a probe has carried one — which refuses a
+    /// forwarded preview with a sentence naming the probe rather than dialling a guess.
+    pub preview: Option<Origin>,
     pub reach: Reach,
     /// The health reply's version, `None` when the row is unreachable.
     pub version: Option<String>,
@@ -346,15 +350,17 @@ pub fn merge_outcome(outcome: probe::Outcome, name: &str, origin: &Origin) -> Ho
     let mut host = Host {
         name: name.to_string(),
         url: origin.clone(),
+        preview: None,
         reach: Reach::Unreachable,
         version: None,
         last_error: None,
         last_checked_at: clock::unix_now(),
     };
     match outcome {
-        probe::Outcome::Healthy { version } => {
+        probe::Outcome::Healthy { version, preview } => {
             host.reach = Reach::Reachable;
             host.version = Some(version);
+            host.preview = preview;
         }
         probe::Outcome::Unreachable(sentence) | probe::Outcome::Refused(sentence) => {
             host.last_error = Some(sentence);
@@ -376,7 +382,14 @@ pub fn probe_row(config: &Config, tools: &Tools, name: &str, origin: &Origin) ->
 /// the process is up.
 fn probe_one(config: &Config, tools: &Tools, origin: &Origin) -> probe::Outcome {
     if is_local(origin, &config.control_origin) {
-        return probe::Outcome::Healthy { version: version() };
+        // The local row carries this config's own preview origin for the reason [
+        // `merge_outcome`] takes one from a peer's payload (HS-069): the shortcut answers a *round trip* without
+        // making one, so it has to answer the same two facts. `None` here would leave this machine's own row the one
+        // row on the machine whose previews cannot be forwarded.
+        return probe::Outcome::Healthy {
+            version: version(),
+            preview: Some(config.preview_origin.clone()),
+        };
     }
     probe::ask(origin, tools)
 }
@@ -435,6 +448,7 @@ pub fn merge(database: &Database, config: &Config, tools: &Tools) -> Result<Merg
             targets.push(Host {
                 name: row.name,
                 url: row.url,
+                preview: None,
                 reach: Reach::Unreachable,
                 version: None,
                 last_error: None,

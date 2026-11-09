@@ -62,10 +62,15 @@ const POLL: Duration = Duration::from_millis(20);
 /// What one probe found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// The host answered its own health payload: the row's version, and a registration worth storing.
+    /// The host answered its own health payload: the row's version, the preview origin it named (HS-069), and a
+    /// registration worth storing.
     Healthy {
         /// The `version` the host reported, as it spelled it.
         version: String,
+        /// The `preview_origin` the host reported, parsed, or `None` when it named none and when what it named is
+        /// not an origin. This is the one fact about the host's *second* listener that only the host can answer
+        /// (ADR-0074), and a payload that cannot be parsed leaves it `None` rather than refusing a healthy host.
+        preview: Option<Origin>,
     },
     /// Nothing answered. The sentence is stored as the row's `last_error` (item 16's "not removed").
     Unreachable(String),
@@ -301,7 +306,20 @@ fn interpret(answer: &[u8]) -> Outcome {
         }
     }
     match health::parse_answer(body) {
-        Ok(Answer { name, version, .. }) if name == health::NAME => Outcome::Healthy { version },
+        Ok(answer) if answer.name == health::NAME => {
+            // The health payload's **fifth** key is the host's own answer about its own second listener, and this is
+            // the only place it can be read: one payload is one answer, so it is taken here beside the version
+            // rather than in a second request. A value that is not an origin is no value — a host that answered its
+            // health payload is healthy, and a malformed fifth key is a fact about its config (one sentence at the
+            // forwarding attempt) rather than about its reach (ADR-0074).
+            let preview = answer
+                .preview_origin
+                .and_then(|origin| Origin::parse(&origin).ok());
+            Outcome::Healthy {
+                version: answer.version,
+                preview,
+            }
+        }
         Ok(Answer { name, .. }) => Outcome::Refused(format!(
             "answered a health payload named {name:?}, and this build registers only {:?}",
             health::NAME
@@ -332,9 +350,30 @@ mod tests {
         assert_eq!(
             interpret(&answer("200 OK", PAYLOAD)),
             Outcome::Healthy {
-                version: "0.1.0".to_string()
+                version: "0.1.0".to_string(),
+                preview: Some(Origin::parse("http://localhost:8081").expect("a test origin")),
             }
         );
+    }
+
+    #[test]
+    fn a_payload_with_no_preview_origin_or_a_bad_one_is_still_healthy() {
+        // The row is a healthy host either way: the fifth key is a fact about its *preview* listener, and a missing
+        // or malformed one refuses a forwarded preview (with a sentence) rather than marking the machine away.
+        for body in [
+            r#"{"name":"holosmith","version":"0.1.0","role":"server","uptime_s":0}"#,
+            r#"{"name":"holosmith","version":"0.1.0","role":"server","uptime_s":0,"preview_origin":"nonsense"}"#,
+            r#"{"name":"holosmith","version":"0.1.0","role":"server","uptime_s":0,"preview_origin":null}"#,
+        ] {
+            assert_eq!(
+                interpret(&answer("200 OK", body)),
+                Outcome::Healthy {
+                    version: "0.1.0".to_string(),
+                    preview: None,
+                },
+                "{body}"
+            );
+        }
     }
 
     #[test]
@@ -419,7 +458,8 @@ mod tests {
         assert_eq!(
             ask(&origin, &Tools::default()),
             Outcome::Healthy {
-                version: "0.1.0".to_string()
+                version: "0.1.0".to_string(),
+                preview: Some(Origin::parse("http://localhost:8081").expect("a test origin")),
             }
         );
         // The stand-in served one request and stopped when the probe closed its end.

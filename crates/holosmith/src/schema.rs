@@ -14,7 +14,7 @@ use include_dir::{Dir, include_dir};
 use crate::sql::code_only;
 
 /// The newest database migration this binary embeds.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 static MIGRATIONS: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/migrations");
 

@@ -18,15 +18,18 @@ use crate::config::Origin;
 use crate::hosts::{Host, Reach};
 use crate::sessions::RepoError;
 
-/// The six columns a row is, in the order every statement below reads them and [`host`] unpacks them.
-const COLUMNS: &str = "name, url, reach, version, last_error, last_checked_at";
+/// The seven columns a row is, in the order every statement below reads them and [`host`] unpacks them.
+///
+/// `preview` is **last** because it is the column HS-069 added (migration `0007`): appending it leaves every index
+/// this file already used where it was, which is one fewer thing for a reader to re-derive from a diff.
+const COLUMNS: &str = "name, url, reach, version, last_error, last_checked_at, preview";
 
 /// The write: one row per name, and a second registration of one name is that machine registered again.
-const UPSERT: &str = "INSERT INTO hosts (name, url, reach, version, last_error, last_checked_at) \
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+const UPSERT: &str = "INSERT INTO hosts (name, url, reach, version, last_error, last_checked_at, preview) \
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
      ON CONFLICT(name) DO UPDATE SET url = excluded.url, reach = excluded.reach, \
      version = excluded.version, last_error = excluded.last_error, \
-     last_checked_at = excluded.last_checked_at";
+     last_checked_at = excluded.last_checked_at, preview = excluded.preview";
 
 /// The removal: what `DELETE /api/hosts/{name}` does once the refuse-if-live rule has its say.
 const REMOVE: &str = "DELETE FROM hosts WHERE name = ?1";
@@ -70,6 +73,7 @@ impl<'a> HostRepository<'a> {
                     host.version,
                     host.last_error,
                     host.last_checked_at,
+                    host.preview.as_ref().map(|preview| preview.as_str()),
                 ],
             )
             .map_err(sqlite)?;
@@ -132,9 +136,17 @@ fn host_row(row: &Row<'_>) -> rusqlite::Result<Host> {
     let url = Origin::parse(&url).map_err(|error| corrupt(1, error))?;
     let reach: String = row.get(2)?;
     let reach = Reach::parse(&reach).map_err(|error| corrupt(2, error))?;
+    // A NULL is a row no probe has carried a preview origin for, which is not corruption; a text that is not an
+    // origin is, and it names the column it was in (HS-069, ADR-0074).
+    let preview: Option<String> = row.get(6)?;
+    let preview = match preview {
+        Some(preview) => Some(Origin::parse(&preview).map_err(|error| corrupt(6, error))?),
+        None => None,
+    };
     Ok(Host {
         name,
         url,
+        preview,
         reach,
         version: row.get(3)?,
         last_error: row.get(4)?,
@@ -196,6 +208,9 @@ mod tests {
         Host {
             name: name.to_string(),
             url: Origin::parse(url).expect("the test's URL is an origin"),
+            preview: Some(
+                Origin::parse("http://localhost:8081").expect("the test's preview is an origin"),
+            ),
             reach,
             version: Some("0.1.0".to_string()),
             last_error: None,

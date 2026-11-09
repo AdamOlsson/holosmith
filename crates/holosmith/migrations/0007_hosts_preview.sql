@@ -1,0 +1,18 @@
+-- HS-069: a machine's preview origin (schema 7). The second origin a registry row knows.
+--
+-- Spec item 3 asks the hub's preview listener to forward `/<host>/<id>/*` to "that machine's preview listener",
+-- and item 3 also gives that listener an origin of its own (the preview server listens on
+-- `preview_listen` and is published on `preview_origin`, `tailscale serve --https=8444`). A machine's control
+-- origin cannot say where its previews are: they are a second listener on a second port, and the port is the
+-- peer's to name. ADR-0074 records the two reasons this column exists rather than a convention: the upgrade's
+-- `Origin` must equal the *peer's* `preview_origin` (the listener compares it as text), and only the peer can say
+-- what that is.
+--
+-- The value is **measured, never supplied**: it comes from the peer's own `/api/health` answer, whose fifth key
+-- has carried `preview_origin` since HS-041. `POST /api/hosts` does not accept it (a caller-supplied origin would
+-- point a hub anywhere, ADR-0016's rule), and a row no probe has completed stays NULL — which refuses a forwarded
+-- preview with a sentence naming the probe instead of dialling a guess.
+--
+-- Nullable, so every existing row is correct without a backfill, and the ADD COLUMN is the expand step ADR-0009
+-- asks for. It is the last statement in this file, so nothing after it can be read as depending on the new column.
+ALTER TABLE hosts ADD COLUMN preview TEXT;

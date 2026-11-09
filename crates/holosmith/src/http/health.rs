@@ -64,20 +64,28 @@ pub fn respond(health: &Health) -> Json<Health> {
     Json(health.clone())
 }
 
-/// The four facts of the payload a **client** reads back: what `holosmith status` prints, what [`crate::doctor`]'s
-/// port check asks about, and what the host registry's probe registers a host by.
+/// The four facts of the payload a **client** reads back, plus the one a **hub** needs (HS-069): what
+/// `holosmith status` prints, what [`crate::doctor`]'s port check asks about, what the host registry's probe
+/// registers a host by, and where that host's preview listener answers.
 ///
-/// Four fields, not six, because `preview_origin` and `application_server_key` are the app shell's business and
-/// `role` is this machine's config where a client reads it as a fact about the other machine. `name` joined in HS-068
-/// because a *third* caller does use it: `POST /api/hosts` refuses an answer whose payload is not a Holosmith's, and
-/// item 4 spells that as "the reply must carry the Holosmith name and version fields". The field was a constant
-/// nobody read until something had to compare it; now something does.
+/// Four fields originally, not six, because `application_server_key` is the app shell's business and `role` is this
+/// machine's config where a client reads it as a fact about the other machine. `name` joined in HS-068 because a
+/// *third* caller does use it: `POST /api/hosts` refuses an answer whose payload is not a Holosmith's, and item 4
+/// spells that as "the reply must carry the Holosmith name and version fields". `preview_origin` joins in HS-069
+/// for the same reason one step further out: the registry's row needs the peer's **preview** origin to forward
+/// `/<host>/<id>/*` to it (ADR-0074), and this payload is where a machine says what that is.
+///
+/// **Optional, so a payload without it still parses.** The key answers for this build's own second listener; a peer
+/// that names none is a host whose previews cannot be forwarded (one sentence at the attempt), never a host that is
+/// not a Holosmith.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Answer {
     pub name: String,
     pub version: String,
     pub role: Role,
     pub uptime_s: u64,
+    #[serde(default)]
+    pub preview_origin: Option<String>,
 }
 
 /// One payload's body as an [`Answer`], or the reason it is not one.
