@@ -50,10 +50,11 @@ _Avoid_: Controller, orchestrator, gateway
 Every entry point a machine may send a request to: one row per host, keyed by the **name** the operator gives it, which
 is the row's identity — so registering a machine twice replaces its row rather than adding a second. A row holds the
 **origin** it answers on (scheme, host and port; never a path), its **reach** (`reachable` or `unreachable`), the
-`version` the last answer reported, the sentence a failed probe gave (`last_error`) and when anything last asked
-(`last_checked_at`). A machine's own row is the one whose origin is its **control origin**; every other row is
-another machine's. Its table is `hosts`, its routes are `GET`/`POST /api/hosts` and `DELETE /api/hosts/{name}`, and
-its machine names are `hosts::{Host, Reach, register, merge, probe}`.
+`version` the last answer reported, the sentence a failed probe gave (`last_error`), when anything last asked
+(`last_checked_at`), and where its **preview** listener answers (`preview`, an origin the probe reads out of that
+machine's own health answer and no caller may supply). A machine's own row is the one whose origin is its **control
+origin**; every other row is another machine's. Its table is `hosts`, its routes are `GET`/`POST /api/hosts` and
+`DELETE /api/hosts/{name}`, and its machine names are `hosts::{Host, Reach, register, merge, probe}`.
 _Avoid_: Host list, node table, inventory
 
 **Hosts seed**:
@@ -87,6 +88,26 @@ because a registered host called `local` would make every forwarded path ambiguo
 thing with the same word: the registry row whose origin is this machine's control origin, which is the one row a
 delete refuses while this machine has live sessions.
 _Avoid_: Self, here, thisbox
+
+**Forwarded request**:
+One API call a **hub** relays to the machine that owns the session: `/api/hosts/<name>/<rest>` reaches that machine's
+own `/api/<rest>`, and the answer — status, headers and body — is the peer's, not the hub's. The hub **authors** the
+call it makes (`Host` and `Origin` are the peer's own origin, `X-Holosmith-Client: 1`, the caller's `Content-Type`,
+`Idempotency-Key` and `Last-Event-ID` verbatim) and it is answered only when the machine's role forwards at all. It is
+bounded at the reply's **head** — 5 s, or 60 s for a merge, a publish and a delete of one session — never on the body,
+because a stream has no end. A path naming `local` is a `308` to `/api/<rest>` rather than a hop, and `/api/hosts/…`
+is never relayed: one hop is the whole promise. Its machine names are `forward::{request_head, Reply, Framing,
+BodyStream, Link, TIMEOUT, SLOW_TIMEOUT, Forwarding}`, `http::forward::respond`.
+_Avoid_: Proxy request, tunnel (a **preview** is the byte tunnel; this one is parsed and re-framed)
+
+**Preview forwarding**:
+One **preview** request a hub relays to another machine's preview listener (`/<name>/<id>/<rest>` → that machine's
+`/local/<id>/<rest>`), **including WebSocket upgrades**, as bytes: the hub does not read what a dev server emits, so a
+chunked body, an event stream and a `101` cannot be mangled. The peer's own preview origin — its `preview_origin`,
+learned from its health answer and stored on its registry row — is what the forwarded `Host` and `Origin` say, and the
+`Origin` matters twice: the peer's listener accepts an upgrade only from the origin it serves. A row with no preview
+origin refuses the hop with a sentence naming the probe rather than dialling a guess.
+_Avoid_: Preview proxy (the proxy is the container on the session network), tunnel routing
 
 ### Configuration
 

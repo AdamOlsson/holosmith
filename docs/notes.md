@@ -2446,3 +2446,56 @@ it rather than adding a caveat beside it.
   FILE` inside the case; a `sed` over a five-row list would assert the wrong row the first time the order changed.
   The order is `name ASC`, and a row's JSON fields are the struct's order, so a needle can stop before the varying
   `last_checked_at`.
+
+### Landmines: the hub's forwarding (HS-069)
+
+- **`HTTP/1.0` is not the free lunch it looks like — measured.** Asking a peer for a 1.0 answer would make its server
+  close-delimit the body, which is what a relay wants; hyper's server will not close-delimit an **endless** one, so it
+  sends **no head at all**: `curl -0` against `GET /api/sessions/<id>/events` printed zero bytes in four seconds while
+  the same request over 1.1 answered at once. That is why `src/forward.rs` carries a chunked decoder. If it ever
+  cannot relay a real peer's stream event for event, the fallback is hyper's `client` feature plus `want` (ADR-0074
+  D2), and that trigger is written down so nobody re-litigates it.
+- **A stand-in peer on `spawn_blocking` hangs the whole test binary.** `spawn_blocking` tasks cannot be aborted, so a
+  `for stream in listener.incoming()` loop keeps the runtime's shutdown waiting forever — the mirror of the HS-068
+  landmine (a *stand-in* loop that never ends). `tests/forward.rs`'s `Peer` is a **tokio** task ended by `abort`. And
+  a peer that is supposed to say nothing must **hold** its socket: closing it is an answer, and the `504` arm is about
+  a socket that is open and silent.
+- **A forwarded `Host` and `Origin` must be the peer's *exact* `control_origin`.** The guard compares `Origin` as text
+  against the config's own spelling while `hosts::is_local` folds ports, so a row registered as
+  `http://localhost:<port>` against a peer whose origin is `http://127.0.0.1:<port>` passes the probe and answers
+  `403 bad_origin` on every mutating call. `case_forward` measures exactly that, and it doubles as "a peer's own
+  refusal survives the trip". Register machines by the origin they report; it is a precondition, not a check.
+- **A stand-in's `Content-Length` has to be computed, not eyeballed.** A reply promising 39 octets and sending 38 makes
+  the hub's `Framing::Length` stream error and hyper truncate the answer — which reads in a test as "the relay lost the
+  tail" and is really the fixture's arithmetic. Count the bytes (or build the head with `format!`).
+- **`Route::strip` no longer decides which host it is, so the slashless redirect moved *after* the plan.** With the
+  old order, `/api/health` on the preview listener became a `308` to `/api/health/` (it is `/<host>/<id>` with no
+  trailing slash) instead of the `404` `case_preview` asserts. Order in `handle`: split → an upgrade's `Origin` →
+  the plan → the redirect → serve.
+- **Two boots break four assumptions of `start_serve`.** Its globals (`serve_pid`, `port`, `control_origin`,
+  `preview_port`) are one machine's, and its `--admin-dir` comment says "only one serve is up at a time". A case with
+  two machines needs `start_peer`/`stop_peer` with their own admin directory and `peer_*` globals, `forward_fetch
+  <port>` (because `fetch` always talks to `$port`), a `peer_pid` in the trap, and a `wait` after a `kill -9` or bash
+  prints its own "Killed" line into the case's captured output.
+- **The gate's `--no-build` run uses whatever is in `dist/`.** Two iterations of `case_forward` failed as bugs of the
+  case that were really a stale artifact with no `preview` column. Rebuild after any `src/` change before believing a
+  gate line.
+- **A container answers a second or two after `docker run` returns, and the *host* can reach it.** Ask it directly
+  first (V7's measurement, and a readiness wait) before reading the forward's answer, or a `502 preview_unreachable`
+  looks like a forwarding bug when it is a socket that had not opened.
+- **`Routes::any` cannot exist.** `every_registered_route_is_classified` panics on a method that is not
+  GET/HEAD/POST/PUT/PATCH/DELETE, `no_get_route_is_mutating` forbids declaring a forwarded GET mutating, and
+  `Routes::head` on a path `get` already answers panics on the overlapping method route. A method-agnostic route is
+  therefore **five registrations of one path**, `get` read-only and the four mutating verbs `Mutating` — and that split
+  is the honest one, because a forwarded `GET` cannot change state at *this* machine.
+- **The forwarding route is not guard-exempt, and must not be.** A forwarded non-`GET` is checked against the **hub's**
+  origin and client header first and only then re-authored as the peer's; reading the rewrite as "the hub trusts the
+  caller's origin" would delete the hub's own guard. The peer's `owner` check is vacuous for a forwarded call (no
+  `tailscale-user-login` arrives), which is HS-070's to change.
+- **A `hosts.toml` row may name loopback where `POST /api/hosts` may not.** The seed is filtered by `name_problem` and
+  `Origin::parse` alone (ADR-0073 D9), and that asymmetry is the only reason two machines can be measured on one box
+  with no tailnet. Do not "fix" it.
+- **A forwarded answer keeps the peer's `Content-Length` and never its `Transfer-Encoding`.** The first is what makes
+  `cmp` of a forwarded row against the server's own row a real measurement; the second would be a second framing
+  under hyper's. A response that loses its length is a truncation the client can see, and `hyper` aborts the
+  connection — which is D7's "a close, then a sentence", not a hang.

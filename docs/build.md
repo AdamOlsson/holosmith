@@ -507,6 +507,29 @@ or `openssl`. What it cannot measure through the artifact is the API's `422 not_
 the host rule refuses loopback and no `.ts.net` name resolves on a machine with no `tailscaled` — so that arm is
 `tests/hosts.rs`'s, split into the probe against real listeners and the mapping as a function (ADR-0073 D10).
 
+…and since HS-069, **the hub's forwarding**: `case_forward` runs **two** artifacts on one box — a `role = "server"`
+boot on pinned control and preview ports, and a `role = "hub"` boot whose `hosts.toml` names the server's control
+origin — which is why the harness grew `start_peer`/`stop_peer` (its own admin directory and its own `peer_*`
+globals: `start_serve` is written for one machine) and `forward_fetch <port>` (`fetch` always talks to `$port`, and
+two machines have two ports). **The API half needs no daemon**: both boots are `backend = "stub"`, a `hub` is asked no
+Docker question at all, and the seed naming loopback is legal where `POST /api/hosts` would answer `422 bad_host_url`
+(ADR-0073 D9) — that asymmetry is the case's whole licence, and adding the host predicate to the seed would break it.
+It measures the probe's new fact (the peer's **preview** origin, read out of its own health answer), a create through
+the hub, the same create again answering the *same row* (the `Idempotency-Key` travelled), one row `cmp`ed **byte for
+byte** with the server's own answer, and the event stream decoded on both sides and `cmp`ed — plus a `Last-Event-ID`
+round trip that starts at the next seq. Then the five refusals with five codes: `local`'s `308`, an unknown name's
+`404 unknown_host`, the registry's `403 not_forwarded`, a peer that is gone (`502 upstream_unreachable`, on a row the
+boot marked `unreachable` — reach is not consulted), a peer that accepts and never answers (`504 upstream_timeout`,
+five real seconds against a `python3` socket that holds the connection), and a row naming the peer by a **different
+spelling** of the same origin, whose forwarded mutating call comes back as the peer's own `403 bad_origin` — a
+forwarded refusal surviving the trip. A hub-only machine serves its reads and refuses the create
+(`403 sessions_disabled`, no row). The preview arms need the daemon and `HOLOSMITH_TEST_IMAGE` and print one `SKIP`
+without them: a container's dev server reached through **both** listeners (`/workshop/<id>/` on the hub), and a
+hand-written `101` handshake whose `Origin` is the hub's and arrives at the peer as the peer's own. Finally a peer
+killed mid-stream: the client's socket must **end** — `read -t`'s 1 (EOF), never 142 (a timeout) — and the next
+request must be the `502` sentence. Two boots and a `kill -9` mean the trap knows a `peer_pid`; a `fail` between the
+two would otherwise leave a listener on a pinned port for the next run.
+
 …and since HS-047, **`server deploy`**: `case_server_deploy` has two halves that skip independently, because the
 bugs it exists to catch are of two kinds. The **offline** half needs `python3` and nothing else: a `_ping` socket
 it answers stands in for the daemon, and the case asserts that the dry run lists the seven steps in the spec's

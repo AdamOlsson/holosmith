@@ -110,6 +110,8 @@ docker_second_session_id=""
 # the only hook — takes it down too (HS-066's push receiver is the first: a `node` listener on a port and a data
 # root, which outlived two failing runs of `case_push` before the trap learned about it).
 extra_pid=""
+# The second machine a case runs (HS-069). Its own pid, for `start_peer`'s reason.
+peer_pid=""
 
 cleanup() {
   local status=$?
@@ -117,6 +119,13 @@ cleanup() {
     kill -TERM "$serve_pid" 2>/dev/null || true
     wait "$serve_pid" 2>/dev/null || true
   fi
+  # A case's second machine (HS-069): two boots on one box, and the trap has to know about both or a `fail`
+  # between them leaves a listener on a pinned port for the next run.
+  if [ -n "$peer_pid" ] && kill -0 "$peer_pid" 2>/dev/null; then
+    kill -TERM "$peer_pid" 2>/dev/null || true
+    wait "$peer_pid" 2>/dev/null || true
+  fi
+  peer_pid=""
   if [ -n "$socket_pid" ] && kill -0 "$socket_pid" 2>/dev/null; then
     kill "$socket_pid" 2>/dev/null || true
     wait "$socket_pid" 2>/dev/null || true
@@ -295,6 +304,28 @@ preview_fetch() {
   sed '1,/^\r$/d' "$WORK/responses/$label.http" >"$WORK/responses/$label.body"
 }
 
+# forward_fetch <port> <label> <method> <path> [Header: value]...: one request to a **named** machine's control
+# listener (HS-069). `fetch` always talks to `$port`, and a case that runs two machines has to address both: the hub
+# through `fetch`, the server it forwards to through this.
+forward_fetch() {
+  local target="$1" label="$2" method="$3" path="$4"
+  shift 4
+  local -a sent=("$@")
+  local request="$method $path HTTP/1.1"$'\r\n' fd header
+  for header in "${sent[@]}"; do
+    request+="$header"$'\r\n'
+  done
+  request+=$'Connection: close\r\n\r\n'
+  exec {fd}<>"/dev/tcp/127.0.0.1/$target" || return 1
+  printf '%s' "$request" >&"$fd"
+  if ! timeout 10 cat <&"$fd" >"$WORK/responses/$label.http"; then
+    exec {fd}<&-
+    return 1
+  fi
+  exec {fd}<&-
+  sed '1,/^\r$/d' "$WORK/responses/$label.http" >"$WORK/responses/$label.body"
+}
+
 # The answer fetch saved for <label>: status line, headers and body.
 answer() {
   cat "$WORK/responses/$1.http"
@@ -424,6 +455,7 @@ serve_cases=(
   case_push
   case_pwa
   case_hosts
+  case_forward
   case_idle_stop
   case_drain
   case_drain_restart
@@ -5096,6 +5128,543 @@ PY
 # (ADR-0025). It runs right after `case_delete_session`, which is the first moment the table is empty,
 # because the cap is one; it removes what it made, so the cap cases that follow still find the free
 # slot they assume.
+# HS-069: one origin that reaches every machine (spec item 3, item 16 and `Roles`; ADR-0074).
+#
+# Two artifacts on one box is what "two machines" means here: a `role = "server"` boot on a pinned control port and a
+# pinned preview port, and a `role = "hub"` boot whose `hosts.toml` names the server's control origin. **The API half
+# needs no daemon** — both boots are `backend = "stub"`, and a `hub` is not asked a Docker question at all — which is
+# worth saying because it is what makes this case run everywhere. The preview half needs the daemon and the image
+# (a real dev server in a container on the peer, reached through the hub's listener) and prints one SKIP without them.
+#
+# The seed naming `http://127.0.0.1:<port>` is legal where `POST /api/hosts` would answer `422 bad_host_url`: the
+# file is the operator's own and is filtered by `name_problem` and `Origin::parse` only, not by item 4's host rule
+# (ADR-0073 D9). That asymmetry is this case's whole licence — do not "fix" it by adding the predicate to the seed.
+#
+# What it measures, in the order a failure reads best:
+#
+# 1. the probe measured the peer's **preview** origin from its own health answer (the row's new column);
+# 2. a create through the hub, the same create again answering the peer's own row (the `Idempotency-Key` survived),
+#    and one row's body compared with the peer's own answer **byte for byte** (`cmp`: `Content-Length` is kept);
+# 3. the event stream: the hub's frames decoded and compared with the peer's own, `... | cmp`, plus a
+#    `Last-Event-ID` round trip that starts at the next seq;
+# 4. the five refusals with five codes: `local`'s `308`, an unknown name, the registry not relayed, a peer that is
+#    gone (`502`), a peer that accepts and never answers (`504`), and a peer whose row is a different spelling of the
+#    right origin (the peer's own `403 bad_origin`, relayed — the forwarded refusal surviving the trip);
+# 5. a hub-only machine serving its reads and refusing the create (`403 sessions_disabled`, no row);
+# 6. the preview hop: a container's dev server through the hub's listener, and a hand-written `101` through it;
+# 7. a peer killed mid-stream: the client's socket **ends** (EOF, not a timeout) and the next request is the `502`.
+case_forward() {
+  local name=case_forward root="$repo_root/target/verify-forward-$$"
+  local hub_root="$root/hub" peer_root="$root/peer"
+  local hub_config="$hub_root/config.toml" peer_config="$peer_root/config.toml"
+  local hub_data="$hub_root/data" peer_data="$peer_root/data"
+  local seed="$hub_root/hosts.toml" standin_pid="" response body id id2 label
+  local hub_control hub_preview peer_control peer_preview silent_port gone_port image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
+  local rc=0 line fd upstream_port events
+
+  # The guards first, before `stop_serve`: a case that skipped after stopping the run's server would leave
+  # `phase_serve`'s own `stop_serve` with no pid to signal. The API half below needs nothing, so only the preview
+  # arms are conditional — and they are decided once, here, so no half of this case runs a daemon question twice.
+  local preview_arms=1
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    preview_arms=0
+  elif ! docker image inspect "$image" >/dev/null 2>&1; then
+    preview_arms=0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to stand a silent peer in and decode two streams (tests/forward.rs covers the API hop, and the preview hop needs its own two machines)\n' "$name"
+    return 0
+  fi
+
+  stop_serve
+  rm -rf "$root"
+  mkdir -p "$peer_root/projects/proj" "$peer_data" "$hub_data" || fail "$name/mkdir" "could not create $root"
+
+  # Four pinned ports: two machines, each with a control listener and a preview listener. A row naming a machine has
+  # to spell the port it will bind, and the seed is written before either boot.
+  hub_control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  hub_preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  peer_control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  peer_preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  silent_port="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  # A port nothing will listen on: bound and released, so the kernel refuses the connection.
+  gone_port="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+
+  # The server: stub backend (so a create needs no project on disk and no container), its own two origins pinned so
+  # the hub's seed can name them before either boot.
+  cat >"$peer_config" <<EOF
+role = "server"
+backend = "stub"
+control_origin = "http://127.0.0.1:$peer_control"
+preview_listen = "127.0.0.1:$peer_preview"
+preview_origin = "http://127.0.0.1:$peer_preview"
+EOF
+
+  # A **silent** peer: it answers `/api/health` (so the row is reachable and carries a preview origin) and holds
+  # every other request open without answering — which is the only way to measure the forwarding timeout without
+  # waiting for a slow route.
+  cat >"$root/silent.py" <<'PY'
+import socket, sys
+
+port = int(sys.argv[1])
+healthy = (b'{"name":"holosmith","version":"silent","role":"server","uptime_s":0,'
+           b'"preview_origin":"http://127.0.0.1:1","application_server_key":null}')
+server = socket.socket()
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("127.0.0.1", port))
+server.listen(8)
+print("PORT %d" % port, flush=True)
+held = []
+while True:
+    connection, _ = server.accept()
+    request = connection.recv(65536)
+    if request.split(b"\r\n")[0].endswith(b"/api/health HTTP/1.1"):
+        connection.sendall(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n"
+            b"Connection: close\r\n\r\n" % len(healthy) + healthy
+        )
+        connection.close()
+    else:
+        # Accepted, read, and **never answered**: the socket stays open, so the hub's bound is what ends the wait.
+        held.append(connection)
+PY
+  python3 "$root/silent.py" "$silent_port" >"$root/silent.out" 2>"$root/silent.err" &
+  standin_pid=$!
+  extra_pid=$standin_pid
+  for _ in $(seq 1 200); do
+    grep -q '^PORT ' "$root/silent.out" 2>/dev/null && break
+    kill -0 "$standin_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  [ "$(sed -n 's/^PORT \([0-9]*\)$/\1/p' "$root/silent.out")" = "$silent_port" ] ||
+    fail "$name/silent" "the silent peer did not bind $silent_port: $(cat "$root/silent.err")"
+
+  # The hub's registry: the peer under its registered name, the same peer under a **different spelling** of the same
+  # origin (a forwarded mutating call to that row must come back as the peer's own `403 bad_origin`), the silent
+  # peer, and a machine that is not there. The hub probes every row at boot.
+  cat >"$seed" <<EOF
+[[hosts]]
+name = "workshop"
+url = "http://127.0.0.1:$peer_control"
+
+[[hosts]]
+name = "wrongspelling"
+url = "http://localhost:$peer_control"
+
+[[hosts]]
+name = "silent"
+url = "http://127.0.0.1:$silent_port"
+
+[[hosts]]
+name = "gone"
+url = "http://127.0.0.1:$gone_port"
+EOF
+  cat >"$hub_config" <<EOF
+role = "hub"
+backend = "stub"
+control_origin = "http://127.0.0.1:$hub_control"
+preview_listen = "127.0.0.1:$hub_preview"
+preview_origin = "http://127.0.0.1:$hub_preview"
+hosts_seed = "$seed"
+EOF
+
+  start_peer "$peer_config" "$peer_data" "$peer_control"
+  # The hub last, because its merge probes the rows: a hub booted before its server learns no preview origin.
+  start_serve "$hub_config" "$hub_data" "$hub_control"
+
+  # One machine's field out of the registry answer, read with `python3` (this case needs it anyway): a `sed` over a
+  # four-row list would assert the wrong row the first time the order changed.
+  hosts_field() {
+    python3 - "$1" "$2" "$3" <<'PY'
+import json, sys
+row = next((row for row in json.load(open(sys.argv[3]))["hosts"] if row["name"] == sys.argv[1]), None)
+if row is None:
+    print("<absent>")
+else:
+    value = row[sys.argv[2]]
+    print("null" if value is None else value)
+PY
+  }
+
+  # Wait for the forwarded session to be `idle`, read through the hub: a create (and a prompt) is answered from the
+  # row and provisions in the background, and every stub step costs a fraction of a second.
+  forward_wait_idle() {
+    local waited=0
+    while [ "$waited" -lt 100 ]; do
+      fetch "$name-idle" GET "/api/hosts/workshop/sessions/$id" "Host: 127.0.0.1" ||
+        fail "$name/idle" "GET /api/hosts/workshop/sessions/$id did not answer"
+      case "$(cat "$WORK/responses/$name-idle.body")" in
+        *'"status":"idle"'*)
+          assertions=$((assertions + 1))
+          return 0
+          ;;
+      esac
+      sleep 0.2
+      waited=$((waited + 1))
+    done
+    fail "$name/idle" "the forwarded session never reached idle: $(cat "$WORK/responses/$name-idle.body")"
+  }
+
+  # ---- 1. the registry measured the peer's second listener --------------------------------------
+  fetch "$name-hosts" GET /api/hosts "Host: 127.0.0.1" || fail "$name/hosts" "GET /api/hosts did not answer"
+  expect_status "$name/hosts" "$(answer "$name-hosts")" 200
+  check "$name/hosts/preview" "http://127.0.0.1:$peer_preview" \
+    "$(hosts_field workshop preview "$WORK/responses/$name-hosts.body")"
+  check "$name/hosts/reach" reachable \
+    "$(hosts_field workshop reach "$WORK/responses/$name-hosts.body")"
+  check "$name/hosts/silent" "http://127.0.0.1:1" \
+    "$(hosts_field silent preview "$WORK/responses/$name-hosts.body")"
+  check "$name/hosts/gone" unreachable \
+    "$(hosts_field gone reach "$WORK/responses/$name-hosts.body")"
+
+  # ---- 2. one session API, two machines ----------------------------------------------------------
+  fetch "$name-list-empty" GET /api/hosts/workshop/sessions "Host: 127.0.0.1" ||
+    fail "$name/list" "GET /api/hosts/workshop/sessions did not answer"
+  expect_status "$name/list" "$(answer "$name-list-empty")" 200
+  fetch_body "$name-create" POST /api/hosts/workshop/sessions \
+    '{"project":"proj","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Idempotency-Key: verify-forward-1" ||
+    fail "$name/create" "POST /api/hosts/workshop/sessions did not answer"
+  expect_status "$name/create" "$(answer "$name-create")" 202
+  id="$(sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p' "$WORK/responses/$name-create.body" | sed -n '1p')"
+  [ -n "$id" ] || fail "$name/create" "the forwarded create names no id: $(cat "$WORK/responses/$name-create.body")"
+
+  # The same create again: the peer's replay rule, which only holds if the `Idempotency-Key` travelled.
+  fetch_body "$name-replay" POST /api/hosts/workshop/sessions \
+    '{"project":"proj","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Idempotency-Key: verify-forward-1" ||
+    fail "$name/replay" "the replay did not answer"
+  expect_status "$name/replay" "$(answer "$name-replay")" 202
+  id2="$(sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p' "$WORK/responses/$name-replay.body" | sed -n '1p')"
+  check "$name/replay/same_row" "$id" "$id2"
+
+  # One row, fetched through the hub and from the peer directly, compared **byte for byte**: the strongest form of
+  # "the hub relays the peer's answer" the API offers, and the reason the forwarding route keeps `Content-Length`.
+  forward_fetch "$peer_port" "$name-direct" GET "/api/sessions/$id" "Host: 127.0.0.1"
+  fetch "$name-row" GET "/api/hosts/workshop/sessions/$id" "Host: 127.0.0.1" || fail "$name/row" "did not answer"
+  expect_status "$name/row" "$(answer "$name-row")" 200
+  if ! cmp -s "$WORK/responses/$name-direct.body" "$WORK/responses/$name-row.body"; then
+    fail "$name/row/bytes" "the hub's row is not the peer's row: $(cat "$WORK/responses/$name-row.body")"
+  fi
+  assertions=$((assertions + 1))
+
+  # ---- 3. the event stream, event byte for event byte --------------------------------------------
+  # A create is answered from the row it just wrote and provisions in the background, so the turn has to wait for
+  # `idle` — polled **through the hub**, which is the relayed row read as the peer's own.
+  forward_wait_idle
+  fetch_body "$name-prompt" POST "/api/hosts/workshop/sessions/$id/prompt" '{"prompt":"hello through the hub"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" ||
+    fail "$name/prompt" "the forwarded prompt did not answer"
+  expect_status "$name/prompt" "$(answer "$name-prompt")" 202
+  # And the turn has to finish before two reads of the stream can agree: the replay is the whole log, and a turn
+  # still running would make the two reads stop at different frames.
+  forward_wait_idle
+  cat >"$root/stream.py" <<'PY'
+import socket, sys, time
+
+port, path, out, last = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
+connection = socket.create_connection(("127.0.0.1", port), timeout=5)
+head = "GET %s HTTP/1.1\r\nHost: 127.0.0.1\r\n" % path
+if last:
+    head += "Last-Event-ID: %s\r\n" % last
+head += "Connection: close\r\n\r\n"
+connection.sendall(head.encode())
+raw = b""
+# An idle window rather than a total one: the replay arrives at once, and a stream that pauses longer than this is
+# one this comparison cannot use anyway (the two reads must see the same frames).
+connection.settimeout(1.5)
+deadline = time.time() + 15
+while time.time() < deadline:
+    try:
+        chunk = connection.recv(65536)
+    except socket.timeout:
+        break
+    if not chunk:
+        break
+    raw += chunk
+connection.close()
+head, _, body = raw.partition(b"\r\n\r\n")
+if b"transfer-encoding: chunked" in head.lower():
+    decoded = b""
+    complete = True
+    while True:
+        line, _, rest = body.partition(b"\r\n")
+        try:
+            size = int(line.split(b";")[0], 16)
+        except ValueError:
+            # A cut in the middle of a chunk: the read stopped before the peer had written the rest, which is this
+            # comparison's failure and not a framing question. Keep what arrived and say so.
+            complete = False
+            break
+        if size == 0 or len(rest) < size:
+            complete = complete and size == 0
+            decoded += rest[:size]
+            break
+        decoded += rest[:size]
+        body = rest[size + 2 :]
+    body = decoded
+    if not complete:
+        print("partial", flush=True)
+        open(out + ".raw", "wb").write(raw)
+open(out, "wb").write(body)
+frames = [frame for frame in body.split(b"\n\n") if frame.strip()]
+ids = [line for frame in frames for line in frame.split(b"\n") if line.startswith(b"id: ")]
+print("frames %d" % len(frames))
+print("first_id %s" % (ids[0].decode().split(" ", 1)[1] if ids else "-"))
+PY
+  python3 "$root/stream.py" "$peer_port" "/api/sessions/$id/events" "$WORK/forward-peer.events" "" \
+    >"$WORK/forward-peer.txt" 2>&1 || fail "$name/stream" "the peer's own stream failed: $(cat "$WORK/forward-peer.txt")"
+  python3 "$root/stream.py" "$port" "/api/hosts/workshop/sessions/$id/events" "$WORK/forward-hub.events" "" \
+    >"$WORK/forward-hub.txt" 2>&1 || fail "$name/stream" "the hub's stream failed: $(cat "$WORK/forward-hub.txt")"
+  if ! cmp -s "$WORK/forward-peer.events" "$WORK/forward-hub.events"; then
+    fail "$name/stream/bytes" "the hub's event bytes are not the peer's: $(cmp "$WORK/forward-peer.events" "$WORK/forward-hub.events" 2>&1)"
+  fi
+  assertions=$((assertions + 1))
+  events="$(sed -n 's/^frames //p' "$WORK/forward-hub.txt")"
+  [ "${events:-0}" -ge 2 ] ||
+    fail "$name/stream/frames" "the forwarded stream carried ${events:-0} frames: $(cat "$WORK/forward-hub.txt")"
+  # The `Last-Event-ID` round trip: ask for the stream after the first frame's seq and the answer starts one later.
+  local first resumed
+  first="$(sed -n 's/^first_id //p' "$WORK/forward-hub.txt")"
+  [ -n "$first" ] && [ "$first" != "-" ] || fail "$name/stream/first_id" "the stream named no id: $(cat "$WORK/forward-hub.txt")"
+  python3 "$root/stream.py" "$port" "/api/hosts/workshop/sessions/$id/events" "$WORK/forward-resume.events" "$first" \
+    >"$WORK/forward-resume.txt" 2>&1 || fail "$name/stream/resume" "the resumed stream failed: $(cat "$WORK/forward-resume.txt")"
+  resumed="$(sed -n 's/^first_id //p' "$WORK/forward-resume.txt")"
+  check "$name/stream/resume_at" "$((first + 1))" "$resumed"
+
+  # ---- 4. the refusals, one code each ------------------------------------------------------------
+  fetch "$name-local" GET /api/hosts/local/sessions "Host: 127.0.0.1" || fail "$name/local" "did not answer"
+  expect_status "$name/local" "$(answer "$name-local")" 308
+  expect_header "$name/local" "$(answer "$name-local")" "location" "/api/sessions"
+  body="$(cat "$WORK/responses/$name-local.body")"
+  [ -z "$body" ] || fail "$name/local" "the redirect carried a body: $body"
+  assertions=$((assertions + 1))
+
+  label="$name-unknown"
+  fetch "$label" GET /api/hosts/nobody/sessions "Host: 127.0.0.1" || fail "$label" "did not answer"
+  expect_status "$name/unknown" "$(answer "$label")" 404
+  expect_code "$name/unknown" "$(answer "$label")" unknown_host
+
+  label="$name-not-forwarded"
+  fetch "$label" GET /api/hosts/workshop/hosts "Host: 127.0.0.1" || fail "$label" "did not answer"
+  expect_status "$name/not_forwarded" "$(answer "$label")" 403
+  expect_code "$name/not_forwarded" "$(answer "$label")" not_forwarded
+
+  label="$name-gone"
+  fetch "$label" GET /api/hosts/gone/sessions "Host: 127.0.0.1" || fail "$label" "did not answer"
+  expect_status "$name/gone" "$(answer "$label")" 502
+  expect_code "$name/gone" "$(answer "$label")" upstream_unreachable
+
+  # The forwarding timeout: five seconds against a peer that took the request and never answers. This is the one
+  # wait in the case, and it is the rule's own number rather than a shortened stand-in.
+  label="$name-timeout"
+  fetch "$label" GET /api/hosts/silent/sessions "Host: 127.0.0.1" || fail "$label" "did not answer"
+  expect_status "$name/timeout" "$(answer "$label")" 504
+  expect_code "$name/timeout" "$(answer "$label")" upstream_timeout
+
+  # A row naming the peer by **another spelling** of the same origin: the probe reaches it, and every mutating call
+  # comes back as the peer's own `403 bad_origin`, because its guard compares the header as text against its
+  # `control_origin` while `hosts::is_local` folds ports. That is the rule ADR-0074 records ("register a machine by
+  # the exact origin it reports"), and the forwarded refusal arriving intact is the measurement.
+  label="$name-wrong-origin"
+  fetch_body "$label" POST "/api/hosts/wrongspelling/sessions/$id/abort" '' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" || fail "$label" "did not answer"
+  expect_status "$name/wrong_origin" "$(answer "$label")" 403
+  expect_code "$name/wrong_origin" "$(answer "$label")" bad_origin
+
+  # ---- 5. a hub-only machine serves its reads and refuses the create -----------------------------
+  fetch "$name-hub-list" GET /api/sessions "Host: 127.0.0.1" || fail "$name/hub_list" "did not answer"
+  expect_status "$name/hub_list" "$(answer "$name-hub-list")" 200
+  body="$(cat "$WORK/responses/$name-hub-list.body")"
+  case "$body" in
+    *'"id"'*) fail "$name/hub_list" "the hub listed a session of its own: $body" ;;
+    *) assertions=$((assertions + 1)) ;;
+  esac
+  fetch_body "$name-hub-create" POST /api/sessions \
+    '{"project":"proj","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Idempotency-Key: verify-forward-2" ||
+    fail "$name/hub_create" "did not answer"
+  expect_status "$name/hub_create" "$(answer "$name-hub-create")" 403
+  expect_code "$name/hub_create" "$(answer "$name-hub-create")" sessions_disabled
+
+  # ---- 6. the preview hop: a container's dev server, and an upgrade, through the hub --------------
+  if [ "$preview_arms" -eq 0 ]; then
+    printf 'SKIP %s/preview: no Docker daemon or no image %s, so the preview hop is not measured here (the API half ran)\n' "$name" "$image"
+  else
+    # The port the *peer's* listener dials inside a container, read from the peer's own config.
+    upstream_port="$("$artifact" config show --config "$peer_config" |
+      sed -n 's/^preview_upstream_port = \([0-9][0-9]*\)$/\1/p')"
+    [ -n "$upstream_port" ] || fail "$name/upstream_port" "config show names no preview_upstream_port"
+    docker_session_id="$id"
+    docker network create --internal "agents_$id" >/dev/null 2>&1 ||
+      fail "$name/network" "docker network create agents_$id did not work"
+    docker run --detach --rm --name "s_$id" --network "agents_$id" \
+      --env "HS_PREVIEW_TEST_PORT=$upstream_port" "$image" node -e '
+const http = require("http");
+const crypto = require("crypto");
+const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+const server = http.createServer((request, response) => {
+  response.writeHead(200, { "content-type": "text/plain" });
+  response.end("hello through two machines at " + request.url + "\n");
+});
+server.on("upgrade", (request, socket) => {
+  const key = request.headers["sec-websocket-key"] || "";
+  const accept = crypto.createHash("sha1").update(key + GUID).digest("base64");
+  socket.write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
+    "Sec-WebSocket-Accept: " + accept + "\r\n\r\n");
+  socket.on("data", (buffer) => {
+    const opcode = buffer[0] & 0x0f;
+    const masked = (buffer[1] & 0x80) !== 0;
+    const length = buffer[1] & 0x7f;
+    if (!masked || length === 0) return;
+    const mask = buffer.subarray(2, 6);
+    const payload = Buffer.from(buffer.subarray(6, 6 + length));
+    for (let index = 0; index < payload.length; index += 1) payload[index] ^= mask[index % 4];
+    if (opcode === 0x8) { socket.end(); return; }
+    socket.write(Buffer.concat([Buffer.from([0x81, payload.length]), payload]));
+  });
+});
+server.listen(Number(process.env.HS_PREVIEW_TEST_PORT), "0.0.0.0");
+' >/dev/null 2>&1 || fail "$name/container" "docker run for s_$id did not work"
+    local address="" waited=0
+    while [ "$waited" -lt 100 ]; do
+      address="$(docker inspect "s_$id" \
+        --format "{{with index .NetworkSettings.Networks \"agents_$id\"}}{{.IPAddress}}{{end}}" 2>/dev/null || true)"
+      [ -z "$address" ] || break
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+    [ -n "$address" ] || fail "$name/address" "s_$id has no address on agents_$id"
+    # A container answers a second or two after `docker run` returns, and the *host* can reach one on an
+    # `--internal` network (V7, measured): asking it directly first is what makes a later refusal about the
+    # forwarding rather than about a socket that had not opened yet.
+    local up=0 tries=0
+    while [ "$tries" -lt 60 ]; do
+      if timeout 3 python3 -c "
+import http.client, sys
+connection = http.client.HTTPConnection(sys.argv[1], int(sys.argv[2]), timeout=2)
+connection.request('GET', '/')
+print(connection.getresponse().status)
+" "$address" "$upstream_port" >"$WORK/forward-container.txt" 2>&1 &&
+        grep -qx 200 "$WORK/forward-container.txt"; then
+        up=1
+        break
+      fi
+      sleep 0.2
+      tries=$((tries + 1))
+    done
+    [ "$up" -eq 1 ] ||
+      fail "$name/container_up" "s_$id never answered on $address:$upstream_port: $(cat "$WORK/forward-container.txt")"
+    assertions=$((assertions + 1))
+
+    # The path the hub serves, with the peer's registered name in it: `/workshop/<id>/` reaches the peer as
+    # `/local/<id>/` and the container as `/`.
+    label="$name-preview"
+    preview_fetch "$label" GET "/workshop/$id/" || fail "$label" "did not answer"
+    expect_status "$name/preview" "$(answer "$label")" 200
+    body="$(cat "$WORK/responses/$label.body")"
+    case "$body" in
+      *"hello through two machines at /"*) assertions=$((assertions + 1)) ;;
+      *) fail "$name/preview" "the container's answer did not arrive through two listeners: $body" ;;
+    esac
+
+    # The upgrade: a hand-written handshake whose `Origin` is the **hub's** preview origin, rewritten to the peer's
+    # on the way out, and one masked frame each way through both tunnels.
+    timeout 20 python3 - "$preview_port" "$id" "$peer_preview_port" >"$WORK/forward-websocket.txt" 2>&1 <<'PYWS' ||
+import base64
+import os
+import socket
+import sys
+
+hub_port, session, peer_port = int(sys.argv[1]), sys.argv[2], int(sys.argv[3])
+key = base64.b64encode(os.urandom(16)).decode()
+connection = socket.create_connection(("127.0.0.1", hub_port), timeout=10)
+connection.sendall(
+    (
+        f"GET /workshop/{session}/socket HTTP/1.1\r\n"
+        f"Host: 127.0.0.1:{hub_port}\r\n"
+        f"Origin: http://127.0.0.1:{hub_port}\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        "Sec-WebSocket-Version: 13\r\n"
+        f"Sec-WebSocket-Key: {key}\r\n\r\n"
+    ).encode()
+)
+received = b""
+while b"\r\n\r\n" not in received:
+    received += connection.recv(4096)
+head, rest = received.split(b"\r\n\r\n", 1)
+status = head.split(b"\r\n")[0].decode()
+print(status)
+if "101" not in status:
+    print(head.decode(errors="replace"))
+    raise SystemExit(1)
+payload = b"ping-through-two-machines"
+mask = os.urandom(4)
+masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+connection.sendall(bytes([0x81, 0x80 | len(payload)]) + mask + masked)
+while len(rest) < 2:
+    rest += connection.recv(4096)
+length = rest[1] & 0x7F
+while len(rest) < 2 + length:
+    rest += connection.recv(4096)
+print("echo " + rest[2 : 2 + length].decode())
+PYWS
+      fail "$name/websocket" "the WebSocket round trip through two listeners failed: $(cat "$WORK/forward-websocket.txt")"
+    case "$(sed -n '1p' "$WORK/forward-websocket.txt")" in
+      "HTTP/1.1 101 Switching Protocols"*) assertions=$((assertions + 1)) ;;
+      *) fail "$name/websocket" "the handshake was not answered 101: $(cat "$WORK/forward-websocket.txt")" ;;
+    esac
+    if ! grep -qx 'echo ping-through-two-machines' "$WORK/forward-websocket.txt"; then
+      fail "$name/websocket" "no frame came back through two listeners: $(cat "$WORK/forward-websocket.txt")"
+    fi
+    assertions=$((assertions + 1))
+
+    docker rm --force "s_$id" >/dev/null 2>&1 || true
+    docker network rm "agents_$id" >/dev/null 2>&1 || true
+    docker_session_id=""
+  fi
+
+  # ---- 7. a peer that goes away mid-stream -------------------------------------------------------
+  # An open stream on a session that has events, then the peer's process is killed. What the client must get is the
+  # **close** — a `read` that returns 1 (EOF), not 142 (a timeout) — and the next request must be the `502`.
+  exec {fd}<>"/dev/tcp/127.0.0.1/$port" || fail "$name/death" "could not open the stream"
+  printf 'GET /api/hosts/workshop/sessions/%s/events HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' \
+    "$id" >&"$fd"
+  timeout 2 cat <&"$fd" >/dev/null 2>&1 || true
+  kill -9 "$peer_pid" 2>/dev/null || fail "$name/death" "could not kill the peer"
+  # Waited here so the shell reaps it (and so its "Killed" line is this `wait`'s, silenced, rather than the case's
+  # output): a machine that went away gets no graceful shutdown, which is the point of the arm.
+  wait "$peer_pid" 2>/dev/null || true
+  peer_pid=""
+  rc=0
+  IFS= read -r -t 8 line <&"$fd" || rc=$?
+  exec {fd}<&-
+  [ "$rc" -eq 1 ] ||
+    fail "$name/death" "the stream did not end when the peer went away: read returned $rc (1 is the close, 142 is a timeout)"
+  assertions=$((assertions + 1))
+  label="$name-after-death"
+  fetch "$label" GET /api/hosts/workshop/sessions "Host: 127.0.0.1" || fail "$label" "did not answer"
+  expect_status "$name/after_death" "$(answer "$label")" 502
+  expect_code "$name/after_death" "$(answer "$label")" upstream_unreachable
+
+  # What this case made of the machine, it takes back, and the shared boot is put back for every case after it.
+  docker rm --force "s_$id" >/dev/null 2>&1 || true
+  docker network rm "agents_$id" >/dev/null 2>&1 || true
+  docker_session_id=""
+  stop_serve
+  stop_peer
+  [ -z "$standin_pid" ] || kill "$standin_pid" 2>/dev/null || true
+  standin_pid=""
+  extra_pid=""
+  start_serve
+}
+
 case_idle_stop() {
   local name=case_idle_stop response body idle fresh
   local create_body='{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}'
@@ -10181,6 +10750,54 @@ stop_serve() {
   wait "$serve_pid" || status=$?
   serve_pid=""
   check "serve/exit" 0 "$status"
+}
+
+# start_peer <config> <data> <listen>: a **second** machine on this box, with its own admin directory and its own
+# `peer_*` globals (HS-069).
+#
+# `start_serve` owns `serve_pid`, `port`, `control_origin`, `preview_port` and one admin socket under `$WORK`, and
+# its comment says why that is safe: "only one serve is up at a time". A case that runs a hub *and* the server it
+# forwards to breaks that, so the second machine gets its own function rather than a flag — and its own admin
+# directory, because two processes must not probe one socket. Everything else is `start_serve`'s shape, including
+# reading the bound ports from the banner rather than assuming them.
+start_peer() {
+  local config="$1" data="$2" listen="$3"
+  peer_err="$WORK/serve-peer.err"
+  "$artifact" serve --config "$config" --port "$listen" --data-dir "$data" \
+    --admin-dir "$WORK/run/peer/holosmith" \
+    >"$WORK/serve-peer.out" 2>"$peer_err" &
+  peer_pid=$!
+  for _ in $(seq 1 200); do
+    grep -q '^control_listen ' "$peer_err" 2>/dev/null && break
+    kill -0 "$peer_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  peer_control_listen="$(sed -n 's/^control_listen //p' "$peer_err" | sed -n '1p')"
+  [ -n "$peer_control_listen" ] ||
+    fail "peer/banner" "the peer printed no control_listen line: $(cat "$peer_err")"
+  peer_port="${peer_control_listen##*:}"
+  peer_control_origin="$(sed -n 's/^control_origin //p' "$peer_err" | sed -n '1p')"
+  [ -n "$peer_control_origin" ] ||
+    fail "peer/banner" "the peer printed no control_origin line: $(cat "$peer_err")"
+  peer_preview_listen="$(sed -n 's/^preview_listen //p' "$peer_err" | sed -n '1p')"
+  case "$peer_preview_listen" in
+    127.0.0.1:[0-9]*) peer_preview_port="${peer_preview_listen##*:}" ;;
+    *)
+      fail "peer/banner" "the peer's preview listener is not bound, and this run's cases need it: $peer_preview_listen"
+      ;;
+  esac
+  printf 'ok peer/banner: listening on %s, control origin %s, preview %s\n' \
+    "$peer_control_listen" "$peer_control_origin" "$peer_preview_listen"
+}
+
+# stop_peer: the second machine's `SIGTERM`, and its exit code, so a hub's peer is as well-behaved as a hub.
+stop_peer() {
+  [ -n "${peer_pid:-}" ] || return 0
+  kill -TERM "$peer_pid" 2>/dev/null || true
+  local status=0
+  wait "$peer_pid" 2>/dev/null || status=$?
+  peer_pid=""
+  check "peer/exit" 0 "$status"
 }
 
 phase_serve() {
