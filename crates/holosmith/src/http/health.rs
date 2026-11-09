@@ -64,17 +64,29 @@ pub fn respond(health: &Health) -> Json<Health> {
     Json(health.clone())
 }
 
-/// The three facts of the payload a **client** reads back: what `holosmith status` prints and what
-/// [`crate::doctor`]'s port check asks about.
+/// The four facts of the payload a **client** reads back: what `holosmith status` prints, what [`crate::doctor`]'s
+/// port check asks about, and what the host registry's probe registers a host by.
 ///
-/// Three fields, not six, because `name` is a constant, `preview_origin` and `application_server_key` are the app
-/// shell's business and `role` is already this machine's config; a client struct that carried them would be a
-/// second reading of a shape it does not use.
+/// Four fields, not six, because `preview_origin` and `application_server_key` are the app shell's business and
+/// `role` is this machine's config where a client reads it as a fact about the other machine. `name` joined in HS-068
+/// because a *third* caller does use it: `POST /api/hosts` refuses an answer whose payload is not a Holosmith's, and
+/// item 4 spells that as "the reply must carry the Holosmith name and version fields". The field was a constant
+/// nobody read until something had to compare it; now something does.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Answer {
+    pub name: String,
     pub version: String,
     pub role: Role,
     pub uptime_s: u64,
+}
+
+/// One payload's body as an [`Answer`], or the reason it is not one.
+///
+/// The one place that turns bytes into this shape, so the loopback client below and the host registry's probe read
+/// one payload one way: `ask` has already checked the status line, and the probe checks it itself before it gets
+/// here, but neither may invent a second spelling of "what a health answer is".
+pub fn parse_answer(body: &str) -> Result<Answer, serde_json::Error> {
+    serde_json::from_str::<Answer>(body)
 }
 
 /// Ask `listen` for `GET /api/health` and read the answer back, or say why there is none.
@@ -140,7 +152,7 @@ fn read_answer(target: &SocketAddr, answer: &[u8]) -> Result<Answer, String> {
             "GET /api/health on {target} answered {status:?} rather than 200"
         ));
     }
-    serde_json::from_str::<Answer>(body).map_err(|error| {
+    parse_answer(body).map_err(|error| {
         format!(
             "GET /api/health on {target} answered a body that is not the health payload ({error})"
         )

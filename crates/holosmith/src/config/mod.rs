@@ -132,6 +132,44 @@ impl Origin {
             Self(format!("{scheme}://{host}:{port}"))
         }
     }
+
+    /// The port this origin means: the one it names, or the scheme's own default when it names none.
+    ///
+    /// `None` for text that is not an origin at all, which [`Self::parse`] already refuses and a deserialised value
+    /// may still be. HS-068 compares two origins' ports to decide whether a registry row names *this* machine, and
+    /// a comparison that guessed a port would answer yes for the wrong row.
+    pub fn port(&self) -> Option<u16> {
+        let (scheme, authority) = self.0.split_once("://")?;
+        // A bracketed IPv6 literal may itself contain colons, so only the brackets delimit it.
+        if let Some(rest) = authority.strip_prefix('[') {
+            let after = rest.split_once(']').map(|(_, after)| after)?;
+            return match after.strip_prefix(':') {
+                Some(port) => port.parse().ok(),
+                None if after.is_empty() => default_port(scheme),
+                None => None,
+            };
+        }
+        match authority.rsplit_once(':') {
+            Some((_, port)) => port.parse().ok(),
+            None => default_port(scheme),
+        }
+    }
+
+    /// The authority without its port (`host` alone, an IPv6 literal still bracketed).
+    ///
+    /// HS-068's host predicate reads it: the registry cares which *host* a row names, and the port is a separate
+    /// sentence with its own rule.
+    pub fn host(&self) -> Option<&str> {
+        let (_, authority) = self.0.split_once("://")?;
+        if let Some(rest) = authority.strip_prefix('[') {
+            let (literal, _) = rest.split_once(']')?;
+            return Some(&authority[..literal.len() + 2]);
+        }
+        Some(match authority.rsplit_once(':') {
+            Some((host, _)) => host,
+            None => authority,
+        })
+    }
 }
 
 /// The port a browser leaves out of `Origin` for this scheme, if it is one of the two we serve.

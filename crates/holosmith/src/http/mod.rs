@@ -9,6 +9,7 @@ pub mod error;
 pub mod guard;
 pub mod health;
 mod history;
+mod hosts;
 mod merge;
 mod publish;
 mod push;

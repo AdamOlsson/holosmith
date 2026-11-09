@@ -423,6 +423,7 @@ serve_cases=(
   case_stopped_expiry
   case_push
   case_pwa
+  case_hosts
   case_idle_stop
   case_drain
   case_drain_restart
@@ -4740,6 +4741,327 @@ case_pwa() {
   assertions=$((assertions + 1))
 
   # The whole tree is this case's: it gives the shared boot back, so the next case's `stop_serve` finds a pid.
+  rm -rf "$root"
+  stop_serve
+  start_serve
+}
+
+# HS-068: the host registry. Item 4 gives the registration its rules and item 16 gives the seed its job, and this
+# case measures both through the artifact on **its own boot** with a pinned control port — the one shape a row naming
+# *this* machine needs, because a seed file is written before the boot and the row has to spell the port the boot will
+# use.
+#
+# What is stood in: a `python3` process that binds **three** TLS listeners on loopback, answering a healthy payload,
+# a `302`, and a payload with no `name`. Its certificate comes from a private CA that `SSL_CERT_FILE` points at for
+# exactly two `start_serve` calls — the same trick `case_push` owns, and it works only because `hosts::probe` passes
+# **no** `-CAfile` (ADR-0071's rule): a machine with a private CA configures `openssl` the way it configures every
+# other tool.
+#
+# What it measures, in items:
+#
+#   1. item 4's four URL rules and two name rules, each answered with its own code, and a valid MagicDNS name that
+#      resolves nowhere stored **`unreachable` with its sentence** rather than refused (item 16's "not removed");
+#   2. the seed read at startup: a healthy TLS answer (with its own `version`), a `302` that is impossible to follow
+#      (the stand-in records **one** request), a payload with no `name`, and the local row — which is `reachable` with
+#      *this build's* version without a round trip, because the merge runs before the listener serves;
+#   3. item 4's last bullet: the local row with a live session is `409 host_busy` and `?force=true` removes it;
+#   4. "the file wins on conflicts" and "a row the file does not mention survives", over a second boot.
+#
+# What it cannot measure, and does not pretend to: a real MagicDNS name, a real tailnet host, Tailscale's own
+# certificate. This machine has no `tailscaled` and cannot add a 100.64 address without root, so the API's
+# `422 not_holosmith` arm is measured in `tests/hosts.rs` — the probe's arms against real listeners, and the mapping
+# as a function — rather than through the artifact.
+case_hosts() {
+  local name=case_hosts root="$repo_root/target/verify-hosts-$$"
+  local data="$root/data" config="$root/config.toml" tls="$root/tls" seed="$root/hosts.toml"
+  local log="$root/asked.txt" standin_pid="" self_port good redirect nameless
+  local response body fresh
+  local api_row="api-made"
+  # The guards are first, before `stop_serve`: a case that skipped after stopping the run's server would leave
+  # `phase_serve`'s own `stop_serve` with no pid to signal.
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to bind a port and stand three hosts in (tests/hosts.rs covers the registry as a client meets it)\n' "$name"
+    return 0
+  fi
+  if ! command -v openssl >/dev/null 2>&1; then
+    printf 'SKIP %s: no openssl to make the CA the two https stand-ins need (tests/hosts.rs covers the probe over http)\n' "$name"
+    return 0
+  fi
+  stop_serve
+  rm -rf "$root"
+  mkdir -p "$root/projects" "$tls" "$data" || fail "$name/mkdir" "could not create $root"
+
+  # One row's field, read with `python3` (this case needs it anyway): the harness has no `jq` and a `sed` over a
+  # five-row list would assert the wrong row the first time the order changed.
+  hosts_row_field() {
+    python3 - "$1" "$2" "$3" <<'PY'
+import json, sys
+row = next((row for row in json.load(open(sys.argv[3]))["hosts"] if row["name"] == sys.argv[1]), None)
+if row is None:
+    print("<absent>")
+else:
+    value = row[sys.argv[2]]
+    print("null" if value is None else value)
+PY
+  }
+
+  # The CA and a `localhost` certificate with a `DNS:` SAN: `-verify_hostname` matches the name in the certificate,
+  # so an IP SAN would not do and the URL has to name `localhost` (case_push's measurement, and the seed is not
+  # filtered by the host predicate, so `localhost` in a seed row is legal — ADR-0073 D9).
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout "$tls/ca.key" -out "$tls/ca.pem" -days 1 \
+    -subj /CN=VerifyHostsCA >/dev/null 2>&1 || fail "$name/ca" "openssl req did not write a CA"
+  openssl req -newkey rsa:2048 -nodes -keyout "$tls/server.key" -out "$tls/server.csr" \
+    -subj /CN=localhost >/dev/null 2>&1 || fail "$name/cert" "openssl req did not write a CSR"
+  printf 'subjectAltName=DNS:localhost\n' >"$tls/server.ext"
+  openssl x509 -req -in "$tls/server.csr" -CA "$tls/ca.pem" -CAkey "$tls/ca.key" \
+    -CAcreateserial -out "$tls/server.pem" -days 1 -extfile "$tls/server.ext" >/dev/null 2>&1 ||
+    fail "$name/cert" "openssl x509 did not sign the server certificate"
+
+  # The three stand-ins, one process: `good` answers the health payload, `redirect` answers a `302` and appends one
+  # line per request to `$log`, and `nameless` answers a payload without a `name`. Each prints the port the kernel
+  # gave it, because the seed has to spell them before the boot.
+  cat >"$root/standin.py" <<'PY'
+import socket, ssl, sys, threading
+
+cert, key, log = sys.argv[1], sys.argv[2], sys.argv[3]
+healthy = (b'{"name":"holosmith","version":"verify","role":"server","uptime_s":0,'
+           b'"preview_origin":"http://localhost:8081","application_server_key":null}')
+nameless = b'{"version":"verify","role":"server","uptime_s":0}'
+
+
+def answer(status, body, location=None):
+    head = "HTTP/1.1 %s\r\n" % status
+    if location:
+        head += "Location: %s\r\n" % location
+    head += "Content-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(body)
+    return head.encode() + body
+
+
+def serve(kind):
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert, key)
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(8)
+    print("PORT %s %d" % (kind, server.getsockname()[1]), flush=True)
+    while True:
+        connection, _ = server.accept()
+        try:
+            wrapped = context.wrap_socket(connection, server_side=True)
+        except Exception:
+            connection.close()
+            continue
+        try:
+            wrapped.recv(4096)
+            with open(log, "a") as asked:
+                asked.write(kind + "\n")
+            if kind == "good":
+                wrapped.sendall(answer("200 OK", healthy))
+            elif kind == "redirect":
+                wrapped.sendall(answer("302 Found", b"", "https://elsewhere.invalid/api/health"))
+            else:
+                wrapped.sendall(answer("200 OK", nameless))
+        except Exception:
+            pass
+        finally:
+            try:
+                wrapped.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            wrapped.close()
+
+
+for kind in ("good", "redirect", "nameless"):
+    threading.Thread(target=serve, args=(kind,), daemon=True).start()
+threading.Event().wait()
+PY
+  : >"$log"
+  python3 "$root/standin.py" "$tls/server.pem" "$tls/server.key" "$log" \
+    >"$root/standin.out" 2>"$root/standin.err" &
+  standin_pid=$!
+  # Registered with the trap as well as held here: a `fail` exits the script, and this is the only other thing that
+  # would leave three TLS listeners behind on ports the next run could bind.
+  extra_pid=$standin_pid
+  for _ in $(seq 1 200); do
+    [ "$(grep -c '^PORT ' "$root/standin.out" 2>/dev/null || true)" = 3 ] && break
+    kill -0 "$standin_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  good="$(sed -n 's/^PORT good \([0-9]*\)$/\1/p' "$root/standin.out")"
+  redirect="$(sed -n 's/^PORT redirect \([0-9]*\)$/\1/p' "$root/standin.out")"
+  nameless="$(sed -n 's/^PORT nameless \([0-9]*\)$/\1/p' "$root/standin.out")"
+  if [ -z "$good" ] || [ -z "$redirect" ] || [ -z "$nameless" ]; then
+    fail "$name/standin" "the stand-in did not bind three ports: $(cat "$root/standin.err")"
+  fi
+  # The control port is pinned: a row naming this machine has to spell it, and the seed is written before the boot.
+  self_port="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+
+  printf '[[hosts]]\nname = "thisbox"\nurl = "http://127.0.0.1:%s"\n\n' "$self_port" >"$seed"
+  printf '[[hosts]]\nname = "good"\nurl = "https://localhost:%s"\n\n' "$good" >>"$seed"
+  printf '[[hosts]]\nname = "redirect"\nurl = "https://localhost:%s"\n\n' "$redirect" >>"$seed"
+  printf '[[hosts]]\nname = "nameless"\nurl = "https://localhost:%s"\n\n' "$nameless" >>"$seed"
+  printf '[[hosts]]\nname = "nowhere"\nurl = "https://attic.tail1234.ts.net"\n' >>"$seed"
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "stub"\nidle_stop_min = 0\nprojects_root = "%s"\nmin_free_gb = 1\ncontrol_origin = "http://127.0.0.1:%s"\nhosts_seed = "%s"\npreview_listen = "127.0.0.1:0"\n' \
+    "$owner" "$root/projects" "$self_port" "$seed" >"$config"
+
+  # `SSL_CERT_FILE` is exported for exactly this `start_serve` and unset at once: the probe's `s_client` child
+  # inherits it, and it is the only way this machine can trust the stand-in's CA.
+  export SSL_CERT_FILE="$tls/ca.pem"
+  start_serve "$config" "$data" "$self_port"
+  unset SSL_CERT_FILE
+
+  # ---- 1. the seed was read at startup, and every row says what the probe found ---------------------------
+  fetch "${name}_list" GET /api/hosts "Host: 127.0.0.1" || fail "${name}_list/no_answer" "GET /api/hosts did not answer"
+  response="$(answer "${name}_list")"
+  expect_status "${name}_list" "$response" 200
+  body="$WORK/responses/${name}_list.body"
+  check "$name/list/rows" 5 "$(grep -o '"name":"' "$body" | wc -l | tr -d ' ')"
+  # The healthy answer: the row's version is the one the *host* reported, and the transport was TLS.
+  check "$name/good/reach" reachable "$(hosts_row_field good reach "$body")"
+  check "$name/good/version" verify "$(hosts_row_field good version "$body")"
+  check "$name/good/error" null "$(hosts_row_field good last_error "$body")"
+  # The local row: `reachable` with this build's version, and no round trip — the merge runs before the listener serves.
+  check "$name/self/reach" reachable "$(hosts_row_field thisbox reach "$body")"
+  check "$name/self/version" "$version" "$(hosts_row_field thisbox version "$body")"
+  # The 302: refused, marked unreachable with the code in its sentence, and asked **once** — that is "redirects are
+  # not followed" as a client can see it.
+  check "$name/redirect/reach" unreachable "$(hosts_row_field redirect reach "$body")"
+  case "$(hosts_row_field redirect last_error "$body")" in
+    *302*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/redirect/sentence" "the redirect's row does not name the 302: $(hosts_row_field redirect last_error "$body")" ;;
+  esac
+  check "$name/redirect/asked" 1 "$(grep -c '^redirect$' "$log" || true)"
+  # A payload with no name: the same answer as a redirect, and the sentence names what was missing.
+  check "$name/nameless/reach" unreachable "$(hosts_row_field nameless reach "$body")"
+  case "$(hosts_row_field nameless last_error "$body")" in
+    *name*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/nameless/sentence" "the nameless row's sentence does not name the field: $(hosts_row_field nameless last_error "$body")" ;;
+  esac
+  # A MagicDNS name that resolves nowhere: item 16's "fails health ... not removed".
+  check "$name/nowhere/reach" unreachable "$(hosts_row_field nowhere reach "$body")"
+  case "$(hosts_row_field nowhere last_error "$body")" in
+    *attic.tail1234.ts.net*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/nowhere/sentence" "the unreachable row's sentence names no host: $(hosts_row_field nowhere last_error "$body")" ;;
+  esac
+
+  # ---- 2. item 4's URL and name rules, each with its own code -------------------------------------------
+  # Every one of these is refused before any probe runs, which is why they need no reachable host.
+  for pair in \
+    "scheme|ftp://box.tail1234.ts.net" \
+    "host|https://example.com" \
+    "loopback|https://localhost" \
+    "port|https://box.tail1234.ts.net:22" \
+    "port-scheme|http://box.tail1234.ts.net:443" \
+    "path|https://box.tail1234.ts.net/api"; do
+    local label="${pair%%|*}" url="${pair#*|}"
+    fetch_body "${name}_url_$label" POST /api/hosts "{\"name\":\"workshop\",\"url\":\"$url\"}" \
+      "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+      "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+      fail "${name}_url_$label/no_answer" "POST /api/hosts ($label) did not answer"
+    response="$(answer "${name}_url_$label")"
+    expect_status "${name}_url_$label" "$response" 422
+    expect_code "${name}_url_$label" "$response" bad_host_url
+  done
+  for pair in "local|local" "case|Workshop"; do
+    local label="${pair%%|*}" host_name="${pair#*|}"
+    fetch_body "${name}_name_$label" POST /api/hosts "{\"name\":\"$host_name\",\"url\":\"https://box.tail1234.ts.net\"}" \
+      "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+      "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+      fail "${name}_name_$label/no_answer" "POST /api/hosts ($label) did not answer"
+    response="$(answer "${name}_name_$label")"
+    expect_status "${name}_name_$label" "$response" 422
+    expect_code "${name}_name_$label" "$response" bad_host_name
+  done
+  # A body with a fourth field is told *that*, not described as malformed.
+  fetch_body "${name}_extra" POST /api/hosts \
+    "{\"name\":\"workshop\",\"url\":\"https://box.tail1234.ts.net\",\"role\":\"server\"}" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_extra/no_answer" "POST /api/hosts did not answer"
+  expect_code "${name}_extra" "$(answer "${name}_extra")" unknown_field
+
+  # A valid registration that cannot be reached is **stored**, not refused: item 16's "marked unreachable with the
+  # last error, not removed". This row is the one the second boot's file does not mention.
+  fetch_body "${name}_ok" POST /api/hosts \
+    "{\"name\":\"$api_row\",\"url\":\"https://attic.tail1234.ts.net\"}" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_ok/no_answer" "POST /api/hosts did not answer"
+  response="$(answer "${name}_ok")"
+  expect_status "${name}_ok" "$response" 201
+  fetch "${name}_list2" GET /api/hosts "Host: 127.0.0.1" || fail "${name}_list2/no_answer" "GET /api/hosts did not answer"
+  check "$name/api/reach" unreachable "$(hosts_row_field "$api_row" reach "$WORK/responses/${name}_list2.body")"
+
+  # ---- 3. the local row with a live session: refused, then forced ---------------------------------------
+  fetch_body "${name}_created" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-hosts-1" ||
+    fail "${name}_created/no_answer" "POST /api/sessions did not answer"
+  response="$(answer "${name}_created")"
+  expect_status "${name}_created" "$response" 202
+  fetch "${name}_busy" DELETE /api/hosts/thisbox \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_busy/no_answer" "DELETE /api/hosts/thisbox did not answer"
+  response="$(answer "${name}_busy")"
+  expect_status "${name}_busy" "$response" 409
+  expect_code "${name}_busy" "$response" host_busy
+  case "$response" in
+    *force=true*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/busy/force" "the refusal does not name the override: $response" ;;
+  esac
+  # Nothing was removed by the refusal.
+  fetch "${name}_list3" GET /api/hosts "Host: 127.0.0.1" || fail "${name}_list3/no_answer" "GET /api/hosts did not answer"
+  check "$name/busy/kept" reachable "$(hosts_row_field thisbox reach "$WORK/responses/${name}_list3.body")"
+  # A row that does not name this machine has no sessions this machine can count, so it goes without a force.
+  fetch "${name}_far" DELETE "/api/hosts/nowhere" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_far/no_answer" "DELETE /api/hosts/nowhere did not answer"
+  expect_status "${name}_far" "$(answer "${name}_far")" 204
+  # The forced removal of the local row: the row goes, the session stays.
+  fetch "${name}_forced" DELETE "/api/hosts/thisbox?force=true" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_forced/no_answer" "the forced DELETE did not answer"
+  expect_status "${name}_forced" "$(answer "${name}_forced")" 204
+  fetch "${name}_list4" GET /api/hosts "Host: 127.0.0.1" || fail "${name}_list4/no_answer" "GET /api/hosts did not answer"
+  check "$name/forced/gone" absent "$(hosts_row_field thisbox name "$WORK/responses/${name}_list4.body")"
+  fresh="$(hosts_row_field "$api_row" name "$WORK/responses/${name}_list4.body")"
+  check "$name/forced/api-row" "$api_row" "$fresh"
+  # A name the table does not hold is a `404`, for both of a delete's moments.
+  fetch "${name}_missing" DELETE /api/hosts/nobody \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "${name}_missing/no_answer" "DELETE /api/hosts/nobody did not answer"
+  expect_status "${name}_missing" "$(answer "${name}_missing")" 404
+  expect_code "${name}_missing" "$(answer "${name}_missing")" not_found
+
+  # ---- 4. the second boot: the file wins on a name, and a row it does not mention survives --------------
+  # `good` now names the *redirect* port and the local row comes back (the file seeds it in again), while `api-made`
+  # — the row the API created above — is not in the file at all.
+  stop_serve
+  printf '[[hosts]]\nname = "thisbox"\nurl = "http://127.0.0.1:%s"\n\n' "$self_port" >"$seed"
+  printf '[[hosts]]\nname = "good"\nurl = "https://localhost:%s"\n' "$redirect" >>"$seed"
+  export SSL_CERT_FILE="$tls/ca.pem"
+  start_serve "$config" "$data" "$self_port"
+  unset SSL_CERT_FILE
+  fetch "${name}_list5" GET /api/hosts "Host: 127.0.0.1" || fail "${name}_list5/no_answer" "GET /api/hosts did not answer"
+  body="$WORK/responses/${name}_list5.body"
+  check "$name/merge/file-wins" "https://localhost:$redirect" "$(hosts_row_field good url "$body")"
+  check "$name/merge/file-wins-reach" unreachable "$(hosts_row_field good reach "$body")"
+  check "$name/merge/self-back" reachable "$(hosts_row_field thisbox reach "$body")"
+  check "$name/merge/api-row" "https://attic.tail1234.ts.net" "$(hosts_row_field "$api_row" url "$body")"
+  # Five rows: the file's two plus the three it says nothing about — the merge never deletes a row it did not read.
+  check "$name/merge/rows" 5 "$(grep -o '"name":"' "$body" | wc -l | tr -d ' ')"
+
+  # The whole boot is the case's: the stand-in goes, the tree goes, and the shared boot comes back, so the next
+  # case's `stop_serve` finds a pid.
+  kill "$standin_pid" 2>/dev/null || true
+  wait "$standin_pid" 2>/dev/null || true
+  extra_pid=""
   rm -rf "$root"
   stop_serve
   start_serve
@@ -9799,7 +10121,7 @@ case_uninstall() {
 # parameters, and so is the banner it reads: a case that ran against the first boot must not read the
 # second's.
 start_serve() {
-  local config="${1:-$WORK/config.toml}" data="${2:-$WORK/data}" tag=serve
+  local config="${1:-$WORK/config.toml}" data="${2:-$WORK/data}" listen="${3:-0}" tag=serve
   [ "$data" = "$WORK/data" ] || tag="serve-$(basename "$data")"
   serve_err="$WORK/$tag.err"
   # --port 0 asks the kernel for the port, and it is also what makes serve re-derive
@@ -9809,7 +10131,7 @@ start_serve() {
   # /var/lib/holosmith: this sandbox lets an unprivileged user write the machine's paths, and a boot here must not
   # bind a real machine's admin socket (HS-051). Every boot in this run shares the one directory under $WORK,
   # which is safe because only one serve is up at a time and a stale socket is replaced on bind.
-  "$artifact" serve --config "$config" --port 0 --data-dir "$data" --admin-dir "$WORK/run/holosmith" \
+  "$artifact" serve --config "$config" --port "$listen" --data-dir "$data" --admin-dir "$WORK/run/holosmith" \
     >"$WORK/$tag.out" 2>"$serve_err" &
   serve_pid=$!
   for _ in $(seq 1 200); do

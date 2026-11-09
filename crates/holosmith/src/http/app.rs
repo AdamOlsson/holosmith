@@ -32,6 +32,7 @@ use crate::http::error::ApiError;
 use crate::http::guard::{self, Guards};
 use crate::http::health::{self, Health};
 use crate::http::history;
+use crate::http::hosts;
 use crate::http::merge;
 use crate::http::publish;
 use crate::http::push;
@@ -544,6 +545,9 @@ pub fn router(state: AppState) -> Routes {
     let steer_state = Arc::clone(&state);
     let resume_state = Arc::clone(&state);
     let delete_state = Arc::clone(&state);
+    let hosts_state = Arc::clone(&state);
+    let host_register_state = Arc::clone(&state);
+    let host_remove_state = Arc::clone(&state);
     let subscribe_state = Arc::clone(&state);
     let unsubscribe_state = Arc::clone(&state);
     Routes::new()
@@ -762,6 +766,30 @@ pub fn router(state: AppState) -> Routes {
             let state = Arc::clone(&unsubscribe_state);
             async move { push::unsubscribe(&state, query).await }
         })
+        // The **host registry** (HS-068, spec items 4 and 16): three routes whose subject is a machine rather than a
+        // session, one per sentence of item 4. The list is `ReadOnly` — it reads the table and never probes — while
+        // the other two are `Mutating`, so every browser-facing guard applies to them; the probe runs off this thread
+        // inside the handler, which is why registering still answers in the shape of every other request.
+        //
+        // The `DELETE` takes its name as a path segment, unlike the push unsubscribe's query: a name is one path
+        // segment by construction (`hosts::name_problem` enforces the alphabet), and HS-069 forwards with it in
+        // exactly that position.
+        .get("/api/hosts", move || {
+            let state = Arc::clone(&hosts_state);
+            async move { hosts::list(&state).await }
+        })
+        .post("/api/hosts", move |body: Result<Bytes, BytesRejection>| {
+            let state = Arc::clone(&host_register_state);
+            async move { hosts::register(&state, body).await }
+        })
+        .delete(
+            "/api/hosts/{name}",
+            move |name: Result<Path<String>, PathRejection>, query: RawQuery| {
+                let state = Arc::clone(&host_remove_state);
+                let name = hosts::path_name(name);
+                async move { hosts::remove(&state, &name, query).await }
+            },
+        )
         .fallback(fallback)
 }
 

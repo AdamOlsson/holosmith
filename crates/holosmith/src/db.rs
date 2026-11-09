@@ -13,6 +13,7 @@ use std::time::Duration;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 
 use crate::events::repository::EventRepository;
+use crate::hosts::repository::HostRepository;
 use crate::push::repository::PushRepository;
 use crate::schema::{self, EmbedError, Migration};
 use crate::sessions::repository::SessionRepository;
@@ -128,6 +129,15 @@ impl Database {
     /// A push service that takes seconds to answer must not hold up a request.
     pub fn push(&self) -> PushRepository<'_> {
         PushRepository::new(&self.connection)
+    }
+
+    /// Every read and write of a `hosts` row (HS-068, spec items 4 and 16).
+    ///
+    /// The same borrow as the three above. The registry's *probe* is the one thing that must not happen under this
+    /// lock: a health check leaves the machine and can take seconds, so every caller reads the rows, drops the
+    /// guard, probes, and takes the lock again to write what it measured.
+    pub fn hosts(&self) -> HostRepository<'_> {
+        HostRepository::new(&self.connection)
     }
 }
 

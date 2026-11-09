@@ -485,6 +485,27 @@ worker, the notification it draws, and the handler's `clients.openWindow("/sessi
 and a click on a system notification are the two things no machine here can do, and both are stated as
 not-measured (ADR-0072 D9).
 
+…and since HS-068, **the host registry**: `case_hosts` boots the artifact on its own data root with the control
+port **pinned** — a row naming *this* machine has to spell the port the boot will use, and the seed is written before
+the boot — and stands three TLS listeners in with `python3`: one answering the health payload, one answering a `302`
+(and appending a line per request), one answering a payload with no `name`. Their certificate comes from a private CA
+that `SSL_CERT_FILE` points at for exactly two `start_serve` calls, which works because `hosts::probe` passes **no**
+`-CAfile` (ADR-0071's rule). The seed names those three plus a MagicDNS name that resolves nowhere plus the local
+row, and the case asserts what each earned: the healthy host `reachable` with **its own** version, the redirect
+`unreachable` with `302` in its sentence and the stand-in **asked exactly once** (that is "redirects are not
+followed" as a client can see it), the nameless payload `unreachable` with the missing field named, the unresolvable
+name `unreachable` with the host named, and the local row `reachable` with *this build's* version without a round
+trip. Then item 4's rules over the wire — the scheme, a host that is neither MagicDNS nor 100.64/10, loopback, two
+out-of-range ports, a path, the reserved name `local`, an uppercase name and a fourth body key, each with its own
+code — a valid registration stored `unreachable` rather than refused, the local row's `409 host_busy` (with the
+count and `?force=true` in the sentence) over a live session, its forced removal leaving the session, a remote row's
+delete needing no force, and a `404`. A **second boot** with a changed file then proves both halves of "the file wins
+on conflicts": the row the file names is the file's (and its reach flipped), the row the API made and the file does
+not mention survives, and the local row the operator removed comes back. It prints one `SKIP` line without `python3`
+or `openssl`. What it cannot measure through the artifact is the API's `422 not_holosmith` against a live listener —
+the host rule refuses loopback and no `.ts.net` name resolves on a machine with no `tailscaled` — so that arm is
+`tests/hosts.rs`'s, split into the probe against real listeners and the mapping as a function (ADR-0073 D10).
+
 …and since HS-047, **`server deploy`**: `case_server_deploy` has two halves that skip independently, because the
 bugs it exists to catch are of two kinds. The **offline** half needs `python3` and nothing else: a `_ping` socket
 it answers stands in for the daemon, and the case asserts that the dry run lists the seven steps in the spec's

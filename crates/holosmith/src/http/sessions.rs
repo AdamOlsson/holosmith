@@ -1177,12 +1177,16 @@ impl Kept {
 
 /// Whether the request carried `force=true`.
 ///
+/// Two routes read it: this session's `DELETE` and (since HS-068) the host registry's, whose row can also be removed
+/// over a refusal. One spelling of the query, because a second reader that accepted `?force=1` would make the same
+/// mistake mean two different things in one API.
+///
 /// The spec names one spelling, `?force=true`, and this accepts exactly that among the query's
 /// pairs. Everything else — no query, a bare `?force`, `?force=1`, `?force=TRUE`, a typo — is not
 /// force, so a mistake fails safe with the 409 rather than discarding uncommitted work. There is no
 /// error code for an unrecognised query in the spec, and inventing one would make a typo louder
 /// than the work it was about to destroy.
-fn force_requested(query: Option<&str>) -> bool {
+pub(crate) fn force_requested(query: Option<&str>) -> bool {
     query
         .unwrap_or_default()
         .split('&')

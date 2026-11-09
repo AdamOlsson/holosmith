@@ -2409,3 +2409,40 @@ it rather than adding a caveat beside it.
   `gather()` then reads the real API, which is the honest order anyway (the state must first be "not subscribed").
 - **`waitForFunction` on `textContent.includes("subscribed on this machine")` resolves on "not subscribed…".** The
   settings screen's two sentences are substrings of each other; every wait on them compares the whole string.
+
+### Landmines: the host registry and its probe (HS-068)
+
+- **The probe's answer fits a pipe, so pipes are right here.** `push::send` writes the child's streams to files
+  because it must never *read* a pipe whose writer is still running; a health payload is a kilobyte, far inside a
+  64 KiB pipe buffer, so the child cannot block writing it while the parent waits. `hosts::probe` therefore spawns
+  `s_client` with piped stdio, holds the stdin handle (closing it makes `s_client` send close-notify first), waits
+  with `try_wait` against `PROBE_TIMEOUT`, and only then calls `wait_with_output` — by which time the child has exited
+  and both pipes are at EOF. Two shapes, two reasons; do not "unify" them.
+- **A test stand-in must serve one connection and stop.** The first draft of `hosts::probe`'s unit test looped
+  `for stream in listener.incoming()` and then called `JoinHandle::join()`, which waits for the *listener* to end: the
+  whole `cargo test --lib` run hung for ten minutes with one test "running" and no error. One `accept()`, one answer,
+  and the thread returns.
+- **The API's host rule refuses loopback, so the probe's success path is measurable only through the seed.** No
+  `tailscaled`, `ip addr add 100.64.0.1/32 dev lo` answers `Operation not permitted`, and no `.ts.net` name resolves
+  here — so `case_hosts` seeds `http://127.0.0.1:<port>` and `https://localhost:<port>` rows (the seed is not
+  filtered by the predicate, ADR-0073 D6) and stands the listeners in. **The seed needs the port before the boot**,
+  which is why `start_serve` grew its optional third argument: a `--port 0` boot's port is exactly what a row naming
+  this machine cannot know in advance.
+- **`SSL_CERT_FILE` needs no code at all.** Unlike `push::send::SslClient`, which reads the variable into a field, the
+  probe's `s_client` child simply inherits the process's environment: exporting it around `start_serve` is the whole
+  mechanism, and it works only because no `-CAfile` is passed (ADR-0071). The certificate still needs a **`DNS:`
+  SAN** — `-verify_hostname` matches the SAN and never a CN — so the stand-in's URL names `localhost`, not
+  `127.0.0.1`.
+- **A merge at startup runs before the listener binds, so a local row must not be probed.** Asking the process to
+  reach its own origin at that moment is a connect into a bound-but-unaccepted listener (the kernel completes the
+  handshake and the read then blocks to the deadline), so the row would be born `unreachable` on a healthy machine.
+  The local shortcut is the fix, and the gate asserts the local row is `reachable` with this build's version.
+- **`tests/db_migrations.rs` hard-codes the applied set in three places.** A new migration moves all three vectors
+  (the first start, the second start, and the two-process race) — `SCHEMA_VERSION` alone is not enough, and the
+  failure reads as "the second start rewrote the applied set", which is a false alarm about the wrong thing.
+- **The `hosts` SQL guard is a word match.** `insert into hosts` is reported as `into hosts`, and a *documentation*
+  sentence containing "from hosts" in another file would trip it — the guard walks `src/**` for text, not for SQL.
+- **The gate has no `jq`, so one row's field is `python3`'s.** `case_hosts` defines `hosts_row_field NAME FIELD
+  FILE` inside the case; a `sed` over a five-row list would assert the wrong row the first time the order changed.
+  The order is `name ASC`, and a row's JSON fields are the struct's order, so a needle can stop before the varying
+  `last_checked_at`.

@@ -169,6 +169,35 @@ pub const PUBLISH_DISABLED: &str = "publish_disabled";
 /// whole machine and project agree on) while the operator's next step is the sentence's.
 pub const BAD_REMOTE: &str = "bad_remote";
 
+/// A host registration's `name` is not one a registry row may have (HS-068, spec item 4).
+///
+/// Its own code rather than a sentence on [`BAD_HOST_URL`], because the two are two fields: a client that showed
+/// "that URL is wrong" for an uppercase name would be describing the wrong input. The name is also the one field
+/// [`LOCAL`](crate::hosts::LOCAL) reserves, so the sentence says which rule it broke.
+pub const BAD_HOST_NAME: &str = "bad_host_name";
+
+/// A host registration's `url` is not one this machine will register (HS-068, spec item 4).
+///
+/// One code for the four facts item 4 spells — the scheme is not http(s), the host is neither a MagicDNS name nor an
+/// address in 100.64.0.0/10, the port is outside the allowed range, the value is not an origin at all — for
+/// [`CAP_REACHED`]'s reason one family over: the client's move is one (send a URL this machine will forward to)
+/// while the operator's next step is the sentence's.
+pub const BAD_HOST_URL: &str = "bad_host_url";
+
+/// A host answered, and what it answered is not a Holosmith health reply (HS-068, spec item 4).
+///
+/// Item 4's "the `/api/health` reply must carry the Holosmith name and version fields; anything else is rejected
+/// with a distinct code", which is this code and not [`BAD_BODY`]: the body was the client's, this answer was the
+/// **other machine's**. It is also not "unreachable" — nothing answered is a row marked unreachable, while this is a
+/// machine that answered and is not one of ours, so the registration is refused rather than stored.
+pub const NOT_HOLOSMITH: &str = "not_holosmith";
+
+/// A host could not be removed because the machine it names is running sessions (HS-068, spec item 4).
+///
+/// The `409` item 4's last bullet asks for, and the same shape as [`CAP_REACHED`]: the request was well formed and
+/// this machine can take it, but something live is in the way, and `?force=true` is how an operator says they meant it.
+pub const HOST_BUSY: &str = "host_busy";
+
 /// A publish named a destination git would never be allowed to write (HS-057, item 12's protected names).
 ///
 /// Item 12's own list — `main`, `master`, `release/*` — on the **destination** ref. Its own code rather than a
@@ -613,6 +642,50 @@ impl ApiError {
             BAD_BODY,
             "the body must be a JSON object with an `endpoint`, a `p256dh` and an `auth` string",
         )
+    }
+
+    /// What a registration whose body is not `{name, url}` answers (HS-068).
+    ///
+    /// The same code as [`Self::bad_body`] with this request's own fields, for the reason [`Self::bad_prompt`] has
+    /// the prompt's: a client told about a create's fields would be describing the wrong request (ADR-0008).
+    pub fn bad_host_body() -> Self {
+        Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            BAD_BODY,
+            "the body must be a JSON object with a `name` and a `url` string",
+        )
+    }
+
+    /// What a registration whose `name` is not one a registry row may have answers (HS-068).
+    ///
+    /// The **message** is the caller's, like [`Self::bad_endpoint`]'s: an uppercase name, a name too long for a path
+    /// segment and `local` are one code and three sentences.
+    pub fn bad_host_name(message: impl Into<Cow<'static, str>>) -> Self {
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, BAD_HOST_NAME, message)
+    }
+
+    /// What a registration whose `url` this machine will not register answers (HS-068).
+    ///
+    /// The message is the caller's for [`Self::bad_host_name`]'s reason: item 4's four facts are one code and four
+    /// sentences, and each names the rule it broke.
+    pub fn bad_host_url(message: impl Into<Cow<'static, str>>) -> Self {
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, BAD_HOST_URL, message)
+    }
+
+    /// What a registration of a machine that answered something other than a health payload answers (HS-068).
+    ///
+    /// `422` rather than `503`: nothing on this machine is unavailable — the *host* is not one of ours, and the
+    /// client's next step is to fix the URL rather than to retry.
+    pub fn not_holosmith(message: impl Into<Cow<'static, str>>) -> Self {
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, NOT_HOLOSMITH, message)
+    }
+
+    /// What a removal of a host with live sessions answers unless it is forced (HS-068).
+    ///
+    /// The message carries the count, because "one session" and "three" are the same next step and different
+    /// sentences an operator reads before forcing.
+    pub fn host_busy(message: impl Into<Cow<'static, str>>) -> Self {
+        Self::new(StatusCode::CONFLICT, HOST_BUSY, message)
     }
 
     /// What a publish naming a protected destination answers (HS-057, item 12's three names).

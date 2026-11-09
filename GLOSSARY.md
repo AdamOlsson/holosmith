@@ -47,16 +47,37 @@ The single entry point you open in a browser. Forwards requests and previews to 
 _Avoid_: Controller, orchestrator, gateway
 
 **Host registry**:
-The hub's list of servers it may forward to.
-_Avoid_: Host list, node table
+Every entry point a machine may send a request to: one row per host, keyed by the **name** the operator gives it, which
+is the row's identity — so registering a machine twice replaces its row rather than adding a second. A row holds the
+**origin** it answers on (scheme, host and port; never a path), its **reach** (`reachable` or `unreachable`), the
+`version` the last answer reported, the sentence a failed probe gave (`last_error`) and when anything last asked
+(`last_checked_at`). A machine's own row is the one whose origin is its **control origin**; every other row is
+another machine's. Its table is `hosts`, its routes are `GET`/`POST /api/hosts` and `DELETE /api/hosts/{name}`, and
+its machine names are `hosts::{Host, Reach, register, merge, probe}`.
+_Avoid_: Host list, node table, inventory
 
 **Hosts seed**:
-An optional file, copied to every machine, that seeds the host registry so the lists stay aligned.
+An optional file, named by `hosts_seed` and copied to every machine, that seeds the host registry so the lists stay
+aligned: `[[hosts]]` tables of `name` and `url`, read at startup and merged so the file wins on a name while a row it
+does not mention survives. It is **not** filtered by the registration's host rule — it is on the machine's own disk
+and as trusted as the config — where `POST /api/hosts` is, because that one exists for values arriving over a
+network. A missing file is one warning and no rows; a malformed one merges nothing at all.
 _Avoid_: Config sync, inventory
 
+**Reach**:
+Whether a host answered its own health payload the last time anything asked: `reachable` or `unreachable`. A host that
+does not answer is **unreachable with the sentence it failed with**, and the row stays — an unreachable row is a fact
+about a machine, not a reason to forget it. The probe asks `GET /api/health` once, over `openssl s_client` for
+`https` and a plain socket for `http`, and never follows a redirect: an answer that is not a Holosmith health payload
+is a refusal (`not_holosmith`), not an unreachable machine.
+_Avoid_: Status (a session has a state), health, uptime, online
+
 **Local**:
-The host name a server uses for its own sessions.
-_Avoid_: Self, here
+The host name a server uses for its own sessions — and, as a **reserved name**, one no host registry row may take,
+because a registered host called `local` would make every forwarded path ambiguous. A **local row** is a different
+thing with the same word: the registry row whose origin is this machine's control origin, which is the one row a
+delete refuses while this machine has live sessions.
+_Avoid_: Self, here, thisbox
 
 ### Configuration
 

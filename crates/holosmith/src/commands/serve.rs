@@ -200,6 +200,39 @@ pub fn run(args: ServeArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // The **hosts seed** (HS-068, spec item 16): "each machine reads an optional `hosts.toml` at startup and merges
+    // it into its hosts table (the file wins on conflicts), so one file copied to every machine keeps the lists
+    // aligned". It runs here — after the database exists, before the listener binds and before any request could read
+    // the table — because a registry that filled itself after the first `GET /api/hosts` would answer two different
+    // things about one machine.
+    //
+    // It **probes**, so it can take a second per host, and that is deliberate: item 4's "a host that fails health is
+    // marked unreachable with the last error" is a fact about this boot rather than about a timer. Two failures are
+    // one `warn` each and nothing else: a missing or malformed file touches no rows (an operator who has not been
+    // given the file yet must still boot), and a host that does not answer is a row, not a refusal. A boot that
+    // refused over a hosts file would take the control UI down for a machine whose sessions are fine — the egress
+    // proxy's rule.
+    match crate::hosts::merge(
+        &database,
+        &loaded.config,
+        &crate::preflight::Tools::default(),
+        clock::unix_now(),
+    ) {
+        Ok(merge) => tracing::debug!(
+            target: "holosmith::serve",
+            seed = merge.path.as_ref().map(|path| path.display().to_string()).as_deref().unwrap_or("-"),
+            from_file = merge.from_file,
+            stored = merge.stored,
+            probed = merge.probed,
+            unreachable = merge.unreachable,
+            "the host registry was merged from its seed"
+        ),
+        Err(sentence) => tracing::warn!(
+            target: "holosmith::serve",
+            %sentence,
+            "the hosts seed could not be merged, so no row was taken from it"
+        ),
+    }
     // `--port 0` asks the kernel for a port, so the origin a browser will send is not knowable
     // until after `bind`; the flag decides, because a port written in the file may deliberately
     // name a proxied address rather than the local one.
