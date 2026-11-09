@@ -23,6 +23,7 @@
 //! `GET /api/health` at it and nothing else, HS-069 appends the path it forwards, and `Origin::parse` already
 //! refuses a non-http(s) scheme, a path, a query and whitespace.
 
+pub mod client;
 pub mod probe;
 pub mod repository;
 pub mod seed;
@@ -108,12 +109,21 @@ impl serde::Serialize for Reach {
     }
 }
 
+/// The read half, written by hand for [`Serialize`]'s reason: [`Reach::parse`] is the one place a word becomes a
+/// variant, so a row or an answer holding a third word is the same sentence on the wire as it is in the table.
+impl<'de> serde::Deserialize<'de> for Reach {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Self::parse(&text).map_err(serde::de::Error::custom)
+    }
+}
+
 /// One row of the registry: the name the operator gave the machine, the origin it answers on, and what the last
 /// probe found.
 ///
 /// `version` and `last_error` are one row's two facts and not a probe history (ADR-0073): the registry's question is
 /// "where can I send a request now", and the sentence is what the operator reads when the answer is no.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Host {
     pub name: String,
     pub url: Origin,
@@ -314,6 +324,40 @@ pub fn is_local(url: &Origin, control_origin: &Origin) -> bool {
 /// This build's version: what a row naming this machine reports, and what every other row's probe compares.
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// One row's facts, as `holosmith status` and `holosmith hub host list` both print them (HS-072).
+///
+/// One function, two callers, because the sentence is a rule: a row is its **reach**, the version that machine
+/// reported, the sentence it failed with if it did, and how long ago anything asked. `checked <n>s ago` is the
+/// honesty mechanism — the facts are the last probe's, which is as old as the boot (ADR-0073, ADR-0074 D5), and a
+/// line that said only `reachable` would read as a live health check this command did not make.
+///
+/// `now` is passed in rather than read here, for the reason `clock`'s own doc gives: a test asserts the value it
+/// wrote instead of racing the clock.
+pub fn facts(host: &Host, now: i64) -> String {
+    let mut text = host.reach.to_string();
+    if let Some(version) = &host.version {
+        text.push_str(&format!(", version {version}"));
+    }
+    if let Some(error) = &host.last_error {
+        text.push_str(&format!(", last error: {error}"));
+    }
+    text.push_str(&format!(", checked {}", age(host.last_checked_at, now)));
+    text
+}
+
+/// How long before `now` something last asked, as a row prints it.
+///
+/// `0` is **never**, which is a state no stored row can hold (the merge writes the moment it probed) and one a reader
+/// still has to be able to tell apart from "asked just now". A timestamp in the future — a clock that moved, or a row
+/// written on a machine whose clock is ahead — reads as `0s ago` rather than as a negative, because "checked -3s ago"
+/// is arithmetic nobody should have to do.
+fn age(at: i64, now: i64) -> String {
+    if at == 0 {
+        return "never".to_string();
+    }
+    format!("{}s ago", now.saturating_sub(at).max(0))
 }
 
 /// Register one host: the rules, then the probe, and the row that goes in the table.

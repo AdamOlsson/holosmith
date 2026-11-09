@@ -18,7 +18,7 @@
 //! | `uptime` | `GET /api/health` ([`crate::http::health::ask`]): [`Runtime::uptime_s`] is the one owner of "how long has this process been up" |
 //! | `sessions <status>` | `sessions` rows, through a **read-only** [`crate::db::Reader`] |
 //! | `proxy <name>` | `preflight::daemon` first (did it answer?), then [`crate::proxies::running`] |
-//! | `machines` | nothing yet — the registry is HS-068 (phase 3) |
+//! | `machines <n>`, `machine <name>` | the `hosts` table, through the same read-only [`crate::db::Reader`] (HS-072) |
 //!
 //! The proxy pair is the one line family whose first question is *whether it could be asked at all*: `Docker::running`
 //! folds every daemon error into `false`, so a `status` that asked it alone would print `not running` for a machine
@@ -26,6 +26,14 @@
 //! both lines `unknown:` — not a failure, because describing a machine whose daemon is down is what this command is for.
 //!
 //! [`Runtime::uptime_s`]: crate::runtime::Runtime::uptime_s
+//!
+//! # Why the registered machines are as old as the boot
+//!
+//! A registry row's `reach`, `version` and `last_error` are the last probe's answers (ADR-0073), taken at the boot that
+//! merged the seed and at every registration since — there is no timer that repeats a probe. So these lines are a
+//! **read**, not a health check: `checked <n>s ago` is what says so, and it is the only form of the fact this command
+//! can honestly print. Asking each machine live would be a hop per row (a CLI with N network timeouts and no bound
+//! of its own), and it is what the Computers screen does because a page can afford it and a registry row cannot.
 //!
 //! # Why uptime is a request and not a file
 //!
@@ -56,21 +64,23 @@
 
 use std::fmt::{self, Write as _};
 
+use crate::clock;
 use crate::config::Config;
 use crate::db;
+use crate::hosts;
 use crate::http::health;
 use crate::preflight::{self, Outcome};
 use crate::proxies;
 use crate::sessions::Status;
 use crate::version::VersionInfo;
 
-/// The sentence the "other machines" line carries until there is a registry to read.
+/// The sentence the "other machines" line carried until there was a registry to read.
 ///
-/// It names the story rather than saying `none`: "no machine has registered" and "the feature that would register
-/// one does not exist" are different facts, and on a phase-2 machine only the second is true.
-pub const NO_REGISTRY: &str = "no hub has registered a machine with this one, and the registry that would hold one \
-     is phase 3 (HS-068) — so there is no other machine's health to report";
-
+/// **Deleted by HS-072**, with its test: the registry exists, `serve` merges and re-probes it at every boot, and
+/// `hub host` writes it — so "no hub has registered a machine with this one" was a sentence about a build that no
+/// longer exists. An empty table is `machines 0`, which is a measurement; the module doc's table says where the fact
+/// comes from now.
+///
 /// One fact of the report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
@@ -144,10 +154,7 @@ pub fn run(config: &Config, machine: &dyn proxies::Containers) -> Report {
     ];
     lines.extend(counts(config));
     lines.extend(proxies(config, machine));
-    lines.push(Line {
-        key: "machines".to_string(),
-        value: Value::Unknown(NO_REGISTRY.to_string()),
-    });
+    lines.extend(machines(config));
     Report { lines }
 }
 
@@ -186,6 +193,49 @@ fn proxies(config: &Config, machine: &dyn proxies::Containers) -> Vec<Line> {
             )
         })
         .collect()
+}
+
+/// The registry: the row count, then one line per machine (HS-072, spec's Commands table).
+///
+/// This is what the acceptance's last bullet asks for — "`status` on a hub reports the health of every registered
+/// machine" — and the answer is the table, because the table **is** the last health of every registered machine.
+/// [`hosts::facts`] prints one row, and `holosmith hub host list` prints the same words, so the CLI has one sentence
+/// for a machine's state rather than two.
+///
+/// A missing database is `machines 0` rather than a finding, for [`counts`]'s reason: a machine that has never served
+/// holds no registry. A database that exists and cannot be read **is** a failure, and it prints no row lines — a zero
+/// or an empty list over a read that failed would be a claim about a machine nobody could look at.
+fn machines(config: &Config) -> Vec<Line> {
+    let path = config.data_root.join(db::DATABASE_FILE);
+    let found = match db::Reader::open(&path) {
+        Ok(None) => Ok(Vec::new()),
+        Ok(Some(reader)) => reader.hosts().all().map_err(|error| {
+            format!(
+                "the registered machines in {} could not be listed ({error})",
+                path.display()
+            )
+        }),
+        Err(error) => Err(format!(
+            "the database at {} could not be opened to be read ({error})",
+            path.display()
+        )),
+    };
+    match found {
+        Ok(hosts) => {
+            let now = clock::unix_now();
+            let mut lines = vec![measured("machines", hosts.len().to_string())];
+            lines.extend(
+                hosts.iter().map(|host| {
+                    measured(&format!("machine {}", host.name), hosts::facts(host, now))
+                }),
+            );
+            lines
+        }
+        Err(sentence) => vec![Line {
+            key: "machines".to_string(),
+            value: Value::Failed(sentence),
+        }],
+    }
 }
 
 /// One measured fact.
@@ -345,7 +395,6 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(root);
     }
-
     #[test]
     fn the_three_arms_render_distinguishably() {
         assert_eq!(measured("role", "server").to_string(), "role server");
@@ -404,8 +453,93 @@ mod tests {
             "a daemon nobody could reach is not a proxy that is down: {rendered}"
         );
         assert!(
-            rendered.contains(&format!("machines unknown: {NO_REGISTRY}")),
-            "the registry line names its story: {rendered}"
+            rendered.contains("machines 0\n"),
+            "a machine that never served holds no registry, which is a count rather than a failure: {rendered}"
+        );
+        assert!(
+            !rendered.contains("\nmachine "),
+            "a table with no rows printed a row: {rendered}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn every_registered_machine_is_one_line_of_its_own_last_probe() {
+        // HS-072's acceptance: `status` on a hub reports the health of every registered machine, and the row **is**
+        // that health — the last probe's answer, taken at the boot (ADR-0073, ADR-0074 D5). Backdating one row is
+        // what makes `checked <n>s ago` a measurement rather than a word: the clock is the machine's, so a row a
+        // minute old cannot read as `0s ago`.
+        let (config, root) = config("machines");
+        let database = crate::db::Database::open(
+            &root.join(db::DATABASE_FILE),
+            crate::db::OpenOptions::default(),
+            1,
+        )
+        .expect("a fresh database opens");
+        let now = crate::clock::unix_now();
+        for row in [
+            crate::hosts::Host {
+                name: "workshop".to_string(),
+                url: crate::config::Origin::parse("https://workshop.tail1234.ts.net")
+                    .expect("a tailnet origin"),
+                preview: None,
+                reach: crate::hosts::Reach::Reachable,
+                version: Some("0.1.0".to_string()),
+                last_error: None,
+                last_checked_at: now - 60,
+            },
+            crate::hosts::Host {
+                name: "attic".to_string(),
+                url: crate::config::Origin::parse("https://attic.tail1234.ts.net")
+                    .expect("a tailnet origin"),
+                preview: None,
+                reach: crate::hosts::Reach::Unreachable,
+                version: None,
+                last_error: Some("nothing answered".to_string()),
+                last_checked_at: now - 3600,
+            },
+        ] {
+            database.hosts().upsert(&row).expect("a row is written");
+        }
+        drop(database);
+        let report = run(&config, &Fake::default());
+        let rendered = report.render();
+        assert!(
+            rendered.contains("machines 2\n"),
+            "the count is not the table's: {rendered}"
+        );
+        for needle in [
+            "machine workshop reachable, version 0.1.0, checked 6",
+            "machine attic unreachable, last error: nothing answered, checked 360",
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "a machine's line is not its row's facts ({needle}): {rendered}"
+            );
+        }
+        // An unreachable machine is a **fact**, not a failed read: this command describes the machine it can see.
+        assert!(!report.failed(), "{rendered}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_registry_that_cannot_be_read_is_one_failed_line_and_no_rows() {
+        // The same rule the session counts follow: zeros over a read that failed would be a guess about a machine
+        // nobody could look at — and a row list over one would be emptier still. This is the arm a corrupt
+        // `app.db` reaches, and both facts fail together because both read one file.
+        let (config, root) = config("machines-broken");
+        std::fs::write(root.join(db::DATABASE_FILE), "this is not a database")
+            .expect("the temp file is writable");
+        let report = run(&config, &Fake::default());
+        let rendered = report.render();
+        assert!(
+            rendered.contains("machines fail: "),
+            "an unreadable table is a failed read: {rendered}"
+        );
+        assert!(report.failed(), "{rendered}");
+        assert!(
+            !rendered.contains("\nmachine "),
+            "row lines were printed over a read that failed: {rendered}"
         );
         let _ = std::fs::remove_dir_all(root);
     }

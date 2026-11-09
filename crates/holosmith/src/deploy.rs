@@ -1,4 +1,5 @@
-//! `holosmith server deploy`: install a server on this machine, in the spec's seven steps (HS-047).
+//! `holosmith server deploy` and `holosmith hub deploy`: install one half of a machine, in the spec's seven steps
+//! (HS-047, HS-072).
 //!
 //! The command is one idempotent pass over item 10 §"What `server deploy` does": each step **reads the machine's
 //! current state** and then applies only what the read found missing, so a second run changes nothing and reports
@@ -9,18 +10,22 @@
 //! [`Word`] is the read's answer, one of five. The two that carry the design are:
 //!
 //! - **`skipped` is never `satisfied`.** A step that prints "already satisfied" over a check that read nothing is a
-//!   lie of exactly the kind this list exists to prevent, which is why the word is in [`Word`] at all. Since HS-049
-//!   every one of the seven steps has a body, so this release has no producer for it — ADR-0056's five words stay
-//!   the contract, and the tally line keeps printing the fourth count as zero.
+//!   lie of exactly the kind this list exists to prevent, which is why the word is in [`Word`] at all. Since HS-072
+//!   its producer is a **role**: a [`Kind::Hub`] run builds no images and starts no proxies, and says so on both
+//!   lines rather than reporting a pass over work it never did.
 //! - **The first `failed` step stops the run.** Later steps are not evaluated at all: a machine whose preflight
 //!   failed has not earned an install, and a report that guessed at the remaining steps would describe a machine
 //!   nobody measured. The lines already printed are the describable state the acceptance asks for, and
 //!   `commands::deploy` prints the resume command — the command that just ran — as the last line.
 //!
-//! Three things are deliberately narrow:
+//! Four things are deliberately narrow:
 //!
-//! - **This is the local deploy.** `--ssh`, `--binary` and the remote copy are phase 3 (HS-072); nothing here
+//! - **This is the local deploy.** `--ssh`, `--binary` and the remote copy are phase 3 (HS-073); nothing here
 //!   reads a remote.
+//! - **A run installs one half of a machine.** [`Kind`] says which, the union of that half with the role the
+//!   config already carries is what step 2 writes, and the two halves together are `both` (the spec's Roles
+//!   table). Nothing is refused over a role: `server deploy` on a hub and `hub deploy` on a server are both
+//!   ordinary runs.
 //! - **Step 1 is [`crate::doctor`]'s list, not a second one.** `serve`'s refusal, `doctor`'s line and this step's
 //!   failure carry the same sentences (ADR-0028, ADR-0054). The one divergence is `ports`, downgraded from a
 //!   failure to a remark, and its doc comment says why.
@@ -120,6 +125,9 @@ const WRONG_MODE: &str = "; a wrong mode or owner in the install tree is what st
 /// The remark a `--root` install carries where a system one names its service user: the half of step 2 no
 /// unprivileged tree can have.
 ///
+/// [`ROOT_REMARK`]:
+// (kept next to `ROOT_UNIT_REMARK` for the same reason: both say what the run did *not* do.)
+///
 /// Without it, "all 7 paths are present with their modes" reads as the whole of item 10 step 2 when the user and
 /// the ownership were read about nothing — the same "say what you did not do" shape [`Word::Skipped`] carries.
 const ROOT_REMARK: &str =
@@ -128,6 +136,83 @@ const ROOT_REMARK: &str =
 /// The remark step 5's line carries under `--root`: a unit in an install tree is not one systemd can load.
 const ROOT_UNIT_REMARK: &str = "; --root: the unit is in the tree, and this run did not ask systemd to load it (a unit under --root is not one \
      systemd can read)";
+
+/// Which deploy a run is: the server's seven steps, or the hub's five and two skips (item 10 §6).
+///
+/// A deploy installs **one half of a machine**, and the two halves together are `both` — so the type carries three
+/// answers and they are deliberately not one: [`Kind::installs`] is the role this run adds, [`union`] is the role
+/// the machine ends up with, and [`Kind::group`]/[`Kind::skip`] are the two places a hub's half is not a server's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// `holosmith server deploy`: the seven steps, a service user in the daemon's group, and both proxies.
+    Server,
+    /// `holosmith hub deploy`: steps 1, 2, 5, 6 and 7; no image, no proxy, and no daemon group.
+    Hub,
+}
+
+impl Kind {
+    /// The role this run adds to whatever the machine's config already says.
+    pub fn installs(self) -> Role {
+        match self {
+            Self::Server => Role::Server,
+            Self::Hub => Role::Hub,
+        }
+    }
+
+    /// The command's own name, which is also the word a sentence about it uses.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Server => "server",
+            Self::Hub => "hub",
+        }
+    }
+
+    /// The group the service user joins, or `None` for the half that drives no daemon (item 10 §6's "without the
+    /// docker group").
+    pub fn group(self) -> Option<&'static str> {
+        match self {
+            Self::Server => Some(SERVICE_GROUP),
+            Self::Hub => None,
+        }
+    }
+
+    /// The reason this run has no work for `step`, or `None` for a step it runs.
+    ///
+    /// The sentence is the whole point of the line: [`Word::Skipped`] is never a pass, so a reader has to be told
+    /// what is being left out and why — and "another story owns it" is not why any more.
+    pub fn skip(self, step: DeployStep) -> Option<&'static str> {
+        match (self, step) {
+            (Self::Hub, DeployStep::Images) => Some(
+                "a hub builds no images: `holosmith-proxy` and `agent-image` are what a session's container and the \
+                 machine's two proxies run, and a hub runs no containers (spec item 10 §6)",
+            ),
+            (Self::Hub, DeployStep::Proxies) => Some(
+                "a hub starts no proxies: `hs_egress` is a session's only route out and `hs_key` is the only thing \
+                 that holds a real provider key, and a hub has neither",
+            ),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for Kind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.word())
+    }
+}
+
+/// The role a machine holds after a deploy of `kind` has run on it: the spec's Roles table as one function.
+///
+/// `server` then `hub` is `both`, and so is the other order; a machine that is already `both` stays `both`. The
+/// union is written into the `config.toml` step 2 installs, which is why the second deploy does not have to be told
+/// what the first one did.
+pub fn union(found: Role, kind: Kind) -> Role {
+    match (found, kind.installs()) {
+        (Role::Both, _) => Role::Both,
+        (Role::Server, Role::Server) | (Role::Hub, Role::Hub) => found,
+        _ => Role::Both,
+    }
+}
 
 /// The spec's seven steps, in the spec's order (item 10, "What `server deploy` does").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -203,8 +288,9 @@ pub enum Word {
     Needs,
     /// The apply ran and did them.
     Changed,
-    /// Another story owns this step's body. Kept because it is one of ADR-0056's five words and the tally line is a
-    /// contract; since HS-049 every step has a body, so nothing in this release produces it.
+    /// This run's role has no work for this step, and the line carries the reason. Since HS-072 its producer is a
+    /// [`Kind::Hub`] install — a hub builds no images and starts no proxies — and the word is never a pass: the tally
+    /// counts it apart, and a reader is told what was left out rather than told it is already right.
     Skipped,
     /// The read or the apply failed; the run stops here.
     Failed,
@@ -276,9 +362,9 @@ impl Report {
 
     /// The whole report as the operator reads it: the header, where it installed, one line per step and the tally.
     ///
-    /// The tally's four counts are always printed — `skipped` included, as zero — because a gate greps the line's
-    /// shape and a reader diffs two runs by it (ADR-0056). Since HS-049 there is no list of who owns what remains,
-    /// because nothing remains: the `deploy: incomplete:` line is gone, not hidden.
+    /// The tally's four counts are always printed — `skipped` included, as zero on a run that skipped nothing —
+    /// because a gate greps the line's shape and a reader diffs two runs by it (ADR-0056). Since HS-049 there is no
+    /// list of who owns what remains, because nothing remains: the `deploy: incomplete:` line is gone, not hidden.
     pub fn render(&self) -> String {
         let count = |word: Word| self.lines.iter().filter(|line| line.word == word).count();
         let mut text = format!("deploy: {}\n", if self.dry_run { "dry run" } else { "run" });
@@ -361,20 +447,6 @@ impl Default for Tools {
             health_wait: HEALTH_WAIT,
         }
     }
-}
-
-/// Why `server deploy` may not run here at all, if it may not.
-///
-/// One case, and it is a role rather than a machine: item 10 §6's `hub deploy` runs steps 1 (without the Docker
-/// and git checks), 2 (without the docker group), 5, 6 and 7, and installs no server — so a machine whose config
-/// says `hub` is a machine whose `serve` runs no sessions, and `server deploy` there would install the wrong
-/// thing and then report success. `hub deploy` itself is phase 3 (HS-072).
-pub fn refusal(config: &Config) -> Option<String> {
-    (config.role == Role::Hub).then(|| {
-        "this machine's role is `hub`, and a hub runs no sessions: `holosmith server deploy` installs a *server*, \
-         and installing a hub is `holosmith hub deploy`, which is phase 3 (HS-072)"
-            .to_string()
-    })
 }
 
 /// Where the deploy installs, and whether that takes privilege.
@@ -476,7 +548,7 @@ impl Target {
     }
 }
 
-/// Run the seven steps in the spec's order and answer the report.
+/// Run the seven steps in the spec's order and answer the report: a **server** deploy.
 ///
 /// `config` is the value [`Target::config`] produced — already prefixed — so `config.data_root` and
 /// `config.projects_root` are the target's own paths and this function prefix nothing.
@@ -485,6 +557,9 @@ impl Target {
 /// plan that read nothing is not a plan, and an apply is only ever reached when `dry_run` is `false`. The first
 /// failing line stops the run ([`Report`]'s docs say why), and a `skipped` or `satisfied`/`changed` line
 /// continues.
+///
+/// This is [`run_as`] with [`Kind::Server`], which is what the name means: the seven steps, the daemon's group and
+/// both proxies. `holosmith hub deploy` calls [`run_as`] with its own half.
 pub fn run(
     config: &Config,
     target: &Target,
@@ -492,6 +567,37 @@ pub fn run(
     machine: &dyn Machine,
     dry_run: bool,
 ) -> Report {
+    run_as(config, target, tools, machine, dry_run, Kind::Server)
+}
+
+/// The same run, for either half of a machine (HS-072).
+///
+/// Two configs come out of the one the caller handed over, and the split is [`Kind`]'s whole substance:
+///
+/// - **The installed config** is the machine's own with `kind.union(found)` in its role. Step 2 renders it, so the
+///   file that boots next says `both` after a `server deploy` and a `hub deploy` — the spec's Roles table, made a
+///   property of the install tree instead of a by-hand edit.
+/// - **The checked config** carries the half this run installs, and only steps 1 and 7 see it, because they are the
+///   two that ask `doctor`. A `hub deploy` therefore asks no Docker and no git question even on a machine that is
+///   now `both` — item 10 §6's "without the Docker and git checks", read literally. The cost is recorded: the
+///   *other* half's health is that deploy's business, and `serve` on a `both` machine refuses at its own boot when
+///   its preflight fails.
+pub fn run_as(
+    config: &Config,
+    target: &Target,
+    tools: &Tools,
+    machine: &dyn Machine,
+    dry_run: bool,
+    kind: Kind,
+) -> Report {
+    let installed = Config {
+        role: union(config.role, kind),
+        ..config.clone()
+    };
+    let checked = Config {
+        role: kind.installs(),
+        ..installed.clone()
+    };
     // The two machine-wide paths of the install tree are the *target's*, not the machine's: `doctor`'s `perms`
     // finding compares the tree this run writes, so a `--root` deploy must not read `/etc/holosmith` or
     // `/run/holosmith` (HS-049's review, SPEC-1). Everything else about the tools — the programs, the systemd
@@ -506,14 +612,24 @@ pub fn run(
         target: target.describe(),
     };
     for step in DeployStep::ALL {
+        // A step this half has no work for is a `skipped` line and the run continues: the remaining steps are still
+        // this run's, and a stop here would leave steps 5–7 of a hub unevaluated for no reason (ADR-0056).
+        if let Some(reason) = kind.skip(step) {
+            report.lines.push(Line {
+                step,
+                word: Word::Skipped,
+                sentence: reason.to_string(),
+            });
+            continue;
+        }
         let line = match step {
-            DeployStep::Preflight => preflight(config, &doctor_tools, machine),
-            DeployStep::Files => files(config, target, tools, dry_run),
-            DeployStep::Images => images_line(config, machine, dry_run),
-            DeployStep::Proxies => proxies_line(config, machine, dry_run),
-            DeployStep::Service => service(target, tools, dry_run),
-            DeployStep::Origins => origins(config, tools, dry_run),
-            DeployStep::Health => health(config, &doctor_tools, tools, machine, dry_run),
+            DeployStep::Preflight => preflight(&checked, &doctor_tools, machine),
+            DeployStep::Files => files(&installed, target, tools, dry_run, kind),
+            DeployStep::Images => images_line(&installed, machine, dry_run),
+            DeployStep::Proxies => proxies_line(&installed, machine, dry_run),
+            DeployStep::Service => service(&installed, target, tools, dry_run),
+            DeployStep::Origins => origins(&installed, tools, dry_run),
+            DeployStep::Health => health(&checked, &doctor_tools, tools, machine, dry_run),
         };
         if line.word == Word::Failed {
             report.failed = Some(step);
@@ -647,9 +763,9 @@ fn disk_of_the_nearest_ancestor(
 ///
 /// The staging directory is removed whatever happened: a failed step must leave nothing behind but the paths it
 /// managed to install.
-fn files(config: &Config, target: &Target, tools: &Tools, dry_run: bool) -> Line {
+fn files(config: &Config, target: &Target, tools: &Tools, dry_run: bool, kind: Kind) -> Line {
     let staging = staging_dir();
-    let line = install(config, target, tools, dry_run, &staging);
+    let line = install(config, target, tools, dry_run, &staging, kind);
     let _ = std::fs::remove_dir_all(&staging);
     line
 }
@@ -658,11 +774,11 @@ fn files(config: &Config, target: &Target, tools: &Tools, dry_run: bool) -> Line
 struct Item {
     path: PathBuf,
     mode: u32,
-    kind: Kind,
+    kind: ItemKind,
 }
 
 /// What a path is, which decides how a wrong one is put right.
-enum Kind {
+enum ItemKind {
     /// A directory: `install -d -m`.
     Directory,
     /// A file whose bytes are this deploy's own: installed when absent, and installed again when they differ.
@@ -689,11 +805,11 @@ enum Action {
     /// The key pair is absent and a child generates it: `openssl` prints the SEC1 DER, and the rendered pair is
     /// installed by the same `install -m 0600` every other file action uses.
     Vapid { path: PathBuf },
-    /// `useradd --system --groups <group> --home-dir <home> --shell /usr/sbin/nologin <name>`: the service user
-    /// does not exist.
+    /// `useradd --system [--groups <group>] --home-dir <home> --shell /usr/sbin/nologin <name>`: the service user
+    /// does not exist. `group` is `None` on a hub install, which joins no group (item 10 §6).
     UserAdd {
         name: String,
-        groups: String,
+        group: Option<String>,
         home: PathBuf,
     },
     /// `usermod -aG <group> <name>`: the user exists and the group does not have it.
@@ -722,8 +838,12 @@ impl Action {
                  <staged> {}",
                 path.display()
             ),
-            Self::UserAdd { name, groups, home } => format!(
-                "useradd --system --groups {groups} --home-dir {} --shell /usr/sbin/nologin {name}",
+            Self::UserAdd { name, group, home } => format!(
+                "useradd --system {}--home-dir {} --shell /usr/sbin/nologin {name}",
+                match group {
+                    Some(group) => format!("--groups {group} "),
+                    None => String::new(),
+                },
                 home.display()
             ),
             Self::UserMod { name, group } => format!("usermod -aG {group} {name}"),
@@ -759,37 +879,37 @@ fn items(config: &Config, target: &Target) -> Result<Vec<Item>, String> {
         Item {
             path: etc_dir,
             mode: 0o755,
-            kind: Kind::Directory,
+            kind: ItemKind::Directory,
         },
         Item {
             path: target.etc_config(),
             mode: 0o644,
-            kind: Kind::Rendered(rendered.into_bytes()),
+            kind: ItemKind::Rendered(rendered.into_bytes()),
         },
         Item {
             path: config.data_root.clone(),
             mode: 0o755,
-            kind: Kind::Directory,
+            kind: ItemKind::Directory,
         },
         Item {
             path: secrets.clone(),
             mode: 0o700,
-            kind: Kind::Directory,
+            kind: ItemKind::Directory,
         },
         Item {
             path: secrets.join(key::KEYS_FILE),
             mode: 0o600,
-            kind: Kind::Kept(key::empty_text().into_bytes()),
+            kind: ItemKind::Kept(key::empty_text().into_bytes()),
         },
         Item {
             path: vapid::store(&config.data_root),
             mode: 0o600,
-            kind: Kind::Vapid,
+            kind: ItemKind::Vapid,
         },
         Item {
             path: target.admin_dir(),
             mode: 0o700,
-            kind: Kind::Directory,
+            kind: ItemKind::Directory,
         },
     ])
 }
@@ -804,17 +924,24 @@ struct ServiceUser {
 
 impl ServiceUser {
     /// The action that would make the user what the unit file's `User=` needs, or `None` when it already is.
-    fn pending(&self, home: &Path) -> Option<Action> {
+    ///
+    /// `group` is the group this run installs the user into, and a `None` makes the group question not exist: a
+    /// `hub deploy` creates the user and joins it to nothing (item 10 §6's "without the docker group"). Nothing here
+    /// ever *removes* a membership, so a `both` machine that ran `server deploy` first keeps the docker group when a
+    /// later `hub deploy` reads it — which is why the hub's satisfied line says the user joins no group rather than
+    /// claiming it is in none.
+    fn pending(&self, home: &Path, group: Option<&str>) -> Option<Action> {
         if self.uid.is_none() {
             return Some(Action::UserAdd {
                 name: SERVICE_USER.to_string(),
-                groups: SERVICE_GROUP.to_string(),
+                group: group.map(str::to_string),
                 home: home.to_path_buf(),
             });
         }
+        let group = group?;
         (!self.grouped).then(|| Action::UserMod {
             name: SERVICE_USER.to_string(),
-            group: SERVICE_GROUP.to_string(),
+            group: group.to_string(),
         })
     }
 }
@@ -827,7 +954,14 @@ impl ServiceUser {
 /// before the chowns, because a chown of a path this run creates needs the path to exist; and the user before the
 /// items, because the tree a system-path install writes is `sudo`'s and belongs to the service user only after the
 /// chowns at the end.
-fn install(config: &Config, target: &Target, tools: &Tools, dry_run: bool, staging: &Path) -> Line {
+fn install(
+    config: &Config,
+    target: &Target,
+    tools: &Tools,
+    dry_run: bool,
+    staging: &Path,
+    kind: Kind,
+) -> Line {
     let items = match items(config, target) {
         Ok(items) => items,
         Err(sentence) => return failed(DeployStep::Files, sentence),
@@ -837,12 +971,12 @@ fn install(config: &Config, target: &Target, tools: &Tools, dry_run: bool, stagi
     let mut user = Vec::new();
     let mut uid = None;
     if target.privileged() {
-        let read = match read_user(tools) {
+        let read = match read_user(tools, kind.group()) {
             Ok(read) => read,
             Err(sentence) => return failed(DeployStep::Files, sentence),
         };
         uid.clone_from(&read.uid);
-        user.extend(read.pending(&config.data_root));
+        user.extend(read.pending(&config.data_root, kind.group()));
     }
     // 2. The seven paths.
     let mut pending = Vec::new();
@@ -871,8 +1005,8 @@ fn install(config: &Config, target: &Target, tools: &Tools, dry_run: bool, stagi
                 present(&items),
                 match target.privileged() {
                     true => format!(
-                        ", the service user {SERVICE_USER} is in the {SERVICE_GROUP} group, and the VAPID keys are in \
-                         {}",
+                        ", {}, and the VAPID keys are in {}",
+                        service_user_clause(kind),
                         vapid::store(&config.data_root).display()
                     ),
                     false => ROOT_REMARK.to_string(),
@@ -904,13 +1038,28 @@ fn install(config: &Config, target: &Target, tools: &Tools, dry_run: bool, stagi
     }
 }
 
+/// What a `satisfied` step-2 line says about the service user, which is the one clause a hub's install cannot
+/// copy from a server's.
+///
+/// The wording is deliberate: a hub's line says the user **exists and joins no group**, not that it is in none —
+/// nothing in this build ever removes a membership, so a `both` machine that ran `server deploy` first keeps the
+/// docker group and a line claiming otherwise would be wrong about the machine it just described.
+fn service_user_clause(kind: Kind) -> String {
+    match kind.group() {
+        Some(group) => format!("the service user {SERVICE_USER} is in the {group} group"),
+        None => format!(
+            "the service user {SERVICE_USER} exists and joins no group, because a hub drives no daemon"
+        ),
+    }
+}
+
 /// Whether `id` says the service user exists and is in the daemon's group (spec item 10 step 2).
 ///
 /// Two questions, each `id`'s exit code: `id -u <user>` answers a uid when the user exists, and `id -nG <user>` the
 /// groups it is in. A spawn failure is a **failure of the read**, not "there is no user": an `id` this machine does
 /// not have cannot tell the deploy whether to create one, and a deploy that guessed would run `useradd` over a user
 /// that is already there.
-fn read_user(tools: &Tools) -> Result<ServiceUser, String> {
+fn read_user(tools: &Tools, group: Option<&str>) -> Result<ServiceUser, String> {
     let uid = ask(
         &tools.id,
         &["-u", SERVICE_USER],
@@ -920,6 +1069,14 @@ fn read_user(tools: &Tools) -> Result<ServiceUser, String> {
         return Ok(ServiceUser {
             uid: None,
             grouped: false,
+        });
+    };
+    // A deploy that installs no daemon joins no group, so there is no question to ask — and answering `false` here
+    // would make `usermod` the plan of every hub install for a group the hub never uses.
+    let Some(group) = group else {
+        return Ok(ServiceUser {
+            uid: Some(uid),
+            grouped: true,
         });
     };
     let groups = ask(
@@ -936,9 +1093,7 @@ fn read_user(tools: &Tools) -> Result<ServiceUser, String> {
     })?;
     Ok(ServiceUser {
         uid: Some(uid),
-        grouped: groups
-            .split_whitespace()
-            .any(|group| group == SERVICE_GROUP),
+        grouped: groups.split_whitespace().any(|seen| seen == group),
     })
 }
 
@@ -1026,17 +1181,17 @@ fn read(item: &Item) -> Result<Option<Action>, String> {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == ErrorKind::NotFound => {
             return Ok(Some(match &item.kind {
-                Kind::Directory => Action::Directory {
+                ItemKind::Directory => Action::Directory {
                     path: path.clone(),
                     mode,
                 },
-                Kind::Rendered(bytes) | Kind::Kept(bytes) => Action::File {
+                ItemKind::Rendered(bytes) | ItemKind::Kept(bytes) => Action::File {
                     path: path.clone(),
                     mode,
                     bytes: bytes.clone(),
                 },
                 // Absent is the one state that earns a generated pair (HS-049).
-                Kind::Vapid => Action::Vapid { path: path.clone() },
+                ItemKind::Vapid => Action::Vapid { path: path.clone() },
             }));
         }
         Err(error) => {
@@ -1049,11 +1204,11 @@ fn read(item: &Item) -> Result<Option<Action>, String> {
     };
     let wrong_mode = metadata.permissions().mode() & 0o777 != mode;
     Ok(match &item.kind {
-        Kind::Directory => (!metadata.is_dir() || wrong_mode).then(|| Action::Directory {
+        ItemKind::Directory => (!metadata.is_dir() || wrong_mode).then(|| Action::Directory {
             path: path.clone(),
             mode,
         }),
-        Kind::Kept(_) => {
+        ItemKind::Kept(_) => {
             if !metadata.is_file() {
                 return Err(format!(
                     "{} is not a file, and it is the key store `serve` and the key proxy read: move it aside — \
@@ -1068,7 +1223,7 @@ fn read(item: &Item) -> Result<Option<Action>, String> {
                 mode,
             })
         }
-        Kind::Rendered(bytes) => {
+        ItemKind::Rendered(bytes) => {
             let same = metadata.is_file() && std::fs::read(path).is_ok_and(|found| found == *bytes);
             if !same {
                 Some(Action::File {
@@ -1083,7 +1238,7 @@ fn read(item: &Item) -> Result<Option<Action>, String> {
                 })
             }
         }
-        Kind::Vapid => {
+        ItemKind::Vapid => {
             if !metadata.is_file() {
                 return Err(format!(
                     "{} is not a file, and it is where the machine's Web Push key pair lives: move it aside — the \
@@ -1181,22 +1336,21 @@ fn apply(action: &Action, target: &Target, tools: &Tools, staging: &Path) -> Res
             let staged = stage(staging, path, vapid::render(&pair).as_bytes())?;
             install_staged(tools, target, &staged, path, 0o600)
         }
-        Action::UserAdd { name, groups, home } => child(
-            tools,
-            target,
-            &tools.useradd,
-            vec![
-                "--system".to_string(),
-                "--groups".to_string(),
-                groups.clone(),
+        Action::UserAdd { name, group, home } => {
+            let mut arguments = vec!["--system".to_string()];
+            if let Some(group) = group {
+                arguments.push("--groups".to_string());
+                arguments.push(group.clone());
+            }
+            arguments.extend([
                 "--home-dir".to_string(),
                 home.display().to_string(),
                 "--shell".to_string(),
                 "/usr/sbin/nologin".to_string(),
                 name.clone(),
-            ],
-        )
-        .map(drop),
+            ]);
+            child(tools, target, &tools.useradd, arguments).map(drop)
+        }
         Action::UserMod { name, group } => child(
             tools,
             target,
@@ -1559,18 +1713,33 @@ fn proxies_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
 ///
 /// `User=` and `Group=` are the two lines `--root` omits rather than blanks: a unit in an install tree is not one
 /// systemd can load, so naming a service user there would describe a machine that does not exist.
-pub fn unit_text(exe: &Path, privileged: bool) -> String {
+///
+/// `role` is the role the **machine** will hold (`deploy::union`'s answer), not the half this run installs, and it
+/// decides two things: `Description=`, and whether the unit requires the daemon. A `hub`-only machine has no
+/// Docker, so a unit that requires `docker.service` there is a unit systemd never starts — and a `both` machine
+/// runs sessions, so its unit keeps the requirement even when the run that wrote it was a `hub deploy`.
+pub fn unit_text(exe: &Path, privileged: bool, role: Role) -> String {
     let identity = if privileged {
         format!("User={SERVICE_USER}\nGroup={SERVICE_USER}\n")
     } else {
         String::new()
     };
+    let daemon = if role == Role::Hub {
+        ""
+    } else {
+        " docker.service"
+    };
+    let requires = if role == Role::Hub {
+        ""
+    } else {
+        "Requires=docker.service\n"
+    };
     format!(
         "[Unit]\n\
-         Description=Holosmith server\n\
-         After=network-online.target docker.service\n\
+         Description=Holosmith {role}\n\
+         After=network-online.target{daemon}\n\
          Wants=network-online.target\n\
-         Requires=docker.service\n\
+         {requires}\
          \n\
          [Service]\n\
          Type=simple\n\
@@ -1590,14 +1759,20 @@ pub fn unit_text(exe: &Path, privileged: bool) -> String {
 
 /// Step 5's read and apply: the file's bytes, and on a system-path install the two `systemctl` verbs that make
 /// systemd load it.
-fn service(target: &Target, tools: &Tools, dry_run: bool) -> Line {
+fn service(config: &Config, target: &Target, tools: &Tools, dry_run: bool) -> Line {
     let staging = staging_dir();
-    let line = service_line(target, tools, dry_run, &staging);
+    let line = service_line(config, target, tools, dry_run, &staging);
     let _ = std::fs::remove_dir_all(&staging);
     line
 }
 
-fn service_line(target: &Target, tools: &Tools, dry_run: bool, staging: &Path) -> Line {
+fn service_line(
+    config: &Config,
+    target: &Target,
+    tools: &Tools,
+    dry_run: bool,
+    staging: &Path,
+) -> Line {
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
         Err(error) => {
@@ -1612,7 +1787,8 @@ fn service_line(target: &Target, tools: &Tools, dry_run: bool, staging: &Path) -
         }
     };
     let path = target.unit_path();
-    let bytes = unit_text(&exe, target.privileged());
+    // The role the machine holds once this run is done, not the half it installs: the unit is what boots.
+    let bytes = unit_text(&exe, target.privileged(), config.role);
     // The unit's directory first: `install -m` does not make one, and under `--root` this step is the only thing
     // that ever asks for `/etc/systemd/system`.
     let directory = Item {
@@ -1620,12 +1796,12 @@ fn service_line(target: &Target, tools: &Tools, dry_run: bool, staging: &Path) -
             .parent()
             .map_or_else(|| PathBuf::from(UNIT_DIR), Path::to_path_buf),
         mode: 0o755,
-        kind: Kind::Directory,
+        kind: ItemKind::Directory,
     };
     let unit = Item {
         path: path.clone(),
         mode: 0o644,
-        kind: Kind::Rendered(bytes.clone().into_bytes()),
+        kind: ItemKind::Rendered(bytes.clone().into_bytes()),
     };
     let mut files = Vec::new();
     for item in [&directory, &unit] {

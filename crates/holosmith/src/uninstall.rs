@@ -246,9 +246,11 @@ pub struct Args {
 /// contract and this function's too: `config.data_root` is the target's own path.
 ///
 /// **`Err` is a refusal, not a failure**: `--purge` over live sessions, or a database the refusal could not be
-/// counted in, stops the command before any child runs and is printed as one sentence (the shape
-/// [`crate::deploy::refusal`] established). The difference matters to the caller: a refusal carries no step lines
-/// and no resume command, because running the same command again would be refused the same way.
+/// counted in, stops the command before any child runs and is printed as one sentence — the shape the deploy's own
+/// refusals established (ADR-0055's resume line, ADR-0056's steps). The difference matters to the caller: a refusal
+/// carries no step lines and no resume command, because running the same command again would be refused the same way.
+/// Since HS-072 the deploy has no refusal of its own (a role is not a reason to refuse a deploy), so this is now the
+/// only command in the build whose `Err` is one.
 ///
 /// A failed *step* stops the run inside the report, for the deploy's reason: later steps would describe a machine
 /// this run could no longer promise anything about. Re-running is the recovery, because every step reads first.

@@ -44,11 +44,13 @@ use crate::http::sessions::force_requested;
 /// The two fields a registration carries, and the whole of what it may carry.
 const FIELDS: [&str; 2] = ["name", "url"];
 
-/// The table as `GET /api/hosts` answers it.
+/// The table as `GET /api/hosts` answers it, and as `holosmith hub host list` reads it back.
 ///
 /// One key, and a wrapper rather than a bare array for `SessionList`'s reason: the sessions list already carries
 /// facts about the machine beside its rows, and a host list is the shape a second fact joins without moving the first.
-#[derive(Debug, Serialize)]
+/// It derives **both** halves because HS-072's CLI is a client of this route: a second struct for the read side would
+/// be a second spelling of one wire shape.
+#[derive(Debug, Serialize, serde::Deserialize)]
 pub struct HostList {
     pub hosts: Vec<Host>,
 }

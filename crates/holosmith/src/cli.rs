@@ -113,13 +113,20 @@ pub enum Cmd {
         #[command(subcommand)]
         action: ServerAction,
     },
+    /// Install and start a hub on this machine, and manage the machines it forwards to (spec's Commands table).
+    Hub {
+        #[command(subcommand)]
+        action: HubAction,
+    },
 }
 
-/// What `server` does. `hub deploy` is phase 3 (HS-072) and has no subcommand yet, because a hub installs a
-/// different set of steps and the spec's own command name for it is `hub deploy`.
+/// What `server` does.
 #[derive(Debug, Subcommand)]
 pub enum ServerAction {
     /// Run the deploy's seven steps in order, each checking the current state first. Re-running is safe.
+    ///
+    /// On a machine whose config says `hub` this installs the **server half** and leaves the config `both`: a role
+    /// is not a reason to refuse a deploy (the spec's Roles table, HS-072).
     Deploy {
         /// Print each step's plan and change nothing. A broken machine still exits non-zero.
         #[arg(long)]
@@ -127,6 +134,55 @@ pub enum ServerAction {
         /// Install into this directory instead of the system paths, as the invoking user (no sudo).
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
+    },
+}
+
+/// What `hub` does: install this machine as a hub, or manage the registry it forwards with.
+#[derive(Debug, Subcommand)]
+pub enum HubAction {
+    /// Steps 1, 2, 5, 6 and 7 of the deploy, each checking the current state first. No image is built and no proxy is
+    /// started, because a hub runs no containers. Re-running is safe.
+    ///
+    /// On a machine whose config says `server` this installs the **hub half** and leaves the config `both`.
+    Deploy {
+        /// Print each step's plan and change nothing. A broken machine still exits non-zero.
+        #[arg(long)]
+        dry_run: bool,
+        /// Install into this directory instead of the system paths, as the invoking user (no sudo).
+        ///
+        /// The spec's Commands table lists this flag for `server deploy` only. It is here with the same meaning and
+        /// for the same reason (ADR-0056): an install tree is how the whole deploy is driven by an unprivileged
+        /// user, and it is how this story's own acceptance is measured.
+        #[arg(long, value_name = "DIR")]
+        root: Option<PathBuf>,
+    },
+    /// Manage this machine's host registry — the machines it forwards to — with the API's own checks.
+    Host {
+        #[command(subcommand)]
+        action: HostAction,
+    },
+}
+
+/// The registry's three commands. Each one is a call to **this machine's own** `POST`/`GET`/`DELETE /api/hosts`, so
+/// the rules, their codes and their sentences are the route's and never a second copy of them.
+#[derive(Debug, Subcommand)]
+pub enum HostAction {
+    /// Register one machine, or update the row it already has (a name is a row's identity).
+    Add {
+        /// The name the row takes: one path segment — lowercase letters, digits and `-`.
+        name: String,
+        /// The machine's control origin: `http(s)`, a MagicDNS name or an address in 100.64.0.0/10, and a port.
+        url: String,
+    },
+    /// Print every row, by name.
+    List,
+    /// Forget one machine. A row that names this machine is refused while it has live sessions.
+    Remove {
+        /// The row's name.
+        name: String,
+        /// Remove the row even when it is this machine and it has live sessions (the API's `?force=true`).
+        #[arg(long)]
+        force: bool,
     },
 }
 

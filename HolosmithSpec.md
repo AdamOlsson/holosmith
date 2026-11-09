@@ -343,7 +343,7 @@ Running `holosmith server deploy` and `holosmith hub deploy` on the same machine
 | --- | --- |
 | `holosmith serve [--config PATH]` | Runs in the foreground with the role from the config; systemd runs this |
 | `holosmith server deploy [--ssh user@host] [--binary PATH] [--root DIR] [--dry-run]` | Installs and starts a server (steps below); `--root` builds every installed path under `DIR`, as the invoking user |
-| `holosmith hub deploy [--ssh user@host] [--binary PATH] [--dry-run]` | Installs and starts a hub |
+| `holosmith hub deploy [--ssh user@host] [--binary PATH] [--root DIR] [--dry-run]` | Installs and starts a hub; `--root` builds the five steps' installed paths under `DIR`, as the invoking user |
 | `holosmith hub host add <name> <url>`, `list`, `remove <name>` | Manages the registry from the CLI, with the same checks as `POST /api/hosts` |
 | `holosmith key set <provider>`, `list`, `remove` | Stores provider API keys for the key proxy; the key is read from stdin, never from arguments |
 | `holosmith doctor [--quick or --full]` | Preflight checks and self-tests |

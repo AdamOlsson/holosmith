@@ -35,16 +35,37 @@ A machine that runs sessions. Has Docker, git and a projects root.
 _Avoid_: Worker, agent host, runner
 
 **Service user**:
-The `holosmith` system user a deployed server runs `serve` as, and the member of the `docker` group that lets it
-drive the machine's daemon: `useradd --system --groups docker --home-dir <data root> --shell /usr/sbin/nologin
-holosmith` on a privileged install, and the owner of the install tree after `server deploy` step 2's `chown`. Under
-`--root` there is none — the tree belongs to the invoking user, and the step's line says so. Its machine names are
+The `holosmith` system user a deployed machine runs `serve` as: `useradd --system --groups docker --home-dir <data
+root> --shell /usr/sbin/nologin holosmith` on a privileged **server** install, and the owner of the install tree after
+step 2's `chown`. A **hub** deploy creates the same user and joins it to **no group** — a hub drives no daemon — and
+nothing in the build ever removes a membership, so a `both` machine that ran `server deploy` first keeps the docker
+group and a later hub install says the user *exists and joins no group* rather than claiming it is in none. Under
+`--root` there is none: the tree belongs to the invoking user, and the step's line says so. Its machine names are
 `deploy::SERVICE_USER` and `deploy::SERVICE_GROUP`.
 _Avoid_: Service account, holosmith user, deploy user (and a `--root` install has no service user at all)
 
 **Hub**:
 The single entry point you open in a browser. Forwards requests and previews to servers. Runs no sessions.
 _Avoid_: Controller, orchestrator, gateway
+
+**Hub deploy**:
+`holosmith hub deploy`: the deploy's steps **1, 2, 5, 6 and 7**, with 3 and 4 `skipped` — a hub builds no images and
+starts no proxies, because it runs no containers — and step 2's service user joining no group. It is one **deploy
+half** of the same seven-step command, so it has `--root` and `--dry-run` with the same meanings a server's has, and
+re-running it is the whole recovery procedure. Its machine names are `deploy::{Kind::Hub, run_as, union}` and
+`commands::hub::run_deploy`.
+_Avoid_: Hub install, hub setup, `server deploy --hub`
+
+**Deploy half**:
+Which part of a machine one `deploy` run installs: the **server** half (all seven steps, the daemon's group, both
+proxies) or the **hub** half (steps 1, 2, 5, 6 and 7, no group, no proxy). A run **unions** its half with the role the
+config already carries and writes the union into the `config.toml` step 2 installs, so `server deploy` then `hub
+deploy` on one machine — in either order — leaves a machine whose config says `both`; nothing is refused over a role.
+Steps 1 and 7 ask their checks about **the half this run installs** rather than the union, which is why a hub deploy
+asks no Docker and no git question even on a `both` machine, while the unit step follows the **union** because a unit
+describes the machine that will boot. Its machine names are `deploy::{Kind, union, run_as}`.
+_Avoid_: Partial deploy, role upgrade, half-install (a **Role** is what a machine holds; a deploy half is what one run
+adds to it)
 
 **Host registry**:
 Every entry point a machine may send a request to: one row per host, keyed by the **name** the operator gives it, which
@@ -854,8 +875,11 @@ _Avoid_: Filter, middleware, auth
 server's uptime, one count per session status, whether each of the two proxies is running, and the last health of
 every machine registered with it. Each value has three arms, `measured`, `unknown: sentence` and `fail: sentence`,
 and only `fail` changes the exit code. Its machine name is `status::Report`. Never the same thing as the health
-endpoint: the endpoint answers about one running binary, and this command asks other machines too (which, until
-HS-068, is the line that says so).
+endpoint: the endpoint answers about one running binary, and this command **reads** the host registry for the others
+— `machines <n>` and one `machine <name>` line per row, through a read-only open of the table, so no server has to be
+running and no probe is made. Those facts are the last probe's, which is as old as the boot (ADR-0074 D5), and
+`checked <n>s ago` is the sentence that says so; `hosts::facts` is the one function this command and `holosmith hub
+host list` share, so a machine reads the same in both.
 _Avoid_: Health, healthcheck, ping, machine state
 
 **Uptime**:
@@ -920,15 +944,17 @@ Pointing `current` back at the previous release.
 _Avoid_: Revert, downgrade
 
 **Deploy step**:
-One of the seven parts of `holosmith server deploy`, in the spec's order: `preflight`, `files`, `images`,
+One of the seven parts of a `deploy` run — `holosmith server deploy` or `holosmith hub deploy` — in the spec's
+order: `preflight`, `files`, `images`,
 `proxies`, `service`, `origins`, `health`. A deploy step is a **state read** and an **apply**: the read says
 whether the step is already satisfied and what is missing, the apply does the missing part, and `--dry-run`
 prints the read alone. Each one reports one of five words — **satisfied**, **needs** (a dry run's plan),
-**changed**, **skipped** (carrying the story that still owns the body, and never a pass; since HS-049 the deploy
-has no step another story owns, so nothing produces the word — it stays in the table because the table is the
-contract, and a `skipped` step may never read as a pass) and **failed** (which
-stops the run and makes the resume command the last line). Its machine names are `deploy::DeployStep` and
-`DeployStep::ALL`, and `--root` is the install tree the step's paths are built under. It is not `Step`.
+**changed**, **skipped** (carrying the reason, and never a pass) and **failed** (which stops the run and makes the
+resume command the last line). `skipped` has had two reasons in its life and both are "no body to run here": a story
+that still owned the body (nothing since HS-049) and — since HS-072 — a **deploy half** with no work for the step
+(a hub's `images` and `proxies`), which is why a hub run's tally reads `5 satisfied, 0 changed, 2 skipped, 0 failed`.
+Its machine names are `deploy::DeployStep` and `DeployStep::ALL`, and `--root` is the install tree the step's paths
+are built under. It is not `Step`.
 _Avoid_: Install step, deploy phase, stage, deployment
 
 **Image build**:

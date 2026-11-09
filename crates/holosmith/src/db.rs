@@ -195,6 +195,16 @@ impl Reader {
         SessionRepository::new(&self.connection)
     }
 
+    /// Every read of a `hosts` row, borrowed from this connection.
+    ///
+    /// HS-072's `holosmith status` asks the registry a question a running `serve` writes: the facts are the last
+    /// boot's probe (ADR-0073), so a read-only open answers them without a lock, a second writer or a server. This is
+    /// the same repository the routes write through, so a row's columns are read in one place and a column a later
+    /// migration adds cannot be missed here.
+    pub fn hosts(&self) -> crate::hosts::repository::HostRepository<'_> {
+        crate::hosts::repository::HostRepository::new(&self.connection)
+    }
+
     /// The schema version the file records, for a caller that wants the same answer `doctor` makes a verdict of.
     pub fn schema_version(&self, path: &Path) -> Result<u32, DbError> {
         recorded_version(&self.connection, path)

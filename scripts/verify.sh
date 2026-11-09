@@ -458,6 +458,7 @@ serve_cases=(
   case_forward
   case_machine_trust
   case_computers
+  case_hub_deploy
   case_idle_stop
   case_drain
   case_drain_restart
@@ -5110,6 +5111,349 @@ PY
   stop_serve
   start_serve
 }
+# HS-072: `hub deploy` and `hub host` (spec item 10 §6, the Commands table, item 4).
+#
+# **The one case in this run that needs no daemon and no image**, which is the story's own headline: "on a Docker-less
+# machine". A hub's five steps ask no Docker question (`doctor::run` skips the daemon and git for `Role::Hub`), build
+# no image and start no container — so nothing here touches `docker` at all, and `tests/deploy.rs`'s
+# `a_hub_deploy_runs_five_steps_and_skips_the_two_a_hub_has_no_work_for` measures the same claim from the inside (it
+# asserts an empty build list and an empty daemon-call list). python3 is the harness's, for the reason `case_hosts`
+# records twice over: `free_port` picks the ports a row naming this machine has to spell before the boot, and one
+# row's field is read out of a JSON answer because this gate has no `jq`. A missing python3 is therefore this case's
+# only SKIP line, and the five arms it would have run are `tests/deploy.rs`'s and `tests/hub_cli.rs`'s.
+#
+# What it measures, in the order a failure reads best:
+#
+# 1. `hub deploy --dry-run`: the seven lines in the spec's order with the spec's numbers, four `needs` and two
+#    `skipped` (each naming what a hub has no work for), the tally counting the skips apart, and an install root that
+#    does not appear.
+# 2. the `--root` run of the hub half: steps 2–6 apply, 7 finds the machine serving, `config.toml` says
+#    `role = "hub"`, the unit requires no daemon — and the second run is five `satisfied` and two `skipped`.
+# 3. the union: the same command on a **server** config leaves `role = "both"` and a unit that does require the
+#    daemon, which is acceptance bullet 4's first half. The second half — "the API is unchanged" — is the stub boot
+#    of that tree answering `/api/health` as `both` with `/api/hosts` and `/api/sessions` still there.
+# 4. `hub host add`/`list`/`remove` against that machine's **own** listener: a stored row printed as its own line, the
+#    API's two registration sentences with no code in front, a removal, and the `409 host_busy` a row naming this
+#    machine earns while it has a live session — then `--force`, which removes the row and leaves the session.
+# 5. `holosmith status`: `machines <n>` and one `machine <name>` line per row, and `machines 0` once they are gone —
+#    the acceptance's last bullet, on the machine whose registry it is.
+#
+# What it cannot measure: a real unit (there is no systemd), a real tailnet (no `tailscaled`, so step 6's two origins
+# exist only in the shim's answer), a second machine, and `--ssh`/`--binary` (HS-073).
+case_hub_deploy() {
+  local name=case_hub_deploy root="$repo_root/target/verify-hub-$$"
+  local control preview closed shims log state status line got entry holder_pid id
+  local hub_config server_config seed tree hub_tree
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to pick the ports a registry row has to spell and to read one row field (tests/deploy.rs and tests/hub_cli.rs cover every arm)\n' "$name"
+    return 0
+  fi
+  # The shared boot is `phase_serve`'s and this case's machine is its own; it comes back at the end, for the reason
+  # `case_hosts` gives: the next case's `stop_serve` has to find a pid.
+  stop_serve
+  rm -rf "$root"
+  mkdir -p "$root"
+  control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a second port"
+  closed="$(free_port)" || fail "$name/port" "could not ask the kernel for a third port"
+  shims="$WORK/$name.shims"
+  log="$WORK/$name.tailscale.log"
+  state="$WORK/$name.tailscale.state"
+  rm -f "$log" "$state"
+  deploy_machine_shims "$shims" "$log" "$state"
+
+  # The machine's own config as `serve`/`status`/`hub host` read it: the data root is the install tree's, because
+  # `status` and `hub host` read **the config**, not `serve`'s flags (HS-050's two-configs landmine).
+  hub_config="$WORK/config-hub.toml"
+  server_config="$WORK/config-hub-server.toml"
+  tree="$root/tree"
+  hub_tree="$root/hub"
+  deploy_config "$hub_config" "$control" "$preview" "unix:///var/run/docker.sock" "pi-agent:local" "hub"
+  # The server's config is the same machine with a seed: a registry row naming **this** machine's control origin is
+  # how a local row exists at all, because `POST /api/hosts` refuses loopback (`host_problem`) while the seed is not
+  # filtered by that rule (ADR-0073 D9). It is written before the boot because the boot is what merges it.
+  seed="$root/hosts.toml"
+  printf '[[hosts]]\nname = "thisbox"\nurl = "http://localhost:%s"\n' "$control" >"$seed"
+  deploy_config "$server_config" "$control" "$preview" "unix:///var/run/docker.sock" "pi-agent:local" "server"
+  printf 'hosts_seed = "%s"\n' "$seed" >>"$server_config"
+
+  # ---- 1. the dry run: the hub's plan, and nothing written -----------------------------------------
+  status=0
+  PATH="$shims:$PATH" "$artifact" hub deploy --dry-run --root "$hub_tree" \
+    --config "$hub_config" >"$WORK/$name.dry.out" 2>&1 || status=$?
+  check "$name/dry/exit" 0 "$status"
+  got="$(sed -n 's/^\([1-7]\)\. .*/\1/p' "$WORK/$name.dry.out" | tr -d '\n')"
+  check "$name/dry/order" "1234567" "$got"
+  # Step 1 is a **read** (`doctor --quick`), so a dry run prints its verdict rather than a plan: `satisfied` here
+  # means this machine passed the hub's five checks, which is the acceptance's "without the Docker and git checks".
+  grep -q '^1\. preflight: satisfied: ' "$WORK/$name.dry.out" ||
+    fail "$name/dry/preflight" "the hub's preflight did not pass: $(cat "$WORK/$name.dry.out")"
+  assertions=$((assertions + 1))
+  for entry in files service origins health; do
+    grep -q "^[1-7]\. $entry: needs: " "$WORK/$name.dry.out" ||
+      fail "$name/dry/$entry" "no $entry plan in the dry run: $(cat "$WORK/$name.dry.out")"
+    assertions=$((assertions + 1))
+  done
+  # The two a hub has no work for: `skipped` with a reason, never a pass.
+  for pair in "images:builds no images" "proxies:no proxies"; do
+    entry="${pair%%:*}" reason="${pair#*:}"
+    line="$(grep "^[1-7]\. $entry: skipped: " "$WORK/$name.dry.out" || true)"
+    [ -n "$line" ] || fail "$name/dry/$entry" "step $entry is not a skip in a hub deploy: $(cat "$WORK/$name.dry.out")"
+    case "$line" in
+      *"$reason"*) assertions=$((assertions + 1)) ;;
+      *) fail "$name/dry/$entry/reason" "the $entry skip does not say why a hub has no work for it: $line" ;;
+    esac
+  done
+  grep -q '^deploy: 7 steps: 1 satisfied, 0 changed, 2 skipped, 0 failed$' "$WORK/$name.dry.out" ||
+    fail "$name/dry/tally" "the tally does not count the two skips apart: $(cat "$WORK/$name.dry.out")"
+  assertions=$((assertions + 1))
+  [ ! -e "$hub_tree" ] || fail "$name/dry/root" "the dry run created $hub_tree"
+  assertions=$((assertions + 1))
+  grep -qx "deploy: role: hub" "$WORK/$name.dry.out" ||
+    fail "$name/dry/role" "the tail does not say the machine is a hub: $(cat "$WORK/$name.dry.out")"
+  assertions=$((assertions + 1))
+  grep -qx 'deploy: next: holosmith hub host add <name> <url>' "$WORK/$name.dry.out" ||
+    fail "$name/dry/next" "a hub is not told to register a machine: $(cat "$WORK/$name.dry.out")"
+  assertions=$((assertions + 1))
+  # A hub has no key proxy, so `key set` is a next step this machine cannot act on.
+  if grep -q '^deploy: next: holosmith key set' "$WORK/$name.dry.out"; then
+    fail "$name/dry/next/key" "a hub-only machine was told to store a provider key: $(cat "$WORK/$name.dry.out")"
+  fi
+  assertions=$((assertions + 1))
+
+  # ---- 2. the install: five steps applied, and a second run that changes nothing -------------------
+  # Step 7 waits for `/api/health` on the config's control port and then runs `doctor --full`, so one responder on
+  # that port is what makes "this machine is serving" a measurement — `case_server_deploy`'s shape, and the same
+  # reason: nothing on this machine starts the unit.
+  holder_pid="$(health_responder "$control")"
+  for _ in $(seq 1 100); do
+    if (exec 3<>/dev/tcp/127.0.0.1/"$control") 2>/dev/null; then break; fi
+    sleep 0.05
+  done
+  status=0
+  PATH="$shims:$PATH" "$artifact" hub deploy --root "$hub_tree" \
+    --config "$hub_config" >"$WORK/$name.run.out" 2>&1 || status=$?
+  check "$name/run/exit" 0 "$status"
+  while read -r n entry; do
+    grep -q "^$n\. $entry: \(changed\|satisfied\): " "$WORK/$name.run.out" ||
+      fail "$name/run/$n" "step $n is neither changed nor satisfied: $(cat "$WORK/$name.run.out")"
+    assertions=$((assertions + 1))
+  done <<'APPLIED'
+2 files
+5 service
+6 origins
+7 health
+APPLIED
+  grep -q '^2\. files: changed: ' "$WORK/$name.run.out" ||
+    fail "$name/run/files" "step 2 did not create the install tree: $(cat "$WORK/$name.run.out")"
+  assertions=$((assertions + 1))
+  for pair in "3 images" "4 proxies"; do
+    n="${pair%% *}" entry="${pair#* }"
+    grep -q "^$n\. $entry: skipped: " "$WORK/$name.run.out" ||
+      fail "$name/run/$n" "step $n is not a skip: $(cat "$WORK/$name.run.out")"
+    assertions=$((assertions + 1))
+  done
+  for path in "etc/holosmith/config.toml 644" "var/lib/holosmith 755" \
+    "var/lib/holosmith/secrets 700" "var/lib/holosmith/secrets/keys.toml 600" \
+    "var/lib/holosmith/secrets/vapid.toml 600" "run/holosmith 700"; do
+    entry="${path% *}" want="${path##* }"
+    check "$name/run/mode/$entry" "$want" "$(stat -c '%a' "$hub_tree/$entry" 2>/dev/null || echo absent)"
+  done
+  # The file it wrote is the machine that boots next, and a hub's unit requires no daemon: a `hub deploy` exists for
+  # the machine that has none, and a unit that named `docker.service` there would never start.
+  grep -qx 'role = "hub"' "$hub_tree/etc/holosmith/config.toml" ||
+    fail "$name/run/config/role" "step 2 did not write the role it installed: $(cat "$hub_tree/etc/holosmith/config.toml")"
+  assertions=$((assertions + 1))
+  if grep -q 'docker.service' "$hub_tree/etc/systemd/system/holosmith.service"; then
+    fail "$name/run/unit" "a hub's unit requires a daemon this machine does not have: $(cat "$hub_tree/etc/systemd/system/holosmith.service")"
+  fi
+  assertions=$((assertions + 1))
+  grep -q '^Description=Holosmith hub$' "$hub_tree/etc/systemd/system/holosmith.service" ||
+    fail "$name/run/unit/description" "the unit does not describe the machine it boots: $(cat "$hub_tree/etc/systemd/system/holosmith.service")"
+  assertions=$((assertions + 1))
+  status=0
+  "$artifact" config validate --config "$hub_tree/etc/holosmith/config.toml" >/dev/null 2>&1 || status=$?
+  check "$name/run/config/valid" 0 "$status"
+  # The second run: re-running is the whole recovery procedure, so a run that reaches the end has to be idempotent.
+  status=0
+  PATH="$shims:$PATH" "$artifact" hub deploy --root "$hub_tree" \
+    --config "$hub_config" >"$WORK/$name.again.out" 2>&1 || status=$?
+  check "$name/again/exit" 0 "$status"
+  while read -r n entry; do
+    grep -q "^$n\. $entry: satisfied: " "$WORK/$name.again.out" ||
+      fail "$name/again/$n" "step $n is not satisfied on the second run: $(cat "$WORK/$name.again.out")"
+    assertions=$((assertions + 1))
+  done <<'AGAIN'
+1 preflight
+2 files
+5 service
+6 origins
+7 health
+AGAIN
+  grep -q '^deploy: 7 steps: 5 satisfied, 0 changed, 2 skipped, 0 failed$' "$WORK/$name.again.out" ||
+    fail "$name/again/tally" "the second run's tally is not five satisfied and two skipped: $(cat "$WORK/$name.again.out")"
+  assertions=$((assertions + 1))
+
+  # ---- 3. the union: a server machine deployed as a hub is `both` ----------------------------------
+  status=0
+  PATH="$shims:$PATH" "$artifact" hub deploy --root "$tree" \
+    --config "$server_config" >"$WORK/$name.union.out" 2>&1 || status=$?
+  check "$name/union/exit" 0 "$status"
+  grep -qx 'role = "both"' "$tree/etc/holosmith/config.toml" ||
+    fail "$name/union/role" "a hub deploy on a server machine did not install both: $(cat "$tree/etc/holosmith/config.toml")"
+  assertions=$((assertions + 1))
+  grep -q '^deploy: role: both (.*server.*hub deploy.*)' "$WORK/$name.union.out" ||
+    fail "$name/union/line" "the run did not say it reached both: $(cat "$WORK/$name.union.out")"
+  assertions=$((assertions + 1))
+  # `both` runs sessions, so its unit keeps the daemon even though the run that wrote it installed the hub's half.
+  grep -qx 'Requires=docker.service' "$tree/etc/systemd/system/holosmith.service" ||
+    fail "$name/union/unit" "a both machine's unit dropped the daemon it needs: $(cat "$tree/etc/systemd/system/holosmith.service")"
+  assertions=$((assertions + 1))
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  holder_pid=""
+
+  # ---- 4. the machine booted for real: its API, and `hub host` against its own listener -------------
+  # `backend = "stub"` in the config the deploy wrote, so `disk::guarded` is false and this boot runs no preflight
+  # and starts no proxy: the only machine in this case that starts anything, and it starts nothing Docker.
+  start_serve "$tree/etc/holosmith/config.toml" "$tree/var/lib/holosmith" "$control"
+  fetch "${name}_health" GET /api/health "Host: 127.0.0.1" || fail "${name}_health/no_answer" "GET /api/health did not answer"
+  case "$(answer "${name}_health")" in
+    *'"role":"both"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/union/api/role" "the both machine does not report its role: $(answer "${name}_health")" ;;
+  esac
+  fetch "${name}_hosts" GET /api/hosts "Host: 127.0.0.1" || fail "${name}_hosts/no_answer" "GET /api/hosts did not answer"
+  expect_status "${name}_hosts" "$(answer "${name}_hosts")" 200
+  fetch "${name}_sessions" GET /api/sessions "Host: 127.0.0.1" || fail "${name}_sessions/no_answer" "GET /api/sessions did not answer"
+  expect_status "${name}_sessions" "$(answer "${name}_sessions")" 200
+  # The seed's row is this machine's — `hosts::is_local` folds the port and compares the host, and the seed's URL is
+  # the control origin verbatim, so the shortcut stored it reachable without a round trip.
+  case "$(answer "${name}_hosts")" in
+    *'"name":"thisbox","url":"http://localhost:'*'"reach":"reachable"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/union/local-row" "the seed's row is not this machine's own: $(answer "${name}_hosts")" ;;
+  esac
+
+  # `add`: the row is stored and printed as the same `machine <name>` line `status` prints. `attic` is a MagicDNS
+  # name that resolves nowhere, which is item 16's "marked unreachable with the last error, not removed".
+  status=0
+  "$artifact" hub host add attic https://attic.tail1234.ts.net --config "$tree/etc/holosmith/config.toml" \
+    >"$WORK/$name.add.out" 2>&1 || status=$?
+  check "$name/add/exit" 0 "$status"
+  grep -q '^machine attic unreachable, last error: .*attic\.tail1234\.ts\.net' "$WORK/$name.add.out" ||
+    fail "$name/add/row" "add did not print the row the API stored: $(cat "$WORK/$name.add.out")"
+  assertions=$((assertions + 1))
+  # The two registration refusals, with the API's sentence and **no code in front** (ADR-0076 D6): the code names a
+  # value the operator just typed, so the sentence is the answer.
+  status=0
+  "$artifact" hub host add local https://box.tail1234.ts.net --config "$tree/etc/holosmith/config.toml" \
+    >"$WORK/$name.badname.out" 2>&1 || status=$?
+  check "$name/badname/exit" 1 "$status"
+  # The reserved name's own sentence, and the API's: a CLI that spelled its own would be the fork ADR-0076 D6
+  # forbids. `local` rather than `Local` because the alphabet rule fires first on an uppercase spelling.
+  grep -qF -- '`name` must not be "local": that is the name this machine'"'"'s own sessions are reached by' \
+    "$WORK/$name.badname.out" ||
+    fail "$name/badname/sentence" "the CLI did not print the API's own sentence: $(cat "$WORK/$name.badname.out")"
+  assertions=$((assertions + 1))
+  status=0
+  "$artifact" hub host add workshop ftp://box.tail1234.ts.net --config "$tree/etc/holosmith/config.toml" \
+    >"$WORK/$name.badurl.out" 2>&1 || status=$?
+  check "$name/badurl/exit" 1 "$status"
+  got="$(cat "$WORK/$name.badurl.out")"
+  case "$got" in
+    'holosmith: hub host: must start with http:// or https://, not "ftp://box.tail1234.ts.net"') assertions=$((assertions + 1)) ;;
+    *) fail "$name/badurl/sentence" "the URL refusal is not the API's sentence: $got" ;;
+  esac
+  if grep -q '^holosmith: hub host: bad_host_\(name\|url\):' "$WORK/$name.badurl.out"; then
+    fail "$name/badurl/code" "the CLI put a code in front of a sentence about a value the operator typed: $(cat "$WORK/$name.badurl.out")"
+  fi
+  assertions=$((assertions + 1))
+  # `list` answers the table, in the route's own order, through the same client as the other two.
+  status=0
+  "$artifact" hub host list --config "$tree/etc/holosmith/config.toml" >"$WORK/$name.list.out" 2>&1 || status=$?
+  check "$name/list/exit" 0 "$status"
+  grep -qx 'machines 2' "$WORK/$name.list.out" ||
+    fail "$name/list/count" "list does not count the two rows: $(cat "$WORK/$name.list.out")"
+  assertions=$((assertions + 1))
+  for needle in '^machine attic unreachable, ' '^machine thisbox reachable, version '; do
+    grep -q "$needle" "$WORK/$name.list.out" ||
+      fail "$name/list/row" "list is missing $needle: $(cat "$WORK/$name.list.out")"
+    assertions=$((assertions + 1))
+  done
+
+  # ---- 5. `status` reads the same table, and the busy row answers with the API's sentence ------------
+  status=0
+  "$artifact" status --config "$tree/etc/holosmith/config.toml" >"$WORK/$name.status.out" 2>&1 || status=$?
+  check "$name/status/exit" 0 "$status"
+  grep -qx 'machines 2' "$WORK/$name.status.out" ||
+    fail "$name/status/count" "status does not report the registry: $(cat "$WORK/$name.status.out")"
+  assertions=$((assertions + 1))
+  grep -q '^machine attic unreachable, last error: ' "$WORK/$name.status.out" ||
+    fail "$name/status/row" "status has no line for a registered machine: $(cat "$WORK/$name.status.out")"
+  assertions=$((assertions + 1))
+  if grep -q 'NO_REGISTRY\|no hub has registered' "$WORK/$name.status.out"; then
+    fail "$name/status/stale" "status still prints the phase-2 sentence: $(cat "$WORK/$name.status.out")"
+  fi
+  assertions=$((assertions + 1))
+
+  # A remote row goes without a force; the row that names this machine is refused while this machine has a session.
+  status=0
+  "$artifact" hub host remove attic --config "$tree/etc/holosmith/config.toml" \
+    >"$WORK/$name.remove.out" 2>&1 || status=$?
+  check "$name/remove/exit" 0 "$status"
+  grep -qx 'removed attic' "$WORK/$name.remove.out" ||
+    fail "$name/remove/line" "remove did not say what it removed: $(cat "$WORK/$name.remove.out")"
+  assertions=$((assertions + 1))
+  fetch_body "${name}_created" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Idempotency-Key: verify-hub-1" ||
+    fail "${name}_created/no_answer" "POST /api/sessions did not answer"
+  expect_status "${name}_created" "$(answer "${name}_created")" 202
+  id="$(sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p' "$WORK/responses/${name}_created.body")"
+  [ -n "$id" ] || fail "$name/created/id" "the create names no session id: $(cat "$WORK/responses/${name}_created.body")"
+  status=0
+  "$artifact" hub host remove thisbox --config "$tree/etc/holosmith/config.toml" \
+    >"$WORK/$name.busy.out" 2>&1 || status=$?
+  check "$name/busy/exit" 1 "$status"
+  grep -q '^holosmith: hub host: host_busy: "thisbox" is this machine, and it has 1 live session' "$WORK/$name.busy.out" ||
+    fail "$name/busy/sentence" "the busy refusal is not the API's sentence with its code: $(cat "$WORK/$name.busy.out")"
+  assertions=$((assertions + 1))
+  grep -q 'force=true' "$WORK/$name.busy.out" ||
+    fail "$name/busy/flag" "the refusal does not name the override it means: $(cat "$WORK/$name.busy.out")"
+  assertions=$((assertions + 1))
+  status=0
+  "$artifact" hub host remove thisbox --force --config "$tree/etc/holosmith/config.toml" \
+    >"$WORK/$name.forced.out" 2>&1 || status=$?
+  check "$name/forced/exit" 0 "$status"
+  grep -qx 'removed thisbox' "$WORK/$name.forced.out" ||
+    fail "$name/forced/line" "--force did not remove the row: $(cat "$WORK/$name.forced.out")"
+  assertions=$((assertions + 1))
+  # Removing the row does not stop the session, which is what the refusal's sentence says.
+  fetch "${name}_session" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+    fail "${name}_session/no_answer" "GET /api/sessions/$id did not answer"
+  expect_status "${name}_session" "$(answer "${name}_session")" 200
+  "$artifact" status --config "$tree/etc/holosmith/config.toml" >"$WORK/$name.status2.out" 2>&1 ||
+    fail "$name/status2" "status failed after the removals: $(cat "$WORK/$name.status2.out")"
+  grep -qx 'machines 0' "$WORK/$name.status2.out" ||
+    fail "$name/status2/empty" "an emptied registry is not a count of zero: $(cat "$WORK/$name.status2.out")"
+  assertions=$((assertions + 1))
+
+  # A machine that is not serving has no registry to add to, and the CLI says so instead of faking an answer.
+  printf 'role = "hub"\nbackend = "stub"\ncontrol_listen = "127.0.0.1:%s"\ncontrol_origin = "http://localhost:%s"\n' \
+    "$closed" "$closed" >"$WORK/$name.closed.toml"
+  status=0
+  "$artifact" hub host list --config "$WORK/$name.closed.toml" >"$WORK/$name.closed.out" 2>&1 || status=$?
+  check "$name/closed/exit" 1 "$status"
+  grep -q "^holosmith: hub host: nothing answered at 127.0.0.1:$closed" "$WORK/$name.closed.out" ||
+    fail "$name/closed/sentence" "the CLI did not name the address it could not reach: $(cat "$WORK/$name.closed.out")"
+  assertions=$((assertions + 1))
+
+  # The whole boot is this case's: the tree goes and the shared boot comes back.
+  rm -rf "$root"
+  stop_serve
+  start_serve
+}
+
 # HS-069: one origin that reaches every machine (spec item 3, item 16 and `Roles`; ADR-0074).
 #
 # Two artifacts on one box is what "two machines" means here: a `role = "server"` boot on a pinned control port and a
@@ -9228,11 +9572,13 @@ case_docker_preflight() {
 # The config a fresh host would have, written by the case rather than by the deploy: `data_root` is deliberately
 # left at its default, because `--root` is what prefixes it and a file that already named the prefixed path would
 # be prefixed twice (ADR-0056).
+# `role` is the sixth argument and defaults to `server`: HS-072's `hub deploy` takes the same machine with its own
+# half, and a second config writer would be a second spelling of the eleven fields a deploy reads.
 deploy_config() {
-  local path="$1" control="$2" preview="$3" docker_host="$4" image="$5"
+  local path="$1" control="$2" preview="$3" docker_host="$4" image="$5" role="${6:-server}"
   cat >"$path" <<EOF
 owner = "$owner"
-role = "server"
+role = "$role"
 backend = "stub"
 control_listen = "127.0.0.1:$control"
 preview_listen = "127.0.0.1:$preview"

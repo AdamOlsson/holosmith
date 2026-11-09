@@ -10,7 +10,9 @@ mod forward;
 pub mod guard;
 pub mod health;
 mod history;
-mod hosts;
+// `pub(crate)` since HS-072: `holosmith hub host` is a **client** of these three routes, and a client that
+// re-declared `HostList` would be a second spelling of one wire shape.
+pub(crate) mod hosts;
 mod merge;
 mod publish;
 mod push;

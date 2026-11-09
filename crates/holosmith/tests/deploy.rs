@@ -30,10 +30,10 @@ use std::time::Duration;
 
 use holosmith::config::{Config, Role};
 use holosmith::container;
-use holosmith::deploy::{self, DeployStep, Line, Report, Target, Word};
+use holosmith::deploy::{self, DeployStep, Kind, Line, Report, Target, Word};
 use holosmith::docker;
 use holosmith::doctor;
-use holosmith::images::{self, Expectation, Kind};
+use holosmith::images::{self, Expectation, Kind as ImageKind};
 use holosmith::key;
 use holosmith::preflight;
 use holosmith::proxies;
@@ -459,7 +459,7 @@ fn labels_from_args(args: &[String]) -> BTreeMap<String, String> {
 }
 
 /// The labels an image built by this binary carries, as `docker image inspect` would answer them.
-fn expected_labels(kind: Kind, config: &Config) -> BTreeMap<String, String> {
+fn expected_labels(kind: ImageKind, config: &Config) -> BTreeMap<String, String> {
     // The digest this process would build from, memoised by the product itself: the test binary is tens of
     // megabytes and an unoptimised SHA-256 is slow, and the production path asks the same question.
     let digest = images::own_digest().expect("the test binary is readable");
@@ -1027,7 +1027,7 @@ fn an_existing_key_file_is_never_rewritten() {
     // two things a deploy must handle differently. `install` would truncate the bytes, so a mode it does own is
     // repaired with `chmod`, which touches nothing — and the fixture starts wrong on purpose, because a mode that is
     // already right makes the repair's only assertion a comparison of the fixture with itself (HS-049's review,
-    // STD-1: with the fixture at 0600, deleting `Kind::Kept`'s `Action::Mode` arm left the whole suite green).
+    // STD-1: with the fixture at 0600, deleting `ItemKind::Kept`'s `Action::Mode` arm left the whole suite green).
     deployed_data_root(&deployed.data_root);
     let secrets = deployed.data_root.join(key::SECRETS_DIR);
     std::fs::create_dir_all(&secrets).expect("the secrets directory is creatable");
@@ -1488,11 +1488,11 @@ fn step_three_is_satisfied_when_both_images_carry_this_binarys_labels() {
     let machine = Fake::new()
         .with_labels(
             &images::proxy_image(),
-            expected_labels(Kind::Proxy, &deployed),
+            expected_labels(ImageKind::Proxy, &deployed),
         )
         .with_labels(
             &images::agent_image(),
-            expected_labels(Kind::Agent, &deployed),
+            expected_labels(ImageKind::Agent, &deployed),
         );
 
     let report = deploy::run(&deployed, &target, &real_tools(&dir), &machine, false);
@@ -1530,7 +1530,7 @@ fn step_three_names_the_label_that_differs() {
     let config = config(Some(format!("unix://{}", socket.display())));
     let target = Target::resolve(Some(dir.file("root")));
     let deployed = target.config(&config);
-    let mut agent = expected_labels(Kind::Agent, &deployed);
+    let mut agent = expected_labels(ImageKind::Agent, &deployed);
     agent.insert(
         images::LABEL_PI.to_string(),
         "0.0.0-not-the-pinned-one".to_string(),
@@ -1538,7 +1538,7 @@ fn step_three_names_the_label_that_differs() {
     let machine = Fake::new()
         .with_labels(
             &images::proxy_image(),
-            expected_labels(Kind::Proxy, &deployed),
+            expected_labels(ImageKind::Proxy, &deployed),
         )
         .with_labels(&images::agent_image(), agent);
 
@@ -1584,12 +1584,12 @@ fn step_three_sees_a_rebuilt_artifact_through_the_digest_label() {
     let config = config(Some(format!("unix://{}", socket.display())));
     let target = Target::resolve(Some(dir.file("root")));
     let deployed = target.config(&config);
-    let mut agent = expected_labels(Kind::Agent, &deployed);
+    let mut agent = expected_labels(ImageKind::Agent, &deployed);
     agent.insert(images::LABEL_BINARY.to_string(), "0".repeat(64));
     let machine = Fake::new()
         .with_labels(
             &images::proxy_image(),
-            expected_labels(Kind::Proxy, &deployed),
+            expected_labels(ImageKind::Proxy, &deployed),
         )
         .with_labels(&images::agent_image(), agent);
 
@@ -1789,30 +1789,280 @@ fn step_four_starts_both_proxies_and_the_second_run_reads_running() {
 }
 
 #[test]
-fn a_hub_role_is_refused() {
-    let hub = Config {
-        role: Role::Hub,
-        ..Config::default()
-    };
-    let sentence = deploy::refusal(&hub).expect("a hub is refused");
-    assert!(sentence.contains("hub"), "{sentence}");
-    assert!(
-        sentence.contains("runs no sessions"),
-        "the refusal does not say why a hub installs no server: {sentence}"
-    );
-    assert!(
-        sentence.contains("hub deploy") && sentence.contains("phase 3"),
-        "the refusal does not name the command that does: {sentence}"
-    );
-    assert!(sentence.contains("HS-072"), "{sentence}");
-    // A server and a `both` machine are deployable: this is one role's refusal, not a machine's.
-    assert_eq!(deploy::refusal(&Config::default()), None);
+fn the_two_halves_union_into_both_and_nothing_is_refused() {
+    // HS-072 deleted `deploy::refusal`: a role is no longer a reason to refuse a deploy, and the spec's Roles table
+    // ("running `server deploy` and `hub deploy` on the same machine makes it `both`") is a function instead. Every
+    // arm is here because the union is symmetric in one direction and not the other, and the asymmetry is the bug a
+    // one-line implementation gets wrong: `server` on a `hub` is `both`, and `hub` on a `server` is `both`, but
+    // `hub` on a `hub` is still `hub`.
+    for (found, kind, want) in [
+        (Role::Server, Kind::Server, Role::Server),
+        (Role::Hub, Kind::Hub, Role::Hub),
+        (Role::Both, Kind::Server, Role::Both),
+        (Role::Both, Kind::Hub, Role::Both),
+        (Role::Hub, Kind::Server, Role::Both),
+        (Role::Server, Kind::Hub, Role::Both),
+    ] {
+        assert_eq!(
+            deploy::union(found, kind),
+            want,
+            "{found} + {} deploy",
+            kind.word()
+        );
+    }
+    // The role each command installs is the half it is named after — the fact `union` rests on.
+    assert_eq!(Kind::Server.installs(), Role::Server);
+    assert_eq!(Kind::Hub.installs(), Role::Hub);
+    assert_eq!(Kind::Hub.word(), "hub");
+}
+
+#[test]
+fn a_hub_deploy_runs_five_steps_and_skips_the_two_a_hub_has_no_work_for() {
+    // The acceptance's first bullet, as a run: steps 1, 2, 5, 6 and 7 apply, steps 3 and 4 are `skipped` with a
+    // reason, and the tally counts them apart. Two measurements underneath it: the machine is **never asked to build
+    // an image or start a container**, and the file the run leaves boots as a hub — a unit with no
+    // `Requires=docker.service`, because a hub-only machine has no daemon for systemd to wait on.
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("deploy-hub");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let mut config = config(Some(format!("unix://{}", socket.display())));
+    config.role = Role::Hub;
+    config.control_listen = health_responder();
+    let root = dir.file("root");
+    let target = Target::resolve(Some(root.clone()));
+    let deployed = target.config(&config);
+    let tools = real_tools(&dir);
+    let machine = Fake::new();
+
+    let report = deploy::run_as(&deployed, &target, &tools, &machine, false, Kind::Hub);
+    assert!(!report.failed(), "the hub run failed:\n{}", report.render());
+    let words: Vec<(u8, Word)> = report
+        .lines
+        .iter()
+        .map(|line| (line.step.number(), line.word))
+        .collect();
     assert_eq!(
-        deploy::refusal(&Config {
-            role: Role::Server,
-            ..Config::default()
-        }),
-        None
+        words,
+        [
+            (1, Word::Satisfied),
+            (2, Word::Changed),
+            (3, Word::Skipped),
+            (4, Word::Skipped),
+            (5, Word::Changed),
+            (6, Word::Changed),
+            (7, Word::Satisfied),
+        ],
+        "the hub's plan is not the spec's:\n{}",
+        report.render()
+    );
+    // A skip is never a pass, and its line says what is left out rather than that nothing was needed.
+    for (step, word) in [
+        (DeployStep::Images, "images"),
+        (DeployStep::Proxies, "proxies"),
+    ] {
+        let line = line(&report, step);
+        assert_eq!(line.word, Word::Skipped, "{}", line.sentence);
+        assert!(
+            line.sentence.contains("a hub"),
+            "the {word} line does not say who has no work for it: {}",
+            line.sentence
+        );
+    }
+    assert!(
+        line(&report, DeployStep::Images)
+            .sentence
+            .contains("builds no images"),
+        "{}",
+        line(&report, DeployStep::Images).sentence
+    );
+    assert!(
+        line(&report, DeployStep::Proxies)
+            .sentence
+            .contains("no proxies"),
+        "{}",
+        line(&report, DeployStep::Proxies).sentence
+    );
+    // Nothing was built and nothing was started: `calls` is the argv of a proxy or a network, `builds` of an image.
+    assert!(
+        machine.builds().is_empty(),
+        "a hub deploy built an image: {:?}",
+        machine.builds()
+    );
+    assert!(
+        machine.calls().is_empty(),
+        "a hub deploy asked the daemon for something: {:?}",
+        machine.calls()
+    );
+    // The file it wrote is the machine that boots next, and a hub's unit requires no daemon.
+    let written = std::fs::read_to_string(root.join("etc/holosmith/config.toml"))
+        .expect("the config the run wrote is readable");
+    assert!(
+        written.contains("role = \"hub\""),
+        "step 2 did not write the role it installed:\n{written}"
+    );
+    let unit = std::fs::read_to_string(target.unit_path()).expect("the unit is readable");
+    assert!(
+        !unit.contains("docker.service"),
+        "a hub's unit requires a daemon this machine does not have:\n{unit}"
+    );
+    assert!(
+        unit.contains("Description=Holosmith hub"),
+        "the unit does not describe the machine it boots:\n{unit}"
+    );
+
+    // The second run changes nothing: the same five satisfied, the same two skipped.
+    let again = deploy::run_as(&deployed, &target, &tools, &machine, false, Kind::Hub);
+    assert!(
+        !again.failed(),
+        "the second hub run failed:\n{}",
+        again.render()
+    );
+    for step in [
+        DeployStep::Preflight,
+        DeployStep::Files,
+        DeployStep::Service,
+        DeployStep::Origins,
+        DeployStep::Health,
+    ] {
+        let line = line(&again, step);
+        assert_eq!(line.word, Word::Satisfied, "{}", line.sentence);
+    }
+    assert_eq!(
+        again
+            .lines
+            .iter()
+            .filter(|l| l.word == Word::Skipped)
+            .count(),
+        2,
+        "the second run lost the two skips:\n{}",
+        again.render()
+    );
+}
+
+#[test]
+fn a_hub_deploy_asks_no_docker_and_no_git_question() {
+    // Item 10 §6's "steps 1 (without the Docker and git checks)" — and the whole reason a hub deploy is the machine
+    // that has neither. The same machine, the same config, the same refused `git`, both halves: the server half's
+    // step 1 fails on the absent daemon, and the hub half's passes. If the `Kind` were dropped from the checked
+    // config this test fails on the second assertion, which is the one the acceptance is about.
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("deploy-hub-checks");
+    let mut config = config(Some(format!(
+        "unix://{}",
+        dir.file("absent.sock").display()
+    )));
+    config.control_listen = health_responder();
+    let root = dir.file("root");
+    let target = Target::resolve(Some(root));
+    let deployed = target.config(&config);
+    let mut tools = real_tools(&dir);
+    tools.doctor.preflight.git = shim(&dir, "git", "exit 1");
+    let machine = Fake::new();
+
+    let server = deploy::run_as(&deployed, &target, &tools, &machine, true, Kind::Server);
+    let preflight = line(&server, DeployStep::Preflight);
+    assert_eq!(preflight.word, Word::Failed, "{}", preflight.sentence);
+    assert!(
+        preflight.sentence.contains("absent.sock"),
+        "the server half did not fail on the daemon: {}",
+        preflight.sentence
+    );
+
+    let hub = deploy::run_as(&deployed, &target, &tools, &machine, true, Kind::Hub);
+    let preflight = line(&hub, DeployStep::Preflight);
+    assert_eq!(
+        preflight.word,
+        Word::Satisfied,
+        "a hub deploy asked a question a hub has no answer for: {}",
+        preflight.sentence
+    );
+    for absent in ["docker", "git"] {
+        assert!(
+            !preflight.sentence.contains(absent),
+            "a hub's preflight still reports {absent}: {}",
+            preflight.sentence
+        );
+    }
+}
+
+#[test]
+fn a_hub_deploy_on_a_server_machine_installs_the_union() {
+    // Acceptance bullet 4's first half: a machine whose config says `server`, deployed as a hub, ends up `both` —
+    // and nothing was refused to get there. The unit is the second half of the same fact: a `both` machine runs
+    // sessions, so its unit still requires the daemon even though the run that wrote it installed the hub's half.
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("deploy-union-hub");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let mut config = config(Some(format!("unix://{}", socket.display())));
+    assert_eq!(config.role, Role::Server);
+    config.control_listen = health_responder();
+    let root = dir.file("root");
+    let target = Target::resolve(Some(root.clone()));
+    let deployed = target.config(&config);
+    let tools = real_tools(&dir);
+    let machine = Fake::new();
+
+    let report = deploy::run_as(&deployed, &target, &tools, &machine, false, Kind::Hub);
+    assert!(!report.failed(), "the run failed:\n{}", report.render());
+    let written = std::fs::read_to_string(root.join("etc/holosmith/config.toml"))
+        .expect("the config the run wrote is readable");
+    assert!(
+        written.contains("role = \"both\""),
+        "a hub deploy on a server machine did not install `both`:\n{written}"
+    );
+    let unit = std::fs::read_to_string(target.unit_path()).expect("the unit is readable");
+    assert!(
+        unit.contains("Requires=docker.service"),
+        "a `both` machine's unit dropped the daemon it needs:\n{unit}"
+    );
+    assert!(
+        unit.contains("Description=Holosmith both"),
+        "the unit does not describe the machine it boots:\n{unit}"
+    );
+    // Still a hub's five steps: the union changed the role, not the plan.
+    assert_eq!(
+        line(&report, DeployStep::Images).word,
+        Word::Skipped,
+        "the union turned a hub deploy into a server one"
+    );
+}
+
+#[test]
+fn a_server_deploy_on_a_hub_machine_installs_the_union() {
+    // The other direction, and the one the deleted `refusal` used to forbid. Everything the server half needs is
+    // here — a daemon that answers, an image build, two proxies — because a `server deploy` is the seven steps
+    // whatever the machine's config says; only the file it leaves is different.
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("deploy-union-server");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let mut config = config(Some(format!("unix://{}", socket.display())));
+    config.role = Role::Hub;
+    config.control_listen = health_responder();
+    let root = dir.file("root");
+    let target = Target::resolve(Some(root.clone()));
+    let deployed = target.config(&config);
+    let tools = real_tools(&dir);
+    let machine = Fake::new();
+
+    let report = deploy::run_as(&deployed, &target, &tools, &machine, false, Kind::Server);
+    assert!(!report.failed(), "the run failed:\n{}", report.render());
+    for step in [DeployStep::Images, DeployStep::Proxies] {
+        let line = line(&report, step);
+        assert_eq!(line.word, Word::Changed, "{}", line.sentence);
+    }
+    let written = std::fs::read_to_string(root.join("etc/holosmith/config.toml"))
+        .expect("the config the run wrote is readable");
+    assert!(
+        written.contains("role = \"both\""),
+        "a server deploy on a hub machine did not install `both`:\n{written}"
+    );
+    let unit = std::fs::read_to_string(target.unit_path()).expect("the unit is readable");
+    assert!(
+        unit.contains("Requires=docker.service"),
+        "a `both` machine's unit dropped the daemon it needs:\n{unit}"
     );
 }
 
@@ -2221,7 +2471,7 @@ fn the_unit_is_the_bytes_this_binary_renders_and_the_machine_reads_enabled() {
         exe = exe.display()
     );
     assert_eq!(
-        deploy::unit_text(&exe, false),
+        deploy::unit_text(&exe, false, Role::Server),
         expected,
         "the rendering is not the spec's unit"
     );

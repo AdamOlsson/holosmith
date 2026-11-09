@@ -2578,3 +2578,65 @@ it rather than adding a caveat beside it.
   `class="session-list"` plus `data-host`, and `addSession` finds the local group by
   `.session-list[data-host="local"]`. An id would have had to be duplicated per group, and `querySelector` would then
   answer the first machine's window for a row on another machine.
+
+### Landmines: the CLI as a client, and the deploy's two halves (HS-072)
+
+- **`deploy::Kind` collided with a private `Kind` that was already in `deploy.rs`** (the `Item` kind: `Directory`,
+  `Rendered`, `Kept`, `Vapid`). Rust reports it as a duplicate definition, but the *first* symptom was 40 lines of
+  "expected `holosmith::images::Kind`, found `holosmith::deploy::Kind`" in `tests/deploy.rs`, because that file
+  imports `images::Kind` for the build expectations. The private one was renamed `ItemKind` (its honest name: it is
+  an `Item`'s kind) and the test's import became `Kind as ImageKind`. **A new public type called `Kind` in a crate
+  that already has two is worth checking for a third before writing it.**
+- **`http::hosts` was a private module, so a client of the route could not name `HostList`.** The fix is
+  `pub(crate) mod hosts;` plus `Deserialize` on the wrapper and on `Host` — one wire shape with one definition.
+  `Reach` needed a **hand-written** `Deserialize` beside its hand-written `Serialize` (its words are `Reach::parse`'s,
+  so a third word is the same sentence on the wire as in the table). The alternative — a client-side `List` struct —
+  is a second spelling that drifts the first time the route grows a key. `ErrorBody` **cannot** be reused for reading:
+  its `code` is a `&'static str` (its whole point on the server side), so the client has a two-field `Envelope` with
+  owned strings, and the doc comment says why that is not a fork.
+- **A `GET` may carry `Origin` and `X-Holosmith-Client`; it may not carry `Content-Type`.** The guard reads the
+  content type as the claim "this request has a body", and a `GET` with one and no body is a lie the `bad_client`
+  check does not read but that no client should send. The CLI sends one head for all three calls, with the content
+  type only on the non-`GET`s, and `tests/hub_cli.rs` pins both halves — asserting the absence of a header is as much
+  a measurement as its presence.
+- **The name in a path segment has to be percent-encoded even though the alphabet refuses it.** `DELETE /api/hosts/a b`
+  is a malformed request line, so the answer is a connect-level error instead of `422 bad_host_name` — the client
+  cannot be told "that name is not one a row may take" by a server that never parsed the request. `segment()` encodes
+  everything outside `[A-Za-z0-9-._~]`, and it is deliberately **not** a copy of `name_problem`: the route's alphabet
+  is still the route's, and this only makes the name sendable so the route can refuse it.
+- **A `grep` pattern got written with a `/` where a `.` belonged and the failure read as "the file is missing".**
+  `"$WORK/$name.union.out"` became `"$WORK/$name/union.out"` in one of four identical-looking lines, so the run
+  failed with `grep: …/case_hub_deploy/union.out: No such file or directory` while the file sat there with a dot in
+  its name — and the printed `$(cat …)` in the same `fail` *worked*, which is the tell. `od -c` on the source line is
+  what settled it: `sed`/`grep` rendering of the line showed the dot, so read the bytes before believing a diff.
+- **`bash -x` on the whole gate is the fastest way to find which statement failed.** 2000 trace lines, greppable for
+  the arm's own name (`grep -n union trace.out`), and it prints the **expanded** path — which is the only thing that
+  showed the slash above.
+- **A deploy half's two skips are `Word::Skipped` and the run continues; the *loop* must not treat them as failures.**
+  `run_as` pushes the skip line and `continue`s before the step match, so `Kind::skip` is asked once per step and the
+  remaining steps still evaluate. A `break` there would leave a hub's steps 5–7 unevaluated and the report would
+  describe four steps of five.
+- **Step 2's docker group is a `Kind` parameter all the way down** (`Kind::group` → `install` → `read_user` →
+  `ServiceUser::pending` → `Action::UserAdd::group: Option<String>`). Skipping only the `usermod` would still ask
+  `id -nG` and plan a `usermod` for a group the hub never uses; skipping only the `useradd` flag would create the user
+  in the group the run was supposed to avoid.
+- **`satisfied` on step 2 must not claim a hub's user is in no group.** Nothing removes a membership, so on a `both`
+  machine that ran `server deploy` first the user *is* in the docker group — the clause says "exists and joins no
+  group" for exactly that reason.
+- **A `--root` deploy of the hub half needs no daemon, no `_ping` stub and no `health_responder`** — step 1 asks
+  `doctor` about `Kind::Hub`, so the Docker and git checks are skipped and the four container questions are `unknown`
+  with the hub sentence. That is what makes `case_hub_deploy` the only case in the run that needs neither `docker` nor
+  an image; the *port* still has to be answered for step 7, and `serve` on that port is the honest stand-in.
+- **A `409 host_busy` arm needs a seeded local row, and the seed needs the port before the boot.** `POST /api/hosts`
+  refuses loopback (`host_problem`) while `hosts.toml` is not filtered by that rule (ADR-0073 D9), and
+  `hosts::is_local` compares hosts (so `http://127.0.0.1:<p>` is *not* this machine when `control_origin` is
+  `http://localhost:<p>`). The seed's URL must be the control origin verbatim, and the boot has to be pinned
+  (`start_serve <config> <data> <port>`) because `--port 0` re-derives the origin after the merge and the shortcut
+  cannot fire.
+- **`status`'s `!rendered.contains("machine ")` is a false assertion** — `machines 0` contains it. A row line starts
+  at a line start, so the assertion is `"\nmachine "`. The suite caught it immediately, but the shape is worth
+  remembering: a substring check over a report whose keys are prefixes of one another proves nothing.
+- **The two-configs landmine applies to `status`/`hub host` as much as to `status`/`logs`.** The config a `--root`
+  deploy reads has no `data_root` (so `--root` can prefix the default), and the config `serve`/`status`/`hub host`
+  read has the prefixed one. One file cannot be both: `hub deploy --config A` then `status --config A` would read the
+  machine's real `/var/lib/holosmith`.

@@ -546,6 +546,23 @@ stranger in plain text while letting the listed peer through to its own `404`. I
 prints one `SKIP` line without `python3` (which binds the client), and leaves nothing behind but the shared boot
 (ADR-0075 D7).
 
+…and since HS-072, **`hub deploy` and `hub host`**: `case_hub_deploy` is **the one case in the run that needs no
+daemon, no image and no `openssl`** — a hub's five steps ask `doctor` no Docker and no git question, build nothing and
+start nothing — so its only `SKIP` line is a missing `python3` (which picks the ports a registry row has to spell and
+reads one row's field). It measures the dry run's seven lines in the spec's order with four `needs` and two `skipped`
+(each naming what a hub has no work for) and the tally counting them apart, and an install root that does not appear;
+a real `--root` run whose steps 2–6 apply with their modes, whose `config.toml` reads `role = "hub"`, whose unit
+carries **no** `docker.service`, and whose second run is five `satisfied` and two `skipped`; the **union** — the same
+command on a `server` config leaves `role = "both"`, a unit that keeps the daemon, the `deploy: role: both` line, and
+a stub boot of that tree answering `"role":"both"` with `/api/hosts` and `/api/sessions` unchanged; `hub host
+add`/`list`/`remove` against that machine's own listener, with both registration sentences printed verbatim and no
+code in front, a `409 host_busy` printed with its code and its `force=true`, and the `--force` removal that leaves the
+session standing (the row has to be **seeded** — `POST /api/hosts` refuses loopback — and the seed needs the port
+before the boot, so the case pins it, `case_hosts`' idiom); and `status`'s `machines 1` / `machine attic …` /
+`machines 0` with the phase-2 sentence gone (ADR-0077 D7). The claim that a hub deploy builds no image is
+`tests/deploy.rs`'s, not this case's: a tag from an earlier case is not this case's fact, and the test's `Fake` records
+every build and every daemon call so both lists can be asserted empty.
+
 …and since HS-047, **`server deploy`**: `case_server_deploy` has two halves that skip independently, because the
 bugs it exists to catch are of two kinds. The **offline** half needs `python3` and nothing else: a `_ping` socket
 it answers stands in for the daemon, and the case asserts that the dry run lists the seven steps in the spec's
