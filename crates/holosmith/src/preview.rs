@@ -85,12 +85,18 @@ pub struct Route {
 }
 
 impl Route {
-    /// Split `/<host>/<id>/<rest>` into its three parts, refusing what this listener cannot serve.
+    /// Split `/<host>/<id>/<rest>` into its three parts, refusing only what is not that shape.
     ///
     /// The segments are **not** percent-decoded: this is a tunnel, so a path reaches the dev server the way
     /// the browser spelled it. The query string is kept (a dev server's `?route=` is its own business), and a
     /// path with no trailing slash is the upstream's root, which is why `/local/<id>` and `/local/<id>/` are
     /// the same request.
+    ///
+    /// **Whose host it is, is not this function's decision** (HS-069): a hub serves another machine's sessions
+    /// under that machine's registered name, so the host segment is a *value* the caller resolves against the
+    /// registry ([`plan`]) rather than a rule this splitter can apply. Nor is the id's alphabet one: a peer's
+    /// session is none of this machine's business, and the local arm answers "no such session" from its own table
+    /// for a name that could not be one ([`Context::holds`]).
     pub fn strip(path: &str) -> Result<Self, Refusal> {
         let (path, query) = match path.split_once('?') {
             Some((path, query)) => (path, Some(query)),
@@ -108,12 +114,6 @@ impl Route {
         let (Some(host), Some(id)) = (host, id) else {
             return Err(not_a_path);
         };
-        if host != HOST {
-            return Err(Refusal::UnknownHost(host.to_string()));
-        }
-        if !crate::sessions::is_id(id) {
-            return Err(Refusal::UnknownSession(id.to_string()));
-        }
         let tail = segments.next().unwrap_or("");
         let mut rest = format!("/{tail}");
         if let Some(query) = query {
@@ -173,6 +173,17 @@ pub enum Refusal {
         expected: String,
         sent: Option<String>,
     },
+    /// This machine's role forwards nothing, so another machine's name is not a preview it can reach (HS-069).
+    NotForwarded { host: String },
+    /// The registry knows the host but not where its previews answer: no probe has carried a `preview_origin` from
+    /// it yet (HS-069, ADR-0074).
+    NoPreview { host: String },
+    /// A hub dialled the host's preview origin and got nothing, or could not dial it at all (HS-069).
+    PeerUnreachable {
+        host: String,
+        origin: String,
+        detail: String,
+    },
 }
 
 impl Refusal {
@@ -199,8 +210,8 @@ impl Refusal {
                 404,
                 "preview_unknown_host",
                 format!(
-                    "this machine serves its own sessions as /{HOST}/<session>/<path>, so /{host}/ is not a \
-                     preview it serves; another machine's sessions are the hub's, which forwards them"
+                    "this machine serves its own sessions as /{HOST}/<session>/<path>, and {host} is not a host \
+                     in this machine's registry"
                 ),
             ),
             Self::UnknownSession(id) => (
@@ -226,6 +237,31 @@ impl Refusal {
                 500,
                 "preview_unreadable",
                 format!("the session could not be read: {detail}"),
+            ),
+            Self::NotForwarded { host } => (
+                403,
+                "preview_not_forwarded",
+                format!(
+                    "this machine's role runs no forwarding, so {host} is another machine's name and only a hub \
+                     reaches it; this machine serves its own sessions as /{HOST}/<session>/<path>"
+                ),
+            ),
+            Self::NoPreview { host } => (
+                502,
+                "preview_no_peer_preview",
+                format!(
+                    "the registry knows {host} but not where it serves previews: its health has not answered \
+                     with a preview origin since this machine started, so there is nothing to forward to"
+                ),
+            ),
+            Self::PeerUnreachable {
+                host,
+                origin,
+                detail,
+            } => (
+                502,
+                "preview_peer_unreachable",
+                format!("{host}'s preview listener could not be reached at {origin}: {detail}"),
             ),
             Self::ForeignOrigin { expected, sent } => (
                 403,
@@ -335,11 +371,12 @@ pub fn parse_head(head: &str) -> Option<Head> {
 /// in the response: a dev build's absolute URLs, its `Location` headers and its cookies still name the
 /// origin root, so an app that serves its assets from `/` works and one that hard-codes a base path needs its
 /// own configuration. That limit is item 3's shape, recorded in ADR-0051.
-pub fn rewrite(head: &str, route: &Route, address: SocketAddr, upgrade: bool) -> String {
+pub fn rewrite(head: &str, target: &Target<'_>, upgrade: bool) -> String {
     let mut out = String::with_capacity(head.len() + 64);
     let mut request_line = true;
     let mut wrote_host = false;
     let mut wrote_connection = false;
+    let mut wrote_origin = false;
     for line in head.lines() {
         let line = line.strip_suffix('\r').unwrap_or(line);
         // The blank line ends the head, and a body can arrive in the same read; `split_head` is what keeps it
@@ -352,7 +389,7 @@ pub fn rewrite(head: &str, route: &Route, address: SocketAddr, upgrade: bool) ->
             let mut parts = line.split(' ');
             let method = parts.next().unwrap_or("GET");
             let version = parts.nth(1).unwrap_or("HTTP/1.1");
-            out.push_str(&format!("{method} {} {version}\r\n", route.rest));
+            out.push_str(&format!("{method} {} {version}\r\n", target.target));
             continue;
         }
         let Some((name, _value)) = line.split_once(':') else {
@@ -361,7 +398,17 @@ pub fn rewrite(head: &str, route: &Route, address: SocketAddr, upgrade: bool) ->
         match name.trim().to_ascii_lowercase().as_str() {
             "host" => {
                 wrote_host = true;
-                out.push_str(&format!("Host: {address}\r\n"));
+                out.push_str(&format!("Host: {}\r\n", target.host));
+            }
+            // The **hub is the author of a forwarded request** (HS-069): a peer's listener compares an upgrade's
+            // `Origin` against the preview origin it serves, and the browser's is this machine's. A local request
+            // keeps the client's origin (`Target::origin` is `None`): the container is the upstream, and what the
+            // browser said about itself is still true.
+            "origin" if target.origin.is_some() => {
+                wrote_origin = true;
+                if let Some(origin) = target.origin {
+                    out.push_str(&format!("Origin: {origin}\r\n"));
+                }
             }
             // An upgrade keeps the client's own `Connection`, because the handshake is the upstream's to
             // accept or refuse; everything else is one request per connection.
@@ -377,13 +424,32 @@ pub fn rewrite(head: &str, route: &Route, address: SocketAddr, upgrade: bool) ->
         }
     }
     if !wrote_host {
-        out.push_str(&format!("Host: {address}\r\n"));
+        out.push_str(&format!("Host: {}\r\n", target.host));
+    }
+    if let Some(origin) = target.origin.filter(|_| !wrote_origin) {
+        out.push_str(&format!("Origin: {origin}\r\n"));
     }
     if !upgrade && !wrote_connection {
         out.push_str("Connection: close\r\n");
     }
     out.push_str("\r\n");
     out
+}
+
+/// What a proxied request's head must become: the target to ask for, the `Host` to name, and the `Origin` to claim.
+///
+/// One value rather than three parameters because the three travel together and two callers build them: the local
+/// arm (`Host` is the container's address, the target is the path below the prefix, the origin is the browser's) and
+/// a hub's peer arm (`Host` and `Origin` are the peer's preview origin, the target is the peer's own spelling).
+#[derive(Debug, Clone, Copy)]
+pub struct Target<'a> {
+    /// What `Host` becomes. A dev server's host allow-list judges it, and a peer's listener answers nothing for a
+    /// name it does not serve.
+    pub host: &'a str,
+    /// The request target the upstream is asked for.
+    pub target: &'a str,
+    /// What `Origin` becomes, or `None` to leave the client's alone.
+    pub origin: Option<&'a str>,
 }
 
 /// The head and whatever arrived behind it.
@@ -472,13 +538,20 @@ impl Upstream for Containers {
     }
 }
 
-/// What every connection needs: the origin an upgrade must come from, the rows, and the upstream.
+/// What every connection needs: the origin an upgrade must come from, the rows, the role, the upstream, and the one
+/// program a peer hop runs.
 pub struct Context {
     /// The origin a browser reaches this listener at, and the only `Origin` an upgrade may carry (item 3).
     pub origin: crate::config::Origin,
     /// The rows, so a path naming nothing is a `404` rather than a failed connection.
     pub database: Arc<Mutex<Database>>,
+    /// Which parts of the system this machine runs: `Roles` gives preview forwarding to a `hub` and a `both`, and a
+    /// `server` answers another machine's name as one it does not serve (HS-069).
+    pub role: crate::config::Role,
     pub upstream: Arc<dyn Upstream>,
+    /// The programs a peer hop runs. Only `openssl` today, for a `https` peer's preview origin — the same child the
+    /// host probe and the forwards route use (ADR-0071/ADR-0073/ADR-0074).
+    pub tools: crate::preflight::Tools,
 }
 
 impl Context {
@@ -490,14 +563,39 @@ impl Context {
     ) -> Self {
         Self {
             origin: config.preview_origin.clone(),
+            role: config.role,
             database,
             upstream,
+            tools: crate::preflight::Tools::default(),
         }
     }
 
     /// Whether a head's `Origin` is the preview origin (see [`from_preview_origin`]).
     pub fn from_preview_origin(&self, origin: Option<&str>) -> bool {
         from_preview_origin(&self.origin, origin)
+    }
+
+    /// What this listener does with one parsed path: serve this machine's session, or relay to another machine's.
+    ///
+    /// One registry read, under one lock scope, and only for a host that is not [`HOST`]: `local` never reads the
+    /// table, which is what makes this machine's own previews independent of its registry.
+    fn plan(&self, route: &Route) -> Result<Plan, Refusal> {
+        if route.host == HOST {
+            return Ok(Plan::Local);
+        }
+        let row = {
+            let database = self
+                .database
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            database
+                .hosts()
+                .one(&route.host)
+                .map_err(|error| Refusal::Unreadable {
+                    detail: error.to_string(),
+                })?
+        };
+        plan(route.host.as_str(), self.role, row.as_ref())
     }
 
     /// Whether the rows hold this session.
@@ -513,6 +611,54 @@ impl Context {
             .map_err(|error| Refusal::Unreadable {
                 detail: error.to_string(),
             })
+    }
+}
+
+/// What this listener does with one path, as a value: the decision [`Route::strip`] deliberately does not make.
+///
+/// A pure table, so the four arms are testable without a socket, a database or a daemon — the shape this file's
+/// other decisions have (`from_preview_origin`, `parse_head`), and the reason [`plan`] takes a row rather than
+/// reading one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Plan {
+    /// This machine's own session: resolve its container and tunnel to it (spec item 3's `local`).
+    Local,
+    /// Another machine's session: relay the exchange to that machine's preview listener (HS-069).
+    Peer(crate::config::Origin),
+}
+
+/// The four rules, in the order the answers differ.
+///
+/// 1. **`local` is this machine**, always and on every role — the one name item 3 spells this machine's sessions
+///    with, and the one a registry row may not take (ADR-0073).
+/// 2. **Only a machine that forwards forwards.** `Roles` gives request and preview forwarding to a `hub`; a
+///    `server`'s answer to another machine's name is that it does not serve it, not that the name is unknown.
+/// 3. **The name must be a row.** Anything else is [`Refusal::UnknownHost`], which is what a browser that opened an
+///    old link sees.
+/// 4. **The row must know where that machine's previews answer** (ADR-0074): a peer's preview origin is a second
+///    listener on a second port, only the peer can say what it is, and until its health has answered with one there
+///    is nothing to dial. The refusal names the probe rather than guessing a port.
+pub fn plan(
+    host: &str,
+    role: crate::config::Role,
+    row: Option<&crate::hosts::Host>,
+) -> Result<Plan, Refusal> {
+    if host == HOST {
+        return Ok(Plan::Local);
+    }
+    if role == crate::config::Role::Server {
+        return Err(Refusal::NotForwarded {
+            host: host.to_string(),
+        });
+    }
+    let Some(row) = row else {
+        return Err(Refusal::UnknownHost(host.to_string()));
+    };
+    match row.preview.clone() {
+        Some(preview) => Ok(Plan::Peer(preview)),
+        None => Err(Refusal::NoPreview {
+            host: host.to_string(),
+        }),
     }
 }
 
@@ -632,22 +778,9 @@ pub async fn handle(mut stream: TcpStream, context: &Context) {
             return;
         }
     };
-    // A page asked for without its trailing slash is sent to the slashed path, because that is the base URL its
-    // own relative URLs resolve against (`Route::slashed`). An upgrade is not a page, so it is left alone: a
-    // redirected handshake is not a handshake.
-    if route.slashless_root && !parsed.upgrade {
-        let target = route.slashed_path();
-        let _ = redirect(&mut stream, &target).await;
-        tracing::debug!(
-            target: "holosmith::preview",
-            path = %parsed.target,
-            location = %target,
-            "preview redirected to its slashed path"
-        );
-        return;
-    }
-    // Item 3's one rule, checked before anything is asked of the machine: an upgrade from anywhere but the
-    // preview origin never reaches a dev server.
+    // Item 3's one rule, checked before anything is asked of the machine or of a peer: an upgrade from anywhere but
+    // **this** listener's preview origin never reaches a dev server. On a hub's forwarded request the origin is the
+    // hub's, and the peer applies the same rule again with its own (HS-069, ADR-0074).
     if parsed.upgrade && !context.from_preview_origin(parsed.origin.as_deref()) {
         let refusal = Refusal::ForeignOrigin {
             expected: context.origin.as_str().to_string(),
@@ -656,15 +789,52 @@ pub async fn handle(mut stream: TcpStream, context: &Context) {
         refuse(&mut stream, &refusal, &parsed).await;
         return;
     }
+    let plan = match context.plan(&route) {
+        Ok(plan) => plan,
+        Err(refusal) => {
+            refuse(&mut stream, &refusal, &parsed).await;
+            return;
+        }
+    };
+    // A page asked for without its trailing slash is sent to the slashed path, because that is the base URL its
+    // own relative URLs resolve against (`Route::slashed_path`). An upgrade is not a page, so it is left alone: a
+    // redirected handshake is not a handshake. The redirect names the host the **client** used, so a page opened at
+    // `/workshop/<id>` stays on the hub's own origin and is never bounced to another machine.
+    if route.slashless_root && !parsed.upgrade {
+        let target = route.slashed_path();
+        let _ = redirect_to(&mut stream, &target).await;
+        tracing::debug!(
+            target: "holosmith::preview",
+            path = %parsed.target,
+            location = %target,
+            "preview redirected to its slashed path"
+        );
+        return;
+    }
+    match plan {
+        Plan::Local => local(stream, context, &route, &parsed, head, early).await,
+        Plan::Peer(origin) => peer(stream, &route, &origin, &parsed, head, early, context).await,
+    }
+}
+
+/// This machine's own session: the container's address, then the tunnel (spec item 3's `local`, V7).
+async fn local(
+    mut stream: TcpStream,
+    context: &Context,
+    route: &Route,
+    parsed: &Head,
+    head: &str,
+    early: &str,
+) {
     match context.holds(&route.id) {
         Ok(true) => {}
         Ok(false) => {
             let refusal = Refusal::UnknownSession(route.id.clone());
-            refuse(&mut stream, &refusal, &parsed).await;
+            refuse(&mut stream, &refusal, parsed).await;
             return;
         }
         Err(refusal) => {
-            refuse(&mut stream, &refusal, &parsed).await;
+            refuse(&mut stream, &refusal, parsed).await;
             return;
         }
     }
@@ -676,7 +846,7 @@ pub async fn handle(mut stream: TcpStream, context: &Context) {
         match tokio::task::spawn_blocking(move || upstream.address(&id)).await {
             Ok(Ok(address)) => address,
             Ok(Err(refusal)) => {
-                refuse(&mut stream, &refusal, &parsed).await;
+                refuse(&mut stream, &refusal, parsed).await;
                 return;
             }
             Err(error) => {
@@ -684,7 +854,7 @@ pub async fn handle(mut stream: TcpStream, context: &Context) {
                     id: route.id.clone(),
                     detail: error.to_string(),
                 };
-                refuse(&mut stream, &refusal, &parsed).await;
+                refuse(&mut stream, &refusal, parsed).await;
                 return;
             }
         }
@@ -698,7 +868,7 @@ pub async fn handle(mut stream: TcpStream, context: &Context) {
                     address,
                     detail: error.to_string(),
                 };
-                refuse(&mut stream, &refusal, &parsed).await;
+                refuse(&mut stream, &refusal, parsed).await;
                 return;
             }
             Err(_) => {
@@ -710,18 +880,26 @@ pub async fn handle(mut stream: TcpStream, context: &Context) {
                         CONNECT_TIMEOUT.as_secs()
                     ),
                 };
-                refuse(&mut stream, &refusal, &parsed).await;
+                refuse(&mut stream, &refusal, parsed).await;
                 return;
             }
         };
-    let rewritten = rewrite(head, &route, address, parsed.upgrade);
+    let rewritten = rewrite(
+        head,
+        &Target {
+            host: &address.to_string(),
+            target: &route.rest,
+            origin: None,
+        },
+        parsed.upgrade,
+    );
     if let Err(error) = upstream.write_all(rewritten.as_bytes()).await {
         let refusal = Refusal::Unreachable {
             id: route.id.clone(),
             address,
             detail: error.to_string(),
         };
-        refuse(&mut stream, &refusal, &parsed).await;
+        refuse(&mut stream, &refusal, parsed).await;
         return;
     }
     // The bytes that arrived with the head are the client's, so they go upstream before the tunnel starts.
@@ -738,6 +916,86 @@ pub async fn handle(mut stream: TcpStream, context: &Context) {
         up,
         down,
         "preview"
+    );
+}
+
+/// Another machine's session: the same exchange, relayed to that machine's **preview listener** (HS-069).
+///
+/// The request is re-authored, not merely copied: the first path segment becomes [`HOST`] — the peer's own name for
+/// its sessions, which is what its listener would otherwise refuse — and `Host` and `Origin` become the peer's
+/// preview origin, because its listener answers `Host` with nothing and compares an upgrade's `Origin` against the
+/// origin it serves. Everything else is the client's, and the tunnel cannot be wrong about the body.
+async fn peer(
+    mut stream: TcpStream,
+    route: &Route,
+    origin: &crate::config::Origin,
+    parsed: &Head,
+    head: &str,
+    early: &str,
+    context: &Context,
+) {
+    let mut upstream = match crate::forward::Link::connect(origin, &context.tools).await {
+        Ok(link) => link,
+        Err(failure) => {
+            let refusal = Refusal::PeerUnreachable {
+                host: route.host.clone(),
+                origin: origin.as_str().to_string(),
+                detail: match failure {
+                    crate::forward::Failure::Timeout => format!(
+                        "nothing answered within {} seconds",
+                        crate::forward::CONNECT_TIMEOUT.as_secs()
+                    ),
+                    crate::forward::Failure::Sentence(detail) => detail,
+                },
+            };
+            refuse(&mut stream, &refusal, parsed).await;
+            return;
+        }
+    };
+    let Some(authority) = crate::forward::authority(origin) else {
+        let refusal = Refusal::PeerUnreachable {
+            host: route.host.clone(),
+            origin: origin.as_str().to_string(),
+            detail: "it is not an origin".to_string(),
+        };
+        refuse(&mut stream, &refusal, parsed).await;
+        return;
+    };
+    // `/workshop/<id>/x` reaches the peer as `/local/<id>/x`: one spelling for "this machine's session", which is
+    // the name a row is not allowed to take (ADR-0073) and the name the peer's own listener accepts.
+    let target = format!("/{HOST}/{}{}", route.id, route.rest);
+    let rewritten = rewrite(
+        head,
+        &Target {
+            host: authority,
+            target: &target,
+            origin: Some(origin.as_str()),
+        },
+        parsed.upgrade,
+    );
+    if let Err(error) = upstream.write_all(rewritten.as_bytes()).await {
+        let refusal = Refusal::PeerUnreachable {
+            host: route.host.clone(),
+            origin: origin.as_str().to_string(),
+            detail: error.to_string(),
+        };
+        refuse(&mut stream, &refusal, parsed).await;
+        return;
+    }
+    if !early.is_empty() && upstream.write_all(early.as_bytes()).await.is_err() {
+        return;
+    }
+    let (up, down) = tunnel::pump_both(stream, upstream, Tunnel::Forward).await;
+    tracing::debug!(
+        target: "holosmith::forward",
+        host = %route.host,
+        session = %route.id,
+        path = %route.rest,
+        upgrade = parsed.upgrade,
+        peer = %origin.as_str(),
+        up,
+        down,
+        "preview forwarded"
     );
 }
 
@@ -760,7 +1018,7 @@ const NOT_A_HEAD: &str = "this listener reads one HTTP/1.1 request, and what arr
 ///
 /// `308` rather than `301`/`302`, because the method and the body must survive it: `/local/<id>` and
 /// `/local/<id>/` are the same resource, and a dev server's form post deserves the same answer a `GET` gets.
-async fn redirect(stream: &mut TcpStream, location: &str) -> std::io::Result<()> {
+async fn redirect_to(stream: &mut TcpStream, location: &str) -> std::io::Result<()> {
     let head = format!(
         "HTTP/1.1 308 Permanent Redirect\r\nLocation: {location}\r\nContent-Length: 0\r\n\
          Connection: close\r\n\r\n"
@@ -800,6 +1058,20 @@ mod tests {
         SocketAddr::from(([172, 18, 0, 2], 3000))
     }
 
+    /// `rewrite` for the local arm, which is what every test here but the peer one drives.
+    fn rewritten_head(head: &str, route: &Route, upgrade: bool) -> String {
+        let host = address().to_string();
+        rewrite(
+            head,
+            &Target {
+                host: &host,
+                target: &route.rest,
+                origin: None,
+            },
+            upgrade,
+        )
+    }
+
     #[test]
     fn a_path_is_split_into_host_id_and_rest() {
         let route = Route::strip("/local/0123456789abcdef/index.html").expect("a preview path");
@@ -832,15 +1104,71 @@ mod tests {
     }
 
     #[test]
-    fn another_machines_host_is_refused_and_named() {
-        let refusal = Route::strip("/studio/0123456789abcdef/").expect_err("another host");
+    fn the_host_is_a_value_and_a_name_the_registry_does_not_hold_is_refused_by_the_decision() {
+        // HS-069: `strip` splits, and `plan` decides. A name nobody registered is still the 404 it was, with a
+        // sentence that names the name — the answer a browser opening an old link gets on a hub.
+        let route = Route::strip("/studio/0123456789abcdef/").expect("a preview path");
+        assert_eq!(route.host, "studio");
+        let refusal = plan(&route.host, crate::config::Role::Both, None).expect_err("no such host");
         assert_eq!(refusal.code(), "preview_unknown_host");
         assert_eq!(refusal.status(), 404);
         assert!(refusal.sentence().contains("studio"), "{refusal}");
     }
 
     #[test]
-    fn a_segment_that_is_not_a_session_id_is_refused() {
+    fn the_four_arms_of_the_decision() {
+        // 1. `local` on every role, and without a row.
+        for role in [
+            crate::config::Role::Hub,
+            crate::config::Role::Server,
+            crate::config::Role::Both,
+        ] {
+            assert_eq!(plan(HOST, role, None), Ok(Plan::Local), "{role:?}");
+        }
+        // 2. Another machine's name on a machine that forwards nothing.
+        let refusal = plan("workshop", crate::config::Role::Server, None).expect_err("a server");
+        assert_eq!(refusal.code(), "preview_not_forwarded");
+        assert_eq!(refusal.status(), 403);
+        // 4. A row with no preview origin: the peer said nothing about where its previews answer.
+        let row = crate::hosts::Host {
+            name: "workshop".to_string(),
+            url: crate::config::Origin::parse("https://workshop.example:443").expect("an origin"),
+            preview: None,
+            reach: crate::hosts::Reach::Reachable,
+            version: Some("0.1.0".to_string()),
+            last_error: None,
+            last_checked_at: 1,
+        };
+        let refusal =
+            plan("workshop", crate::config::Role::Hub, Some(&row)).expect_err("no preview origin");
+        assert_eq!(refusal.code(), "preview_no_peer_preview");
+        assert_eq!(refusal.status(), 502);
+        // 3. A row that does know, and a hub that forwards.
+        let row = crate::hosts::Host {
+            preview: Some(
+                crate::config::Origin::parse("https://workshop.example:8444").expect("an origin"),
+            ),
+            ..row
+        };
+        assert_eq!(
+            plan("workshop", crate::config::Role::Hub, Some(&row)),
+            Ok(Plan::Peer(
+                crate::config::Origin::parse("https://workshop.example:8444").expect("an origin")
+            ))
+        );
+        // A `both` machine forwards too: `Roles` says "any machine can be the hub".
+        assert_eq!(
+            plan("workshop", crate::config::Role::Both, Some(&row)),
+            Ok(Plan::Peer(
+                crate::config::Origin::parse("https://workshop.example:8444").expect("an origin")
+            ))
+        );
+    }
+
+    #[test]
+    fn a_segment_that_is_not_a_session_id_is_the_local_tables_answer() {
+        // The id's alphabet is the row's, not the path's (HS-069): a peer's session is none of this machine's
+        // business, and the local arm answers "no session is called that" from its own table.
         for path in [
             "/local/nope/",
             "/local/0123456789ABCDEF/",
@@ -848,9 +1176,52 @@ mod tests {
             "/local/0123456789abcdef0/",
             "/local/../",
         ] {
-            let refusal = Route::strip(path).expect_err(path);
-            assert_eq!(refusal.code(), "preview_unknown_session", "{path}");
+            let route = Route::strip(path).expect(path);
+            assert_eq!(route.id, path.split('/').nth(2).expect("an id"), "{path}");
+            assert_eq!(
+                plan(&route.host, crate::config::Role::Both, None),
+                Ok(Plan::Local)
+            );
         }
+    }
+
+    #[test]
+    fn a_forwarded_request_names_the_peer_and_claims_the_peers_origin() {
+        // What a hub sends the machine that owns the session: the path spelled the way that machine spells its own
+        // (`local`), its preview origin in `Host`, and the same origin in `Origin` — which is the header its listener
+        // compares against its own config, and the reason `hosts.preview` exists (ADR-0074 D5).
+        let route =
+            Route::strip("/workshop/0123456789abcdef/index.html?x=1").expect("a preview path");
+        let target = format!("/{HOST}/{}{}", route.id, route.rest);
+        let rewritten = rewrite(
+            "GET /workshop/0123456789abcdef/index.html?x=1 HTTP/1.1\r\nHost: hub.example\r\n\
+             Origin: https://hub.example:8444\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+            &Target {
+                host: "workshop.example:8444",
+                target: &target,
+                origin: Some("https://workshop.example:8444"),
+            },
+            true,
+        );
+        assert_eq!(
+            rewritten,
+            "GET /local/0123456789abcdef/index.html?x=1 HTTP/1.1\r\nHost: workshop.example:8444\r\n\
+             Origin: https://workshop.example:8444\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
+        );
+        // And an origin the client did not send is added rather than left missing, or the peer refuses the upgrade.
+        let rewritten = rewrite(
+            "GET /local/0123456789abcdef/ws HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\n\r\n",
+            &Target {
+                host: "workshop.example:8444",
+                target: "/local/0123456789abcdef/ws",
+                origin: Some("https://workshop.example:8444"),
+            },
+            true,
+        );
+        assert!(
+            rewritten.contains("Origin: https://workshop.example:8444\r\n"),
+            "{rewritten}"
+        );
     }
 
     #[test]
@@ -863,13 +1234,17 @@ mod tests {
 
     #[test]
     fn a_control_api_path_is_a_host_this_listener_does_not_serve() {
-        // `/api/health` is `/<host>/<id>` to a listener that serves only `/<host>/<id>/…`, so the host segment
-        // is what refuses it — which is the same 404 a browser gets and a different sentence in the log. The
-        // gate's `case_preview` asserts the answer rather than the code: no envelope, and a path it can point at.
+        // `/api/health` is `/<host>/<id>` to a listener that serves only `/<host>/<id>/…`, so the **host** segment
+        // is what refuses it: `api` is a name, and no row has it. That is the same 404 a browser gets, and the
+        // sentence names a preview path. The gate's `case_preview` asserts the answer rather than the code: no
+        // envelope, and a path it can point at.
         for path in ["/api/health", "/api/sessions"] {
-            let refusal = Route::strip(path).expect_err(path);
+            let route = Route::strip(path).expect(path);
+            assert_eq!(route.host, "api", "{path}");
+            let refusal = plan(&route.host, crate::config::Role::Both, None).expect_err(path);
             assert_eq!(refusal.code(), "preview_unknown_host", "{path}");
             assert_eq!(refusal.status(), 404, "{path}");
+            assert!(refusal.sentence().contains("/local/"), "{path}: {refusal}");
         }
     }
 
@@ -931,7 +1306,7 @@ mod tests {
         let route = Route::strip("/local/0123456789abcdef/index.html?x=1").expect("a preview path");
         let head = "GET /local/0123456789abcdef/index.html?x=1 HTTP/1.1\r\nHost: localhost:8081\r\n\
                     Accept: */*\r\n\r\n";
-        let rewritten = rewrite(head, &route, address(), false);
+        let rewritten = rewritten_head(head, &route, false);
         assert_eq!(
             rewritten,
             "GET /index.html?x=1 HTTP/1.1\r\nHost: 172.18.0.2:3000\r\nAccept: */*\r\n\
@@ -944,7 +1319,7 @@ mod tests {
         let route = Route::strip("/local/0123456789abcdef/ws").expect("a preview path");
         let head = "GET /local/0123456789abcdef/ws HTTP/1.1\r\nHost: h\r\nConnection: Upgrade\r\n\
                     Upgrade: websocket\r\nSec-WebSocket-Key: k\r\n\r\n";
-        let rewritten = rewrite(head, &route, address(), true);
+        let rewritten = rewritten_head(head, &route, true);
         assert!(rewritten.contains("Connection: Upgrade\r\n"), "{rewritten}");
         assert!(!rewritten.contains("Connection: close"), "{rewritten}");
         assert!(rewritten.contains("Upgrade: websocket\r\n"), "{rewritten}");
@@ -953,15 +1328,14 @@ mod tests {
     #[test]
     fn a_host_that_was_not_sent_is_added_and_a_duplicate_is_replaced() {
         let route = Route::strip("/local/0123456789abcdef/").expect("a preview path");
-        let rewritten = rewrite("GET / HTTP/1.1\r\n\r\n", &route, address(), false);
+        let rewritten = rewritten_head("GET / HTTP/1.1\r\n\r\n", &route, false);
         assert!(
             rewritten.contains("Host: 172.18.0.2:3000\r\n"),
             "{rewritten}"
         );
-        let rewritten = rewrite(
+        let rewritten = rewritten_head(
             "GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n",
             &route,
-            address(),
             false,
         );
         assert_eq!(rewritten.matches("Host: ").count(), 2, "{rewritten}");
@@ -1035,6 +1409,17 @@ mod tests {
             Refusal::ForeignOrigin {
                 expected: ORIGIN.to_string(),
                 sent: None,
+            },
+            Refusal::NotForwarded {
+                host: "workshop".to_string(),
+            },
+            Refusal::NoPreview {
+                host: "workshop".to_string(),
+            },
+            Refusal::PeerUnreachable {
+                host: "workshop".to_string(),
+                origin: "https://workshop.example:8444".to_string(),
+                detail: "refused".to_string(),
             },
         ];
         for refusal in refusals {

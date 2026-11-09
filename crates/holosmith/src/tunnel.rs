@@ -26,6 +26,8 @@ use tokio::net::TcpStream;
 pub enum Tunnel {
     Egress,
     Preview,
+    /// The hub's preview hop (HS-069): one machine's preview listener relaying to another's.
+    Forward,
 }
 
 impl Tunnel {
@@ -43,6 +45,12 @@ impl Tunnel {
                 direction,
                 %error,
                 "the tunnel's direction stopped"
+            ),
+            Self::Forward => tracing::debug!(
+                target: "holosmith::forward",
+                direction,
+                %error,
+                "the forwarded preview's direction stopped"
             ),
         }
     }
@@ -92,7 +100,16 @@ pub async fn read_head(stream: &mut TcpStream, max: usize, within: Duration) -> 
 /// chunk that failed and nothing else. A `shutdown` on the far side is how the other half learns the stream
 /// ended. [`Tunnel`] decides which listener's tracing target the two `debug` lines carry, because a target
 /// has to be a literal for the macro and an egress failure under a preview's name would be a lie.
-pub async fn pump_both(client: TcpStream, upstream: TcpStream, tunnel: Tunnel) -> (u64, u64) {
+///
+/// **Generic in both ends since HS-069.** The client is a socket this listener accepted and the upstream is a
+/// socket it dialled — and on a hub's preview hop that dial is `openssl s_client`'s two pipes rather than a
+/// `TcpStream` (ADR-0074), so both parameters are "something readable and writable" and neither is a concrete
+/// socket type. Behaviour is unchanged: the same two loops, the same counts, the same shutdown.
+pub async fn pump_both<C, U>(client: C, upstream: U, tunnel: Tunnel) -> (u64, u64)
+where
+    C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    U: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     use std::sync::atomic::{AtomicU64, Ordering};
 
     let (mut client_read, mut client_write) = tokio::io::split(client);

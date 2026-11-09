@@ -149,8 +149,10 @@ impl Listening {
         };
         let context = Context {
             origin: Origin::parse(ORIGIN).expect("the test origin is valid"),
+            role: holosmith::config::Role::Both,
             database,
             upstream: Arc::new(Stub { answer: upstream }),
+            tools: holosmith::preflight::Tools::default(),
         };
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
