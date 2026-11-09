@@ -153,6 +153,11 @@ impl Listening {
             database,
             upstream: Arc::new(Stub { answer: upstream }),
             tools: holosmith::preflight::Tools::default(),
+            // HS-070: no `allowed_hubs`, so the listener verifies nobody and these tests measure the routing.
+            trust: holosmith::trust::Trust::of(
+                &holosmith::config::Config::default(),
+                &holosmith::preflight::Tools::default(),
+            ),
         };
         let listener = TcpListener::bind("127.0.0.1:0")
             .await

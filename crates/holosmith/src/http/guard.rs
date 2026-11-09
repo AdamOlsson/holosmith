@@ -43,12 +43,20 @@ pub struct Guards {
     control_origin: String,
     /// The tailnet login the requests must come from, when one is configured.
     owner: Option<String>,
+    /// The machine-to-machine check (HS-070): not a header's, and asked after these four.
+    trust: crate::trust::Trust,
 }
 
 impl Guards {
     /// Resolve the checks from the config in force. The config's own validators already
     /// guarantee an allow-list entry is a bare ASCII name or a bracketed IPv6 literal.
     pub fn from_config(config: &Config) -> Self {
+        Self::from_config_with(config, &crate::preflight::Tools::default())
+    }
+
+    /// The same checks, with the programs they run named: `serve` passes the run's own
+    /// [`Tools`](crate::preflight::Tools), and a test passes a shim for the `tailscale` whois.
+    pub fn from_config_with(config: &Config, tools: &crate::preflight::Tools) -> Self {
         let mut hosts: Vec<String> = config
             .allowed_hosts
             .iter()
@@ -63,7 +71,15 @@ impl Guards {
             hosts,
             control_origin: config.control_origin.as_str().to_ascii_lowercase(),
             owner: config.owner.clone(),
+            trust: crate::trust::Trust::of(config, tools),
         }
+    }
+
+    /// Machine-to-machine trust, which the caller asks **after** [`Self::check`] and outside it: the four
+    /// checks read headers, and this one reads a socket address the layer below supplies and runs a child
+    /// ([`crate::trust::Trust::admit`]).
+    pub fn trust(&self) -> &crate::trust::Trust {
+        &self.trust
     }
 
     /// The first check this request fails, or `None` when it passes all four.

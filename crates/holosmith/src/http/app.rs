@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Router;
 use axum::body::Bytes;
+use axum::extract::connect_info::ConnectInfo;
 use axum::extract::rejection::{BytesRejection, PathRejection};
 use axum::extract::{Path, RawQuery, Request};
 use axum::handler::Handler;
@@ -846,7 +847,21 @@ async fn edge(
     } else {
         match guards.check(&request) {
             Some(error) => error.into_response(),
-            None => next.run(request).await,
+            // The fifth check, and the fifth is not a header's: who is calling. Asked **after** the four because a
+            // browser's mistake is the cheaper answer to give, and only where they apply because a peer's health
+            // probe has to keep working (HS-070).
+            None => match admit(
+                guards.trust(),
+                request
+                    .extensions()
+                    .get::<ConnectInfo<std::net::SocketAddr>>()
+                    .map(|info| info.0.ip()),
+            )
+            .await
+            {
+                Some(error) => error.into_response(),
+                None => next.run(request).await,
+            },
         }
     };
     guard::strip_cors(&mut response);
@@ -859,6 +874,46 @@ async fn edge(
         "request"
     );
     response
+}
+
+/// Machine-to-machine trust: does the address this call came from belong to a hub this machine takes calls from
+/// (HS-070, spec item 4, V11)?
+///
+/// `None` is "yes, or nothing to ask" — an empty `allowed_hubs` verifies nobody (the ACLs-only fallback), and a
+/// front door, a listed node and a machine with no list all come back `None` here. The whois is a child, so it runs
+/// on the blocking pool: this is a request path, and a wedged `tailscaled` must cost a refusal rather than a stall.
+///
+/// The address comes from [`ConnectInfo`], which [`crate::serve::run`] installs by serving the router as
+/// `into_make_service_with_connect_info`. A router driven in-process (a test's `oneshot`) has no address, which is a
+/// refusal when a list is configured — a machine that cannot say who is calling has verified nobody.
+async fn admit(trust: &crate::trust::Trust, peer: Option<std::net::IpAddr>) -> Option<ApiError> {
+    let trust = trust.clone();
+    if !trust.guarded() {
+        return None;
+    }
+    match tokio::task::spawn_blocking(move || trust.admit(peer)).await {
+        Ok(Ok(admitted)) => {
+            admitted.log();
+            None
+        }
+        Ok(Err(refusal)) => {
+            refusal.log();
+            Some(ApiError::from(&refusal))
+        }
+        Err(error) => {
+            // The blocking task itself failed, which no listener has seen: it is still a machine that verified
+            // nobody, so it is still a refusal, and the reason is a log line rather than an answer.
+            tracing::warn!(
+                target: "holosmith::trust",
+                %error,
+                "the trust check could not be run for a call, so the call was refused"
+            );
+            Some(crate::http::error::ApiError::peer_unverifiable(
+                "this machine could not verify the caller, so it will not accept the call"
+                    .to_string(),
+            ))
+        }
+    }
 }
 
 /// The only request no guard applies to: the health endpoint, on `GET` or `HEAD`.

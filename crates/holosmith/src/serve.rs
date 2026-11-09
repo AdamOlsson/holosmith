@@ -71,7 +71,15 @@ where
     // deadline therefore lives outside it, in the second `select!` below, which needs to know
     // when the signal arrived.
     let (stop_tx, stop_rx) = oneshot::channel();
-    let server = axum::serve(listener, app.into_router()).with_graceful_shutdown(async move {
+    // Served **with connect info** since HS-070: machine-to-machine trust asks the Tailscale daemon
+    // who an address is, so the address has to reach the edge layer. `Router::into_make_service`
+    // would drop it, and a router built without it is a router whose callers cannot be verified.
+    let server = axum::serve(
+        listener,
+        app.into_router()
+            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
         shutdown.await;
         let _ = stop_tx.send(());
     });

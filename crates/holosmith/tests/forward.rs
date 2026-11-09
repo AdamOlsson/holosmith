@@ -669,6 +669,9 @@ impl Preview {
             database: Arc::clone(&state.database),
             upstream: Arc::new(Never),
             tools: Tools::default(),
+            // HS-070: this test's machine lists no hubs, so its preview listener verifies nobody (the config's own
+            // default, and the arm the ACLs-only fallback is).
+            trust: holosmith::trust::Trust::of(config, &Tools::default()),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await

@@ -311,7 +311,20 @@ pub fn run(args: ServeArgs) -> ExitCode {
             &preview_line,
             &database,
         );
-        let guards = Guards::from_config(&loaded.config);
+        // The external programs this run's request paths use, named once: the guards resolve the trust
+        // check from the same `Tools` the state carries, so a boot with a shim (a test's, or a machine whose
+        // `tailscale` is elsewhere) is one value rather than two spellings of one.
+        let tools = crate::preflight::Tools::default();
+        let guards = Guards::from_config_with(&loaded.config, &tools);
+        // Machine-to-machine trust (HS-070) is a fact about the config rather than about this boot, and the banner
+        // is exactly eight lines (`tests/serve_cli.rs`): so it is said at `debug!`, and the empty-list arm is a
+        // recorded risk (ADR-0075) rather than a startup warning.
+        tracing::debug!(
+            target: "holosmith::serve",
+            hubs = loaded.config.allowed_hubs.len(),
+            guarded = !loaded.config.allowed_hubs.is_empty(),
+            "machine trust: an empty allowed_hubs verifies nobody and leaves Tailscale's ACLs as the only control"
+        );
         let database = Arc::new(Mutex::new(database));
         // The writer thread outlives this scope, so its handle is what the app carries. The
         // stream `spawn` also hands back is dropped: every subscriber is made from the handle
@@ -336,7 +349,7 @@ pub fn run(args: ServeArgs) -> ExitCode {
             merges: crate::merge::Merges::new(),
             // HS-062's floor measures the data root on the request path, with the same `df` this boot's
             // preflight used: the machine's own program, resolved through `PATH`, which a test swaps for a shim.
-            tools: crate::preflight::Tools::default(),
+            tools,
             forwarding: crate::forward::Forwarding::default(),
         };
         // The **startup reconcile** (HS-044, V9): what a `kill -9` left behind, put right **before any

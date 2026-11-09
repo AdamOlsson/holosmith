@@ -121,6 +121,7 @@ fn floored_state(dir: &TempDir, df: PathBuf, min_free_gb: u64) -> AppState {
         du: PathBuf::from("du"),
         // The Web Push sender's (HS-066); this test is about `df` too.
         openssl: PathBuf::from("openssl"),
+        ..Tools::default()
     };
     state
 }
@@ -249,6 +250,7 @@ async fn the_boot_and_the_request_paths_read_one_number() {
             du: PathBuf::from("du"),
             // The Web Push sender's (HS-066); this test is about `df` too.
             openssl: PathBuf::from("openssl"),
+            ..Tools::default()
         },
     );
     let disk_finding = findings
@@ -279,6 +281,7 @@ async fn the_boot_and_the_request_paths_read_one_number() {
         du: PathBuf::from("du"),
         // The Web Push sender's (HS-066); this test is about `df` too.
         openssl: PathBuf::from("openssl"),
+        ..Tools::default()
     };
     let served = Served::start(http::router(state.clone()), GRACE).await;
     let refused = post_create(served.addr, "disk-floor-agree").await;
@@ -447,6 +450,7 @@ async fn a_stub_run_is_not_measured_at_all() {
         du: PathBuf::from("du"),
         // The Web Push sender's (HS-066); this test is about `df` too.
         openssl: PathBuf::from("openssl"),
+        ..Tools::default()
     };
     // `state_in` leaves `runtime` on the stub, which is what `serve --backend stub` would build.
     assert_eq!(state.runtime.backend, Backend::Stub);
@@ -508,6 +512,7 @@ async fn a_floor_of_zero_does_not_need_a_df_at_all() {
         du: PathBuf::from("du"),
         // The Web Push sender's (HS-066); this test is about `df` too.
         openssl: PathBuf::from("openssl"),
+        ..Tools::default()
     };
     let served = Served::start(http::router(state.clone()), GRACE).await;
     let response = post_create(served.addr, "disk-floor-zero-no-df").await;

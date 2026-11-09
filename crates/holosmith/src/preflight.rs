@@ -253,22 +253,26 @@ impl fmt::Display for Finding {
 /// (HS-062); `du` is the per-session soft cap's watchdog (HS-063), which is neither a request path nor a
 /// startup check — so the value rides here because this is the one place a test can own a program. `openssl` is
 /// the Web Push sender's (HS-066), a background task's program like `du`, and it is here for the same reason.
+/// `tailscale` is machine-to-machine trust's (HS-070): the whois both listeners run on a request path, which a
+/// test can only stand in for by naming a shim.
 #[derive(Debug, Clone)]
 pub struct Tools {
     pub git: PathBuf,
     pub df: PathBuf,
     pub du: PathBuf,
     pub openssl: PathBuf,
+    pub tailscale: PathBuf,
 }
 
 impl Default for Tools {
-    /// `git`, `df`, `du` and `openssl` from `PATH`, which is what a machine has.
+    /// `git`, `df`, `du`, `openssl` and `tailscale` from `PATH`, which is what a machine has.
     fn default() -> Self {
         Self {
             git: PathBuf::from("git"),
             df: PathBuf::from(crate::disk::DF),
             du: PathBuf::from(crate::quota::DU),
             openssl: PathBuf::from(crate::push::OPENSSL),
+            tailscale: PathBuf::from(crate::trust::PROGRAM),
         }
     }
 }

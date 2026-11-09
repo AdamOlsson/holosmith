@@ -55,6 +55,19 @@ pub const UPSTREAM_UNREACHABLE: &str = "upstream_unreachable";
 /// A create on a machine whose role runs no sessions (HS-069, spec's `Roles`).
 pub const SESSIONS_DISABLED: &str = "sessions_disabled";
 
+/// The caller is a machine that is not a hub this one accepts forwarded calls from (HS-070, spec item 4, V11).
+///
+/// `403`: the route exists, the *machine* will not be driven by this caller, and no retry changes that — the fix is
+/// on the caller (it is not the listed hub) or on this machine's `allowed_hubs`, which no answer may describe.
+pub const PEER_NOT_ALLOWED: &str = "peer_not_allowed";
+
+/// The caller's tailnet identity could not be read, so this machine cannot tell a hub from anything else (HS-070).
+///
+/// A second code rather than one, because the two facts need different fixes: one is "this machine is not your
+/// hub", the other is "this machine's daemon did not answer" — and `doctor`'s Tailscale finding is where the
+/// second one is diagnosed.
+pub const PEER_UNVERIFIABLE: &str = "peer_unverifiable";
+
 /// A create's body is not a JSON object with the four accepted fields (HS-008).
 pub const BAD_BODY: &str = "bad_body";
 
@@ -737,6 +750,19 @@ impl ApiError {
         )
     }
 
+    /// What a call from a machine that is not a listed hub answers (HS-070, spec item 4, V11).
+    ///
+    /// The message is the trust check's own sentence: it names the peer's address and the node the tailnet named for
+    /// it, and never this machine's list (`crate::trust::Refusal`).
+    pub fn peer_not_allowed(message: impl Into<Cow<'static, str>>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, PEER_NOT_ALLOWED, message)
+    }
+
+    /// What a call whose tailnet identity could not be read answers (HS-070).
+    pub fn peer_unverifiable(message: impl Into<Cow<'static, str>>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, PEER_UNVERIFIABLE, message)
+    }
+
     /// What a registration whose `name` is not one a registry row may have answers (HS-068).
     ///
     /// The **message** is the caller's, like [`Self::bad_endpoint`]'s: an uppercase name, a name too long for a path
@@ -913,6 +939,22 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.status, Json(self.body)).into_response()
+    }
+}
+
+/// A machine-to-machine refusal, as the control listener's answer (HS-070).
+///
+/// The mapping lives here rather than in [`crate::trust`] for ADR-0008's reason: the codes are this module's, and a
+/// refusal that carried its own status and JSON would be a second envelope. The sentence is the trust check's own —
+/// one decision, two spellings — and it names no `allowed_hubs` entry (`crate::trust::Refusal`'s doc says why).
+impl From<&crate::trust::Refusal> for ApiError {
+    fn from(refusal: &crate::trust::Refusal) -> Self {
+        match refusal {
+            crate::trust::Refusal::NotListed { .. } => Self::peer_not_allowed(refusal.sentence()),
+            crate::trust::Refusal::NoPeer { .. } | crate::trust::Refusal::Unverifiable { .. } => {
+                Self::peer_unverifiable(refusal.sentence())
+            }
+        }
     }
 }
 

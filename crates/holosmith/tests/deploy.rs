@@ -142,6 +142,8 @@ fn doctor_tools(dir: &TempDir) -> doctor::Tools {
             df: df_shim(dir),
             du: PathBuf::from("du"),
             openssl: PathBuf::from("openssl"),
+            // Machine trust's whois (HS-070): no deploy step runs it, so the name is enough.
+            tailscale: PathBuf::from("tailscale"),
         },
         tailscale: tailscale_serve_shim(
             dir,

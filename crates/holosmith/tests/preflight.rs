@@ -77,6 +77,8 @@ fn tools(dir: &TempDir, version: &str, available_kb: u64) -> Tools {
         du: std::path::PathBuf::from("du"),
         // The Web Push sender's (HS-066): no preflight check runs it either.
         openssl: std::path::PathBuf::from("openssl"),
+        // Machine trust's whois (HS-070): no preflight check runs it.
+        tailscale: std::path::PathBuf::from("tailscale"),
     }
 }
 
@@ -210,6 +212,7 @@ fn a_git_that_cannot_be_run_is_a_complaint_and_not_a_pass() {
             df: df_shim(&dir, 480_000_000),
             du: std::path::PathBuf::from("du"),
             openssl: std::path::PathBuf::from("openssl"),
+            tailscale: std::path::PathBuf::from("tailscale"),
         },
     );
     assert_eq!(

@@ -52,6 +52,7 @@ pub mod status;
 pub mod stop;
 pub mod sweeper;
 pub mod tool;
+pub mod trust;
 pub mod tunnel;
 pub mod turn;
 pub mod uninstall;

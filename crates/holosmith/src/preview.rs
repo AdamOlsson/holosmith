@@ -177,6 +177,13 @@ pub enum Refusal {
     },
     /// This machine's role forwards nothing, so another machine's name is not a preview it can reach (HS-069).
     NotForwarded { host: String },
+    /// The machine that asked is not one this machine takes calls from (HS-070, spec item 4, V11).
+    ///
+    /// One variant for both of the trust check's refusals, because this listener's own vocabulary is one sentence in
+    /// plain text: [`crate::trust::Refusal`] owns the words (a peer and the node the tailnet named for it, never an
+    /// `allowed_hubs` entry) and this variant owns the fact that a *preview* listener said them. The code differs per
+    /// arm, so the log line a test greps is the one a reader expects.
+    Peer { refusal: crate::trust::Refusal },
     /// The registry knows the host but not where its previews answer: no probe has carried a `preview_origin` from
     /// it yet (HS-069, ADR-0074).
     NoPreview { host: String },
@@ -247,6 +254,15 @@ impl Refusal {
                     "this machine's role runs no forwarding, so {host} is another machine's name and only a hub \
                      reaches it; this machine serves its own sessions as /{HOST}/<session>/<path>"
                 ),
+            ),
+            Self::Peer { refusal } => (
+                refusal.status(),
+                match refusal {
+                    crate::trust::Refusal::NotListed { .. } => "preview_peer_not_allowed",
+                    crate::trust::Refusal::NoPeer { .. }
+                    | crate::trust::Refusal::Unverifiable { .. } => "preview_peer_unverifiable",
+                },
+                refusal.sentence(),
             ),
             Self::NoPreview { host } => (
                 502,
@@ -554,6 +570,9 @@ pub struct Context {
     /// The programs a peer hop runs. Only `openssl` today, for a `https` peer's preview origin — the same child the
     /// host probe and the forwards route use (ADR-0071/ADR-0073/ADR-0074).
     pub tools: crate::preflight::Tools,
+    /// Which machines may drive this listener (HS-070): the same decision the control listener asks, spelled in
+    /// this listener's own words (`Refusal::Peer`).
+    pub trust: crate::trust::Trust,
 }
 
 impl Context {
@@ -563,12 +582,32 @@ impl Context {
         database: Arc<Mutex<Database>>,
         upstream: Arc<dyn Upstream>,
     ) -> Self {
+        let tools = crate::preflight::Tools::default();
         Self {
             origin: config.preview_origin.clone(),
             role: config.role,
             database,
             upstream,
-            tools: crate::preflight::Tools::default(),
+            trust: crate::trust::Trust::of(config, &tools),
+            tools,
+        }
+    }
+
+    /// Whether the machine that opened this connection may drive this listener at all (HS-070).
+    ///
+    /// The whois is a child, so it runs on the blocking pool: an accept loop must keep accepting while one peer is
+    /// being verified. A blocking task that died is still a machine this listener verified nobody for, and
+    /// [`crate::trust::Refusal::NoPeer`] is exactly that fact.
+    async fn admits(
+        &self,
+        peer: Option<IpAddr>,
+    ) -> Result<crate::trust::Admitted, crate::trust::Refusal> {
+        let trust = self.trust.clone();
+        match tokio::task::spawn_blocking(move || trust.admit(peer)).await {
+            Ok(answer) => answer,
+            Err(error) => Err(crate::trust::Refusal::NoPeer {
+                detail: error.to_string(),
+            }),
         }
     }
 
@@ -763,6 +802,10 @@ where
 /// closed, and a body of any size (a dev build's upload, a build's streaming response) moves 16 KiB at a
 /// time through [`tunnel::pump_both`].
 pub async fn handle(mut stream: TcpStream, context: &Context) {
+    // The address the connection came from, before anything is read: it is what machine-to-machine trust asks the
+    // Tailscale daemon about (HS-070). `peer_addr` fails on a socket that has already been shut down, and that is a
+    // machine whose identity cannot be read — which the check refuses rather than waves through.
+    let caller = stream.peer_addr().ok().map(|address| address.ip());
     let head = match tunnel::read_head(&mut stream, MAX_HEAD, HEAD_TIMEOUT).await {
         Some(head) => head,
         None => {
@@ -775,6 +818,18 @@ pub async fn handle(mut stream: TcpStream, context: &Context) {
         let _ = respond(&mut stream, 400, NOT_A_HEAD).await;
         return;
     };
+    // Item 4's machine rule, **before** this listener's own: whether this machine takes calls from the caller at all
+    // precedes whether the caller's `Origin` is one an upgrade may carry, and it is the same decision the control
+    // listener makes — so a stranger's preview is refused in the words `crate::trust` owns (HS-070).
+    match context.admits(caller).await {
+        Ok(admitted) => admitted.log(),
+        Err(refusal) => {
+            refusal.log();
+            let refused = Refusal::Peer { refusal };
+            refuse(&mut stream, &refused, &parsed).await;
+            return;
+        }
+    }
     let route = match Route::strip(&parsed.target) {
         Ok(route) => route,
         Err(refusal) => {
