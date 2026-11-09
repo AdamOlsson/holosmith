@@ -4775,7 +4775,7 @@ case_hosts() {
   local name=case_hosts root="$repo_root/target/verify-hosts-$$"
   local data="$root/data" config="$root/config.toml" tls="$root/tls" seed="$root/hosts.toml"
   local log="$root/asked.txt" standin_pid="" self_port good redirect nameless
-  local response body fresh
+  local response body fresh id
   local api_row="api-made"
   # The guards are first, before `stop_serve`: a case that skipped after stopping the run's server would leave
   # `phase_serve`'s own `stop_serve` with no pid to signal.
@@ -4935,7 +4935,7 @@ PY
   # A payload with no name: the same answer as a redirect, and the sentence names what was missing.
   check "$name/nameless/reach" unreachable "$(hosts_row_field nameless reach "$body")"
   case "$(hosts_row_field nameless last_error "$body")" in
-    *name*) assertions=$((assertions + 1)) ;;
+    *"missing field \`name\`"*) assertions=$((assertions + 1)) ;;
     *) fail "$name/nameless/sentence" "the nameless row's sentence does not name the field: $(hosts_row_field nameless last_error "$body")" ;;
   esac
   # A MagicDNS name that resolves nowhere: item 16's "fails health ... not removed".
@@ -4953,6 +4953,9 @@ PY
     "loopback|https://localhost" \
     "port|https://box.tail1234.ts.net:22" \
     "port-scheme|http://box.tail1234.ts.net:443" \
+    "port-text|https://box.tail1234.ts.net:abc" \
+    "port-range|https://box.tail1234.ts.net:99999" \
+    "port-empty|https://box.tail1234.ts.net:" \
     "path|https://box.tail1234.ts.net/api"; do
     local label="${pair%%|*}" url="${pair#*|}"
     fetch_body "${name}_url_$label" POST /api/hosts "{\"name\":\"workshop\",\"url\":\"$url\"}" \
@@ -5013,6 +5016,8 @@ PY
     *) fail "$name/busy/force" "the refusal does not name the override: $response" ;;
   esac
   # Nothing was removed by the refusal.
+  id="$(sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p' "$WORK/responses/${name}_created.body")"
+  [ -n "$id" ] || fail "$name/created/id" "the create names no session id: $(cat "$WORK/responses/${name}_created.body")"
   fetch "${name}_list3" GET /api/hosts "Host: 127.0.0.1" || fail "${name}_list3/no_answer" "GET /api/hosts did not answer"
   check "$name/busy/kept" reachable "$(hosts_row_field thisbox reach "$WORK/responses/${name}_list3.body")"
   # A row that does not name this machine has no sessions this machine can count, so it goes without a force.
@@ -5031,6 +5036,11 @@ PY
   check "$name/forced/gone" '<absent>' "$(hosts_row_field thisbox name "$WORK/responses/${name}_list4.body")"
   fresh="$(hosts_row_field "$api_row" name "$WORK/responses/${name}_list4.body")"
   check "$name/forced/api-row" "$api_row" "$fresh"
+  # The session the refused delete protected is still there: removing the *row* does not stop it, which is the
+  # sentence the 409 gave the operator and what `?force=true` means.
+  fetch "${name}_session" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+    fail "${name}_session/no_answer" "GET /api/sessions/$id did not answer"
+  expect_status "${name}_session" "$(answer "${name}_session")" 200
   # A name the table does not hold is a `404`, for both of a delete's moments.
   fetch "${name}_missing" DELETE /api/hosts/nobody \
     "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \

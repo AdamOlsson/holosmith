@@ -31,7 +31,6 @@ use crate::clock;
 use crate::config::{Config, Origin};
 use crate::db::Database;
 use crate::preflight::Tools;
-use crate::sessions::RepoError;
 
 /// The lowest port a registry row may name that is not its own scheme's default.
 ///
@@ -147,19 +146,6 @@ impl Refusal {
         match self {
             Self::Name(sentence) | Self::Url(sentence) | Self::NotHolosmith(sentence) => sentence,
         }
-    }
-}
-
-/// Why a registration did not happen: a refusal a client can act on, or the database.
-#[derive(Debug)]
-pub enum RegisterError {
-    Refused(Refusal),
-    Store(RepoError),
-}
-
-impl From<Refusal> for RegisterError {
-    fn from(refusal: Refusal) -> Self {
-        Self::Refused(refusal)
     }
 }
 
@@ -283,23 +269,27 @@ fn is_magic_name(host: &str) -> bool {
 /// [`MIN_PORT`], plus the port the scheme itself means when the URL leaves it out — the rule is one sentence and a
 /// URL that names its own default port is the same URL.
 pub fn port_problem(origin: &Origin) -> Option<String> {
-    let port = origin.port()?;
-    if port >= MIN_PORT || Some(port) == default_port(origin) {
+    // A port that is not a number is **not** an allowed port: `:abc`, `:99999` and a bare trailing `:` all reach
+    // here (`Origin::parse` checks a URL's shape, not its port's range), and an early `?` on `origin.port()` would
+    // turn each of them into "fine" — a row no forwarder could ever use.
+    let Some(port) = origin.port() else {
+        return Some(format!(
+            "`url` {} names a port that is not a number",
+            origin.as_str()
+        ));
+    };
+    let scheme = origin
+        .as_str()
+        .split_once("://")
+        .map(|(scheme, _)| scheme)
+        .unwrap_or_default();
+    if port >= MIN_PORT || Some(port) == crate::config::default_port(scheme) {
         return None;
     }
     Some(format!(
         "`url`'s port {port} is not in the allowed range: {MIN_PORT} or above, or the scheme's own default \
          (80 for http, 443 for https)"
     ))
-}
-
-/// The scheme's own default port, from the origin's text.
-fn default_port(origin: &Origin) -> Option<u16> {
-    match origin.as_str().split_once("://").map(|(scheme, _)| scheme) {
-        Some("http") => Some(80),
-        Some("https") => Some(443),
-        _ => None,
-    }
 }
 
 /// Whether `url` names **this** machine.
@@ -391,10 +381,10 @@ fn probe_one(config: &Config, tools: &Tools, origin: &Origin) -> probe::Outcome 
     probe::ask(origin, tools)
 }
 
-/// The startup merge: read `config.hosts_seed`, store what it says, and probe every row in the table.
+/// The startup merge: read `config.hosts_seed`, merge what it says, and probe every row in the table.
 ///
 /// Item 16's "each machine reads an optional `hosts.toml` at startup and merges it into its hosts table (the file
-/// wins on conflicts), so one file copied to every machine keeps the lists aligned". Three rules shape it:
+/// wins on conflicts), so one file copied to every machine keeps the lists aligned". Four rules shape it:
 ///
 /// - **The file wins** on a name, because a name is the identity: a file row replaces the API row of the same name.
 /// - **A row the file does not mention survives** — an operator's registration made over the API is not undone by a
@@ -402,78 +392,73 @@ fn probe_one(config: &Config, tools: &Tools, origin: &Origin) -> probe::Outcome 
 /// - **The parse is all-or-nothing; the probes are per row.** A malformed file merges nothing (a half-read seed
 ///   would leave the table saying something the operator never wrote), while a host that does not answer is one row
 ///   marked unreachable — the acceptance's "not removed".
+/// - **Every row is probed, whether or not a seed is named.** Reachability is a fact of this moment rather than of
+///   the row's creation, so a machine whose registry is only `POST /api/hosts` re-asks its hosts at every boot and a
+///   host that went away is marked by the next start. Item 16 does not ask for it; item 4's "a host that fails health
+///   is marked unreachable" is what it is.
 ///
 /// Probe failures are rows here and never refusals: the seed has no client to answer, and a boot that refused over
 /// a hosts file would take the control UI down for a machine whose sessions are fine.
-pub fn merge(
-    database: &Database,
-    config: &Config,
-    tools: &Tools,
-    now: i64,
-) -> Result<Merge, String> {
-    let Some(path) = &config.hosts_seed else {
-        // No key, no file: the seed is optional (item 16's own word), and a machine that has not been given one must
-        // still boot — its own registration over the API is the whole registry then.
-        return Ok(Merge::default());
-    };
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(format!(
-                "{} is not there, so no host was seeded from it (the key names an optional file)",
-                path.display()
-            ));
-        }
-        Err(error) => {
-            return Err(format!("{} could not be read ({error})", path.display()));
-        }
-    };
-    let rows = seed::parse(&text).map_err(|error| format!("{}: {error}", path.display()))?;
-    let mut merge = Merge {
-        path: Some(path.clone()),
-        from_file: rows.len(),
-        ..Merge::default()
-    };
-    // The file's rows first, each stored as it is read: the probe runs with the lock dropped, so a row is written
-    // twice — once as it arrives (`unreachable` until something asks) and once with what the probe measured.
-    let mut stored: Vec<Host> = Vec::new();
-    for row in &rows {
-        let host = Host {
-            name: row.name.clone(),
-            url: row.url.clone(),
-            reach: Reach::Unreachable,
-            version: None,
-            last_error: Some("not probed yet".to_string()),
-            last_checked_at: now,
-        };
-        database
-            .hosts()
-            .upsert(&host)
-            .map_err(|error| format!("{}: {error}", path.display()))?;
-        merge.stored += 1;
-        stored.push(host);
-    }
-    // Then every row in the table, seeded or not: reachability is a fact of this moment, and a row registered over
-    // the API last week is as interesting as one from the file.
-    let mut all = database
+///
+/// The rows to probe are collected **in memory first** and written once, after the probe: a row is never stored with
+/// a placeholder status, so the table cannot be read as saying "not asked yet" about a host nobody asked (ADR-0073
+/// D8). The clock is read per row as the probe is made ([`merge_outcome`]), because `last_checked_at` is when *that*
+/// ask happened and not when the boot started.
+pub fn merge(database: &Database, config: &Config, tools: &Tools) -> Result<Merge, String> {
+    let mut merge = Merge::default();
+    // Every row the table holds, and then the file's on top of them: a name in both is the file's, which is the one
+    // line that makes "the file wins" true rather than a tie broken by statement order.
+    let mut targets = database
         .hosts()
         .all()
         .map_err(|error| format!("the hosts table could not be read ({error})"))?;
-    all.extend(stored);
-    let mut seen = std::collections::BTreeSet::new();
-    for host in all {
-        if !seen.insert(host.name.clone()) {
-            continue;
+    if let Some(path) = &config.hosts_seed {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // The key names an *optional* file: a machine that has not been given one yet still boots, and its
+                // own rows are still probed below.
+                return Err(format!(
+                    "{} is not there, so no host was seeded from it (the key names an optional file)",
+                    path.display()
+                ));
+            }
+            Err(error) => {
+                return Err(format!("{} could not be read ({error})", path.display()));
+            }
+        };
+        let rows = seed::parse(&text).map_err(|error| format!("{}: {error}", path.display()))?;
+        merge.path = Some(path.clone());
+        merge.from_file = rows.len();
+        for row in rows {
+            targets.retain(|host| host.name != row.name);
+            targets.push(Host {
+                name: row.name,
+                url: row.url,
+                reach: Reach::Unreachable,
+                version: None,
+                last_error: None,
+                last_checked_at: 0,
+            });
+            merge.stored += 1;
         }
-        let probed = probe_row(config, tools, &host.name, &host.url);
+    }
+    for target in &targets {
+        let probed = probe_row(config, tools, &target.name, &target.url);
         merge.probed += 1;
         if probed.reach == Reach::Unreachable {
             merge.unreachable += 1;
         }
-        database
-            .hosts()
-            .upsert(&probed)
-            .map_err(|error| format!("{}: {error}", path.display()))?;
+        database.hosts().upsert(&probed).map_err(|error| {
+            format!(
+                "{} could not be written: {error}",
+                merge
+                    .path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "the hosts table".to_string())
+            )
+        })?;
     }
     Ok(merge)
 }
@@ -485,9 +470,9 @@ pub struct Merge {
     pub path: Option<std::path::PathBuf>,
     /// Rows the file named.
     pub from_file: usize,
-    /// Rows written from the file.
+    /// Rows taken from the file (a name in both the table and the file counts once: the file's).
     pub stored: usize,
-    /// Rows probed (the whole table, not only the file's).
+    /// Rows probed — the whole table, seeded or not.
     pub probed: usize,
     /// Rows the probe left unreachable.
     pub unreachable: usize,

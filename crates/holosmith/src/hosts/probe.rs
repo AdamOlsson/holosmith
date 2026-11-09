@@ -37,11 +37,20 @@ use crate::config::Origin;
 use crate::http::health::{self, Answer};
 use crate::preflight::Tools;
 
-/// How long one probe may take — connect, request and answer included.
+/// How long one probe may take — **the whole exchange**, from the first byte to the last.
 ///
 /// Three seconds, the same bound [`health::ASK_TIMEOUT`] puts on a loopback question, because the two ask the same
 /// endpoint: this one may be a tailnet's latency away rather than a syscall's, which is the whole distance between
 /// them and still not a reason for a registration to hang.
+///
+/// One deadline, computed once in [`ask`] and handed to the transport: a per-step bound (three for the connect,
+/// three for the write, three for the read) would be a nine-second "three seconds" — the shape this story's review
+/// caught, and the reason the number is not read again inside either transport.
+///
+/// **What is not bounded:** name resolution. `http` resolves with `to_socket_addrs` and `https` lets `s_client`
+/// resolve for itself; neither has a timeout of its own, so a resolver that never answers is the platform's problem
+/// rather than this probe's. The gate's `start_serve` and `fetch` both wait ten seconds, which is the budget a
+/// resolver here has.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The largest answer a probe reads before giving up on it being a health payload.
@@ -82,9 +91,10 @@ pub fn ask(origin: &Origin, tools: &Tools) -> Outcome {
         .strip_prefix('[')
         .and_then(|rest| rest.strip_suffix(']'))
         .unwrap_or(host);
+    let deadline = Instant::now() + PROBE_TIMEOUT;
     let answer = match scheme {
-        "http" => plain(bare, port, request.as_bytes()),
-        "https" => tls(bare, port, request.as_bytes(), tools),
+        "http" => plain(bare, port, request.as_bytes(), deadline),
+        "https" => tls(bare, port, request.as_bytes(), tools, deadline),
         other => Err(format!(
             "{:?} is not an http or https origin, so there is nothing to ask it",
             other
@@ -97,29 +107,30 @@ pub fn ask(origin: &Origin, tools: &Tools) -> Outcome {
 }
 
 /// The plain-socket half: resolve, connect, one request, read until the peer closes or the deadline passes.
-fn plain(host: &str, port: u16, request: &[u8]) -> Result<Vec<u8>, String> {
+fn plain(host: &str, port: u16, request: &[u8], deadline: Instant) -> Result<Vec<u8>, String> {
     let target = resolve(host, port)?;
-    let mut stream = TcpStream::connect_timeout(&target, PROBE_TIMEOUT)
+    let Some(left) = remaining(deadline) else {
+        return Err(format!("{host}:{port} was not reached in time"));
+    };
+    let mut stream = TcpStream::connect_timeout(&target, left)
         .map_err(|error| format!("{host}:{port} could not be reached ({error})"))?;
-    let _ = stream.set_write_timeout(Some(PROBE_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(left));
     stream
         .write_all(request)
         .map_err(|error| format!("{host}:{port} did not accept the request ({error})"))?;
-    let deadline = Instant::now() + PROBE_TIMEOUT;
     let mut answer = Vec::new();
     let mut buffer = [0_u8; 1024];
     loop {
         if answer.len() >= MAX_ANSWER {
             break;
         }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
+        let Some(left) = remaining(deadline) else {
             return Err(format!(
                 "{host}:{port} did not finish answering within {} s",
                 PROBE_TIMEOUT.as_secs()
             ));
-        }
-        let _ = stream.set_read_timeout(Some(remaining));
+        };
+        let _ = stream.set_read_timeout(Some(left));
         match stream.read(&mut buffer) {
             Ok(0) => break,
             Ok(read) => answer.extend_from_slice(&buffer[..read]),
@@ -141,7 +152,13 @@ fn plain(host: &str, port: u16, request: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 /// The TLS half: one `openssl s_client` child, its answer read after it has exited.
-fn tls(host: &str, port: u16, request: &[u8], tools: &Tools) -> Result<Vec<u8>, String> {
+fn tls(
+    host: &str,
+    port: u16,
+    request: &[u8],
+    tools: &Tools,
+    deadline: Instant,
+) -> Result<Vec<u8>, String> {
     let connect = if host.contains(':') {
         format!("[{host}]:{port}")
     } else {
@@ -181,7 +198,6 @@ fn tls(host: &str, port: u16, request: &[u8], tools: &Tools) -> Result<Vec<u8>, 
             format!("the TLS client for {host} did not accept the request ({error})")
         })?;
     }
-    let deadline = Instant::now() + PROBE_TIMEOUT;
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
@@ -235,10 +251,16 @@ fn tls(host: &str, port: u16, request: &[u8], tools: &Tools) -> Result<Vec<u8>, 
     Ok(output.stdout)
 }
 
+/// How much of `deadline` is left, or `None` once it has passed.
+fn remaining(deadline: Instant) -> Option<Duration> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    (!left.is_zero()).then_some(left)
+}
+
 /// One address for `host:port`: the resolver's first answer.
 ///
 /// `to_socket_addrs` has no timeout of its own — a resolver that never answers is the platform's problem, not this
-/// probe's, and the same is true of the `s_client` child that resolves the other transport.
+/// probe's (see [`PROBE_TIMEOUT`]), and the same is true of the `s_client` child that resolves the other transport.
 fn resolve(host: &str, port: u16) -> Result<SocketAddr, String> {
     let mut addresses = (host, port)
         .to_socket_addrs()

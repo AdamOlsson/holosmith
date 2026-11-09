@@ -36,7 +36,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::hosts::{self, Host, Refusal, RegisterError};
+use crate::hosts::{self, Host, Refusal};
 use crate::http::AppState;
 use crate::http::error::{ApiError, NOT_FOUND, internal};
 use crate::http::sessions::force_requested;
@@ -89,16 +89,13 @@ pub async fn register(state: &AppState, body: Result<Bytes, BytesRejection>) -> 
     let config = state.config.clone();
     let tools = state.tools.clone();
     let Registration { name, url } = registration;
-    let probed = tokio::task::spawn_blocking(move || {
-        hosts::register(&config, &tools, &name, &url).map_err(RegisterError::Refused)
-    })
-    .await;
+    let probed =
+        tokio::task::spawn_blocking(move || hosts::register(&config, &tools, &name, &url)).await;
     let row = match probed {
         Ok(Ok(row)) => row,
-        Ok(Err(RegisterError::Refused(refusal))) => return refusal_of(&refusal).into_response(),
-        Ok(Err(RegisterError::Store(error))) => {
-            return internal("hosts.register", error).into_response();
-        }
+        Ok(Err(refusal)) => return refusal_of(&refusal).into_response(),
+        // A task that panicked has said nothing about the host, and that is not a refusal — it is this machine's
+        // problem, which `internal` answers and logs once (ADR-0008).
         Err(error) => return internal("hosts.register", error).into_response(),
     };
     let stored = {
@@ -252,24 +249,35 @@ mod tests {
     }
 
     #[test]
-    fn each_refusal_is_its_own_code() {
-        for (refusal, code) in [
+    fn each_refusal_is_its_own_code_and_status() {
+        // The **status** as well as the code: a `422` turned into a `200` would leave a client with no way to tell a
+        // stored registration from a refused one, and a test that compares only the code stays green.
+        for (refusal, code, status) in [
             (
                 Refusal::Name("bad name".to_string()),
                 crate::http::error::BAD_HOST_NAME,
+                StatusCode::UNPROCESSABLE_ENTITY,
             ),
             (
                 Refusal::Url("bad url".to_string()),
                 crate::http::error::BAD_HOST_URL,
+                StatusCode::UNPROCESSABLE_ENTITY,
             ),
             (
                 Refusal::NotHolosmith("not one of ours".to_string()),
                 crate::http::error::NOT_HOLOSMITH,
+                StatusCode::UNPROCESSABLE_ENTITY,
             ),
         ] {
             let error = refusal_of(&refusal);
+            assert_eq!(error.status, status, "{code}");
             assert_eq!(error.body.code, code);
             assert_eq!(error.body.message, refusal.sentence());
         }
+        // The fourth code is the delete's, and its status is a `409`: the request was well formed and something live
+        // is in the way.
+        let busy = ApiError::host_busy("one live session");
+        assert_eq!(busy.status, StatusCode::CONFLICT);
+        assert_eq!(busy.body.code, crate::http::error::HOST_BUSY);
     }
 }

@@ -134,8 +134,10 @@ impl Database {
     /// Every read and write of a `hosts` row (HS-068, spec items 4 and 16).
     ///
     /// The same borrow as the three above. The registry's *probe* is the one thing that must not happen under this
-    /// lock: a health check leaves the machine and can take seconds, so every caller reads the rows, drops the
-    /// guard, probes, and takes the lock again to write what it measured.
+    /// lock: a health check leaves the machine and can take seconds. `http::hosts::register` probes inside
+    /// `spawn_blocking` **before** it takes the guard, and `hosts::merge` is called by the boot on the plain
+    /// `Database`, before the `Mutex` exists — so nothing in this build holds the guard across a probe. A caller
+    /// that has only a `&Database` can still be holding one, which is why that rule is the caller's to keep.
     pub fn hosts(&self) -> HostRepository<'_> {
         HostRepository::new(&self.connection)
     }

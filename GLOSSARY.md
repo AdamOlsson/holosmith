@@ -64,6 +64,15 @@ and as trusted as the config — where `POST /api/hosts` is, because that one ex
 network. A missing file is one warning and no rows; a malformed one merges nothing at all.
 _Avoid_: Config sync, inventory
 
+**Host probe**:
+The one `GET /api/health` a machine makes to a registry row: `openssl s_client` for an `https` origin, a plain socket
+for an `http` one, one deadline for the whole exchange, and **never a redirect followed** — an answer that is not a
+Holosmith health payload is a refusal rather than a host that is merely away. Its machine names are
+`hosts::probe::{ask, Outcome, PROBE_TIMEOUT}`; it happens at registration and at startup, and there is no timer that
+repeats it.
+_Avoid_: Health check, ping, uptime check (a **self-test** is this machine testing its own isolation, and a
+**preflight** is a check that must pass before a session starts)
+
 **Reach**:
 Whether a host answered its own health payload the last time anything asked: `reachable` or `unreachable`. A host that
 does not answer is **unreachable with the sentence it failed with**, and the row stays — an unreachable row is a fact

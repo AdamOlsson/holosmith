@@ -149,8 +149,17 @@ a **server** does. So:
 A **local row is not probed**: asking this process to reach itself over its own origin is a question about the boot
 order — the merge runs before the listener serves, so the answer would be "connection refused" — and not about
 health. It is stored `reachable` with this build's version, which is what the round trip would say once the process is
-up. A row registered over the API for a tailnet origin *is* probed, including when it is this machine's own tailnet
-origin.
+up. That shortcut is `probe_one`'s and it does not care which caller asked, so a `POST /api/hosts` whose origin is
+this machine's own is answered the same way: `201`, `reachable`, this build's version, no round trip. It is the one
+row in the table whose `reach` is a claim rather than a measurement, and the claim is "this process is the thing that
+answers that origin".
+
+**A `--port 0` boot cannot recognise the local row.** `apply_overrides` writes the flag into `control_origin` before
+the merge runs, and `serve` re-derives the origin's port only after `bind` — which is after the merge. So on such a
+boot (a dev run, and the gate's default) a seed row naming this machine is probed like any other and, because the
+listener is not serving yet, born `unreachable` on a perfectly healthy machine. A pinned port — every deploy, and
+`case_hosts`, which pins one — is unaffected. Moving the merge after `bind` would fix it and would put the probe on
+the runtime's own thread or behind a second lock; the wart is documented instead.
 
 ## D8 — a probe that cannot reach marks the row; only a non-Holosmith answer refuses
 
@@ -185,9 +194,10 @@ Three failures and their arms:
 - a host that does not answer is a **row**, never a boot failure.
 
 A boot that refused over a hosts file would take the control UI down for a machine whose sessions are fine — the
-egress proxy's rule (ADR-0045). The cost is that a boot pays up to `PROBE_TIMEOUT` per unreachable row before it
-serves, which is the price of item 4's "marked unreachable" being a fact about *this* boot rather than a timer. A
-periodic probe is not asked for, and is not here.
+egress proxy's rule (ADR-0045). The cost is that a boot pays up to `PROBE_TIMEOUT` (3 s, **the whole exchange**) per
+unreachable row before it serves, which is the price of item 4's "marked unreachable" being a fact about *this* boot
+rather than a timer. Name resolution is the one thing that bound does not cover: `to_socket_addrs` and the child's
+own resolver have no timeout of theirs. A periodic probe is not asked for, and is not here.
 
 ## D10 — what this machine could not measure, and how the measurement was split instead
 

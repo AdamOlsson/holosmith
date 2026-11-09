@@ -117,28 +117,41 @@ fn row(response: &Response, name: &str) -> Option<serde_json::Value> {
         .find(|row| row["name"] == serde_json::Value::String(name.to_string()))
 }
 
-/// A listener that answers one request with `answer` and stops, with the port it bound and a counter of requests
-/// that keeps counting after the socket is closed (an `Arc<AtomicUsize>` the assertion reads).
+/// A listener that answers up to **two** requests with `answer` and then stops, with the port it bound and a counter
+/// of requests that keeps counting.
+///
+/// Two, not one, because that is what makes "a redirect is not followed" measurable: a probe that followed one would
+/// open a second connection to this port, and the counter is what says it did. The listener is **non-blocking with a
+/// deadline** rather than a `for stream in listener.incoming()`: a loop with no end leaves the thread parked in
+/// `accept()` for the rest of the binary, holding a port, which is exactly the hang `docs/notes.md` records from this
+/// story's own unit test.
 fn stand_in(answer: Vec<u8>) -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
     use std::sync::atomic::AtomicUsize;
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a loopback listener");
+    listener
+        .set_nonblocking(true)
+        .expect("a loopback listener is made non-blocking");
     let port = listener.local_addr().expect("the bound address").port();
     let asked = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&asked);
     std::thread::spawn(move || {
-        // Two connections at most: the second one is what the test would see if a redirect were followed, so the
-        // listener stays up long enough to *receive* it and the assertion is the count rather than a failure to
-        // connect.
-        for _ in 0..2 {
-            let Ok((mut stream, _)) = listener.accept() else {
-                break;
-            };
-            let mut request = [0_u8; 1024];
-            if stream.read(&mut request).unwrap_or(0) == 0 {
-                break;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut served = 0;
+        while served < 2 && std::time::Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    // A non-blocking listener accepts a blocking stream; the read is bounded so a peer that connects
+                    // and says nothing cannot park this thread either.
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                    let mut request = [0_u8; 1024];
+                    if stream.read(&mut request).unwrap_or(0) > 0 {
+                        served += 1;
+                        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let _ = stream.write_all(&answer);
+                    }
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
             }
-            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let _ = stream.write_all(&answer);
         }
     });
     (port, asked)
@@ -306,13 +319,7 @@ async fn the_probe_reads_a_real_answer_and_refuses_anything_that_is_not_a_health
     let state = state_in(&dir, config.clone());
     {
         let database = database_of(&state);
-        let merged = hosts::merge(
-            &database,
-            &config,
-            &Tools::default(),
-            holosmith::clock::unix_now(),
-        )
-        .expect("the seed merges");
+        let merged = hosts::merge(&database, &config, &Tools::default()).expect("the seed merges");
         assert_eq!(merged.from_file, 4);
         assert_eq!(merged.stored, 4);
         assert_eq!(merged.probed, 4);
@@ -371,7 +378,7 @@ async fn the_file_wins_on_a_name_and_a_row_it_does_not_mention_survives() {
     let state = state_in(&dir, config.clone());
     {
         let database = database_of(&state);
-        hosts::merge(&database, &config, &Tools::default(), 1).expect("the first merge");
+        hosts::merge(&database, &config, &Tools::default()).expect("the first merge");
         // A row the file does not mention, written the way a request writes one.
         database
             .hosts()
@@ -394,7 +401,7 @@ async fn the_file_wins_on_a_name_and_a_row_it_does_not_mention_survives() {
     );
     {
         let database = database_of(&state);
-        hosts::merge(&database, &config, &Tools::default(), 2).expect("the second merge");
+        hosts::merge(&database, &config, &Tools::default()).expect("the second merge");
     }
     let served = served(state).await;
     let listed = list(served.addr).await;
@@ -431,7 +438,7 @@ async fn a_seed_that_does_not_parse_merges_nothing_and_leaves_the_table_alone() 
                 last_checked_at: 1,
             })
             .expect("a row the merge must not touch");
-        let error = hosts::merge(&database, &config, &Tools::default(), 2)
+        let error = hosts::merge(&database, &config, &Tools::default())
             .expect_err("a table with no url is not a seed");
         assert!(error.contains("has no `url`"), "{error}");
         assert!(
@@ -444,7 +451,8 @@ async fn a_seed_that_does_not_parse_merges_nothing_and_leaves_the_table_alone() 
     assert_eq!(rows(&listed).len(), 1, "{}", listed.body);
     assert!(row(&listed, "kept").is_some());
 
-    // No seed key at all is no seed and no failure: item 16's file is optional.
+    // No seed key at all is no seed and no failure: item 16's file is optional — and every row the table holds is
+    // still probed, because reachability is a fact of this moment rather than of the row's creation (ADR-0073 D8).
     let quiet = TempDir::new("hosts-no-seed");
     let config = Config {
         data_root: quiet.path().to_path_buf(),
@@ -453,10 +461,37 @@ async fn a_seed_that_does_not_parse_merges_nothing_and_leaves_the_table_alone() 
     let state = state_in(&quiet, config.clone());
     {
         let database = database_of(&state);
-        let merged = hosts::merge(&database, &config, &Tools::default(), 3)
-            .expect("no key is not a failure");
+        database
+            .hosts()
+            .upsert(&hosts::Host {
+                name: "unasked".to_string(),
+                url: holosmith::config::Origin::parse("https://unasked.tail1234.ts.net")
+                    .expect("an origin"),
+                reach: Reach::Reachable,
+                version: Some("an older answer".to_string()),
+                last_error: None,
+                last_checked_at: 1,
+            })
+            .expect("a row with a stale verdict");
+        let merged =
+            hosts::merge(&database, &config, &Tools::default()).expect("no key is not a failure");
         assert_eq!(merged.from_file, 0);
         assert_eq!(merged.path, None);
+        assert_eq!(
+            merged.probed, 1,
+            "a machine with no seed still re-asks its rows"
+        );
+        let row = database
+            .hosts()
+            .one("unasked")
+            .expect("the row reads")
+            .expect("the row is still there");
+        assert_eq!(
+            row.reach,
+            Reach::Unreachable,
+            "the stale `reachable` was replaced by this boot's own answer"
+        );
+        assert!(row.last_checked_at > 1, "the clock moved with the probe");
     }
 }
 
@@ -473,7 +508,7 @@ async fn the_local_row_is_refused_while_this_machine_has_live_sessions_unless_fo
     let state = with_stub(state_in(&dir, config.clone()), fast_stub());
     {
         let database = database_of(&state);
-        hosts::merge(&database, &config, &Tools::default(), 1).expect("the seed merges");
+        hosts::merge(&database, &config, &Tools::default()).expect("the seed merges");
     }
     let served = served(state.clone()).await;
 
@@ -546,18 +581,25 @@ async fn the_local_row_is_refused_while_this_machine_has_live_sessions_unless_fo
 /// redirect and a `register` that stored it cannot disagree.
 #[test]
 fn a_refused_answer_is_the_registrations_own_code_and_a_merge_marks_the_row() {
-    let origin =
-        holosmith::config::Origin::parse("https://box.tail1234.ts.net").expect("an origin");
-    let refusal = hosts::accept(
-        hosts::probe::Outcome::Refused("answered HTTP 302".to_string()),
-        "workshop",
-        &origin,
-    )
-    .expect_err("a 302 is not a health reply");
+    // The composition the API cannot reach: a **real** probe whose answer is a foreign payload, through the one
+    // mapping that turns a refused outcome into `422 not_holosmith`. A literal `Refused` would only test the match.
+    let (foreign, _) = stand_in(answered(
+        &PAYLOAD.replace(r#""name":"holosmith""#, r#""name":"something-else""#),
+    ));
+    let origin = holosmith::config::Origin::parse(&format!("http://127.0.0.1:{foreign}"))
+        .expect("an origin");
+    let outcome = hosts::probe::ask(&origin, &Tools::default());
     assert!(
-        matches!(refusal, hosts::Refusal::NotHolosmith(ref sentence) if sentence.contains("302")),
+        matches!(outcome, hosts::probe::Outcome::Refused(_)),
+        "a payload named something else is refused: {outcome:?}"
+    );
+    let refusal = hosts::accept(outcome, "workshop", &origin)
+        .expect_err("a foreign payload is not a health reply");
+    assert!(
+        matches!(refusal, hosts::Refusal::NotHolosmith(ref sentence) if sentence.contains("something-else")),
         "{refusal:?}"
     );
+    // The seed's mapping answers a row instead, because a file has no client to refuse.
     let row = hosts::merge_outcome(
         hosts::probe::Outcome::Refused("answered HTTP 302".to_string()),
         "workshop",

@@ -501,7 +501,8 @@ code — a valid registration stored `unreachable` rather than refused, the loca
 count and `?force=true` in the sentence) over a live session, its forced removal leaving the session, a remote row's
 delete needing no force, and a `404`. A **second boot** with a changed file then proves both halves of "the file wins
 on conflicts": the row the file names is the file's (and its reach flipped), the row the API made and the file does
-not mention survives, and the local row the operator removed comes back. It prints one `SKIP` line without `python3`
+not mention survives, and the local row the operator removed comes back. Every row is probed at every boot, seeded or
+not, so a machine whose registry is only `POST /api/hosts` re-asks its hosts at each start. It prints one `SKIP` line without `python3`
 or `openssl`. What it cannot measure through the artifact is the API's `422 not_holosmith` against a live listener —
 the host rule refuses loopback and no `.ts.net` name resolves on a machine with no `tailscaled` — so that arm is
 `tests/hosts.rs`'s, split into the probe against real listeners and the mapping as a function (ADR-0073 D10).

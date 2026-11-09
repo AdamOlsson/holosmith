@@ -111,69 +111,79 @@ impl Origin {
     /// An origin with no scheme, which [`Self::parse`] refuses, is returned unchanged rather
     /// than guessed at.
     pub fn with_port(&self, port: u16) -> Self {
-        let (scheme, authority) = match self.0.split_once("://") {
-            Some(parts) => parts,
-            None => return self.clone(),
+        let Some(parts) = self.parts() else {
+            return self.clone();
         };
-        // A bracketed IPv6 literal may itself contain colons, so only the brackets delimit it.
-        let host = match authority.strip_prefix('[') {
-            Some(rest) => match rest.split_once(']') {
-                Some((literal, _)) => format!("[{literal}]"),
-                None => format!("[{rest}"),
-            },
-            None => match authority.rsplit_once(':') {
-                Some((host, _)) => host.to_string(),
-                None => authority.to_string(),
-            },
-        };
-        if default_port(scheme) == Some(port) {
-            Self(format!("{scheme}://{host}"))
+        if default_port(parts.scheme) == Some(port) {
+            Self(format!("{}://{}", parts.scheme, parts.host))
         } else {
-            Self(format!("{scheme}://{host}:{port}"))
+            Self(format!("{}://{}:{port}", parts.scheme, parts.host))
         }
     }
 
     /// The port this origin means: the one it names, or the scheme's own default when it names none.
     ///
     /// `None` for text that is not an origin at all, which [`Self::parse`] already refuses and a deserialised value
-    /// may still be. HS-068 compares two origins' ports to decide whether a registry row names *this* machine, and
-    /// a comparison that guessed a port would answer yes for the wrong row.
+    /// may still be — and for a port that is not a number (`:abc`, `:99999`), which is the one answer a caller must
+    /// be able to tell apart from "no port": HS-068's port rule refuses the first and accepts the second.
     pub fn port(&self) -> Option<u16> {
-        let (scheme, authority) = self.0.split_once("://")?;
-        // A bracketed IPv6 literal may itself contain colons, so only the brackets delimit it.
-        if let Some(rest) = authority.strip_prefix('[') {
-            let after = rest.split_once(']').map(|(_, after)| after)?;
-            return match after.strip_prefix(':') {
-                Some(port) => port.parse().ok(),
-                None if after.is_empty() => default_port(scheme),
-                None => None,
-            };
-        }
-        match authority.rsplit_once(':') {
-            Some((_, port)) => port.parse().ok(),
-            None => default_port(scheme),
+        let parts = self.parts()?;
+        match parts.port {
+            Some(digits) => digits.parse().ok(),
+            None => default_port(parts.scheme),
         }
     }
 
-    /// The authority without its port (`host` alone, an IPv6 literal still bracketed).
+    /// The authority without its port — the host alone, an IPv6 literal still bracketed.
     ///
-    /// HS-068's host predicate reads it: the registry cares which *host* a row names, and the port is a separate
+    /// HS-068's host predicate reads it: the registry cares which *host* a row names, and the port is another
     /// sentence with its own rule.
     pub fn host(&self) -> Option<&str> {
-        let (_, authority) = self.0.split_once("://")?;
-        if let Some(rest) = authority.strip_prefix('[') {
-            let (literal, _) = rest.split_once(']')?;
-            return Some(&authority[..literal.len() + 2]);
+        Some(self.parts()?.host)
+    }
+
+    /// The text's three pieces, split by the one rule all three readers share.
+    ///
+    /// One function rather than three, because a bracketed IPv6 literal may itself contain colons — so only the
+    /// brackets delimit its host — and the three copies this replaces had already drifted: `with_port` fabricated
+    /// `http://[::1:8080` from an unterminated literal while `host` and `port` answered `None`. The port comes back
+    /// as the **digits**, unparsed, so a caller can tell "no port named" from "a port that is not one".
+    fn parts(&self) -> Option<Parts<'_>> {
+        let (scheme, authority) = self.0.split_once("://")?;
+        let (host, rest) = match authority.strip_prefix('[') {
+            Some(rest) => {
+                let (literal, after) = rest.split_once(']')?;
+                // Sliced out of `authority` rather than reassembled, so the brackets are written once.
+                (&authority[..literal.len() + 2], after)
+            }
+            None => match authority.rsplit_once(':') {
+                Some((host, _)) => (host, &authority[host.len()..]),
+                None => (authority, ""),
+            },
+        };
+        if host.is_empty() {
+            return None;
         }
-        Some(match authority.rsplit_once(':') {
-            Some((host, _)) => host,
-            None => authority,
-        })
+        let port = match rest {
+            "" => None,
+            rest => Some(rest.strip_prefix(':')?),
+        };
+        Some(Parts { scheme, host, port })
     }
 }
 
+/// [`Origin`]'s three pieces: the scheme, the host (an IPv6 literal still bracketed) and the port's digits, if any.
+struct Parts<'a> {
+    scheme: &'a str,
+    host: &'a str,
+    port: Option<&'a str>,
+}
+
 /// The port a browser leaves out of `Origin` for this scheme, if it is one of the two we serve.
-fn default_port(scheme: &str) -> Option<u16> {
+///
+/// `pub(crate)` because HS-068's port rule asks the same question of a registry row's URL, and a second 80/443 table
+/// is the kind of copy that drifts.
+pub(crate) fn default_port(scheme: &str) -> Option<u16> {
     match scheme {
         "http" => Some(80),
         "https" => Some(443),
@@ -1753,6 +1763,55 @@ allow = ["crates.io"]
             let origin = Origin::parse(text).expect("a valid origin");
             assert_eq!(origin.with_port(port).as_str(), expected);
         }
+    }
+
+    #[test]
+    fn an_origin_answers_its_own_host_and_port_or_neither() {
+        // The three readers HS-068 needed — and the one rule they share: a bracketed IPv6 literal may itself contain
+        // colons, so only the brackets delimit its host, and a literal that is not closed is not an origin rather
+        // than a host somebody guessed at.
+        let cases = [
+            ("http://localhost:8080", Some("localhost"), Some(8080)),
+            ("http://localhost", Some("localhost"), Some(80)),
+            (
+                "https://box.tail1234.ts.net",
+                Some("box.tail1234.ts.net"),
+                Some(443),
+            ),
+            ("http://[::1]:8080", Some("[::1]"), Some(8080)),
+            ("https://[2001:db8::1]", Some("[2001:db8::1]"), Some(443)),
+            // A port that is not a number is not a port: `port` answers `None` and the host is still readable, which
+            // is what lets the registry refuse it as a *port* rather than as an origin.
+            (
+                "https://box.tail1234.ts.net:abc",
+                Some("box.tail1234.ts.net"),
+                None,
+            ),
+            (
+                "https://box.tail1234.ts.net:99999",
+                Some("box.tail1234.ts.net"),
+                None,
+            ),
+            (
+                "https://box.tail1234.ts.net:",
+                Some("box.tail1234.ts.net"),
+                None,
+            ),
+            // Not an origin at all.
+            ("http://[::1", None, None),
+            ("no-scheme:8080", None, None),
+        ];
+        for (text, host, port) in cases {
+            let origin = Origin(text.to_string());
+            assert_eq!(origin.host(), host, "{text}");
+            assert_eq!(origin.port(), port, "{text}");
+        }
+        // An unterminated literal is returned unchanged rather than fabricated into a host: the drift this one
+        // function replaced.
+        assert_eq!(
+            Origin("http://[::1".to_string()).with_port(8080).as_str(),
+            "http://[::1"
+        );
     }
 
     #[test]

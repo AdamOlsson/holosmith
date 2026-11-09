@@ -212,11 +212,17 @@ pub fn run(args: ServeArgs) -> ExitCode {
     // given the file yet must still boot), and a host that does not answer is a row, not a refusal. A boot that
     // refused over a hosts file would take the control UI down for a machine whose sessions are fine — the egress
     // proxy's rule.
+    //
+    // It is called **here**, on the plain `Database` and before the `Arc<Mutex<…>>` exists, because it probes: a
+    // caller that already held the mutex would hold it across a socket and a TLS child (ADR-0012's rule). Nothing
+    // else can reach this database yet, so there is no lock to take — and `hosts::merge`'s doc says so for the next
+    // caller. The `--port 0` limitation is worth knowing: this runs before `bind`, so `control_origin` still names
+    // port 0 (`apply_overrides`) and a seed row naming *this* machine is probed rather than recognised — see
+    // ADR-0073 D7. A pinned port, which is what every deploy has, re-derives nothing and is unaffected.
     match crate::hosts::merge(
         &database,
         &loaded.config,
         &crate::preflight::Tools::default(),
-        clock::unix_now(),
     ) {
         Ok(merge) => tracing::debug!(
             target: "holosmith::serve",
