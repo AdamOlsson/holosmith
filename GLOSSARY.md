@@ -74,6 +74,20 @@ repeats it.
 _Avoid_: Health check, ping, uptime check (a **self-test** is this machine testing its own isolation, and a
 **preflight** is a check that must pass before a session starts)
 
+**Machine trust**:
+The rule that decides which machines may drive this one: a call is served only when the **address** its connection came
+from is the LocalAPI's own answer about a machine listed in `allowed_hubs` — never a header the caller supplies. The
+identity is the node's **short machine name** (`hub` out of `hub.tail1a2b.ts.net`), because that is the name the
+registry keys rows by; the tailnet **login** is the owner and is identical on every node, so it is deliberately not the
+comparison. Three arms decide it: an **empty `allowed_hubs`** verifies nobody (Tailscale's ACLs are then the only
+control — the spec's documented fallback, and the default), a peer at `127.0.0.1`/`::1` is this machine's **front
+door** (what `tailscale serve` connects from) and costs no whois, and every other address must whois to a listed node.
+An identity that cannot be read is a **refusal**, because an unread identity is not an identity. Its machine names are
+`trust::{Trust, admit, Admitted, Refusal, whois, identity, front_door}`, `Tools::tailscale`, and the shell word
+`tailscale whois --json <ip>`.
+_Avoid_: Authentication, authorization, ACL (an ACL is the tailnet's, and it is what applies when the list is empty), hub
+check
+
 **Reach**:
 Whether a host answered its own health payload the last time anything asked: `reachable` or `unreachable`. A host that
 does not answer is **unreachable with the sentence it failed with**, and the row stays — an unreachable row is a fact

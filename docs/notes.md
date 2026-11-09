@@ -2506,3 +2506,27 @@ it rather than adding a caveat beside it.
   output. The fix is the one the test has now: **port 0 is the port nothing can listen on** (a bind with 0 is an
   ephemeral port, so no process holds 0) and a connect to it is refused at once — plus a bounded read, so the next
   surprise is a failure with a sentence rather than a gate that cannot finish.
+
+### Landmines: machine trust, and being a peer on one box (HS-070)
+
+- **`127.0.0.2` is the whole measurement.** Without root, binding the *client* to `127.0.0.2` is the only way to be an
+  address other than `127.0.0.1` — and that is not a trick, it is the rule: `tailscale serve` (deploy step 6) proxies
+  both origins to `127.0.0.1`, so the front door is `127.0.0.1`/`::1` **exactly** and the rest of `127/8` is a peer.
+  `IpAddr::is_loopback()` is the wrong predicate here by one bit of precision, and the gate would measure nothing if
+  it were used (`scripts/verify.sh`'s `case_machine_trust`, `tests/trust.rs`).
+- **A `TempDir` label is a directory, and `TempDir::new` empties it.** `tests/trust.rs`'s shim and its database both
+  lived in `trust-arm` for a moment, and the boot wiped the shim. One label per artefact (`-whois`, `-db`), and every
+  test names its own — two tests in one binary sharing a label is ADR-0009's same-process locking trap.
+- **`App::new(router, guards)` served without `into_make_service_with_connect_info` has no address**, and an address
+  nobody reported is a refusal when `allowed_hubs` is non-empty, never a pass. `serve::run` installs it; a test that
+  drives the router in-process cannot, so that arm is a *unit* test (`Trust::admit(None)`).
+- **The refusal's sentence says "hub" as the domain noun**, so a test or a case that asserts "no configured entry
+  appears in the answer" must not put `hub` in `allowed_hubs` — it would not be able to tell a leak from prose. Both
+  the unit test and the gate use `workshop`.
+- **The banner is exactly eight lines at the default filter** (`tests/serve_cli.rs`), so the trust config is a
+  `debug!` at startup and a `warn!` only per refusal. A startup `warn` would fail that test — and it did, in the
+  first draft of the boot line.
+- **`preflight::Tools` is the seam, so a new program joins it.** `tailscale` did, and four test literals that built the
+  struct field by field had to say so; a `Trust`-only program path would have been a second seam for one idea.
+- **One whois per request on the tailnet path, and no cache.** A dev-server page is thirty children. That is recorded
+  as a cost (ADR-0075 D8) rather than fixed: a cached admission outlives the tailnet's own membership change.

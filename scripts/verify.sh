@@ -456,6 +456,7 @@ serve_cases=(
   case_pwa
   case_hosts
   case_forward
+  case_machine_trust
   case_idle_stop
   case_drain
   case_drain_restart
@@ -505,12 +506,13 @@ serve_cases=(
   case_doctor_full
 )
 
-# HS-046: the spec's verification table is the record of phase 1's verification run, and this is what keeps
-# it honest after the story that filled it. It reads `HolosmithSpec.md`'s eleven V rows and asserts four things:
-# no V1-V10 row still says "not yet run"; each carries a verdict (`**pass**` or `**fail**`, the words the
-# table's own column uses); each names an automation this repository really has — a `case_*` in serve_cases,
-# a `tests/*.rs` under the crate, a `scripts/*.sh`, or the by-hand procedure in `docs/build.md` — and V11 still
-# says it is deferred to phase 3 (HS-070), because that is the one row a phase-2 story may not fill.
+# HS-046: the spec's verification table is the record of the verification runs, and this is what keeps it
+# honest after the stories that filled it. It reads `HolosmithSpec.md`'s eleven V rows and asserts four things:
+# no row still says "not yet run"; each carries a verdict (`**pass**` or `**fail**`, the words the table's own
+# column uses); each names an automation this repository really has — a `case_*` in serve_cases, a `tests/*.rs`
+# under the crate, a `scripts/*.sh`, or the by-hand procedure in `docs/build.md` — and every row is measured by
+# those same rules. **HS-070 filled V11, the last deferred row**, so the deferral rule that used to live in the
+# loop is gone; a row a later story fills needs no edit here beyond the row's own cell.
 #
 # It is deliberately not a second copy of the table: it reads every `V<n>` row out of the spec whatever its
 # number, so a row a later story adds is measured by the same rules. The eleven-row count is what keeps that
@@ -545,14 +547,10 @@ case_verification_table() {
     if printf '%s\n' "$cell" | grep -qi 'not yet run'; then
       fail "$name/V$n" "V$n still says \"not yet run\": $cell"
     fi
-    if [ "$n" = 11 ]; then
-      printf '%s\n' "$cell" | grep -q 'deferred to phase 3' ||
-        fail "$name/V11" "V11 no longer says it is deferred to phase 3: $cell"
-      printf '%s\n' "$cell" | grep -q 'HS-070' ||
-        fail "$name/V11" "V11's deferral names no story: $cell"
-      assertions=$((assertions + 2))
-      continue
-    fi
+    # **V11 was the last deferred row and HS-070 filled it**, so there is no longer a row this case treats
+    # differently: every row is measured by the same four rules, and the two greps that used to pin V11's
+    # "deferred to phase 3 (HS-070)" sentence are gone with the sentence. A row that is filled by a story and one
+    # that a story's scope excludes now differ only in what their cells say, which is what a record is.
     if printf '%s\n' "$cell" | grep -q '\*\*fail'; then
       # Acceptance bullet 2: a failure records which fallback was taken, not only that it failed.
       printf '%s\n' "$cell" | grep -qi 'fallback' ||
@@ -5665,6 +5663,245 @@ PYWS
   extra_pid=""
   # Two data roots, two configs, the seed, the two python helpers and the event dumps: this case's, and every other
   # boot-owning case removes what it made (HS-068's lesson was a *passing* case leaving a container behind).
+  rm -rf "$root"
+  start_serve
+}
+
+# HS-070: machine-to-machine trust (spec item 4, V11). A machine takes forwarded calls from its hub and from nobody
+# else, and the two facts that decide it are measured here against a real listener: the whois of the **address a
+# connection came from** (never a header the caller writes) and the `allowed_hubs` list that answer is compared
+# against. The three arms are the story's own: an empty list verifies nobody (the documented ACLs-only fallback), a
+# listed node is served, and another node — or an identity that cannot be read — is refused in each listener's own
+# words with one logged reason.
+#
+# Two loopback boots cannot produce a tailnet peer, so this case stands two things in:
+#
+# - a `tailscale` on `PATH` (the shape `deploy_machine_shims` already uses: the paths arrive through the
+#   environment, so the script itself is plain `sh`) that records every argv and answers `whois --json <ip>` from a
+#   state file — which is what lets one listener be asked about a listed node, another node and a daemon that is not
+#   there without a third boot;
+# - a client **bound to 127.0.0.2**, the only way to be an address other than 127.0.0.1 without root — and the
+#   distinction is the rule's own, not a trick: `tailscale serve` connects from 127.0.0.1 (deploy step 6, the front
+#   door), and the rest of `127/8` is a peer like any other.
+#
+# It needs no daemon and no image, and it leaves nothing behind: its own root, its own boot, and the shared boot
+# put back. `tests/trust.rs` drives the same arms in-process and the shim's three answers as values.
+case_machine_trust() {
+  local name=case_machine_trust root="$repo_root/target/verify-trust-$$"
+  local peer_root="$root/peer"
+  local config="$peer_root/config.toml" data="$peer_root/data"
+  local bin="$root/bin" answer="$root/whois.json" failure="$root/whois.err" log="$root/whois.log"
+  local peer_control peer_preview saved_path body head
+  local id=0123456789abcdef
+  local have_python3=1
+  command -v python3 >/dev/null 2>&1 || have_python3=0
+  if [ "$have_python3" -eq 0 ]; then
+    printf 'SKIP %s: no python3 to bind a client to 127.0.0.2, which is the only way to be a peer on one box (tests/trust.rs drives every arm)\n' "$name"
+    return 0
+  fi
+
+  stop_serve
+  rm -rf "$root"
+  mkdir -p "$peer_root/projects/proj" "$data" "$bin" || fail "$name/mkdir" "could not create $root"
+  peer_control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  peer_preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+
+  # The gate's tailscale: record the call, then answer from the state file, or fail in the words this machine's real
+  # one prints. `tests/trust.rs` owns the same three answers as a decision table.
+  export HS_TRUST_LOG="$log" HS_TRUST_ANSWER="$answer" HS_TRUST_FAILURE="$failure"
+  cat >"$bin/tailscale" <<'SHIM'
+#!/bin/sh
+# The gate's tailscale (HS-070): no daemon is asked, and every argv is one line in the log.
+set -eu
+printf '%s\n' "$*" >>"$HS_TRUST_LOG"
+if [ -f "$HS_TRUST_ANSWER" ]; then
+  cat "$HS_TRUST_ANSWER"
+  exit 0
+fi
+if [ -f "$HS_TRUST_FAILURE" ]; then
+  cat "$HS_TRUST_FAILURE" >&2
+fi
+exit 1
+SHIM
+  chmod 0755 "$bin/tailscale"
+  printf 'failed to connect to local tailscaled\n' >"$failure"
+  saved_path="$PATH"
+  PATH="$bin:$PATH"
+
+  # The peer machine's config, rewritten between the two boots: the list is read at boot, and the two arms this case
+  # needs are "no list" and "a list".
+  write_trust_config() {
+    local hubs="$1"
+    cat >"$config" <<EOF
+role = "server"
+backend = "stub"
+control_origin = "http://127.0.0.1:$peer_control"
+preview_listen = "127.0.0.1:$peer_preview"
+preview_origin = "http://127.0.0.1:$peer_preview"
+allowed_hubs = $hubs
+EOF
+  }
+
+  # as_peer <label> <source> <port> <path> [Header: value]: one request from a chosen **source address**, because a
+  # client that cannot choose one is always the front door. The answer is saved under the two names the harness's own
+  # assertions read (`.http` the whole answer, `.body` after the header block), so `answer`/`expect_status`/
+  # `expect_code` work unchanged.
+  as_peer() {
+    local label="$1" source="$2" then_port="$3" path="$4" extra="${5:-}"
+    timeout 20 python3 - "$source" "$then_port" "$path" "$extra" "$WORK/responses/$label" <<'PYCLIENT' ||
+import socket, sys
+
+source, port, path, extra, out = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5]
+connection = socket.socket()
+connection.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+connection.settimeout(10)
+connection.bind((source, 0))
+connection.connect(("127.0.0.1", port))
+head = "GET %s HTTP/1.1\r\nHost: 127.0.0.1\r\n" % path
+if extra:
+    head += extra + "\r\n"
+head += "Connection: close\r\n\r\n"
+connection.sendall(head.encode())
+raw = b""
+while True:
+    chunk = connection.recv(65536)
+    if not chunk:
+        break
+    raw += chunk
+connection.close()
+head, _, body = raw.partition(b"\r\n\r\n")
+open(out + ".http", "wb").write(raw)
+open(out + ".body", "wb").write(body)
+print(head.split(b"\r\n")[0].decode())
+PYCLIENT
+      fail "$name/$label" "the request from $source:$then_port$path did not answer"
+  }
+
+  # ---- 1. no list: the ACLs-only fallback, measured -----------------------------------------------
+  # V11's own "If it fails" cell: a machine that lists no hubs verifies nobody, and tailnet ACLs are the control. It
+  # is the default config, so this arm is also the one that keeps every existing deployment working.
+  write_trust_config '[]'
+  start_peer "$config" "$data" "$peer_control"
+  as_peer "$name-open" 127.0.0.2 "$peer_port" /api/sessions
+  expect_status "$name/open" "$(answer "$name-open")" 200
+  if [ -f "$log" ]; then
+    fail "$name/open/whois" "an empty allowed_hubs asked a whois, so it verified something: $(cat "$log")"
+  fi
+  assertions=$((assertions + 1))
+  stop_peer
+
+  # ---- 2. a list, and the identity comes from the address -----------------------------------------
+  write_trust_config '["workshop"]'
+  start_peer "$config" "$data" "$peer_control"
+  printf '{"Node":{"Name":"workshop.tail1a2b.ts.net"}}\n' >"$answer"
+  as_peer "$name-listed" 127.0.0.2 "$peer_port" /api/sessions
+  expect_status "$name/listed" "$(answer "$name-listed")" 200
+  # The argv is the measurement that it is the **address** and nothing the caller wrote: no header ever reaches this
+  # child, and `request_head` (HS-069) does not send an identity header at all.
+  [ -f "$log" ] || fail "$name/listed/whois" "a listed peer was admitted without a whois"
+  grep -qx 'whois --json 127.0.0.2' "$log" ||
+    fail "$name/listed/whois" "the whois was not asked about the connection's address: $(cat "$log")"
+  assertions=$((assertions + 1))
+
+  # ---- 3. the front door costs no child -----------------------------------------------------------
+  # `tailscale serve` proxies both origins to 127.0.0.1, so every browser call and every local tool arrives from
+  # there. A machine that whois-ed that address would refuse every browser it has: 127.0.0.1 is no tailnet node.
+  : >"$log"
+  forward_fetch "$peer_port" "$name-front" GET /api/sessions "Host: 127.0.0.1" ||
+    fail "$name/front" "the front door's request did not answer"
+  expect_status "$name/front" "$(answer "$name-front")" 200
+  if [ -s "$log" ]; then
+    fail "$name/front/whois" "the front door asked a whois: $(cat "$log")"
+  fi
+  assertions=$((assertions + 1))
+
+  # ---- 4. another tailnet node is refused, in the envelope, once in the log ------------------------
+  printf '{"Node":{"Name":"stranger.tail1a2b.ts.net"}}\n' >"$answer"
+  as_peer "$name-stranger" 127.0.0.2 "$peer_port" /api/sessions
+  expect_status "$name/stranger" "$(answer "$name-stranger")" 403
+  expect_code "$name/stranger" "$(answer "$name-stranger")" peer_not_allowed
+  body="$(cat "$WORK/responses/$name-stranger.body")"
+  case "$body" in
+    *127.0.0.2*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/stranger/peer" "the refusal names no peer address: $body" ;;
+  esac
+  # Acceptance bullet 5: never the configuration. The sentence's own "hub" is the domain word, so the entry this
+  # machine lists is the needle.
+  case "$body" in
+    *workshop*) fail "$name/stranger/leak" "the refusal names a configured hub: $body" ;;
+    *) assertions=$((assertions + 1)) ;;
+  esac
+  grep -q 'a call from a peer this machine does not trust was refused' "$WORK/serve-peer.err" ||
+    fail "$name/stranger/log" "the refusal was not logged: $(cat "$WORK/serve-peer.err")"
+  grep -q 'peer=127.0.0.2' "$WORK/serve-peer.err" ||
+    fail "$name/stranger/log-peer" "the log line names no peer address: $(cat "$WORK/serve-peer.err")"
+  grep -q 'reason=peer_not_allowed' "$WORK/serve-peer.err" ||
+    fail "$name/stranger/log-reason" "the log line names no reason: $(cat "$WORK/serve-peer.err")"
+  assertions=$((assertions + 1))
+
+  # ---- 5. a header the caller supplies changes nothing --------------------------------------------
+  # Item 4's "not by a header the caller supplies": the one header `tailscale serve` would add is a claim, and the
+  # address is the fact.
+  as_peer "$name-forged" 127.0.0.2 "$peer_port" /api/sessions "Tailscale-User-Login: me@example.com"
+  expect_status "$name/forged" "$(answer "$name-forged")" 403
+  expect_code "$name/forged" "$(answer "$name-forged")" peer_not_allowed
+
+  # ---- 6. an identity that cannot be read is its own code -----------------------------------------
+  # The arm this machine can really run: `tailscaled` is not answering here, and the sentence must not be the
+  # daemon's English.
+  rm -f "$answer"
+  as_peer "$name-unverifiable" 127.0.0.2 "$peer_port" /api/sessions
+  expect_status "$name/unverifiable" "$(answer "$name-unverifiable")" 403
+  expect_code "$name/unverifiable" "$(answer "$name-unverifiable")" peer_unverifiable
+  body="$(cat "$WORK/responses/$name-unverifiable.body")"
+  case "$body" in
+    *tailscaled*) fail "$name/unverifiable/prose" "the answer repeats the daemon's English: $body" ;;
+    *) assertions=$((assertions + 1)) ;;
+  esac
+  grep -q 'reason=peer_unverifiable' "$WORK/serve-peer.err" ||
+    fail "$name/unverifiable/log" "the failure was not logged: $(cat "$WORK/serve-peer.err")"
+  assertions=$((assertions + 1))
+
+  # ---- 7. the preview hop is gated by the same decision, in this listener's own words ---------------
+  # Two hops reach a peer (ADR-0074 D1), and a check on only one of them leaves the other open: the preview listener
+  # answers a **sentence** in plain text, and the accept arm reaches its own "no such session" — which is how "the
+  # machine check passed and the listener carried on" is measured rather than claimed.
+  printf '{"Node":{"Name":"workshop.tail1a2b.ts.net"}}\n' >"$answer"
+  as_peer "$name-preview-listed" 127.0.0.2 "$peer_preview_port" "/local/$id/"
+  expect_status "$name/preview_listed" "$(answer "$name-preview-listed")" 404
+  body="$(cat "$WORK/responses/$name-preview-listed.body")"
+  case "$body" in
+    *"no session is called $id"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/preview_listed" "a listed peer did not reach the listener's own answer: $body" ;;
+  esac
+
+  printf '{"Node":{"Name":"stranger.tail1a2b.ts.net"}}\n' >"$answer"
+  as_peer "$name-preview-stranger" 127.0.0.2 "$peer_preview_port" "/local/$id/"
+  expect_status "$name/preview_stranger" "$(answer "$name-preview-stranger")" 403
+  head="$(sed -n '1,/^\r$/p' "$WORK/responses/$name-preview-stranger.http")"
+  case "$head" in
+    *"text/plain"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/preview_stranger/plain" "a preview refusal must be plain text, not an envelope: $head" ;;
+  esac
+  body="$(cat "$WORK/responses/$name-preview-stranger.body")"
+  case "$body" in
+    *127.0.0.2*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/preview_stranger/peer" "the preview refusal names no peer address: $body" ;;
+  esac
+  case "$body" in
+    *workshop*) fail "$name/preview_stranger/leak" "the preview refusal names a configured hub: $body" ;;
+    *) assertions=$((assertions + 1)) ;;
+  esac
+  case "$body" in
+    *'"code"'*) fail "$name/preview_stranger/envelope" "this listener has no envelope: $body" ;;
+    *) assertions=$((assertions + 1)) ;;
+  esac
+
+  # What this case made of the machine, it takes back — including the `PATH` the shim was on, so the shared boot
+  # after it runs the machine's own `tailscale` and not the gate's.
+  stop_peer
+  PATH="$saved_path"
+  unset HS_TRUST_LOG HS_TRUST_ANSWER HS_TRUST_FAILURE
   rm -rf "$root"
   start_serve
 }

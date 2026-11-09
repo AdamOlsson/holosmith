@@ -531,6 +531,21 @@ killed mid-stream: the client's socket must **end** — `read -t`'s 1 (EOF), nev
 request must be the `502` sentence. Two boots and a `kill -9` mean the trap knows a `peer_pid`; a `fail` between the
 two would otherwise leave a listener on a pinned port for the next run.
 
+…and since HS-070, **machine trust**: `case_machine_trust` boots one machine twice — an empty `allowed_hubs` and
+then `allowed_hubs = ["workshop"]` — and puts a `tailscale` shim first on `PATH` (the shape `deploy_machine_shims`
+already uses: paths through the environment, a plain `sh` body) that records every argv and answers
+`whois --json <ip>` from a state file. Every request comes from a client **bound to `127.0.0.2`**, which is the only
+address other than `127.0.0.1` a process without root can call from — and it is on the wrong side of the front-door
+rule by design, because `tailscale serve` connects from `127.0.0.1`, so that address is served with no whois at all.
+The arms are the story's: the empty list serves the stranger and asks nothing (the ACLs-only fallback); a listed node
+is served and the shim's log line `whois --json 127.0.0.2` is the proof the **address** was verified rather than a
+header; another node is `403 peer_not_allowed` with one `warn` naming the peer and the reason and no configured entry
+anywhere in the answer; a forged `Tailscale-User-Login` changes nothing; a shim that fails in `tailscaled`'s words is
+`403 peer_unverifiable` and the body repeats none of that prose; and the **preview** listener refuses the same
+stranger in plain text while letting the listed peer through to its own `404`. It needs no daemon and no image,
+prints one `SKIP` line without `python3` (which binds the client), and leaves nothing behind but the shared boot
+(ADR-0075 D7).
+
 …and since HS-047, **`server deploy`**: `case_server_deploy` has two halves that skip independently, because the
 bugs it exists to catch are of two kinds. The **offline** half needs `python3` and nothing else: a `_ping` socket
 it answers stands in for the daemon, and the case asserts that the dry run lists the seven steps in the spec's
