@@ -5028,7 +5028,7 @@ PY
     fail "${name}_forced/no_answer" "the forced DELETE did not answer"
   expect_status "${name}_forced" "$(answer "${name}_forced")" 204
   fetch "${name}_list4" GET /api/hosts "Host: 127.0.0.1" || fail "${name}_list4/no_answer" "GET /api/hosts did not answer"
-  check "$name/forced/gone" absent "$(hosts_row_field thisbox name "$WORK/responses/${name}_list4.body")"
+  check "$name/forced/gone" '<absent>' "$(hosts_row_field thisbox name "$WORK/responses/${name}_list4.body")"
   fresh="$(hosts_row_field "$api_row" name "$WORK/responses/${name}_list4.body")"
   check "$name/forced/api-row" "$api_row" "$fresh"
   # A name the table does not hold is a `404`, for both of a delete's moments.
