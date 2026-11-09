@@ -6,6 +6,7 @@ pub mod app;
 mod changes;
 mod disk;
 pub mod error;
+mod forward;
 pub mod guard;
 pub mod health;
 mod history;

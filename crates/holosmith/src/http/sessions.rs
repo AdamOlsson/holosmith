@@ -277,7 +277,13 @@ pub async fn create(
     // HS-062's disk floor is the third of that family and the same kind of fact — the *machine's*, not the
     // session's — so it is asked second, and again instead of the project's read: a full machine needs no `git`
     // process to answer itself. In the same order the resume asks it, and for the same reason.
-    let refusal = if state.drain.is_draining() {
+    let refusal = if state.config.role == crate::config::Role::Hub {
+        // **A hub has no sessions** (HS-069, the spec's `Roles`: "a hub-only machine ... creates no sessions").
+        // First of the machine's refusals, before the drain and the floor, because it is the fact that makes the
+        // other two questions unnecessary: a machine that starts nothing has no disk to protect and no drain to
+        // honour. The row is never written, and the client's next step is the one the sentence names.
+        Some(ApiError::sessions_disabled())
+    } else if state.drain.is_draining() {
         Some(ApiError::draining())
     } else if let Some(floor) = crate::http::disk::refusal(state).await {
         Some(floor)

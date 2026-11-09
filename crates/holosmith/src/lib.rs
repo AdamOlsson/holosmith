@@ -21,6 +21,7 @@ pub mod egress;
 pub mod events;
 pub mod exit;
 pub mod expiry;
+pub mod forward;
 pub mod hosts;
 pub mod http;
 pub mod images;

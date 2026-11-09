@@ -337,6 +337,7 @@ pub fn run(args: ServeArgs) -> ExitCode {
             // HS-062's floor measures the data root on the request path, with the same `df` this boot's
             // preflight used: the machine's own program, resolved through `PATH`, which a test swaps for a shim.
             tools: crate::preflight::Tools::default(),
+            forwarding: crate::forward::Forwarding::default(),
         };
         // The **startup reconcile** (HS-044, V9): what a `kill -9` left behind, put right **before any
         // policy or request can read a row**. It is awaited rather than spawned, and both reasons are

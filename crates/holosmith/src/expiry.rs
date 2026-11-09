@@ -301,6 +301,7 @@ mod tests {
                 drain: crate::drain::Control::new(),
                 merges: Merges::new(),
                 tools: Tools::default(),
+                forwarding: crate::forward::Forwarding::default(),
             },
             stub,
         )

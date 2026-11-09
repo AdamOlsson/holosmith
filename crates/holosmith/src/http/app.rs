@@ -22,13 +22,14 @@ use axum::routing::{MethodRouter, get};
 
 use crate::backend::Backends;
 use crate::compactor::Compactor;
-use crate::config::Config;
+use crate::config::{Config, Role};
 use crate::db::Database;
 use crate::deleter::Deleter;
 use crate::drain::{Control, Drain};
 use crate::events::{EventWriter, StreamRegistry};
 use crate::http::changes;
 use crate::http::error::ApiError;
+use crate::http::forward;
 use crate::http::guard::{self, Guards};
 use crate::http::health::{self, Health};
 use crate::http::history;
@@ -80,6 +81,12 @@ pub struct AppState {
     /// reason the state's other handles are: two requests must share the lock, so it must be the state's, and a
     /// clone of the state clones the `Arc` rather than the map.
     pub merges: Merges,
+    /// The timeouts a forwarded call gets (HS-069): five seconds by default, sixty for the three slow arms.
+    ///
+    /// The state's rather than a constant read at the call site for the reason [`Merges`] is: one value per process
+    /// that a handler reads, and the one seam a test can shorten so a `504` is measured in milliseconds instead of
+    /// five seconds.
+    pub forwarding: crate::forward::Forwarding,
     /// The external programs this *request path* runs, as opposed to the ones a startup check runs.
     ///
     /// Only `df` today, for HS-062's floor: a create and a resume measure the data root's free space before
@@ -550,7 +557,8 @@ pub fn router(state: AppState) -> Routes {
     let host_remove_state = Arc::clone(&state);
     let subscribe_state = Arc::clone(&state);
     let unsubscribe_state = Arc::clone(&state);
-    Routes::new()
+    let forward_state = Arc::clone(&state);
+    let routes = Routes::new()
         .get("/api/health", move || {
             let state = Arc::clone(&health_state);
             async move { health::respond(&Health::of(&state.config, &state.runtime)) }
@@ -789,8 +797,34 @@ pub fn router(state: AppState) -> Routes {
                 let name = hosts::path_name(name);
                 async move { hosts::remove(&state, &name, query).await }
             },
-        )
-        .fallback(fallback)
+        );
+
+    // The **forwarding route** (HS-069, spec item 3, ADR-0074): one peer's API, under this machine's host prefix.
+    // Five registrations of one path rather than one `any` route, because `Routes` records a method and a kind per
+    // entry (ADR-0010) and a forwarded `GET` cannot change state *at this machine* — so the manifest can say which
+    // methods read and which mutate without inventing a method it does not have. The method that travels is the
+    // client's, unmapped, and `http::forward` is the one handler.
+    //
+    // Only a machine that forwards has the route: `Roles` gives request and preview forwarding to a `hub` (and a
+    // `both`, which is the default), and a `server` answers the fallback's `404 not_found` — which is what makes "a
+    // server serves the session API" true of its path space rather than only of its intentions.
+    let routes = if matches!(state.config.role, Role::Hub | Role::Both) {
+        let handler = move |captured: Result<Path<(String, String)>, PathRejection>,
+                            request: Request| {
+            let state = Arc::clone(&forward_state);
+            async move { forward::respond(&state, captured, request).await }
+        };
+        // `handler` is `Clone` because it captures one `Arc` and nothing else: one body, five methods.
+        routes
+            .get("/api/hosts/{name}/{*rest}", handler.clone())
+            .post("/api/hosts/{name}/{*rest}", handler.clone())
+            .put("/api/hosts/{name}/{*rest}", handler.clone())
+            .patch("/api/hosts/{name}/{*rest}", handler.clone())
+            .delete("/api/hosts/{name}/{*rest}", handler)
+    } else {
+        routes
+    };
+    routes.fallback(fallback)
 }
 
 /// The `edge` layer: request accounting, the guards, and one `debug` line, in that order.

@@ -103,6 +103,7 @@ pub fn state() -> AppState {
         drain: Control::new(),
         merges: Merges::new(),
         tools: preflight::Tools::default(),
+        forwarding: holosmith::forward::Forwarding::default(),
     }
 }
 
@@ -152,6 +153,7 @@ pub fn state_with_writer(dir: &TempDir, config: Config, options: WriterOptions) 
         drain: Control::new(),
         merges: Merges::new(),
         tools: preflight::Tools::default(),
+        forwarding: holosmith::forward::Forwarding::default(),
     }
 }
 

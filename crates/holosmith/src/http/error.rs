@@ -34,6 +34,27 @@ pub const BAD_CLIENT: &str = "bad_client";
 /// The tailnet user behind the request is not the configured owner (ADR-0010).
 pub const BAD_OWNER: &str = "bad_owner";
 
+/// A forwarded call named a machine this registry does not hold (HS-069, ADR-0074).
+///
+/// `404` because the path named nothing this machine knows, and the client's next step is to read the registry:
+/// the four "wrong name" refusals of this API are one status and four sentences.
+pub const UNKNOWN_HOST: &str = "unknown_host";
+
+/// A path a hub was asked to relay and will not (HS-069).
+///
+/// One sentence today — the host registry is each machine's own, so `/api/hosts/…` is not a path a hub relays — and
+/// the code exists so a client can tell "this proxy will not" from "that machine does not have it".
+pub const NOT_FORWARDED: &str = "not_forwarded";
+
+/// The peer did not answer a forwarded call inside the forwarding timeout (HS-069, ADR-0074).
+pub const UPSTREAM_TIMEOUT: &str = "upstream_timeout";
+
+/// A forwarded call could not reach the machine it was addressed to (HS-069, ADR-0074).
+pub const UPSTREAM_UNREACHABLE: &str = "upstream_unreachable";
+
+/// A create on a machine whose role runs no sessions (HS-069, spec's `Roles`).
+pub const SESSIONS_DISABLED: &str = "sessions_disabled";
+
 /// A create's body is not a JSON object with the four accepted fields (HS-008).
 pub const BAD_BODY: &str = "bad_body";
 
@@ -653,6 +674,52 @@ impl ApiError {
             StatusCode::UNPROCESSABLE_ENTITY,
             BAD_BODY,
             "the body must be a JSON object with a `name` and a `url` string",
+        )
+    }
+
+    /// What a forwarded call naming a machine this registry does not hold answers (HS-069).
+    ///
+    /// The message names the registry rather than the path: the caller is a client of *this* machine, and the row it
+    /// probably meant is one `GET /api/hosts` shows.
+    pub fn unknown_host(name: impl Into<Cow<'static, str>>) -> Self {
+        Self::new(
+            StatusCode::NOT_FOUND,
+            UNKNOWN_HOST,
+            format!(
+                "no host in this machine's registry is called {}",
+                name.into()
+            ),
+        )
+    }
+
+    /// What a path a hub will not relay answers (HS-069).
+    pub fn not_forwarded(message: impl Into<Cow<'static, str>>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, NOT_FORWARDED, message)
+    }
+
+    /// What a forwarded call whose peer did not answer in time answers (HS-069).
+    ///
+    /// `504`, and the message carries the machine and the bound: the client can neither fix nor retry it on this
+    /// machine, and the sentence says which machine was asked and for how long.
+    pub fn upstream_timeout(message: impl Into<Cow<'static, str>>) -> Self {
+        Self::new(StatusCode::GATEWAY_TIMEOUT, UPSTREAM_TIMEOUT, message)
+    }
+
+    /// What a forwarded call whose peer could not be reached answers (HS-069).
+    pub fn upstream_unreachable(message: impl Into<Cow<'static, str>>) -> Self {
+        Self::new(StatusCode::BAD_GATEWAY, UPSTREAM_UNREACHABLE, message)
+    }
+
+    /// What a create on a hub answers (HS-069, the spec's `Roles`: a hub runs no sessions).
+    ///
+    /// `403` for `publish_disabled`'s reason: the route exists, the *machine* will not do it, and no retry on this
+    /// machine changes that — the operator creates the session on a server, which this machine forwards to.
+    pub fn sessions_disabled() -> Self {
+        Self::new(
+            StatusCode::FORBIDDEN,
+            SESSIONS_DISABLED,
+            "this machine's role is `hub`, so it has no Docker and starts no sessions: create one on a server, \
+             through this machine's /api/hosts/<name>/sessions",
         )
     }
 
