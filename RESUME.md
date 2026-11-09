@@ -1,4 +1,4 @@
-# RESUME — one issue per session (next: PER-103 / HS-071, the Computers screen)
+# RESUME — one issue per session (next: PER-104 / HS-072, `hub deploy` and `hub host`)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating procedure and
 still governs the cycle; this file is the state of the world, and it adds one rule of its own:
@@ -45,188 +45,192 @@ sandbox-specific incantation (§2).
 
 ---
 
-## 1. The issue this session picks up: `PER-103` — HS-071, the Computers screen
+## 1. The issue this session picks up: `PER-104` — HS-072, `hub deploy` and `hub host`
 
-**State when this file was written** (HEAD at `a624406`, **tree clean** apart from the operator's own
-`orchestrate.sh`/`log.txt`): **71 of 80 stories Done, 9 Backlog**, all in project `Holosmith`. `PER-103` is
-`Backlog`, it is the next in `HS-###` order, and its blocker (HS-070) is `Done` — so it is eligible. Check Linear's
-`Blocked by` list rather than this sentence if it turns out to be a stop. **It is the first *page* story of phase 3**:
-its deliverable is a screen, and no gate may open a browser (§3) — so the shape of its gate is the first decision,
-not the last.
+**State when this file was written** (HEAD at `1a7f93d`, **tree clean** apart from the operator's own
+`orchestrate.sh`/`log.txt`): **72 of 80 stories Done, 8 Backlog**, all in project `Holosmith`. `PER-104` is
+`Backlog`, it is the next in `HS-###` order, and its blocker (HS-071) is `Done` — so it is eligible. Check Linear's
+`Blocked by` list rather than this sentence if it turns out to be a stop. **It is a CLI story and not a screen**, so
+no browser is needed; what it asks for is the third way into machinery this build already has: the deploy's seven
+steps, and the host registry's three rules.
 
-The last shipped story was `PER-102` (HS-070, machine-to-machine trust, **ADR-0075**) — `allowed_hubs` has its reader:
-one `trust::Trust::admit` asked by the edge of both listeners, the identity being the tailnet node's short name from a
-`tailscale whois --json <ip>` child, with `127.0.0.1`/`::1` as the front door and an empty list as the documented
-ACLs-only fallback. Its §1 material is now Linear, `docs/review/PER-102.md`, `git log` and §9. What it leaves behind
-that this story stands on:
+The last shipped story was `PER-103` (HS-071, the Computers screen, **ADR-0076**) — four commits' worth of lessons
+are in `docs/review/PER-103.md`, `docs/notes.md`'s newest `### Landmines:` section and `git log`. What it leaves
+behind that this story stands on:
 
-- **`GET /api/hosts` is the only list of machines there is**, and the row's shape is the struct's order:
-  `{name, url, preview, reach, version, last_error, last_checked_at}`, by name. `POST /api/hosts` upserts on the name
-  and `DELETE /api/hosts/{name}[?force=true]` refuses a **local** row that has live sessions (`409 host_busy`); the
-  codes are `bad_host_name`, `bad_host_url`, `not_holosmith`, `host_busy`. The probe runs at boot and at registration
-  only, so a row's `reach`/`version`/`preview` are as old as the boot (ADR-0074 D5).
-- **A row has no `role`, no uptime and no session counts** — and HS-071's acceptance names role, version,
-  reachability, last-seen and live/stopped counts. The *health payload* carries `role`, `uptime_s` and
-  `preview_origin`, and **the forwarding route already reaches a peer's health answer**: `GET /api/hosts/<name>/health`
-  is a `GET` (so the hub's guards pass it) forwarded to the peer's `/api/health` (which is guard-exempt). That is one
-  hop per host for role + version + uptime, today, with no migration and no new route. The counts are the same shape:
-  `GET /api/hosts/<name>/sessions` answers `{sessions:[…], network_default, stopped_ttl_days}` and each row carries
-  `status`, so `live` (running/idle/starting) and `stopped` are a fold over that answer.
-- **The page has no host awareness at all**, which ADR-0074 D10 recorded as *the* limitation HS-071 closes:
-  `web/src/main.ts` fetches `/api/sessions` and `/api/sessions/<id>`, builds the preview link from **this machine's**
-  `health.preview_origin` (`transcript.ts`'s `previewUrl`/`previewOffered`), and every affordance spells its own path
-  (prompt, abort, steer, resume, delete, the SSE stream, the Changes sheet's four reads, tool output, tool images).
-  HS-071 is therefore mostly **`apiPath(host, rest)`** — `/api/<rest>` for `local`, `/api/hosts/<host>/<rest>`
-  otherwise — plus threading the host through `StreamTarget` and every request, and the preview link needs the
-  **row's** `preview` origin rather than the health payload's.
-- **The machine's own role is already on the wire**: `/api/health`'s `role`, which `main.ts` already prints in the
-  header. "A hub-only machine shows no new-session affordance for itself" needs no new field and no probe.
-- **`web/`'s rules are pure functions with node tests** (`transcript.test.ts` 72, `push.test.ts` 32): every sentence,
-  every count and every URL HS-071 adds is a pure function there first, and `main.ts` keeps only the DOM (HS-058 and
-  HS-067's rule). A gate case can only assert the **served bundle's** ids and sentences (`case_pwa`'s precedent).
-- **No ADR number taken: 0076 is next.** No migration is needed unless role or counts are stored rather than read.
+- **The registry's rules are ordinary functions**, and `POST /api/hosts` is the only caller: `hosts::name_problem`
+  (the alphabet, `MAX_NAME`, the reserved `local`), `hosts::origin`/`host_problem`/`port_problem` (`http(s)`, a
+  MagicDNS shape or 100.64.0.0/10, `MIN_PORT` plus each scheme's default), and `hosts::probe::{ask, interpret}`
+  (one `s_client` child or one plain socket, one deadline). The HTTP route's three refusals are `bad_host_name`,
+  `bad_host_url`, `not_holosmith`, and **ADR-0076 D6 says the CLI must show the same `message`**: the Computers
+  screen prints it verbatim and `docs/build.md`'s "one rule, two callers" is the reason, so `hub host add` posting
+  its own sentence would be the fork this story exists to avoid.
+- **A row's `url` is an origin and the name is the identity** (`hosts::register` upserts on it), the seed's merge is
+  `hosts::merge`, and a failed probe is a row stored `unreachable` with its sentence rather than a refusal (ADR-0073).
+- **`deploy` is seven steps and one function**: `DeployStep::{Preflight, Files, Images, Proxies, Service, Origins,
+  Health}` with `run(config, target, tools, machine, dry_run)` in `src/deploy.rs`, and `deploy::refusal(&config)`
+  refuses **only** `Role::Hub`, in a sentence that names this story by number ("installing a hub is `holosmith hub
+  deploy`, which is phase 3 (HS-072)"). `src/commands/deploy.rs` is thin: the config, the refusal, `Target::resolve`,
+  the tail (`holosmith key set <provider>`, how a hub registers the machine) and the resume command a failed run
+  prints. Every step reads its state first, so re-running is the whole recovery.
+- **`Target` is where `--root` lives**: it prefixes only the paths the deploy writes, `Target::config` hands `run` a
+  prefixed `Config`, and the two machine-wide paths (`/etc/holosmith`, `/run/holosmith`) are the *target's* so a
+  `--root` deploy never touches the machine's (ADR-0056, HS-049's SPEC-1).
+- **`Word` is the report's one word per step**: `satisfied`, `needs` (a dry run's plan), `changed`, `skipped` (with
+  a reason, never a pass) and `failed`. HS-049 removed the last "another story owns it" skip, so a hub's two
+  non-steps are the first `Skipped` lines since.
+- **`status` still carries a stale sentence**: `status::NO_REGISTRY` says "no hub has registered a machine with this
+  one, and the registry that would hold one is phase 3 (HS-068)" — which is now false twice over, and is exactly the
+  acceptance's last bullet (`status` on a hub reports every registered machine's health). `status` reads this
+  machine's own facts (`config`, `version`, a `/api/health` ask) and the registry is a **table** it can read.
+- **The CLI's shape**: `Command::Server { action: ServerAction::Deploy { dry_run, root } }` and a comment in
+  `src/cli.rs` that says `hub deploy` "is phase 3 (HS-072) and has no subcommand yet". A `hub` command with
+  `deploy` and `host {add,list,remove}` is the shape the spec's Commands table spells.
+- **The gate's precedent** is `case_server_deploy` (an offline half and an online half, `deploy_machine_shims`' two
+  stand-ins for `tailscale`, `health_responder` for step 7's wait) plus `tests/deploy.rs` for the words, the order,
+  the modes and the `sudo` seam. `case_status`/`case_logs`/`case_uninstall` are the CLI cases.
+- **No ADR number taken: 0077 is next.** No migration is expected unless `status` needs a new statement.
 
 ### 1.1 The slice (verbatim from `docs/stories/phase-3-multiple-machines.md`; Linear's body is the same text)
 
-> ### HS-071 — Hub UI: Computers screen
+> ### HS-072 — `hub deploy` and `hub host` CLI
 >
-> **As** the operator **I want** to see my machines and their state **so that** I know where work is running.
+> **As** the operator **I want** to deploy and manage a hub from the CLI **so that** the hub is as scriptable as a server.
 >
-> - **Size:** M · **Blocked by:** HS-070 · **Spec:** Roles, item 4
-> - **Demo:** the Computers screen lists two machines with health, version, live session counts and last-seen times,
->   and can add and remove one.
+> - **Size:** M · **Blocked by:** HS-071 · **Spec:** CLI, What `server deploy` does, Commands table
+> - **Demo:** `holosmith hub deploy` on a Docker-less machine gives a working hub; `hub host add/list/remove` match the API.
 >
 > **Acceptance**
-> - [ ] Lists name, URL, role, version, reachability, last health check and live/stopped session counts.
-> - [ ] Add and remove are available with the same validation as `POST /api/hosts`, showing the specific rejection
->       reason.
-> - [ ] Version skew between machines is visible, since it affects which API a call can use.
-> - [ ] Sessions screen groups by machine and shows which machine owns each session.
-> - [ ] A hub-only machine shows no "new session" affordance for itself.
+> - [ ] `hub deploy` runs steps 1 (without Docker and git checks), 2 (without the docker group), 5, 6 and 7; it builds no images and no proxies.
+> - [ ] `holosmith hub host add <name> <url>`, `list` and `remove <name>` perform the same checks as `POST /api/hosts`.
+> - [ ] `--dry-run` works for `hub deploy`.
+> - [ ] Running `server deploy` and `hub deploy` on the same machine yields role `both`, and the API is unchanged.
+> - [ ] `status` on a hub reports the health of every registered machine.
 
 ### 1.2 The spec it closes
 
-`HolosmithSpec.md`'s **Roles** section and item 4's host-registration paragraph, verbatim:
+`HolosmithSpec.md`'s Commands table and item 10, verbatim:
 
-> API paths are unchanged on every role: a hub serves `/api/hosts*`, a server serves the session API.
+> | `holosmith hub deploy [--ssh user@host] [--binary PATH] [--dry-run]` | Installs and starts a hub |
+> | `holosmith hub host add <name> <url>`, `list`, `remove <name>` | Manages the registry from the CLI, with the same checks as `POST /api/hosts` |
+> | `holosmith status` | Role, version, uptime, session count, proxies, last health of registered machines |
 
-> Host registration (`POST /api/hosts`): the URL must be http(s), the host a MagicDNS name or an address in
-> 100.64.0.0/10, the port in an allowed range; redirects are not followed; and the `/api/health` reply must carry the
-> Holosmith name and version fields.
+> `hub deploy` runs steps 1 (without the Docker and git checks), 2 (without the docker group), 5, 6 and 7, and builds
+> no images or proxies.
 
-The neighbours: **HS-072** (`PER-104`) is `hub deploy` and `hub host add/list/remove`, which must perform *the same
-checks as `POST /api/hosts`* — a validation rule the screen shows and the CLI repeats is one rule, so where the
-sentence lives matters; **HS-073** (`PER-105`) is `--ssh` deploys; **HS-074** (`PER-106`) is cross-machine sessions **and
-notifications**, which owns `{host, session_id, kind}` payloads and therefore the host-aware deep link this story's
-`apiPath` makes possible.
+And the Roles table's sentence this story makes true: "Running `holosmith server deploy` and `holosmith hub deploy`
+on the same machine makes it `both`."
+
+The neighbours: **HS-073** (`PER-105`) is `--ssh` deploys — it changes how a deploy *reaches* a machine, so it
+wants this story's step plan to already be role-aware; **HS-074** (`PER-106`) is cross-machine sessions and
+notifications; **HS-078/079** (`PER-110`/`PER-111`) are `upgrade`/`rollback`, which re-run a deploy's steps.
 
 ### 1.3 What already exists (read this before planning)
 
-- **`src/hosts/`** — `Host` (the row), `Reach`, `register`/`accept`/`merge_outcome`/`probe_row`/`probe_one`/`merge`,
-  `name_problem`/`origin`/`host_problem`/`port_problem`, `is_local`, `LOCAL`, and `seed.rs`. **The validation
-  sentences already exist** and are what the screen must show unchanged: `http::hosts`' three refusals are
-  `bad_host_name`, `bad_host_url`, `not_holosmith` (ADR-0073).
-- **`src/http/hosts.rs`** — the registry's three routes and the probe-then-store order (`spawn_blocking` **before** the
-  lock).
-- **`src/http/forward.rs` + `src/forward.rs`** — `/api/hosts/<name>/<rest>` forwards one call to the peer that owns it
-  (ADR-0074): the response is the peer's, byte for byte; `local` is a `308`; `hosts/…` is `403 not_forwarded`; the
-  bound is 5 s (60 s for `merge`, `publish`, a `DELETE` of one session).
-- **`src/preview.rs`** — `Route::path`/`slashed_path` spell `/<host>/<id>/…`, and `HOST` is `hosts::LOCAL`: the
-  preview URL a row already supports.
-- **`web/src/main.ts`** — the three screens (`/`, `/sessions/<id>`, `/settings`), `StreamTarget`'s one `showState`, and
-  the settings screen's push state; `web/src/transcript.ts` — the renderer's rules; `web/src/push.ts` — the sentences
-  and `navLink`.
-- **`case_pwa`, `case_hosts`, `case_forward`, `case_machine_trust`** — the four cases closest to this story, and the
-  only precedent for "a gate may not run a browser" that is not a promise.
+- **`src/deploy.rs`** (1953 lines) — `DeployStep` (seven, with `number()`/`word()`), `Word`, `Line`, `Report`
+  (`failed`/`render`), `Tools` (the programs and the one `sudo` seam), `refusal`, `Target`, `run`, `unit_text`,
+  `control_target`/`preview_target`, `wait_for_health`, and the two `*_line` helpers steps 3 and 4 go through.
+- **`src/commands/deploy.rs`** — `server deploy`: `DeployArgs { config, dry_run, root }`, the tail, the resume
+  command. `src/cli.rs` — `ServerAction::Deploy` and nothing else.
+- **`src/hosts/`** — `Host`, `Reach`, `Refusal`, the five rule functions, `register`/`accept`/`merge_outcome`/
+  `probe_row`/`probe_one`/`merge`, `repository.rs` (every statement), `seed.rs`. `src/http/hosts.rs` — the three
+  routes, and the probe-then-store order (`spawn_blocking` **before** the lock).
+- **`src/status.rs`** — `Line`/`Value`/`Report`/`render`, the `NO_REGISTRY` sentence, and the one `/api/health` ask.
+- **`src/db.rs`** — `Database::open` and `recorded_without_mirating` (read-only, `doctor`'s reader), which is the
+  precedent for a CLI that reads a table a running server owns.
+- **`case_server_deploy`, `case_server_service`, `case_status`, `tests/deploy.rs`** — the gate precedents, and
+  `scripts/verify.sh`'s `deploy_machine_shims`/`health_responder` stand-ins.
 
 ### 1.4 What does not exist
 
-No Computers screen, no host-aware page (no `apiPath`), no per-host role/uptime/counts reader, no version-skew rule, no
-ADR 0076, and no `case_*` that asserts a screen's *bundle* for a screen other than Settings and the session list.
+No `holosmith hub` command, no role-aware step plan, no `hub host {add,list,remove}`, no registry line in `status`,
+no `case_*` that drives a hub deploy, no ADR 0077, and **no CLI path that performs one of the API's mutations**.
 
 ### 1.5 What the plan must decide (and the arms each one has)
 
-1. **Where role and uptime come from.** (a) One forwarded `GET /api/hosts/<name>/health` per host on the page's own
-   call — the route exists today, needs no migration, and costs one hop per machine inside the 5 s bound; (b) a new
-   `role` column fed by the boot's probe (migration 0008, `SCHEMA_VERSION` 8) — fresher only at boot, and a row that
-   lies about a machine's role after a redeploy; (c) both, the column cached and the hop read when the operator opens
-   the screen. Say which, and what an unreachable machine shows.
-2. **Where session counts come from.** (a) `GET /api/hosts/<name>/sessions` per host, folded by `status` on the page
-   (the hub has none of its own, and its own role is `hub`); (b) a new hub-side aggregate route (a second reader of
-   every machine, and a route with an N-hop bound — item 3's promise is "a remote machine going down mid-stream
-   produces a clear client-visible error, not a hang", which an aggregate would have to answer for ×N); (c) nothing new:
-   the rows the hub already forwards. Pick one and say what a *stopped* count means (the peer's `stopped_ttl_days`
-   window, not the hub's).
-3. **`apiPath(host, rest)` and everything it touches.** Which requests move (the list, one row, the stream,
-   prompt/abort/steer/resume/delete, the four Changes reads, tool output and images, merge, publish), where the host
-   travels (`StreamTarget`, the sheet, the delete affordance), and what the page does with a host it did not come from
-   (`/api/hosts/<name>/sessions/<id>` is already the peer's own path). ADR-0074 D10 named this function; the story's
-   weight is in it.
-4. **Grouping and ownership.** "Sessions screen groups by machine and shows which machine owns each session." (a) One
-   list per machine, each from its own hop, rendered as sections with the machine's name as the heading; (b) a single
-   fan-in list with a `host` key added by the page (`{host, …row}` — the row is the peer's, so it cannot be edited
-   server-side, ADR-0074 D10); (c) a `host` query on the list route. Say which, and what a machine that cannot be
-   reached shows in the list (`{host, kind:"unreachable"}`? the `push::Payload` precedent).
-5. **Version skew.** The row's `version` is what the peer reported at boot; this build's is `version::VersionInfo`'s.
-   (a) A sentence when they differ (`machine trusts peers`? no — the sentence is about *API skew*: a call the older
-   peer does not know is a `404`), plus the row's version always shown; (b) a warning only; (c) refuse forwarding to a
-   skewed peer — no: ADR-0074 never gates on version. Also: a mixed-version fleet is `tests/`-measurable by writing a
-   row whose `version` is `"0.0.1"`.
-6. **Add and remove from the page.** The three refusals are the API's, and the screen must show *the sentence*: `POST
-   /api/hosts` bodies (`{name, url}`), `DELETE` with `?force=true` when `host_busy` names live sessions. (a) The
-   screen prints the envelope's `message` verbatim (the project refusal precedent: `transcript.ts`'s `createFailure`);
-   (b) a new pure function mapping codes to sentences — no: the API's sentence is the one the CLI will reuse in
-   HS-072.
-7. **The gate's shape.** No browser. (a) A `case_*` that boots a hub and a peer, asserts `GET /api/hosts`'s rows,
-   asserts `GET /api/hosts/<peer>/health` and `/sessions` answer through the hop (that is the data the screen draws),
-   and greps the served bundle for the screen's new ids and sentences; (b) the same plus `web/test/`'s pure functions
-   (which is where each sentence is actually pinned); (c) a by-hand browser check, which the gate may not do. Say what
-   the case leaves behind and what it would still measure if a sentence were deleted.
+1. **How `hub host add`/`remove` reach the registry's rules.** (a) POST/DELETE to **this machine's own control
+   listener** (`http://<control_origin>/api/hosts`), with the four guard headers — `Origin` exactly the configured
+   `control_origin` (the guard compares text; ADR-0074's landmine), `Content-Type: application/json`,
+   `X-Holosmith-Client: 1` — which is literally "the same checks as `POST /api/hosts`", lands the row where a running
+   `serve` reads it, and needs one small hand-written client (the shape `health::ask` already has, plus a body); it
+   refuses when no server is running, which is a sentence the operator needs; (b) **in-process**: open the database
+   and call `hosts::register`/`probe`/`repository` directly, the same functions the route calls — no client, but a
+   second writer of one SQLite file and the `local`-row special case to keep in step; (c) a new admin-socket verb, no
+   — the drain socket is one line protocol for one purpose. Say which, and whether `list` shares it (`db::
+   recorded_without_mirating`'s read-only open is the precedent for a `list` that works with no server up).
+2. **The role upgrade.** `deploy::refusal` refuses a `hub` today, in a sentence that names this story. Acceptance
+   bullet 4 wants `server deploy` then `hub deploy` to yield `both` — so does each deploy **union** the role it finds
+   in the config with the one it installs (and rewrite step 2's `config.toml`), or does it refuse a machine whose
+   role is the other one and tell the operator to edit the file? (b) is cheaper and worse: it makes the acceptance
+   bullet a by-hand step. Say which, what a `both` machine's `serve` does (it already forwards *and* serves — ADR-0074
+   registered the forwarding route for `Hub | Both`), and what the refusal sentence becomes.
+3. **Which steps a hub runs, and how the two it skips are reported.** `Word::Skipped` carries a reason and is never
+   a pass; the spec says a hub "builds no images and no proxies". Does `run` take a plan (a `&[DeployStep]` or a
+   `Role`) or does each step ask? And step 1's "without the Docker and git checks": does `preflight` gain a role
+   filter (the `disk::guarded(backend, role)` precedent is "Docker and not a Hub") or does `doctor::Depth` gain a
+   third arm? Also: step 2's service user is "without the docker group" — `deploy::SERVICE_GROUP` is `docker`, so
+   that is a `files` parameter and not a second function.
+4. **`status` on a hub.** (a) read the `hosts` table (read-only open, no hop) and print one line per machine with
+   its `reach`, `version` and `last_checked_at` — the spec's "last health of registered machines" *is* the row, the
+   facts are as old as the boot (ADR-0074 D5) and a sentence says so; (b) one forwarded `/health` per row, live, at
+   N hops, duplicating HS-071 D1's reader in a CLI; (c) one summary line ("3 machines, 1 unreachable"). Say which,
+   and replace `NO_REGISTRY` (whose sentence is now false twice over).
+5. **What `hub host remove` may remove.** The API's `DELETE` refuses a **local** row with live sessions
+   (`409 host_busy`) and asks for `?force=true` (ADR-0073). Does the CLI offer `--force`, and does it repeat the
+   API's sentence verbatim (`host_busy`'s message already names the count and the flag)?
+6. **The gate's shape.** A `case_hub_deploy` with an **offline** half (a `--dry-run` on a machine whose daemon is a
+   `_ping` socket, asserting the five planned steps and the two skips, and that no root was written) and a
+   **`--root`** half (the shims on `PATH`, the role upgrade, `hub host add`/`list`/`remove` against the deployed
+   hub's own listener, `status`'s line) — this sandbox has no systemd, no sudo and no `tailscaled`, so every arm is
+   a `--root` one (ADR-0056). What it cannot measure: a real unit, a real tailnet, and `--ssh`.
 
 ### 1.6 The questions the plan must answer (before code)
 
-1. Which reader feeds role/uptime, and is a migration in scope?
-2. What exactly does "counts" mean, and whose window is a `stopped` count?
-3. What does `apiPath` change, and what is the host's route through `StreamTarget`?
-4. How is the list grouped, and what does an unreachable machine render as?
-5. What is the version-skew rule, in one sentence?
-6. What does the gate measure without a browser, and which `web/test/` functions carry the sentences?
+1. Does `hub host add` go through the API, the database, or a third door — and does `list` share it?
+2. What does the role do when the other deploy has already run, and what is step 2's `config.toml` then?
+3. Which steps does a hub plan, which does it skip, and what is on the skipped lines?
+4. What does `status` read for another machine's health, and what sentence replaces `NO_REGISTRY`?
+5. Does the CLI expose `--force` for a busy row, and whose sentence does it print?
+6. What does the gate measure without systemd, sudo or a tailnet — and which `tests/` file carries the words?
 
 ### 1.7 Acceptance, restated as checks
 
-- *Lists name, URL, role, version, reachability, last health check and counts* — one row per machine from
-  `GET /api/hosts`, the rest from the two forwarded reads; a `web/test/` function for each rendered field's rule.
-- *Add and remove with the same validation, showing the specific reason* — the three refusals' `message` rendered
-  verbatim; `host_busy` offering the forced retry; a `case_*` assertion on the API and on the bundle's ids.
-- *Version skew is visible* — a row whose `version` differs renders the sentence; measured with a hand-written row.
-- *Sessions grouped by machine, each naming its owner* — the group heading and the row's machine; the peer's own rows,
-  not a re-serialisation.
-- *A hub-only machine shows no new-session affordance for itself* — from `/api/health`'s `role`, with a `web/test/`
-  function (and `case_pwa`-style bundle grep), not a new route.
-- Plus the usual gates, a `case_*` that needs no browser, `GLOSSARY.md` (a **Computers** term?), and an ADR (**0076**).
+- *`hub deploy` runs 1 (minus docker/git), 2 (minus the docker group), 5, 6, 7 and builds nothing* — a dry run's
+  five `needs` lines in the spec's order, two `skipped` lines with reasons, and an install root that a `--root` run
+  fills with exactly step 2's paths, the unit, and no image build.
+- *`hub host add`/`list`/`remove` are the API's checks* — the three refusals' codes and messages, a row stored by the
+  same function the route calls, and a `409 host_busy` answered with the API's own sentence.
+- *`--dry-run` works* — changes nothing, lists the plan, exits non-zero on a broken machine (the acceptance's own
+  split, `case_server_deploy`'s precedent).
+- *both deploys yield `both`* — a second deploy on the same root reaches the union and says so; `serve` needs no
+  change (ADR-0074 already registers forwarding for `Both`).
+- *`status` on a hub names every machine* — one line per registry row, `NO_REGISTRY` gone, and a test for the
+  sentence that replaces it.
+- Plus the usual gates, a `case_*` that needs no daemon for its offline half, `GLOSSARY.md` (a **Hub deploy** term?
+  and `state`/`Skipped` if it changes), and an ADR (**0077**).
 
 ### 1.8 Non-goals
 
-`hub deploy`/`hub host` (HS-072) — though the validation rule must not fork; `--ssh` (HS-073); cross-machine
-notifications and the `{host, session_id, kind}` payload (HS-074); a per-host role column unless §1.5's arm (b) is
-chosen; any change to `POST /api/hosts`' rules.
+`--ssh` and `--binary` (HS-073) — though the step plan must be shaped so a remote run reuses it; `upgrade`/
+`rollback` (HS-078/079); cross-machine sessions and notifications (HS-074); any change to `POST /api/hosts`' rules;
+any change to the images or the proxies (a hub runs none).
 
 ### 1.9 The demo
 
-A hub booted with a `hosts.toml` naming one reachable peer and one that is not there, and the screen opened in the
-browser this machine has (Playwright's Chromium, `docs/notes.md`'s fact: launch with `--no-sandbox`, navigate with
-`domcontentloaded`): the two machines with role, version, reachability, last-seen and counts; the unavailable one
-degraded with a sentence rather than an empty list; a version-skew sentence on a row the demo writes; a session created
-on the peer and **visible through the hub grouped under it**; and the hub-only affordance rule. Say plainly what was
-not measured: no real tailnet, and the skew is a written row rather than a second build.
+`holosmith hub deploy --root DIR --dry-run` on this machine with the two stand-ins on `PATH`, then the real
+`--root` run twice (the second all `satisfied`), then `server deploy --root` on the same tree to reach `both`, then
+`hub host add <name> <url>`/`list`/`remove` against the machine's own listener with a bad name and a bad URL to show
+the API's sentences, then `holosmith status` printing the registered machine's line. Say plainly what was not
+measured: no systemd (so no unit is loaded), no `tailscaled`, no second machine (a `--root` tree and one boot), and
+no `--ssh`.
 
 ### 1.10 What the next agent needs back
 
 When you write the state back (§5, step 10): §1 becomes the **next** issue — by `PROMPT.md`'s ranking that is
-`PER-104` (HS-072, `hub deploy` and `hub host`) *if* HS-071 ships and its blocker (HS-071) is `Done`, and `PER-103`
-again if it does not; check Linear's `Blocked by` list. Refresh the counts, the ADR number you took (**0076** is next),
-the last gate run's own numbers (and `web/`'s test count), and replace §9's row with this story's. Anything you learned
-that is **not** state and **not** an ADR goes into `docs/notes.md` under a new `### Landmines: …` heading, never into
+`PER-105` (HS-073, `--ssh` deploys) *if* HS-072 ships and its blocker (HS-072) is `Done`, and `PER-104` again if it
+does not; check Linear's `Blocked by` list. Refresh the counts, the ADR number you took (**0077** is next), the last
+gate run's own numbers (and `web/`'s test count), and replace §9's row with this story's. Anything you learned that
+is **not** state and **not** an ADR goes into `docs/notes.md` under a new `### Landmines: …` heading, never into
 §1. Then kill what you started (§5, step 11).
 
 ## 2. Environment (already repaired — do not redo)
@@ -447,9 +451,10 @@ dir, running its cases plus a CORS sweep, then torn down with `SIGTERM` and an a
 prints its own case and assertion counts — quote those, never a number copied out of this file.** Since HS-046
 it also prints one `ok <case>` line per case that measured something: a case that printed `SKIP` withholds that
 line and the run ends with `SKIP n of N cases measured nothing`, so `grep -c '^ok case_'` is the number that
-proved something and a skip can never read as a pass. It takes ~13–14 min (both musl targets, the Docker cases,
+proved something and a skip can never read as a pass. It takes ~15 min (both musl targets, the Docker cases,
 `case_idle_stop`'s real minute, `case_disk_quota`'s two boots, `case_preview`'s container and
-`case_doctor_full`'s self-test). `--no-build` skips `build` and `embed`; `--keep` keeps the work dir.
+`case_doctor_full`'s self-test). As of PER-103 the run prints **93 cases and 1911 assertions**, `cargo test` is
+**1254** in 62 binaries, and `web/` is **122** tests. `--no-build` skips `build` and `embed`; `--keep` keeps the work dir.
 
 Some cases bring their own boot, and they are the ones a new story is most likely to collide with:
 
@@ -471,6 +476,7 @@ Some cases bring their own boot, and they are the ones a new story is most likel
 | `case_push` | **no daemon, no image**: its own stub boot, a `node:https` receiver on `127.0.0.1:0` (so `node`), a CA and a `localhost` certificate plus the machine's VAPID pair (so `openssl`), and `python3` for the SEC1 walk and `app.db`. It exports `SSL_CERT_FILE` around `start_serve` and unsets it at once — the sender passes no `-CAfile` on purpose (ADR-0071), which is what lets a private CA stand in front of it. It holds an SSE stream open **across** a turn (a raw `/dev/tcp` descriptor, because `fetch_stream` closes its socket and releases the guard) |
 | `case_forward` | **two boots of its own** (a `role = "server"` and a `role = "hub"` with a `hosts.toml` naming it — `start_peer`/`stop_peer`, its own admin dir, `forward_fetch <port>`), a `python3` silent peer for the `504`, and — for the preview arms only — the daemon and `agent_image` (one `SKIP` line without them; the API half needs no daemon). It puts the shared boot back |
 | `case_machine_trust` | **its own boot, twice** (an empty `allowed_hubs`, then `["workshop"]`), a `tailscale` shim first on `PATH` (the `deploy_machine_shims` shape, paths through the environment), and `python3` for a client **bound to `127.0.0.2`** — the only way to be a peer on one box. No daemon, no image. It prints one `SKIP` line without `python3` and restores `PATH` and the shared boot |
+| `case_computers` | **two boots of its own** (`start_peer` with a `role = "server"` and its own seed naming the hub, then a `role = "hub"` boot with a seed naming the peer and a `gone` port — both on pinned control/preview ports), `python3` for `free_port` (one `SKIP` line without it), `forward_fetch <port>` for the peer's own `404`, and no daemon and no image. It restores the shared boot |
 | `case_hosts` | **its own stub boot on a pinned control port** (`start_serve <config> <data> <listen>` — a seed row naming *this* machine has to spell the port the boot will use), three `python3` **TLS** stand-ins on loopback (a healthy payload, a `302` that records each request, a payload with no `name`), a CA + `localhost` certificate with a `DNS:` SAN (so `openssl`), and `SSL_CERT_FILE` exported around both `start_serve` calls — the probe passes no `-CAfile` on purpose (ADR-0071/0073), which is what lets a private CA stand in front of it. It restores the shared boot |
 
 A story is not done until the gates are green on a clean tree, and then you run the story's own demo
@@ -1000,7 +1006,9 @@ crates/holosmith/
                             default `pi-agent:local`, and skips otherwise**), support/mod.rs
                             (the shared harness, which also has `repository`/`git`/`head`/
                             `branch_exists`/`worktrees` helpers for a real git repo in a `TempDir`)
-web/                        Vite 7 + TypeScript, three screens (`/`, `/sessions/<id>`, `/settings`)
+web/                        Vite 7 + TypeScript, four screens (`/`, `/sessions/<id>`, `/settings`,
+                            `/computers` — the last since HS-071, and `/hosts/<host>/sessions/<id>` is the
+                            remote spelling of a session's page)
                             package-lock COMMITTED; main.ts is the DOM, transcript.ts the renderer's
                             rules (frame parsing, block model, affordances, `stoppedNotice` /
                             `stoppedDetail`, `budgetNotice`, `createFailure`, `parseTruncated`,
@@ -1019,8 +1027,16 @@ web/                        Vite 7 + TypeScript, three screens (`/`, `/sessions/
                             notification sentences, the id→path rule, `pushState`'s five arms, the two install
                             sentences, `navLink`, `subscriptionBody`) with `test/push.test.ts`, and
                             `sw.ts` — the service worker, bundled by `vite.sw.config.ts` into `web/dist/sw.js` —
-                            plus `public/manifest.webmanifest` and four PNGs under `public/icons/`)
-web/test/transcript.test.ts 72 tests over synthetic frames, node's own runner (`npm test`)
+                            plus `public/manifest.webmanifest` and four PNGs under `public/icons/`); since
+                            HS-071 `transcript.ts` also owns the machine dimension — `apiPath`, `hostRef`,
+                            `sessionPath`/`sessionActionPath`/`streamPath`/`historyPath`/`diffPath`,
+                            `sessionHref`/`sessionIdFromPath`, `previewPath`/`previewUrl`, `sessionCounts`,
+                            `skewNote`, `reachText`/`lastCheckText`/`relativeTime`/`uptimeText`, `hostFailure`,
+                            `hostForceOffered`, `createOffered`, `forwards`/`forwardingNote`/`previewShown`,
+                            `isLocalRow`, `hostLabel`, `hostRemoveQuestion`, `COMPUTERS_INTRO` — with `main.ts`'s
+                            `computersSection`/`machineCard` as the screen and `push.ts`'s `navLinks`/`SCREENS`
+                            naming the four paths)
+web/test/transcript.test.ts 97 tests over synthetic frames, node's own runner (`npm test`)
 scripts/build-web.sh        npm ci + npm test + npm run build, asserts web/dist/index.html
 scripts/build.sh            web first, HOLOSMITH_REQUIRE_WEB=1, both musl targets → dist/<triple>/,
                             atomic copy, then check-static.sh. Uses `cargo build --locked`.
@@ -1032,11 +1048,11 @@ scripts/verify.sh           the one-command gate (see §3), including the two st
                             --json` from the pairs it was asked for) and `health_responder` (a `python3` that
                             answers `/api/health` for a whole case)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0075          read the recent ones before planning anything (0075 is machine trust, whose D10 is
-                            the topology limit this story's UI inherits; 0076 is the next free number)
+docs/adr/0001…0076          read the recent ones before planning anything (0076 is the Computers screen, whose D3
+                            and D6 are the two rules a CLI must share; 0077 is the next free number)
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-102, PER-107  each a verbatim review + a `## Resolution` table
-                            (`PER-102` is this build's newest; `PER-101` the one before it)
+docs/review/PER-33…PER-103, PER-107  each a verbatim review + a `## Resolution` table
+                            (`PER-103` is this build's newest — fifteen findings; `PER-102` the one before it)
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -1275,14 +1291,14 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 The catalogue lives in **`docs/notes.md`** — read the **cross-cutting** sections before you start anything,
 then the sections below. It is a reference: everything there is a measurement or a review finding.
 
-| Read | Why it bears on HS-071's Computers screen |
+| Read | Why it bears on HS-072's `hub deploy` and `hub host` |
 | --- | --- |
-| Cross-cutting: *HTTP and the envelope*, then *Data and state*, *Config and docs* | **HTTP and the envelope** is what a screen draws from: ADR-0008's one envelope and the rule that a refusal's `message` is the sentence a client shows, the four guards, `is_guard_exempt`'s one entry (the health read a per-host role needs is exempt, which is why a forwarded health call works), and the `Routes`/`App` seam with its single `.layer(`. **Data and state**: a session's `status` is the fold the counts are made of, and the stopped window is the **peer's** `stopped_ttl_days`, not the hub's. **Config and docs**: a new key moves the golden file, `KNOWN_KEYS` and `config show`'s prose; an ADR means a line in `docs/stories/README.md`. |
-| *Landmines: the installable app (HS-067)* and *the Changes sheet (HS-058)* | **This is the story's own section.** A page that must show something new: every sentence and every rule is a pure `transcript.ts`/`push.ts` function with a node test, `main.ts` keeps nothing but the DOM, `StreamTarget`'s one `showState` patches the badge, the preview link, the composer, the delete affordance and the sheet — and a gate case can only assert the served **bundle**'s ids and sentences, because no gate may run a browser. HS-058's `apiPath`-shaped lesson is here too: a route the page spells is a string a test pins. |
-| *Landmines: the hub's forwarding (HS-069)* and *machine trust (HS-070)* | The two hops this screen reads through: `GET /api/hosts/<name>/<rest>` relays the peer's own answer **byte for byte** (so a row's fields are the peer's struct order, not this page's invention), `local` is a `308`, `hosts/…` is `403 not_forwarded`, the bound is 5 s per hop (60 s for `merge`, `publish`, a `DELETE` of one session) — so N hosts is N hops and an unreachable one must degrade rather than hang — and ADR-0075 **D10** is why a hub's forwarded call arrives at a peer as a front-door caller. |
-| *Landmines: the host registry and its probe (HS-068)* | The row this screen lists: its shape and order, `is_local` (a row naming this machine is stored without a round trip), `reach`/`version`/`preview` being as old as the boot (ADR-0074 D5), the seed's asymmetry, and the probe's measured landmines — **one** deadline, `SSL_CERT_FILE` as the only trust seam, the certificate's `DNS:` SAN. The three registration refusals are the sentences the Add form must show unchanged. |
-| *Landmines: the preview listener (HS-041)* | Where a preview link points and why it is a **second origin**: `previewUrl`/`previewOffered` in `transcript.ts`, `preview::Route::path`, and the row's `preview` (measured, never configured) — a page that built the link from *this* machine's health origin already exists and is the thing to change for a remote session. |
-| *Reviews* (`docs/review/PER-102.md`, `PER-101.md`, `PER-100.md`, `PER-98`) | Four reviews' worth of the lessons that recur: a gate claim that asserts nothing, a **forged-header arm that could not fail** because it forged a value the implementation would refuse anyway (PER-102 S2), a check whose claim outran its topology (PER-102 S1, ADR-0075 D10), and a background path with no deadline. |
+| Cross-cutting: *Config and docs*, then *HTTP and the envelope*, *Data and state* | **Config and docs**: an ADR means a line in `docs/stories/README.md` (and its count), and `docs/build.md` is a deliverable if the gates change. **HTTP and the envelope**: a CLI that posts to this machine's own listener has to satisfy the four guards — `Host` against the allow-list, `Origin` **as text** against `control_origin` (ADR-0074's landmine), `Content-Type: application/json` *even with no body*, and `X-Holosmith-Client: 1` — and answers arrive in ADR-0008's one envelope, whose `message` is the sentence a client shows. **Data and state**: the repository owns every statement against its table (a `status` reader goes through `select()`/`one()`, never a hand-copied column list), and `recorded_without_mirating` is the read-only open that reads a table a server owns. |
+| *Landmines: the deploy, the ports and what `install` does to a key file (HS-047)*, *the image builds (HS-048)*, *the service, the keys and the origins (HS-049)* | **This is the story's nearest section.** Seven steps, the report's five words and the `skipped` line's rule; `Target` and `--root`'s one asymmetry (only the paths the deploy writes are prefixed, and the two machine-wide paths are the *target's*); step 1's preflight as `doctor --quick` and the sentences it refuses with; step 2's modes and the key file `install` must not rewrite; step 6's two `tailscale` argvs and the shim that answers `serve status --json`; step 7's `/api/health` wait and `doctor --full`. A hub runs five of the seven and skips 3 and 4 **with a reason**. |
+| *Landmines: `status`, `logs` and `uninstall` (HS-050)* | The CLI's own shape: `status` reads the config, asks `/api/health` once, and prints one `key value` line per fact in a pinned order; its `NO_REGISTRY` sentence names HS-068 and is now false twice over — the acceptance's last bullet replaces it. `logs`/`uninstall` are the two other commands whose words are pinned by a test. |
+| *Landmines: the host registry and its probe (HS-068)* | The rules `hub host add` must not respell: `name_problem` (the alphabet, `MAX_NAME`, the reserved `local`), `origin`/`host_problem`/`port_problem` (a MagicDNS shape or 100.64.0.0/10, `MIN_PORT` plus each scheme's default), `register` as an **upsert on the name**, a failed probe stored `unreachable` with its sentence rather than refused, and the probe's measured landmines (**one** deadline, `SSL_CERT_FILE` as the only trust seam, the certificate's `DNS:` SAN, an answer that is not a health payload is `422 not_holosmith`). |
+| *Landmines: the hub's forwarding (HS-069)* and *the Computers screen (HS-071)* | ADR-0074's `Origin` landmine is the one a CLI is most likely to hit: a row registered as `http://localhost:<port>` against a peer whose origin is `http://127.0.0.1:<port>` passes the probe and answers `403 bad_origin` on every mutating call — so `hub host add` must send the configured `control_origin`, character for character, or it refuses its own machine's POST. HS-071's ADR-0076 **D6** is the other half: the CLI prints the API's `message` verbatim, because the Computers screen already does. |
+| *Reviews* (`docs/review/PER-103.md`, `PER-102.md`, `PER-050`… `PER-047`) | The recurring lessons: a gate claim that asserts nothing, a **forged arm that could not fail** because it forged a value the implementation would refuse anyway (PER-102 S2), a check whose claim outran its topology (PER-102 S1), a fan-out that assumed a role could forward (PER-103 #1 — the same class as a CLI assuming a server is running), and the deploy's own reviews' findings about `--root`, modes and the `sudo` seam. |
 
 Three rules worth repeating here because they are the most expensive to relearn: **a test that cannot fail is worse
 than no test** (mutate the behaviour and watch it go red); **a gate case that SKIPs on the bug it exists to catch is
@@ -1324,17 +1340,17 @@ cd /home/adamolsson/projects/holosmith
 git status --short                                  # clean apart from log.txt/orchestrate.sh
 . ~/.pi/toolchains/env.sh                           # ALWAYS before cargo/rustc
 python3 /tmp/lin.py issues | grep -v ' Done ' | head # recreate /tmp/lin.py first (§2)
-python3 /tmp/lin.py issue PER-103                   # scoped, Backlog, the issue §1 names
+python3 /tmp/lin.py issue PER-104                   # scoped, Backlog, the issue §1 names
 docker version                                      # the daemon must answer, or a Docker check cannot be measured
 docker image inspect pi-agent:local                 # the image the Docker stories run
 docker network ls | grep -w egress                  # the proxy test's premise (§2); `grep -x` never matches
 docker rm -f hs_egress hs_key 2>/dev/null           # so tests/container.rs runs its real path
-scripts/verify.sh                                   # baseline green, ~13–14 min (it prints its own counts)
+scripts/verify.sh                                   # baseline green, ~15 min (it prints its own counts)
 ```
 
 If the baseline is red before you touch anything, that is the first thing you fix — and say so in Linear.
 
-Then start §5 on **§1's issue** (`PER-103`, HS-071) and stop after step 11.
+Then start §5 on **§1's issue** (`PER-104`, HS-072) and stop after step 11.
 
 Before you begin, check that the last session left nothing behind — `subagent({action:"list"})` should show
 no run in progress, `docker ps` none of its containers, and `git status --short` should look like the line
@@ -1353,27 +1369,48 @@ from those three; do not carry old sessions' ledgers in this file.
 If you stop before the issue ships, say so explicitly, name the next action, and leave the tree clean and the
 gates green — **a half-finished story is worse than an honest stop**.
 
-**The last shipped story** (`PER-102`, HS-070, ADR-0075; commits `fa0bf32`, `e087358`, `027f036`, `a624406`): phase
-3's third story — machine-to-machine trust. Four things are worth carrying: **one decision, asked at the edge of both
-listeners** (`trust::Trust::admit` in `http::app::edge` after the four browser checks and in `preview::handle` after
-`parse_head`), because two copies of a trust rule is the failure mode and ADR-0051 already gives the two listeners two
-vocabularies; **the identity is the tailnet node's short machine name and never the login**, because the login is the
-owner and is identical on every node — comparing it would admit the stray node the story exists to refuse; **an
-identity that cannot be read refuses** rather than admits, and the spec's ACLs-only fallback is spelled by an **empty
-list**, not by a broken daemon; and **the front door is `127.0.0.1`/`::1` exactly**, because `tailscale serve` connects
-from there — which the review then turned into the story's most important paragraph: `tailscale serve` dials the
-origin's *local target*, so on a deployed machine every caller including the hub arrives as the front door, the whois
-check bites only where a machine's control origin is its listener's own tailnet-reachable address, and a
-serve-published machine rests on the tailnet's ACLs plus item 4's `owner` rule. That is **ADR-0075 D10**, it is why
-V11's cell reads `pass, with the fallback applied`, and a machine-identity path behind serve is a named follow-up
-(HS-072's shape). The gate: **92 cases, 1823 assertions**, no `SKIP`; `cargo test` **1254** (62 binaries); `web/`
-**104**. The review found **one blocker** (that topology, recorded and narrowed rather than papered over), **one
-major** (the forged-header arm could not fail, now forging the *listed* name) and nine findings in all, every one
-fixed or recorded in `docs/review/PER-102.md`. Two measurements this run made rather than assumed: `cat f 2>/dev/null >&2`
-sends stdout to `/dev/null` too (the log line's `detail` was empty until the shim was fixed), and a `tracing` field
-written without `%` is Debug-quoted, so `reason=` arrived as `reason="…"` and the gate's own grep would not have matched.
+**The last shipped story** (`PER-103`, HS-071, the Computers screen, ADR-0076; commits `505c936`, `1a7f93d`): phase
+3's fourth story, and the first whose deliverable is a screen. Five things are worth carrying.
+
+**The story added no route, no migration, no config key and no server-side reader.** Everything the screen draws was
+already served — `GET /api/hosts`, and one forwarded `/health` and one forwarded `/sessions` per machine — so the work
+was a page that asks several machines the same two questions. That is the shape a UI story should look for first: the
+data plane usually exists by the time a screen is asked for, and a second reader of it is a second truth.
+
+**`apiPath(host, rest)` was the whole story's weight, and the path the *server* computed was the one that nearly
+escaped.** `tool.end`'s `output_ref` is written by the peer for itself (`/api/sessions/<id>/tool-output/<tool>`), and a
+forwarded frame is the peer's bytes — so the hub's own route for that path is a `404` that reads to an operator as
+"the output is gone". `hostRef` re-roots it. When a story threads a dimension through a page, the values that come
+*from the server* are the ones that get missed, because they are not spelled in the page at all.
+
+**The second review finding was mine and the review could not have been softer about it:** nine of twelve
+`ADR-0076 D<n>` cross-references pointed at the wrong decision, because the ADR's numbering settled after the code
+citations were written. Cite an ADR's decision *after* its sections exist, or cite the file.
+
+**The review's one major was a role assumption**, and it is the recurring class: the page fanned out to every registry
+row, but the seed is copied to **every** machine and a `server` cannot forward — so the deployment the seed exists for
+would have drawn a wall of `404 not_found` sections. `forwards(role)` gates it now, with a sentence that says what the
+limit is, and the gate proves the `404` on the peer it boots. The lesson generalises: **a page that fans out must ask
+what the fan-out looks like on a machine that cannot reach its rows.**
+
+**Two measurements the demo made rather than the gate:** the local card had no `reach` (no probe built its row, so
+the acceptance's "reachability" had a hole in the one card always on screen — it is drawn now from the health answer
+that served the page), and a failed read was showing an envelope code in front of a sentence that already names the
+machine. A screenshot caught both. And one thing a screenshot could not: **two link texts with no separator read as
+one word** (`SessionsNotifications`) — the header had no layout until it had two links.
+
+The gate: **93 cases, 1911 assertions**, no `SKIP`; `cargo test` **1254** (62 binaries); `web/` **122** (was 104).
+The review found **two majors** (the fan-out's role assumption, the ADR cross-references) and thirteen more, and
+every one is fixed — none dismissed. `docs/notes.md`'s `### Landmines: the Computers screen …` carries the eight
+measurements; the two most portable are that **`node --test` resolves `src` imports without an extension**, so a
+module a node test imports may not import an extensionless sibling (a shared constant belongs where both node and
+Vite already load it), and that **`span:empty` in a flex row still costs a gap**, which is why a machine that is not
+there had its facts pushed sideways.
 
 **Two things this build does not do, recorded rather than discovered:** a resumed session's pi has **no memory** of
 earlier turns (`--no-session`; the transcript is Holosmith's log), and a notification's payload is deliberately
-content-free, so the browser has four `kind` words and a session id and nothing else to draw with — the four
-sentences are `web/src/push.ts`'s, and the worker never asks for more.
+content-free, so the browser has four `kind` words and a session id and nothing else to draw with.
+
+**A session that cannot push must say so.** This one could not: `/run/ssh-agent.sock` does not exist, `SSH_AUTH_SOCK`
+is unset and `ssh-add -L` answers `Could not open a connection to your authentication agent`, so `505c936` and
+`1a7f93d` are **local commits** and the next session pushes them (§2's single-key loop). Nothing was faked.
