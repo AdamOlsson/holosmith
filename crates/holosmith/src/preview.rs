@@ -576,20 +576,24 @@ pub struct Context {
 }
 
 impl Context {
-    /// The context a boot builds from the config in force.
+    /// The context a boot builds from the config in force and the programs the run uses.
+    ///
+    /// `tools` is a parameter rather than `Tools::default()` for the reason it is one in `serve`: the guards and this
+    /// listener must resolve the trust check from the **same** value, so a machine (or a test) that names its
+    /// `tailscale` names it once. Both callers pass the run's own.
     pub fn of(
         config: &Config,
         database: Arc<Mutex<Database>>,
         upstream: Arc<dyn Upstream>,
+        tools: &crate::preflight::Tools,
     ) -> Self {
-        let tools = crate::preflight::Tools::default();
         Self {
             origin: config.preview_origin.clone(),
             role: config.role,
             database,
             upstream,
-            trust: crate::trust::Trust::of(config, &tools),
-            tools,
+            trust: crate::trust::Trust::of(config, tools),
+            tools: tools.clone(),
         }
     }
 

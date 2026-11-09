@@ -5835,14 +5835,16 @@ PYCLIENT
     fail "$name/stranger/log" "the refusal was not logged: $(cat "$WORK/serve-peer.err")"
   grep -q 'peer=127.0.0.2' "$WORK/serve-peer.err" ||
     fail "$name/stranger/log-peer" "the log line names no peer address: $(cat "$WORK/serve-peer.err")"
-  grep -q 'reason=peer_not_allowed' "$WORK/serve-peer.err" ||
-    fail "$name/stranger/log-reason" "the log line names no reason: $(cat "$WORK/serve-peer.err")"
-  assertions=$((assertions + 1))
+  check "$name/stranger/log-reason" 1 \
+    "$(grep -c 'reason=peer_not_allowed' "$WORK/serve-peer.err" || true)"
+  check "$name/stranger/log-once" 1 \
+    "$(grep -c 'a call from a peer this machine does not trust was refused' "$WORK/serve-peer.err" || true)"
 
   # ---- 5. a header the caller supplies changes nothing --------------------------------------------
   # Item 4's "not by a header the caller supplies": the one header `tailscale serve` would add is a claim, and the
-  # address is the fact.
-  as_peer "$name-forged" 127.0.0.2 "$peer_port" /api/sessions "Tailscale-User-Login: me@example.com"
+  # address is the fact. The forged value is the **listed** name, which is what makes this arm able to fail — an
+  # implementation that honoured the header would answer 200, and a name nobody lists would pass either way.
+  as_peer "$name-forged" 127.0.0.2 "$peer_port" /api/sessions "Tailscale-User-Login: workshop"
   expect_status "$name/forged" "$(answer "$name-forged")" 403
   expect_code "$name/forged" "$(answer "$name-forged")" peer_not_allowed
 

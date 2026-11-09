@@ -2526,7 +2526,15 @@ it rather than adding a caveat beside it.
 - **The banner is exactly eight lines at the default filter** (`tests/serve_cli.rs`), so the trust config is a
   `debug!` at startup and a `warn!` only per refusal. A startup `warn` would fail that test — and it did, in the
   first draft of the boot line.
-- **`preflight::Tools` is the seam, so a new program joins it.** `tailscale` did, and four test literals that built the
-  struct field by field had to say so; a `Trust`-only program path would have been a second seam for one idea.
+- **`preflight::Tools` is the seam, so a new program joins it.** `tailscale` did — seven test literals name it and five
+  more take `..Tools::default()` — and a `Trust`-only program path would have been a second seam for one idea.
+- **`tailscale serve` rewrites the source address, and that is the whole topology question.** Deploy step 6 proxies
+  `https://<machine>.ts.net` to `http://127.0.0.1:<port>`, so every caller — browser, hub, stray node — reaches the
+  listener from `127.0.0.1`. The machine check therefore bites where the control origin is the listener's own
+  tailnet-reachable address and **cannot** bite behind serve (ADR-0075 D10). Do not "fix" this by trusting
+  `X-Forwarded-For` or `Tailscale-User-Login`: that is the caller-supplied claim item 4 forbids.
+- **A forged identity header must forge a *listed* name to be a measurement.** `tests/trust.rs` and the gate both
+  forge `workshop`, not an arbitrary login: with a name nobody lists, both an implementation that trusts headers and
+  one that does not answer `403`, so the arm could not fail.
 - **One whois per request on the tailnet path, and no cache.** A dev-server page is thirty children. That is recorded
   as a cost (ADR-0075 D8) rather than fixed: a cached admission outlives the tailnet's own membership change.

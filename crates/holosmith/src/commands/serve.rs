@@ -499,6 +499,7 @@ pub fn run(args: ServeArgs) -> ExitCode {
                 docker: Docker::new(loaded.config.docker_host.clone()),
                 port: loaded.config.preview_upstream_port,
             }),
+            &state.tools,
         );
         // **One signal handler, two listeners.** `serve::run` and `preview::serve` both take a shutdown future
         // and both get theirs from this watch, so the process still has exactly one `StopSignal` and the two

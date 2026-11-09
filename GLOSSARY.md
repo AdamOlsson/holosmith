@@ -82,7 +82,10 @@ registry keys rows by; the tailnet **login** is the owner and is identical on ev
 comparison. Three arms decide it: an **empty `allowed_hubs`** verifies nobody (Tailscale's ACLs are then the only
 control — the spec's documented fallback, and the default), a peer at `127.0.0.1`/`::1` is this machine's **front
 door** (what `tailscale serve` connects from) and costs no whois, and every other address must whois to a listed node.
-An identity that cannot be read is a **refusal**, because an unread identity is not an identity. Its machine names are
+An identity that cannot be read is a **refusal**, because an unread identity is not an identity. **What it cannot see,
+it does not claim:** `tailscale serve` (deploy step 6) dials the origin's local target, so a call published that way
+arrives from the front door and the rule there is the tailnet's ACLs plus **Owner** — the whois check governs a machine
+whose control origin is its listener's own tailnet-reachable address (ADR-0075 D10). Its machine names are
 `trust::{Trust, admit, Admitted, Refusal, whois, identity, front_door}`, `Tools::tailscale`, and the shell word
 `tailscale whois --json <ip>`.
 _Avoid_: Authentication, authorization, ACL (an ACL is the tailnet's, and it is what applies when the list is empty), hub

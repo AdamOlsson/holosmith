@@ -69,6 +69,9 @@ arrive from `127.0.0.1`; asking the tailnet about an address that is not in the 
 machine has. The rest of `127/8` is an address no deployment uses, so a peer there is a peer like any other — which is
 also the only way one box can measure the refusal at all (D7).
 
+**And that same sentence is why this check cannot bite on a deployed machine's forwarded call** — the one arrival
+`tailscale serve` hides with the rest. D10 records it rather than leaving it to be discovered.
+
 | Arm | Verdict |
 | --- | --- |
 | **empty list = ACLs only, non-empty list = verify and fail closed** (chosen) | the default config keeps working, a list is the operator asking for the check, and the fallback the spec names is a *setting* rather than a broken daemon |
@@ -133,8 +136,11 @@ from, and it is on the *wrong* side of the front-door rule by design. `python3` 
   and a cache is a second trust decision with a lifetime. If it bites, a `Trust` cache with a TTL is the follow-up.
 - **A `warn` per refused request.** A peer that retries fills the log; nothing throttles it.
 - **`preflight::Tools` gained `tailscale`**, so the seam a test already uses for `git`/`df`/`du`/`openssl` names the
-  whois too, and four test literals had to say so. The alternative — a `Trust`-only path — would have been a second
-  seam for the same idea.
+  whois too: seven test literals name it and five more take `..Tools::default()`. The alternative — a `Trust`-only
+  program path — would have been a second seam for the same idea.
+- **On a machine published through `tailscale serve`, this check sees the front door** (D10), so the acceptance bullet
+  that names it is satisfied by the tailnet's ACLs and the `owner` check there, not by the whois. Recorded, not
+  claimed.
 
 ## D9 — V11's row and the case that pins it, in one commit
 
@@ -142,6 +148,38 @@ from, and it is on the *wrong* side of the front-door rule by design. `python3` 
 it). This story **removes that rule** and gives V11 the same four rules every other row gets, in the same commit that
 fills the cell — which is the shape that makes the row's automation a case that exists rather than a promise. The row
 now says `**pass**`, names `case_machine_trust` and `tests/trust.rs`, and points at the risk row D6 records.
+
+## D10 — what `tailscale serve` hides, and therefore what V11's verdict is
+
+Deploy step 6 publishes the control origin with `tailscale serve --https=443 http://127.0.0.1:<control port>`
+(`deploy::control_target`) and the preview origin the same way on 8444. `tailscaled` terminates the tailnet connection
+and dials the local target, so **the listener sees `127.0.0.1` for every caller**: a browser, the CLI, a host probe —
+and the hub's forwarded call, which is the one D3 exists to govern. A hub dials the peer's registry row, and ADR-0074
+D4 requires that row to be the peer's exact `control_origin`, which on a deployed machine is the serve origin — so a
+forwarded call reaches the peer through serve and arrives as a front-door caller.
+
+Four consequences, and none of them is a bug in this story's code:
+
+1. **The check bites where the address is real.** A machine whose `control_origin` is its listener's own
+   tailnet-reachable address (bound beyond loopback, or reached by an address in `100.64/10`) — and any caller that
+   dials the listener's socket directly — is verified exactly as D2/D3 describe. That is the arm `case_machine_trust`
+   measures, and it is the arm `tests/trust.rs` pins.
+2. **It does not bite behind serve**, and the address that would let it is not available: `tailscale serve` adds a
+   header for the *user* (`Tailscale-User-Login`), never for the node, so the app cannot ask `whois` about a machine it
+   cannot name. Trusting `X-Forwarded-For` or the login header to stand in for the node would be precisely the
+   caller-supplied claim item 4 forbids.
+3. **What controls a deployed machine instead** is the tailnet's ACLs (V11's own documented fallback) plus item 4's
+   `owner` check, which `tailscale serve` makes meaningful because it is what adds the login header. That is a weaker
+   claim than the story's, and it is the one the spec's "If it fails" column anticipated.
+4. **The follow-up is named, not implied:** a machine-identity path that survives serve is a story of its own — either
+   a listener a hub reaches directly with the origin the peer reports (which needs ADR-0074's row to carry a dial
+   address distinct from the origin it claims) or a serve feature that reports the node. HS-072 writes a deployed
+   machine's config and is where the first would land.
+
+So V11's Result cell says **`pass, with the fallback applied`**: the whois check accepts a listed hub and rejects
+another tailnet node wherever it can see the address (measured, above), and a machine published through `tailscale
+serve` falls back to ACLs plus the owner rule (recorded, in the spec's risk table). Saying `pass` outright would claim
+the deployed path; saying `fail` would deny the measurement.
 
 ## What this machine could not measure
 

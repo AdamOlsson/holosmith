@@ -90,12 +90,6 @@ impl Trust {
         }
     }
 
-    /// The same trust, with another whois program: the seam a test points at a shim.
-    pub fn with_program(mut self, program: impl Into<PathBuf>) -> Self {
-        self.program = program.into();
-        self
-    }
-
     /// Whether this machine verifies its callers at all. `false` is the ACLs-only fallback, and it is the default
     /// config's answer.
     pub fn guarded(&self) -> bool {
@@ -189,10 +183,16 @@ impl Refusal {
     }
 
     /// The word a control-listener envelope carries, and the word this refusal is logged with.
+    ///
+    /// The constants are [`crate::http::error`]'s because the envelope is: this module owns the decision, the
+    /// listener owns the code, and a literal here would be the second spelling of a word a client keys on
+    /// (`docs/notes.md`'s envelope rule).
     pub fn code(&self) -> &'static str {
         match self {
-            Self::NotListed { .. } => "peer_not_allowed",
-            Self::NoPeer { .. } | Self::Unverifiable { .. } => "peer_unverifiable",
+            Self::NotListed { .. } => crate::http::error::PEER_NOT_ALLOWED,
+            Self::NoPeer { .. } | Self::Unverifiable { .. } => {
+                crate::http::error::PEER_UNVERIFIABLE
+            }
         }
     }
 
@@ -630,12 +630,39 @@ mod tests {
 
     #[test]
     fn every_refusal_has_a_status_a_code_and_a_sentence() {
-        let refusal = Refusal::NoPeer {
-            detail: "no address".to_string(),
-        };
-        assert_eq!(refusal.status(), 403);
-        assert_eq!(refusal.code(), "peer_unverifiable");
-        assert!(!refusal.sentence().is_empty());
-        assert_eq!(refusal.to_string(), refusal.sentence());
+        let peer: IpAddr = "100.64.0.7".parse().expect("an address");
+        for (refusal, code) in [
+            (
+                Refusal::NoPeer {
+                    detail: "no address".to_string(),
+                },
+                "peer_unverifiable",
+            ),
+            (
+                Refusal::NotListed {
+                    peer,
+                    node: "stranger".to_string(),
+                },
+                "peer_not_allowed",
+            ),
+            (
+                Refusal::Unverifiable {
+                    peer,
+                    detail: "no daemon".to_string(),
+                },
+                "peer_unverifiable",
+            ),
+        ] {
+            assert_eq!(refusal.status(), 403);
+            assert_eq!(refusal.code(), code);
+            assert!(!refusal.sentence().is_empty());
+            assert_eq!(refusal.to_string(), refusal.sentence());
+            // The envelope a client reads carries the same word, from the same constant: the mapping is not a second
+            // spelling, and this is the assertion that keeps it one.
+            let envelope = crate::http::error::ApiError::from(&refusal);
+            assert_eq!(envelope.body.code, code);
+            assert_eq!(envelope.status.as_u16(), refusal.status());
+            assert_eq!(envelope.body.message, refusal.sentence());
+        }
     }
 }

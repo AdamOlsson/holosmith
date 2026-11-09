@@ -949,12 +949,11 @@ impl IntoResponse for ApiError {
 /// one decision, two spellings — and it names no `allowed_hubs` entry (`crate::trust::Refusal`'s doc says why).
 impl From<&crate::trust::Refusal> for ApiError {
     fn from(refusal: &crate::trust::Refusal) -> Self {
-        match refusal {
-            crate::trust::Refusal::NotListed { .. } => Self::peer_not_allowed(refusal.sentence()),
-            crate::trust::Refusal::NoPeer { .. } | crate::trust::Refusal::Unverifiable { .. } => {
-                Self::peer_unverifiable(refusal.sentence())
-            }
-        }
+        Self::new(
+            StatusCode::from_u16(refusal.status()).unwrap_or(StatusCode::FORBIDDEN),
+            refusal.code(),
+            refusal.sentence(),
+        )
     }
 }
 

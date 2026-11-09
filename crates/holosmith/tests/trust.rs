@@ -20,7 +20,6 @@ use holosmith::http::error::{PEER_NOT_ALLOWED, PEER_UNVERIFIABLE};
 use holosmith::http::{self, Guards};
 use holosmith::preflight::Tools;
 use holosmith::preview;
-use holosmith::trust::Trust;
 
 mod support;
 use support::{Response, Served, TempDir, parse, request, state_in};
@@ -198,14 +197,15 @@ async fn the_refusal_names_the_peer_and_never_the_configuration() {
 #[tokio::test]
 async fn a_forged_login_header_changes_nothing() {
     let whois = Whois::new("trust-forged");
-    let served = booted("trust-forged", &whois, config(&["hub"])).await;
+    // The forged value is **the listed name**, which is what makes this arm able to fail: an implementation that
+    // honoured the header would serve this call (`200`), and the reference of a name nobody listed would pass either
+    // way. `tailscale serve` is what adds this header, and item 4 says the peer must not trust one a caller supplies.
+    let served = booted("trust-forged", &whois, config(&["workshop"])).await;
     whois.node("stranger");
     let response = request_from(
         PEER,
         served.addr,
-        // `tailscale serve` is what adds this header, and item 4 says the peer must not trust one the caller
-        // supplies: the same (or a better) claim changes nothing, because the address is what is verified.
-        "GET /api/sessions HTTP/1.1\r\nHost: 127.0.0.1\r\nTailscale-User-Login: me@example.com\r\n\
+        "GET /api/sessions HTTP/1.1\r\nHost: 127.0.0.1\r\nTailscale-User-Login: workshop\r\n\
          X-Holosmith-Client: 1\r\nConnection: close\r\n\r\n",
     )
     .await;
@@ -299,12 +299,13 @@ async fn listener(
 ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let dir = TempDir::new(&format!("{label}-db"));
     let state = state_in(&dir, Config::default());
+    let tools = whois.tools();
     let mut context = preview::Context::of(
         &config,
         Arc::clone(&state.database),
         Arc::new(Never) as Arc<dyn preview::Upstream>,
+        &tools,
     );
-    context.trust = Trust::of(&config, &whois.tools());
     context.role = Role::Server;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
