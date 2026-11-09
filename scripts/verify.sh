@@ -11324,9 +11324,15 @@ case_status() {
     fi
     assertions=$((assertions + 1))
   done
-  # The one fact with no reader yet says which story owns it, rather than printing a zero.
-  grep -q '^machines unknown: .*HS-068' "$WORK/$name.out" ||
-    fail "$name/machines" "the machines line does not name HS-068: $(cat "$WORK/$name.out")"
+  # The registry (HS-072): this boot's data root has no `hosts.toml` and nothing has registered, so the fact is a
+  # **count of zero** and not the phase-2 sentence that used to name HS-068. The rows themselves are
+  # `case_hub_deploy`'s, against a machine that really has some.
+  grep -qx 'machines 0' "$WORK/$name.out" ||
+    fail "$name/machines" "an empty registry is not a count of zero: $(cat "$WORK/$name.out")"
+  assertions=$((assertions + 1))
+  if grep -q 'NO_REGISTRY\|no hub has registered' "$WORK/$name.out"; then
+    fail "$name/machines/stale" "status still prints the phase-2 sentence: $(cat "$WORK/$name.out")"
+  fi
   assertions=$((assertions + 1))
 
   # A session moves one count, and the six counts are the table's own sum: `1 idle` is what a create leaves, and
