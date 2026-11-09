@@ -82,7 +82,7 @@ fn main() -> ExitCode {
         },
         Cmd::Hub { action } => match action {
             HubAction::Deploy { dry_run, root } => {
-                commands::hub::run_deploy(commands::deploy::DeployArgs {
+                commands::deploy::run(commands::deploy::DeployArgs {
                     config: cli.config,
                     kind: holosmith::deploy::Kind::Hub,
                     dry_run,

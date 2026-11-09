@@ -11,7 +11,7 @@
 //! would make is one it can skip, and an `https` origin would mean an `s_client` child and a trust seam for a
 //! request that never leaves the box.
 //!
-//! It still sends the origin's own **authority** in `Host` and its exact text in `Origin`, which is what the served
+//! It still sends the origin's own **host** in `Host` and its exact text in `Origin`, which is what the served
 //! request looks like after `tailscale serve` has proxied it: the guard compares `Origin` as text against
 //! `control_origin` (ADR-0074's landmine), and `Host` is the allow-list's question. A caller on this machine arrives
 //! from `127.0.0.1`, which is ADR-0075's **front door** and asks no whois. The other two guards' headers —
@@ -52,7 +52,9 @@ pub struct Client {
     target: SocketAddr,
     /// `control_origin` verbatim — the `Origin` header the guard compares as text.
     origin: String,
-    /// The origin's authority, which is the `Host` a served request carries.
+    /// The origin's host, without its port, which is the `Host` a served request carries. The guard reduces `Host` to
+    /// a port-less name itself (`guard::host_of`), so writing it that way removes the question rather than relying on
+    /// the reduction agreeing with this field.
     host: String,
 }
 
@@ -194,12 +196,14 @@ impl Client {
         })?;
         let mut answer = Vec::new();
         let mut buffer = [0_u8; 4096];
+        let mut capped = false;
         loop {
             match stream.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(read) => {
                     answer.extend_from_slice(&buffer[..read]);
                     if answer.len() >= MAX_ANSWER {
+                        capped = true;
                         break;
                     }
                 }
@@ -211,11 +215,27 @@ impl Client {
                 }
             }
         }
-        self.read(method, path, &answer)
+        self.read(method, path, &answer, capped)
     }
 
     /// One answer's status line and body, as the API means them.
-    fn read(&self, method: &str, path: &str, answer: &[u8]) -> Result<String, Failure> {
+    ///
+    /// `capped` is the read's own fact and it is spent before the parse: a body this client stopped reading is not a
+    /// body that is wrong, and reporting it as "something else is on that port" would blame the answer for the
+    /// reader's own cap.
+    fn read(
+        &self,
+        method: &str,
+        path: &str,
+        answer: &[u8],
+        capped: bool,
+    ) -> Result<String, Failure> {
+        if capped {
+            return Err(Failure::Unreachable(format!(
+                "{method} {path} on {} answered more than this client reads ({MAX_ANSWER} bytes) in one answer",
+                self.target
+            )));
+        }
         let text = String::from_utf8_lossy(answer);
         let (head, body) = text.split_once("\r\n\r\n").ok_or_else(|| {
             Failure::Unreachable(format!(

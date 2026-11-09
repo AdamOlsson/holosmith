@@ -48,9 +48,9 @@ gives is one this process cannot know.
 The head is the four guards' worth of headers, in the shape the listener sees after `tailscale serve` has proxied a
 browser's call:
 
-- `Host: <control_origin's authority>`, which is the allow-list's question (and the reason it is the *origin's* host
-  rather than the dialled address: a tailnet name is what `allowed_hosts` carries, and a browser on the machine sends
-  the same);
+- `Host: <control_origin's host>`, port-less, which is the allow-list's question (and the reason it is the *origin's*
+  host rather than the dialled address: a tailnet name is what `allowed_hosts` carries, and a browser on the machine
+  sends the same — `guard::host_of` strips a port anyway, so writing the port-less form removes the question);
 - `Origin: <control_origin>` **verbatim** — ADR-0074's landmine, because the guard compares text and a row registered
   as `http://localhost:<port>` against an origin of `http://127.0.0.1:<port>` passes the probe and then refuses every
   mutating call;
@@ -101,6 +101,10 @@ commands makes a machine `both`, so `server deploy` on a hub and `hub deploy` on
 2 renders into `config.toml`, so the file that boots next says `both`) and the *checked* config (the half this run
 installs, which steps 1 and 7 hand to `doctor`). The split is the story's sharpest edge:
 
+- **A dry run says `would be`.** The role line is the one place the tail describes a state, and a `--dry-run` reaches
+  the tail without writing anything, so its parenthetical is future tense over the config this run really holds. The
+  wording is the whole mechanism: a past-tense `added the hub half` under a `deploy: dry run` header is the report's
+  first lie.
 - **The union is why acceptance bullet 4 needs no by-hand edit.** The second deploy reads the role the first one
   wrote, and a machine that ran `server deploy` then `hub deploy` boots as `both`.
 - **The checked role is why acceptance bullet 1 is true unconditionally.** A `hub deploy` asks **no Docker and no git
@@ -160,8 +164,12 @@ empty list over a read that failed would be a claim about a machine nobody could
 
 ## D7 — what the gate measures, and what it cannot
 
-`case_hub_deploy` is **the one case in the run that needs no daemon, no image and no `openssl`** — the story's own
-headline ("on a Docker-less machine") as a property of the harness. python3 is needed only to pick ports
+`case_hub_deploy` is **the one case in the run that needs no daemon and no image** — the story's own headline ("on a
+Docker-less machine") as a property of the harness. It still needs the machine's own `install`, `chmod` and `df`, and
+**`openssl`**, which is not an oversight: step 2 generates the VAPID pair with `openssl ecparam` and step 7's
+`doctor --full` has an `openssl` finding. A hub is not exempt from that one the way it is from the Docker and git
+checks, because a hub genuinely needs the program — `hosts::probe` runs `s_client` for every `https` row, which is the
+whole of the registry's reachability. python3 is needed only to pick ports
 (`free_port`) and to keep the busy-row arm's seed addressable, and a missing python3 is the case's only `SKIP` line,
 with `tests/deploy.rs` and `tests/hub_cli.rs` named as where every arm lives.
 

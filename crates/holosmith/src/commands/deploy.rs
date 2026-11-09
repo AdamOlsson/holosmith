@@ -73,7 +73,10 @@ pub fn run(args: DeployArgs) -> ExitCode {
         return ExitCode::FAILURE;
     }
     let role = deploy::union(loaded.config.role, args.kind);
-    println!("{}", role_line(loaded.config.role, role, args.kind));
+    println!(
+        "{}",
+        role_line(loaded.config.role, role, args.kind, args.dry_run)
+    );
     println!("deploy: url: {}", deployed.control_origin.as_str());
     for next in next_steps(role) {
         println!("deploy: next: {next}");
@@ -83,15 +86,28 @@ pub fn run(args: DeployArgs) -> ExitCode {
 
 /// What the machine is now, and what this run changed about it — the acceptance's "yielding role `both`", as a line
 /// rather than as a file the operator has to open.
-fn role_line(found: Role, role: Role, kind: Kind) -> String {
+///
+/// **A dry run says `would be`, and that is not a nicety.** The line above the report says `deploy: dry run` and
+/// nothing was written, so a past-tense `added the hub half` over a config that still says `server` would be the
+/// report's first lie — the one thing the five words exist to prevent (ADR-0056). The role it *would* reach is still
+/// worth printing: it is the answer to "what does this command do to me", and it is read from the config this run
+/// really holds.
+fn role_line(found: Role, role: Role, kind: Kind, dry_run: bool) -> String {
     if found == role {
         return format!("deploy: role: {role}");
     }
-    format!(
-        "deploy: role: {role} (this machine's config said `{found}`, and `{} deploy` added the {} half)",
-        kind.word(),
-        kind.word()
-    )
+    match dry_run {
+        true => format!(
+            "deploy: role: {role} (would be: this machine's config says `{found}`, and `{} deploy` adds the {} half)",
+            kind.word(),
+            kind.word()
+        ),
+        false => format!(
+            "deploy: role: {role} (this machine's config said `{found}`, and `{} deploy` added the {} half)",
+            kind.word(),
+            kind.word()
+        ),
+    }
 }
 
 /// The next steps the role this run installed earns, in one order.

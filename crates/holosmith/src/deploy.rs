@@ -1041,14 +1041,15 @@ fn install(
 /// What a `satisfied` step-2 line says about the service user, which is the one clause a hub's install cannot
 /// copy from a server's.
 ///
-/// The wording is deliberate: a hub's line says the user **exists and joins no group**, not that it is in none —
-/// nothing in this build ever removes a membership, so a `both` machine that ran `server deploy` first keeps the
-/// docker group and a line claiming otherwise would be wrong about the machine it just described.
+/// The wording is deliberate: a hub's line says the user **exists, and this run joined it to no group**, not that it
+/// is in none — nothing in this build ever removes a membership, so a `both` machine that ran `server deploy` first
+/// keeps the docker group, and a line whose subject was the user would be wrong about the machine it just described.
 fn service_user_clause(kind: Kind) -> String {
     match kind.group() {
         Some(group) => format!("the service user {SERVICE_USER} is in the {group} group"),
         None => format!(
-            "the service user {SERVICE_USER} exists and joins no group, because a hub drives no daemon"
+            "the service user {SERVICE_USER} exists, and this run joined it to no group because a hub drives no \
+             daemon"
         ),
     }
 }
@@ -1705,8 +1706,9 @@ fn proxies_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
 
 /// Step 5: the systemd unit, rendered from this binary's own path (spec item 10 step 5, HS-049).
 ///
-/// The bytes are the deliverable, which is why the rendering is a public function of exactly two facts — where the
-/// binary is, and whether this is a privileged install — and the read compares the file with it byte for byte. The
+/// The bytes are the deliverable, which is why the rendering is a public function of exactly three facts — where the
+/// binary is, whether this is a privileged install, and the role the machine will hold — and the read compares the
+/// file with it byte for byte. The
 /// path is [`std::env::current_exe`] and not the literal `holosmith`: this binary does not install itself, and an
 /// `ExecStart` resolved through systemd's `PATH` would be a coin flip between the artifact the operator just built
 /// and whatever else answers to the name.

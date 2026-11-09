@@ -2626,7 +2626,8 @@ it rather than adding a caveat beside it.
 - **A `--root` deploy of the hub half needs no daemon, no `_ping` stub and no `health_responder`** — step 1 asks
   `doctor` about `Kind::Hub`, so the Docker and git checks are skipped and the four container questions are `unknown`
   with the hub sentence. That is what makes `case_hub_deploy` the only case in the run that needs neither `docker` nor
-  an image; the *port* still has to be answered for step 7, and `serve` on that port is the honest stand-in.
+  an image; the *port* still has to be answered for step 7, and `serve` on that port is the honest stand-in. The
+  machine's own `openssl` is **not** dispensable — see the bullet at the end of this section.
 - **A `409 host_busy` arm needs a seeded local row, and the seed needs the port before the boot.** `POST /api/hosts`
   refuses loopback (`host_problem`) while `hosts.toml` is not filtered by that rule (ADR-0073 D9), and
   `hosts::is_local` compares hosts (so `http://127.0.0.1:<p>` is *not* this machine when `control_origin` is
@@ -2640,3 +2641,22 @@ it rather than adding a caveat beside it.
   deploy reads has no `data_root` (so `--root` can prefix the default), and the config `serve`/`status`/`hub host`
   read has the prefixed one. One file cannot be both: `hub deploy --config A` then `status --config A` would read the
   machine's real `/var/lib/holosmith`.
+- **A hub is exempt from the Docker and git checks and from nothing else — `openssl` included.** The tempting
+  extension of `doctor::run`'s `Role::Hub` carve-out (`deploy.rs`'s `Kind::group`/`skip`, `doctor.rs:209`) is to drop
+  the `openssl` finding too, because a hub runs no turns and sends no notifications. It is wrong: `hosts::probe` runs
+  `s_client` for every `https` registry row, so a hub **without** `openssl` cannot reach a peer at all — the
+  reachability of every machine on its Computers screen. So `hub deploy`'s step 7 asks it, and the docs must not claim
+  a Docker-less machine is an everything-less one: `case_hub_deploy` needs `install`, `chmod`, `df` and `openssl` for
+  step 2's VAPID pair and step 7's finding, and "needs no daemon and no image" is the whole of the headline.
+- **A scripted Markdown insert that anchors on a link's *first line* eats the summary that follows it.** The ADR index
+  writes each bullet as `- [ADR-00xx](path) — **the decision**, …`, and a replacement that matched only
+  `- [ADR-00xx](path)` put the new bullet between the link and its own em dash — so ADR-0076 lost its description and
+  ADR-0077 was given it. The gate cannot see a document, and only a review caught it. **Anchor on the end of the
+  bullet** (`(HS-0nn).` is the shape every one of them ends with), then read the two lines back; this is the fourth
+  time a scripted doc edit has cost a finding, and the existing rule ("read the changed lines") needed the *shape*
+  of the mistake named.
+- **`run_deploy` was a one-line delegation with a doc comment claiming it decided something.** A wrapper whose whole
+  body is `deploy::run(args)` and whose `Kind` was chosen by its caller is a "Middle Man": `main` dispatches
+  `HubAction::Deploy` straight to `commands::deploy::run`, and `commands::hub` keeps only the registry half. Worth the
+  reflex — *does this function choose anything?* — because a doc comment that describes a decision nobody makes is
+  worse than no wrapper at all.

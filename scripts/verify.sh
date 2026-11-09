@@ -5305,6 +5305,23 @@ AGAIN
   grep -q '^deploy: role: both (.*server.*hub deploy.*)' "$WORK/$name.union.out" ||
     fail "$name/union/line" "the run did not say it reached both: $(cat "$WORK/$name.union.out")"
   assertions=$((assertions + 1))
+  # A **dry run** over the same server config says `would be`: the header above it says `deploy: dry run`, nothing is
+  # written, and a past-tense "added the hub half" over a config that still says `server` would be the report's first
+  # lie (ADR-0056's five words, and ADR-0077 D4's wording).
+  status=0
+  PATH="$shims:$PATH" "$artifact" hub deploy --dry-run --root "$root/dry-union" \
+    --config "$server_config" >"$WORK/$name.uniondry.out" 2>&1 || status=$?
+  check "$name/uniondry/exit" 0 "$status"
+  grep -qx 'deploy: dry run' "$WORK/$name.uniondry.out" ||
+    fail "$name/uniondry/header" "the run does not call itself a dry run: $(cat "$WORK/$name.uniondry.out")"
+  assertions=$((assertions + 1))
+  grep -qxF -- 'deploy: role: both (would be: this machine'"'"'s config says `server`, and `hub deploy` adds the hub half)' \
+    "$WORK/$name.uniondry.out" ||
+    fail "$name/uniondry/role" "a dry run claims a role change it did not make: $(cat "$WORK/$name.uniondry.out")"
+  assertions=$((assertions + 1))
+  [ ! -e "$root/dry-union" ] || fail "$name/uniondry/root" "the dry run created $root/dry-union"
+  assertions=$((assertions + 1))
+
   # `both` runs sessions, so its unit keeps the daemon even though the run that wrote it installed the hub's half.
   grep -qx 'Requires=docker.service' "$tree/etc/systemd/system/holosmith.service" ||
     fail "$name/union/unit" "a both machine's unit dropped the daemon it needs: $(cat "$tree/etc/systemd/system/holosmith.service")"

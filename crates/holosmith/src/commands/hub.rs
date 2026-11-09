@@ -2,7 +2,8 @@
 //!
 //! Two very different commands behind one word because the spec's Commands table puts them there: `hub deploy` is
 //! [`crate::commands::deploy`] with [`crate::deploy::Kind::Hub`] — the same seven-step report, five of the steps and
-//! two honest skips — while `hub host add|list|remove` is a **client** of this machine's own `/api/hosts` routes
+//! two honest skips — and it is dispatched there directly (`main`), because there is nothing for a wrapper to decide.
+//! `hub host add|list|remove` is a **client** of this machine's own `/api/hosts` routes
 //! ([`crate::hosts::client`]).
 //!
 //! Three things this module decides, and each is a sentence rather than a mechanism:
@@ -19,14 +20,8 @@ use std::process::ExitCode;
 
 use crate::cli::HostAction;
 use crate::clock;
-use crate::commands::deploy::{self, DeployArgs};
 use crate::config::{Config, LoadError};
 use crate::hosts::{self, client};
-
-/// `holosmith hub deploy`: the deploy, told which half it installs.
-pub fn run_deploy(args: DeployArgs) -> ExitCode {
-    deploy::run(args)
-}
 
 /// `holosmith hub host …`: one call to this machine's own registry.
 pub fn run_host(action: HostAction, config: Option<PathBuf>) -> ExitCode {

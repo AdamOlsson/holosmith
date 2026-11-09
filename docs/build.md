@@ -547,9 +547,11 @@ prints one `SKIP` line without `python3` (which binds the client), and leaves no
 (ADR-0075 D7).
 
 …and since HS-072, **`hub deploy` and `hub host`**: `case_hub_deploy` is **the one case in the run that needs no
-daemon, no image and no `openssl`** — a hub's five steps ask `doctor` no Docker and no git question, build nothing and
-start nothing — so its only `SKIP` line is a missing `python3` (which picks the ports a registry row has to spell and
-reads one row's field). It measures the dry run's seven lines in the spec's order with four `needs` and two `skipped`
+daemon and no image** — a hub's five steps ask `doctor` no Docker and no git question, build nothing and start nothing
+— so its only `SKIP` line is a missing `python3` (which picks the ports a registry row has to spell and reads one row's
+field). It still needs the machine's `install`, `chmod`, `df` and `openssl`: step 2 generates the VAPID pair with
+`openssl ecparam`, and step 7's `doctor --full` has an `openssl` finding that a hub is **not** exempt from, because a
+hub runs `s_client` for every `https` registry row. It measures the dry run's seven lines in the spec's order with four `needs` and two `skipped`
 (each naming what a hub has no work for) and the tally counting them apart, and an install root that does not appear;
 a real `--root` run whose steps 2–6 apply with their modes, whose `config.toml` reads `role = "hub"`, whose unit
 carries **no** `docker.service`, and whose second run is five `satisfied` and two `skipped`; the **union** — the same

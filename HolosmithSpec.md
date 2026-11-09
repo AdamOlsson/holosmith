@@ -344,10 +344,10 @@ Running `holosmith server deploy` and `holosmith hub deploy` on the same machine
 | `holosmith serve [--config PATH]` | Runs in the foreground with the role from the config; systemd runs this |
 | `holosmith server deploy [--ssh user@host] [--binary PATH] [--root DIR] [--dry-run]` | Installs and starts a server (steps below); `--root` builds every installed path under `DIR`, as the invoking user |
 | `holosmith hub deploy [--ssh user@host] [--binary PATH] [--root DIR] [--dry-run]` | Installs and starts a hub; `--root` builds the five steps' installed paths under `DIR`, as the invoking user |
-| `holosmith hub host add <name> <url>`, `list`, `remove <name>` | Manages the registry from the CLI, with the same checks as `POST /api/hosts` |
+| `holosmith hub host add <name> <url>`, `list`, `remove <name> [--force]` | Manages the registry from the CLI, with the same checks as `POST /api/hosts`; `--force` is the API's `?force=true` for a row that names this machine while it has live sessions |
 | `holosmith key set <provider>`, `list`, `remove` | Stores provider API keys for the key proxy; the key is read from stdin, never from arguments |
 | `holosmith doctor [--quick or --full]` | Preflight checks and self-tests |
-| `holosmith status` | Role, version, uptime, session count, proxies, last health of registered machines |
+| `holosmith status` | Role, version, uptime, session count, proxies, last health of registered machines — the registry row's own, as old as the boot; `status` makes no live hop |
 | `holosmith logs [-f] [--session ID]` | Server log from journald, or a session's `session.log` |
 | `holosmith upgrade <binary>` and `holosmith rollback` | The promotion pipeline and rollback from item 10 |
 | `holosmith drain [--wait 10m]` | The drain from item 10 |
@@ -371,9 +371,9 @@ would change.
 4. Create the `egress` network and start the `hs_egress` and `hs_key` containers with restart policy `unless-stopped`. Per-session networks are created by the server.
 5. Install and start `holosmith.service` (`Restart=on-failure`, `ExecStartPre=holosmith doctor --quick`).
 6. Configure `tailscale serve` for the control origin (443) and the preview origin (8444).
-7. Wait for `/api/health`, run `doctor --full` (it includes the egress self-test and the network-off probe), then print the URL and next steps: `holosmith key set <provider>` and registering the machine in a hub.
+7. Wait for `/api/health`, run `doctor --full` (it includes the egress self-test and the network-off probe), then print the URL and the next steps this machine's role earns: `holosmith key set <provider>` on a machine that runs sessions, and `holosmith hub host add <name> <url>` on a machine that forwards (a server registers *into* a hub, and a hub has no key proxy to store a key for).
 
-`hub deploy` runs steps 1 (without the Docker and git checks), 2 (without the docker group), 5, 6 and 7, and builds no images or proxies.
+`hub deploy` runs steps 1 (without the Docker and git checks), 2 (without the docker group), 5, 6 and 7, and builds no images or proxies. A run installs **one half** of a machine and unions it with the role the config already carries, so the two commands together leave a machine whose config says `both`.
 
 With `--ssh`, the CLI copies the same binary to the target, verifies its SHA-256 after the copy, and runs the same deploy there with sudo, streaming the output. It refuses if the target's CPU architecture differs, unless `--binary` supplies a matching build. The CLI itself downloads nothing from the internet.
 
