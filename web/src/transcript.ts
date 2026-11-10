@@ -1276,12 +1276,55 @@ export function hostForceOffered(code: string): boolean {
 
 export const HOST_FORCE_LABEL = "Remove anyway";
 
-// Whether this machine offers the new-session form at all (item 5's "a hub-only machine shows no new-session
-// affordance for itself").
+// Whether this machine offers the new-session form **for itself** (item 5's "a hub-only machine shows no
+// new-session affordance for itself").
 //
 // From `/api/health`'s `role`, which the page already fetches — no new field and no probe. A `hub` runs no
 // sessions and refuses `POST /api/sessions` with `403 sessions_disabled` (ADR-0074), so a button there is a button
-// whose only answer is that refusal. Creating a session on *another* machine is HS-074's, not this form's.
+// whose only answer is that refusal.
 export function createOffered(role: string): boolean {
   return role !== "hub";
 }
+
+// Which machine a create may name (HS-074, spec item 11's "the hub is the only thing I open").
+//
+// A create names its machine **in the path**: the form posts to `POST /api/hosts/<host>/sessions`, which is the
+// hub's forwarding route reaching that machine's own `POST /api/sessions` — so the answer is the peer's own row, the
+// `403 sessions_disabled` this machine answers for itself stays true, and there is no second route and no `machine`
+// key on a create's body (ADR-0074: the owning machine is the URL).
+//
+// The list is this machine first — when this machine can create at all — then every registry row the last probe
+// called `reachable`. An unreachable machine is **not** offered: the answer would be the hop's own refusal, and a
+// picker whose choice can only fail is a control with one sentence (ADR-0076 D3's rule, one screen over). The order
+// is the registry's, which is by name, so the list is stable between loads.
+export function createTargets(
+  role: string,
+  rows: readonly { name: string; reach: string }[],
+): string[] {
+  const local = createOffered(role) ? [LOCAL_HOST] : [];
+  const reachable = rows.filter((row) => row.reach === "reachable").map((row) => row.name);
+  return [...local, ...reachable];
+}
+
+// What the form's one button says, before and after the picker moves: the machine is the one thing about this form
+// that can point at the wrong computer, so the label names it (item 11's "the UI shows which machine it will run on").
+export function startLabel(host: string): string {
+  return `Start session on ${hostLabel(host)}`;
+}
+
+// What a hub with nothing to offer says, instead of a form whose only choice is unavailable.
+export const NO_CREATE_TARGET =
+  "no machine is reachable: register one on the Computers screen, or start a session on the machine itself";
+
+// What a session's page says under the sentence when the machine that owns it did not answer at all (HS-074). The
+// four composer actions, the delete and the Changes sheet are all requests to that a machine, so the page offers
+// none of them: this sentence is why there is nothing else on the screen.
+export const AWAY_DETAIL =
+  "every action on a session is a request to the machine that owns it, so they are offered again once it answers";
+
+// A session page whose machine went away **while the page was open** (HS-074). The read that drew the screen
+// succeeded, so there is no reply to quote; the stream's own connection failing is the observation, and a cached
+// transcript kept on screen after it is a claim this machine cannot make (ADR-0017). The transcript is left where it
+// is — it is what the machine last said — and this sentence says so above it.
+export const STREAM_LOST =
+  "this machine stopped answering: what is below is the last thing it sent before it went";

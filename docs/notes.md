@@ -2710,3 +2710,39 @@ it rather than adding a caveat beside it.
 - **A child a signal killed has no exit code, and `unwrap_or(-1)` prints one that does not exist.** The remote run's
   line says `exited <n>` when there is a code and `was killed by signal <n>` when there is not; a report whose whole
   discipline is "a word means what it measured" cannot print `exited -1`.
+
+### Landmines: a name across machines, and a second machine's subscription (HS-074)
+
+- **A hand-written VAPID "pair" is a shape, not a point.** `case_pwa`'s literal (`0x04 0x01 … 0x40`) is what
+  `vapid::parse`'s two-string shape accepts and what `/api/health` echoes, and it is **not on the curve**. Node says so
+  the moment a receiver builds a JWK out of it: `ERR_CRYPTO_INVALID_JWK`, from `createPublicKey`, before any
+  verification. A case that only stores and echoes a key can use a literal; a case whose receiver *verifies a token*
+  has to generate one (`ecparam` + the SEC1 walk). The two shapes look identical in a `vapid.toml`.
+- **The receiver's seventh argument is the `auth` secret, and the wrong one fails as "the payload is empty".** The
+  `node:https` receiver decrypts with (subscription private key, subscription public point, `auth`); passing it the
+  private hex again produced `"payload":null` on a request that was otherwise perfect (`authorized:true`,
+  `jwt_ok:true`, `aud_ok:true`). A decrypt that fails returns `null` by design, so the *only* symptom is a null field
+  in the log line — read the log line, not the assertion.
+- **A `DELETE` needs `Content-Type: application/json` even with no body.** The guard's `bad_client` arm is
+  `Content-Type` **and** `X-Holosmith-Client` for every non-`GET` (ADR-0010), so a hand-written `DELETE` that carries
+  the client header and no media type is a `403 bad_client` that reads like an auth problem. The page's own
+  unsubscribe has sent `JSON_HEADERS` since HS-067, which is why nothing in the browser half ever met it.
+- **`PushManager.getSubscription` takes the machine's key, and this tree's TypeScript does not know it.** The lib
+  declaration is `getSubscription()`, so the option form needs a local cast (the `navigator.standalone` SAFETY
+  precedent). Without the option the call answers the *default* subscription — one machine's endpoint reported for
+  every machine's row, which is the opposite of the story.
+- **`push.ts` cannot import `transcript.ts`, so the tap's path is spelled twice.** `npm test`'s node ESM resolver wants
+  an extension on every hop (HS-071's landmine), and `push.ts` is what `sw.ts` and `test/push.test.ts` load first. The
+  second spelling is made safe by one test that walks a table of hosts and asserts
+  `notificationPath(host, id) === sessionHref(host, id)` — and that table is exactly the names *both* are called
+  with (`local` and registry names), because `sessionHref` percent-encodes while `notificationPath` refuses.
+- **`ends_with` on the health payload is a test that pins the last key, not the key it names.** Two tests asserted
+  the sixth key's `null` by `ends_with(...)`; adding a seventh moved them to `contains(...,",")` and one exact-shape
+  assertion. Every "exactly N keys, in this order" assertion in this build is a whole-string comparison for exactly
+  this reason.
+- **Two `cat >"$WORK/x" <<'PY'` blocks in one case are two chances to end the outer heredoc.** Writing a case through
+  a shell heredoc whose body contains `PY` heredocs terminates the outer one early — the python that was generating
+  the case was the thing that broke, not the case. Generate a long bash case through a file, not through a heredoc.
+- **A new case reusing an old case's stand-in wants the stand-in as a function.** `case_push`'s receiver and SEC1 walk
+  became `write_push_receiver`/`write_sec1_walk` so `case_cross_machine` runs the same bytes rather than a copy —
+  and the receiver has already found two of its own bugs, which is the argument for one copy.

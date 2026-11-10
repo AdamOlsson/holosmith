@@ -12,12 +12,17 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  AWAY_DETAIL,
   COMPUTERS_INTRO,
   COUNTS_UNKNOWN,
   GROUP_WAITING,
   HISTORY_PAGE_LIMIT,
   HOST_ADD_LABEL,
   HOST_FORCE_LABEL,
+  NO_CREATE_TARGET,
+  STREAM_LOST,
+  createTargets,
+  startLabel,
   HOST_REFUSALS,
   HOST_REMOVE_LABEL,
   LIVE_STATES,
@@ -1684,4 +1689,39 @@ test("a session's action is spelled on the machine that owns it", () => {
       action,
     );
   }
+});
+
+// ---- the machine a create names (HS-074) -----------------------------------------------------------
+
+test("a create may name this machine or a reachable peer, and nothing else", () => {
+  const rows = [
+    { name: "workshop", reach: "reachable" },
+    { name: "attic", reach: "unreachable" },
+    { name: "build-box", reach: "reachable" },
+  ];
+  // This machine first — it is the one a single-machine deployment uses — then the registry's own order.
+  assert.deepEqual(createTargets("both", rows), [LOCAL_HOST, "workshop", "build-box"]);
+  // A hub runs no sessions of its own, so its own path is not offered (it answers `403 sessions_disabled`).
+  assert.deepEqual(createTargets("hub", rows), ["workshop", "build-box"]);
+  // An unreachable machine is not offered at all: the create would be the hop's own refusal, and a choice whose
+  // only answer is a sentence is the control `createOffered` exists to withhold.
+  assert.ok(!createTargets("server", rows).includes("attic"));
+  assert.deepEqual(createTargets("server", []), [LOCAL_HOST]);
+  assert.deepEqual(createTargets("hub", []), []);
+  // A registry row that said `reachable` in some other spelling is not a machine this page will post to.
+  assert.deepEqual(createTargets("hub", [{ name: "odd", reach: "Reachable" }]), []);
+});
+
+test("the button says which machine before the click, and a hub with nothing to offer says why", () => {
+  assert.equal(startLabel(LOCAL_HOST), "Start session on local · this machine");
+  assert.equal(startLabel("workshop"), "Start session on workshop");
+  assert.match(NO_CREATE_TARGET, /no machine is reachable/);
+});
+
+test("an away machine's sentences name what the page cannot do", () => {
+  // Both are rules rather than prose in `main.ts`: a sentence the operator reads when a machine goes away, and one
+  // they read when it was already away when the page loaded.
+  assert.match(AWAY_DETAIL, /request to the machine that owns it/);
+  assert.match(STREAM_LOST, /stopped answering/);
+  assert.notEqual(AWAY_DETAIL, STREAM_LOST);
 });

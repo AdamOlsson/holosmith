@@ -45,8 +45,14 @@ export function notificationText(kind: string): string {
 }
 
 // The notification's title is the payload's `host` — `local` for a server's own session (GLOSSARY's **Local**).
+//
+// A machine with a name of its own shows it (`Holosmith · workshop`), because the name is what the operator set and
+// what the tap's path is built from; `local` and an empty string earn the bare name, since "local" said to a phone
+// is a word about the sender's own page rather than a machine's name.
+const LOCAL_NAME = "local";
+
 export function notificationTitle(host: string): string {
-  return host === "" ? "Holosmith" : `Holosmith · ${host}`;
+  return host === "" || host === LOCAL_NAME ? "Holosmith" : `Holosmith · ${host}`;
 }
 
 // One notification per session: two sessions must not replace each other on a lock screen. Gated on the same
@@ -61,11 +67,29 @@ export function isSessionId(id: string): boolean {
   return /^[0-9a-f]{16}$/.test(id);
 }
 
-// Which path a tap opens: the session the payload names, or the sessions list for anything else. A path built
-// from arbitrary text is a link this machine did not author, and `openWindow` would open it in the app's own
-// origin — so the rule is the id's alphabet and nothing else (ADR-0072 D7).
-export function notificationPath(sessionId: string): string {
-  return isSessionId(sessionId) ? `/sessions/${sessionId}` : "/";
+// Which path a tap opens: the session the payload names **on the machine the payload names**, or the sessions list
+// for anything else.
+//
+// Two untrusted pieces now, and two alphabets (HS-074). The id is `sessions::is_id`'s sixteen lowercase hex; the host
+// is a registry name one hop later — `hosts::name_problem`'s alphabet, lowercase letters, digits and `-`, at most 63,
+// not beginning or ending with `-` — because `/hosts/<host>/sessions/<id>` is answered by the hub's forwarding route,
+// which refuses a name it does not have with its own `404 unknown_host`. A path built from arbitrary text is a link
+// this machine did not author, and `openWindow` would open it in the app's own origin, so anything else is `/`.
+//
+// `local` (and an empty host) is *this machine*: `/sessions/<id>`, the path a server's own page is at. This is the
+// same rule as `transcript.ts`'s `sessionHref`, which cannot be imported here (`npm test`'s ESM resolver wants an
+// extension on every hop, HS-071's landmine) — `web/test/push.test.ts` asserts the two agree over a table of hosts,
+// so the second spelling cannot drift.
+const HOST_NAME = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+export function notificationPath(host: string, sessionId: string): string {
+  if (!isSessionId(sessionId)) {
+    return "/";
+  }
+  if (host === "" || host === LOCAL_NAME) {
+    return `/sessions/${sessionId}`;
+  }
+  return HOST_NAME.test(host) ? `/hosts/${host}/sessions/${sessionId}` : "/";
 }
 
 // The notification's payload as the sender writes it: exactly `{host, session_id, kind}` (ADR-0071). `null` for
@@ -119,7 +143,7 @@ export function subscriptionBody(value: unknown): SubscriptionBody | null {
 // Five arms and one order, which is the story: what the browser can do, then what the operator has decided, then
 // what this machine can deliver, then what is stored.
 
-export type PushAction = "subscribe" | "unsubscribe" | "blocked" | "unsupported" | "no-key";
+export type PushAction = "subscribe" | "unsubscribe" | "blocked" | "unsupported" | "no-key" | "away";
 
 // The facts the screen is drawn from, each read in `main.ts` from the platform.
 export type PushFacts = {
@@ -134,6 +158,11 @@ export type PushFacts = {
   subscribed: boolean;
   // Whether the page is running as the installed app (`display-mode: standalone`, or iOS's `navigator.standalone`).
   installed: boolean;
+  // The sentence of a machine that did **not** answer this page's read (HS-074), or `null` when it did. Since HS-074
+  // the settings screen has one row per machine and those rows are read through the hub, so a peer that is away is a
+  // third state rather than a `false`: both facts a row would show — the machine's key and the row it stores — are
+  // things only that machine can answer, and "not subscribed" is a claim about a machine nothing measured.
+  away: string | null;
 };
 
 export type PushState = { action: PushAction; sentence: string; detail: string | null };
@@ -159,6 +188,15 @@ export function pushState(facts: PushFacts): PushState {
       sentence: "this browser cannot receive notifications",
       detail:
         "push needs a secure origin (https, or localhost) and a browser with service-worker support; on iOS it needs 16.4 or later",
+    };
+  }
+  // Before `subscribed`, because the machine is the thing that cannot be asked: a row removed from a machine that is
+  // away is a `DELETE` the hub cannot deliver, and its own sentence is the honest half of the pair.
+  if (facts.away !== null) {
+    return {
+      action: "away",
+      sentence: facts.away,
+      detail: null,
     };
   }
   if (facts.subscribed) {
@@ -202,6 +240,8 @@ export function pushActionLabel(action: PushAction): string {
       return "Unavailable";
     case "no-key":
       return "No key";
+    case "away":
+      return "Away";
   }
 }
 
@@ -239,11 +279,17 @@ export function isIos(userAgent: string, maxTouchPoints: number): boolean {
   return userAgent.includes("Macintosh") && maxTouchPoints > 1;
 }
 
-// The per-machine row's sentence. One origin today, so one row — and the second line is why a second machine
-// will be a second subscription: each machine signs with its own pair and seals to its own key (item 11's last
-// bullet).
-export function machineState(origin: string, subscribed: boolean): string {
-  return `${origin} · ${subscribed ? "subscribed" : "not subscribed"}`;
+// One machine's row on the settings screen, and what it says about the subscription **on that machine** (HS-074).
+//
+// Three words, not two: `away` is a machine this page could not read, and a `false` there would be a claim about a
+// machine nothing measured (the rule `COUNTS_UNKNOWN`'s `—` keeps one screen over). `subscribed` is read from the
+// browser for that machine's own application server key, so it is a fact about this device; the row is written by
+// `pushState`'s answer so the sentence beside the control and the control itself cannot disagree.
+export type MachineSubscription = "subscribed" | "not-subscribed" | "away";
+
+export function machineState(label: string, state: MachineSubscription): string {
+  const word = state === "away" ? "away" : state === "subscribed" ? "subscribed" : "not subscribed";
+  return `${label} · ${word}`;
 }
 
 export const PER_MACHINE_SENTENCE =

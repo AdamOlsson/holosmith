@@ -38,6 +38,7 @@ import {
   subscriptionBody,
   type PushFacts,
 } from "../src/push.ts";
+import { sessionHref } from "../src/transcript.ts";
 
 // One well-formed session id: sixteen lowercase hex characters (`sessions::is_id`).
 const ID = "0123456789abcdef";
@@ -50,6 +51,7 @@ function facts(overrides: Partial<PushFacts> = {}): PushFacts {
     hasKey: true,
     subscribed: false,
     installed: false,
+    away: null,
     ...overrides,
   };
 }
@@ -77,9 +79,12 @@ test("a kind this build does not know is a notification and never an exception",
 });
 
 test("the title is the payload's host, and a nameless host still says what this is", () => {
-  assert.equal(notificationTitle("local"), "Holosmith · local");
+  // `local` is the reserved word for *the machine whose page this is* (GLOSSARY's **Local**), so it earns the bare
+  // name: a phone has no registry to look a word like that up in, and "local" is not a machine's name.
+  assert.equal(notificationTitle("local"), "Holosmith");
   assert.equal(notificationTitle("build-box"), "Holosmith · build-box");
   assert.equal(notificationTitle(""), "Holosmith");
+  assert.notEqual(notificationTitle("build-box"), notificationTitle("workshop"));
 });
 
 test("one notification per session, so two sessions do not replace each other", () => {
@@ -108,12 +113,49 @@ test("a session id is sixteen lowercase hex characters and nothing else", () => 
 });
 
 test("a tap opens the named session, and anything else opens the list", () => {
-  assert.equal(notificationPath(ID), `/sessions/${ID}`);
+  assert.equal(notificationPath("local", ID), `/sessions/${ID}`);
   // Not a path built from arbitrary text: `openWindow` would open it on this app's own origin.
-  assert.equal(notificationPath("../../api/push/subscribe"), "/");
-  assert.equal(notificationPath(""), "/");
-  assert.equal(notificationPath("//evil.example/"), "/");
-  assert.equal(notificationPath("0123456789ABCDEF"), "/");
+  assert.equal(notificationPath("local", "../../api/push/subscribe"), "/");
+  assert.equal(notificationPath("local", ""), "/");
+  assert.equal(notificationPath("local", "//evil.example/"), "/");
+  assert.equal(notificationPath("local", "0123456789ABCDEF"), "/");
+});
+
+test("the payload's host is a path segment, and only a registry name gets one", () => {
+  // The machine the session lives on (HS-074): the hub's own forwarding route, which is what makes the tap open
+  // *that* machine's session rather than this page's own.
+  assert.equal(notificationPath("workshop", ID), `/hosts/workshop/sessions/${ID}`);
+  assert.equal(notificationPath("build-box-2", ID), `/hosts/build-box-2/sessions/${ID}`);
+  // An empty host is this machine, the way `local` is.
+  assert.equal(notificationPath("", ID), `/sessions/${ID}`);
+  // `hosts::name_problem`'s alphabet, and nothing else: a name is one path segment, so a slash, a dot-segment, a
+  // query or a scheme is not a name a registry row could take either.
+  for (const host of [
+    "../sessions",
+    "workshop/../sessions",
+    "workshop?sessions",
+    "https://workshop",
+    "//evil.example",
+    "Work Shop",
+    "-workshop",
+    "workshop-",
+    "workshop.",
+    "a".repeat(64),
+  ]) {
+    assert.equal(notificationPath(host, ID), "/", host);
+  }
+});
+
+test("the tap's path and the screen's path are the same rule, spelled twice", () => {
+  // `push.ts` cannot import `transcript.ts` (`npm test`'s ESM resolver wants an extension on every hop, HS-071), so
+  // the two spellings are compared here rather than merged. This is the test that makes the second spelling safe.
+  // The table is exactly what both are called with in practice: `local` and names a registry row can hold. A name
+  // that could not be a row — `""`, `"../evil"`, `"Work Shop"` — is `notificationPath`'s own business and is
+  // refused there (the test above), while `sessionHref` would percent-encode it; comparing the two there would be
+  // comparing two different questions.
+  for (const host of ["local", "workshop", "build-box-2", "a".repeat(63)]) {
+    assert.equal(notificationPath(host, ID), sessionHref(host, ID), host);
+  }
 });
 
 // ---- the payload's shape --------------------------------------------------------------------------
@@ -191,6 +233,8 @@ test("the control the screen offers, one arm at a time", () => {
   assert.deepEqual(pushState(facts({ permission: "denied" })).action, "blocked");
   assert.deepEqual(pushState(facts({ supported: false })).action, "unsupported");
   assert.deepEqual(pushState(facts({ hasKey: false })).action, "no-key");
+  // A machine that did not answer (HS-074): its own sentence, and no control.
+  assert.deepEqual(pushState(facts({ away: "workshop could not be reached" })).action, "away");
 });
 
 test("the arms' order is what makes the sentences true", () => {
@@ -223,8 +267,9 @@ test("every arm has a sentence of its own, and a detail only where one is earned
     pushState(facts({ permission: "denied" })),
     pushState(facts({ supported: false })),
     pushState(facts({ hasKey: false })),
+    pushState(facts({ away: "workshop could not be reached" })),
   ].map((state) => state.sentence);
-  assert.equal(new Set(states).size, 5, states.join(" | "));
+  assert.equal(new Set(states).size, 6, states.join(" | "));
   // `subscribed` and `not subscribed` are the only two arms with nothing to add: the button already says it.
   assert.equal(pushState(facts()).detail, null);
   assert.equal(pushState(facts({ subscribed: true })).detail, null);
@@ -235,16 +280,16 @@ test("every arm has a sentence of its own, and a detail only where one is earned
 test("only the two arms that can be acted on are offered as buttons", () => {
   assert.equal(pushActionable("subscribe"), true);
   assert.equal(pushActionable("unsubscribe"), true);
-  for (const action of ["blocked", "unsupported", "no-key"] as const) {
+  for (const action of ["blocked", "unsupported", "no-key", "away"] as const) {
     assert.equal(pushActionable(action), false, action);
   }
 });
 
 test("each action's label is its own word", () => {
-  const labels = (["subscribe", "unsubscribe", "blocked", "unsupported", "no-key"] as const).map(
+  const labels = (["subscribe", "unsubscribe", "blocked", "unsupported", "no-key", "away"] as const).map(
     pushActionLabel,
   );
-  assert.equal(new Set(labels).size, 5, labels.join(" | "));
+  assert.equal(new Set(labels).size, 6, labels.join(" | "));
   assert.equal(pushActionLabel("subscribe"), "Subscribe");
   assert.equal(pushActionLabel("unsubscribe"), "Unsubscribe");
 });
@@ -292,9 +337,11 @@ test("iOS is the phone and pad agents, and the iPad that pretends to be a Macint
 
 // ---- the per-machine row and the header's link -----------------------------------------------------
 
-test("the machine's row names the origin and whether it is subscribed", () => {
-  assert.equal(machineState("https://box.tail.ts.net", true), "https://box.tail.ts.net · subscribed");
-  assert.equal(machineState("https://box.tail.ts.net", false), "https://box.tail.ts.net · not subscribed");
+test("the machine's row names the machine and whether it is subscribed", () => {
+  assert.equal(machineState("workshop", "subscribed"), "workshop · subscribed");
+  assert.equal(machineState("workshop", "not-subscribed"), "workshop · not subscribed");
+  // A machine that did not answer says so: `not subscribed` would be a claim about a machine nothing measured.
+  assert.equal(machineState("workshop", "away"), "workshop · away");
   // The sentence that explains why a second machine is a second subscription is not the row's, and says so.
   assert.match(PER_MACHINE_SENTENCE, /each machine has its own/);
 });

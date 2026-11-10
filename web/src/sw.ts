@@ -112,19 +112,19 @@ scope.addEventListener("push", (event) => {
 scope.addEventListener("notificationclick", (event) => {
   const click = event as NotificationClickEventLike;
   click.notification.close();
-  const id = readSessionId(click.notification.data);
-  const path = notificationPath(id);
+  const target = readTarget(click.notification.data);
+  const path = notificationPath(target.host, target.sessionId);
   click.waitUntil(
     (async () => {
       const windows = await scope.clients.matchAll({ type: "window", includeUncontrolled: true });
-      const target = new URL(path, self.location.origin);
+      const destination = new URL(path, self.location.origin);
       for (const window of windows) {
-        if (new URL(window.url, self.location.origin).pathname === target.pathname) {
+        if (new URL(window.url, self.location.origin).pathname === destination.pathname) {
           await window.focus();
           return;
         }
       }
-      await scope.clients.openWindow(target.pathname);
+      await scope.clients.openWindow(destination.pathname);
     })(),
   );
 });
@@ -168,11 +168,20 @@ function readPayload(event: PushEventLike): ReturnType<typeof notificationPayloa
   }
 }
 
-// The session id out of a notification's `data`, or `""` — which `notificationPath` turns into the list.
-function readSessionId(data: unknown): string {
+// The two fields out of a notification's `data`, or empty strings — which `notificationPath` turns into the list.
+//
+// Not `notificationPayload`: that reads the **push** body, which the browser parsed out of the sealed record, and a
+// notification's `data` is this worker's own copy of two of its fields. A missing field is the list rather than a
+// throw, because a tap on a notification this build did not draw is still a tap.
+function readTarget(data: unknown): { host: string; sessionId: string } {
   if (typeof data !== "object" || data === null) {
-    return "";
+    return { host: "", sessionId: "" };
   }
-  const id = (data as Record<string, unknown>)["session_id"];
-  return typeof id === "string" ? id : "";
+  const record = data as Record<string, unknown>;
+  const host = record["host"];
+  const id = record["session_id"];
+  return {
+    host: typeof host === "string" ? host : "",
+    sessionId: typeof id === "string" ? id : "",
+  };
 }

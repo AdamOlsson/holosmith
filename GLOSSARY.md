@@ -10,6 +10,16 @@ A single-operator system that runs coding agents in containers on machines you o
 One computer running the `holosmith` binary.
 _Avoid_: Node, box, instance
 
+**Machine name**:
+What a **machine** calls itself in a **Notification**'s payload (HS-074): the `machine_name` config key, `local` by
+default — the reserved word that means *the machine whose page this is* (see **Local**). Two consumers and one value:
+`push::Payload::host`, which is the word a phone shows (`Holosmith · workshop`) and the segment a tap's path is built
+from (`/hosts/<name>/sessions/<id>`), and `/api/health`'s seventh key, which is how a page labels its own row and how a
+hub reads a peer's claim through the hop. On a multi-machine deployment it is the **same string** as the hub's
+registry row for that machine (`hosts.toml`), because the tap's path is a registry name one hop later; a mismatch is
+`404 unknown_host`, not a silent wrong page.
+_Avoid_: Hostname (that is a row's `url`), node name, display name
+
 **Preflight**:
 The checks a machine must pass before it can run a **session**: the Docker daemon answering `_ping` on
 `docker_host`, git 2.38 or newer, and `min_free_gb` free on the data root. Each answers a **finding**, and its
@@ -1034,7 +1044,8 @@ _Avoid_: Push URL, push channel, subscription URL
 
 **Notification**:
 The message a subscription earns when a turn ends (spec item 11): a VAPID-signed, sealed body whose plaintext is
-exactly `{host, session_id, kind}`. `host` is **Local**, `session_id` is the row's id and `kind` is one of four
+exactly `{host, session_id, kind}`. `host` is the sending machine's **Machine name** (`local` for a machine that has
+none of its own), `session_id` is the row's id and `kind` is one of four
 words — `error`, `turn_timeout`, `budget_exceeded` and `turn_finished` — the first three of which are words this
 build already uses for the same fact. It is not sent while an SSE stream for that session is open, and the envelope
 never carries a message's content. Its machine names are `push::Pusher::announce` and `push::Watcher::observe`

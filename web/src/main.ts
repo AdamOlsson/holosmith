@@ -25,6 +25,7 @@ import {
   LIVE_STATES,
   LOCAL_HOST,
   NOTHING_COMMITTED,
+  NO_CREATE_TARGET,
   RESOLVE_ASKED,
   RESOLVE_LABEL,
   RESOLVE_PROMPT,
@@ -32,12 +33,13 @@ import {
   TRANSCRIPT_EVENTS,
   Transcript,
   UNSAVED_WORK_NOTICE,
+  AWAY_DETAIL,
   affordances,
   apiPath,
   budgetNotice,
   ciWarning,
   createFailure,
-  createOffered,
+  createTargets,
   expiryText,
   conflictLine,
   countsLine,
@@ -75,8 +77,10 @@ import {
   sessionPath,
   sheetFailure,
   skewNote,
+  startLabel,
   stateText,
   stoppedDetail,
+  STREAM_LOST,
   streamPath,
   targetOptions,
   uptimeText,
@@ -94,7 +98,6 @@ import {
   COMPUTERS_PATH,
   PER_MACHINE_SENTENCE,
   SETTINGS_PATH,
-  SUBSCRIBE_PATH,
   installSentence,
   isIos,
   machineState,
@@ -242,7 +245,9 @@ function textInput(name: string, value: string): HTMLInputElement {
   return input;
 }
 
-function field(label: string, input: HTMLInputElement): HTMLLabelElement {
+// One labelled control. `HTMLElement` rather than `HTMLInputElement` since HS-074: the create form's machine is a
+// `<select>`, and a field helper that only took an input would have had the picker drawn outside its own label.
+function field(label: string, input: HTMLElement): HTMLLabelElement {
   const element = make("label", "field");
   element.append(make("span", "field-name", label), input);
   return element;
@@ -489,12 +494,12 @@ function fillGroup(body: HTMLElement, host: string, answer: Answer<SessionList>)
   body.replaceChildren(list);
 }
 
-function addSession(session: Session): void {
-  // A session a create just made is **this** machine's: the form posts to the machine that serves the page and to
-  // no other (HS-071; a create on a peer is HS-074's).
-  const list = document.querySelector<HTMLUListElement>(
-    `.session-list[data-host="${LOCAL_HOST}"]`,
-  );
+function addSession(session: Session, host: string): void {
+  // A session a create just made belongs to **the machine the form named** (HS-074): the form posts to
+  // `/api/hosts/<host>/sessions`, and the answer is that machine's own row, so the row is drawn in that machine's
+  // group rather than in this machine's. A group that is not on screen is a row with nowhere to land, and the
+  // operator's own reload is the honest answer.
+  const list = document.querySelector<HTMLUListElement>(`.session-list[data-host="${host}"]`);
   if (list === null) {
     return;
   }
@@ -507,12 +512,17 @@ function addSession(session: Session): void {
   list.querySelector<HTMLElement>(".empty")?.remove();
   // Prepended because the repository lists newest activity first and a create is the newest. The window comes
   // off the list's own dataset: a create's answer carries the row and not the machine's setting (HS-064).
-  list.prepend(sessionRow(session, stoppedTtlDays(list), LOCAL_HOST));
+  list.prepend(sessionRow(session, stoppedTtlDays(list), host));
 }
 
 // The new-session form. `networkDefault` is the machine setting the list carried: the checkbox
 // starts where the config says and the operator may still change it for this session.
-function createSection(networkDefault: boolean): HTMLElement {
+//
+// Since HS-074 the form also says **which machine** the session runs on, and it says so in the request rather than
+// in the body: the post goes to `POST /api/hosts/<host>/sessions`, so a hub forwards it to the machine the operator
+// picked and a machine that runs no sessions still answers `403 sessions_disabled` for its own path. `targets` is
+// `createTargets`' answer — this machine first when it can create, then every reachable peer.
+function createSection(networkDefault: boolean, targets: string[]): HTMLElement {
   const section = make("section", "create");
   const form = document.createElement("form");
   const project = textInput("project", "holosmith");
@@ -528,6 +538,26 @@ function createSection(networkDefault: boolean): HTMLElement {
   button.type = "submit";
   const error = make("p", "error");
   error.hidden = true;
+
+  // The machine, as a control of its own. A `<select>` even when there is one machine: the form must say where the
+  // session runs either way, and a form whose label vanishes when a second machine is registered is a form whose
+  // answer changed without the operator doing anything.
+  const machine = document.createElement("select");
+  machine.name = "machine";
+  for (const host of targets) {
+    const option = document.createElement("option");
+    option.value = host;
+    option.textContent = hostLabel(host);
+    machine.append(option);
+  }
+  // Before the click, not only after it: the button names the machine the picker holds, so the one thing about this
+  // form that can point at the wrong computer is on the button (item 11's "the UI shows which machine it will run
+  // on"). A create's answer then puts the row in that machine's own group with its own `hostLabel` badge (HS-071).
+  const refreshLabel = (): void => {
+    button.textContent = startLabel(machine.value);
+  };
+  machine.addEventListener("change", refreshLabel);
+  refreshLabel();
 
   // The key of the submission in flight or last refused. A retry has to repeat the same request,
   // so a refusal keeps the key; a 202 means the next press is a new intent, so it is dropped
@@ -545,7 +575,8 @@ function createSection(networkDefault: boolean): HTMLElement {
     button.disabled = true;
     error.hidden = true;
     try {
-      const response = await fetch(apiPath(LOCAL_HOST, "sessions"), {
+      const target = machine.value;
+      const response = await fetch(apiPath(target, "sessions"), {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -565,8 +596,9 @@ function createSection(networkDefault: boolean): HTMLElement {
         return;
       }
       const created = (await response.json()) as Session;
-      // The row is on screen before its stream has said anything: the 202's row is `starting`.
-      addSession(created);
+      // The row is on screen before its stream has said anything: the 202's row is `starting`, and it lands in the
+      // group of the machine the request named — the peer's own row, the peer's own group.
+      addSession(created, target);
       // Only now is the submission finished: a body that did not parse is a retry of this key, not
       // a new intent, so the key survives it.
       pendingKey = null;
@@ -596,6 +628,7 @@ function createSection(networkDefault: boolean): HTMLElement {
   });
 
   form.append(
+    field("machine", machine),
     field("project", project),
     field("model", model),
     field("thinking", thinking),
@@ -603,6 +636,15 @@ function createSection(networkDefault: boolean): HTMLElement {
     button,
   );
   section.append(make("h2", "", "New session"), form, error);
+  return section;
+}
+
+// What a machine with nothing to offer draws instead of a form: a hub whose registry has no reachable peer, or a
+// machine whose only candidate is itself and a `hub` role. A control whose one choice can only be refused is the
+// affordance `createOffered`'s rule exists to withhold, one step out.
+function noCreateSection(): HTMLElement {
+  const section = make("section", "create");
+  section.append(make("h2", "", "New session"), make("p", "empty", NO_CREATE_TARGET));
   return section;
 }
 
@@ -1410,10 +1452,12 @@ type StreamTarget = {
   // is written" is what HS-020's blocker was).
   showState: (state: SessionState, reason: string | null) => void;
   showSpend: (spend: Spend) => void;
+  // The line that says the machine stopped answering under an open page (HS-074), hidden until it does.
+  lost: HTMLElement;
 };
 
 function openSessionStream(host: string, id: string, target: StreamTarget): void {
-  const { transcript, placeholder, earlier, showState, showSpend } = target;
+  const { transcript, placeholder, earlier, showState, showSpend, lost } = target;
   const model = new Transcript();
   const blocks = new Map<string, MessageBlock>();
   const tools = new Map<string, ToolBlock>();
@@ -1478,6 +1522,20 @@ function openSessionStream(host: string, id: string, target: StreamTarget): void
     })();
   });
 
+  // A connection that fails is not a frame: `EventSource` dispatches a plain `Event` named `error` and retries on
+  // its own, and a machine that went away leaves the transcript below as the last thing it sent. The sentence says
+  // exactly that rather than letting a stale transcript read as live (ADR-0017); the next frame it does receive
+  // takes the line away again, because a stream that came back is the machine answering.
+  source.addEventListener("error", (event) => {
+    if (!(event instanceof MessageEvent)) {
+      lost.textContent = STREAM_LOST;
+      lost.hidden = false;
+    }
+  });
+  source.addEventListener("open", () => {
+    lost.hidden = true;
+  });
+
   for (const eventType of TRANSCRIPT_EVENTS) {
     source.addEventListener(eventType, (event) => {
       // `error` is the one name the platform uses as well as the server: an `EventSource` dispatches a plain
@@ -1494,6 +1552,8 @@ function openSessionStream(host: string, id: string, target: StreamTarget): void
       if (placeholder.isConnected) {
         placeholder.remove();
       }
+      // A frame is the machine answering, whatever the last connection error said.
+      lost.hidden = true;
       for (const change of model.apply(frame)) {
         applyChange(change, transcript, blocks, tools, host);
       }
@@ -2119,6 +2179,46 @@ function deleteSection(
 // `host` is the machine the session lives on, from the address (HS-071): the preview link's first segment names
 // it, every request the screen makes is made against it, and the meta line says whose session this is — the list's
 // grouping is gone on a screen that shows one row.
+// What a session's page draws when the machine that owns it did not answer (HS-074).
+//
+// Not a bare notice: the operator came here from the list, so the screen keeps the way back and the name of the
+// machine whose session it is, and says the machine's own sentence — `hostFailure` drops the code of the two
+// upstream words, because "upstream_unreachable: workshop could not be reached" reads as a word to look up about a
+// machine that is simply away (HS-071's rule, on the one screen that did not have it yet).
+//
+// Nothing is invented: no cached transcript, no counts, no false `idle`. The one affordance is a reload, which is a
+// new read of the same address — the sentence the machine would answer if it came back.
+function awayScreen(health: Health, host: string, code: string, message: string): void {
+  if (app === null) {
+    return;
+  }
+  const section = make("section", "session-screen");
+  section.id = "session-away";
+  section.dataset.host = host;
+
+  const back = document.createElement("a");
+  back.className = "back";
+  back.href = "/";
+  back.textContent = "← All sessions";
+
+  const retry = document.createElement("a");
+  retry.className = "secondary";
+  retry.href = location.pathname;
+  retry.textContent = "Try again";
+
+  const head = make("div", "session-head");
+  head.append(make("span", "project", hostLabel(host)), make("span", "state", "unreachable"));
+
+  section.append(
+    back,
+    head,
+    make("p", "error", hostFailure(code, message)),
+    make("p", "notice", AWAY_DETAIL),
+    retry,
+  );
+  app.replaceChildren(header(health, navLinks(location.pathname)), section);
+}
+
 function sessionScreen(health: Health, host: string, session: SessionDetail): void {
   if (app === null) {
     return;
@@ -2166,6 +2266,11 @@ function sessionScreen(health: Health, host: string, session: SessionDetail): vo
   preview.hidden = !previewShown(session.status, host, health.role);
   showSpend({ settled: 0, usage: false });
 
+  const lost = make("p", "notice");
+  lost.id = "stream-lost";
+  lost.textContent = STREAM_LOST;
+  lost.hidden = true;
+
   const transcript = make("div", "transcript");
   transcript.id = "transcript";
   const placeholder = make(
@@ -2211,6 +2316,7 @@ function sessionScreen(health: Health, host: string, session: SessionDetail): vo
     head,
     meta,
     changes.element,
+    lost,
     earlier,
     transcript,
     composer.element,
@@ -2223,39 +2329,39 @@ function sessionScreen(health: Health, host: string, session: SessionDetail): vo
     earlier,
     showState,
     showSpend,
+    lost,
   });
 }
 
-// ---- the settings screen (HS-067, ADR-0072 D2/D6) -------------------------------------------
+// ---- the settings screen (HS-067, HS-074; ADR-0072 D2/D6, ADR-0079) --------------------------
 
-// The machine's notifications: one row per machine the app is served from (one today, because there is one
-// control origin), the sentence this browser earns, and the one control that sentence allows.
+// One machine's row: the words `push.ts` decided and the nodes they are drawn into.
+type MachineRow = {
+  host: string;
+  // This machine's application server key, as the last read answered it. `null` is a machine with no pair, and
+  // `undefined` is a machine that has not answered yet — two facts a sentence must not confuse (HS-074).
+  key: string | null | undefined;
+  name: HTMLElement;
+  sentence: HTMLElement;
+  detail: HTMLElement;
+  action: HTMLButtonElement;
+  decided: PushState | null;
+};
+
+// The machine's notifications: **one row per machine** the app can subscribe on (HS-074, item 11's last bullet —
+// "each machine has its own keys, so the web app subscribes on every machine it uses (through the hub)").
 //
-// Every word is `push.ts`'s — the page only decides *when* to ask, never *what* to say. The facts are read from
-// the platform each time the screen is (re)drawn rather than kept: a permission the operator changed in the
-// browser's settings is a fact this page cannot be told about, and a subscription can be rotated by the browser
-// without asking anybody.
-function settingsSection(health: Health): HTMLElement {
+// Every word is `push.ts`'s, and every row asks that machine's own questions: its `application_server_key` through
+// the hop, and whether *this browser* holds a subscription for that key. A machine that did not answer is a
+// sentence and no control — both facts a row would show are things only that machine can answer (HS-071's rule
+// about `false` being a claim, in a second screen).
+//
+// The facts are read from the platform each time the screen is (re)drawn rather than kept: a permission the
+// operator changed in the browser's settings is a fact this page cannot be told about, and a subscription can be
+// rotated by the browser without asking anybody.
+function settingsSection(health: Health, hosts: HostRow[]): HTMLElement {
   const section = make("section", "settings");
   section.id = "settings";
-
-  const machine = make("p", "settings-machine");
-  machine.id = "settings-machine";
-
-  const sentence = make("p", "settings-state");
-  sentence.id = "settings-state";
-
-  const action = make("button", "settings-action");
-  action.id = "settings-action";
-  action.type = "button";
-
-  const detail = make("p", "settings-detail");
-  detail.id = "settings-detail";
-  detail.hidden = true;
-
-  const install = make("p", "settings-install");
-  install.id = "settings-install";
-  install.hidden = true;
 
   const perMachine = make("p", "settings-per-machine", PER_MACHINE_SENTENCE);
   perMachine.id = "settings-per-machine";
@@ -2264,74 +2370,92 @@ function settingsSection(health: Health): HTMLElement {
   notice.id = "settings-notice";
   notice.hidden = true;
 
-  // The facts as last read, and whether a request of ours is in flight. `busy` exists because the screen is
-  // redrawn after every action: without it a re-render re-enables the button mid-request and a second tap is a
-  // second subscribe (ADR-0067's lesson, in a second screen).
-  let facts: PushFacts = {
-    supported: false,
-    permission: "default",
-    hasKey: health.application_server_key !== null,
-    subscribed: false,
-    installed: false,
-  };
+  const install = make("p", "settings-install");
+  install.id = "settings-install";
+  install.hidden = true;
+
+  const list = make("ul", "settings-machines");
+  list.id = "settings-machines";
+
+  // This machine first, then every registry row that is not this machine's own row: the registry has a row for the
+  // local machine when the seed names it, and a second row for one machine would be a second subscription to the
+  // same origin.
+  const machines: string[] = [
+    LOCAL_HOST,
+    ...hosts.filter((row) => !isLocalRow(row.url, location.origin)).map((row) => row.name),
+  ];
+
+  const rows: MachineRow[] = machines.map((host, index) => {
+    const item = make("li", "settings-machine");
+    item.dataset.host = host;
+    const name = make("p", "settings-machine-name");
+    const sentence = make("p", "settings-state");
+    const detail = make("p", "settings-detail");
+    detail.hidden = true;
+    const action = make("button", "settings-action");
+    action.type = "button";
+    // The first row keeps the ids this screen has carried since HS-067 (the local machine's), and a **class** is
+    // what the rest share: an id two elements carry is not an id (HS-071's `nav-link`). `case_pwa` reads these
+    // four ids out of the served bundle, so the local row is where they stay.
+    if (index === 0) {
+      name.id = "settings-machine";
+      sentence.id = "settings-state";
+      detail.id = "settings-detail";
+      action.id = "settings-action";
+    }
+    item.append(name, sentence, detail, action);
+    list.append(item);
+    return { host, key: undefined, name, sentence, detail, action, decided: null };
+  });
+
+  // Only one of this screen's controls is ever in flight: a second tap while one subscribe is still asking the
+  // browser for permission is the second subscribe ADR-0067's lesson is about.
   let busy = false;
-  let pending: PushState | null = null;
 
   function draw(): void {
-    const decided = pushState(facts);
-    pending = decided;
-    machine.textContent = machineState(location.origin, facts.subscribed);
-    machine.dataset.origin = location.origin;
-    machine.dataset.subscribed = String(facts.subscribed);
-    sentence.textContent = decided.sentence;
-    detail.textContent = decided.detail ?? "";
-    detail.hidden = decided.detail === null;
-    action.textContent = busy ? "Working…" : pushActionLabel(decided.action);
-    action.hidden = !pushActionable(decided.action);
-    action.disabled = busy;
-    // The iOS requirement is item 11's third bullet, and it is stated here rather than in a document. `null`
-    // once the app really is installed, where the row above already says so.
+    for (const row of rows) {
+      const decided = row.decided;
+      const state =
+        decided === null
+          ? null
+          : decided.action === "away" || decided.action === "no-key"
+            ? null
+            : decided.action === "subscribe" || decided.action === "blocked" || decided.action === "unsupported"
+              ? "not-subscribed"
+              : "subscribed";
+      // `subscribed` is the action that would undo one, so it is the row's own word; everything else that is not
+      // away is a `not subscribed`, which is the safe half (HS-071).
+      const subscribed = decided !== null && decided.action === "unsubscribe";
+      row.name.textContent = machineState(hostLabel(row.host), decided?.action === "away" ? "away" : state ?? "not-subscribed");
+      row.name.dataset.subscribed = String(subscribed);
+      row.sentence.textContent = decided?.sentence ?? GROUP_WAITING;
+      row.detail.textContent = decided?.detail ?? "";
+      row.detail.hidden = decided?.detail == null;
+      row.action.textContent = busy ? "Working…" : decided === null ? "" : pushActionLabel(decided.action);
+      row.action.hidden = decided === null || !pushActionable(decided.action);
+      row.action.disabled = busy;
+    }
+    // The iOS requirement is item 11's third bullet, and it is stated here rather than in a document. `null` once
+    // the app really is installed, where the rows above say so.
     const installText = installSentence({
-      installed: facts.installed,
+      installed: installedNow(),
       ios: isIos(navigator.userAgent, navigator.maxTouchPoints),
     });
     install.textContent = installText ?? "";
     install.hidden = installText === null;
   }
 
-  // The platform's answers, read fresh. `supported` covers the three things a subscribe needs at once: a secure
-  // origin (an insecure one has no `serviceWorker` at all), a browser with a `PushManager`, and a `Notification`
-  // to ask for permission with.
-  async function gather(): Promise<PushFacts> {
-    const supported =
-      window.isSecureContext &&
-      "serviceWorker" in navigator &&
-      "PushManager" in window &&
-      "Notification" in window;
+  function fail(code: string, message: string): void {
+    notice.textContent = `${code}: ${message}`;
+    notice.hidden = false;
+  }
+
+  // Whether the page is running as the installed app (`display-mode: standalone`, or iOS's own flag).
+  function installedNow(): boolean {
     // SAFETY: `navigator.standalone` is iOS Safari's own non-standard flag, which no lib declares. It is
     // `undefined` everywhere else, which the comparison reads as "not installed".
     const standalone = (navigator as unknown as { standalone?: boolean }).standalone === true;
-    const installed = standalone || window.matchMedia("(display-mode: standalone)").matches;
-    let subscribed = false;
-    if (supported) {
-      try {
-        const registration = await navigator.serviceWorker.getRegistration();
-        subscribed =
-          registration !== undefined &&
-          (await registration.pushManager.getSubscription()) !== null;
-      } catch {
-        // A registration this page cannot read is a browser that has no subscription as far as this screen can
-        // tell; the sentence says `not subscribed`, which is the safe half of the two.
-        subscribed = false;
-      }
-    }
-    return {
-      supported,
-      permission: supported ? Notification.permission : "default",
-      hasKey: health.application_server_key !== null,
-      subscribed,
-      installed,
-    };
+    return standalone || window.matchMedia("(display-mode: standalone)").matches;
   }
 
   // The worker's registration, or `undefined`. `navigator.serviceWorker.ready` never settles when the registration
@@ -2347,14 +2471,70 @@ function settingsSection(health: Health): HTMLElement {
     return Promise.race([navigator.serviceWorker.ready, timeout]);
   }
 
-  function fail(code: string, message: string): void {
-    notice.textContent = `${code}: ${message}`;
-    notice.hidden = false;
+  // This browser's subscription for **one machine's key**, or `null`.
+  //
+  // One service-worker registration can hold one subscription per application server key, and the option is how the
+  // browser is asked for the one that belongs to this machine. A browser that refuses the option form (or throws)
+  // answers `null` — the safe half again: the row says `not subscribed` about a machine this page could not ask,
+  // and the subscribe control is the one that can fix it.
+  async function subscriptionFor(key: string | null): Promise<PushSubscription | null> {
+    if (key === null || !("serviceWorker" in navigator) || !("PushManager" in window)) {
+      return null;
+    }
+    const registration = await registrationFor();
+    if (registration === undefined) {
+      return null;
+    }
+    // SAFETY: `getSubscription` takes the machine's key as `PushSubscriptionOptionsInit`, which is how a
+    // registration that holds several subscriptions names the one it is asked about. The library's declaration in
+    // this tree's TypeScript still says `getSubscription()`, so the argument is stated here rather than dropped: the
+    // call without it answers the browser's *default* subscription, which may belong to another machine.
+    const manager = registration.pushManager as PushManager & {
+      getSubscription(options?: { applicationServerKey?: string }): Promise<PushSubscription | null>;
+    };
+    try {
+      return await manager.getSubscription({ applicationServerKey: key });
+    } catch {
+      return null;
+    }
   }
 
-  async function subscribe(): Promise<void> {
+  // One machine's facts: what the platform can do, what that machine answered, and what this browser holds.
+  async function gather(row: MachineRow): Promise<PushFacts> {
+    const supported =
+      window.isSecureContext &&
+      "serviceWorker" in navigator &&
+      "PushManager" in window &&
+      "Notification" in window;
+    // This machine's own health is the answer the page already made; a peer's is one forwarded read, the same one
+    // the Computers screen makes. A machine that did not answer has no key to read, and its refusal is the row's
+    // sentence — `hostFailure` drops the code of the two upstream ones, which is the operator-facing word for "away".
+    const read =
+      row.host === LOCAL_HOST
+        ? ({ ok: true, value: health } as const)
+        : await getJson<Health>(apiPath(row.host, "health"));
+    const away = read.ok ? null : hostFailure(read.code, read.message);
+    row.key = read.ok ? read.value.application_server_key : undefined;
+    const subscribed =
+      supported && read.ok && row.key ? (await subscriptionFor(row.key ?? null)) !== null : false;
+    return {
+      supported,
+      permission: supported ? Notification.permission : "default",
+      hasKey: read.ok && row.key !== null && row.key !== undefined,
+      subscribed,
+      installed: installedNow(),
+      away,
+    };
+  }
+
+  async function drawMachine(row: MachineRow): Promise<void> {
+    row.decided = pushState(await gather(row));
+    draw();
+  }
+
+  async function subscribe(row: MachineRow): Promise<void> {
     notice.hidden = true;
-    const key = health.application_server_key;
+    const key = row.key ?? null;
     if (key === null) {
       return;
     }
@@ -2379,7 +2559,10 @@ function settingsSection(health: Health): HTMLElement {
       fail("bad_subscription", "this browser's subscription carried no p256dh/auth pair");
       return;
     }
-    const response = await fetch(SUBSCRIBE_PATH, {
+    // That machine's own route, through the hub: `local` is this origin's own path, a peer is
+    // `/api/hosts/<name>/push/subscribe`, which is HS-069's forwarding route reaching the peer's own
+    // `POST /api/push/subscribe`. The row is stored **there**, sealed to **that** machine's pair.
+    const response = await fetch(apiPath(row.host, "push/subscribe"), {
       method: "POST",
       headers: JSON_HEADERS,
       body: JSON.stringify(body),
@@ -2390,70 +2573,74 @@ function settingsSection(health: Health): HTMLElement {
       await subscription.unsubscribe();
       const envelope = (await response.json()) as ErrorEnvelope;
       fail(envelope.code, envelope.message);
-      return;
     }
   }
 
-  async function unsubscribe(): Promise<void> {
+  // The one delete: **every** machine this app subscribed to (item 11's acceptance, HS-074).
+  //
+  // One `DELETE` per machine, against each machine's own route with that machine's own endpoint — the endpoints
+  // differ, because each subscribe call is the push service minting a subscription for a different application
+  // server key. `404` is the answer the operator wanted (the row is already gone) and is the rule the local
+  // unsubscribe has kept since HS-067; anything else is that row's own sentence, so a machine that is away says so
+  // and the machines that answered are still cleared.
+  async function unsubscribeEverywhere(): Promise<void> {
     notice.hidden = true;
-    const registration = await navigator.serviceWorker.getRegistration();
-    const subscription =
-      registration === undefined ? null : await registration.pushManager.getSubscription();
-    if (subscription === null) {
-      return;
+    const failures: string[] = [];
+    for (const row of rows) {
+      const key = row.key ?? null;
+      const subscription = await subscriptionFor(key);
+      if (subscription === null) {
+        continue;
+      }
+      const query = new URLSearchParams({ endpoint: subscription.endpoint }).toString();
+      const response = await fetch(`${apiPath(row.host, "push/subscribe")}?${query}`, {
+        method: "DELETE",
+        // A mutating request carries these even with no body (ADR-0010).
+        headers: JSON_HEADERS,
+      });
+      if (!response.ok && response.status !== 404) {
+        const envelope = (await response.json()) as ErrorEnvelope;
+        failures.push(`${hostLabel(row.host)}: ${hostFailure(envelope.code, envelope.message)}`);
+        continue;
+      }
+      await subscription.unsubscribe();
     }
-    const query = new URLSearchParams({ endpoint: subscription.endpoint }).toString();
-    const response = await fetch(`${SUBSCRIBE_PATH}?${query}`, {
-      method: "DELETE",
-      // A mutating request carries these even with no body (ADR-0010); `404` is the row already gone, which is the
-      // answer the operator wanted.
-      headers: JSON_HEADERS,
-    });
-    if (!response.ok && response.status !== 404) {
-      const envelope = (await response.json()) as ErrorEnvelope;
-      fail(envelope.code, envelope.message);
-      return;
+    if (failures.length > 0) {
+      fail("not_everywhere", failures.join(" · "));
     }
-    await subscription.unsubscribe();
   }
 
-  action.addEventListener("click", () => {
-    const decided = pending;
+  function act(row: MachineRow): void {
+    const decided = row.decided;
     if (busy || decided === null || !pushActionable(decided.action)) {
       return;
     }
     busy = true;
     draw();
-    const run = decided.action === "subscribe" ? subscribe : unsubscribe;
-    run()
+    const run = decided.action === "subscribe" ? subscribe(row) : unsubscribeEverywhere();
+    run
       .catch((error: unknown) => {
         fail("unreachable", String(error));
       })
       .finally(() => {
         busy = false;
-        void gather().then((read) => {
-          facts = read;
-          draw();
-        });
+        void Promise.all(rows.map(drawMachine));
       });
-  });
+  }
 
-  // The first draw is the unsupported shape until the platform has answered, so the button is never offered on a
-  // guess.
+  for (const row of rows) {
+    row.action.addEventListener("click", () => act(row));
+  }
+
+  // The first draw is `reading…` on every row until the platform has answered, so no control is offered on a guess.
   draw();
-  void gather().then((read) => {
-    facts = read;
-    draw();
-  });
+  void Promise.all(rows.map(drawMachine));
 
   section.append(
     make("h2", "", "Notifications"),
-    machine,
-    sentence,
-    detail,
-    action,
-    install,
     perMachine,
+    list,
+    install,
     notice,
   );
   return section;
@@ -2468,14 +2655,20 @@ function render(
   own: SessionList,
   groups: SessionGroup[],
   note: string | null,
+  targets: string[],
 ): SessionsList | null {
   if (app === null) {
     return null;
   }
   const list = sessionList(groups, note);
   const sections: HTMLElement[] = [header(health, navLinks(location.pathname)), list.element];
-  if (createOffered(health.role)) {
-    sections.push(createSection(own.network_default));
+  // The form is drawn when there is somewhere to put a session: this machine (a role that runs sessions) or a peer
+  // that said it was reachable. A hub with no reachable peer says why instead of offering a choice that can only be
+  // refused (§1.5's question 2, `createOffered`'s rule one machine out).
+  if (targets.length > 0) {
+    sections.push(createSection(own.network_default, targets));
+  } else {
+    sections.push(noCreateSection());
   }
   app.replaceChildren(...sections);
   return list;
@@ -2516,19 +2709,39 @@ async function show(): Promise<void> {
   if (address !== null) {
     const session = await getJson<SessionDetail>(sessionPath(address.host, address.id));
     if (!session.ok) {
+      // A machine that is away is a **state of this session**, not a page that failed to load (HS-074, item 11's
+      // "degrades to a clear state per session rather than an empty list"): the hub's own `502 upstream_unreachable`
+      // and `504 upstream_timeout` say the machine did not answer, and everything this page could offer —
+      // the four composer actions, the delete, the Changes sheet — is a request to that same machine. So the screen
+      // says whose session it is and what happened, and offers one thing that can now work: the same read again.
+      // Anything else (a `404`, a refusal) keeps the plain notice, because the page has nothing to add to it.
+      if (session.code === "upstream_unreachable" || session.code === "upstream_timeout") {
+        awayScreen(health.value, address.host, session.code, session.message);
+        return;
+      }
       renderFailure(session.code, session.message);
       return;
     }
     sessionScreen(health.value, address.host, session.value);
     return;
   }
-  // `/settings` is the third screen and the machine's own (HS-067, ADR-0072): it needs no request but the health
-  // this function already made, and it draws one row per machine the app is served from — one today.
+  // `/settings` is the third screen and the machine's own (HS-067, ADR-0072), and since HS-074 it is **one row per
+  // machine**: the health this function already made is this machine's row, and the registry is what names the rest,
+  // exactly as the Computers screen reads it. A registry that cannot be read is not a reason to draw nothing — this
+  // machine's own row is still true, and the notice says the rest are missing rather than absent.
   if (location.pathname === SETTINGS_PATH) {
+    const hosts = await getJson<HostList>(apiPath(LOCAL_HOST, "hosts"));
     app?.replaceChildren(
       header(health.value, navLinks(location.pathname)),
-      settingsSection(health.value),
+      settingsSection(health.value, hosts.ok ? hosts.value.hosts : []),
     );
+    if (!hosts.ok) {
+      const notice = document.getElementById("settings-notice");
+      if (notice !== null) {
+        notice.textContent = `the registry could not be read, so other machines are missing: ${hostFailure(hosts.code, hosts.message)}`;
+        notice.hidden = false;
+      }
+    }
     return;
   }
   // `/computers` is the fourth (HS-071): the machines this one may send a request to, and their state. It reads the
@@ -2575,6 +2788,7 @@ async function show(): Promise<void> {
     own.value,
     [{ host: LOCAL_HOST, answer: own }, ...remote.map((row) => ({ host: row.name, answer: null }))],
     note,
+    createTargets(health.value.role, hosts.value.hosts),
   );
   if (list === null) {
     return;

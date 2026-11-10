@@ -458,6 +458,7 @@ serve_cases=(
   case_forward
   case_machine_trust
   case_computers
+  case_cross_machine
   case_hub_deploy
   case_idle_stop
   case_drain
@@ -4058,117 +4059,14 @@ PY
 # default trust store, which is what lets a private CA be configured the way every other tool is configured —
 # the reason the sender passes no `-CAfile` (ADR-0071's D2). An exported override must not leak into another
 # case's boot.
-case_push() {
-  local name=case_push
-  local root="$repo_root/target/verify-push-$$"
-  local repo="$root/projects/holosmith"
-  local data="$root/data"
-  local tls="$root/tls"
-  local response body id fresh created_at rows port_line push_port=""
-  local before sent
-  local vapid_public vapid_private subscription_public subscription_private_hex
-  local subscription_public_hex auth_b64 auth_hex rotated rotated_hex
-  local ok_endpoint gone_endpoint keyed_endpoint
-  local line
-  if ! command -v openssl >/dev/null 2>&1; then
-    printf 'SKIP %s: no openssl to sign a token or serve TLS (tests/push.rs covers the JWT and RFC 8291)\n' "$name"
-    return 0
-  fi
-  if ! command -v node >/dev/null 2>&1; then
-    printf 'SKIP %s: no node to run the TLS receiver (tests/push.rs covers the sender)\n' "$name"
-    return 0
-  fi
-  if ! command -v python3 >/dev/null 2>&1; then
-    printf 'SKIP %s: no python3 to read the SEC1 keys and the database (tests/push.rs covers the rows)\n' "$name"
-    return 0
-  fi
-  stop_serve
-  rm -rf "$root"
-  mkdir -p "$repo" "$tls" "$data/secrets" ||
-    fail "$name/mkdir" "could not create $root"
-  chmod 0700 "$data/secrets"
-  git -C "$repo" init --quiet -b main . || fail "$name/git" "git init did not work in $repo"
-  git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet \
-    --allow-empty -m "the first commit" || fail "$name/git" "git commit did not work"
-
-  # The SEC1 walk, in one place: `openssl ecparam … -outform DER` writes 121 octets and the two strings a
-  # `vapid.toml` holds are its scenic halves. `python3` reads the DER rather than a second hand parser in bash.
-  cat >"$WORK/sec1.py" <<'PY'
-import base64, sys
-der = open(sys.argv[1], "rb").read()
-# One TLV: the tag, the content's first offset and the offset after it. Every length in a 121-octet SEC1 key is
-# short-form (the longest is the 0x77 SEQUENCE), so one length octet is the whole of the rule -- and a long form is
-# refused rather than misread, which is the same rule `vapid::from_der` keeps in Rust.
-def element(at):
-    tag = der[at]
-    length = der[at + 1]
-    assert length < 0x80, "a long-form length in a 121-octet key"
-    start = at + 2
-    return tag, start, start + length
-tag, body, end = element(0)
-assert tag == 0x30, "not a SEQUENCE: %r" % der[:4]
-tag, _, after_version = element(body)
-assert tag == 0x02, "no version: %r" % der[:4]
-tag, start, after_scalar = element(after_version)
-assert tag == 0x04, "no private scalar: %r" % der[:4]
-scalar = der[start:after_scalar]
-tag, _, after_curve = element(after_scalar)
-assert tag == 0xa0, "no named curve"
-tag, start, after_public = element(after_curve)
-assert tag == 0xa1, "no public key"
-tag, start, after_bits = element(start)
-assert tag == 0x03 and der[start] == 0x00, "no BIT STRING"
-point = der[start + 1:after_bits]
-assert len(point) == 65 and point[0] == 0x04, "not an uncompressed point"
-assert after_bits == end, "trailing octets after the public key"
-b64 = lambda value: base64.urlsafe_b64encode(value).rstrip(b"=").decode()
-print(b64(point), b64(scalar), scalar.hex(), point.hex())
-PY
-
-  # The machine's own pair, generated the way `server deploy` generates it and written the way `vapid::render`
-  # writes it — header line included, because a file an operator may open should say what it is.
-  openssl ecparam -name prime256v1 -genkey -noout -outform DER -out "$tls/vapid.der" ||
-    fail "$name/ecparam" "openssl ecparam did not write a key"
-  read -r vapid_public vapid_private _ _ < <(python3 "$WORK/sec1.py" "$tls/vapid.der")
-  [ -n "$vapid_public" ] && [ -n "$vapid_private" ] ||
-    fail "$name/vapid" "the generated pair did not parse"
-  printf '# The machine'"'"'s Web Push key pair (HS-049). `server deploy` writes this once and never rewrites it.\npublic_key = "%s"\nprivate_key = "%s"\n' \
-    "$vapid_public" "$vapid_private" >"$data/secrets/vapid.toml" ||
-    fail "$name/vapid" "could not write $data/secrets/vapid.toml"
-  chmod 0600 "$data/secrets/vapid.toml"
-
-  # The subscription: its own pair, and sixteen octets of `auth`. Both go to the receiver, because the
-  # receiver is the *browser* in this exchange and only it can read what the machine sealed.
-  openssl ecparam -name prime256v1 -genkey -noout -outform DER -out "$tls/subscription.der" ||
-    fail "$name/ecparam" "openssl ecparam did not write the subscription's key"
-  read -r subscription_public _ subscription_private_hex subscription_public_hex \
-    < <(python3 "$WORK/sec1.py" "$tls/subscription.der")
-  auth_hex="$(openssl rand -hex 16)"
-  auth_b64="$(printf '%s' "$auth_hex" | python3 -c \
-    'import base64, sys; print(base64.urlsafe_b64encode(bytes.fromhex(sys.stdin.read())).rstrip(b"=").decode())')"
-  [ -n "$auth_b64" ] || fail "$name/auth" "openssl rand did not answer 16 octets"
-  # The secret the *re-subscribe* arm rotates to. The receiver holds this one, because it plays the browser that
-  # re-subscribed: `/ok/`'s body therefore only decrypts if the machine really stored the new secret.
-  rotated_hex="$(openssl rand -hex 16)"
-  rotated="$(printf '%s' "$rotated_hex" | python3 -c \
-    'import base64, sys; print(base64.urlsafe_b64encode(bytes.fromhex(sys.stdin.read())).rstrip(b"=").decode())')"
-
-  # The TLS material: a CA and a `localhost` certificate with a `DNS:` SAN, because `-verify_hostname` matches
-  # the name in the certificate and an IP SAN would not do.
-  openssl req -x509 -newkey rsa:2048 -nodes -keyout "$tls/ca.key" -out "$tls/ca.pem" -days 1 \
-    -subj /CN=VerifyPushCA >/dev/null 2>&1 ||
-    fail "$name/ca" "openssl req did not write a CA"
-  openssl req -newkey rsa:2048 -nodes -keyout "$tls/server.key" -out "$tls/server.csr" \
-    -subj /CN=localhost >/dev/null 2>&1 ||
-    fail "$name/cert" "openssl req did not write a CSR"
-  printf 'subjectAltName=DNS:localhost\n' >"$tls/server.ext"
-  openssl x509 -req -in "$tls/server.csr" -CA "$tls/ca.pem" -CAkey "$tls/ca.key" \
-    -CAcreateserial -out "$tls/server.pem" -days 1 -extfile "$tls/server.ext" >/dev/null 2>&1 ||
-    fail "$name/cert" "openssl x509 did not sign the server certificate"
-
-  # The receiver. It is the browser: it verifies the token against the **case's** VAPID public key, decrypts the
-  # record with its own private key, and appends one JSON line per request so the assertions below read what
-  # arrived rather than what the sender said it sent.
+# The push receiver: the *browser* in a push exchange, written once for the two cases that need one.
+#
+# HS-066's `case_push` reads one machine's payload: the token, the record, the disposition for each answer a
+# push service can give. HS-074's `case_cross_machine` reads the same three fields from a **peer's** payload
+# through a hub, so it needs the same arithmetic with different keys — and a second copy of this file would be
+# a second thing to keep right (this script already found its own two bugs: a JWK without `format: 'jwk'` and
+# an auth tag set after `final()`).
+write_push_receiver() {
   cat >"$WORK/push-receiver.mjs" <<'JS'
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -4285,6 +4183,129 @@ server.listen(0, '127.0.0.1', () => {
   console.log(`PORT ${server.address().port}`);
 });
 JS
+}
+
+# The SEC1 walk: a 121-octet `openssl ecparam` key read as the two base64url strings a `vapid.toml` holds and
+# the two hex strings a receiver needs. `python3` reads the DER rather than a second hand parser in bash.
+#
+# One writer, two cases (HS-066's `case_push` and HS-074's `case_cross_machine`): the peer's pair, the
+# subscription's pair and a hub's own pair are the same three questions about the same 121 octets.
+write_sec1_walk() {
+  cat >"$WORK/sec1.py" <<'PY'
+import base64, sys
+der = open(sys.argv[1], "rb").read()
+# One TLV: the tag, the content's first offset and the offset after it. Every length in a 121-octet SEC1 key is
+# short-form (the longest is the 0x77 SEQUENCE), so one length octet is the whole of the rule -- and a long form is
+# refused rather than misread, which is the same rule `vapid::from_der` keeps in Rust.
+def element(at):
+    tag = der[at]
+    length = der[at + 1]
+    assert length < 0x80, "a long-form length in a 121-octet key"
+    start = at + 2
+    return tag, start, start + length
+tag, body, end = element(0)
+assert tag == 0x30, "not a SEQUENCE: %r" % der[:4]
+tag, _, after_version = element(body)
+assert tag == 0x02, "no version: %r" % der[:4]
+tag, start, after_scalar = element(after_version)
+assert tag == 0x04, "no private scalar: %r" % der[:4]
+scalar = der[start:after_scalar]
+tag, _, after_curve = element(after_scalar)
+assert tag == 0xa0, "no named curve"
+tag, start, after_public = element(after_curve)
+assert tag == 0xa1, "no public key"
+tag, start, after_bits = element(start)
+assert tag == 0x03 and der[start] == 0x00, "no BIT STRING"
+point = der[start + 1:after_bits]
+assert len(point) == 65 and point[0] == 0x04, "not an uncompressed point"
+assert after_bits == end, "trailing octets after the public key"
+b64 = lambda value: base64.urlsafe_b64encode(value).rstrip(b"=").decode()
+print(b64(point), b64(scalar), scalar.hex(), point.hex())
+PY
+}
+
+case_push() {
+  local name=case_push
+  local root="$repo_root/target/verify-push-$$"
+  local repo="$root/projects/holosmith"
+  local data="$root/data"
+  local tls="$root/tls"
+  local response body id fresh created_at rows port_line push_port=""
+  local before sent
+  local vapid_public vapid_private subscription_public subscription_private_hex
+  local subscription_public_hex auth_b64 auth_hex rotated rotated_hex
+  local ok_endpoint gone_endpoint keyed_endpoint
+  local line
+  if ! command -v openssl >/dev/null 2>&1; then
+    printf 'SKIP %s: no openssl to sign a token or serve TLS (tests/push.rs covers the JWT and RFC 8291)\n' "$name"
+    return 0
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    printf 'SKIP %s: no node to run the TLS receiver (tests/push.rs covers the sender)\n' "$name"
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to read the SEC1 keys and the database (tests/push.rs covers the rows)\n' "$name"
+    return 0
+  fi
+  stop_serve
+  rm -rf "$root"
+  mkdir -p "$repo" "$tls" "$data/secrets" ||
+    fail "$name/mkdir" "could not create $root"
+  chmod 0700 "$data/secrets"
+  git -C "$repo" init --quiet -b main . || fail "$name/git" "git init did not work in $repo"
+  git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet \
+    --allow-empty -m "the first commit" || fail "$name/git" "git commit did not work"
+
+  # The SEC1 walk, in one place: `openssl ecparam … -outform DER` writes 121 octets and the two strings a
+  # `vapid.toml` holds are its scenic halves. `python3` reads the DER rather than a second hand parser in bash.
+  write_sec1_walk
+
+  # The machine's own pair, generated the way `server deploy` generates it and written the way `vapid::render`
+  # writes it — header line included, because a file an operator may open should say what it is.
+  openssl ecparam -name prime256v1 -genkey -noout -outform DER -out "$tls/vapid.der" ||
+    fail "$name/ecparam" "openssl ecparam did not write a key"
+  read -r vapid_public vapid_private _ _ < <(python3 "$WORK/sec1.py" "$tls/vapid.der")
+  [ -n "$vapid_public" ] && [ -n "$vapid_private" ] ||
+    fail "$name/vapid" "the generated pair did not parse"
+  printf '# The machine'"'"'s Web Push key pair (HS-049). `server deploy` writes this once and never rewrites it.\npublic_key = "%s"\nprivate_key = "%s"\n' \
+    "$vapid_public" "$vapid_private" >"$data/secrets/vapid.toml" ||
+    fail "$name/vapid" "could not write $data/secrets/vapid.toml"
+  chmod 0600 "$data/secrets/vapid.toml"
+
+  # The subscription: its own pair, and sixteen octets of `auth`. Both go to the receiver, because the
+  # receiver is the *browser* in this exchange and only it can read what the machine sealed.
+  openssl ecparam -name prime256v1 -genkey -noout -outform DER -out "$tls/subscription.der" ||
+    fail "$name/ecparam" "openssl ecparam did not write the subscription's key"
+  read -r subscription_public _ subscription_private_hex subscription_public_hex \
+    < <(python3 "$WORK/sec1.py" "$tls/subscription.der")
+  auth_hex="$(openssl rand -hex 16)"
+  auth_b64="$(printf '%s' "$auth_hex" | python3 -c \
+    'import base64, sys; print(base64.urlsafe_b64encode(bytes.fromhex(sys.stdin.read())).rstrip(b"=").decode())')"
+  [ -n "$auth_b64" ] || fail "$name/auth" "openssl rand did not answer 16 octets"
+  # The secret the *re-subscribe* arm rotates to. The receiver holds this one, because it plays the browser that
+  # re-subscribed: `/ok/`'s body therefore only decrypts if the machine really stored the new secret.
+  rotated_hex="$(openssl rand -hex 16)"
+  rotated="$(printf '%s' "$rotated_hex" | python3 -c \
+    'import base64, sys; print(base64.urlsafe_b64encode(bytes.fromhex(sys.stdin.read())).rstrip(b"=").decode())')"
+
+  # The TLS material: a CA and a `localhost` certificate with a `DNS:` SAN, because `-verify_hostname` matches
+  # the name in the certificate and an IP SAN would not do.
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout "$tls/ca.key" -out "$tls/ca.pem" -days 1 \
+    -subj /CN=VerifyPushCA >/dev/null 2>&1 ||
+    fail "$name/ca" "openssl req did not write a CA"
+  openssl req -newkey rsa:2048 -nodes -keyout "$tls/server.key" -out "$tls/server.csr" \
+    -subj /CN=localhost >/dev/null 2>&1 ||
+    fail "$name/cert" "openssl req did not write a CSR"
+  printf 'subjectAltName=DNS:localhost\n' >"$tls/server.ext"
+  openssl x509 -req -in "$tls/server.csr" -CA "$tls/ca.pem" -CAkey "$tls/ca.key" \
+    -CAcreateserial -out "$tls/server.pem" -days 1 -extfile "$tls/server.ext" >/dev/null 2>&1 ||
+    fail "$name/cert" "openssl x509 did not sign the server certificate"
+
+  # The receiver. It is the browser: it verifies the token against the **case's** VAPID public key, decrypts the
+  # record with its own private key, and appends one JSON line per request so the assertions below read what
+  # arrived rather than what the sender said it sent.
+  write_push_receiver
 
   rm -f "$WORK/push-received.jsonl"
   : >"$WORK/push-received.jsonl"
@@ -6060,6 +6081,347 @@ PYWS
 # What it cannot measure, and does not pretend to: the DOM. A needle in a bundle is not a rendered element — the
 # weak half is why each sentence is a `web/test/transcript.test.ts` function with its own test — and the demo is
 # what watches the page draw.
+# HS-074: one session list and one notification stream across machines.
+#
+# Two machines on one box — `case_computers`' two boots, `case_push`'s receiver — and the four values this story adds:
+# what a machine calls itself in a payload, which machine a create names, which machine each subscription belongs to,
+# and what a machine that is away says per session. The peer is a `server` with `machine_name = "workshop"` and a
+# budget of one token, so its own stub turn trips `budget_exceeded` and its own pusher signs the notification; the hub
+# is a `hub` whose `hosts.toml` names that peer `workshop`, which is the name the tap's path is built from.
+#
+# What is stood in for the phone: the TLS receiver below, the same one `case_push` runs, with two endpoints — a
+# different push service subscription per machine, because each machine's pair mints its own.
+#
+# What it measures, in the acceptance's own order:
+#
+#   1. each machine keeps its own subscriptions: a subscribe through the hop writes **one row in the peer's
+#      `app.db`** and the hub's own subscribe writes one in the hub's, and the peer's key read through the hop is
+#      the peer's own pair;
+#   2. the payload's `host` is the peer's own name and its `session_id` is the session the hub created — so a tap
+#      opens `/hosts/workshop/sessions/<id>` (`web/test/push.test.ts` asserts the path rule itself);
+#   3. a create through the hub names its machine in the **path**, and the peer's own list holds the row;
+#   4. the peer stopping is a `502 upstream_unreachable` naming the machine, not an empty list;
+#   5. deleting a subscription removes it from the machine that stored it (the page loops; the route pair is what a
+#      gate can measure).
+#
+# It needs `openssl` (the CA, the certificate and the subscription's key), `node` (the receiver) and `python3` (the
+# SEC1 walk and two `app.db` reads), and no daemon and no image.
+case_cross_machine() {
+  local name=case_cross_machine root="$repo_root/target/verify-cross-$$"
+  local hub_root="$root/hub" peer_root="$root/peer"
+  local hub_config="$hub_root/config.toml" peer_config="$peer_root/config.toml"
+  local hub_data="$hub_root/data" peer_data="$peer_root/data"
+  local seed="$hub_root/hosts.toml" tls="$root/tls" projects="$peer_root/projects"
+  local hub_control hub_preview peer_control peer_preview push_port="" port_line
+  local vapid_public vapid_private subscription_public subscription_private_hex subscription_public_hex
+  local auth_b64 auth_hex response body id peer_endpoint hub_endpoint rows received try
+
+  if ! command -v openssl >/dev/null 2>&1; then
+    printf 'SKIP %s: no openssl to make the receiver certificate and the subscription key (tests/push.rs covers the payload)\n' "$name"
+    return 0
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    printf 'SKIP %s: no node to run the TLS receiver (tests/push.rs covers the payload keys)\n' "$name"
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to ask for four ports, walk the SEC1 keys and read two app.db files\n' "$name"
+    return 0
+  fi
+
+  stop_serve
+  rm -rf "$root"
+  mkdir -p "$projects/holosmith" "$peer_data/secrets" "$hub_data/secrets" "$tls" ||
+    fail "$name/mkdir" "could not create $root"
+  chmod 0700 "$peer_data/secrets" "$hub_data/secrets"
+  git -C "$projects/holosmith" init --quiet -b main . || fail "$name/git" "git init did not work"
+  git -C "$projects/holosmith" -c user.name=verify -c user.email=verify@example commit --quiet \
+    --allow-empty -m "the first commit" || fail "$name/git" "git commit did not work"
+
+  hub_control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  hub_preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  peer_control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  peer_preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+
+  # The peer's pair is **real** — `ecparam`'s own point, walked in `write_sec1_walk` — because the receiver verifies
+  # the token against it and node validates the point (`case_pwa`'s hand-written literal is a *shape*, which is all
+  # that case needs and not enough for this one: `ERR_CRYPTO_INVALID_JWK` is what that difference looks like). The
+  # hub's is the literal, since nothing signs with it here.
+  openssl ecparam -name prime256v1 -genkey -noout -outform DER -out "$tls/vapid.der" ||
+    fail "$name/ecparam" "openssl ecparam did not write a key"
+  write_sec1_walk
+  read -r vapid_public vapid_private _ _ < <(python3 "$WORK/sec1.py" "$tls/vapid.der")
+  [ -n "$vapid_public" ] && [ -n "$vapid_private" ] ||
+    fail "$name/vapid" "the generated pair did not parse"
+  printf 'public_key = "%s"\nprivate_key = "%s"\n' "$vapid_public" "$vapid_private" \
+    >"$peer_data/secrets/vapid.toml" || fail "$name/vapid" "could not write the peer's pair"
+  printf 'public_key = "%s"\nprivate_key = "%s"\n' \
+    'BAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-P0E' \
+    'IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI' >"$hub_data/secrets/vapid.toml" ||
+    fail "$name/vapid" "could not write the hub's pair"
+  chmod 0600 "$peer_data/secrets/vapid.toml" "$hub_data/secrets/vapid.toml"
+
+  # The subscription's own pair: the browser's, and only the receiver can use the private half.
+  openssl ecparam -name prime256v1 -genkey -noout -outform DER -out "$tls/subscription.der" ||
+    fail "$name/ecparam" "openssl ecparam did not write the subscription's key"
+  read -r subscription_public _ subscription_private_hex subscription_public_hex \
+    < <(python3 "$WORK/sec1.py" "$tls/subscription.der")
+  [ -n "$subscription_public" ] && [ -n "$subscription_public_hex" ] ||
+    fail "$name/subscription" "the subscription's key did not parse"
+  auth_hex="$(openssl rand -hex 16)"
+  auth_b64="$(printf '%s' "$auth_hex" | python3 -c \
+    'import base64, sys; print(base64.urlsafe_b64encode(bytes.fromhex(sys.stdin.read())).rstrip(b"=").decode())')"
+  [ -n "$auth_b64" ] || fail "$name/auth" "openssl rand did not answer 16 octets"
+
+  # The TLS material: a CA and a `localhost` certificate with a `DNS:` SAN (`-verify_hostname` matches the SAN, not
+  # the CN — HS-066's landmine).
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout "$tls/ca.key" -out "$tls/ca.pem" -days 1 \
+    -subj /CN=VerifyCrossCA >/dev/null 2>&1 || fail "$name/ca" "openssl req did not write a CA"
+  openssl req -newkey rsa:2048 -nodes -keyout "$tls/server.key" -out "$tls/server.csr" \
+    -subj /CN=localhost >/dev/null 2>&1 || fail "$name/cert" "openssl req did not write a CSR"
+  printf 'subjectAltName=DNS:localhost\n' >"$tls/server.ext"
+  openssl x509 -req -in "$tls/server.csr" -CA "$tls/ca.pem" -CAkey "$tls/ca.key" \
+    -CAcreateserial -out "$tls/server.pem" -days 1 -extfile "$tls/server.ext" >/dev/null 2>&1 ||
+    fail "$name/cert" "openssl x509 did not sign the server certificate"
+
+  # The two machines. The peer's own name is the value this story adds, and its budget of one token is what makes its
+  # stub turn end with `budget_exceeded` — the trigger that needs no clock and no real agent.
+  cat >"$peer_config" <<EOF
+role = "server"
+backend = "stub"
+machine_name = "workshop"
+control_origin = "http://127.0.0.1:$peer_control"
+preview_listen = "127.0.0.1:$peer_preview"
+preview_origin = "http://127.0.0.1:$peer_preview"
+projects_root = "$projects"
+max_live_sessions = 2
+max_session_tokens = 1
+idle_stop_min = 0
+min_free_gb = 1
+EOF
+  cat >"$seed" <<EOF
+[[hosts]]
+name = "workshop"
+url = "http://127.0.0.1:$peer_control"
+EOF
+  cat >"$hub_config" <<EOF
+role = "hub"
+backend = "stub"
+control_origin = "http://127.0.0.1:$hub_control"
+preview_listen = "127.0.0.1:$hub_preview"
+preview_origin = "http://127.0.0.1:$hub_preview"
+hosts_seed = "$seed"
+idle_stop_min = 0
+min_free_gb = 1
+EOF
+
+  write_push_receiver
+  rm -f "$WORK/cross-received.jsonl"
+  : >"$WORK/cross-received.jsonl"
+  # The receiver's seven arguments are `case_push`'s: the certificate, its key, the log, the **peer's** application
+  # server key (the machine that signs), the subscription's private and public halves, and the `auth` secret the row
+  # was stored with — the same one, because this case subscribes once and never rotates it.
+  node "$WORK/push-receiver.mjs" "$tls/server.pem" "$tls/server.key" "$WORK/cross-received.jsonl" \
+    "$vapid_public" "$subscription_private_hex" "$subscription_public_hex" "$auth_hex" \
+    >"$WORK/cross-receiver.out" 2>"$WORK/cross-receiver.err" &
+  local receiver_pid=$!
+  extra_pid=$receiver_pid
+  for _ in $(seq 1 100); do
+    port_line="$(sed -n 's/^PORT \([0-9]*\)$/\1/p' "$WORK/cross-receiver.out" | sed -n '1p')"
+    [ -n "$port_line" ] && break
+    kill -0 "$receiver_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  if [ -z "$port_line" ]; then
+    kill "$receiver_pid" 2>/dev/null || true
+    fail "$name/receiver" "the push receiver did not bind: $(cat "$WORK/cross-receiver.err")"
+  fi
+  push_port="$port_line"
+  peer_endpoint="https://localhost:$push_port/peer/1"
+  hub_endpoint="https://localhost:$push_port/hub/1"
+
+  # The peer first: its sender is the machine that has to trust a private CA (`SSL_CERT_FILE`, exported for exactly
+  # this boot — the sender passes no `-CAfile` on purpose, ADR-0071). The hub second, because its registry probes the
+  # seeded row at startup.
+  export SSL_CERT_FILE="$tls/ca.pem"
+  start_peer "$peer_config" "$peer_data" "$peer_control"
+  unset SSL_CERT_FILE
+  start_serve "$hub_config" "$hub_data" "$hub_control"
+
+  # ---- 1. each machine's own name and its own key, read through the hop ---------------------------
+  fetch "$name-hub-health" GET /api/health "Host: 127.0.0.1" || fail "$name/hub-health" "GET /api/health did not answer"
+  expect_status "$name-hub-health" "$(answer "$name-hub-health")" 200
+  body="$(cat "$WORK/responses/$name-hub-health.body")"
+  case "$body" in
+    *'"machine_name":"local"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/hub-health/name" "a machine with no name of its own is local: $body" ;;
+  esac
+
+  fetch "$name-peer-health" GET /api/hosts/workshop/health "Host: 127.0.0.1" \
+    "Origin: $control_origin" "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "$name/peer-health" "GET /api/hosts/workshop/health did not answer"
+  expect_status "$name/peer-health" "$(answer "$name-peer-health")" 200
+  body="$(cat "$WORK/responses/$name-peer-health.body")"
+  # The peer's **own** name, and its **own** pair: this is the value the page subscribes with, one hop out.
+  case "$body" in
+    *'"machine_name":"workshop"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/peer-health/name" "the peer's health through the hop does not name it workshop: $body" ;;
+  esac
+  case "$body" in
+    *"\"application_server_key\":\"$vapid_public\""*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/peer-health/key" "the hop does not carry the peer's own pair: $body" ;;
+  esac
+
+  # ---- 2. the subscriptions: one per machine, each in that machine's own table --------------------
+  fetch_body "$name-peer-sub" POST /api/hosts/workshop/push/subscribe \
+    "{\"endpoint\":\"$peer_endpoint\",\"p256dh\":\"$subscription_public\",\"auth\":\"$auth_b64\"}" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "$name/peer-sub" "POST /api/hosts/workshop/push/subscribe did not answer"
+  expect_status "$name/peer-sub" "$(answer "$name-peer-sub")" 204
+  fetch_body "$name-hub-sub" POST /api/push/subscribe \
+    "{\"endpoint\":\"$hub_endpoint\",\"p256dh\":\"$subscription_public\",\"auth\":\"$auth_b64\"}" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "$name/hub-sub" "POST /api/push/subscribe did not answer"
+  expect_status "$name-hub-sub" "$(answer "$name-hub-sub")" 204
+  rows="$(python3 - "$peer_data/app.db" <<'PY'
+import sqlite3, sys
+connection = sqlite3.connect(sys.argv[1])
+print(" ".join(row[0] for row in connection.execute("SELECT endpoint FROM push_subscriptions ORDER BY endpoint")))
+connection.close()
+PY
+)"
+  check "$name/peer-row" "$peer_endpoint" "$rows"
+  rows="$(python3 - "$hub_data/app.db" <<'PY'
+import sqlite3, sys
+connection = sqlite3.connect(sys.argv[1])
+print(" ".join(row[0] for row in connection.execute("SELECT endpoint FROM push_subscriptions ORDER BY endpoint")))
+connection.close()
+PY
+)"
+  # The hub's own table has the hub's own subscription and **not** the peer's: a subscription is stored by the
+  # machine that will sign for it, which is what "each machine keeps its own subscriptions" means.
+  check "$name/hub-row" "$hub_endpoint" "$rows"
+
+  # ---- 3. a create through the hub names its machine in the path ---------------------------------
+  fetch_body "$name-create" POST /api/hosts/workshop/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-cross-1" ||
+    fail "$name-create" "POST /api/hosts/workshop/sessions did not answer"
+  expect_status "$name-create" "$(answer "$name-create")" 202
+  body="$(cat "$WORK/responses/$name-create.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id" ] || fail "$name-create/id" "the forwarded create names no id: $body"
+  # The row is the peer's own: the peer's own route answers it, which is the fact a hub's list cannot invent.
+  for try in $(seq 1 100); do
+    forward_fetch "$peer_control" "$name-peer-row" GET "/api/sessions/$id" \
+      "Host: 127.0.0.1" "Origin: http://127.0.0.1:$peer_control" ||
+      fail "$name/peer-row" "GET /api/sessions/$id on the peer did not answer"
+    body="$(cat "$WORK/responses/$name-peer-row.body")"
+    case "$body" in
+      *'"status":"starting"'*) sleep 0.1 ;;
+      *) break ;;
+    esac
+  done
+  expect_status "$name-peer-row" "$(answer "$name-peer-row")" 200
+  case "$body" in
+    *'"status":"idle"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/peer-row/status" "the session did not provision on the peer: $body" ;;
+  esac
+
+  # ---- 4. a turn on the peer notifies the receiver with the peer's name --------------------------
+  fetch_body "$name-prompt" POST "/api/hosts/workshop/sessions/$id/prompt" \
+    '{"prompt":"go"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "$name-prompt" "POST /api/hosts/workshop/sessions/$id/prompt did not answer"
+  expect_status "$name-prompt" "$(answer "$name-prompt")" 202
+  received=""
+  for try in $(seq 1 300); do
+    received="$(python3 - "$WORK/cross-received.jsonl" <<'PY'
+import json, sys
+lines = []
+for line in open(sys.argv[1]):
+    record = json.loads(line)
+    payload = record.get("payload")
+    if isinstance(payload, dict) and payload.get("session_id"):
+        lines.append("%s|%s|%s" % (payload.get("host"), payload.get("session_id"), payload.get("kind")))
+print(",".join(lines))
+PY
+)"
+    [ -n "$received" ] && break
+    sleep 0.1
+  done
+  # The payload's `host` is the peer's own name and the id is the session the **hub** created, so the tap's path is
+  # `/hosts/workshop/sessions/<id>` — one machine's session, opened from the hub's origin.
+  check "$name/payload" "workshop|$id|budget_exceeded" "$received"
+
+  # ---- 5. the peer going away is a sentence per session, not an empty list ------------------------
+  stop_peer
+  fetch "$name-gone" GET /api/hosts/workshop/sessions "Host: 127.0.0.1" \
+    "Origin: $control_origin" "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "$name/gone" "GET /api/hosts/workshop/sessions did not answer"
+  expect_status "$name-gone" "$(answer "$name-gone")" 502
+  body="$(cat "$WORK/responses/$name-gone.body")"
+  case "$body" in
+    *'"code":"upstream_unreachable"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/gone/code" "an unreachable machine is not upstream_unreachable: $body" ;;
+  esac
+  case "$body" in
+    *"workshop"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/gone/sentence" "the refusal does not name the machine: $body" ;;
+  esac
+
+  # ---- 6. the hub's own create is still refused, and a delete still reaches the machine ----------
+  # The decision this story took: a create names its machine in the **path**, so the hub's own route keeps its
+  # `403 sessions_disabled` rather than becoming a proxy (ADR-0074 D3, ADR-0079 D2).
+  fetch_body "$name-hub-create" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-cross-2" ||
+    fail "$name-hub-create" "POST /api/sessions on the hub did not answer"
+  expect_status "$name-hub-create" "$(answer "$name-hub-create")" 403
+  body="$(cat "$WORK/responses/$name-hub-create.body")"
+  case "$body" in
+    *'"code":"sessions_disabled"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name-hub-create/code" "the hub's own create is not sessions_disabled: $body" ;;
+  esac
+
+  # The page's delete loops every machine; what a gate can measure is the route pair it loops over. The peer goes up
+  # again for it, because the arm that matters is the one that really removes a row.
+  start_peer "$peer_config" "$peer_data" "$peer_control"
+  fetch "$name-delete-peer" DELETE \
+    "/api/hosts/workshop/push/subscribe?endpoint=$(printf '%s' "$peer_endpoint" | python3 -c \
+      'import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=""))')" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "$name/delete-peer" "DELETE on the peer did not answer"
+  expect_status "$name-delete-peer" "$(answer "$name-delete-peer")" 204
+  rows="$(python3 - "$peer_data/app.db" <<'PY'
+import sqlite3, sys
+connection = sqlite3.connect(sys.argv[1])
+print(str(connection.execute("SELECT count(*) FROM push_subscriptions").fetchone()[0]))
+connection.close()
+PY
+)"
+  check "$name/peer-deleted" "0" "$rows"
+  # A mutating request carries `Content-Type` even with no body (ADR-0010's `bad_client` arm, and the page's own
+  # `JSON_HEADERS` does the same).
+  fetch "$name-delete-hub" DELETE "/api/push/subscribe?endpoint=$hub_endpoint" \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "$name/delete-hub" "DELETE on the hub did not answer"
+  expect_status "$name-delete-hub" "$(answer "$name-delete-hub")" 204
+
+  # The two machines are this case's, and the shared boot goes back for the cases after it.
+  stop_peer
+  rm -rf "$root"
+  stop_serve
+  start_serve
+}
+
 case_computers() {
   local name=case_computers root="$repo_root/target/verify-computers-$$"
   local hub_root="$root/hub" peer_root="$root/peer"
