@@ -50,6 +50,11 @@ fn main() -> ExitCode {
                 holosmith::doctor::Depth::Quick
             },
         }),
+        Cmd::Build { target, out } => commands::build::run(commands::build::BuildArgs {
+            config: cli.config,
+            target,
+            out,
+        }),
         Cmd::Container { action } => match action {
             ContainerAction::Snapshot => commands::container::run_snapshot(),
         },

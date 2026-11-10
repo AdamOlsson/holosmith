@@ -37,6 +37,9 @@
 # does finish stops the idle sessions with reason `server_restart`; `case_drain_restart`: the row an expired drain
 # and a `kill -9` left `running` comes back `idle · interrupted`, and the new process is not draining), and a
 # Docker preflight that
+# the release build of HS-076 in a case of its own (`case_build`: the orchestration measured through a `docker`
+# stand-in whose artifact is this tree's own binary and whose `cargo`/`rustc` stand-ins must never fire, plus the
+# real container build when this machine already has the builder image), and a Docker preflight that
 # refuses to start with one sentence naming the fix, with no CORS header
 # on any answer, and stopping on SIGTERM with exit 0. Each case prints `ok <case>` once it passes — a
 # case that printed SKIP withholds that line, so the log can never call a check that measured nothing a
@@ -485,6 +488,7 @@ serve_cases=(
   case_disk_floor
   case_disk_quota
   case_server_images
+  case_build
   case_server_deploy
   case_server_service
   case_deploy_ssh
@@ -10872,6 +10876,242 @@ case_server_images() {
   wait "$holder_pid" 2>/dev/null || true
   holder_pid=""
   timeout 60 docker rm -f "hs_images_egress_$$" "hs_images_key_$$" hs_egress hs_key >/dev/null 2>&1 || true
+  rm -rf "$root"
+}
+
+# The release build runs in the pinned builder container, and the host only orchestrates Docker (HS-076).
+#
+# The first arm is the one that can fail on the thing the story is about: a `docker` stand-in on `PATH` records every
+# argv and writes a **real** static artifact into the `--out` mount, while `cargo` and `rustc` stand-ins are also on
+# `PATH` and record any call — so "the host compiled nothing" is an assertion, not a hope. It measures the recipe the
+# image is built from (the `--build-arg` carries the digest of the two embedded files), the two mounts, the tag the
+# container is handed, the placement of the artifact and its `.sha256`, an idempotent re-run, a refusal when the
+# directory already holds a different binary, and a refusal when the artifact is for another machine.
+#
+# The second arm runs the real container when this machine has a daemon **and** the builder image is already built:
+# it asserts what only a real build can — `file` says statically linked, `readelf -d` finds no dynamic section, and
+# the digest is the file's. Without them it prints one note and the first arm's measurements stand, because a `SKIP`
+# here would fire exactly when the feature is deleted (RESUME §6) and the first arm already fails on that.
+case_build() {
+  local name=case_build root="$repo_root/target/verify-build-$$"
+  local bin="$root/bin" out="$root/out" log="$root/docker.argv" compiled="$root/compiled"
+  local built="$root/built" fake="$root/fake.bin" recipe="$root/recipe.txt"
+  local host_target other_target image version tag plain digest said answer status
+  local artifact_line digest_line file_line dynamic real="$root/real"
+  case "$(uname -m)" in
+    x86_64)
+      host_target=x86_64-unknown-linux-musl
+      other_target=aarch64-unknown-linux-musl
+      ;;
+    aarch64)
+      host_target=aarch64-unknown-linux-musl
+      other_target=x86_64-unknown-linux-musl
+      ;;
+    *) fail "$name/arch" "no release target for $(uname -m): docs/build.md names the two" ;;
+  esac
+  rm -rf "$root"
+  mkdir -p "$bin" "$out"
+
+  # The recipe's digest, computed the way `builder::recipe()` computes it: the Dockerfile, a `\n---\n` separator,
+  # then the entry script. This is also the assertion that the shipped artifact's embedded recipe is this tree's —
+  # a stale `dist/` would put a different value in the `--build-arg` below.
+  cat "$repo_root/crates/holosmith/images/builder.Dockerfile" >"$recipe"
+  printf '\n---\n' >>"$recipe"
+  cat "$repo_root/crates/holosmith/images/builder-entry.sh" >>"$recipe"
+  recipe="$(sha256sum "$recipe" | cut -d' ' -f1)"
+
+  # The artifact the stand-in "builds" is this tree's own: a real static ELF for this machine, so the command's own
+  # ELF check, the digest and the `.sha256` are measured over real bytes rather than over a placeholder.
+  cp "$repo_root/dist/$host_target/holosmith" "$fake"
+
+  cat >"$bin/docker" <<'SHIM'
+#!/bin/sh
+# A `docker` that records every argv and fakes the three questions a build asks: who the daemon is, whether the
+# image is there, and what a build produces.
+set -eu
+{
+  printf 'docker'
+  for arg in "$@"; do printf ' %s' "$arg"; done
+  printf '\n'
+} >>"$HS_BUILD_LOG"
+case "$1" in
+  version)
+    printf 'amd64\n'
+    ;;
+  image)
+    # `image inspect --format …`: absent until the build below has "run", then this recipe's.
+    [ -f "$HS_BUILD_BUILT" ] || exit 1
+    printf '%s\n' "$HS_BUILD_RECIPE"
+    ;;
+  build)
+    # The context is the archive on stdin; a real daemon reads it, and this one has to drain it.
+    cat >/dev/null
+    : >"$HS_BUILD_BUILT"
+    printf 'faked the image build\n'
+    ;;
+  run)
+    for arg in "$@"; do
+      case "$arg" in
+        *:/out) dir="${arg%:/out}" ;;
+      esac
+    done
+    [ -n "${dir:-}" ] || exit 1
+    cp "$HS_BUILD_FAKE" "$dir/.holosmith.new"
+    if [ "${HS_BUILD_VARIANT:-1}" = 2 ]; then printf 'x' >>"$dir/.holosmith.new"; fi
+    printf 'faked the artifact\n'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+SHIM
+  chmod 0755 "$bin/docker"
+
+  # The two compilers, which must never run on this host. They record and fail: if one is ever invoked the artifact
+  # would be wrong as well as the rule broken, so a failure is the honest answer.
+  local compiler
+  for compiler in cargo rustc; do
+    cat >"$bin/$compiler" <<'SHIM'
+#!/bin/sh
+printf '%s %s\n' "$0" "$*" >>"$HS_BUILD_COMPILED"
+echo "$0: the host must not compile anything: the build runs in the pinned container (HS-076)" >&2
+exit 1
+SHIM
+    chmod 0755 "$bin/$compiler"
+  done
+
+  # Run 1: the artifact is built, placed, digested and reported.
+  answer="$(
+    cd "$repo_root" &&
+      PATH="$bin:$PATH" HS_BUILD_LOG="$log" HS_BUILD_COMPILED="$compiled" HS_BUILD_BUILT="$built" \
+        HS_BUILD_RECIPE="$recipe" HS_BUILD_FAKE="$fake" \
+        "$artifact" --config "$WORK/config.toml" build --target "$host_target" --out "$out" 2>&1
+  )" || fail "$name/first" "the build command failed: $answer"
+  [ -f "$out/holosmith" ] || fail "$name/artifact" "no artifact at $out/holosmith: $answer"
+  cmp -s "$out/holosmith" "$fake" ||
+    fail "$name/artifact" "the placed artifact is not the bytes the container wrote"
+  digest="$(sha256sum "$out/holosmith" | cut -d' ' -f1)"
+  [ "$(cat "$out/holosmith.sha256")" = "$digest  holosmith" ] ||
+    fail "$name/digest" "$out/holosmith.sha256 does not hold '$digest  holosmith': $(cat "$out/holosmith.sha256" 2>/dev/null)"
+  case "$answer" in
+    *"build: artifact: $out/holosmith"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/report" "the command did not name the artifact it placed: $answer" ;;
+  esac
+  case "$answer" in
+    *"build: sha256: $digest"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/report" "the command did not report the digest: $answer" ;;
+  esac
+
+  # The rule the story exists for: no compiler ran on this host.
+  [ ! -e "$compiled" ] ||
+    fail "$name/host-compiler" "a compiler ran on the host: $(cat "$compiled")"
+
+  # The recorded argvs: the image build carries this recipe, and the run mounts the source read-only, the output
+  # writable, hands over the tag, and names the triple.
+  version="$(sed -n 's/^version //p' <<<"$("$artifact" version 2>/dev/null)")"
+  image="holosmith-builder:$version"
+  [ -n "$version" ] || fail "$name/version" "the artifact does not report a version"
+  grep -q -- "--build-arg HOLOSMITH_BUILDER_RECIPE=$recipe" "$log" ||
+    fail "$name/recipe" "the image build did not carry this tree's recipe: $(cat "$log")"
+  grep -q -- " build -t $image " "$log" ||
+    fail "$name/image" "the image build did not tag $image: $(cat "$log")"
+  grep -q -- ":/src:ro" "$log" ||
+    fail "$name/mount" "the source was not mounted read-only: $(cat "$log")"
+  grep -q -- " -v $out:/out " "$log" ||
+    fail "$name/mount" "the output directory was not the writable mount: $(cat "$log")"
+  grep -q -- " -e HOLOSMITH_GIT_TAG=" "$log" ||
+    fail "$name/tag" "the container was not handed the tree's tag: $(cat "$log")"
+  grep -q -- " run --rm " "$log" ||
+    fail "$name/run" "the build was not a one-off container: $(cat "$log")"
+  tag="$(sed -n 's/.* -e HOLOSMITH_GIT_TAG=\([^ ]*\) .*/\1/p' "$log" | head -1)"
+  [ -n "$tag" ] || fail "$name/tag" "no tag reached the container: $(cat "$log")"
+  grep -q -- " $image $host_target\$" "$log" ||
+    fail "$name/triple" "the container was not asked for $host_target: $(cat "$log")"
+
+  # Run 2: the same tree again. The image is current (no second `build` in the log) and the artifact is already
+  # these bytes, so nothing is written and the command says so.
+  local builds_before builds_after
+  builds_before="$(grep -c '^docker build ' "$log" || true)"
+  answer="$(
+    cd "$repo_root" &&
+      PATH="$bin:$PATH" HS_BUILD_LOG="$log" HS_BUILD_COMPILED="$compiled" HS_BUILD_BUILT="$built" \
+        HS_BUILD_RECIPE="$recipe" HS_BUILD_FAKE="$fake" \
+        "$artifact" --config "$WORK/config.toml" build --target "$host_target" --out "$out" 2>&1
+  )" || fail "$name/second" "the second build failed: $answer"
+  builds_after="$(grep -c '^docker build ' "$log" || true)"
+  check "$name/image-current" "$builds_before" "$builds_after"
+  case "$answer" in
+    *"is already this build"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/idempotent" "a re-run did not say the artifact was already this build: $answer" ;;
+  esac
+
+  # Run 3: a container that produces different bytes for the same release directory. Refused, and nothing replaced.
+  if answer="$(
+    cd "$repo_root" &&
+      PATH="$bin:$PATH" HS_BUILD_LOG="$log" HS_BUILD_COMPILED="$compiled" HS_BUILD_BUILT="$built" \
+        HS_BUILD_RECIPE="$recipe" HS_BUILD_FAKE="$fake" HS_BUILD_VARIANT=2 \
+        "$artifact" --config "$WORK/config.toml" build --target "$host_target" --out "$out" 2>&1
+  )"; then
+    fail "$name/different" "a different binary was placed into a release directory that held one: $answer"
+  fi
+  case "$answer" in
+    *"already holds a different binary"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/different" "the refusal did not say why: $answer" ;;
+  esac
+  [ "$(sha256sum "$out/holosmith" | cut -d' ' -f1)" = "$digest" ] ||
+    fail "$name/different" "the refusal replaced the artifact"
+  [ ! -e "$out/.holosmith.new" ] ||
+    fail "$name/different" "the refused build's bytes were left behind"
+
+  # Run 4: the container produced the wrong machine's binary (the stand-in copies this host's artifact). The
+  # command reads the ELF header of what landed and refuses it, which is the acceptance's "builds for the
+  # requested target" measured from the artifact rather than from the triple it was asked for.
+  rm -rf "$root/wrong"
+  mkdir -p "$root/wrong"
+  if answer="$(
+    cd "$repo_root" &&
+      PATH="$bin:$PATH" HS_BUILD_LOG="$log" HS_BUILD_COMPILED="$compiled" HS_BUILD_BUILT="$built" \
+        HS_BUILD_RECIPE="$recipe" HS_BUILD_FAKE="$fake" \
+        "$artifact" --config "$WORK/config.toml" build --target "$other_target" --out "$root/wrong" 2>&1
+  )"; then
+    fail "$name/machine" "an artifact for another machine was accepted for $other_target: $answer"
+  fi
+  case "$answer" in
+    *"was asked for"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/machine" "the refusal did not name the target: $answer" ;;
+  esac
+  [ ! -e "$root/wrong/holosmith" ] || fail "$name/machine" "a refused artifact was placed"
+  [ ! -e "$compiled" ] || fail "$name/host-compiler" "a compiler ran on the host: $(cat "$compiled")"
+
+  # Arm 2: the real container, when this machine can run one.
+  if ! command -v docker >/dev/null 2>&1 || ! timeout 60 docker version >/dev/null 2>&1; then
+    printf 'note %s: no Docker daemon answers, so the real container build was not measured (arm 1 was)\n' "$name"
+    rm -rf "$root"
+    return 0
+  fi
+  if ! timeout 60 docker image inspect "$image" >/dev/null 2>&1; then
+    printf 'note %s: %s is not built on this machine yet, so the real build was not measured: run `holosmith build` once (arm 1 was)\n' \
+      "$name" "$image"
+    rm -rf "$root"
+    return 0
+  fi
+  mkdir -p "$real"
+  answer="$(
+    cd "$repo_root" && timeout 3600 "$artifact" --config "$WORK/config.toml" build --target "$host_target" --out "$real" 2>&1
+  )" || fail "$name/real" "the real container build failed: $(tail -20 <<<"$answer")"
+  [ -f "$real/holosmith" ] || fail "$name/real" "the real build placed no artifact: $answer"
+  file_line="$(file -b "$real/holosmith")"
+  case "$file_line" in
+    *"statically linked"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/real" "the real artifact is not statically linked: $file_line" ;;
+  esac
+  dynamic="$(readelf -d "$real/holosmith" 2>&1)"
+  case "$dynamic" in
+    *"There is no dynamic section in this file"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/real" "the real artifact has a dynamic section: $dynamic" ;;
+  esac
+  check "$name/real" "$(sha256sum "$real/holosmith" | cut -d' ' -f1)" \
+    "$(cut -d' ' -f1 "$real/holosmith.sha256")"
   rm -rf "$root"
 }
 

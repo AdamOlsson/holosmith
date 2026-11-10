@@ -8,6 +8,9 @@ The only artifacts are static musl binaries for `x86_64-unknown-linux-musl` and
 scripts/build.sh              # web app, both targets, then scripts/check-static.sh
 ```
 
+That is the **development** build. A release is built in a container, where the host runs no
+compiler at all: `holosmith build` (see *The release build* below).
+
 `scripts/build.sh` builds the web app first (`scripts/build-web.sh`, ADR-0007) and then
 each target, copies each artifact to `dist/<target-triple>/holosmith` (by rename, so an
 interrupted build never leaves a truncated file there), prints its SHA-256 and size, and
@@ -1329,10 +1332,10 @@ linked` and an empty `readelf -d` so the mistake fails loudly instead.
 ## Git tag
 
 `build.rs` reports the tag in this order: `HOLOSMITH_GIT_TAG` if set, otherwise
-`git describe --tags --always --dirty`, otherwise `unknown`. `scripts/build.sh` always
-sets it, so an artifact never reports the tag of a stale checkout. Builder containers
-have no `.git` in the build context, so image builds pass `HOLOSMITH_GIT_TAG` as a build
-argument (phase 2); that is why the fallback makes the build succeed instead of failing.
+`git describe --tags --always --dirty`, otherwise `unknown`. `scripts/build.sh` sets it —
+unless it is already set, which is how the builder container gets the tag of the tree it
+mounted: the copy has no `.git`, so `holosmith build` runs `git describe` on the host and
+passes the answer in. That is why the fallback makes the build succeed instead of failing.
 A bare `cargo build` does not set it, and because `build.rs`'s `rerun-if-changed` lines
 opt out of cargo's default rerun, a new tag on an unchanged tree leaves the old value in
 place: only `scripts/build.sh` guarantees a fresh tag.
@@ -1350,13 +1353,38 @@ The Cargo workspace root has one member, `crates/holosmith` (ADR-0004), so comma
 the repo root need the package flag: `cargo run -p holosmith -- version`. Build output
 goes to `target/`; shipped artifacts to `dist/`; both are git-ignored.
 
+## The release build: the pinned builder container
+
+A **release** artifact is built in a container, so that an agent-authored `build.rs`, proc macro
+or Vite config cannot run on this host (spec item 10's first step, ADR-0080):
+
+```bash
+holosmith build                                  # this machine's target, into releases/<tag>/
+holosmith build --target aarch64-unknown-linux-musl --out /tmp/release
+```
+
+It needs Docker and nothing else: no `cargo`, no `rustc`, no node on the host. The first run
+builds the builder image (`holosmith-builder:<version>`, from `crates/holosmith/images/
+builder.Dockerfile`) — six minutes on a cold machine, because it fetches two pinned bases, the two
+musl.cc toolchains and the rust targets — and every run after that reuses it. The container gets
+the source **read-only** at `/src`, copies it into its own `/build`, and runs the same
+`scripts/build.sh` the developer path runs; the artifact comes back as `<out>/holosmith` with
+`<out>/holosmith.sha256` beside it, and `sha256sum -c holosmith.sha256` inside that directory
+checks it. A failed build prints the container's last 40 lines and exits 1, and a directory that
+already holds a *different* binary for the same tag is refused rather than overwritten.
+
+**This makes the build safe, never trusted.** A container bounds what agent-written build code can
+reach; it does not judge what that code does. The diff review (item 12, the Changes sheet) is the
+real gate and it happens before this command runs.
+
 ## Reproducibility
 
-Building on this machine is enough for development. Promotion builds run in a pinned
-builder container (spec item 10), so `build.rs` and proc macros never run host-side; the
-host has to run only the resulting static binary. Until that container exists (phase 2),
-`scripts/build.sh` is the documented path and `scripts/check-static.sh` is the evidence
-that the artifact is what it claims.
+Building on this machine is enough for development: `scripts/build.sh` is that path, and
+`scripts/check-static.sh` is the evidence that its artifact is what it claims. The gate
+(`scripts/verify.sh`) deliberately builds **that** artifact — it is fast, offline, and it is what
+`check-static.sh` and `case_pwa` read — and `case_build` is what keeps that from being a hole: it
+measures the container path through a `docker` stand-in whose `cargo`/`rustc` must never fire, and
+it builds the host's target in the real container when the daemon and the image are there.
 
 The fetch-nothing claim has a runnable proof, run once per target:
 

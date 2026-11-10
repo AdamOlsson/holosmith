@@ -65,6 +65,22 @@ pub enum Cmd {
         #[command(subcommand)]
         action: KeyAction,
     },
+    /// Compile a release artifact in the pinned builder container, so nothing is built on this host (spec item
+    /// 10's first step).
+    ///
+    /// The host orchestrates Docker and nothing else: no `build.rs`, no proc macro and no toolchain step runs
+    /// outside the container. The artifact and its SHA-256 land in `--out`, which is where `holosmith upgrade`
+    /// reads them (HS-078); a failure prints the container's own last lines rather than a generic error.
+    Build {
+        /// The triple to build (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`). Absent means the
+        /// architecture this binary was built for.
+        #[arg(long, value_name = "TRIPLE")]
+        target: Option<String>,
+        /// Where the artifact and its digest land. Absent means `releases/<tag>/` for the tag of the tree being
+        /// built (spec item 10's layout; HS-080 owns the `current` symlink).
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+    },
     /// Container helpers, used inside a session's container.
     Container {
         #[command(subcommand)]

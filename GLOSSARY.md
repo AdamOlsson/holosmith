@@ -906,6 +906,23 @@ is live unless `--force`. Its lines carry four words of its own — `removed`, `
 deploy's five. Its machine name is `uninstall::Report`.
 _Avoid_: Teardown, remove, destroy, deploy --reverse
 
+**Builder image**:
+The pinned container a release artifact is compiled in (HS-076): `holosmith-builder:<version>`, built locally from
+`crates/holosmith/images/builder.Dockerfile` — two bases pinned by manifest-list digest, the two musl.cc cross
+toolchains pinned by their tarballs' SHA-256, and node for the web app — and labelled with the recipe's own digest, so
+an edited recipe rebuilds instead of reusing a stale image. It is the only place a `build.rs`, a proc macro or the web
+app's Vite config ever executes. It carries no `holosmith` of its own: the two product images are built *from* the
+binary, and this one builds it.
+_Avoid_: Build container, build image, toolchain image, CI image
+
+**Release build**:
+`holosmith build [--target <triple>] [--out DIR]`: compiles one static musl artifact **inside the builder image** and
+places `<out>/holosmith` with `<out>/holosmith.sha256` beside it, `--out` defaulting to `releases/<tag>/`. The host
+orchestrates Docker and reads the ELF header of the bytes that landed (`e_machine` for the requested triple, `ET_EXEC`,
+no `PT_INTERP`); it compiles nothing. A directory holding the same bytes again is left alone, and one holding a
+different binary for the same tag is refused with both digests named. Safe, not trusted: the diff review is the gate.
+_Avoid_: Build script, host build (that is `scripts/build.sh`, the development path), compile step
+
 **Version**:
 The semantic version of the `holosmith` binary itself, such as `0.1.0`. It is not a Release and never a synonym for one.
 _Avoid_: Release, build, build number

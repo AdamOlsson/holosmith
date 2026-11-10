@@ -2763,3 +2763,33 @@ it rather than adding a caveat beside it.
 - **A new case reusing an old case's stand-in wants the stand-in as a function.** `case_push`'s receiver and SEC1 walk
   became `write_push_receiver`/`write_sec1_walk` so `case_cross_machine` runs the same bytes rather than a copy —
   and the receiver has already found two of its own bugs, which is the argument for one copy.
+
+### Landmines: the builder container (HS-076)
+
+- **The daemon does not share this process's filesystem, and `docker build .` proves it by building an empty context.**
+  Measured: `docker build -f builder.Dockerfile .` from the recipe's directory failed with
+  `COPY build-entry.sh: not found` — the daemon resolved the *path* in its own namespace. The context has to be an
+  archive on **stdin** (HS-048's rule), and the same rule decides where a gate case may put its `--out`: a
+  `mktemp -d` under `/tmp` is a *different directory* to the daemon (this sandbox's `/tmp` is tmpfs), so `case_build`
+  writes into `target/verify-build-<pid>/` — inside the repository, which exists at the same path on both sides.
+- **`docker build -f Dockerfile -` is ambiguous in Docker 29**: "both stdin and flag correspond to Dockerfiles". With a
+  stdin context the Dockerfile must be *named* `Dockerfile` **inside the archive** — which is why `images::archive`
+  and `builder::archive` write that name and not the file's name in the tree.
+- **`docker run --user <uid>` answers `HOME=/` for a user with no passwd entry, and npm reads that as its cache
+  directory.** Measured: `npm error syscall mkdir / path /.npm` two seconds into the first real build. The entry
+  script sets `HOME=/build/home` itself; `: "${HOME:=…}"` is not enough, because the runtime *sets* `HOME` to `/`.
+- **`scripts/build.sh` overwrote the tag its own comment promised.** `HOLOSMITH_GIT_TAG="$(git describe …)"` is an
+  unconditional assignment, so the container's artifact reported `git_tag unknown` (measured) and `check-static.sh`'s
+  tag comparison would have refused it. It is `${HOLOSMITH_GIT_TAG:-…}` now. The lesson is the general one: a comment
+  that says "the variable arrives from outside" is a claim no test makes, and this one had been false since HS-001.
+- **The builder image is a cache with a price and a key.** A cold image is ~6.5 minutes here (two bases, two
+  musl.cc tarballs, the rust targets), a real artifact build ~2.5 minutes, and the *label* is what decides whether the
+  image is reused: `org.holosmith.builder-recipe-sha256` is the SHA-256 of the Dockerfile **and** the entry script, so
+  an edit to either one rebuilds. `case_build` asserts the recorded `--build-arg` equals a value the *case* computes
+  from the two files on disk — which is also the assertion that the shipped artifact's embedded recipe is this tree's.
+- **Two recipes name the same node base digest, so a test holds them together.** The builder copies node out of the
+  same `node:24-bookworm-slim` manifest the agent image is built on; `tests/build.rs` asserts the two digests agree, so
+  a bump in one is a failing test rather than a stale toolchain nobody notices.
+- **`set -e` does not save a `cmd && fail …` idiom, and it does not need to — but `if cmd; then fail; fi` reads
+  better.** A gate case that asserts a refusal is `if answer="$(…)"; then fail …; fi`; the `&&` form relies on `set -e`
+  ignoring the left operand's failure, which is true and is not obvious at a glance.

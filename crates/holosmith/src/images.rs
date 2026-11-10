@@ -505,7 +505,10 @@ pub fn archive(dockerfile: &str, binary: &Path) -> Result<Vec<u8>, String> {
 }
 
 /// One ustar entry: a 512-byte header, the data, and the zero padding that rounds it to a block.
-fn push_entry(out: &mut Vec<u8>, name: &str, mode: u32, data: &[u8]) {
+///
+/// `pub(crate)` since HS-076, whose builder archive is a second caller: the daemon reads a context it is handed, and
+/// one ustar writer for the three images is one place the header can be wrong.
+pub(crate) fn push_entry(out: &mut Vec<u8>, name: &str, mode: u32, data: &[u8]) {
     let mut header = [0_u8; 512];
     // The name is 100 bytes with a NUL; every name here is far shorter, and a longer one would be a `panic`
     // rather than an archive the daemon misreads.

@@ -46,10 +46,12 @@ if [ ${#targets[@]} -eq 0 ]; then
 fi
 
 # A release artifact must report the tag it was built from, never a stale one. Builder
-# containers have no .git, so there the tag arrives in this variable instead.
+# containers have no .git, so there the tag arrives in this variable instead — and a caller
+# that set it wins, because a copy of the source without history cannot describe itself
+# (HS-076: `holosmith build` passes the tag of the tree it mounted).
 # Never export RUSTFLAGS here (ADR-0005): it would disable the per-target rustflags in
 # .cargo/config.toml and silently ship a static-PIE binary.
-HOLOSMITH_GIT_TAG="$(git describe --tags --always --dirty 2>/dev/null || echo unknown)"
+HOLOSMITH_GIT_TAG="${HOLOSMITH_GIT_TAG:-$(git describe --tags --always --dirty 2>/dev/null || echo unknown)}"
 export HOLOSMITH_GIT_TAG
 
 printf 'git tag: %s\n' "$HOLOSMITH_GIT_TAG"

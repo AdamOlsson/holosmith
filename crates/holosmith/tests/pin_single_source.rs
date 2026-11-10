@@ -57,6 +57,47 @@ fn no_other_tracked_file_contains_the_pin() {
     );
 }
 
+/// The digest the builder recipe's rust base is pinned to (HS-076), read out of the recipe itself.
+///
+/// A builder image's pin is its `FROM` line, the same place the two product recipes keep theirs. What this test
+/// adds is the rule `pins/pi.txt` has: the value lives in **one** file, so a second copy — in a doc, a review, or a
+/// second Dockerfile — is a failure rather than a value that can drift.
+fn builder_base_digest() -> String {
+    let line = holosmith::builder::DOCKERFILE
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("FROM rust:"))
+        .expect("the builder recipe names a rust base");
+    line.rsplit_once("@sha256:")
+        .map(|(_, digest)| digest.trim().to_string())
+        .expect("the builder's rust base is pinned by digest")
+}
+
+#[test]
+fn the_builder_recipes_base_digest_appears_in_one_file() {
+    let digest = builder_base_digest();
+    assert_eq!(digest.len(), 64, "a digest is 64 hex characters: {digest}");
+    let root = repo_root();
+    let files = match tracked_files(&root) {
+        Some(files) => files,
+        None => walk_files(&root),
+    };
+    assert!(!files.is_empty(), "no files to search under {root:?}");
+    let needle = digest.as_bytes();
+    let mut offenders: Vec<&str> = files
+        .iter()
+        .filter(|file| *file != "crates/holosmith/images/builder.Dockerfile")
+        .filter(|file| std::fs::read(root.join(file)).is_ok_and(|bytes| contains(&bytes, needle)))
+        .map(String::as_str)
+        .collect();
+    offenders.sort_unstable();
+    assert!(
+        offenders.is_empty(),
+        "the builder image's base digest {digest} also appears in {offenders:?}; it belongs in \
+         crates/holosmith/images/builder.Dockerfile only"
+    );
+}
+
 /// Every file in the worktree except build output and git history, for trees with no
 /// `.git` to list tracked files from.
 fn walk_files(root: &Path) -> Vec<String> {

@@ -355,7 +355,10 @@ impl Machine {
     }
 
     /// The ELF header's `e_machine`, which is what a file *is* rather than what a name says about it.
-    fn of_elf(machine: u16) -> Option<Self> {
+    ///
+    /// `pub(crate)` since HS-076: a release build reads its own artifact's machine from these bytes, and the
+    /// 62/183 mapping is one place.
+    pub(crate) fn of_elf(machine: u16) -> Option<Self> {
         match machine {
             62 => Some(Self::X86_64),
             183 => Some(Self::Aarch64),

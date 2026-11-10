@@ -437,25 +437,38 @@ impl Docker {
     }
 
     /// Run one `docker build` with `archive` on its stdin under a bound, answering its combined output (HS-048).
-    ///
-    /// Three things make a build unlike every other call here, and each is why this is not `run`:
-    ///
-    /// - **Its input is a tar on a pipe.** The context is written by a **spawned thread**, so a daemon that stops
-    ///   reading stdin cannot hold this call past its deadline: the poll below kills the child and the writer dies
-    ///   on a closed pipe.
-    /// - **Its output is hundreds of lines.** stdout and stderr go to a **temporary file**, not to pipes: a pipe
-    ///   nobody drains fills at 64 KiB and the build deadlocks, and a `Command::output` that buffered them would
-    ///   hand back the same thing only after the build was over anyway.
-    /// - **A failed build is an answer, not an error.** So the status and the text come back together as a
-    ///   [`crate::images::Log`], and `Ok(None)` means only "the build did not finish".
     pub(crate) fn build_bounded(
         &self,
         arguments: &[String],
         archive: &[u8],
         bound: std::time::Duration,
     ) -> Result<Option<crate::images::Log>, DockerError> {
+        self.run_captured(arguments, Some(archive), bound)
+    }
+
+    /// Run one `docker` child under a bound with its **output captured in a file** and, when it needs one, its input
+    /// written to a pipe from a thread of its own (HS-048; generalised in HS-076 for `docker run`).
+    ///
+    /// Three things make a build — an image build or a release build — unlike every other call here, and each is why
+    /// this is not `run`:
+    ///
+    /// - **Its input may be a tar on a pipe.** The context is written by a **spawned thread**, so a daemon that
+    ///   stops reading stdin cannot hold this call past its deadline: the poll below kills the child and the writer
+    ///   dies on a closed pipe. A child that takes no input gets `/dev/null`, because a container that inherits
+    ///   this process's stdin could consume a caller's pipe.
+    /// - **Its output is hundreds or thousands of lines.** stdout and stderr go to a **temporary file**, not to
+    ///   pipes: a pipe nobody drains fills at 64 KiB and the build deadlocks, and a `Command::output` that buffered
+    ///   them would hand back the same thing only after the build was over anyway.
+    /// - **A failed build is an answer, not an error.** So the status and the text come back together as a
+    ///   [`crate::images::Log`], and `Ok(None)` means only "the build did not finish".
+    pub(crate) fn run_captured(
+        &self,
+        arguments: &[String],
+        input: Option<&[u8]>,
+        bound: std::time::Duration,
+    ) -> Result<Option<crate::images::Log>, DockerError> {
         let borrowed: Vec<&str> = arguments.iter().map(String::as_str).collect();
-        let path = build_log_path();
+        let path = capture_path();
         let capture = std::fs::File::create(&path).map_err(|error| {
             DockerError::new(
                 &borrowed,
@@ -472,10 +485,14 @@ impl Docker {
                 format!("the build's output file could not be shared ({error})"),
             )
         })?;
+        let stdin = match input {
+            Some(_) => std::process::Stdio::piped(),
+            None => std::process::Stdio::null(),
+        };
         let mut child = self
             .command()
             .args(&borrowed)
-            .stdin(std::process::Stdio::piped())
+            .stdin(stdin)
             .stdout(std::process::Stdio::from(capture))
             .stderr(std::process::Stdio::from(stderr))
             .spawn()
@@ -485,21 +502,26 @@ impl Docker {
                     format!("the docker command could not be run ({error})"),
                 )
             })?;
-        let Some(mut stdin) = child.stdin.take() else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(DockerError::new(
-                &borrowed,
-                "the build's stdin could not be written to, so no context was sent".to_string(),
-            ));
+        let writer = match (input, child.stdin.take()) {
+            (None, _) => None,
+            (Some(_), None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(DockerError::new(
+                    &borrowed,
+                    "the build's stdin could not be written to, so no context was sent".to_string(),
+                ));
+            }
+            (Some(context), Some(mut stdin)) => {
+                // The writer is a thread of its own so that the deadline below runs whatever the daemon does with
+                // the context: writing 40 MiB down a pipe the daemon never reads is a `write` that never returns.
+                let context = context.to_vec();
+                Some(std::thread::spawn(move || {
+                    use std::io::Write as _;
+                    let _ = stdin.write_all(&context);
+                }))
+            }
         };
-        let context = archive.to_vec();
-        // The writer is a thread of its own so that the deadline below runs whatever the daemon does with the
-        // archive: writing 40 MiB down a pipe the daemon never reads is a `write` that never returns.
-        let writer = std::thread::spawn(move || {
-            use std::io::Write as _;
-            let _ = stdin.write_all(&context);
-        });
         let deadline = std::time::Instant::now() + bound;
         let finished = loop {
             match child.try_wait() {
@@ -519,7 +541,9 @@ impl Docker {
             }
         };
         // The child is gone either way, so the writer's pipe is closed and this cannot block on it.
-        let _ = writer.join();
+        if let Some(writer) = writer {
+            let _ = writer.join();
+        }
         let text = std::fs::read(&path)
             .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
             .unwrap_or_default();
@@ -564,7 +588,7 @@ fn first_line(stderr: &str, code: Option<i32>) -> String {
 ///
 /// In the temp directory rather than beside the artifact: a build's output is hundreds of lines nobody keeps,
 /// and the path is removed by the call that wrote it whatever the build did.
-fn build_log_path() -> std::path::PathBuf {
+fn capture_path() -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_nanos())
