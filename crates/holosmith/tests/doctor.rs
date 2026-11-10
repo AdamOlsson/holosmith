@@ -212,7 +212,7 @@ impl Machine for FakeMachine {
         self.image_labels.clone()
     }
 
-    fn selftest(&self, _image: &str) -> selftest::Outcome {
+    fn selftest(&self, _names: &selftest::Names, _image: &str) -> selftest::Outcome {
         self.selftest.clone()
     }
 }

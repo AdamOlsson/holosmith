@@ -46,22 +46,29 @@ use crate::key;
 /// run on a slow machine unpacks an image, and a `serve` boot and a deploy step must give a proxy the same room.
 pub const START_TIMEOUT: Duration = container::PROXY_START_TIMEOUT;
 
-/// The two proxies' container names, in the order [`running`] answers: `[egress, key]`.
+/// The two proxies' container names for this run, in the order [`running`] answers: `[egress, key]`.
 ///
-/// The spec's names, spelled once for this module's own reader: the two callers that name the containers
-/// individually (`doctor`'s proxy findings, and a teardown) ask [`crate::container::PROXY_NAME`] and
-/// [`crate::key::KEY_PROXY_NAME`] directly, because they name one at a time.
-pub const NAMES: [&str; 2] = [container::PROXY_NAME, key::KEY_PROXY_NAME];
+/// A function of the config rather than a constant since HS-077, because a smoke run's two proxies are its own
+/// (`smoke_hs_egress`, `smoke_hs_key`): an unprefixed start would replace the machine's live key proxy — whose mount
+/// is *its* key store — with one holding an empty store, and drop the egress proxy's per-session network joins. A
+/// caller that names one at a time (`doctor`'s proxy findings, a teardown) composes it the same way from its own
+/// config, so no reader of a name spells the prefix itself.
+pub fn names(config: &Config) -> [String; 2] {
+    [
+        container::proxy_name(&config.container_prefix),
+        key::key_proxy_name(&config.container_prefix),
+    ]
+}
 
 /// What a successful start did, for the caller's own log line.
 ///
 /// It is the two facts a start knows and a caller would otherwise re-derive from the config: which container is
 /// now running, and how big the egress allow-list it was given is. `serve` logs both at `debug` and says nothing
 /// else, because the boot's `info` lines are the eight the startup banner owns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Started {
-    /// The container that is now running, by the name a later `docker inspect` asks for ([`NAMES`]).
-    pub container: &'static str,
+    /// The container that is now running, by the name a later `docker inspect` asks for ([`names`]).
+    pub container: String,
     /// How many `[egress] allow` domains the container was given.
     ///
     /// The egress proxy's size, which is the one number worth logging about a start; `0` for the key proxy, which
@@ -155,9 +162,9 @@ pub fn start_egress(config: &Config, containers: &dyn Containers) -> Result<Star
         "a session's container has no route out without it",
     )?;
     let allow = proxy.allow.len();
-    containers.replace(container::PROXY_NAME, &proxy.run_args(), START_TIMEOUT)?;
+    containers.replace(&proxy.name, &proxy.run_args(), START_TIMEOUT)?;
     Ok(Started {
-        container: container::PROXY_NAME,
+        container: proxy.name,
         allow,
     })
 }
@@ -215,9 +222,9 @@ pub fn start_key(config: &Config, containers: &dyn Containers) -> Result<Started
             ));
         }
     }
-    containers.replace(key::KEY_PROXY_NAME, &proxy.run_args(), START_TIMEOUT)?;
+    containers.replace(&proxy.name, &proxy.run_args(), START_TIMEOUT)?;
     Ok(Started {
-        container: key::KEY_PROXY_NAME,
+        container: proxy.name,
         allow: 0,
     })
 }
@@ -228,10 +235,10 @@ pub fn start_key(config: &Config, containers: &dyn Containers) -> Result<Started
 /// running is what makes a second deploy honestly `satisfied` rather than a re-application. `serve` never asks
 /// (its boot always replaces them), which is why the answer is a plain pair of booleans.
 ///
-/// The config is the value the starters are handed, and it is unused here because both names are constants
-/// ([`NAMES`]) — kept so the three functions are called the same way.
-pub fn running(_config: &Config, containers: &dyn Containers) -> [bool; 2] {
-    [containers.running(NAMES[0]), containers.running(NAMES[1])]
+/// The config is the value the starters are handed, and it is what the two names are composed from ([`names`]).
+pub fn running(config: &Config, containers: &dyn Containers) -> [bool; 2] {
+    let [egress, key] = names(config);
+    [containers.running(&egress), containers.running(&key)]
 }
 
 /// The one check both starters make before asking the daemon to run anything: the image is on this machine.

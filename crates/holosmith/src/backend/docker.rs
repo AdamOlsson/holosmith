@@ -235,9 +235,19 @@ impl DockerBackend {
         SessionContainer::of(&self.settings, session)
     }
 
-    /// This session's private network name: `agents_<id>`.
+    /// This session's private network name: `agents_<id>`, with this run's network prefix in front of it.
     fn network(&self, session: &Session) -> String {
-        network_name(&session.id)
+        network_name(&self.settings.network_prefix, &session.id)
+    }
+
+    /// This run's egress proxy container: `hs_egress`, or `smoke_hs_egress` in a smoke run (HS-077).
+    fn egress_name(&self) -> String {
+        crate::container::proxy_name(&self.settings.container_prefix)
+    }
+
+    /// This run's key proxy container, composed the same way.
+    fn key_name(&self) -> String {
+        crate::key::key_proxy_name(&self.settings.container_prefix)
     }
 
     /// Whether `project`'s repository may be mounted, and why not when it may not (HS-026).
@@ -354,16 +364,14 @@ impl DockerBackend {
     /// `--internal`, and HS-036 measures that with a probe rather than trusting this process.
     async fn apply_proxy(&self, session: &Session) {
         let network = self.network(session);
+        let egress = self.egress_name();
         let wanted = session.network;
+        let proxy = egress.clone();
         let joined = Self::docker(Step::Network, self.settings.docker(), move |docker| {
             if wanted {
-                docker.join_network(
-                    &network,
-                    crate::container::PROXY_NAME,
-                    crate::container::PROXY_ALIAS,
-                )?;
+                docker.join_network(&network, &proxy, crate::container::PROXY_ALIAS)?;
             } else {
-                docker.leave_network(&network, crate::container::PROXY_NAME);
+                docker.leave_network(&network, &proxy);
             }
             Ok(())
         })
@@ -372,7 +380,7 @@ impl DockerBackend {
             (Ok(()), true) => tracing::debug!(
                 target: "holosmith::backend",
                 session = %session.id,
-                proxy = crate::container::PROXY_NAME,
+                proxy = %egress,
                 "the egress proxy is on the session's network"
             ),
             (Ok(()), false) => tracing::debug!(
@@ -398,15 +406,13 @@ impl DockerBackend {
     /// session, and a machine whose proxy image is not built yet must still serve its control UI.
     async fn apply_key_proxy(&self, session: &Session) {
         let network = self.network(session);
+        let key = self.key_name();
+        let probe = key.clone();
         let joined = Self::docker(Step::Network, self.settings.docker(), move |docker| {
-            if !docker.running(crate::key::KEY_PROXY_NAME) {
+            if !docker.running(&probe) {
                 return Ok(false);
             }
-            docker.join_network(
-                &network,
-                crate::key::KEY_PROXY_NAME,
-                crate::key::KEY_PROXY_ALIAS,
-            )?;
+            docker.join_network(&network, &probe, crate::key::KEY_PROXY_ALIAS)?;
             Ok(true)
         })
         .await;
@@ -414,13 +420,13 @@ impl DockerBackend {
             Ok(true) => tracing::debug!(
                 target: "holosmith::backend",
                 session = %session.id,
-                proxy = crate::key::KEY_PROXY_NAME,
+                proxy = %key,
                 "the key proxy is on the session's network"
             ),
             Ok(false) => tracing::warn!(
                 target: "holosmith::backend",
                 session = %session.id,
-                proxy = crate::key::KEY_PROXY_NAME,
+                proxy = %key,
                 "the key proxy is not running, so this session's model calls will fail at its proxy address"
             ),
             Err(error) => tracing::warn!(
@@ -700,7 +706,8 @@ impl DockerBackend {
         // removed too. Not being attached is the ordinary answer for a network that never finished its step.
         let key_leaving = Self::docker(Step::Network, self.settings.docker(), {
             let name = name.clone();
-            move |docker| Ok(docker.leave_network(&name, crate::key::KEY_PROXY_NAME))
+            let key = self.key_name();
+            move |docker| Ok(docker.leave_network(&name, &key))
         })
         .await;
         match key_leaving {
@@ -719,7 +726,8 @@ impl DockerBackend {
         }
         let leaving = Self::docker(Step::Network, self.settings.docker(), {
             let name = name.clone();
-            move |docker| Ok(docker.leave_network(&name, crate::container::PROXY_NAME))
+            let egress = self.egress_name();
+            move |docker| Ok(docker.leave_network(&name, &egress))
         })
         .await;
         match leaving {

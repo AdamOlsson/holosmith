@@ -32,12 +32,13 @@ use std::process::Command;
 
 use crate::agent;
 use crate::config::{Config, Role};
-use crate::container::{PROXY_ALIAS, PROXY_NAME};
+use crate::container::PROXY_ALIAS;
 use crate::db;
 use crate::docker::Docker;
 use crate::images::{Expectation, Kind};
-use crate::key::{KEY_PROXY_ALIAS, KEY_PROXY_NAME};
+use crate::key::KEY_PROXY_ALIAS;
 use crate::preflight::{self, Check, Finding, Outcome};
+use crate::proxies;
 use crate::schema::{self, Verdict};
 use crate::selftest;
 
@@ -129,7 +130,10 @@ pub trait Machine {
     fn image_labels(&self, image: &str) -> Result<Option<BTreeMap<String, String>>, String>;
 
     /// The network self-test, whose bare probe is the network-off probe (ADR-0044/ADR-0046).
-    fn selftest(&self, image: &str) -> selftest::Outcome;
+    ///
+    /// The names come from the run's own config ([`selftest::Names`]), because a smoke run's probes and proxies carry
+    /// its prefix (HS-077) and a machine's own do not.
+    fn selftest(&self, names: &selftest::Names, image: &str) -> selftest::Outcome;
 }
 
 impl Machine for Docker {
@@ -145,8 +149,8 @@ impl Machine for Docker {
         <Docker as crate::images::Images>::labels(self, image)
     }
 
-    fn selftest(&self, image: &str) -> selftest::Outcome {
-        selftest::run(self, image)
+    fn selftest(&self, names: &selftest::Names, image: &str) -> selftest::Outcome {
+        selftest::run(self, names, image)
     }
 }
 
@@ -241,11 +245,15 @@ pub fn run(config: &Config, depth: Depth, tools: &Tools, machine: &dyn Machine) 
         } else {
             "the docker check above failed"
         };
-        findings.push(network(machine, image, docker_ok, because));
-        findings.push(proxy(machine, PROXY_NAME, PROXY_ALIAS, docker_ok, because));
+        let isolation = selftest::Names::of(&config.container_prefix, &config.network_prefix);
+        findings.push(network(machine, &isolation, image, docker_ok, because));
+        // The two proxies by the names this run's config composes, so a smoke run's `doctor` looks at its own
+        // (`smoke_hs_egress`, HS-077) rather than at the machine's.
+        let names = proxies::names(config);
+        findings.push(proxy(machine, &names[0], PROXY_ALIAS, docker_ok, because));
         findings.push(proxy(
             machine,
-            KEY_PROXY_NAME,
+            &names[1],
             KEY_PROXY_ALIAS,
             docker_ok,
             because,
@@ -808,7 +816,13 @@ fn write(dir: &Path, name: &str, body: &str) -> Result<(), String> {
 /// network-off probe**: a container on a temporary internal network that reaches neither the internet, nor the
 /// host, nor the egress proxy's alias. The proxy-joined pass is [`selftest::pair`], a `debug`/`warn` line rather
 /// than a verdict, which is why one outcome speaks for both halves here.
-fn network(machine: &dyn Machine, image: &str, docker_ok: bool, because: &str) -> Finding {
+fn network(
+    machine: &dyn Machine,
+    names: &selftest::Names,
+    image: &str,
+    docker_ok: bool,
+    because: &str,
+) -> Finding {
     if !docker_ok {
         return Finding::unknown(
             Check::Network,
@@ -818,7 +832,7 @@ fn network(machine: &dyn Machine, image: &str, docker_ok: bool, because: &str) -
             ),
         );
     }
-    match machine.selftest(image) {
+    match machine.selftest(names, image) {
         selftest::Outcome::Passed => Finding::pass(
             Check::Network,
             "a probe container on a temporary internal network reached none of the ways out, and the network it \
@@ -1221,7 +1235,13 @@ mod tests {
         assert!(hub.contains("hub"), "{hub}");
         // The reason this matters: `serve` may run a `stub` backend on a machine with no daemon, and `doctor`
         // must still print its list rather than claiming a leak.
-        let finding = network(&NoDaemon, "image", false, "the docker check above failed");
+        let finding = network(
+            &NoDaemon,
+            &selftest::Names::of("", ""),
+            "image",
+            false,
+            "the docker check above failed",
+        );
         assert_eq!(finding.outcome, Outcome::Unknown);
     }
 
@@ -1268,7 +1288,7 @@ mod tests {
             Ok(None)
         }
 
-        fn selftest(&self, _image: &str) -> selftest::Outcome {
+        fn selftest(&self, _names: &selftest::Names, _image: &str) -> selftest::Outcome {
             selftest::Outcome::Unknown("no image".to_string())
         }
     }

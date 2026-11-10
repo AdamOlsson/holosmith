@@ -167,6 +167,18 @@ pub const KNOWN_KEYS: &[KeySpec] = &[
         set: set_container_pids,
     },
     KeySpec {
+        path: "container_prefix",
+        section: None,
+        kind: Kind::String,
+        set: set_container_prefix,
+    },
+    KeySpec {
+        path: "network_prefix",
+        section: None,
+        kind: Kind::String,
+        set: set_network_prefix,
+    },
+    KeySpec {
         path: "docker_host",
         section: None,
         kind: Kind::String,
@@ -624,6 +636,58 @@ fn set_container_pids(config: &mut Config, value: &Value) -> Result<(), String> 
     Ok(())
 }
 
+fn set_container_prefix(config: &mut Config, value: &Value) -> Result<(), String> {
+    let prefix = string(value)?;
+    if let Some(problem) = prefix_problem(prefix) {
+        return Err(problem);
+    }
+    config.container_prefix = prefix.to_string();
+    Ok(())
+}
+
+fn set_network_prefix(config: &mut Config, value: &Value) -> Result<(), String> {
+    let prefix = string(value)?;
+    if let Some(problem) = prefix_problem(prefix) {
+        return Err(problem);
+    }
+    config.network_prefix = prefix.to_string();
+    Ok(())
+}
+
+/// What a container or network prefix must be, or `None` when it is one (HS-077).
+///
+/// Two rules, both about the name it is composed into. **Empty is the default** and means the build's own prefix
+/// alone, so a machine's names are exactly `s_<id>`/`agents_<id>`. A non-empty one is **Docker's name alphabet**
+/// (`[a-z0-9][a-z0-9_.-]*`) for the same reason a container name is, and it **must end with `_`**: the composed
+/// name is `prefix + s_ + id`, so `smoke_` gives `smoke_s_<id>` and a reviewer can still split the three parts by
+/// eye. A prefix without the separator (`smoke`) would give `smokes_<id>` — a name that reads as neither half.
+fn prefix_problem(prefix: &str) -> Option<String> {
+    if prefix.is_empty() {
+        return None;
+    }
+    let legal = prefix.chars().all(|character| {
+        character.is_ascii_lowercase()
+            || character.is_ascii_digit()
+            || matches!(character, '_' | '.' | '-')
+    }) && prefix
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_alphanumeric());
+    if !legal {
+        return Some(
+            "must be lowercase letters, digits and `_`, `-` or `.`, beginning with a letter or digit".to_string(),
+        );
+    }
+    if !prefix.ends_with('_') {
+        return Some(
+            "must end with `_`, because it is prepended to the build's own `s_`/`agents_` and a prefix without the \
+             separator would merge into a name neither half can be read out of"
+                .to_string(),
+        );
+    }
+    None
+}
+
 fn set_docker_host(config: &mut Config, value: &Value) -> Result<(), String> {
     config.docker_host = Some(string(value)?.to_string());
     Ok(())
@@ -827,7 +891,7 @@ mod tests {
 
     #[test]
     fn the_table_holds_the_documented_keys() {
-        assert_eq!(KNOWN_KEYS.len(), 34);
+        assert_eq!(KNOWN_KEYS.len(), 36);
     }
 
     #[test]

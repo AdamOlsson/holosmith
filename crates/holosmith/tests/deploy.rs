@@ -536,7 +536,7 @@ impl doctor::Machine for Fake {
             .cloned())
     }
 
-    fn selftest(&self, _image: &str) -> selftest::Outcome {
+    fn selftest(&self, _names: &selftest::Names, _image: &str) -> selftest::Outcome {
         self.selftest
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

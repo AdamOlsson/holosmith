@@ -101,9 +101,49 @@ pub fn proxy_url(session_id: &str) -> String {
 /// The command the container runs is pi's RPC loop (HS-031, [`crate::agent::COMMAND`]); until HS-030 the
 /// container was detached on `sleep infinity`, and this constant is what replaced that placeholder.
 ///
-/// The name of a session's private network.
-pub fn network_name(session_id: &str) -> String {
-    format!("{NETWORK_PREFIX}{session_id}")
+/// A session's private network: `agents_<id>`, with this run's network prefix in front of it (HS-077).
+///
+/// The prefix is a value rather than a constant because the **smoke run** (item 10 step 2) must not touch the
+/// machine's own names: a machine with `network_prefix = "smoke_"` names it `smoke_agents_<id>`. It is passed in
+/// rather than read from a global so that the name a container joins and the name the reconcile sweeps are composed
+/// by the same function — the sweep compares with `strip_prefix` ([`crate::reconcile`]), so a name built any other
+/// way is a session the next boot takes away.
+pub fn network_name(prefix: &str, session_id: &str) -> String {
+    format!("{prefix}{NETWORK_PREFIX}{session_id}")
+}
+
+/// A session's container: `s_<id>`, with this run's container prefix in front of it (HS-077).
+///
+/// The twin of [`network_name`] and named for the same reason: [`crate::container::NAME_PREFIX`] alone is the
+/// build's half of the name, and a caller that spells the other half itself is a caller that can drift from the
+/// reconcile's reader.
+pub fn container_name(prefix: &str, session_id: &str) -> String {
+    format!("{prefix}{NAME_PREFIX}{session_id}")
+}
+
+/// The prefix a run's container names carry, for the **listing and stripping** a sweep does (HS-077).
+///
+/// [`container_name`] composes one name; the reconcile does the other direction, and the two must be the same string:
+/// Docker's `name=` filter is a **substring** match, so the listing is wider than the rule (`s_` also answers
+/// `smoke_s_<id>`), and `session_id_of`'s `strip_prefix` is what decides. One function so a run cannot list with one
+/// composition and strip with another — which would either miss its own leftovers or take somebody else's container.
+pub fn container_listing_prefix(container_prefix: &str) -> String {
+    format!("{container_prefix}{NAME_PREFIX}")
+}
+
+/// The same for the networks: [`network_name`]'s prefix, `network_prefix` + `agents_`.
+pub fn network_listing_prefix(network_prefix: &str) -> String {
+    format!("{network_prefix}{NETWORK_PREFIX}")
+}
+
+/// The egress proxy's container for a run whose container prefix is `prefix`: `hs_egress`, or `smoke_hs_egress`.
+///
+/// Prefixed for the same reason the session's names are, and it is not cosmetic: a boot `rm -f`s both proxies and
+/// starts them again from **its own** config (the key proxy mounts *its* key store), so an unprefixed smoke run
+/// would replace the machine's live key proxy with one holding an empty store and drop the egress proxy's per-session
+/// network joins. With the prefix, the smoke run owns two containers of its own and removes them when it is done.
+pub fn proxy_name(prefix: &str) -> String {
+    format!("{prefix}{PROXY_NAME}")
 }
 
 /// What a mount's source must be on disk.
@@ -348,6 +388,10 @@ pub struct ContainerSettings {
     /// The daemon's address, as `docker -H` takes it; `None` is the CLI's own default.
     pub docker_host: Option<String>,
     pub limits: Limits,
+    /// The prefix in front of every session container name (`container_prefix`, HS-077). Empty on a normal machine.
+    pub container_prefix: String,
+    /// The prefix in front of every session network name (`network_prefix`, HS-077). Empty on a normal machine.
+    pub network_prefix: String,
     /// The port a session's dev server is expected to listen on inside its container, from
     /// `preview_upstream_port` (HS-041): the preview listener forwards `/<host>/<id>/…` to it, so the container
     /// is told it as `HS_PREVIEW_PORT` rather than left to guess a number the listener would not forward to.
@@ -387,6 +431,8 @@ impl ContainerSettings {
                 memory_mb: config.container_memory_mb,
                 pids: config.container_pids,
             },
+            container_prefix: config.container_prefix.clone(),
+            network_prefix: config.network_prefix.clone(),
             preview_port: config.preview_upstream_port,
         }
     }
@@ -438,9 +484,9 @@ impl SessionContainer {
         let home = crate::agent::home(&settings.data_root, &session.id);
         Self {
             image: settings.image.clone(),
-            name: format!("{NAME_PREFIX}{}", session.id),
+            name: container_name(&settings.container_prefix, &session.id),
             session_id: session.id.clone(),
-            network: network_name(&session.id),
+            network: network_name(&settings.network_prefix, &session.id),
             home: home.clone(),
             model: session.model.clone(),
             thinking: session.thinking.clone(),
@@ -548,6 +594,8 @@ impl SessionContainer {
 pub struct EgressProxy {
     /// The image the container runs, from [`crate::images::proxy_image`].
     pub image: String,
+    /// Its container name: `hs_egress`, with this run's container prefix in front of it ([`proxy_name`]).
+    pub name: String,
     /// The domains a tunnel may target, from `[egress] allow`.
     pub allow: Vec<String>,
 }
@@ -562,6 +610,7 @@ impl EgressProxy {
     pub fn of(config: &Config) -> Self {
         Self {
             image: crate::images::proxy_image(),
+            name: proxy_name(&config.container_prefix),
             allow: config.egress.allow.clone(),
         }
     }
@@ -579,7 +628,7 @@ impl EgressProxy {
             // Detached: nothing reads this container's stdio. `--rm` cannot be passed with `--restart`.
             "--detach".to_string(),
             "--name".to_string(),
-            PROXY_NAME.to_string(),
+            self.name.clone(),
             "--network".to_string(),
             crate::docker::EGRESS_NETWORK.to_string(),
             "--restart".to_string(),
@@ -619,6 +668,9 @@ impl EgressProxy {
 pub struct KeyProxy {
     /// The image the container runs, from [`crate::images::proxy_image`].
     pub image: String,
+    /// Its container name: `hs_key`, with this run's container prefix in front of it
+    /// ([`crate::key::key_proxy_name`]).
+    pub name: String,
     /// `<data>/secrets/keys.toml`, read by the proxy inside the container. What is mounted is its directory
     /// ([`KeyProxy::mount`]); this container is the only one that ever sees a real key.
     pub keys: PathBuf,
@@ -632,6 +684,7 @@ impl KeyProxy {
     pub fn of(config: &Config) -> Self {
         Self {
             image: crate::images::proxy_image(),
+            name: crate::key::key_proxy_name(&config.container_prefix),
             keys: config.secrets_path(),
         }
     }
@@ -661,7 +714,7 @@ impl KeyProxy {
             "run".to_string(),
             "--detach".to_string(),
             "--name".to_string(),
-            crate::key::KEY_PROXY_NAME.to_string(),
+            self.name.clone(),
             "--network".to_string(),
             crate::docker::EGRESS_NETWORK.to_string(),
             "--network-alias".to_string(),
@@ -738,12 +791,63 @@ mod tests {
             image: "agent-image:0.1.0".to_string(),
             docker_host: None,
             limits: Limits::default(),
+            container_prefix: String::new(),
+            network_prefix: String::new(),
             preview_port: 3000,
         }
     }
 
     fn container() -> SessionContainer {
         SessionContainer::of(&settings(), &session("holosmith", "0123456789abcdef"))
+    }
+
+    /// HS-077's composition, in one place: the empty prefix is today's name byte for byte, and `smoke_` is the smoke
+    /// run's. Six names, because a prefix that reached only some of them is exactly the bug the story cannot afford.
+    #[test]
+    fn a_prefix_is_composed_into_every_name_the_build_derives() {
+        assert_eq!(container_name("", "0123456789abcdef"), "s_0123456789abcdef".to_string());
+        assert_eq!(network_name("", "0123456789abcdef"), "agents_0123456789abcdef".to_string());
+        assert_eq!(proxy_name(""), "hs_egress");
+        assert_eq!(crate::key::key_proxy_name(""), "hs_key");
+        assert_eq!(container_listing_prefix(""), "s_");
+        assert_eq!(network_listing_prefix(""), "agents_");
+
+        assert_eq!(container_name("smoke_", "0123456789abcdef"), "smoke_s_0123456789abcdef".to_string());
+        assert_eq!(network_name("smoke_", "0123456789abcdef"), "smoke_agents_0123456789abcdef".to_string());
+        assert_eq!(proxy_name("smoke_"), "smoke_hs_egress");
+        assert_eq!(crate::key::key_proxy_name("smoke_"), "smoke_hs_key");
+        assert_eq!(container_listing_prefix("smoke_"), "smoke_s_");
+        assert_eq!(network_listing_prefix("smoke_"), "smoke_agents_");
+    }
+
+    /// The whole smoke config's effect on names, through the settings the backend is built from: the session's
+    /// container, its network, and **both** proxies — the ones an unprefixed smoke boot would replace on the machine.
+    #[test]
+    fn a_smoke_config_names_the_container_the_network_and_both_proxies() {
+        let mut config = Config::default();
+        config.container_prefix = "smoke_".to_string();
+        config.network_prefix = "smoke_".to_string();
+        let settings = ContainerSettings::of(&config);
+        let container = SessionContainer::of(&settings, &session("holosmith", "0123456789abcdef"));
+        assert_eq!(container.name, "smoke_s_0123456789abcdef".to_string());
+        assert_eq!(container.network, "smoke_agents_0123456789abcdef".to_string());
+        let run = container.run_args();
+        assert!(
+            run.windows(2)
+                .any(|pair| pair == ["--name", &"smoke_s_0123456789abcdef".to_string()]),
+            "the run vector does not name the prefixed container: {run:?}"
+        );
+        assert!(
+            run.windows(2)
+                .any(|pair| pair == ["--network", &"smoke_agents_0123456789abcdef".to_string()]),
+            "the run vector does not join the prefixed network: {run:?}"
+        );
+        let egress = EgressProxy::of(&config);
+        assert_eq!(egress.name, "smoke_hs_egress");
+        assert!(egress.run_args().iter().any(|word| word == "smoke_hs_egress"));
+        let key = KeyProxy::of(&config);
+        assert_eq!(key.name, "smoke_hs_key");
+        assert!(key.run_args().iter().any(|word| word == "smoke_hs_key"));
     }
 
     /// The five mounts: spec item 1's four, then the agent's own directory (spec item 2).
@@ -1020,6 +1124,7 @@ mod tests {
     fn the_proxy_container_is_detached_restarting_and_lives_on_the_egress_network() {
         let proxy = EgressProxy {
             image: crate::images::proxy_image(),
+            name: crate::container::PROXY_NAME.to_string(),
             allow: vec!["crates.io".to_string(), "static.crates.io".to_string()],
         };
         let arguments = proxy.run_args();
@@ -1094,6 +1199,7 @@ mod tests {
     fn the_key_proxy_mounts_only_the_directory_the_key_file_lives_in() {
         let proxy = KeyProxy {
             image: crate::images::proxy_image(),
+            name: crate::key::KEY_PROXY_NAME.to_string(),
             keys: PathBuf::from("/var/lib/holosmith/secrets/keys.toml"),
         };
         let arguments = proxy.run_args();
@@ -1177,6 +1283,7 @@ mod tests {
         let metadata = std::fs::metadata(&keys).expect("the file this test just wrote");
         let proxy = KeyProxy {
             image: crate::images::proxy_image(),
+            name: crate::key::KEY_PROXY_NAME.to_string(),
             keys: keys.clone(),
         };
         let arguments = proxy.run_args();

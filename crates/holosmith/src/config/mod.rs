@@ -272,6 +272,20 @@ pub struct Config {
     pub container_cpus: u32,
     pub container_memory_mb: u64,
     pub container_pids: u64,
+    /// The prefix in front of every session **container** name (HS-077, spec item 10 step 2).
+    ///
+    /// The build's own prefix is `s_` ([`crate::container::NAME_PREFIX`]), so a machine with `smoke_` here names a
+    /// session's container `smoke_s_<id>`. The default is empty, which leaves a normal machine's names exactly
+    /// `s_<id>`; a smoke run's names then cannot collide with them, and neither run's startup reconcile can sweep
+    /// the other's, because the sweep's prefix is composed the same way and compared with `strip_prefix` rather than
+    /// with Docker's **substring** name filter (HS-044). When it is not empty it must end with `_`, so the composed
+    /// name can never merge the two halves (`smoke` would give `smokes_<id>`, which reads as neither).
+    pub container_prefix: String,
+    /// The prefix in front of every session **network** name, `agents_<id>` composed the same way (HS-077).
+    ///
+    /// Two keys rather than one because two different sweeps read the two names and a machine may want one without
+    /// the other; the smoke config sets both, and both must be empty or end with `_`.
+    pub network_prefix: String,
     pub docker_host: Option<String>,
     pub hosts_seed: Option<PathBuf>,
     pub allowed_hubs: Vec<String>,
@@ -321,6 +335,8 @@ impl Default for Config {
             container_cpus: 2,
             container_memory_mb: 4096,
             container_pids: 512,
+            container_prefix: String::new(),
+            network_prefix: String::new(),
             docker_host: None,
             hosts_seed: None,
             allowed_hubs: Vec::new(),
@@ -1034,6 +1050,8 @@ agent_toolchains = ["node", "ripgrep"]
 container_cpus = 3
 container_memory_mb = 2048
 container_pids = 256
+container_prefix = "test_"
+network_prefix = "nets_"
 docker_host = "unix:///run/user/1000/docker.sock"
 hosts_seed = "/etc/holosmith/hosts.toml"
 allowed_hubs = ["hub.example"]
@@ -1116,6 +1134,37 @@ allow = ["crates.io"]
         }
     }
 
+    /// HS-077's two keys: empty by default, and a prefix that can be composed into a name.
+    ///
+    /// The empty value is the one a normal machine has, so it is asserted by name rather than left to the golden
+    /// file: a default that changed would rename every container on the machine. The four refusals are the two rules
+    /// — the name alphabet, and the trailing `_` that keeps `smoke_` from composing into `smokes_<id>`.
+    #[test]
+    fn a_name_prefix_is_empty_by_default_and_must_end_with_an_underscore() {
+        let defaults = Config::default();
+        assert_eq!(defaults.container_prefix, "");
+        assert_eq!(defaults.network_prefix, "");
+        // `EVERY_KEY` names the non-default values, so both setters are exercised by `settings()` too.
+        assert_eq!(settings().container_prefix, "test_");
+        assert_eq!(settings().network_prefix, "nets_");
+        assert!(
+            parse("container_prefix = \"\"\nnetwork_prefix = \"\"\n").is_ok(),
+            "the empty prefix is the default and must be writable"
+        );
+        for (text, wanted) in [
+            ("container_prefix = \"smoke\"\n", "must end with `_`"),
+            ("network_prefix = \"Smoke_\"\n", "must be lowercase letters"),
+            ("network_prefix = \"_smoke\"\n", "must be lowercase letters"),
+            (
+                "container_prefix = \"smoke/\"\n",
+                "must be lowercase letters",
+            ),
+        ] {
+            let problem = problems_of(text);
+            assert!(problem.contains(wanted), "{text:?} answered {problem:?}");
+        }
+    }
+
     #[test]
     fn a_partial_file_fills_in_the_defaults() {
         let config = parse("role = \"hub\"\n").expect("one key is a valid file");
@@ -1148,6 +1197,8 @@ allow = ["crates.io"]
         assert_eq!(config.container_cpus, 3);
         assert_eq!(config.container_memory_mb, 2048);
         assert_eq!(config.container_pids, 256);
+        assert_eq!(config.container_prefix, "test_");
+        assert_eq!(config.network_prefix, "nets_");
         assert_eq!(
             config.docker_host.as_deref(),
             Some("unix:///run/user/1000/docker.sock")

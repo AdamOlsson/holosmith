@@ -562,6 +562,15 @@ pub const KEY_PROXY_PORT: u16 = 8080;
 /// The container's name. `hs_key`, one per machine.
 pub const KEY_PROXY_NAME: &str = "hs_key";
 
+/// The name a run with this container prefix gives it: `hs_key`, or `smoke_hs_key` (HS-077).
+///
+/// Prefixed for [`crate::container::proxy_name`]'s reason, and the key proxy is the sharper half of that reason: it
+/// mounts the key store of the config it was started from, so an unprefixed smoke run's proxy would replace the
+/// machine's with one holding an empty store.
+pub fn key_proxy_name(prefix: &str) -> String {
+    format!("{prefix}{KEY_PROXY_NAME}")
+}
+
 /// The secret a `models.json` file may never contain: the real provider key. Kept here so a test can grep a
 /// whole session directory for it without re-spelling the rule.
 pub fn contains_real_key(secrets: &Secrets, text: &str) -> bool {

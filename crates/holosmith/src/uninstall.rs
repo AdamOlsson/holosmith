@@ -52,11 +52,10 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::config::Config;
-use crate::container::{NAME_PREFIX, NETWORK_PREFIX, PROXY_NAME, network_name};
+use crate::container::{container_listing_prefix, network_listing_prefix, network_name};
 use crate::db;
 use crate::deploy::{Target, UNIT_NAME};
 use crate::docker::{self, Docker};
-use crate::key::KEY_PROXY_NAME;
 use crate::sessions::Status;
 
 /// How long one daemon call may take. A teardown is not on a startup path, so the bound is generous; it exists for
@@ -284,7 +283,7 @@ pub fn run(
     }
     for line in [
         unit(target, tools),
-        proxies(machine),
+        proxies(config, machine),
         network(machine, tools),
         data(config, target, tools, machine, args),
     ] {
@@ -519,16 +518,21 @@ fn remove(path: &Path, recursive: bool, target: &Target, tools: &Tools) -> Resul
 /// The read is **existence**, not `running`: `--restart unless-stopped` keeps a stopped proxy's name and its
 /// definition, so a teardown that removed only running ones would leave two containers behind that a later boot has
 /// to work around.
-fn proxies(machine: &dyn Machines) -> Line {
-    let existing: Vec<&str> = [PROXY_NAME, KEY_PROXY_NAME]
-        .into_iter()
+fn proxies(config: &Config, machine: &dyn Machines) -> Line {
+    // The names this run's config composes (`hs_egress`/`hs_key`, or a smoke run's `smoke_hs_egress`/`smoke_hs_key`,
+    // HS-077) — the same two [`crate::proxies::names`] answers, so a teardown and a boot never disagree about which
+    // containers are "the proxies".
+    let names = crate::proxies::names(config);
+    let existing: Vec<&str> = names
+        .iter()
+        .map(String::as_str)
         .filter(|name| machine.exists(name))
         .collect();
     if existing.is_empty() {
         return Line {
             what: What::Proxies,
             word: Word::Nothing,
-            sentence: format!("neither {PROXY_NAME} nor {KEY_PROXY_NAME} is on this machine"),
+            sentence: format!("neither {} nor {} is on this machine", names[0], names[1]),
         };
     }
     for name in &existing {
@@ -623,7 +627,7 @@ fn data(
     }
     let swept = match db::Reader::open(&root.join(db::DATABASE_FILE)) {
         Ok(Some(reader)) => match reader.sessions().list(None) {
-            Ok(rows) => sweep(machine, &rows, tools),
+            Ok(rows) => sweep(config, machine, &rows, tools),
             Err(error) => Swept {
                 containers: 0,
                 networks: 0,
@@ -706,10 +710,20 @@ struct Swept {
 ///
 /// A container first, for [`network`]'s reason — a network with an endpoint refuses to be removed — and only names
 /// this build derives from a row's id, so nothing an operator named can be swept by accident.
-fn sweep(machine: &dyn Machines, rows: &[crate::sessions::Session], tools: &Tools) -> Swept {
+fn sweep(
+    config: &Config,
+    machine: &dyn Machines,
+    rows: &[crate::sessions::Session],
+    tools: &Tools,
+) -> Swept {
     let mut swept = Swept::default();
+    // Two compositions, deliberately named differently: a **name** is the raw prefix plus the build's own
+    // (`container_name`/`network_name`), and a **listing filter** is the composed one the daemon is asked for.
+    // Composing twice would ask for `s_s_<id>`, which is the defect this test exists for.
+    let container_prefix = &config.container_prefix;
+    let network_prefix = &config.network_prefix;
     for row in rows {
-        let container = format!("{NAME_PREFIX}{}", row.id);
+        let container = crate::container::container_name(container_prefix, &row.id);
         if machine.exists(&container) {
             if machine.remove_container(&container) {
                 swept.containers += 1;
@@ -722,7 +736,7 @@ fn sweep(machine: &dyn Machines, rows: &[crate::sessions::Session], tools: &Tool
     // `s_` would answer both by accident, and a rule that is right by accident is one edit away from being wrong.
     // A daemon that cannot list is recorded as a refusal rather than read as "no session networks" — the count in
     // the line is a measurement or it is a sentence saying what was not measured.
-    let names = match machine.network_names(NETWORK_PREFIX, tools.bound) {
+    let names = match machine.network_names(&network_listing_prefix(network_prefix), tools.bound) {
         Ok(names) => names,
         Err(sentence) => {
             swept.refused.push(format!(
@@ -732,7 +746,7 @@ fn sweep(machine: &dyn Machines, rows: &[crate::sessions::Session], tools: &Tool
         }
     };
     for row in rows {
-        let wanted = network_name(&row.id);
+        let wanted = network_name(network_prefix, &row.id);
         if names.contains(&wanted) {
             if machine.remove_network(&wanted) {
                 swept.networks += 1;

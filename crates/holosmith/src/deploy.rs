@@ -55,7 +55,6 @@ use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::config::{self, Config, Role};
-use crate::container;
 use crate::docker;
 use crate::doctor::{self, Depth};
 use crate::images::{self, Expectation, Kind as ImageKind, Status};
@@ -1644,6 +1643,9 @@ fn proxies_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
         .network_names(docker::EGRESS_NETWORK, proxies::START_TIMEOUT)
         .is_ok_and(|names| names.iter().any(|name| name == docker::EGRESS_NETWORK));
     let [egress, key] = proxies::running(config, machine);
+    // The names this run's config composes: `hs_egress`/`hs_key` on a deployed machine, and a smoke config's own two
+    // if a deploy is ever run with one (HS-077).
+    let names = proxies::names(config);
     if network && egress && key {
         return Line {
             step: DeployStep::Proxies,
@@ -1651,8 +1653,8 @@ fn proxies_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
             sentence: format!(
                 "{} is there and {} and {} are running on it",
                 docker::EGRESS_NETWORK,
-                container::PROXY_NAME,
-                key::KEY_PROXY_NAME
+                names[0],
+                names[1]
             ),
         };
     }
@@ -1663,12 +1665,12 @@ fn proxies_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
     for (running, name, what) in [
         (
             egress,
-            container::PROXY_NAME,
+            names[0].as_str(),
             "the only route out of a session's container",
         ),
         (
             key,
-            key::KEY_PROXY_NAME,
+            names[1].as_str(),
             "the only thing that holds a real provider key",
         ),
     ] {

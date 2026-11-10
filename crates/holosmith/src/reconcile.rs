@@ -45,7 +45,7 @@ use std::time::Duration;
 
 use crate::backend::Backends;
 use crate::config::Config;
-use crate::container::{NAME_PREFIX, NETWORK_PREFIX};
+use crate::container::{container_listing_prefix, network_listing_prefix};
 use crate::db::Database;
 use crate::docker::Docker;
 use crate::events::EventWriter;
@@ -108,10 +108,13 @@ pub fn recoveries(rows: &[Session]) -> Vec<Recovery> {
 ///
 /// A `deleting` row is the one exception: its container is the delete's to remove, and a reconcile that took
 /// it would be finishing somebody's teardown for them (ADR-0023).
-fn containers_to_remove(rows: &[Session], names: &[String]) -> Vec<String> {
+///
+/// `prefix` is the **composed** one (`container_prefix` + `s_`, HS-077): a smoke boot passes `smoke_s_`, so its
+/// sweep can neither see nor take the machine's `s_<id>` containers, and the machine's own boot cannot see its.
+fn containers_to_remove(rows: &[Session], names: &[String], prefix: &str) -> Vec<String> {
     names
         .iter()
-        .filter(|name| match session_id_of(name, NAME_PREFIX) {
+        .filter(|name| match session_id_of(name, prefix) {
             Some(id) if crate::sessions::is_id(id) => {
                 status_of(rows, id).is_none_or(|status| status != Status::Deleting)
             }
@@ -124,10 +127,10 @@ fn containers_to_remove(rows: &[Session], names: &[String]) -> Vec<String> {
 
 /// The networks **no row** has: a live row's network is reused by its restart (and holds the proxies'
 /// endpoints), a stopped row's is what its resume reuses, and a `deleting` row's belongs to its delete.
-fn networks_to_remove(rows: &[Session], names: &[String]) -> Vec<String> {
+fn networks_to_remove(rows: &[Session], names: &[String], prefix: &str) -> Vec<String> {
     names
         .iter()
-        .filter(|name| match session_id_of(name, NETWORK_PREFIX) {
+        .filter(|name| match session_id_of(name, prefix) {
             Some(id) if crate::sessions::is_id(id) => status_of(rows, id).is_none(),
             _ => false,
         })
@@ -264,6 +267,12 @@ pub struct Reconciler {
     backend: Backends,
     docker: Docker,
     projects_root: PathBuf,
+    /// `container_prefix` + `s_`: the prefix this run's own containers carry (HS-077), and the prefix its sweep
+    /// strips. Composed once here, because the two halves must be the same string — a sweep that listed with one and
+    /// stripped with another would either miss its own leftovers or take somebody else's container.
+    container_prefix: String,
+    /// `network_prefix` + `agents_`, composed the same way for the networks.
+    network_prefix: String,
     /// Which backend this run uses: the row half is every backend's, the name half Docker's.
     kind: Backend,
 }
@@ -282,6 +291,8 @@ impl Reconciler {
             backend,
             docker: Docker::new(config.docker_host.clone()),
             projects_root: config.projects_root.clone(),
+            container_prefix: container_listing_prefix(&config.container_prefix),
+            network_prefix: network_listing_prefix(&config.network_prefix),
             kind,
         }
     }
@@ -349,8 +360,8 @@ impl Reconciler {
 
     /// Remove what no row owns: containers, then networks, then worktree directories.
     async fn sweep(&self, rows: &[Session]) {
-        let containers = match self.docker.container_names(NAME_PREFIX, BOUND) {
-            Ok(names) => containers_to_remove(rows, &names),
+        let containers = match self.docker.container_names(&self.container_prefix, BOUND) {
+            Ok(names) => containers_to_remove(rows, &names, &self.container_prefix),
             Err(error) => {
                 tracing::warn!(
                     target: "holosmith::reconcile",
@@ -375,8 +386,8 @@ impl Reconciler {
                 );
             }
         }
-        let networks = match self.docker.network_names(NETWORK_PREFIX, BOUND) {
-            Ok(names) => networks_to_remove(rows, &names),
+        let networks = match self.docker.network_names(&self.network_prefix, BOUND) {
+            Ok(names) => networks_to_remove(rows, &names, &self.network_prefix),
             Err(error) => {
                 tracing::warn!(
                     target: "holosmith::reconcile",
@@ -457,6 +468,7 @@ impl Reconciler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::container::{NAME_PREFIX, NETWORK_PREFIX};
 
     /// A row with only the fields the rules read, built the way the repository builds one.
     fn row(id: &str, status: Status) -> Session {
@@ -539,7 +551,7 @@ mod tests {
             format!("{NAME_PREFIX}0123456789ABCDEF"),
         ];
         assert_eq!(
-            containers_to_remove(&rows, &names),
+            containers_to_remove(&rows, &names, NAME_PREFIX),
             vec![
                 format!("{NAME_PREFIX}{LIVE}"),
                 format!("{NAME_PREFIX}{IDLE}"),
@@ -566,7 +578,7 @@ mod tests {
             format!("{NETWORK_PREFIX}not-a-session-id"),
         ];
         assert_eq!(
-            networks_to_remove(&rows, &names),
+            networks_to_remove(&rows, &names, NETWORK_PREFIX),
             vec![format!("{NETWORK_PREFIX}9999999999999999")]
         );
     }
@@ -577,19 +589,52 @@ mod tests {
         let container = format!("{NAME_PREFIX}9999999999999999");
         let network = format!("{NETWORK_PREFIX}9999999999999999");
         assert_eq!(
-            containers_to_remove(&rows, std::slice::from_ref(&container)),
+            containers_to_remove(&rows, std::slice::from_ref(&container), NAME_PREFIX),
             vec![container.clone()]
         );
         assert_eq!(
-            networks_to_remove(&rows, std::slice::from_ref(&network)),
+            networks_to_remove(&rows, std::slice::from_ref(&network), NETWORK_PREFIX),
             vec![network.clone()]
         );
         // The pass that follows the removals sees only what it kept — no name to take, and the same rows to
         // bring back. That is what "safe to run twice" means here: not a no-op (live sessions are restarted
         // again), but nothing new to remove.
-        assert!(containers_to_remove(&rows, &[]).is_empty());
-        assert!(networks_to_remove(&rows, &[]).is_empty());
+        assert!(containers_to_remove(&rows, &[], NAME_PREFIX).is_empty());
+        assert!(networks_to_remove(&rows, &[], NETWORK_PREFIX).is_empty());
         assert_eq!(recoveries(&rows).len(), 1);
+    }
+
+    /// HS-077's other half: a sweep with a **composed** prefix takes only its own run's names.
+    ///
+    /// The empty prefix is today's behaviour (the two tests above) and this one is the smoke run's: a boot whose
+    /// config says `smoke_` lists `smoke_s_`, strips `smoke_s_`, and must neither see the machine's `s_<id>` nor its
+    /// proxies. The four names in each list are exactly the four a real `docker ps` answers with both runs on the
+    /// machine, because `name=` is a substring filter.
+    #[test]
+    fn a_prefixed_sweep_takes_its_own_names_and_not_the_machines() {
+        let rows: Vec<Session> = Vec::new();
+        let smoke = container_listing_prefix("smoke_");
+        assert_eq!(smoke, "smoke_s_");
+        let names = vec![
+            format!("{smoke}{LIVE}"),
+            format!("{NAME_PREFIX}{LIVE}"),
+            "hs_egress".to_string(),
+            "smoke_hs_egress".to_string(),
+        ];
+        assert_eq!(
+            containers_to_remove(&rows, &names, &smoke),
+            vec![format!("{smoke}{LIVE}")],
+            "a smoke boot took a name that is not its own: {names:?}"
+        );
+        let networks = vec![
+            format!("{}{LIVE}", network_listing_prefix("smoke_")),
+            format!("{NETWORK_PREFIX}{LIVE}"),
+            "egress".to_string(),
+        ];
+        assert_eq!(
+            networks_to_remove(&rows, &networks, &network_listing_prefix("smoke_")),
+            vec![format!("smoke_agents_{LIVE}")]
+        );
     }
 
     #[test]
@@ -601,7 +646,7 @@ mod tests {
             "s-0123456789abcdef",
         ] {
             assert!(
-                containers_to_remove(&rows, &[name.to_string()]).is_empty(),
+                containers_to_remove(&rows, &[name.to_string()], NAME_PREFIX).is_empty(),
                 "{name} was taken for a session's container"
             );
         }

@@ -171,8 +171,9 @@ pub fn run(config: &Config, machine: &dyn proxies::Containers) -> Report {
 /// `status` is for, and the two `unknown:` lines say which fact was not measured and why.
 fn proxies(config: &Config, machine: &dyn proxies::Containers) -> Vec<Line> {
     let daemon = preflight::daemon(config);
+    let names = proxies::names(config);
     if daemon.outcome != Outcome::Pass {
-        return proxies::NAMES
+        return names
             .into_iter()
             .map(|name| Line {
                 key: format!("proxy {name}"),
@@ -185,7 +186,7 @@ fn proxies(config: &Config, machine: &dyn proxies::Containers) -> Vec<Line> {
     }
     proxies::running(config, machine)
         .into_iter()
-        .zip(proxies::NAMES)
+        .zip(names)
         .map(|(running, name)| {
             measured(
                 &format!("proxy {name}"),

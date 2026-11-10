@@ -48,6 +48,31 @@ use crate::preflight::{Check, Complaint};
 /// tell what it was, and so the orphan sweep HS-044 owns can leave it alone.
 pub const NETWORK: &str = "holosmith-selftest";
 
+/// The three names one self-test uses, composed from the run's two prefixes (HS-077).
+///
+/// The probe's network and the two proxy containers are the self-test's only names, and since a smoke run owns a
+/// machine's names as well as its own, all three carry its prefix: a smoke boot probes `smoke_holosmith-selftest`,
+/// joins `smoke_hs_egress`/`smoke_hs_key`, and never touches the running machine's proxies. Composed in one place so a
+/// caller cannot pass a network and a proxy that disagree about which run they belong to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Names {
+    pub egress: String,
+    pub key: String,
+    pub network: String,
+}
+
+impl Names {
+    /// The names for a run with these two config prefixes ([`crate::config::Config::container_prefix`] and
+    /// `network_prefix`). Both empty is a normal machine: `holosmith-selftest`, `hs_egress`, `hs_key`.
+    pub fn of(container_prefix: &str, network_prefix: &str) -> Self {
+        Self {
+            egress: crate::container::proxy_name(container_prefix),
+            key: crate::key::key_proxy_name(container_prefix),
+            network: format!("{network_prefix}{NETWORK}"),
+        }
+    }
+}
+
 /// The address that stands for "the internet": a public resolver's HTTPS port, so a successful connection is
 /// unambiguous and a refusal still proves a route.
 pub const PUBLIC: &str = "1.1.1.1:443";
@@ -164,27 +189,27 @@ pub trait Runner {
     fn targets(&self) -> Vec<String>;
     /// Run the probe on `network` and answer what it reported.
     fn probe(&self, network: &str, image: &str, targets: &[String]) -> Result<Report, String>;
-    /// The egress proxy's container name, when this machine has one running. `None` is a machine that runs
+    /// The egress proxy's container name, when a container by that name is running. `None` is a machine that runs
     /// sessions without a proxy (HS-037 warns about it rather than refusing), and it is why the pair below is not
     /// measured — not a verdict about isolation.
-    fn proxy(&self) -> Option<String>;
-    /// Attach the proxy to `network` under the alias a session's container resolves it by.
-    fn join_proxy(&self, network: &str) -> Result<(), String>;
+    fn proxy(&self, name: &str) -> Option<String>;
+    /// Attach the proxy called `name` to `network` under the alias a session's container resolves it by.
+    fn join_proxy(&self, network: &str, name: &str) -> Result<(), String>;
     /// Detach it again. Not being attached is not a failure.
-    fn leave_proxy(&self, network: &str);
+    fn leave_proxy(&self, network: &str, name: &str);
 
-    /// The key proxy's container name, when this machine has one running.
-    fn key_proxy(&self) -> Option<String> {
+    /// The key proxy's container name, when a container by that name is running.
+    fn key_proxy(&self, _name: &str) -> Option<String> {
         None
     }
 
-    /// Attach the key proxy to `network` under its alias.
-    fn join_key_proxy(&self, _network: &str) -> Result<(), String> {
+    /// Attach the key proxy called `name` to `network` under its alias.
+    fn join_key_proxy(&self, _network: &str, _name: &str) -> Result<(), String> {
         Err("this runner has no key proxy".to_string())
     }
 
     /// Detach it again.
-    fn leave_key_proxy(&self, _network: &str) {}
+    fn leave_key_proxy(&self, _network: &str, _name: &str) {}
 }
 
 impl Runner for Docker {
@@ -232,46 +257,36 @@ impl Runner for Docker {
         }
     }
 
-    fn proxy(&self) -> Option<String> {
-        self.running(crate::container::PROXY_NAME)
-            .then(|| crate::container::PROXY_NAME.to_string())
+    fn proxy(&self, name: &str) -> Option<String> {
+        self.running(name).then(|| name.to_string())
     }
 
-    fn join_proxy(&self, network: &str) -> Result<(), String> {
-        self.join_network(
-            network,
-            crate::container::PROXY_NAME,
-            crate::container::PROXY_ALIAS,
-        )
-        .map_err(|error| error.to_string())
+    fn join_proxy(&self, network: &str, name: &str) -> Result<(), String> {
+        self.join_network(network, name, crate::container::PROXY_ALIAS)
+            .map_err(|error| error.to_string())
     }
 
-    fn leave_proxy(&self, network: &str) {
-        self.leave_network(network, crate::container::PROXY_NAME);
+    fn leave_proxy(&self, network: &str, name: &str) {
+        self.leave_network(network, name);
     }
 
-    fn key_proxy(&self) -> Option<String> {
-        self.running(crate::key::KEY_PROXY_NAME)
-            .then(|| crate::key::KEY_PROXY_NAME.to_string())
+    fn key_proxy(&self, name: &str) -> Option<String> {
+        self.running(name).then(|| name.to_string())
     }
 
-    fn join_key_proxy(&self, network: &str) -> Result<(), String> {
-        self.join_network(
-            network,
-            crate::key::KEY_PROXY_NAME,
-            crate::key::KEY_PROXY_ALIAS,
-        )
-        .map_err(|error| error.to_string())
+    fn join_key_proxy(&self, network: &str, name: &str) -> Result<(), String> {
+        self.join_network(network, name, crate::key::KEY_PROXY_ALIAS)
+            .map_err(|error| error.to_string())
     }
 
-    fn leave_key_proxy(&self, network: &str) {
-        self.leave_network(network, crate::key::KEY_PROXY_NAME);
+    fn leave_key_proxy(&self, network: &str, name: &str) {
+        self.leave_network(network, name);
     }
 }
 
 /// Run the self-test with the machine's own Docker and image.
-pub fn run(docker: &Docker, image: &str) -> Outcome {
-    run_with(docker, image)
+pub fn run(docker: &Docker, names: &Names, image: &str) -> Outcome {
+    run_with(docker, names, image)
 }
 
 /// Run the self-test against any [`Runner`], which is what a test drives.
@@ -279,24 +294,25 @@ pub fn run(docker: &Docker, image: &str) -> Outcome {
 /// The temporary network is created first and removed **whatever happened** — including when the probe could not
 /// run — because a network left behind is a name the next boot has to cope with, and an operator has to clean
 /// up. Everything else is the decision [`decide`] makes.
-pub fn run_with(runner: &dyn Runner, image: &str) -> Outcome {
-    if let Err(error) = runner.create_network(NETWORK) {
+pub fn run_with(runner: &dyn Runner, names: &Names, image: &str) -> Outcome {
+    let network = names.network.as_str();
+    if let Err(error) = runner.create_network(network) {
         return Outcome::Unknown(format!(
             "the probe network could not be created, so this machine's isolation was not measured ({error}); \
-             check that the daemon can create networks, and run `docker network create --internal {NETWORK}` \
+             check that the daemon can create networks, and run `docker network create --internal {network}` \
              by hand to see what it says"
         ));
     }
     let targets = runner.targets();
     // Spec item 2's **off case**, measured first: on a network nothing is attached to, none of the targets may
     // answer — the internet, the host, or the egress proxy's own alias.
-    let report = runner.probe(NETWORK, image, &targets);
+    let report = runner.probe(network, image, &targets);
     // …and then the same network with the proxy on it, before the network goes. This is what makes the silence
     // above mean something: an alias that never resolves would pass the off case for a proxy that is not there
     // at all, which is the bug the off case exists to catch (HS-038).
-    pair(runner, image);
-    key_pair(runner, image);
-    runner.remove_network(NETWORK);
+    pair(runner, names, image);
+    key_pair(runner, names, image);
+    runner.remove_network(network);
     match report {
         Ok(report) => decide(&report, &targets),
         Err(error) => Outcome::Unknown(format!(
@@ -317,11 +333,12 @@ pub fn run_with(runner: &dyn Runner, image: &str) -> Outcome {
 ///
 /// The join is `join_network`'s (disconnect, then connect with the alias), so a proxy left attached by a previous
 /// run is replaced rather than doubled; the leave is unconditional, and the network is removed right after.
-fn pair(runner: &dyn Runner, image: &str) {
-    let Some(proxy) = runner.proxy() else {
+fn pair(runner: &dyn Runner, names: &Names, image: &str) {
+    let network = names.network.as_str();
+    let Some(proxy) = runner.proxy(&names.egress) else {
         tracing::debug!(
             target: "holosmith::selftest",
-            proxy = crate::container::PROXY_NAME,
+            proxy = %names.egress,
             "the egress proxy is not running on this machine, so the off case's pair — the proxy answering once \
              it is joined — was not measured"
         );
@@ -329,10 +346,10 @@ fn pair(runner: &dyn Runner, image: &str) {
     };
     let one = [PROXY_TARGET.to_string()];
     let joined = runner
-        .join_proxy(NETWORK)
+        .join_proxy(network, &names.egress)
         .map_err(|error| format!("the proxy could not be joined to the probe's network ({error})"))
-        .and_then(|()| runner.probe(NETWORK, image, &one));
-    runner.leave_proxy(NETWORK);
+        .and_then(|()| runner.probe(network, image, &one));
+    runner.leave_proxy(network, &names.egress);
     match joined {
         Ok(report) if report.code == REACHED => tracing::debug!(
             target: "holosmith::selftest",
@@ -363,23 +380,24 @@ fn pair(runner: &dyn Runner, image: &str) {
 /// This is the inverse of [`pair`] and it is not a verdict either. A key proxy that is missing is HS-039's
 /// `warn`, not a machine that leaks; what the line buys is the discrimination "the alias resolves on a session
 /// network" that no unit test can make at boot.
-fn key_pair(runner: &dyn Runner, image: &str) {
-    let Some(proxy) = runner.key_proxy() else {
+fn key_pair(runner: &dyn Runner, names: &Names, image: &str) {
+    let network = names.network.as_str();
+    let Some(proxy) = runner.key_proxy(&names.key) else {
         tracing::debug!(
             target: "holosmith::selftest",
-            proxy = crate::key::KEY_PROXY_NAME,
+            proxy = %names.key,
             "the key proxy is not running, so the off case's legitimate answer — the key proxy's alias — was not measured"
         );
         return;
     };
     let one = [KEY_PROXY_TARGET.to_string()];
     let joined = runner
-        .join_key_proxy(NETWORK)
+        .join_key_proxy(network, &names.key)
         .map_err(|error| {
             format!("the key proxy could not be joined to the probe's network ({error})")
         })
-        .and_then(|()| runner.probe(NETWORK, image, &one));
-    runner.leave_key_proxy(NETWORK);
+        .and_then(|()| runner.probe(network, image, &one));
+    runner.leave_key_proxy(network, &names.key);
     match joined {
         Ok(report) if report.code == REACHED => tracing::debug!(
             target: "holosmith::selftest",
@@ -469,6 +487,34 @@ fn leaked(report: &Report) -> bool {
 mod tests {
     use super::*;
 
+    /// The names a machine with no prefixes uses: `holosmith-selftest`, `hs_egress`, `hs_key`.
+    fn machine() -> Names {
+        Names::of("", "")
+    }
+
+    /// The ruling HS-077 rests on, as one test: a prefix reaches **all three** names, and the empty prefix changes
+    /// none of them. The five-name version of this claim is `tests/reconcile.rs`'s and `tests/container.rs`'s; this is
+    /// the half that would otherwise silently keep probing the machine's proxies from a smoke boot.
+    #[test]
+    fn a_prefix_reaches_the_probe_network_and_both_proxies() {
+        assert_eq!(
+            Names::of("", ""),
+            Names {
+                egress: "hs_egress".to_string(),
+                key: "hs_key".to_string(),
+                network: NETWORK.to_string(),
+            }
+        );
+        assert_eq!(
+            Names::of("smoke_", "smoke_"),
+            Names {
+                egress: "smoke_hs_egress".to_string(),
+                key: "smoke_hs_key".to_string(),
+                network: "smoke_holosmith-selftest".to_string(),
+            }
+        );
+    }
+
     /// A runner that answers from a script: what creating the network does, **what each probe run reports** (a
     /// queue, because the off case runs one probe and its pair runs a second), whether the proxy was joined, and
     /// whether the network was removed.
@@ -554,16 +600,16 @@ mod tests {
             }
         }
 
-        fn proxy(&self) -> Option<String> {
+        fn proxy(&self, _name: &str) -> Option<String> {
             self.proxy.clone()
         }
 
-        fn join_proxy(&self, network: &str) -> Result<(), String> {
+        fn join_proxy(&self, network: &str, _name: &str) -> Result<(), String> {
             self.joined.borrow_mut().push(network.to_string());
             self.join.clone()
         }
 
-        fn leave_proxy(&self, network: &str) {
+        fn leave_proxy(&self, network: &str, _name: &str) {
             self.left.borrow_mut().push(network.to_string());
         }
     }
@@ -571,7 +617,7 @@ mod tests {
     #[test]
     fn nothing_reachable_is_a_pass_and_the_network_is_removed() {
         let fake = Fake::passing();
-        let outcome = run_with(&fake, "pi-agent:local");
+        let outcome = run_with(&fake, &machine(), "pi-agent:local");
         assert_eq!(outcome, Outcome::Passed);
         assert_eq!(fake.created.borrow().as_slice(), [NETWORK]);
         assert_eq!(
@@ -595,7 +641,7 @@ mod tests {
             reached: format!("{PUBLIC} connected"),
             complaint: String::new(),
         });
-        let outcome = run_with(&fake, "pi-agent:local");
+        let outcome = run_with(&fake, &machine(), "pi-agent:local");
         let Outcome::Failed(sentence) = &outcome else {
             panic!("a reached target must fail the boot: {outcome:?}");
         };
@@ -643,7 +689,7 @@ mod tests {
                 .borrow_mut()
                 .front_mut()
                 .expect("the fake was given one scripted probe") = report.clone();
-            let outcome = run_with(&fake, "missing:image");
+            let outcome = run_with(&fake, &machine(), "missing:image");
             let Outcome::Unknown(sentence) = &outcome else {
                 panic!("{report:?} must be unknown, not a verdict: {outcome:?}");
             };
@@ -667,7 +713,7 @@ mod tests {
             create: Err("Error response from daemon: could not create network".to_string()),
             ..Fake::passing()
         };
-        let outcome = run_with(&fake, "pi-agent:local");
+        let outcome = run_with(&fake, &machine(), "pi-agent:local");
         let Outcome::Unknown(sentence) = &outcome else {
             panic!("{outcome:?}");
         };
@@ -778,7 +824,7 @@ mod tests {
             reached: format!("{PROXY_TARGET} connected"),
             complaint: String::new(),
         });
-        let outcome = run_with(&fake, "pi-agent:local");
+        let outcome = run_with(&fake, &machine(), "pi-agent:local");
         assert_eq!(outcome, Outcome::Passed);
         assert_eq!(
             fake.asked.borrow().len(),
@@ -819,7 +865,7 @@ mod tests {
             reached: String::new(),
             complaint: String::new(),
         });
-        let outcome = run_with(&fake, "pi-agent:local");
+        let outcome = run_with(&fake, &machine(), "pi-agent:local");
         assert_eq!(outcome, Outcome::Passed);
         assert!(outcome.complaint().is_none(), "{outcome:?}");
         assert_eq!(fake.joined.borrow().as_slice(), [NETWORK]);
@@ -831,7 +877,10 @@ mod tests {
         // `Fake::passing()` has no proxy running: the second run would be a second silence, which is not evidence,
         // so it is not made — and a join of a container that is not there would be a `warn` at every boot.
         let fake = Fake::passing();
-        assert_eq!(run_with(&fake, "pi-agent:local"), Outcome::Passed);
+        assert_eq!(
+            run_with(&fake, &machine(), "pi-agent:local"),
+            Outcome::Passed
+        );
         assert_eq!(fake.asked.borrow().len(), 1);
         assert!(fake.joined.borrow().is_empty());
         assert!(fake.left.borrow().is_empty());

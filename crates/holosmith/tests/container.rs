@@ -205,6 +205,8 @@ fn settings(projects_root: &Path) -> ContainerSettings {
         image: image(),
         docker_host: None,
         limits: Limits::default(),
+        container_prefix: String::new(),
+        network_prefix: String::new(),
         preview_port: 3000,
     }
 }
@@ -456,6 +458,8 @@ fn the_container_step_runs_a_limited_container_with_no_way_out() {
         image: image(),
         docker_host: None,
         limits: TEST_LIMITS,
+        container_prefix: String::new(),
+        network_prefix: String::new(),
         preview_port: 3000,
     };
     let backend = DockerBackend::new(settings.clone());
@@ -484,7 +488,7 @@ fn the_container_step_runs_a_limited_container_with_no_way_out() {
             Provisioned::Nothing
         );
     });
-    assert_eq!(container.network, network_name(ID_RUN));
+    assert_eq!(container.network, network_name("", ID_RUN));
     assert!(
         wait_running(&docker, &container.name),
         "the container the step launched never came up"
@@ -990,7 +994,7 @@ fn the_egress_proxy_joins_a_session_network_under_its_alias_and_leaves_it() {
         docker: &docker,
         name: stand_in,
     };
-    let network = network_name(ID_PROXY);
+    let network = network_name("", ID_PROXY);
     docker.remove_container(stand_in);
     let _ = docker.remove_network(&network);
     docker

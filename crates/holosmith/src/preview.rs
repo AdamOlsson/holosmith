@@ -514,6 +514,11 @@ pub struct Containers {
     pub docker: Docker,
     /// The port a session's dev server listens on inside its container (the config's key).
     pub port: u16,
+    /// This run's session-network prefix (`network_prefix` + `agents_`), because the inspect call names the network
+    /// a container joined (HS-077: a smoke run's networks are its own).
+    pub network_prefix: String,
+    /// This run's session-container prefix (`container_prefix` + `s_`), for the same reason.
+    pub container_prefix: String,
 }
 
 /// The inspect format, with `NETWORK` standing in for the session's own network name.
@@ -525,8 +530,11 @@ with index .NetworkSettings.Networks \"NETWORK\"}}{{.IPAddress}}{{end}}";
 
 impl Upstream for Containers {
     fn address(&self, session: &str) -> Result<SocketAddr, Refusal> {
-        let name = format!("{}{session}", crate::container::NAME_PREFIX);
-        let format = FORMAT.replace("NETWORK", &crate::container::network_name(session));
+        let name = crate::container::container_name(&self.container_prefix, session);
+        let format = FORMAT.replace(
+            "NETWORK",
+            &crate::container::network_name(&self.network_prefix, session),
+        );
         let said = self
             .docker
             .inspect(&name, &format)

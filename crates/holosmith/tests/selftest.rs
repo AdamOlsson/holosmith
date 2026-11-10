@@ -46,7 +46,7 @@ fn an_internal_network_reaches_nothing_while_the_default_bridge_reaches_the_host
     let docker = Docker::new(None);
     let image = image();
 
-    let outcome = selftest::run(&docker, &image);
+    let outcome = selftest::run(&docker, &selftest::Names::of("", ""), &image);
     eprintln!("selftest on an internal network: {outcome}");
     match &outcome {
         Outcome::Passed => {}

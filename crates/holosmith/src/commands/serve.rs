@@ -161,7 +161,11 @@ pub fn run(args: ServeArgs) -> ExitCode {
             // asserted. Only a *proven* leak refuses the boot; a probe that could not run is a `warn`, because
             // a machine that cannot verify is not the same fact as a machine that was measured to leak (and a
             // machine whose image is not built yet must still serve) — ADR-0044.
-            let outcome = crate::selftest::run(&docker, &loaded.config.agent_image);
+            let names = crate::selftest::Names::of(
+                &loaded.config.container_prefix,
+                &loaded.config.network_prefix,
+            );
+            let outcome = crate::selftest::run(&docker, &names, &loaded.config.agent_image);
             if let Some(complaint) = outcome.complaint() {
                 complaints.push(complaint);
             }
@@ -498,6 +502,12 @@ pub fn run(args: ServeArgs) -> ExitCode {
             Arc::new(preview::Containers {
                 docker: Docker::new(loaded.config.docker_host.clone()),
                 port: loaded.config.preview_upstream_port,
+                network_prefix: crate::container::network_listing_prefix(
+                    &loaded.config.network_prefix,
+                ),
+                container_prefix: crate::container::container_listing_prefix(
+                    &loaded.config.container_prefix,
+                ),
             }),
             &state.tools,
         );

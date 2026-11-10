@@ -124,6 +124,8 @@ impl Scratch {
             image: image.to_string(),
             docker_host: None,
             limits: Limits::default(),
+            container_prefix: String::new(),
+            network_prefix: String::new(),
             preview_port: 3000,
         }
     }
