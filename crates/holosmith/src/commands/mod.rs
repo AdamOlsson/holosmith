@@ -11,6 +11,7 @@ pub mod key;
 pub mod logs;
 pub mod proxy;
 pub mod serve;
+pub mod smoke;
 pub mod status;
 pub mod uninstall;
 pub mod version;

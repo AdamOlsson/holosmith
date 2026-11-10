@@ -52,7 +52,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::config::Config;
-use crate::container::{container_listing_prefix, network_listing_prefix, network_name};
+use crate::container::{network_listing_prefix, network_name};
 use crate::db;
 use crate::deploy::{Target, UNIT_NAME};
 use crate::docker::{self, Docker};

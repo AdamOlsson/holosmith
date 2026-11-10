@@ -57,7 +57,13 @@ fn main() -> ExitCode {
         }),
         Cmd::Container { action } => match action {
             ContainerAction::Snapshot => commands::container::run_snapshot(),
+            ContainerAction::FakePi { pi_args } => commands::container::run_fake_pi(&pi_args),
         },
+        Cmd::Smoke { binary, root } => commands::smoke::run(commands::smoke::SmokeArgs {
+            config: cli.config,
+            binary,
+            root,
+        }),
         Cmd::Status => commands::status::run(commands::status::StatusArgs { config: cli.config }),
         Cmd::Logs { follow, session } => commands::logs::run(commands::logs::LogsArgs {
             config: cli.config,

@@ -35,6 +35,19 @@ pub const PROXY_DOCKERFILE: &str = include_str!("../images/proxy.Dockerfile");
 /// The agent image's Dockerfile, for the same reason.
 pub const AGENT_DOCKERFILE: &str = include_str!("../images/agent.Dockerfile");
 
+/// The **smoke** image's recipe (HS-077, spec item 10 step 2): the candidate as `pi`, on the agent image's base.
+///
+/// A third recipe rather than a variant of the agent image, because the two answer different questions: the agent
+/// image is what a session runs in production (pi at the pinned version, git, the toolchains), and this one exists so
+/// a *candidate binary* can prove itself with a `pi` that replays a recording. Built by `holosmith smoke`, never by
+/// `server deploy` — it is not what a promotion ships, and the ADR says so.
+pub const SMOKE_DOCKERFILE: &str = include_str!("../images/smoke.Dockerfile");
+
+/// The smoke image's tag: `holosmith-smoke:<version>`, one spelling for `images` and `smoke` (HS-077).
+pub fn smoke_image() -> String {
+    format!("holosmith-smoke:{}", env!("CARGO_PKG_VERSION"))
+}
+
 /// Where the binary lives inside both images (`--entrypoint`, and `holosmith container snapshot`).
 pub const BINARY_IN_IMAGE: &str = "/usr/local/bin/holosmith";
 
@@ -496,12 +509,20 @@ pub fn archive(dockerfile: &str, binary: &Path) -> Result<Vec<u8>, String> {
             binary.display()
         )
     })?;
+    Ok(archive_bytes(dockerfile, &program))
+}
+
+/// The same archive from bytes the caller already holds.
+///
+/// The smoke run's half (HS-077): it has read, hashed and ELF-checked the candidate before it builds anything, so a
+/// second read could be a second file — and a promotion's image is supposed to be built from the bytes it measured.
+pub fn archive_bytes(dockerfile: &str, program: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     push_entry(&mut out, "Dockerfile", 0o644, dockerfile.as_bytes());
-    push_entry(&mut out, "holosmith", 0o755, &program);
+    push_entry(&mut out, "holosmith", 0o755, program);
     // Two zero blocks end a tar archive: without them the daemon reads a truncated context.
     out.resize(out.len() + 1024, 0);
-    Ok(out)
+    out
 }
 
 /// One ustar entry: a 512-byte header, the data, and the zero padding that rounds it to a block.

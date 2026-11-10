@@ -371,7 +371,11 @@ pub trait SessionBackend {
 #[derive(Debug, Clone)]
 pub enum Backends {
     Stub(StubBackend),
-    Docker(DockerBackend),
+    /// Boxed since HS-077: the Docker backend carries the whole [`ContainerSettings`](crate::container::ContainerSettings),
+    /// and the two name prefixes grew it past the size where an enum variant is worth inlining. One value lives in
+    /// `AppState` for the process's life, so the indirection is free and the alternative — a `Box` in every field that
+    /// did not need one — is worse.
+    Docker(Box<DockerBackend>),
 }
 
 impl Backends {
@@ -384,7 +388,7 @@ impl Backends {
     pub fn for_run(backend: Backend, container: ContainerSettings) -> Self {
         match backend {
             Backend::Stub => Self::Stub(StubBackend::default()),
-            Backend::Docker => Self::Docker(DockerBackend::new(container)),
+            Backend::Docker => Self::Docker(Box::new(DockerBackend::new(container))),
         }
     }
 

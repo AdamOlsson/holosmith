@@ -86,6 +86,21 @@ pub enum Cmd {
         #[command(subcommand)]
         action: ContainerAction,
     },
+    /// Run the smoke test against a candidate binary (spec item 10 step 2).
+    ///
+    /// The promotion's go/no-go: it starts the binary named by `--binary` as a `serve` with a smoke config — its own
+    /// port, its own temporary roots, `smoke_` in front of every container and network it names — creates a session,
+    /// runs one turn through a container whose `pi` replays a recorded turn, asserts the frames, deletes it, and
+    /// answers 0 when the candidate passed, 1 when a measurement failed and 2 when the test could not run at all.
+    Smoke {
+        /// The binary to test. Absent means this executable.
+        #[arg(long, value_name = "PATH")]
+        binary: Option<PathBuf>,
+        /// The directory the smoke run's config, data root and scratch repository live under. Absent means
+        /// `<data_root>/smoke`, which is the one directory the config already guarantees the daemon can see.
+        #[arg(long, value_name = "DIR")]
+        root: Option<PathBuf>,
+    },
     /// What this machine is and what it is doing: role, version, uptime, session counts, the proxies, and the
     /// health of the machines registered with it (spec's Commands table).
     Status,
@@ -248,6 +263,23 @@ pub enum ProxyAction {
 pub enum ContainerAction {
     /// Save the worktree's uncommitted work at `refs/holosmith/wip/<HS_SESSION_ID>`.
     Snapshot,
+    /// Be pi, for the smoke run: replay the committed turn on stdin/stdout (spec item 10 step 2).
+    ///
+    /// The smoke image's `/usr/local/bin/pi` is a two-line wrapper around this, so a session's container runs this
+    /// binary under pi's own name and `agent::COLUMN`'s launch line, version check and record framing are the real
+    /// ones. Every argument after the subcommand is pi's and is **ignored** — `--mode rpc`, `--no-session`,
+    /// `--approve`, `--model` and `--thinking` are the launch's, and a fake that refused them would be a fake nobody
+    /// can start the way the build starts pi. `--version` answers the pinned version, which is what
+    /// `agent::version_of` asks the image.
+    FakePi {
+        /// pi's own flags, accepted and ignored; `--version` is the one that is read.
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "PI_ARGS"
+        )]
+        pi_args: Vec<String>,
+    },
 }
 
 /// The three key subcommands (spec CLI phase 1).

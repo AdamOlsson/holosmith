@@ -56,7 +56,7 @@ fn docker_state(dir: &TempDir, root: &Path) -> AppState {
         ..ContainerSettings::at(root, root.join("data"))
     };
     state.runtime = Runtime::started(Backend::Docker);
-    state.backend = Backends::Docker(DockerBackend::new(settings));
+    state.backend = Backends::Docker(Box::new(DockerBackend::new(settings)));
     state
 }
 

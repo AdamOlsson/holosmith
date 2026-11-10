@@ -7,6 +7,7 @@
 
 use std::process::ExitCode;
 
+use crate::fake_pi;
 use crate::snapshot;
 
 /// A session id as the database makes it. The id is joined into a temporary path, so the rule is
@@ -44,6 +45,34 @@ pub fn run_snapshot() -> ExitCode {
         }
         Err(error) => {
             eprintln!("holosmith: container snapshot: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `holosmith container fake-pi`: be pi for the smoke run (HS-077, spec item 10 step 2).
+///
+/// Two answers and one job. `--version` is the pinned pi version, because `agent::version_of` asks the image's `pi`
+/// which release it is and the smoke image's `pi` is this binary — answering the pin makes that check *measured*
+/// through the real launch path instead of skipped. Every other argument is pi's and is ignored; the stdin/stdout
+/// pair is the RPC channel and [`fake_pi::replay`] is the whole of it.
+///
+/// A refusal is on stderr with exit 1: a fixture this build may not replay (a newer schema) must fail the launch with
+/// a sentence rather than print a turn whose frames are quietly incomplete.
+pub fn run_fake_pi(pi_args: &[String]) -> ExitCode {
+    if pi_args
+        .iter()
+        .any(|argument| argument == crate::agent::VERSION_ARGUMENT)
+    {
+        println!("{}", crate::pins::pi_version());
+        return ExitCode::SUCCESS;
+    }
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    match fake_pi::replay(stdin.lock(), stdout.lock()) {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("holosmith: container fake-pi: {error}");
             ExitCode::FAILURE
         }
     }

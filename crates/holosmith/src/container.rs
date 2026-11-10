@@ -805,15 +805,27 @@ mod tests {
     /// run's. Six names, because a prefix that reached only some of them is exactly the bug the story cannot afford.
     #[test]
     fn a_prefix_is_composed_into_every_name_the_build_derives() {
-        assert_eq!(container_name("", "0123456789abcdef"), "s_0123456789abcdef".to_string());
-        assert_eq!(network_name("", "0123456789abcdef"), "agents_0123456789abcdef".to_string());
+        assert_eq!(
+            container_name("", "0123456789abcdef"),
+            "s_0123456789abcdef".to_string()
+        );
+        assert_eq!(
+            network_name("", "0123456789abcdef"),
+            "agents_0123456789abcdef".to_string()
+        );
         assert_eq!(proxy_name(""), "hs_egress");
         assert_eq!(crate::key::key_proxy_name(""), "hs_key");
         assert_eq!(container_listing_prefix(""), "s_");
         assert_eq!(network_listing_prefix(""), "agents_");
 
-        assert_eq!(container_name("smoke_", "0123456789abcdef"), "smoke_s_0123456789abcdef".to_string());
-        assert_eq!(network_name("smoke_", "0123456789abcdef"), "smoke_agents_0123456789abcdef".to_string());
+        assert_eq!(
+            container_name("smoke_", "0123456789abcdef"),
+            "smoke_s_0123456789abcdef".to_string()
+        );
+        assert_eq!(
+            network_name("smoke_", "0123456789abcdef"),
+            "smoke_agents_0123456789abcdef".to_string()
+        );
         assert_eq!(proxy_name("smoke_"), "smoke_hs_egress");
         assert_eq!(crate::key::key_proxy_name("smoke_"), "smoke_hs_key");
         assert_eq!(container_listing_prefix("smoke_"), "smoke_s_");
@@ -824,27 +836,37 @@ mod tests {
     /// container, its network, and **both** proxies — the ones an unprefixed smoke boot would replace on the machine.
     #[test]
     fn a_smoke_config_names_the_container_the_network_and_both_proxies() {
-        let mut config = Config::default();
-        config.container_prefix = "smoke_".to_string();
-        config.network_prefix = "smoke_".to_string();
+        let config = Config {
+            container_prefix: "smoke_".to_string(),
+            network_prefix: "smoke_".to_string(),
+            ..Config::default()
+        };
         let settings = ContainerSettings::of(&config);
         let container = SessionContainer::of(&settings, &session("holosmith", "0123456789abcdef"));
         assert_eq!(container.name, "smoke_s_0123456789abcdef".to_string());
-        assert_eq!(container.network, "smoke_agents_0123456789abcdef".to_string());
+        assert_eq!(
+            container.network,
+            "smoke_agents_0123456789abcdef".to_string()
+        );
         let run = container.run_args();
         assert!(
             run.windows(2)
-                .any(|pair| pair == ["--name", &"smoke_s_0123456789abcdef".to_string()]),
+                .any(|pair| pair == ["--name", "smoke_s_0123456789abcdef"]),
             "the run vector does not name the prefixed container: {run:?}"
         );
         assert!(
             run.windows(2)
-                .any(|pair| pair == ["--network", &"smoke_agents_0123456789abcdef".to_string()]),
+                .any(|pair| pair == ["--network", "smoke_agents_0123456789abcdef"]),
             "the run vector does not join the prefixed network: {run:?}"
         );
         let egress = EgressProxy::of(&config);
         assert_eq!(egress.name, "smoke_hs_egress");
-        assert!(egress.run_args().iter().any(|word| word == "smoke_hs_egress"));
+        assert!(
+            egress
+                .run_args()
+                .iter()
+                .any(|word| word == "smoke_hs_egress")
+        );
         let key = KeyProxy::of(&config);
         assert_eq!(key.name, "smoke_hs_key");
         assert!(key.run_args().iter().any(|word| word == "smoke_hs_key"));
