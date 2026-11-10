@@ -529,13 +529,26 @@ pub struct Containers {
 const FORMAT: &str = "{{.State.Running}} {{\
 with index .NetworkSettings.Networks \"NETWORK\"}}{{.IPAddress}}{{end}}";
 
+impl Containers {
+    /// The container this run inspects for a session: the composer with **this run's raw** prefix.
+    ///
+    /// Two methods rather than two calls inline, so the composition is assertable without a daemon: passing a
+    /// *composed* prefix here asks about `s_s_<id>`, which arrives as a `502` on a preview request and nothing else
+    /// (measured while this story's first gate run was red — HS-077's review, S4).
+    fn container_of(&self, session: &str) -> String {
+        crate::container::container_name(&self.container_prefix, session)
+    }
+
+    /// The network whose address the inspect format reads, composed the same way.
+    fn network_of(&self, session: &str) -> String {
+        crate::container::network_name(&self.network_prefix, session)
+    }
+}
+
 impl Upstream for Containers {
     fn address(&self, session: &str) -> Result<SocketAddr, Refusal> {
-        let name = crate::container::container_name(&self.container_prefix, session);
-        let format = FORMAT.replace(
-            "NETWORK",
-            &crate::container::network_name(&self.network_prefix, session),
-        );
+        let name = self.container_of(session);
+        let format = FORMAT.replace("NETWORK", &self.network_of(session));
         let said = self
             .docker
             .inspect(&name, &format)
@@ -1128,6 +1141,28 @@ mod tests {
 
     fn address() -> SocketAddr {
         SocketAddr::from(([172, 18, 0, 2], 3000))
+    }
+
+    /// The inspect names are composed **once**, from the raw prefixes: a composed one would ask the daemon about
+    /// `s_s_<id>` and the listener would answer `502` (HS-077's review, S4).
+    #[test]
+    fn the_inspect_names_are_composed_once_from_the_raw_prefix() {
+        let plain = Containers {
+            docker: Docker::new(None),
+            port: 3000,
+            container_prefix: String::new(),
+            network_prefix: String::new(),
+        };
+        assert_eq!(plain.container_of(ID), format!("s_{ID}"));
+        assert_eq!(plain.network_of(ID), format!("agents_{ID}"));
+        let smoke = Containers {
+            docker: Docker::new(None),
+            port: 3000,
+            container_prefix: "smoke_".to_string(),
+            network_prefix: "smoke_".to_string(),
+        };
+        assert_eq!(smoke.container_of(ID), format!("smoke_s_{ID}"));
+        assert_eq!(smoke.network_of(ID), format!("smoke_agents_{ID}"));
     }
 
     /// `rewrite` for the local arm, which is what every test here but the peer one drives.

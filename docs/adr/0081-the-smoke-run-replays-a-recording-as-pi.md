@@ -117,8 +117,18 @@ candidate), `idle_stop_min` 0 (the sweeper must not take the session mid-turn), 
 **The root defaults to `<data_root>/smoke`**, because the data root is the one directory the config already guarantees
 the daemon can see — it is a container mount source — and because HS-078 has to run this with no operator input. A
 `/tmp` root mounts as an empty root-owned directory and fails with no error anywhere (ADR-0035's measurement); `--root`
-is for anything else, and the gate and the demo pass `target/smoke-$$`. The run removes its root on every ending
-unless `HOLOSMITH_KEEP_SCRATCH=1`, and an unremovable leftover is itself a failure rather than a note.
+is for anything else, and the gate and the demo pass `target/smoke-$$`.
+
+The root's ending is three rules, and the middle one is why a refusal's sentence can point at a file:
+
+- **A passing run removes it**, and a root that cannot be removed after a pass is a **failure** (exit 1): a second
+  run would inherit a database, a worktree and a log that answer about the previous candidate.
+- **A failing run keeps it** — it is the evidence an operator reads, and the smoke config in it is what every refusal
+  in this command names. It is *not* removed on the way out, which is the one place this harness differs from a test's
+  scratch directory. `HOLOSMITH_KEEP_SCRATCH=1` keeps a passing one too.
+- **A directory that is not a smoke run's is refused, never deleted.** `--root` is an operator's argument, so the
+  harness recognises its own root by the first line of `config.toml` ([`smoke::CONFIG_MARKER`]) and refuses a
+  non-empty stranger by name. Deleting a path on a guess is not a failure a sentence can make good.
 
 **The prefix reaches five kinds of name, through one composer per kind, and every reader uses it** (config's
 `container_prefix`/`network_prefix`, HS-077's other half):
@@ -159,8 +169,11 @@ container and network by a bounded `docker ps`/`network ls`.
    and the run's own data root.
 3. **real** — the full run against the daemon, asserting its report, the row's absence, no `smoke_` container or
    network left, and the machine's two proxies by **id** (`docker inspect --format '{{.Id}}'`), because a replaced
-   container keeps its name — which is exactly the damage D5's prefixing exists to prevent. No daemon prints one
-   `note`, never a `SKIP`: a note withholds the `ok` line, so nothing can read as a pass that measured nothing.
+   container keeps its name — which is exactly the damage D5's prefixing exists to prevent. The case **makes** those
+   two containers (`docker create --name hs_egress hs_key`) rather than hoping an earlier case left them, because two
+   empty strings compare equal to themselves and a vacuous gate assertion cited by an ADR is this repository's
+   recurring finding. No daemon prints one `note`, never a `SKIP`, and the same holds for the one machine with no
+   local image to make the sentinels from.
 
 Arm 3 asserts the proxies are **running**, which is the only measurement the prefixing works; it cannot assert a
 provider call, and does not claim to.

@@ -278,6 +278,18 @@ pub struct Reconciler {
 }
 
 impl Reconciler {
+    /// The two prefixes this run **lists and strips** with: `container_prefix` + `s_`, `network_prefix` + `agents_`.
+    ///
+    /// A function of the config rather than two initialisers inside [`Reconciler::new`], so a test can ask what a
+    /// smoke run's reconciler will sweep without a database — the wiring a unit test of the composer cannot see
+    /// (HS-077's review, S4).
+    pub fn prefixes(config: &Config) -> (String, String) {
+        (
+            container_listing_prefix(&config.container_prefix),
+            network_listing_prefix(&config.network_prefix),
+        )
+    }
+
     pub fn new(
         database: Arc<Mutex<Database>>,
         events: EventWriter,
@@ -285,14 +297,15 @@ impl Reconciler {
         config: &Config,
         kind: Backend,
     ) -> Self {
+        let (container_prefix, network_prefix) = Self::prefixes(config);
         Self {
             database,
             events,
             backend,
             docker: Docker::new(config.docker_host.clone()),
             projects_root: config.projects_root.clone(),
-            container_prefix: container_listing_prefix(&config.container_prefix),
-            network_prefix: network_listing_prefix(&config.network_prefix),
+            container_prefix,
+            network_prefix,
             kind,
         }
     }
@@ -602,6 +615,24 @@ mod tests {
         assert!(containers_to_remove(&rows, &[], NAME_PREFIX).is_empty());
         assert!(networks_to_remove(&rows, &[], NETWORK_PREFIX).is_empty());
         assert_eq!(recoveries(&rows).len(), 1);
+    }
+
+    /// The wiring, not the composer: a smoke config's reconciler lists and strips `smoke_s_`/`smoke_agents_`, and a
+    /// default config's is the build's own two prefixes. Mutating `Reconciler::prefixes` to hand back the raw
+    /// config values — the mistake that would leave a smoke boot unable to sweep its own leftovers — fails here.
+    #[test]
+    fn a_smoke_configs_reconciler_sweeps_only_its_own_names() {
+        let mut config = Config::default();
+        assert_eq!(
+            Reconciler::prefixes(&config),
+            (NAME_PREFIX.to_string(), NETWORK_PREFIX.to_string())
+        );
+        config.container_prefix = "smoke_".to_string();
+        config.network_prefix = "smoke_".to_string();
+        assert_eq!(
+            Reconciler::prefixes(&config),
+            ("smoke_s_".to_string(), "smoke_agents_".to_string())
+        );
     }
 
     /// HS-077's other half: a sweep with a **composed** prefix takes only its own run's names.

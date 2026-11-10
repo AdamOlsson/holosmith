@@ -2855,6 +2855,21 @@ it rather than adding a caveat beside it.
   `Backends::Docker(DockerBackend)` crossed `large_enum_variant`'s threshold — a gate failure with no defect behind
   it. `Backends::Docker` is boxed: one value lives in `AppState`, so the indirection is free and the alternative was a
   lint allowance that would hide the next growth.
+- **A cleanup hung on the success path is a cleanup that never runs.** The first version put the server's stop, the
+  proxies' removal and the container/network check behind `and_then` on the measurement — so the *only* ending a
+  promotion cares about (a failed candidate) left a `serve` holding a data root that was then deleted underneath it,
+  and four `smoke_*` names on the machine. The cleanups now run unconditionally, the session's id is captured as soon
+  as it exists so a run that fails *after* the create force-removes its own names, and a cleanup failure on a failed
+  run is one printed line above the sentence that matters. `and_then` over a `Result` is a `&&`, not a `finally`.
+- **`--root` is an operator's argument, so "this is my scratch space" has to be provable.** The harness recognises a
+  root it wrote by the first line of `config.toml` (`smoke::CONFIG_MARKER`) and refuses a non-empty stranger by name;
+  the alternative was `remove_dir_all` on whatever path the flag named, which is one typo away from a home directory.
+  A passing run removes its root (and an unremovable one is a failure), a failing run keeps it as evidence.
+- **A gate assertion that compares two empty strings passes and measures nothing.** `case_smoke`'s proxy-by-id check
+  was written against containers an earlier case had already removed, so `check "" ""` was green — and the ADR cited
+  it as *the* proof the machine's proxies survive. The case now creates the two sentinels itself, fails if neither can
+  be made, and removes them at the end; the same shape (`[ -n "$x" ] || fail`) is what any future comparison of
+  "unchanged" should start with.
 - **A smoke run's root cannot live under `/tmp`.** It is `data_root`/`projects_root` for the candidate's own server, and
   the agent directory is a container mount source — the `/tmp` measurement ADR-0035 records, again. The default is
   `<data_root>/smoke`, which the config already guarantees the daemon can see; the gate and the demo pass

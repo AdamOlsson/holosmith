@@ -245,7 +245,7 @@ pub fn run(config: &Config, depth: Depth, tools: &Tools, machine: &dyn Machine) 
         } else {
             "the docker check above failed"
         };
-        let isolation = selftest::Names::of(&config.container_prefix, &config.network_prefix);
+        let isolation = selftest::Names::of(config);
         findings.push(network(machine, &isolation, image, docker_ok, because));
         // The two proxies by the names this run's config composes, so a smoke run's `doctor` looks at its own
         // (`smoke_hs_egress`, HS-077) rather than at the machine's.
@@ -1243,7 +1243,7 @@ mod tests {
         // must still print its list rather than claiming a leak.
         let finding = network(
             &NoDaemon,
-            &selftest::Names::of("", ""),
+            &selftest::Names::of(&Config::default()),
             "image",
             false,
             "the docker check above failed",

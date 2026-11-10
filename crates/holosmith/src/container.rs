@@ -98,9 +98,6 @@ pub fn proxy_url(session_id: &str) -> String {
     format!("http://{session_id}@{PROXY_ALIAS}:{}", crate::egress::PORT)
 }
 
-/// The command the container runs is pi's RPC loop (HS-031, [`crate::agent::COMMAND`]); until HS-030 the
-/// container was detached on `sleep infinity`, and this constant is what replaced that placeholder.
-///
 /// A session's private network: `agents_<id>`, with this run's network prefix in front of it (HS-077).
 ///
 /// The prefix is a value rather than a constant because the **smoke run** (item 10 step 2) must not touch the

@@ -86,12 +86,12 @@ pub enum Cmd {
         #[command(subcommand)]
         action: ContainerAction,
     },
-    /// Run the smoke test against a candidate binary (spec item 10 step 2).
+    /// Run the smoke run against a candidate binary: spec item 10 step 2, a promotion's go/no-go (ADR-0081).
     ///
     /// The promotion's go/no-go: it starts the binary named by `--binary` as a `serve` with a smoke config — its own
     /// port, its own temporary roots, `smoke_` in front of every container and network it names — creates a session,
     /// runs one turn through a container whose `pi` replays a recorded turn, asserts the frames, deletes it, and
-    /// answers 0 when the candidate passed, 1 when a measurement failed and 2 when the test could not run at all.
+    /// answers 0 when the candidate passed, 1 when a measurement failed and 2 when the run could not happen at all.
     Smoke {
         /// The binary to test. Absent means this executable.
         #[arg(long, value_name = "PATH")]

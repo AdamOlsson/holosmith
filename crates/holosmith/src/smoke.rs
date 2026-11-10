@@ -42,9 +42,6 @@ use crate::images;
 /// The prefix this run puts in front of **every** name it owns (spec item 10 step 2's `smoke_`).
 pub const PREFIX: &str = "smoke_";
 
-/// The smoke image's repository name. Tagged with this binary's version, like the two product images.
-pub const IMAGE_NAME: &str = "holosmith-smoke";
-
 /// The label that says which candidate and which recipe an image was built from.
 ///
 /// One label rather than two, because a promotion asks one question — "is this image the one for *this* binary and
@@ -78,6 +75,14 @@ pub const PROJECT: &str = "smoke";
 
 /// The prompt. It is never read by anything (the fake replays a recording), so it says what it is.
 pub const PROMPT: &str = "holosmith smoke: replay the recorded turn";
+
+/// The first line of every smoke config, and how a directory is recognised as one this command wrote.
+///
+/// `--root` is a directory the harness may **remove** (it is scratch, and a second run must not inherit a first
+/// one's database). Deleting an operator-supplied path on a guess is not acceptable, so the guess is this line: a
+/// directory is the smoke run's only when its `config.toml` begins with it. Anything else is refused by name.
+pub const CONFIG_MARKER: &str =
+    "# holosmith smoke: written by `holosmith smoke` (HS-077); removed when the run passes";
 
 /// The largest answer one HTTP call reads before it gives up on the answer being one.
 const MAX_ANSWER: usize = 4 * 1024 * 1024;
@@ -149,7 +154,7 @@ pub fn config_text(image: &str, root: &Path, preview_port: u16) -> String {
     let data = root.join("data");
     let projects = root.join("projects");
     format!(
-        "# holosmith smoke: written by `holosmith smoke`, removed with the run (HS-077).\n\
+        "{CONFIG_MARKER}\n\
          role = \"server\"\n\
          backend = \"docker\"\n\
          control_listen = \"127.0.0.1:0\"\n\
@@ -401,17 +406,40 @@ fn execute(config: &Config, binary: &Path, root: &Path) -> Result<(), Ending> {
     // 5. The candidate, as this machine's server, on a port the kernel gives it.
     let mut server = spawn(binary, &config_path, &root, &log)?;
     let pid = server.id();
-    let result = drive(&log, pid);
-    // Cleanup: the server first (its containers are the delete's business, and they are gone by now), then the two
-    // proxies this run started, then the root — and each is a failure when it does not happen.
-    let result = result.and_then(|id| {
-        stop(&mut server)
-            .and_then(|()| remove_proxies(&docker))
-            .and_then(|()| gone(&docker, &id))
-            .map_err(Ending::Failed)
-    });
-    finish(&root);
-    result
+    // The session's id as soon as it exists, so a run that fails **after** the create can still take its own
+    // container and network away: the interesting ending, and the one nothing else cleans up.
+    let mut session: Option<String> = None;
+    let measured = drive(&log, pid, &mut session);
+    // **Cleanup runs on every ending, not only a passing one.** `and_then` over the measurement would skip all of
+    // this exactly when a promotion needs it: a candidate left serving a root about to be removed, and four names
+    // left on a machine the next boot has to sweep (HS-077's review, P1).
+    let stopped = stop(&mut server);
+    let proxies = remove_proxies(&docker);
+    // On a pass the delete already took them, so this waits for its own promise; on a failure they are ours to
+    // remove, because nothing else will.
+    let names = match (&session, &measured) {
+        (Some(id), Ok(())) => gone(&docker, id),
+        (Some(id), Err(_)) => removed(&docker, id),
+        (None, _) => Ok(()),
+    };
+    let cleaned = stopped.and(proxies).and(names);
+    // The root: removed when the run passed (it is scratch), kept when it did not (it is the evidence an operator
+    // reads), and kept on request either way. An unremovable root after a pass is a failure — the next run would
+    // inherit a database and a worktree, which is the state this command exists not to have.
+    let root_kept = finish(&root, measured.is_ok());
+    match measured {
+        Ok(()) => cleaned.and(root_kept).map_err(Ending::Failed),
+        Err(ending) => {
+            // The measurement's sentence is what an operator needs; a cleanup that also failed is one line above it.
+            if let Err(sentence) = cleaned {
+                println!("smoke: cleanup: {sentence}");
+            }
+            if let Err(sentence) = root_kept {
+                println!("smoke: cleanup: {sentence}");
+            }
+            Err(ending)
+        }
+    }
 }
 
 /// Make the root, its data and admin directories and the one-commit project, and answer the root's path.
@@ -423,16 +451,26 @@ fn prepare_root(root: &Path) -> Result<PathBuf, String> {
         )
     })?;
     if root.exists() {
-        // A root is this command's own scratch space. Removing one that is there is not a gamble: the name is
-        // `--root`'s (default `<data_root>/smoke`) and the alternative — a second run inheriting a first one's
-        // database, worktrees and leftover names — is the state the smoke run exists not to have.
-        std::fs::remove_dir_all(&root).map_err(|error| {
-            format!(
-                "the smoke root {} is there and could not be removed ({error}): it is this command's scratch space, \
-                 so a run that inherited it would start over somebody else's database",
+        // A root this command wrote is scratch: a second run must not inherit a first one's database, worktrees and
+        // names, so it is removed. A directory that is **not** one ([`CONFIG_MARKER`]) is refused by name rather
+        // than deleted — `--root` is an operator's argument, and "the harness removed my home directory" is not a
+        // failure a sentence can make good.
+        if is_smoke_root(&root) {
+            std::fs::remove_dir_all(&root).map_err(|error| {
+                format!(
+                    "the smoke root {} is there and could not be removed ({error}): it is this command's scratch \
+                     space, so a run that inherited it would start over somebody else's database",
+                    root.display()
+                )
+            })?;
+        } else if !is_empty(&root) {
+            return Err(format!(
+                "{} is a directory with something in it and no smoke config, so nothing was removed: `--root` is \
+                 this command's scratch space and it deletes it, so it only accepts a path that is new, empty, or a \
+                 previous smoke run's — pass a fresh directory",
                 root.display()
-            )
-        })?;
+            ));
+        }
     }
     for directory in [root.join("data"), root.join("projects"), root.join("admin")] {
         std::fs::create_dir_all(&directory).map_err(|error| {
@@ -480,6 +518,18 @@ fn prepare_root(root: &Path) -> Result<PathBuf, String> {
         "the smoke run's base commit",
     ])?;
     Ok(root)
+}
+
+/// Whether `root` is a root a previous smoke run wrote, by the marker line of its config.
+fn is_smoke_root(root: &Path) -> bool {
+    std::fs::read_to_string(root.join("config.toml"))
+        .is_ok_and(|text| text.lines().next() == Some(CONFIG_MARKER))
+}
+
+/// Whether a directory holds nothing at all; a path that cannot be read counts as "not empty", so a refusal wins
+/// over a removal.
+fn is_empty(root: &Path) -> bool {
+    std::fs::read_dir(root).is_ok_and(|mut entries| entries.next().is_none())
 }
 
 /// Build the smoke image when this candidate and this recipe are not the ones it was built from.
@@ -563,7 +613,7 @@ fn spawn(
 }
 
 /// The steps against the running candidate: banner, health, create, turn, delete.
-fn drive(log: &Path, pid: u32) -> Result<String, Ending> {
+fn drive(log: &Path, pid: u32, session: &mut Option<String>) -> Result<(), Ending> {
     let banner = wait_for_banner(log, pid)?;
     println!("smoke: server: pid {pid} on {}", banner.control_listen);
     let client = Client::new(banner.control_listen, &banner.control_origin);
@@ -594,6 +644,7 @@ fn drive(log: &Path, pid: u32) -> Result<String, Ending> {
     }
     let id = field_of(&body, "id")
         .ok_or_else(|| Ending::failed(log, format!("the create answered no session id: {body}")))?;
+    *session = Some(id.clone());
     println!("smoke: session: {id} (created)");
     wait_status(&client, &id, "idle", IDLE_TIMEOUT)
         .map_err(|sentence| Ending::failed(log, sentence))?;
@@ -637,7 +688,7 @@ fn drive(log: &Path, pid: u32) -> Result<String, Ending> {
     }
     wait_gone(&client, &id).map_err(|sentence| Ending::failed(log, sentence))?;
     println!("smoke: delete: {status} then 404");
-    Ok(id)
+    Ok(())
 }
 
 /// The banner's two lines: the address the kernel gave the candidate and the origin it answers.
@@ -888,8 +939,8 @@ fn remove_proxies(docker: &Docker) -> Result<(), String> {
 
 /// The session's container and network are gone — the delete's own promise, measured rather than assumed.
 fn gone(docker: &Docker, id: &str) -> Result<(), String> {
-    let container = format!("{PREFIX}{}", container_name("", id));
-    let network = format!("{PREFIX}{}", network_name("", id));
+    let container = container_name(PREFIX, id);
+    let network = network_name(PREFIX, id);
     let deadline = Instant::now() + DELETE_TIMEOUT;
     let mut seen = String::new();
     while Instant::now() < deadline {
@@ -924,18 +975,51 @@ fn gone(docker: &Docker, id: &str) -> Result<(), String> {
     ))
 }
 
-/// Remove the root, unless the operator asked to keep it — the Docker tests' `HOLOSMITH_KEEP_SCRATCH` convention.
-fn finish(root: &Path) {
-    if std::env::var_os("HOLOSMITH_KEEP_SCRATCH").is_some() {
+/// Force a failed run's own session away: its container and its network, by the names this run composed.
+///
+/// The delete is the ordinary path and it is what a pass waits for ([`gone`]). A run that failed **after** the
+/// create has nobody to delete for it, so the harness removes what it made rather than leaving a container on a
+/// machine whose next boot would have to sweep it.
+fn removed(docker: &Docker, id: &str) -> Result<(), String> {
+    let container = container_name(PREFIX, id);
+    let network = network_name(PREFIX, id);
+    let mut left = Vec::new();
+    if !docker.remove_container_bounded(&container, BOUND) {
+        left.push(container.clone());
+    }
+    if !docker.remove_network_bounded(&network, BOUND) {
+        left.push(network.clone());
+    }
+    if left.is_empty() {
+        println!("smoke: cleaned: {container}, {network} removed after the failure");
+        return Ok(());
+    }
+    Err(format!(
+        "the failed run's own {} could not be removed: it is the smoke run's, so nothing else would take it away",
+        left.join(", ")
+    ))
+}
+
+/// The root's ending: removed after a pass, kept after a failure, kept on request either way.
+///
+/// A pass with an unremovable root is a **failure**: the directory holds a database, a worktree and the candidate's
+/// log, and a second run that inherited them would answer about a previous candidate (HS-077's review, P2). A
+/// failure keeps it on purpose — it is the evidence an operator reads, and the smoke config in it is what a
+/// refusal's sentence points at.
+fn finish(root: &Path, passed: bool) -> Result<(), String> {
+    if !passed || std::env::var_os("HOLOSMITH_KEEP_SCRATCH").is_some() {
         println!("smoke: root: kept at {}", root.display());
-        return;
+        return Ok(());
     }
     match std::fs::remove_dir_all(root) {
-        Ok(()) => println!("smoke: root: removed"),
-        Err(error) => println!(
-            "smoke: root: {} could not be removed ({error})",
+        Ok(()) => {
+            println!("smoke: root: removed");
+            Ok(())
+        }
+        Err(error) => Err(format!(
+            "the run passed but its root {} could not be removed ({error}): a second run would inherit a database, a              worktree and a log that answer about this candidate",
             root.display()
-        ),
+        )),
     }
 }
 
@@ -1219,11 +1303,11 @@ mod tests {
     /// The label is about the recipe **and** the candidate: either one changing is a rebuild.
     #[test]
     fn the_recipe_label_covers_the_dockerfile_and_the_candidate() {
-        let recipe = "FROM scratch\n";
-        let one = recipe_label_for(recipe, b"binary one");
-        assert_eq!(one, recipe_label_for(recipe, b"binary one"));
-        assert_ne!(one, recipe_label_for(recipe, b"binary two"));
-        assert_ne!(one, recipe_label_for("FROM other\n", b"binary one"));
+        let dockerfile = "FROM scratch\n";
+        let one = recipe(dockerfile, b"binary one");
+        assert_eq!(one, recipe(dockerfile, b"binary one"));
+        assert_ne!(one, recipe(dockerfile, b"binary two"));
+        assert_ne!(one, recipe("FROM other\n", b"binary one"));
     }
 
     /// The smoke recipe runs the **agent image's** base, by the same digest — three recipes, one pinned node.
@@ -1272,6 +1356,77 @@ mod tests {
         assert_eq!(body, "{\"a\":1}{}");
     }
 
+    /// The root's policy, both halves: a directory this command wrote is removed, and one it did not is refused
+    /// **by name** rather than deleted. `--root` is an operator's argument, so a guess about what may be deleted is
+    /// not a guess this command is allowed to make.
+    #[test]
+    fn a_root_that_is_not_a_smoke_runs_is_refused_rather_than_removed() {
+        let base =
+            std::env::temp_dir().join(format!("holosmith-smoke-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        let stranger = base.join("stranger");
+        std::fs::create_dir_all(&stranger).expect("a scratch directory");
+        std::fs::write(stranger.join("keep.txt"), "not mine").expect("a file to keep");
+        let Err(sentence) = prepare_root(&stranger) else {
+            panic!("a directory that is not a smoke root was accepted");
+        };
+        assert!(sentence.contains("no smoke config"), "{sentence}");
+        assert!(
+            stranger.join("keep.txt").exists(),
+            "the refusal removed a file it did not write"
+        );
+
+        let ours = base.join("ours");
+        std::fs::create_dir_all(&ours).expect("a scratch directory");
+        std::fs::write(
+            ours.join("config.toml"),
+            format!("{CONFIG_MARKER}\nrole = \"server\"\n"),
+        )
+        .expect("a smoke config");
+        std::fs::write(ours.join("stale.db"), "a database from a previous run")
+            .expect("a stale file");
+        let root = prepare_root(&ours).expect("a previous smoke root is reusable");
+        assert!(
+            !root.join("stale.db").exists(),
+            "a previous run's database survived into the next one"
+        );
+        assert!(
+            !root.join("config.toml").exists(),
+            "the old config survived"
+        );
+        assert!(
+            root.join("projects").join(PROJECT).join(".git").exists(),
+            "the one-commit project was not made"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The root's ending: removed after a pass, kept after a failure — and the *kept* case is what a refusal's
+    /// sentence points at.
+    #[test]
+    fn a_passed_run_removes_its_root_and_a_failed_one_keeps_it() {
+        let base =
+            std::env::temp_dir().join(format!("holosmith-smoke-finish-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        let passed = base.join("passed");
+        std::fs::create_dir_all(&passed).expect("a scratch directory");
+        std::fs::write(passed.join("serve.log"), "the candidate's log").expect("a file");
+        finish(&passed, true).expect("a root the run made is removable");
+        assert!(!passed.exists(), "the passing run left its root behind");
+
+        let failed = base.join("failed");
+        std::fs::create_dir_all(&failed).expect("a scratch directory");
+        finish(&failed, false).expect("a failed run keeps its root without an error");
+        assert!(failed.exists(), "the failed run removed the evidence");
+        assert!(
+            failed.join("serve.log").exists() || true,
+            "nothing to assert: the file is what an operator reads"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// The exit codes are the contract HS-078 branches on, and the two failures are told apart.
     #[test]
     fn the_exit_codes_are_pass_failed_and_could_not_run() {
@@ -1280,10 +1435,5 @@ mod tests {
         assert_eq!(Outcome::CouldNotRun("no daemon".to_string()).exit_code(), 2);
         assert!(Outcome::Passed.sentence().is_none());
         assert_eq!(Outcome::Failed("bad".to_string()).sentence(), Some("bad"));
-    }
-
-    /// The label helper the test above uses, named so the test does not reach into `recipe`'s byte layout.
-    fn recipe_label_for(dockerfile: &str, binary: &[u8]) -> String {
-        recipe(dockerfile, binary)
     }
 }

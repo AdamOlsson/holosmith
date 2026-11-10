@@ -719,7 +719,8 @@ fn sweep(
     let mut swept = Swept::default();
     // Two compositions, deliberately named differently: a **name** is the raw prefix plus the build's own
     // (`container_name`/`network_name`), and a **listing filter** is the composed one the daemon is asked for.
-    // Composing twice would ask for `s_s_<id>`, which is the defect this test exists for.
+    // Composing twice asks for `s_s_<id>`, which is what `tests/uninstall.rs`'s
+    // `a_forced_purge_removes_the_data_and_the_rows_own_names` caught on this story's first pass.
     let container_prefix = &config.container_prefix;
     let network_prefix = &config.network_prefix;
     for row in rows {

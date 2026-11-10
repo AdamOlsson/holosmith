@@ -11,7 +11,7 @@
 use std::process::Command;
 use std::time::Duration;
 
-use holosmith::agent::{self, AgentError, Ended, Received};
+use holosmith::agent::{self, Ended, Received};
 use holosmith::rpc::{Mapped, Mapping};
 use serde_json::{Value, json};
 
@@ -278,5 +278,4 @@ fn an_unparseable_command_is_skipped_rather_than_fatal() {
         ),
         "the answer echoes the id of the command it was given: {stdout}"
     );
-    let _ = AgentError::Closed;
 }

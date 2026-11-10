@@ -62,13 +62,17 @@ pub struct Names {
 }
 
 impl Names {
-    /// The names for a run with these two config prefixes ([`crate::config::Config::container_prefix`] and
-    /// `network_prefix`). Both empty is a normal machine: `holosmith-selftest`, `hs_egress`, `hs_key`.
-    pub fn of(container_prefix: &str, network_prefix: &str) -> Self {
+    /// The names a run with this config uses. A config with both prefixes empty is a normal machine:
+    /// `holosmith-selftest`, `hs_egress`, `hs_key`.
+    ///
+    /// The config is taken **whole** rather than as two `&str`s: two sibling strings of one type can be passed the
+    /// wrong way round, and that mistake is invisible whenever the two are equal — which is every machine but a
+    /// smoke run (HS-077's review, S4).
+    pub fn of(config: &crate::config::Config) -> Self {
         Self {
-            egress: crate::container::proxy_name(container_prefix),
-            key: crate::key::key_proxy_name(container_prefix),
-            network: format!("{network_prefix}{NETWORK}"),
+            egress: crate::container::proxy_name(&config.container_prefix),
+            key: crate::key::key_proxy_name(&config.container_prefix),
+            network: format!("{}{NETWORK}", config.network_prefix),
         }
     }
 }
@@ -314,7 +318,7 @@ pub fn run_with(runner: &dyn Runner, names: &Names, image: &str) -> Outcome {
     key_pair(runner, names, image);
     runner.remove_network(network);
     match report {
-        Ok(report) => decide(&report, &targets),
+        Ok(report) => decide(&report, &targets, &names.egress),
         Err(error) => Outcome::Unknown(format!(
             "the probe container could not be run, so this machine's isolation was not measured ({error}); \
              check that the image `{image}` exists on this machine and that `docker run` works without a tty"
@@ -423,7 +427,7 @@ fn key_pair(runner: &dyn Runner, names: &Names, image: &str) {
 ///
 /// Split out so the three answers are one function of one report — the shape `crate::exit::classify` has, and
 /// for the same reason: the decision is the thing worth testing, and the machine is the thing worth not needing.
-pub fn decide(report: &Report, targets: &[String]) -> Outcome {
+pub fn decide(report: &Report, targets: &[String], egress: &str) -> Outcome {
     match report.code {
         0 => Outcome::Passed,
         // Two findings, two sentences: a proxy that answers where nothing should leave is a wiring mistake
@@ -435,7 +439,7 @@ pub fn decide(report: &Report, targets: &[String]) -> Outcome {
              network is joined only when its row says it may be; `docker network inspect <network>` lists what \
              is attached",
             report.reached.trim(),
-            crate::container::PROXY_NAME,
+            egress,
         )),
         REACHED => Outcome::Failed(format!(
             "a container on an internal network reached {} — this machine would run sessions that are not \
@@ -489,7 +493,7 @@ mod tests {
 
     /// The names a machine with no prefixes uses: `holosmith-selftest`, `hs_egress`, `hs_key`.
     fn machine() -> Names {
-        Names::of("", "")
+        Names::of(&crate::config::Config::default())
     }
 
     /// The ruling HS-077 rests on, as one test: a prefix reaches **all three** names, and the empty prefix changes
@@ -498,7 +502,7 @@ mod tests {
     #[test]
     fn a_prefix_reaches_the_probe_network_and_both_proxies() {
         assert_eq!(
-            Names::of("", ""),
+            Names::of(&crate::config::Config::default()),
             Names {
                 egress: "hs_egress".to_string(),
                 key: "hs_key".to_string(),
@@ -506,12 +510,44 @@ mod tests {
             }
         );
         assert_eq!(
-            Names::of("smoke_", "smoke_"),
+            Names::of(&crate::config::Config {
+                container_prefix: "smoke_".to_string(),
+                network_prefix: "smoke_".to_string(),
+                ..crate::config::Config::default()
+            }),
             Names {
                 egress: "smoke_hs_egress".to_string(),
                 key: "smoke_hs_key".to_string(),
                 network: "smoke_holosmith-selftest".to_string(),
             }
+        );
+    }
+
+    /// The same ruling one step further: the *sentence* a leak produces names **this run's** proxy. A smoke boot that
+    /// measured a leak telling the operator to look at `hs_egress` would send them to the machine's container, which
+    /// the smoke run never joined — the reader-left-on-the-constant defect, in the one place a sentence matters most.
+    #[test]
+    fn a_leak_sentence_names_the_run_s_own_egress_proxy() {
+        let targets = vec![PUBLIC.to_string(), PROXY_TARGET.to_string()];
+        let reached = Report {
+            code: REACHED,
+            reached: format!("{PROXY_TARGET} connected"),
+            complaint: String::new(),
+        };
+        let smoke = Names::of(&crate::config::Config {
+            container_prefix: "smoke_".to_string(),
+            ..crate::config::Config::default()
+        });
+        let Outcome::Failed(sentence) = decide(&reached, &targets, &smoke.egress) else {
+            panic!("a proxy that answers where nothing should leave is a finding");
+        };
+        assert!(
+            sentence.contains("smoke_hs_egress"),
+            "the sentence does not name the smoke run's own proxy: {sentence}"
+        );
+        assert!(
+            !sentence.contains(" hs_egress "),
+            "the sentence names the machine's proxy, which this run never joined: {sentence}"
         );
     }
 
@@ -734,22 +770,30 @@ mod tests {
             reached: reached.to_string(),
             complaint: String::new(),
         };
-        assert_eq!(decide(&report(0, ""), &targets), Outcome::Passed);
+        assert_eq!(
+            decide(&report(0, ""), &targets, &machine().egress),
+            Outcome::Passed
+        );
         assert!(matches!(
-            decide(&report(REACHED, "x:1 refused"), &targets),
+            decide(&report(REACHED, "x:1 refused"), &targets, &machine().egress),
             Outcome::Failed(_)
         ));
         // The probe's own protocol is 9; anything else is a probe that did not finish, which is unknown.
         for code in [1, 2, 126, 127, 137] {
             assert!(
-                matches!(decide(&report(code, ""), &targets), Outcome::Unknown(_)),
+                matches!(
+                    decide(&report(code, ""), &targets, &machine().egress),
+                    Outcome::Unknown(_)
+                ),
                 "{code}"
             );
         }
         // A refused connection is a *reached* target, and the sentence says so in the probe's own words.
-        let Outcome::Failed(sentence) =
-            decide(&report(REACHED, "172.17.0.1:2375 refused"), &targets)
-        else {
+        let Outcome::Failed(sentence) = decide(
+            &report(REACHED, "172.17.0.1:2375 refused"),
+            &targets,
+            &machine().egress,
+        ) else {
             panic!("a refusal is a reach");
         };
         assert!(sentence.contains("refused"), "{sentence}");
@@ -772,9 +816,11 @@ mod tests {
         };
 
         // Only the proxy answered: the sentence names the proxy and the fix is the join, not the bridge.
-        let Outcome::Failed(sentence) =
-            decide(&report(&format!("{PROXY_TARGET} connected")), &targets)
-        else {
+        let Outcome::Failed(sentence) = decide(
+            &report(&format!("{PROXY_TARGET} connected")),
+            &targets,
+            &machine().egress,
+        ) else {
             panic!("a proxy that answers on a network that asked for no internet is a finding");
         };
         assert!(
@@ -794,6 +840,7 @@ mod tests {
         let Outcome::Failed(sentence) = decide(
             &report(&format!("{PUBLIC} connected,{PROXY_TARGET} connected")),
             &targets,
+            &machine().egress,
         ) else {
             panic!("a reached public address is always a finding");
         };
@@ -809,6 +856,7 @@ mod tests {
                     complaint: String::new(),
                 },
                 &targets,
+                &machine().egress,
             ),
             Outcome::Passed
         );
@@ -899,6 +947,7 @@ mod tests {
                 complaint: String::new(),
             },
             &targets,
+            &machine().egress,
         ) else {
             panic!("an unattributed finding is a finding");
         };

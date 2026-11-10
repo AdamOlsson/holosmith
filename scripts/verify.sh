@@ -11002,9 +11002,18 @@ SHIM
     rm -rf "$root"
     return 0
   fi
-  # The machine's own two proxies, by **id**: a start replaces a container's definition under the same name, so
-  # "the name is still there" would pass over exactly the damage the prefixed names exist to prevent.
-  proxies_before="$(docker inspect --format '{{.Id}}' hs_egress hs_key 2>/dev/null || true)"
+  # The machine's own two proxies, by **id**: a start `rm -f`s and re-runs both, and a replaced container keeps its
+  # name — only the id says whether it is the same one. They are made here rather than assumed, because
+  # `case_server_images` removed them and an empty string would compare equal to itself: a vacuous check that this
+  # ADR cites is the pattern this repository keeps re-finding (HS-077's review, S2).
+  sentinel="$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -E '^(holosmith-proxy:|alpine:)' | head -1)"
+  proxies_before=""
+  if [ -n "$sentinel" ] && docker create --name hs_egress "$sentinel" >/dev/null 2>&1 &&
+    docker create --name hs_key "$sentinel" >/dev/null 2>&1; then
+    proxies_before="$(docker inspect --format '{{.Id}}' hs_egress hs_key | tr '\n' ' ')"
+  else
+    printf 'note %s: no local image to make the two proxy sentinels from, so "the machine proxies were not replaced" was not measured\n' "$name"
+  fi
   code=0
   answer="$("$artifact" --config "$WORK/config.toml" smoke --binary "$artifact" --root "$root/real" 2>&1)" ||
     code=$?
@@ -11026,8 +11035,13 @@ SHIM
   networks="$(docker network ls -q --filter 'name=smoke_' 2>/dev/null || true)"
   [ -z "$networks" ] || fail "$name/leftover_network" "a smoke network outlived the run: $networks"
   assertions=$((assertions + 2))
-  proxies_after="$(docker inspect --format '{{.Id}}' hs_egress hs_key 2>/dev/null || true)"
-  check "$name/machine_proxies" "$proxies_before" "$proxies_after"
+  if [ -n "$proxies_before" ]; then
+    proxies_after="$(docker inspect --format '{{.Id}}' hs_egress hs_key 2>/dev/null | tr '\n' ' ' || true)"
+    [ -n "$proxies_after" ] ||
+      fail "$name/machine_proxies" "the machine's two sentinel proxies are gone: the smoke run took them"
+    check "$name/machine_proxies" "$proxies_before" "$proxies_after"
+  fi
+  docker rm -f hs_egress hs_key >/dev/null 2>&1 || true
   # The root is the run's scratch space and goes with it, so a second run cannot inherit a first one's database.
   [ ! -e "$root/real" ] || fail "$name/root" "the run left its root behind: $root/real"
 

@@ -46,7 +46,11 @@ fn an_internal_network_reaches_nothing_while_the_default_bridge_reaches_the_host
     let docker = Docker::new(None);
     let image = image();
 
-    let outcome = selftest::run(&docker, &selftest::Names::of("", ""), &image);
+    let outcome = selftest::run(
+        &docker,
+        &selftest::Names::of(&holosmith::config::Config::default()),
+        &image,
+    );
     eprintln!("selftest on an internal network: {outcome}");
     match &outcome {
         Outcome::Passed => {}
@@ -243,7 +247,9 @@ fn a_listener_on_the_proxy_alias_is_what_the_off_case_looks_for() {
         attached.reached
     );
     // And the decision turns that report into the proxy's own sentence, not the bridge's.
-    let Outcome::Failed(sentence) = selftest::decide(&attached, &targets) else {
+    let Outcome::Failed(sentence) =
+        selftest::decide(&attached, &targets, holosmith::container::PROXY_NAME)
+    else {
         panic!("the report must refuse the boot");
     };
     assert!(
