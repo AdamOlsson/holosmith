@@ -1095,8 +1095,8 @@ mod tests {
         assert_eq!(findings[1].outcome, Outcome::Pass);
         assert!(findings[1].sentence.contains("nothing here to hold"));
 
-        // The item 10 §7 moment: with this machine's own health answering, the same held port is the pass.
-        drop(held);
+        // The item 10 §7 moment: with this machine's own health answering, a port it holds is the pass — held
+        // across both arms, because the only interesting question about a *held* port is who is holding it.
         assert_eq!(
             port(listen, "control", Some(true)).outcome,
             Outcome::Pass,
@@ -1104,11 +1104,17 @@ mod tests {
         );
         // …and a held port on a machine that is *not* serving is the failure, which is what makes the line above
         // meaningful.
-        let held = TcpListener::bind(listen).expect("the port is bindable again");
         assert_eq!(port(listen, "control", Some(false)).outcome, Outcome::Fail);
         drop(held);
+        // The last arm asks about a port **this test has just taken and released**, and it takes a fresh one rather
+        // than `listen`: `port` binds and drops the address it is given, and a parallel test binding `:0` in that gap
+        // can be handed the port we just freed — measured as `AddrInUse` in a gate run (HS-077), which is a flake in
+        // this test and not a fact about the machine.
+        let probe = TcpListener::bind("127.0.0.1:0").expect("a port is bindable");
+        let fresh = probe.local_addr().expect("the bound address is known");
+        drop(probe);
         assert_eq!(
-            port(listen, "control", None).outcome,
+            port(fresh, "control", None).outcome,
             Outcome::Pass,
             "the port is free again, so the last check would be vacuous if it still failed"
         );
