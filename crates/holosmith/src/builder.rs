@@ -248,14 +248,18 @@ fn write_digest(out: &Path, built: &str) -> Result<(), String> {
 /// `e_machine` is what the file *is*, not what its name says (ADR-0078 reads it for the same reason), and the
 /// interpreter segment is what a glibc or static-PIE build has: `scripts/check-static.sh` asserts both with
 /// `readelf`, and this reads them from the bytes so the command can refuse its own output before placing it.
+///
+/// Each sentence names the **file**, not a build: two callers ask this question — `holosmith build` about the bytes
+/// its container wrote, and `holosmith smoke` about the `--binary` a promotion is about to make live (HS-077) — and
+/// only one of them ran a build.
 pub fn artifact_problem(path: &Path, bytes: &[u8], target: &str) -> Option<String> {
     let wanted = Machine::parse(target.split('-').next().unwrap_or(target));
     let machine = match Machine::of_elf(elf_field(bytes, 18).unwrap_or_default()) {
         Some(machine) => machine,
         None => {
             return Some(format!(
-                "the build produced {} but it is not an ELF binary for a machine this build names: a release is a \
-                 static Linux binary for {X86_64} or {AARCH64}",
+                "{} is not an ELF binary for a machine this build names: a release is a static Linux binary for \
+                 {X86_64} or {AARCH64}",
                 path.display()
             ));
         }
@@ -264,8 +268,8 @@ pub fn artifact_problem(path: &Path, bytes: &[u8], target: &str) -> Option<Strin
         && wanted != machine
     {
         return Some(format!(
-            "the build produced {} for {}, and {} was asked for: the container's toolchain did not build the \
-             target this command names",
+            "{} is an artifact for {}, and {} was asked for: the toolchain that produced it did not build the target \
+             this command names",
             path.display(),
             machine.word(),
             target
@@ -274,16 +278,16 @@ pub fn artifact_problem(path: &Path, bytes: &[u8], target: &str) -> Option<Strin
     // `e_type` 2 is `ET_EXEC`; 3 is `ET_DYN`, which is what a static-PIE build is and what ADR-0005 refuses.
     if elf_field(bytes, 16) != Some(2) {
         return Some(format!(
-            "the build produced {} but it is not an executable (ELF type {:?}, and 2 is what a static build is): \
-             a static-PIE artifact is what an exported RUSTFLAGS produces (ADR-0005)",
+            "{} is not an executable (ELF type {:?}, and 2 is what a static build is): a static-PIE artifact is \
+             what an exported RUSTFLAGS produces (ADR-0005)",
             path.display(),
             elf_field(bytes, 16)
         ));
     }
     if interpreter_segment(bytes).is_some() {
         return Some(format!(
-            "the build produced {} with a PT_INTERP segment, so it needs a dynamic loader: a release artifact is \
-             statically linked, and this one would not run on a machine without the loader it names",
+            "{} has a PT_INTERP segment, so it needs a dynamic loader: a release artifact is statically linked, and \
+             this one would not run on a machine without the loader it names",
             path.display()
         ));
     }

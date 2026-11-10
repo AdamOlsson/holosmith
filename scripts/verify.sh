@@ -38,7 +38,10 @@
 # and a `kill -9` left `running` comes back `idle · interrupted`, and the new process is not draining), the
 # release build of HS-076 in a case of its own (`case_build`: the orchestration measured through a `docker` stand-in
 # whose artifact is this tree's own binary and whose `cargo`/`rustc` stand-ins must never fire, plus the real
-# container build when this machine already has the builder image), and a Docker preflight that
+# container build when this machine already has the builder image), the smoke run of HS-077 in three arms and with
+# no skip (`case_smoke`: the artifact's own `container fake-pi` over two pipes, a `docker` stand-in that refuses the
+# smoke image and must be exit 1 with the smoke config on disk, and the real run — a session whose turn is asserted,
+# then deleted, with the machine's two proxies compared by id before and after), and a Docker preflight that
 # refuses to start with one sentence naming the fix, with no CORS header
 # on any answer, and stopping on SIGTERM with exit 0. Each case prints `ok <case>` once it passes — a
 # case that printed SKIP withholds that line, so the log can never call a check that measured nothing a
@@ -138,6 +141,16 @@ cleanup() {
     kill "$holder_pid" 2>/dev/null || true
     wait "$holder_pid" 2>/dev/null || true
   fi
+  # A **smoke run's** own names (HS-077). The harness removes its container, its network and its two proxies
+  # itself; this is what a `fail` in the middle needs, and the filter is `smoke_` and nothing else — the
+  # machine's own `hs_egress`/`hs_key` are not this case's to remove (the block above is).
+  local leftover
+  for leftover in $(docker ps -aq --filter 'name=smoke_' 2>/dev/null || true); do
+    docker rm --force "$leftover" >/dev/null 2>&1 || true
+  done
+  for leftover in $(docker network ls -q --filter 'name=smoke_' 2>/dev/null || true); do
+    docker network rm "$leftover" >/dev/null 2>&1 || true
+  done
   # And a case's own process, for the same reason (`case_push`'s receiver).
   if [ -n "$extra_pid" ] && kill -0 "$extra_pid" 2>/dev/null; then
     kill "$extra_pid" 2>/dev/null || true
@@ -488,6 +501,7 @@ serve_cases=(
   case_disk_quota
   case_server_images
   case_build
+  case_smoke
   case_server_deploy
   case_server_service
   case_deploy_ssh
@@ -10891,6 +10905,121 @@ case_server_images() {
 # it asserts what only a real build can — `file` says statically linked, `readelf -d` finds no dynamic section, and
 # the digest is the file's. Without them it prints one note and the first arm's measurements stand, because a `SKIP`
 # here would fire exactly when the feature is deleted (RESUME §6) and the first arm already fails on that.
+# HS-077: the smoke run — a candidate binary proving itself against the real daemon through a fake pi.
+#
+# Three arms and **no SKIP**. The first two are daemon-free and always run, so deleting the verb, the subcommand, the
+# fixture or the smoke config fails this case on any machine: the artifact's own `container fake-pi` over two pipes
+# (the recorded turn, its echoed ids and its `agent_settled`), and a `docker` stand-in that answers about itself and
+# refuses the image build, which must be exit **1** with the harness's own sentence and a smoke config on disk with
+# the four settings the acceptance names. The third arm is the real run — the candidate served, a session created, a
+# turn whose frames are asserted, the delete and the names gone — and prints a `note` (never a SKIP) when this machine
+# has no daemon, because a note withholds the `ok` line that says something was measured.
+case_smoke() {
+  local name=case_smoke root="$repo_root/target/verify-smoke-$$" bin="$root/bin" fake
+  local answer code pin usage containers networks proxies_before proxies_after
+  rm -rf "$root"
+  mkdir -p "$bin"
+
+  # Arm 1: the artifact's own fake pi, over two pipes. `--version` is the pin, because the image's `pi` is what
+  # `agent::version_of` asks; the two commands are a handshake and a prompt, and what must come out is the recorded
+  # turn — never the header line, never the recording's own command id (`req-1`), and always `agent_settled` last.
+  pin="$(tr -d '[:space:]' <"$repo_root/pins/pi.txt")"
+  answer="$("$artifact" container fake-pi --version)" || fail "$name/version" "the fake refused --version"
+  check "$name/version" "$pin" "$(printf '%s' "$answer" | tr -d '[:space:]')"
+
+  fake="$(printf '%s\n' \
+    '{"id":"ready-1","type":"get_state"}' \
+    '{"id":"turn-1","type":"prompt","message":"replay the recorded turn"}' |
+    "$artifact" container fake-pi)" || fail "$name/fake_pi" "the fake pi did not answer"
+  case "$(printf '%s\n' "$fake" | sed -n '1p')" in
+    *'"id":"ready-1"'*'"command":"get_state"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/handshake" "the first answer is not the get_state response: $(printf '%s\n' "$fake" | sed -n '1p')" ;;
+  esac
+  case "$fake" in
+    *'"id":"turn-1"'*'"command":"prompt"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/prompt" "no response echoed the prompt's own id" ;;
+  esac
+  case "$fake" in
+    *'"type":"fixture"'*) fail "$name/header" "the fixture's header line reached the client" ;;
+    *'"id":"req-1"'*) fail "$name/recorded_id" "the recording's own command id was replayed as an answer" ;;
+    *'"type":"tool_execution_start"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/tool" "the replayed turn holds no tool call" ;;
+  esac
+  check "$name/settled" '{"type":"agent_settled","aborted":false}' "$(printf '%s\n' "$fake" | tail -1)"
+  usage="$(printf '%s\n' "$fake" | grep -o '"totalTokens":[0-9]*' | sed 's/.*://' | sort -n | tail -1)"
+  [ -n "$usage" ] && [ "$usage" -gt 0 ] ||
+    fail "$name/usage" "the replayed turn reports no usage: '$usage'"
+
+  # Arm 2: a daemon that answers about itself and refuses to build the smoke image. Exit **1**, the harness's own
+  # sentence, and the smoke config on disk carrying the four settings that keep the run off the machine's state.
+  cat >"$bin/docker" <<'SHIM'
+#!/bin/sh
+case "$1" in
+  version) printf 'amd64\n' ;;
+  image) exit 1 ;;
+  build) cat >/dev/null; printf 'the stand-in daemon refused the smoke image\n' >&2; exit 1 ;;
+  *) exit 1 ;;
+esac
+SHIM
+  chmod 0755 "$bin/docker"
+  code=0
+  answer="$(PATH="$bin:$PATH" "$artifact" --config "$WORK/config.toml" smoke --binary "$artifact" \
+    --root "$root/config" 2>&1)" || code=$?
+  check "$name/build_exit" 1 "$code"
+  case "$answer" in
+    *"the stand-in daemon refused the smoke image"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/build_sentence" "the refusal did not carry the daemon's own words: $answer" ;;
+  esac
+  [ -f "$root/config/config.toml" ] ||
+    fail "$name/config" "no smoke config was written before the build: $answer"
+  grep -qx 'container_prefix = "smoke_"' "$root/config/config.toml" ||
+    fail "$name/container_prefix" "the smoke config does not prefix containers: $(cat "$root/config/config.toml")"
+  grep -qx 'network_prefix = "smoke_"' "$root/config/config.toml" ||
+    fail "$name/network_prefix" "the smoke config does not prefix networks: $(cat "$root/config/config.toml")"
+  grep -qx 'control_listen = "127.0.0.1:0"' "$root/config/config.toml" ||
+    fail "$name/port" "the smoke config does not ask for a port of its own: $(cat "$root/config/config.toml")"
+  grep -q "^data_root = \"$root/config/data\"$" "$root/config/config.toml" ||
+    fail "$name/data_root" "the smoke config's data root is not the run's own: $(cat "$root/config/config.toml")"
+  assertions=$((assertions + 4))
+
+  # Arm 3: the real thing.
+  if ! command -v docker >/dev/null 2>&1 || ! timeout 60 docker version >/dev/null 2>&1; then
+    printf 'note %s: no Docker daemon answers, so the real smoke run was not measured (arms 1 and 2 were)\n' "$name"
+    rm -rf "$root"
+    return 0
+  fi
+  # The machine's own two proxies, by **id**: a start replaces a container's definition under the same name, so
+  # "the name is still there" would pass over exactly the damage the prefixed names exist to prevent.
+  proxies_before="$(docker inspect --format '{{.Id}}' hs_egress hs_key 2>/dev/null || true)"
+  code=0
+  answer="$("$artifact" --config "$WORK/config.toml" smoke --binary "$artifact" --root "$root/real" 2>&1)" ||
+    code=$?
+  check "$name/exit" 0 "$code"
+  for line in 'smoke: image: holosmith-smoke:' 'smoke: session: ' 'smoke: turn: ' 'smoke: delete: 202 then 404' \
+    'smoke: gone: smoke_s_' 'smoke: proxies: smoke_hs_egress, smoke_hs_key removed' 'smoke: ok'; do
+    case "$answer" in
+      *"$line"*) assertions=$((assertions + 1)) ;;
+      *) fail "$name/report" "the run did not print '$line': $answer" ;;
+    esac
+  done
+  case "$answer" in
+    *'one tool call, usage '*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/turn" "the run did not report the turn's tool call and usage: $answer" ;;
+  esac
+  # Nothing of the run's own is left, and the machine's proxies are the containers they were.
+  containers="$(docker ps -aq --filter 'name=smoke_' 2>/dev/null || true)"
+  [ -z "$containers" ] || fail "$name/leftover_container" "a smoke container outlived the run: $containers"
+  networks="$(docker network ls -q --filter 'name=smoke_' 2>/dev/null || true)"
+  [ -z "$networks" ] || fail "$name/leftover_network" "a smoke network outlived the run: $networks"
+  assertions=$((assertions + 2))
+  proxies_after="$(docker inspect --format '{{.Id}}' hs_egress hs_key 2>/dev/null || true)"
+  check "$name/machine_proxies" "$proxies_before" "$proxies_after"
+  # The root is the run's scratch space and goes with it, so a second run cannot inherit a first one's database.
+  [ ! -e "$root/real" ] || fail "$name/root" "the run left its root behind: $root/real"
+
+  rm -rf "$root"
+}
+
 case_build() {
   local name=case_build root="$repo_root/target/verify-build-$$"
   local bin="$root/bin" out="$root/out" log="$root/docker.argv" compiled="$root/compiled"

@@ -485,8 +485,15 @@ A session backend that produces sessions, turns and events without Docker, git o
 _Avoid_: Mock, test mode, dry run
 
 **Fake pi**:
-A stand-in agent process inside a container that replays a recorded session.
-_Avoid_: Mock pi, test agent
+`holosmith container fake-pi`, and the `/usr/local/bin/pi` a **smoke image** puts in front of it: a program that speaks
+pi's side of the RPC protocol — every command answered with a `response` carrying the id it was *sent*, the
+**recorded turn** printed after the `prompt`'s answer, EOF exiting 0 — so a turn can be measured against the real
+daemon with no provider key. It is reached through pi's own name (a two-line wrapper), so the launch, the ready
+handshake, the JSONL framing and `agent::version_check` are the shipped ones; `fake-pi --version` answers the
+**pinned pi version** rather than the check being skipped. Its machine names are `fake_pi::replay`, `fake_pi::Header`
+and `fake_pi::records`. It is not the **stub backend**: the stub is in-process and provisions nothing (ADR-0001),
+while this is a process inside a container that the backend really launches.
+_Avoid_: Mock pi, stub pi, test agent, fake backend
 
 **Agent process**:
 The `pi` process a session's container runs, in RPC mode with the container's stdio attached: its stdout
@@ -969,6 +976,46 @@ _Avoid_: Deploy, upgrade, rollout
 **Rollback**:
 Pointing `current` back at the previous release.
 _Avoid_: Revert, downgrade
+
+**Smoke run**:
+`holosmith smoke [--binary PATH] [--root DIR]`: spec item 10's second step as one command, and a **promotion's**
+go/no-go. It starts the binary `--binary` names as a `serve` with a **smoke config**, builds the **smoke image** from
+that binary, creates a session, runs one turn through a **fake pi**, asserts the turn's frames, deletes the session and
+measures that its container and network went with the row — then exits **0** (passed), **1** (a measurement failed,
+including the image build) or **2** (it could not run here: no daemon, no `git`, a binary that is not this machine's).
+Its machine names are `smoke::run`, `smoke::Outcome`, `smoke::assert_frames`, `smoke::Report` and
+`smoke::LABEL_RECIPE`. It makes no provider call, so the **key proxy** is started and joined and never exercised; the
+smoke image is not what a promotion ships.
+_Avoid_: Smoke test (that is the step, not the command), self-test (that is `doctor`'s network measurement), canary,
+healthcheck
+
+**Smoke config**:
+The config file a **smoke run** writes before it asks the daemon anything, under its root: role `server`, backend
+`docker`, `control_listen = "127.0.0.1:0"` (the port is the kernel's), a `preview_listen` picked by a bind-and-drop,
+both roots under the run's own directory, `agent_image` = the **smoke image**, `container_prefix` and `network_prefix`
+both `smoke_`, the disk floor and the per-session cap off, `idle_stop_min` 0 and `max_live_sessions` 1. "Cannot touch
+real state" is those four settings **and** the five names the two prefixes compose.
+_Avoid_: Test config, temporary config, sandbox config
+
+**Smoke image**:
+`holosmith-smoke:<version>`, which a **smoke run** builds from the candidate's own bytes: the **agent image**'s
+digest-pinned node base, `COPY holosmith`, and `/usr/local/bin/pi` a wrapper onto `holosmith container fake-pi "$@"`
+(`crates/holosmith/images/smoke.Dockerfile`, embedded like the two product recipes). Nothing is installed on it — the
+**fake pi** replays records — and node stays because the boot's network self-test probes `agent_image` as `node -e`.
+Labelled `org.holosmith.smoke-recipe-sha256` with the SHA-256 of (recipe ‖ candidate bytes), so a changed recipe or a
+different candidate rebuilds and the same candidate again does not. It is not one of the **image build**'s two: a
+promotion never ships it, and `server deploy` does not build it.
+_Avoid_: Test image, agent image (that is the product one), fake image, mock image
+
+**Recorded turn**:
+`crates/holosmith/fixtures/smoke-turn.jsonl`: one header line (`{"type":"fixture","version":1,"schema":7,"recorded":
+"HS-032","turn":"tool"}`) and then HS-032's `pi-turn-tool.jsonl` **verbatim** — `agent_start`, deltas, one tool round
+trip, non-zero usage, closing `agent_settled`. Embedded in the binary (`include_str!`) because the container runs the
+candidate and has no file to read, and its header's `schema` is compared with `schema::SCHEMA_VERSION` by a test, so a
+schema change is a failure naming both numbers rather than a surprise at a promotion. At run time a newer header is
+refused and an older one replays with one printed note. It is a *recording plus a header*, not a hand-written fixture:
+a second test asserts the body is byte-identical to HS-032's file.
+_Avoid_: Fixture, test data, sample session, golden transcript
 
 **Remote deploy**:
 A deploy that runs on **another machine**: `holosmith server deploy --ssh user@host` (or `hub deploy`) sends the

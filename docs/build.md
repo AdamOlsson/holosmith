@@ -1377,6 +1377,42 @@ already holds a *different* binary for the same tag is refused rather than overw
 reach; it does not judge what that code does. The diff review (item 12, the Changes sheet) is the
 real gate and it happens before this command runs.
 
+## The smoke run: a candidate against the real daemon
+
+Spec item 10's second step, and the only automated evidence that a candidate binary can serve a session at all
+(ADR-0081). Run it against an artifact `holosmith build` placed — or let HS-078's `upgrade` run it for you:
+
+```bash
+holosmith smoke --binary releases/<tag>/holosmith --root target/smoke
+```
+
+It writes its own config under `--root` (default `<data_root>/smoke`), builds `holosmith-smoke:<version>` from the
+candidate's bytes, starts the candidate as `serve` on a port the kernel picks, creates a session in a one-commit
+repository it makes under the root, runs one turn, asserts the turn's frames, deletes the session, and removes the
+container, the network, its two proxies and the root. One `smoke: ` line per step, and the exit code is the answer:
+
+| Code | Meaning |
+|---|---|
+| 0 | the candidate passed: `smoke: ok` |
+| 1 | a measurement failed — including the smoke image build — so a promotion must refuse it |
+| 2 | the test could not run **here**: no daemon, no `git`, a `--binary` that is missing, not executable, or built for another CPU |
+
+`HOLOSMITH_KEEP_SCRATCH=1` keeps the root for inspection, the same variable the Docker tests honour.
+
+**What it measures, and what it does not.** The turn is real — a Docker container, the worktree, the network, the
+launch, the ready handshake, the event log and the delete — but its `pi` is
+`holosmith container fake-pi`, which replays `crates/holosmith/fixtures/smoke-turn.jsonl`: HS-032's recorded turn,
+committed with a header that names the schema it was recorded against. So **no provider call is made**, and the key
+proxy is started and joined and never exercised; V3's by-hand procedure above is what measures that path, because it
+needs a real key and no gate may hold one. The smoke image is not what a promotion ships either — `server deploy`'s
+step 3 still builds the two product images.
+
+**The dev instance does not cover this, and that is the point.** A `--backend stub` run (`serve` with the stub, the
+fake pi in-process) exercises the UI, the API and the event handling on a machine with no Docker; the container, git
+and proxy paths are the host smoke run's, which is why a story that changes any of them owes this command a green
+exit. `case_smoke` is the gate's half: three arms — the artifact's own fake pi over two pipes, a `docker` stand-in
+that refuses the image build, and the real run when the daemon answers — with no `SKIP` in any of them.
+
 ## Reproducibility
 
 Building on this machine is enough for development: `scripts/build.sh` is that path, and

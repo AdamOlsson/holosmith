@@ -2805,3 +2805,61 @@ it rather than adding a caveat beside it.
 - **`set -e` does not save a `cmd && fail …` idiom, and it does not need to — but `if cmd; then fail; fi` reads
   better.** A gate case that asserts a refusal is `if answer="$(…)"; then fail …; fi`; the `&&` form relies on `set -e`
   ignoring the left operand's failure, which is true and is not obvious at a glance.
+
+### Landmines: the fake pi and the smoke run (HS-077)
+
+- **The id in the recording is not the id the launch sent, and echoing it hangs the handshake.** `agent::request`
+  correlates by command id, so a fake that replays the recording's own `response` (`"id":"req-1"`) is a process that
+  never answers the `get_state` of `ready-1` — the launch fails with `READY_TIMEOUT` thirty seconds later, and the
+  sentence blames pi. The replay therefore answers every command with the **incoming** id and drops the recording's
+  own answer line along with its header. Both are asserted in `tests/fake_pi.rs` (`!"req-1"`) and in `case_smoke`
+  arm 1, because the failure mode looks like a plumbing bug rather than a fixture bug.
+- **A command answered with nothing is a hang in a different story.** The fake answers `abort`, `steer`,
+  `clear_queue` and anything unknown too: an unanswered `abort` is the ladder's `ABORT_TIMEOUT`, and an unanswered
+  `prompt` is a turn that never starts. That is also why pi's own flags are *accepted and ignored* — a fake that
+  refused `--model` would be a fake the shipped launch vector cannot start.
+- **PI-off-the-pin is how the version check stays measured.** `agent::version_of` asks the image's `pi --version` and
+  compares it with `pins/pi.txt`; the wrapper answers the pin, so the smoke run exercises the check rather than
+  skipping it. Skipping it would have been a claim nothing reads — the shape PER-108's P1 is about.
+- **A smoke boot that does not prefix the proxies replaces the machine's.** Measured on the way in: `proxies::start_*`
+  `rm -f`s and re-runs both containers, and the key proxy's mount is the **config's** key store — so an unprefixed
+  smoke run leaves the machine with a key proxy holding an empty store, and every live session's model calls fail at
+  that address until the next real boot. The prefix is not cosmetic for the egress proxy either: a replaced one loses
+  the per-session network joins it had. `case_smoke` arm 3 compares the machine's two proxies by
+  `docker inspect --format '{{.Id}}'` rather than by name, because a replaced container keeps its name.
+- **A `serve` boot runs the network self-test, so its network is a name too.** `selftest::run` creates
+  `holosmith-selftest`, joins the proxies to it and removes it; a smoke boot sharing that name with the machine's own
+  boot would have the two boots attaching each other's proxies. `selftest::Names::of` composes all three names
+  (`smoke_holosmith-selftest`, `smoke_hs_egress`, `smoke_hs_key`), and a unit test asserts the empty prefix reproduces
+  today's three byte for byte.
+- **Two `:0` listeners are refused, so the smoke config asks the kernel for one and picks the other.** `config` refuses
+  `preview_listen == control_listen`, so `--port 0` on the control listener plus `preview_listen = "127.0.0.1:0"` is a
+  config that cannot validate. The control port is the kernel's (`--port 0`, and `serve` re-derives `control_origin`
+  from the bound address); the preview port is a bind-and-drop, and the smoke run never uses it — losing that race
+  costs one `warn` in the candidate's log and nothing else.
+- **The banner is the only way to learn an ephemeral port, and it is in the log file.** The harness spawns the
+  candidate with `stderr` to `<root>/serve.log` (a pipe nobody drains wedges a chatty boot), then polls that file for
+  `control_listen`/`control_origin` with a deadline and a `kill -0` on the child. A candidate that exits before its
+  banner fails with the log's tail rather than a timeout, which is the difference between "it refuses this config" and
+  "it is slow".
+- **The deltas coalesce, so the assertion counts frames rather than deltas.** One recorded turn becomes **14** events
+  with **one** `message.delta` row, because the writer merges a message's consecutive deltas (ADR-0031). An assertion
+  that demanded seven deltas — the number the stub's pacing produces — would fail on the recording for a reason that is
+  not a defect. `assert_frames` requires `≥ 1` delta, one `tool.start`/`tool.end` pair with the same id, a
+  non-zero `usage`, and the turn pair.
+- **`artifact_problem`'s sentences named a build; a second caller has none.** HS-077 reuses the ELF reader to refuse a
+  `--binary` built for another CPU, and the sentences said "the build produced X but it is not an executable" — true
+  for `holosmith build`, false for a promotion's candidate. They now name the file and what is wrong with it, and each
+  caller adds its own consequence.
+- **Two config keys can push a backend past clippy's variant-size lint.** `ContainerSettings` grew by two `String`s, and
+  `Backends::Docker(DockerBackend)` crossed `large_enum_variant`'s threshold — a gate failure with no defect behind
+  it. `Backends::Docker` is boxed: one value lives in `AppState`, so the indirection is free and the alternative was a
+  lint allowance that would hide the next growth.
+- **A smoke run's root cannot live under `/tmp`.** It is `data_root`/`projects_root` for the candidate's own server, and
+  the agent directory is a container mount source — the `/tmp` measurement ADR-0035 records, again. The default is
+  `<data_root>/smoke`, which the config already guarantees the daemon can see; the gate and the demo pass
+  `target/smoke-$$`.
+- **The smoke image is rebuilt by most gate runs, and that is the label working.** `build.rs` bakes `git describe`, so
+  a new commit is new bytes, and `org.holosmith.smoke-recipe-sha256` covers the candidate's bytes as well as the
+  recipe. It is one `COPY` and one `RUN` on a base this machine already has — measured at a few seconds — not the
+  builder image's cold six minutes.
