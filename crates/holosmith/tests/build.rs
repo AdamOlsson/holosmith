@@ -160,6 +160,21 @@ fn the_same_bytes_again_are_idempotent() {
 }
 
 #[test]
+fn a_directory_with_the_right_bytes_but_no_digest_gets_one() {
+    // The digest write can fail after a successful rename — a full disk — and `upgrade` reads two files, so "already
+    // this build" has to mean both of them are there rather than only the bytes.
+    let dir = TempDir::new("build-current-no-digest");
+    let out = dir.path();
+    std::fs::write(out.join(builder::BINARY), b"binary").expect("the artifact");
+    let digest = digest_of(&out.join(builder::BINARY));
+    assert_eq!(builder::place(out, &digest), Ok(Placement::Current));
+    assert_eq!(
+        std::fs::read_to_string(out.join(builder::DIGEST)).expect("the digest file"),
+        format!("{digest}  {}\n", builder::BINARY)
+    );
+}
+
+#[test]
 fn a_different_binary_in_the_same_release_directory_is_refused() {
     let dir = TempDir::new("build-different");
     let out = dir.path();

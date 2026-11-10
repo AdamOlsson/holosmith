@@ -53,6 +53,18 @@ What it is pinned by:
   answer the question — editing the recipe without bumping `Cargo.toml` would leave the same tag over different
   toolchains, which is the mistake `org.holosmith.binary-sha256` exists to prevent on the product images.
 
+Two details of the recipe are load-bearing and each was a defect the review found or the first build measured:
+
+- **both stages are named, and the rust stage comes first.** `COPY --from=rust` resolves against *stage names* first
+  and an image reference second, so an unnamed `FROM rust:…` silently means `docker.io/library/rust:latest` — an extra
+  unpinned pull and a toolchain nobody pinned, which the first version of the recipe did. And a stage cannot copy
+  from itself, so the rust stage is the first `FROM` and node is the final image; `builder`'s own unit test reads the
+  file for every `COPY --from=` name.
+- **`CARGO_HOME` is not set.** Copied into a stage it is root-owned, and the build runs as the operator's uid, so
+  cargo cannot write its registry (`failed to create directory /usr/local/cargo/registry/cache/…`, measured on the
+  first real build after the stages were reordered). It uses `$HOME/.cargo` under `/build`, which the entry script
+  creates and the container throws away; the same reason `HOME` is set there rather than defaulted.
+
 The rust base's digest appears in **one** file, and `tests/pin_single_source.rs` — the test that keeps `pins/pi.txt`
 single — walks every tracked file to prove it. The pin is the `FROM` line, which is where the two recipes that already
 exist keep theirs; what a `pins/builder.txt` would add is a second place to read one value.

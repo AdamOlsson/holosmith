@@ -203,6 +203,10 @@ pub fn place(out: &Path, built: &str) -> Result<Placement, String> {
     let placement = if artifact.is_file() {
         let existing = images::digest(&artifact)?;
         if existing == built {
+            // The digest file is written here too when it is missing: a directory can hold the right bytes without
+            // it — a run whose rename succeeded and whose write failed leaves exactly that — and `upgrade` reads two
+            // files, so "already this build" must mean both are there.
+            write_digest(out, built)?;
             Placement::Current
         } else {
             Placement::Different {
@@ -218,19 +222,24 @@ pub fn place(out: &Path, built: &str) -> Result<Placement, String> {
                 artifact.display()
             )
         })?;
-        // The digest beside the artifact, in the format `sha256sum -c` reads: two spaces between the value and the
-        // name, because that is the file an operator checks with the tool they already have.
-        std::fs::write(out.join(DIGEST), format!("{built}  {BINARY}\n")).map_err(|error| {
-            format!(
-                "the artifact was placed at {} but its digest could not be written to {} ({error})",
-                artifact.display(),
-                out.join(DIGEST).display()
-            )
-        })?;
+        write_digest(out, built)?;
         Placement::Fresh
     };
     let _ = std::fs::remove_file(&pending);
     Ok(placement)
+}
+
+/// Write `<out>/holosmith.sha256` in the format `sha256sum -c` reads: two spaces between the value and the name,
+/// because that is the file an operator checks with the tool they already have.
+fn write_digest(out: &Path, built: &str) -> Result<(), String> {
+    let path = out.join(DIGEST);
+    std::fs::write(&path, format!("{built}  {BINARY}\n")).map_err(|error| {
+        format!(
+            "the artifact is at {} but its digest could not be written to {} ({error})",
+            out.join(BINARY).display(),
+            path.display()
+        )
+    })
 }
 
 /// The two properties of a release artifact this side can read without `file` or `readelf`: the machine it is for,
@@ -502,6 +511,37 @@ mod tests {
             );
             let digest = reference.rsplit("@sha256:").next().unwrap_or_default();
             assert_eq!(digest.len(), 64, "a digest is 64 hex characters: {line}");
+        }
+    }
+
+    #[test]
+    fn every_copy_from_names_a_stage_this_recipe_declares() {
+        // `COPY --from=rust` resolves against stage names first and an image reference second, so an unnamed `FROM`
+        // stage silently becomes `rust:latest` — an extra unpinned pull, and a toolchain nobody pinned. Measured in
+        // this story's review: the build loaded `docker.io/library/rust:latest` beside the pinned base.
+        let stages: Vec<&str> = DOCKERFILE
+            .lines()
+            .filter_map(|line| line.trim().split_once(" AS "))
+            .map(|(_, name)| name.trim())
+            .collect();
+        assert!(!stages.is_empty(), "the recipe declares its stages");
+        let copies: Vec<&str> = DOCKERFILE
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("COPY --from="))
+            .collect();
+        assert!(!copies.is_empty(), "the recipe copies from its stages");
+        for line in copies {
+            let name = line
+                .trim_start_matches("COPY --from=")
+                .split_whitespace()
+                .next()
+                .unwrap_or_default();
+            assert!(
+                stages.contains(&name),
+                "COPY --from={name} names no stage of this recipe (stages: {stages:?}): it would be an image \
+                 reference, and an unpinned one"
+            );
         }
     }
 

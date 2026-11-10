@@ -10,27 +10,42 @@
 # rule as `proxy.Dockerfile` and `agent.Dockerfile`), and the musl.cc tarballs are pinned by their SHA-256 in the
 # `RUN` lines below — a download is a pin only if its bytes are checked.
 #
+# The **second** stage is the final image: node is the base a session's build needs anyway, and rust is copied into
+# it. The order is not cosmetic — `COPY --from=rust` inside a stage named `rust` is a circular dependency, so the
+# rust stage has to come first.
+#
 # It carries no `holosmith` binary: the product images are built from this program, and this image builds the
 # program. Its `build-entry.sh` is the whole of what it runs.
+FROM rust:1.99.1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c AS rust
 FROM node:24-bookworm-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9 AS node
-FROM rust:1.99.1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c
 
-# rustc, cargo and rustup, taken from the pinned rust image rather than installed by a script: `curl … | sh` would
+# rustc, cargo and rustup, taken from the pinned rust stage rather than installed by a script: `curl … | sh` would
 # put an unpinned installer in the build path, which is the thing a pinned builder exists to avoid.
+#
+# **`AS rust` on the `FROM` above is load-bearing.** `COPY --from=rust` resolves against *stage names* first and an
+# image reference second, so an unnamed stage means `docker.io/library/rust:latest` — an extra unpinned pull, and a
+# toolchain from whatever `latest` is today. A unit test reads this file for exactly that.
 COPY --from=rust /usr/local/rustup /usr/local/rustup
 COPY --from=rust /usr/local/cargo /usr/local/cargo
 
-# node and npm, taken from the pinned node image for the web app (`scripts/build-web.sh` runs `npm ci`, the
-# transcript's tests and Vite). Copying the two files and recreating npm's two symlinks is the whole of it; the
-# node image and this base are the same Debian release, so the binary's libraries are here.
-COPY --from=node /usr/local/bin/node /usr/local/bin/node
-COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
-RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
- && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+# The toolchain's paths, set **before** the `RUN`s that use them: this stage's base is node, which knows nothing
+# about rustup, and an `ENV` at the end of the file is an environment no earlier instruction sees. (The first version
+# of this recipe got away without it only because the final stage *was* the rust image — which is the unnamed-stage
+# bug the recipe's own test now catches.)
+#
+# **`CARGO_HOME` is deliberately not set.** Copied into this stage it is root-owned, and the build runs as the
+# operator's uid — cargo then cannot write its registry (`failed to create directory
+# /usr/local/cargo/registry/cache/…`, measured), so it uses `$HOME/.cargo` under `/build` instead, which the entry
+# script creates and the container throws away.
+#
+# Never `RUSTFLAGS` (ADR-0005): it would disable `.cargo/config.toml`'s per-target `relocation-model=static` and
+# silently ship a static-PIE binary — one container out, the same trap.
+ENV RUSTUP_HOME=/usr/local/rustup \
+    PATH=/usr/local/cargo/bin:/opt/x86_64-linux-musl-cross/bin:/opt/aarch64-linux-musl-cross/bin:/usr/local/bin:/usr/bin:/bin
 
 # `build-essential` is the `cc` the `cc` crate needs for bundled SQLite on the host's own architecture, and git is
 # what `scripts/build.sh` asks for the tag (it answers `unknown` in a copy without `.git`, and `holosmith build`
-# passes `HOLOSMITH_GIT_TAG` instead).
+# passes `HOLOSMITH_GIT_TAG` instead). node and npm are the base's own.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential ca-certificates curl git \
  && rm -rf /var/lib/apt/lists/*
@@ -65,11 +80,5 @@ COPY build-entry.sh /usr/local/bin/holosmith-build
 # of mistake `org.holosmith.binary-sha256` exists to prevent on the product images (HS-048).
 ARG HOLOSMITH_BUILDER_RECIPE
 LABEL org.holosmith.builder-recipe-sha256="${HOLOSMITH_BUILDER_RECIPE}"
-
-# Never `RUSTFLAGS` (ADR-0005): it would disable `.cargo/config.toml`'s per-target `relocation-model=static` and
-# silently ship a static-PIE binary — one container out, the same trap.
-ENV RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:/opt/x86_64-linux-musl-cross/bin:/opt/aarch64-linux-musl-cross/bin:/usr/local/bin:/usr/bin:/bin
 
 ENTRYPOINT ["/bin/sh", "/usr/local/bin/holosmith-build"]

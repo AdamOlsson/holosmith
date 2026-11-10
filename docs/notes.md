@@ -2790,6 +2790,18 @@ it rather than adding a caveat beside it.
 - **Two recipes name the same node base digest, so a test holds them together.** The builder copies node out of the
   same `node:24-bookworm-slim` manifest the agent image is built on; `tests/build.rs` asserts the two digests agree, so
   a bump in one is a failing test rather than a stale toolchain nobody notices.
+- **A `COPY --from=<name>` that names no stage is an unpinned image pull.** `COPY --from=rust` resolves against
+  stage names first and an image reference second, so `FROM rust:1.99.1-bookworm@sha256:…` without `AS rust` gave the
+  build a toolchain from `docker.io/library/rust:latest` — visible in the build's own output as an extra
+  `FROM … rust:latest@sha256:…` line, and found by the review, not by a test. It also *worked*, which is why it
+  survived a green gate: the final stage happened to be the rust image, whose `ENV PATH` is what found `rustup`. The
+  recipe now names both stages, the rust stage is first (a stage cannot copy from itself), and a unit test asserts
+  every `COPY --from=` names a declared stage.
+- **A copied `CARGO_HOME` is root-owned, so the build cannot write its registry.** `COPY --from=rust
+  /usr/local/cargo /usr/local/cargo` into a *node* stage makes a root-owned directory, and the container runs as the
+  operator's uid: `failed to create directory /usr/local/cargo/registry/cache/…`. `CARGO_HOME` is unset in the recipe
+  and cargo uses `$HOME/.cargo` under `/build`. The sibling trap is the same shape: an `ENV` at the end of a
+  Dockerfile is an environment no earlier `RUN` sees, so the toolchain's `PATH` is set right after the `COPY`s.
 - **`set -e` does not save a `cmd && fail …` idiom, and it does not need to — but `if cmd; then fail; fi` reads
   better.** A gate case that asserts a refusal is `if answer="$(…)"; then fail …; fi`; the `&&` form relies on `set -e`
   ignoring the left operand's failure, which is true and is not obvious at a glance.

@@ -68,8 +68,11 @@ fn builder_base_digest() -> String {
         .map(str::trim)
         .find(|line| line.starts_with("FROM rust:"))
         .expect("the builder recipe names a rust base");
-    line.rsplit_once("@sha256:")
-        .map(|(_, digest)| digest.trim().to_string())
+    // The `FROM <ref> AS <stage>` line's second word is the reference; the digest is its last `@sha256:` field.
+    line.split_whitespace()
+        .nth(1)
+        .and_then(|reference| reference.rsplit_once("@sha256:"))
+        .map(|(_, digest)| digest.to_string())
         .expect("the builder's rust base is pinned by digest")
 }
 

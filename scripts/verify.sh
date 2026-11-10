@@ -35,11 +35,10 @@
 # (`case_drain`: the admin socket exists and is not an HTTP route, a wait shorter than a turn exits 1 and leaves
 # the drain on, the create and the prompt answer 503 `draining` while the reads answer 200, and the drain that
 # does finish stops the idle sessions with reason `server_restart`; `case_drain_restart`: the row an expired drain
-# and a `kill -9` left `running` comes back `idle · interrupted`, and the new process is not draining), and a
-# Docker preflight that
-# the release build of HS-076 in a case of its own (`case_build`: the orchestration measured through a `docker`
-# stand-in whose artifact is this tree's own binary and whose `cargo`/`rustc` stand-ins must never fire, plus the
-# real container build when this machine already has the builder image), and a Docker preflight that
+# and a `kill -9` left `running` comes back `idle · interrupted`, and the new process is not draining), the
+# release build of HS-076 in a case of its own (`case_build`: the orchestration measured through a `docker` stand-in
+# whose artifact is this tree's own binary and whose `cargo`/`rustc` stand-ins must never fire, plus the real
+# container build when this machine already has the builder image), and a Docker preflight that
 # refuses to start with one sentence naming the fix, with no CORS header
 # on any answer, and stopping on SIGTERM with exit 0. Each case prints `ok <case>` once it passes — a
 # case that printed SKIP withholds that line, so the log can never call a check that measured nothing a
@@ -10896,8 +10895,7 @@ case_build() {
   local name=case_build root="$repo_root/target/verify-build-$$"
   local bin="$root/bin" out="$root/out" log="$root/docker.argv" compiled="$root/compiled"
   local built="$root/built" fake="$root/fake.bin" recipe="$root/recipe.txt"
-  local host_target other_target image version tag plain digest said answer status
-  local artifact_line digest_line file_line dynamic real="$root/real"
+  local host_target other_target image version tag digest answer file_line dynamic real="$root/real"
   case "$(uname -m)" in
     x86_64)
       host_target=x86_64-unknown-linux-musl
