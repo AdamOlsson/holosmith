@@ -21,7 +21,11 @@ import {
   HOST_FORCE_LABEL,
   NO_CREATE_TARGET,
   STREAM_LOST,
+  awaySentence,
   createTargets,
+  isAwayCode,
+  ownLabel,
+  registryMissing,
   startLabel,
   HOST_REFUSALS,
   HOST_REMOVE_LABEL,
@@ -1694,22 +1698,32 @@ test("a session's action is spelled on the machine that owns it", () => {
 // ---- the machine a create names (HS-074) -----------------------------------------------------------
 
 test("a create may name this machine or a reachable peer, and nothing else", () => {
+  const origin = "https://hub.tail.ts.net";
   const rows = [
-    { name: "workshop", reach: "reachable" },
-    { name: "attic", reach: "unreachable" },
-    { name: "build-box", reach: "reachable" },
+    { name: "workshop", reach: "reachable", url: "https://workshop.tail.ts.net" },
+    { name: "attic", reach: "unreachable", url: "https://attic.tail.ts.net" },
+    { name: "build-box", reach: "reachable", url: "https://build.tail.ts.net" },
   ];
-  // This machine first — it is the one a single-machine deployment uses — then the registry's own order.
-  assert.deepEqual(createTargets("both", rows), [LOCAL_HOST, "workshop", "build-box"]);
+  // This machine first on a `both` machine — it is the one a single-machine deployment uses — then the registry's own
+  // order.
+  assert.deepEqual(createTargets("both", rows, origin), [LOCAL_HOST, "workshop", "build-box"]);
   // A hub runs no sessions of its own, so its own path is not offered (it answers `403 sessions_disabled`).
-  assert.deepEqual(createTargets("hub", rows), ["workshop", "build-box"]);
+  assert.deepEqual(createTargets("hub", rows, origin), ["workshop", "build-box"]);
   // An unreachable machine is not offered at all: the create would be the hop's own refusal, and a choice whose
   // only answer is a sentence is the control `createOffered` exists to withhold.
-  assert.ok(!createTargets("server", rows).includes("attic"));
-  assert.deepEqual(createTargets("server", []), [LOCAL_HOST]);
-  assert.deepEqual(createTargets("hub", []), []);
+  assert.ok(!createTargets("both", rows, origin).includes("attic"));
+  // A `server` forwards nothing — its own `/api/hosts/<name>/…` is its `404 not_found` (`forwardingNote`'s rule) — so
+  // it offers no peer at all, only this machine.
+  assert.deepEqual(createTargets("server", rows, origin), [LOCAL_HOST]);
+  assert.deepEqual(createTargets("both", [], origin), [LOCAL_HOST]);
+  assert.deepEqual(createTargets("hub", [], origin), []);
   // A registry row that said `reachable` in some other spelling is not a machine this page will post to.
-  assert.deepEqual(createTargets("hub", [{ name: "odd", reach: "Reachable" }]), []);
+  assert.deepEqual(createTargets("hub", [{ name: "odd", reach: "Reachable", url: "" }], origin), []);
+  // And a row that *is* this machine is not a peer: a hub whose seed names itself would otherwise be offered twice.
+  assert.deepEqual(
+    createTargets("hub", [{ name: "hubrow", reach: "reachable", url: origin }], origin),
+    [],
+  );
 });
 
 test("the button says which machine before the click, and a hub with nothing to offer says why", () => {
@@ -1724,4 +1738,28 @@ test("an away machine's sentences name what the page cannot do", () => {
   assert.match(AWAY_DETAIL, /request to the machine that owns it/);
   assert.match(STREAM_LOST, /stopped answering/);
   assert.notEqual(AWAY_DETAIL, STREAM_LOST);
+});
+
+test("an away machine's own words, and the two codes that earn them", () => {
+  // The two codes the hub answers for a forwarded call it could not deliver (HS-074) — the rule that keeps
+  // `upstream_unreachable: workshop could not be reached` off a screen.
+  assert.equal(isAwayCode("upstream_unreachable"), true);
+  assert.equal(isAwayCode("upstream_timeout"), true);
+  assert.equal(isAwayCode("not_found"), false, "a machine that answered is not away");
+  assert.equal(awaySentence("upstream_unreachable", "workshop could not be reached at http://x"), "workshop could not be reached at http://x");
+  assert.equal(awaySentence("upstream_timeout", "workshop did not answer in time"), "workshop did not answer in time");
+  // Anything else keeps `hostFailure`'s rule: the code in front of a sentence about what the operator typed.
+  assert.equal(awaySentence("not_found", "no such host"), "not_found: no such host");
+  assert.match(registryMissing("workshop could not be reached"), /^the registry could not be read/);
+});
+
+test("this machine's own name is what its own screens call it", () => {
+  // `local` is the URL space's word for this machine; a machine given a name of its own says that instead, because it
+  // is the string its notifications carry and the operator has to be able to see it.
+  assert.equal(ownLabel("local"), "local · this machine");
+  assert.equal(ownLabel(""), "local · this machine");
+  assert.equal(ownLabel("workshop"), "workshop · this machine");
+  // The `· this machine` half is not the name's: two machines may be called the same thing by mistake, and which page
+  // you are on is the one thing the row can still say.
+  assert.notEqual(ownLabel("workshop"), hostLabel("workshop"));
 });

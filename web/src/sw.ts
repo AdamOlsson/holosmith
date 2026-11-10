@@ -14,6 +14,7 @@
 
 import {
   SUBSCRIBE_PATH,
+  notificationData,
   notificationPath,
   notificationPayload,
   notificationTag,
@@ -100,7 +101,12 @@ scope.addEventListener("push", (event) => {
       tag: notificationTag(payload.sessionId),
       // A lock-screen entry that opens the session, and the icon the app already ships. `badge` is the small
       // monochrome slot Android draws; the same file is the honest answer there.
-      data: { session_id: payload.sessionId },
+      //
+      // `data` carries the host as well as the id (HS-074), and `push.ts`'s `notificationData` is what says so: a
+      // session lives on exactly one machine, the tap's path is `/hosts/<host>/sessions/<id>` on the hub's origin, and
+      // this worker has no page to ask which machine an id belongs to. Without the host every tap opened the *hub's*
+      // own `/sessions/<id>`, which holds no such row — the story's one P0.
+      data: notificationData(payload),
       icon: "/icons/icon-192.png",
       badge: "/icons/icon-192.png",
     }),

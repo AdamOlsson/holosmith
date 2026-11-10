@@ -25,7 +25,10 @@ import {
   isIos,
   isSessionId,
   machineState,
+  machineSubscription,
   navLinks,
+  notificationData,
+  subscriptionRoute,
   SCREENS,
   notificationPath,
   notificationPayload,
@@ -38,7 +41,7 @@ import {
   subscriptionBody,
   type PushFacts,
 } from "../src/push.ts";
-import { sessionHref } from "../src/transcript.ts";
+import { apiPath, sessionHref } from "../src/transcript.ts";
 
 // One well-formed session id: sixteen lowercase hex characters (`sessions::is_id`).
 const ID = "0123456789abcdef";
@@ -340,8 +343,9 @@ test("iOS is the phone and pad agents, and the iPad that pretends to be a Macint
 test("the machine's row names the machine and whether it is subscribed", () => {
   assert.equal(machineState("workshop", "subscribed"), "workshop · subscribed");
   assert.equal(machineState("workshop", "not-subscribed"), "workshop · not subscribed");
-  // A machine that did not answer says so: `not subscribed` would be a claim about a machine nothing measured.
-  assert.equal(machineState("workshop", "away"), "workshop · away");
+  // A machine that did not answer says so, in GLOSSARY's **Reach** word: `not subscribed` would be a claim about a
+  // machine nothing measured.
+  assert.equal(machineState("workshop", "unreachable"), "workshop · unreachable");
   // The sentence that explains why a second machine is a second subscription is not the row's, and says so.
   assert.match(PER_MACHINE_SENTENCE, /each machine has its own/);
 });
@@ -478,4 +482,49 @@ test("the shell links the manifest and an apple-touch icon", () => {
   assert.match(shell, /<link rel="apple-touch-icon" href="\/icons\/apple-touch-icon-180\.png"/);
   // iOS opens a home-screen app without Safari's chrome only when this is declared.
   assert.match(shell, /name="apple-mobile-web-app-capable" content="yes"/);
+});
+
+// ---- the two shapes a tap needs, and the route a machine's key is stored on (HS-074) ----------------
+
+test("the notification's data carries the host with the id, so a tap can name a machine", () => {
+  // The `push` handler hangs this on the notification and `notificationclick` reads it back; the two halves were
+  // written apart once and the host was lost, so this is one function and one test.
+  assert.deepEqual(
+    notificationData({ host: "workshop", sessionId: ID, kind: "turn_finished" }),
+    { host: "workshop", session_id: ID },
+  );
+  // Exactly two keys: a notification's `data` is this worker's own, and a third field would travel to the tap handler
+  // with no reader.
+  assert.deepEqual(
+    Object.keys(notificationData({ host: "workshop", sessionId: ID, kind: "error" })).sort(),
+    ["host", "session_id"],
+  );
+  // And the pair really names the machine's page — the failure the P0 produced was `""` here.
+  const data = notificationData({ host: "workshop", sessionId: ID, kind: "error" });
+  assert.equal(notificationPath(data.host, data.session_id), `/hosts/workshop/sessions/${ID}`);
+});
+
+test("a subscription is stored on the machine whose key signs for it", () => {
+  assert.equal(subscriptionRoute("local"), SUBSCRIBE_PATH);
+  assert.equal(subscriptionRoute(""), SUBSCRIBE_PATH);
+  assert.equal(subscriptionRoute("workshop"), "/api/hosts/workshop/push/subscribe");
+  // The same path `transcript.ts` builds for the hop — the second spelling, made safe here.
+  for (const host of ["local", "workshop", "build-box-2"]) {
+    assert.equal(subscriptionRoute(host), apiPath(host, "push/subscribe"), host);
+  }
+});
+
+test("a row says a word only once its machine has answered", () => {
+  // `null` is "nothing has been read", which is why the page draws the name and `reading…` rather than a claim.
+  assert.equal(machineSubscription("subscribe"), "not-subscribed");
+  assert.equal(machineSubscription("blocked"), "not-subscribed");
+  assert.equal(machineSubscription("no-key"), "not-subscribed");
+  assert.equal(machineSubscription("unsupported"), "not-subscribed");
+  // Only the arm that would undo a subscription says one exists.
+  assert.equal(machineSubscription("unsubscribe"), "subscribed");
+  // And a machine that did not answer is the reach word, never `not-subscribed`.
+  assert.equal(machineSubscription("away"), "unreachable");
+  // Every arm is covered: a seventh word would have to be classified here.
+  const actions = ["subscribe", "unsubscribe", "blocked", "unsupported", "no-key", "away"] as const;
+  assert.equal(new Set(actions.map(machineSubscription)).size, 3);
 });

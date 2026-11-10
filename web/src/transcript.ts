@@ -1235,11 +1235,39 @@ export function hostFailure(code: string, message: string): string {
   return HOST_REFUSALS.includes(code) ? message : `${code}: ${message}`;
 }
 
+// The two codes that mean **the machine did not answer** (HS-074): the hub's own `502` and `504` for a forwarded
+// call. They earn the peer's message alone, without the code in front, for `hostFailure`'s own reason one step out —
+// `upstream_unreachable: workshop could not be reached at http://…` reads as a word to look up about a machine that is
+// simply away (HS-071's rule on the list's groups, and this is the same rule for the two screens that did not have
+// it: a session's page and the settings screen's rows).
+export const UPSTREAM_CODES: readonly string[] = ["upstream_unreachable", "upstream_timeout"];
+
+export function isAwayCode(code: string): boolean {
+  return UPSTREAM_CODES.includes(code);
+}
+
+export function awaySentence(code: string, message: string): string {
+  return isAwayCode(code) ? message : hostFailure(code, message);
+}
+
 // What a session's machine is called on the screen. `local` is the name this machine's own sessions are reached
 // by (GLOSSARY's **Local**), and on a page that shows several machines the operator needs to know that this one is
 // the page's own host rather than another row in the registry.
 export function hostLabel(host: string): string {
   return host === LOCAL_HOST ? "local · this machine" : host;
+}
+
+// What **this** machine is called on its own screens (HS-074).
+//
+// `hostLabel` answers for a name in the URL space, where this machine's is the reserved `local`; a machine that has
+// been given a `machine_name` of its own says so instead, because that is the string its notifications carry and the
+// operator needs to see it — a mismatch with the hub's registry row is then visible on this screen rather than only
+// as a `404` when a notification is tapped. The `· this machine` half stays: it is *whose* page this is, which no
+// name can say (two machines may be called the same thing by mistake).
+export function ownLabel(machineName: string): string {
+  return machineName === "" || machineName === LOCAL_HOST
+    ? "local · this machine"
+    : `${machineName} · this machine`;
 }
 
 // One sentence for a machine whose role forwards nothing. A `server` still keeps a registry — the seed is copied to
@@ -1299,10 +1327,20 @@ export function createOffered(role: string): boolean {
 // is the registry's, which is by name, so the list is stable between loads.
 export function createTargets(
   role: string,
-  rows: readonly { name: string; reach: string }[],
+  rows: readonly { name: string; reach: string; url: string }[],
+  origin: string,
 ): string[] {
   const local = createOffered(role) ? [LOCAL_HOST] : [];
-  const reachable = rows.filter((row) => row.reach === "reachable").map((row) => row.name);
+  // Two filters, both the screen's own rules one hop out. A machine that does not `forwards` reaches no peer at all
+  // (its own `/api/hosts/<name>/…` is a `404 not_found`, which is the sentence `forwardingNote` already draws on the
+  // list), so it must offer no peer here. And a registry row whose `url` is this machine is this machine: a seed that
+  // names it would otherwise offer one computer twice.
+  if (!forwards(role)) {
+    return local;
+  }
+  const reachable = rows
+    .filter((row) => row.reach === "reachable" && !isLocalRow(row.url, origin))
+    .map((row) => row.name);
   return [...local, ...reachable];
 }
 
@@ -1321,6 +1359,12 @@ export const NO_CREATE_TARGET =
 // none of them: this sentence is why there is nothing else on the screen.
 export const AWAY_DETAIL =
   "every action on a session is a request to the machine that owns it, so they are offered again once it answers";
+
+// What the settings screen says when the registry could not be read: this machine's own row is still true, and the
+// other machines are missing for a reason rather than absent (HS-074).
+export function registryMissing(sentence: string): string {
+  return `the registry could not be read, so other machines are missing: ${sentence}`;
+}
 
 // A session page whose machine went away **while the page was open** (HS-074). The read that drew the screen
 // succeeded, so there is no reply to quote; the stream's own connection failing is the observation, and a cached

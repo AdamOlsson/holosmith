@@ -1453,8 +1453,9 @@ PY
   rm -rf "$root"
 }
 
-# The health payload: exactly six keys (the sixth is HS-067's application server key), and the uptime is not
-# predictable, so the assertion is the prefix and the closing brace (the shape tests/http_contract.rs uses).
+# The health payload: exactly seven keys (the sixth is HS-067's application server key, the seventh is HS-074's
+# machine name), and the uptime is not predictable, so the assertion is the prefix and the closing brace (the shape
+# tests/http_contract.rs uses — where the whole string is compared, because the counts are what move).
 case_health() {
   local name=case_health response content_type body expected
   fetch "$name" GET /api/health "Host: 127.0.0.1" ||
@@ -4703,7 +4704,7 @@ case_pwa() {
   for needle in \
     'a turn finished' 'a session failed' 'a turn timed out' 'a turn ran out of its budget' \
     'pushsubscriptionchange' 'notificationclick' 'openWindow' 'addEventListener("push"' \
-    'there is news about a session'; do
+    'there is news about a session' 'notificationData'; do
     grep -qF -- "$needle" "$WORK/responses/${name}_worker.body" ||
       fail "${name}_worker/sentences" "the served worker does not carry $needle"
     assertions=$((assertions + 1))
@@ -4768,7 +4769,7 @@ case_pwa() {
     'iOS delivers notifications only to an app on the home screen: tap Share, then Add to Home Screen, and open Holosmith from the icon' \
     'each machine has its own Web Push key pair, so a phone subscribes on every machine it uses' \
     'notifications are blocked for this app' \
-    'this machine has no Web Push key pair'; do
+    'this machine has no Web Push key pair' 'applicationServerKey' 'push/subscribe'; do
     grep -qF -- "$needle" "$WORK/responses/${name}_asset.body" ||
       fail "${name}_asset/settings" "the served bundle does not carry $needle"
     assertions=$((assertions + 1))
@@ -6089,8 +6090,10 @@ PYWS
 # budget of one token, so its own stub turn trips `budget_exceeded` and its own pusher signs the notification; the hub
 # is a `hub` whose `hosts.toml` names that peer `workshop`, which is the name the tap's path is built from.
 #
-# What is stood in for the phone: the TLS receiver below, the same one `case_push` runs, with two endpoints — a
-# different push service subscription per machine, because each machine's pair mints its own.
+# What is stood in for the phone: the TLS receiver below, the same one `case_push` runs, with two endpoints and one
+# browser key — a real phone mints a *second* subscription key per machine's application server key, and what this
+# case measures is the store (two rows, two databases) and the wire (the peer's own pair signs, the peer's own
+# endpoint receives), not the browser's key schedule.
 #
 # What it measures, in the acceptance's own order:
 #

@@ -565,6 +565,29 @@ before the boot, so the case pins it, `case_hosts`' idiom); and `status`'s `mach
 `tests/deploy.rs`'s, not this case's: a tag from an earlier case is not this case's fact, and the test's `Fake` records
 every build and every daemon call so both lists can be asserted empty.
 
+…and since HS-074, **one session list and one notification stream across machines**: `case_cross_machine` is two
+boots on one box — a `role = "server"` peer with `machine_name = "workshop"` and a budget of one token, and a
+`role = "hub"` whose `hosts.toml` names that peer — plus `case_push`'s `node:https` receiver standing in for the
+phone, with two endpoints and one browser key (a real phone mints a second subscription key per machine's
+application server key; what this case measures is the **store** and the **wire**). It needs `openssl`, `node` and
+`python3`, and **no daemon and no image**; each tool's absence is its own `SKIP` line, and none of them may read as
+a pass. It measures: the peer's own `machine_name` and its own `application_server_key` read through the hop (the
+`/api/health` seventh and sixth keys); one `push_subscriptions` row in the **peer's** `app.db` for a subscribe posted
+to `/api/hosts/workshop/push/subscribe` and the hub's own in the hub's — each machine's own table, which is what
+"each machine keeps its own subscriptions" means; a create posted to the same prefix whose row the **peer's own**
+`/api/sessions/<id>` answers (`idle`), which is the hub's create naming its machine in the path and nothing else; a
+stub turn tripped by the peer's own budget sending a push that arrives at the receiver as
+`workshop|<the hub's session id>|budget_exceeded`, decrypted and verified by code that is not the sender's; the peer
+stopped, and the hub answering `502 upstream_unreachable` with a sentence that names it; the hub's own
+`POST /api/sessions` still `403 sessions_disabled`; and the delete pair that empties the peer's table (one `DELETE`
+per machine is what the page loops). What it cannot measure is the **browser** deciding: the settings screen's rows,
+the picker, the away session page and the worker's tap are `main.ts`/`sw.ts`, and no gate may need a browser — the
+path rule and the row's word are `web/test/push.test.ts`'s (`notificationPath` against `sessionHref`,
+`subscriptionRoute` against `apiPath`, `machineSubscription`'s three words), `case_pwa` carries the bundle needles
+(`applicationServerKey`, `push/subscribe`, `notificationData`), and the two sentences the DOM draws are
+`web/test/transcript.test.ts`'s (`awaySentence`/`isAwayCode` for the two upstream codes, `ownLabel` for this
+machine's own name, `AWAY_DETAIL` and `STREAM_LOST` for the away session page and a stream lost under it).
+
 …and since HS-073, **`--ssh` deploys**: `case_deploy_ssh` measures the transport that carries a deploy to another
 machine, and it is built the only way this sandbox can build one — there is **no ssh key on this machine and no second
 machine**, so `ssh` is an `sh` stand-in on `PATH` that records every argv and runs the words after the host through

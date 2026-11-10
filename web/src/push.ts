@@ -24,6 +24,20 @@ export const COMPUTERS_PATH = "/computers";
 // The two push routes HS-066 built. The page never spells either anywhere else.
 export const SUBSCRIBE_PATH = "/api/push/subscribe";
 
+// Which machine a subscription is stored on, and therefore which machine's key signs for it (HS-074).
+//
+// This machine's own route for `local`, and a peer's for a name — the hub's forwarding route reaching that machine's
+// own `POST`/`DELETE /api/push/subscribe`, which is the same path shape `transcript.ts`'s `apiPath` builds. It is
+// spelled here because `push.ts` cannot import `transcript.ts` (node's ESM resolver wants an extension on every hop,
+// HS-071), and `web/test/push.test.ts` compares this with `apiPath(host, "push/subscribe")` over a table of machines:
+// two spellings, one test that makes the second safe.
+export function subscriptionRoute(host: string): string {
+  if (host === "" || host === LOCAL_NAME) {
+    return SUBSCRIBE_PATH;
+  }
+  return `/api/hosts/${encodeURIComponent(host)}/push/subscribe`;
+}
+
 // Spec item 11's four `kind` words, and the sentence each one earns. The payload is content-free by design
 // (ADR-0071), so these four strings are the whole of what a notification can say.
 const KIND_SENTENCES: Readonly<Record<string, string>> = {
@@ -90,6 +104,18 @@ export function notificationPath(host: string, sessionId: string): string {
     return `/sessions/${sessionId}`;
   }
   return HOST_NAME.test(host) ? `/hosts/${host}/sessions/${sessionId}` : "/";
+}
+
+// The `data` a notification carries to its own tap handler: the two fields `notificationclick` needs and nothing
+// else (HS-074).
+//
+// A second shape rather than the payload: the browser parses the payload out of the sealed record for the `push`
+// handler, and `notificationclick` later reads whatever this worker hung on the notification. Keeping the pair
+// together in one function is what stopped the two halves disagreeing once already — the `push` handler drew the
+// host in the title and forgot it here, so every tap opened *this* machine's `/sessions/<id>` instead of the
+// machine's `/hosts/<host>/sessions/<id>` (the story's P0, found in review).
+export function notificationData(payload: NotificationPayload): { host: string; session_id: string } {
+  return { host: payload.host, session_id: payload.sessionId };
 }
 
 // The notification's payload as the sender writes it: exactly `{host, session_id, kind}` (ADR-0071). `null` for
@@ -241,7 +267,7 @@ export function pushActionLabel(action: PushAction): string {
     case "no-key":
       return "No key";
     case "away":
-      return "Away";
+      return "Unreachable";
   }
 }
 
@@ -285,10 +311,31 @@ export function isIos(userAgent: string, maxTouchPoints: number): boolean {
 // machine nothing measured (the rule `COUNTS_UNKNOWN`'s `—` keeps one screen over). `subscribed` is read from the
 // browser for that machine's own application server key, so it is a fact about this device; the row is written by
 // `pushState`'s answer so the sentence beside the control and the control itself cannot disagree.
-export type MachineSubscription = "subscribed" | "not-subscribed" | "away";
+export type MachineSubscription = "subscribed" | "not-subscribed" | "unreachable";
+
+// Which word a control's arm earns on its own row, or `null` while nothing has been read — a row that has not asked
+// its machine yet must not say "not subscribed" (the `false`-is-a-claim rule HS-071's `COUNTS_UNKNOWN` keeps).
+//
+// `pushState`'s action is the input, so the row and the control cannot disagree: `unsubscribe` is the only arm that
+// means a subscription exists, `away` is the only one that means the machine did not answer (GLOSSARY's **Reach**
+// word, which is what a row that was not read is — never `false`), and the three that withhold a subscribe are a
+// machine this page has not subscribed to yet.
+export function machineSubscription(action: PushAction): MachineSubscription | null {
+  switch (action) {
+    case "unsubscribe":
+      return "subscribed";
+    case "away":
+      return "unreachable";
+    case "subscribe":
+    case "blocked":
+    case "no-key":
+    case "unsupported":
+      return "not-subscribed";
+  }
+}
 
 export function machineState(label: string, state: MachineSubscription): string {
-  const word = state === "away" ? "away" : state === "subscribed" ? "subscribed" : "not subscribed";
+  const word = state === "unreachable" ? "unreachable" : state === "subscribed" ? "subscribed" : "not subscribed";
   return `${label} · ${word}`;
 }
 

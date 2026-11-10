@@ -31,9 +31,12 @@ So the contract is the operator's: `machine_name` on the machine, the same strin
 `hosts.toml`. A mismatch is visible, not silent — the tap opens `/hosts/<name>/sessions/<id>` and the hub's forwarding
 route answers its own `404 unknown_host` (ADR-0074's decision 3), which the session page draws as a sentence.
 
-The value is also the **seventh `/api/health` key**, for HS-067's sixth key's reason: the page needs it to label its
-own row and a hub needs to read a peer's claim through the hop, and a browser cannot learn a machine's name any other
-way. `null` is not one of its arms — a machine always has a name, and `local` is the one with no name of its own.
+The value is also the **seventh `/api/health` key**, for HS-067's sixth key's reason, and it has the reader that
+promise needs: the page's `Health` declares it and `transcript.ts`'s `ownLabel` labels **this machine's own row** (on
+the settings screen and as the create form's first option) with the name its notifications carry — so an operator can
+check the one string the tap depends on, and a mismatch with the hub's row is visible rather than only audible as a
+`404`. A hub reads a peer's claim through the hop with the same key. `null` is not one of its arms: a machine always
+has a name, and `local` is the one with no name of its own (which is why `ownLabel` says `local · this machine`).
 
 ## D2 — a create names its machine **in the URL**, and the hub's own create stays refused
 
@@ -61,9 +64,11 @@ navigator.serviceWorker.ready → registration.pushManager.getSubscription({appl
 ```
 
 The key is read through the hop — `GET /api/hosts/<name>/health`'s `application_server_key` (HS-067) — so the settings
-screen's row per machine is drawn from facts that machine answered. The worker keeps its three events and gains the
-host in the notification's `data`, because `notificationclick` runs on the hub's origin and has no page to ask which
-machine an id belongs to.
+screen's row per machine is drawn from facts that machine answered. The worker keeps its three events and carries
+the host in the notification's `data` — `push.ts`'s `notificationData`, so the two fields are written and read by one
+function — because `notificationclick` runs on the hub's origin and has no page to ask which machine an id belongs to.
+That last sentence is the story's one P0: the first draft carried the host in the *title* and left `data` with the id
+alone, so every tap opened the hub's own `/sessions/<id>`.
 
 Three consequences worth naming:
 
@@ -74,23 +79,28 @@ Three consequences worth naming:
 - **`getSubscription()` with a key is the browser's own answer**, and a browser that ignores the option answers the
   *default* subscription; the page takes the safe half (`null` → `not subscribed`) rather than claiming a subscription
   it cannot attribute (HS-071's `false` rule, in a second screen).
-- **an away machine is a third state, not a `false`.** Its key and its stored row are both things only it can answer,
-  so the row is its sentence and no control.
+- **an unreachable machine is a third state, not a `false`.** Its key and its stored row are both things only it can
+  answer, so the row is its sentence and no control — and a row that has not been read yet says its name and
+  `reading…` rather than `not subscribed` (`machineSubscription` returns `null` for "nothing read").
 
 ## D4 — the delete loops **every** machine, and `404` is the answer the operator wanted
 
 One `DELETE` per machine, against that machine's own route with **that machine's** endpoint (each subscribe mints a
-different one). `404` is success — the row is already gone, which is the rule the local unsubscribe has kept since
-HS-067 — and anything else is that row's own sentence (`hostFailure`'s code-dropping rule, ADR-0076 D6). A machine
-that is away is therefore reported per row while the machines that answered are still cleared.
+different one, from `push.ts`'s `subscriptionRoute`). `404` is success — the row is already gone, which is the rule the
+local unsubscribe has kept since HS-067 — and anything else is that row's own sentence through `awaySentence`: the
+**message alone** for the two upstream codes (`502`/`504`), because `upstream_unreachable: workshop could not be
+reached` reads as a word to look up about a machine that is simply away, and `hostFailure`'s rule otherwise
+(ADR-0076 D6 — which drops the code only for the three registration codes, so the two screens that show an away
+machine use the second rule rather than citing the first, as this ADR's first draft wrongly did). A machine that is
+unreachable is therefore reported per row while the machines that answered are still cleared.
 
 ## D5 — an away machine degrades **per session**, and nothing is invented locally
 
 Two shapes, one rule (ADR-0017: every value on screen came from a response or a frame):
 
-- **the page's first read refused** with `502 upstream_unreachable`/`504 upstream_timeout`: the session's screen keeps
-  the way back and the machine's name, says the machine's sentence (no code — HS-071's rule for these two words), and
-  offers *Try again*. The four composer actions, the delete affordance and the Changes sheet are **not drawn**: every
+- **the page's first read refused** with `502 upstream_unreachable`/`504 upstream_timeout` (`transcript.ts`'s
+  `isAwayCode`): the session's screen keeps the way back and the machine's name, says the machine's sentence through
+  `awaySentence` (no code), and offers *Try again*. The four composer actions, the delete affordance and the Changes sheet are **not drawn**: every
   one of them is a request to that same machine.
 - **the machine leaving under an open page**: the stream's own connection failure is not a frame (`EventSource`
   dispatches a plain `Event` named `error`, which the transcript's loop already ignores), so one line above the
@@ -106,7 +116,8 @@ page was missing.
 `case_cross_machine`: a peer (`role = "server"`, `machine_name = "workshop"`, a budget of one token so its own stub
 turn trips `budget_exceeded`) and a hub (`role = "hub"`, a `hosts.toml` naming that peer `workshop`), on one box, plus
 `case_push`'s `node:https` receiver standing in for the phone with **two** endpoints — one per machine, because each
-pair mints its own. What it asserts is the acceptance item by item: the peer's own name and pair read through the hop;
+pair mints its own — the case sends one browser key to both, because what it measures is the store and the wire, not
+the browser's key schedule. What it asserts is the acceptance item by item: the peer's own name and pair read through the hop;
 one `push_subscriptions` row in the **peer's** `app.db` and the hub's own in the hub's (and not each other's); a
 forwarded create whose row the peer's own route answers; a payload that arrives as
 `workshop|<the hub's session id>|budget_exceeded`; the peer stopped ⇒ `502 upstream_unreachable` naming it; the hub's
@@ -114,7 +125,11 @@ own create still `403 sessions_disabled`; and a delete that empties the peer's t
 
 The path rule itself is `web/test/push.test.ts`'s — `notificationPath(host, id)` compared against `transcript.ts`'s
 `sessionHref(host, id)` over a table of hosts, because `push.ts` cannot import `transcript.ts` (node's ESM resolver
-wants an extension on every hop, HS-071's landmine). Two spellings, one test that makes the second one safe.
+wants an extension on every hop, HS-071's landmine). Two spellings, one test that makes the second one safe; the
+subscribe route is the same shape (`subscriptionRoute` against `apiPath(host, "push/subscribe")`), and the app half of
+bullet 1 — that the page passes *that machine's* key to *that machine's* route — is `case_pwa`'s two bundle needles
+(`applicationServerKey`, `push/subscribe`) plus that pairing rule. What no gate can see is the browser deciding: the
+settings rows and the picker are `main.ts`, and no gate may need a browser.
 
 ## What this does not measure
 

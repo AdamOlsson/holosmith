@@ -35,6 +35,8 @@ import {
   UNSAVED_WORK_NOTICE,
   AWAY_DETAIL,
   affordances,
+  awaySentence,
+  isAwayCode,
   apiPath,
   budgetNotice,
   ciWarning,
@@ -59,6 +61,7 @@ import {
   mergeBlocked,
   mergedNotice,
   networkText,
+  ownLabel,
   parseFrame,
   preselectedTarget,
   previewShown,
@@ -68,6 +71,7 @@ import {
   publishedNotice,
   parseTruncated,
   reachText,
+  registryMissing,
   relativeTime,
   sessionActionPath,
   sessionCounts,
@@ -101,11 +105,13 @@ import {
   installSentence,
   isIos,
   machineState,
+  machineSubscription,
   navLinks,
   pushActionLabel,
   pushActionable,
   pushState,
   subscriptionBody,
+  subscriptionRoute,
   type NavLink,
   type PushFacts,
   type PushState,
@@ -119,6 +125,10 @@ type Health = {
   // The machine's Web Push pair's public half, base64url, or `null` when it has none (HS-067, ADR-0072 D1). The
   // settings screen hands it straight to `pushManager.subscribe`, which is the only use it has.
   application_server_key: string | null;
+  // What this machine calls itself in a notification's payload (HS-074): the `machine_name` config key, `local` for a
+  // machine that has no name of its own. The settings screen labels its own row with it and the create form's first
+  // option too, so the string the tap's path is built from is one the operator can see.
+  machine_name: string;
   // The origin a session's preview is served on (HS-041): the listener's own origin, never the control one.
   preview_origin: string;
 };
@@ -522,7 +532,7 @@ function addSession(session: Session, host: string): void {
 // in the body: the post goes to `POST /api/hosts/<host>/sessions`, so a hub forwards it to the machine the operator
 // picked and a machine that runs no sessions still answers `403 sessions_disabled` for its own path. `targets` is
 // `createTargets`' answer — this machine first when it can create, then every reachable peer.
-function createSection(networkDefault: boolean, targets: string[]): HTMLElement {
+function createSection(networkDefault: boolean, targets: string[], ownName: string): HTMLElement {
   const section = make("section", "create");
   const form = document.createElement("form");
   const project = textInput("project", "holosmith");
@@ -547,7 +557,7 @@ function createSection(networkDefault: boolean, targets: string[]): HTMLElement 
   for (const host of targets) {
     const option = document.createElement("option");
     option.value = host;
-    option.textContent = hostLabel(host);
+    option.textContent = host === LOCAL_HOST ? ownLabel(ownName) : hostLabel(host);
     machine.append(option);
   }
   // Before the click, not only after it: the button names the machine the picker holds, so the one thing about this
@@ -2207,12 +2217,17 @@ function awayScreen(health: Health, host: string, code: string, message: string)
   retry.textContent = "Try again";
 
   const head = make("div", "session-head");
-  head.append(make("span", "project", hostLabel(host)), make("span", "state", "unreachable"));
+  // `state` is the badge's look; `machine-state` says which fact this badge is (a machine's reach, not a session's
+  // state) — `stateText`'s slot on the normal screen is the session's, and the two must not read as one vocabulary.
+  head.append(
+    make("span", "project", hostLabel(host)),
+    make("span", "state machine-state", "unreachable"),
+  );
 
   section.append(
     back,
     head,
-    make("p", "error", hostFailure(code, message)),
+    make("p", "error", awaySentence(code, message)),
     make("p", "notice", AWAY_DETAIL),
     retry,
   );
@@ -2359,7 +2374,7 @@ type MachineRow = {
 // The facts are read from the platform each time the screen is (re)drawn rather than kept: a permission the
 // operator changed in the browser's settings is a fact this page cannot be told about, and a subscription can be
 // rotated by the browser without asking anybody.
-function settingsSection(health: Health, hosts: HostRow[]): HTMLElement {
+function settingsSection(health: Health, hosts: HostRow[], origin: string): HTMLElement {
   const section = make("section", "settings");
   section.id = "settings";
 
@@ -2377,13 +2392,13 @@ function settingsSection(health: Health, hosts: HostRow[]): HTMLElement {
   const list = make("ul", "settings-machines");
   list.id = "settings-machines";
 
-  // This machine first, then every registry row that is not this machine's own row: the registry has a row for the
-  // local machine when the seed names it, and a second row for one machine would be a second subscription to the
-  // same origin.
-  const machines: string[] = [
-    LOCAL_HOST,
-    ...hosts.filter((row) => !isLocalRow(row.url, location.origin)).map((row) => row.name),
-  ];
+  // This machine first, then every registry row that is not this machine's own row — and a machine that forwards
+  // nothing has no peer rows at all (its own `/api/hosts/<name>/…` is a `404 not_found`, the sentence the list's
+  // `forwardingNote` already draws), so a `server` shows its own row and says nothing about the others.
+  const peers = forwards(health.role)
+    ? hosts.filter((row) => !isLocalRow(row.url, origin)).map((row) => row.name)
+    : [];
+  const machines: string[] = [LOCAL_HOST, ...peers];
 
   const rows: MachineRow[] = machines.map((host, index) => {
     const item = make("li", "settings-machine");
@@ -2408,6 +2423,12 @@ function settingsSection(health: Health, hosts: HostRow[]): HTMLElement {
     return { host, key: undefined, name, sentence, detail, action, decided: null };
   });
 
+  // What a machine's row is called: this machine's own name (`ownLabel`) for the local row, and the registry's name for
+  // a peer — the string the tap's path is built from in both cases.
+  function ownLabelFor(host: string): string {
+    return host === LOCAL_HOST ? ownLabel(health.machine_name) : hostLabel(host);
+  }
+
   // Only one of this screen's controls is ever in flight: a second tap while one subscribe is still asking the
   // browser for permission is the second subscribe ADR-0067's lesson is about.
   let busy = false;
@@ -2415,19 +2436,15 @@ function settingsSection(health: Health, hosts: HostRow[]): HTMLElement {
   function draw(): void {
     for (const row of rows) {
       const decided = row.decided;
-      const state =
-        decided === null
-          ? null
-          : decided.action === "away" || decided.action === "no-key"
-            ? null
-            : decided.action === "subscribe" || decided.action === "blocked" || decided.action === "unsupported"
-              ? "not-subscribed"
-              : "subscribed";
-      // `subscribed` is the action that would undo one, so it is the row's own word; everything else that is not
-      // away is a `not subscribed`, which is the safe half (HS-071).
-      const subscribed = decided !== null && decided.action === "unsubscribe";
-      row.name.textContent = machineState(hostLabel(row.host), decided?.action === "away" ? "away" : state ?? "not-subscribed");
-      row.name.dataset.subscribed = String(subscribed);
+      // Which word the row's own state earns is `push.ts`'s rule, and `null` while nothing has been read: a row that
+      // has not asked its machine yet shows its name and `reading…`, never `not subscribed` (the `false`-is-a-claim
+      // rule HS-071's `—` keeps, one screen over).
+      const state = decided === null ? null : machineSubscription(decided.action);
+      row.name.textContent =
+        state === null
+          ? hostLabel(row.host)
+          : machineState(ownLabelFor(row.host), state);
+      row.name.dataset.subscribed = String(state === "subscribed");
       row.sentence.textContent = decided?.sentence ?? GROUP_WAITING;
       row.detail.textContent = decided?.detail ?? "";
       row.detail.hidden = decided?.detail == null;
@@ -2513,7 +2530,7 @@ function settingsSection(health: Health, hosts: HostRow[]): HTMLElement {
       row.host === LOCAL_HOST
         ? ({ ok: true, value: health } as const)
         : await getJson<Health>(apiPath(row.host, "health"));
-    const away = read.ok ? null : hostFailure(read.code, read.message);
+    const away = read.ok ? null : awaySentence(read.code, read.message);
     row.key = read.ok ? read.value.application_server_key : undefined;
     const subscribed =
       supported && read.ok && row.key ? (await subscriptionFor(row.key ?? null)) !== null : false;
@@ -2562,7 +2579,7 @@ function settingsSection(health: Health, hosts: HostRow[]): HTMLElement {
     // That machine's own route, through the hub: `local` is this origin's own path, a peer is
     // `/api/hosts/<name>/push/subscribe`, which is HS-069's forwarding route reaching the peer's own
     // `POST /api/push/subscribe`. The row is stored **there**, sealed to **that** machine's pair.
-    const response = await fetch(apiPath(row.host, "push/subscribe"), {
+    const response = await fetch(subscriptionRoute(row.host), {
       method: "POST",
       headers: JSON_HEADERS,
       body: JSON.stringify(body),
@@ -2593,7 +2610,7 @@ function settingsSection(health: Health, hosts: HostRow[]): HTMLElement {
         continue;
       }
       const query = new URLSearchParams({ endpoint: subscription.endpoint }).toString();
-      const response = await fetch(`${apiPath(row.host, "push/subscribe")}?${query}`, {
+      const response = await fetch(`${subscriptionRoute(row.host)}?${query}`, {
         method: "DELETE",
         // A mutating request carries these even with no body (ADR-0010).
         headers: JSON_HEADERS,
@@ -2632,7 +2649,8 @@ function settingsSection(health: Health, hosts: HostRow[]): HTMLElement {
     row.action.addEventListener("click", () => act(row));
   }
 
-  // The first draw is `reading…` on every row until the platform has answered, so no control is offered on a guess.
+  // The first draw is a name and `reading…` on every row until the platform has answered, so neither the control nor
+  // the word on it is offered on a guess.
   draw();
   void Promise.all(rows.map(drawMachine));
 
@@ -2666,7 +2684,7 @@ function render(
   // that said it was reachable. A hub with no reachable peer says why instead of offering a choice that can only be
   // refused (§1.5's question 2, `createOffered`'s rule one machine out).
   if (targets.length > 0) {
-    sections.push(createSection(own.network_default, targets));
+    sections.push(createSection(own.network_default, targets, health.machine_name));
   } else {
     sections.push(noCreateSection());
   }
@@ -2715,7 +2733,7 @@ async function show(): Promise<void> {
       // the four composer actions, the delete, the Changes sheet — is a request to that same machine. So the screen
       // says whose session it is and what happened, and offers one thing that can now work: the same read again.
       // Anything else (a `404`, a refusal) keeps the plain notice, because the page has nothing to add to it.
-      if (session.code === "upstream_unreachable" || session.code === "upstream_timeout") {
+      if (isAwayCode(session.code)) {
         awayScreen(health.value, address.host, session.code, session.message);
         return;
       }
@@ -2733,12 +2751,12 @@ async function show(): Promise<void> {
     const hosts = await getJson<HostList>(apiPath(LOCAL_HOST, "hosts"));
     app?.replaceChildren(
       header(health.value, navLinks(location.pathname)),
-      settingsSection(health.value, hosts.ok ? hosts.value.hosts : []),
+      settingsSection(health.value, hosts.ok ? hosts.value.hosts : [], location.origin),
     );
     if (!hosts.ok) {
       const notice = document.getElementById("settings-notice");
       if (notice !== null) {
-        notice.textContent = `the registry could not be read, so other machines are missing: ${hostFailure(hosts.code, hosts.message)}`;
+        notice.textContent = registryMissing(awaySentence(hosts.code, hosts.message));
         notice.hidden = false;
       }
     }
@@ -2788,7 +2806,7 @@ async function show(): Promise<void> {
     own.value,
     [{ host: LOCAL_HOST, answer: own }, ...remote.map((row) => ({ host: row.name, answer: null }))],
     note,
-    createTargets(health.value.role, hosts.value.hosts),
+    createTargets(health.value.role, hosts.value.hosts, location.origin),
   );
   if (list === null) {
     return;

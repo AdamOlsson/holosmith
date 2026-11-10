@@ -2737,9 +2737,26 @@ it rather than adding a caveat beside it.
   `notificationPath(host, id) === sessionHref(host, id)` — and that table is exactly the names *both* are called
   with (`local` and registry names), because `sessionHref` percent-encodes while `notificationPath` refuses.
 - **`ends_with` on the health payload is a test that pins the last key, not the key it names.** Two tests asserted
-  the sixth key's `null` by `ends_with(...)`; adding a seventh moved them to `contains(...,",")` and one exact-shape
-  assertion. Every "exactly N keys, in this order" assertion in this build is a whole-string comparison for exactly
-  this reason.
+  the sixth key's `null` by `ends_with(...)`; adding a seventh moved them to `contains(...,",")` and one whole-string
+  assertion (the lib's and `tests/http_contract.rs`'s). A payload that grows by one key silently invalidates any
+  assertion about its *end*, which is why the "exactly N keys, in this order" tests compare the whole string.
+- **A page that offers a peer a machine which forwards nothing is offering a `404`.** `createTargets` and the
+  settings screen's row list filter registry rows on `reach`; the missing half is `forwards(role)` — a `server` keeps
+  a registry (the seed is copied everywhere) but its own `/api/hosts/<name>/…` is its `not_found`, so a peer row on a
+  `server` is a choice whose only answer is a refusal, and the settings row reads "unreachable" about a machine that
+  is up. `forwardingNote` had said this for the *list* since HS-071; the two new screens needed the same predicate and
+  the review found it, not a test.
+- **A row must not say a word before its machine has answered.** The settings screen's first draw had every row
+  showing "not subscribed" beside `reading…`, because the state cascade's `null` fell through to the default word — a
+  `false` about a machine nothing had asked, which is the rule `COUNTS_UNKNOWN`'s `—` keeps one screen over. The fix
+  is a rule (`machineSubscription` returns `null` for "nothing read") rather than a `??` in the page, because
+  `main.ts` is the one file no gate can see.
+- **A `python3` `str.replace` that is not asserted is a silent no-op, and this story shipped one.** The edit that was
+  meant to put the host into the notification's `data` used an `oldText` that did not exist (a comment sentence the
+  author had invented), so `replace` matched nothing, printed "ok", and left `sw.ts` writing `{session_id}` — a P0
+  that made every tap open the hub's own session page. Two habits prevent it: `assert old in s` before every
+  replacement (this file's other edits do), and a *reader* of the shape you changed (`grep` the new field, not the
+  function name) before believing the edit landed.
 - **Two `cat >"$WORK/x" <<'PY'` blocks in one case are two chances to end the outer heredoc.** Writing a case through
   a shell heredoc whose body contains `PY` heredocs terminates the outer one early — the python that was generating
   the case was the thing that broke, not the case. Generate a long bash case through a file, not through a heredoc.
