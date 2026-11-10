@@ -10915,8 +10915,11 @@ case_server_images() {
 # turn whose frames are asserted, the delete and the names gone — and prints a `note` (never a SKIP) when this machine
 # has no daemon, because a note withholds the `ok` line that says something was measured.
 case_smoke() {
-  local name=case_smoke root="$repo_root/target/verify-smoke-$$" bin="$root/bin" fake
-  local answer code pin usage containers networks proxies_before proxies_after
+  local name=case_smoke root="$repo_root/target/verify-smoke-$$" bin fake
+  local answer code pin usage containers networks proxies_before proxies_after first
+  # A second statement, because `local a=$x b=$a/b` expands every word *before* it assigns anything: under `set -u`
+  # that is `b: unbound variable`, which is how this case first failed (HS-077's third gate run).
+  bin="$root/bin"
   rm -rf "$root"
   mkdir -p "$bin"
 
@@ -10931,13 +10934,24 @@ case_smoke() {
     '{"id":"ready-1","type":"get_state"}' \
     '{"id":"turn-1","type":"prompt","message":"replay the recorded turn"}' |
     "$artifact" container fake-pi)" || fail "$name/fake_pi" "the fake pi did not answer"
-  case "$(printf '%s\n' "$fake" | sed -n '1p')" in
-    *'"id":"ready-1"'*'"command":"get_state"'*) assertions=$((assertions + 1)) ;;
-    *) fail "$name/handshake" "the first answer is not the get_state response: $(printf '%s\n' "$fake" | sed -n '1p')" ;;
+  # One line, two fields, in whatever order the encoder wrote them: serde_json sorts an object's keys, so a pattern
+  # that pinned `id` before `command` asserted the encoder rather than the answer (measured: this case's first run).
+  first="$(printf '%s\n' "$fake" | sed -n '1p')"
+  case "$first" in
+    *'"id":"ready-1"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/handshake" "the first answer does not carry the id that was sent: $first" ;;
+  esac
+  case "$first" in
+    *'"command":"get_state"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/handshake" "the first answer is not the get_state response: $first" ;;
   esac
   case "$fake" in
-    *'"id":"turn-1"'*'"command":"prompt"'*) assertions=$((assertions + 1)) ;;
+    *'"id":"turn-1"'*) assertions=$((assertions + 1)) ;;
     *) fail "$name/prompt" "no response echoed the prompt's own id" ;;
+  esac
+  case "$fake" in
+    *'"command":"prompt"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/prompt" "no answer named the prompt command" ;;
   esac
   case "$fake" in
     *'"type":"fixture"'*) fail "$name/header" "the fixture's header line reached the client" ;;
