@@ -1,4 +1,4 @@
-# RESUME — one issue per session (next: PER-109 / HS-077, fake pi, a recorded fixture and the smoke harness)
+# RESUME — one issue per session (next: PER-110 / HS-078, `holosmith upgrade <binary>`)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating procedure and
 still governs the cycle; this file is the state of the world, and it adds one rule of its own:
@@ -45,188 +45,195 @@ sandbox-specific incantation (§2).
 
 ---
 
-## 1. The issue this session picks up: `PER-109` — HS-077, fake pi, a recorded fixture and the smoke harness
+## 1. The issue this session picks up: `PER-110` — HS-078, `holosmith upgrade <binary>`
 
-**State when this file was written** (HEAD after the `Refresh the handoff after PER-108` commit, **tree clean** apart
-from the operator's own `log.txt`): **76 of 80 stories Done, 4 Backlog**, all in project `Holosmith`. `PER-109` is
-`Backlog`, it is the next in `HS-###` order, and its only blocker (`HS-076`, the pinned builder container) is `Done` —
-so it is eligible. **Check Linear's `Blocked by` list rather than this sentence if it turns out to be a stop.** It has
-**no screen**: this story is a subcommand and a harness, and the only user-visible surface is what they print.
+**State when this file was written** (HEAD after the `Record what the review found and what each answer was` commit,
+**tree clean** apart from the operator's own `log.txt`): **77 of 80 stories Done, 3 Backlog** (`PER-110`, `PER-111`,
+`PER-112`), all in project `Holosmith`. `PER-110` is the next in `HS-###` order, its blockers are `HS-077` (just
+shipped), `HS-051` and `HS-075` (Done), and it is eligible — **check Linear's `Blocked by` list rather than this
+sentence if it turns out to be a stop.** It has **no screen**: it is the promotion pipeline as one command, and its user-visible surface is what it
+prints.
 
-The last shipped story was `PER-108` (HS-076, the pinned builder container, **ADR-0080**) — two commits, one P1 in
-review (an unnamed Docker stage silently resolving to `rust:latest`) and a gate case whose first arm runs without a
-daemon. Its lessons are in `docs/review/PER-108.md`, `docs/notes.md`'s newest `### Landmines: the builder container
-(HS-076)` section and `git log`. It left `holosmith build` placing `<out>/holosmith` + `<out>/holosmith.sha256` where
-`upgrade` (HS-078) will read them, which is the file the smoke harness will be asked to promote.
+The last shipped story was `PER-109` (HS-077, fake pi + the recorded fixture + `holosmith smoke`, **ADR-0081**) — seven
+commits, a **BLOCK** review with one P1 (a cleanup hung on the success path, so a *failed* candidate left a `serve`
+and four `smoke_*` names behind) and its lessons are in `docs/review/PER-109.md`, `docs/notes.md`'s newest
+`### Landmines: the fake pi and the smoke run (HS-077)` section and `git log`. **It left the harness HS-078 calls**:
+`holosmith smoke --binary PATH` exits **0** passed, **1** a measurement failed (including the smoke image build) and
+**2** it could not run here, and `holosmith build` (HS-076) leaves `<out>/holosmith` + `<out>/holosmith.sha256` where
+`upgrade` must read them.
 
-**The four commits of this session are unpushed** (`git log origin/master..HEAD` — no ssh agent existed; see §2).
+**Every commit of the last five sessions is unpushed** (`git log origin/master..HEAD` — no ssh agent existed; see §2).
+The next session's first job is that command, then §2's single-key loop, before any story work.
 
 ### 1.1 The slice (verbatim from `docs/stories/phase-4-self-development.md`; Linear's body is the same text)
 
-> ### HS-077 — Fake pi, recorded fixture and the smoke harness
+> ### HS-078 — `holosmith upgrade <binary>`
 >
-> **As** the maintainer **I want** a candidate binary to prove itself against real Docker before going live **so that**
-> a bad release is caught by a robot, not by me at midnight.
+> **As** the operator **I want** one command to promote a new version safely **so that** self-development is not a
+> manual ritual.
 >
-> - **Size:** L · **Blocked by:** HS-076 · **Spec:** item 10 (step 2), Internal subcommands
-> - **Demo:** the smoke harness creates a session, runs a turn and deletes it against the real Docker daemon, using a
->   replayed session and no API key.
+> - **Size:** L · **Blocked by:** HS-077, HS-051, HS-075 · **Spec:** item 10, Commands table
+> - **Demo:** upgrade to a deliberately broken binary and watch it roll back by itself; upgrade to a good one and see
+>   the new version serving.
 >
 > **Acceptance**
-> - [ ] `holosmith container fake-pi` replays a recorded session from inside the container, including deltas, a tool
->   call and usage.
-> - [ ] A fixture recorded from a real turn (HS-032) is committed and versioned with the schema it was recorded
->   against.
-> - [ ] The smoke run uses a smoke config: alternate port, temporary data directory, `container_prefix=smoke_`,
->   `network_prefix=smoke_`, so it cannot touch real state.
-> - [ ] The harness creates a session, runs a turn, asserts events, and deletes it; any failure is a failed promotion.
-> - [ ] The harness runs against the real Docker daemon, so container, git and proxy paths are covered — the dev
->   instance does not cover those and the docs say so.
+> - [ ] Runs the spec's pipeline in order: review gate acknowledged, host smoke test, drain `--wait 10m`, DB backup
+>   with `VACUUM INTO backups/app-<ts>.db` keeping five, symlink switch, `systemctl restart`.
+> - [ ] Polls `/api/health` for 20 seconds; if the new version does not answer, switches the symlink back and
+>   restarts.
+> - [ ] Sessions live before the drain return to `idle` afterwards.
+> - [ ] Rebuilds the two images only when the binary or a pinned version changed.
+> - [ ] Refuses to upgrade while draining is already in progress, or when the candidate's schema is older than the
+>   database's.
+> - [ ] Prints the outcome with the version that is now live and the backup path.
 
 ### 1.2 The spec it closes
 
-`HolosmithSpec.md` **item 10, step 2**, verbatim:
+`HolosmithSpec.md` item 10's six steps, verbatim, are the pipeline: **1.** build in the pinned builder container
+(`holosmith build`, HS-076, done) and "review the diff first (item 12); that review is the real gate". **2.** host smoke
+test (`holosmith smoke`, HS-077, done — exit 0/1/2). **3.** drain: "`holosmith admin drain --wait 10m` over a local
+unix socket. It refuses new creates and prompts (503 `draining`), waits for running turns, then stops idle sessions
+with reason `server_restart`" — `holosmith drain [--wait]` exists (HS-051, ADR-0060) and its exit code is already "the
+server's terminal word". **4.** "Back up the database (`VACUUM INTO backups/app-<ts>.db`, keep five), switch the
+symlink, `systemctl restart`". **5.** "Poll `/api/health` for 20 seconds. If the new version does not answer, switch
+the symlink back and restart." **6.** "Sessions that were live before the drain return to idle on startup." And:
+"**In v1 these steps are implemented by `holosmith upgrade <binary>` and `holosmith rollback`** (see Single binary and
+CLI), not by a separate script."
 
-> 2. Smoke test on the host: run the candidate with a smoke config (alternate port, temporary data directory,
->    `container_prefix=smoke_`, `network_prefix=smoke_`) against the real Docker daemon, using a fake pi in the image
->    that replays the session recorded in phase 1. Create a session, run a turn, delete it.
-
-and the **Internal subcommands** paragraph under `## Single binary and CLI`:
-
-> Internal subcommands, used inside containers: `holosmith proxy egress`, `holosmith proxy key`, `holosmith container
-> snapshot` (the `hs-snapshot` logic from item 9) and `holosmith container fake-pi` (replays the recorded session for
-> tests).
-
-The neighbours: **HS-076** (`PER-108`, the builder container) is **Done** and places the artifact; **HS-078**
-(`PER-110`, `upgrade <binary>`) is this harness's **caller** — its acceptance is "runs the spec's pipeline in order:
-review gate acknowledged, host smoke test, drain `--wait 10m`, …", so a promotion's go/no-go is this story's exit
-code; **HS-079** (`PER-111`, `rollback`) and **HS-080** (`PER-112`, the release layout and `current` symlink) follow.
+The **Commands table**'s row is `holosmith upgrade <binary>`: "The promotion pipeline and rollback from item 10". Item
+10's first paragraph adds the layout: "Releases live in `releases/<tag>/` with a `current` symlink that systemd runs" —
+**HS-080 owns the layout and the symlink**, so decide now (and say in the ADR) which half of that layout this story
+writes.
 
 ### 1.3 What already exists (read this before planning)
 
-- **The fixtures are there, and they are pi's own records.** `crates/holosmith/tests/fixtures/pi-turn-{text,thinking,
-  tool,image,extension-ui}.jsonl` are five turns recorded in HS-032. `tests/rpc.rs` replays them through the
-  *mapping* (`rpc::Mapping::map` + `pump`) — that is the **reader** half, and it is not what this story needs: this
-  story needs the **writer** half, a program that speaks pi's RPC protocol *into* `agent::launch`'s pipes.
-- **`src/agent.rs` is the launch.** `COMMAND` = `["pi", "--mode", "rpc", "--no-session", "--approve"]`;
-  `Agent::launch` gives it piped stdio, an **LF-only** JSONL reader (never split on U+2028), routes `response` records
-  by command id and publishes the rest, keeps stderr in a 64 KiB tail and sends the exit after the last record;
-  `request`/`ready` are the two commands the runner sends. `version_of` runs `pi <VERSION_ARGUMENT>` in the image
-  (`--entrypoint pi --network none`), and `version_check` compares it with `pins/pi.txt`, whose value
-  `agent_image`'s label already carries — **a fake pi has to answer that or the check has to be told**.
-- **`tests/rpc.rs` already writes two stand-in pi scripts** (`fake-pi.sh`, `fake-pi-recording.sh`) through the
-  `Agent`/records seam. That is the shape, not the feature: they live in a test, they replay records the test wrote,
-  and nothing puts them in a container.
-- **`src/container.rs` names things without a prefix.** `network_name(id)` = `agents_<id>`; `SessionContainer::run_args`
-  names the container `s_<id>`; `reconcile.rs` sweeps leftovers by those two names, `Docker::container_names("s_")`
-  being a **substring** filter. The smoke config's `container_prefix`/`network_prefix` **do not exist** — they are two
-  new config keys (33 today → 35), which means `tests/golden/config-default.toml` and `config/schema.rs`'s
-  `KNOWN_KEYS.len()`, and a prefix the reconcile does not know is a session the next boot sweeps away.
-- **The turn path is real and gated.** `case_docker_turn` is the existing real-daemon turn; it asserts **pi's own
-  refusal** for a prompt with no provider key ("this machine stores no key"), so a *successful* turn through a
-  container is exactly what has never been measured in a gate — a fake pi is what makes it measurable.
-- **`src/commands/container.rs`** (`container snapshot`) is the shape `container fake-pi` follows: a mode of the
-  artifact, an env var for the session id, no arguments, its lines on stdout.
-- **`src/images.rs`** (HS-048) builds `agent-image:<version>` from `images/agent.Dockerfile`, whose pi is
-  `npm install -g @earendil-works/pi-coding-agent@<pinned>`; `agent_image` is a config key, and `pi-agent:local` is
-  the hand-built image every Docker case uses. A smoke image whose `pi` is the fake is a *decision* (§1.5).
-- **`holosmith build` (HS-076, ADR-0080)** places a release artifact and prints its digest. The harness's own demo can
-  run against `dist/<triple>/holosmith`, and HS-078 will run it against a candidate — so the entry point must be able
-  to name the binary it tests.
-- **`docs/notes.md`**: the cross-cutting sections first, then `### Landmines: the agent launch (HS-031)`,
-  `### Landmines: the mapping and the record seam (HS-032)`, `### Landmines: Docker — mounts, containers, starts
-  (HS-027 – HS-029)`, `### Landmines: the image builds (HS-048)`, `### Landmines: the builder container (HS-076)` and
-  `### Landmines: the startup reconcile (HS-044)` (the sweep that a prefix has to teach).
+- **The smoke test is a library call and a verb.** `crate::smoke::run(config, binary, root) -> Outcome` (0/1/2,
+  `Outcome::exit_code`), and `holosmith smoke [--binary PATH] [--root DIR]`. `upgrade` can call `smoke::run` **in
+  process** (one binary, no second entry point) or spawn the verb; the ADR should say which and why. A failed smoke
+  test is "a failed promotion" — exit 1 is a candidate that must not go live, exit **2** is "this machine cannot judge
+  it" (no daemon, no git), which `upgrade` must treat as a refusal rather than a pass.
+- **The drain is a client and an exit code.** `src/drain.rs`: `Client`-side `main`-level `holosmith drain [--wait]`
+  speaks one line to `<admin dir>/drain.sock` and answers `Ending::{drained, expired, refused}` with the code the
+  server ended on (0 only for `drained`). `admin_dir` defaults to `deploy::ADMIN_DIR` and can be overridden
+  (`--admin-dir`). A drain that is **already** running answers `refused` (`Trigger`/`SERVER_RESTART`): acceptance
+  bullet 5 wants that as a refusal, not a retry.
+- **The database backup already has a home and a rule**: `src/backup.rs` (`Backups::{new, take, prune}`, `KEEP` = 7,
+  `BACKUPS` = `backups/`, and its own copy of `VACUUM INTO`'s day arithmetic). Item 10 says **keep five** and the
+  filename `app-<ts>.db` — read `backup.rs` before deciding whether the promotion reuses it (it is the *project's*
+  backup, per HS-065) or needs its own five-file rotation, and say which in the ADR.
+- **The schema rule is `schema::verdict` and `schema::SCHEMA_VERSION`** (ADR-0047): a *candidate* whose schema is older
+  than the database's is acceptance bullet 5's refusal, and `recorded_without_migrating` is the one read-only reader a
+  command may use on a live database (`db::Reader`). `serve` runs migrations on open; `upgrade` must not open the
+  database read-write just to ask.
+- **The images are `images::{Kind, Expectation, Status, ensure}`** (HS-048, ADR-0057) with `LABEL_*` labels and
+  `Expectation::of`/`of_digest` reading them; `unbuilt`/`mismatches` are the skip rule acceptance bullet 4 wants
+  ("only when the binary or a pinned version changed"). `server deploy`'s step 3 is the existing caller.
+- **The service**: `deploy::` writes `holosmith.service` (step 5, `ExecStartPre=holosmith doctor --quick`,
+  `Restart=on-failure`), and `src/deploy.rs`'s `systemd`/`install` machinery plus `deploy_machine_shims` in
+  `scripts/verify.sh` are how a gate case drives `systemctl` without systemd (there is **no systemd on this machine**:
+  `/proc/1/comm` is `bwrap`, so a real restart cannot be measured here and the case must go through a stand-in and say
+  so).
+- **`--root` is the gate's way to install as the calling user** (`Target`, `Target::privileged()`), and `--dry-run` is
+  every deploy step's read. `releases/<tag>/` and the `current` symlink have no owner yet (HS-080) — a story that
+  switches a *symlink* must decide where it lives and must not invent HS-080's layout wholesale.
+- **The gate's case shapes**: `case_build` (HS-076) and `case_smoke` (HS-077) are the two newest — an always-on arm
+  through a stand-in plus a real arm that prints a `note`, never a `SKIP`. A promotion is a **process-order** claim, so
+  the case should assert the *order* of the recorded argv/child launches, not just their presence.
+- **`docs/notes.md`**: read the cross-cutting sections first, then `### Landmines: the drain and its socket (HS-051)`,
+  `### Landmines: the deploy, the ports and what `install` does to a key file (HS-047)`, `### Landmines: the service,
+  the keys and the origins (HS-049)`, `### Landmines: `status`, `logs` and `uninstall` (HS-050)`, `### Landmines: the
+  image builds (HS-048)`, `### Landmines: the builder container (HS-076)` and `### Landmines: the fake pi and the smoke
+  run (HS-077)`.
 
 ### 1.4 What does not exist
 
-No `container fake-pi` subcommand and no program that answers pi's RPC commands; no fixture carrying the schema it was
-recorded against; no smoke config keys (`container_prefix`, `network_prefix`) and no reader for them; no smoke harness
-— nothing creates a session, runs a turn, asserts events and deletes it in one command, and nothing decides what a
-failure's exit code is; and no image or launch path in which the container's `pi` is the candidate binary.
+No `upgrade` verb and no `rollback` verb. Nothing acknowledges a review, nothing calls the smoke test and branches on
+its three codes, nothing drains before switching, nothing takes a pre-promotion database backup with a five-file
+rotation, nothing switches a `current` symlink or restarts the unit, nothing polls health for 20 s and switches back,
+and nothing reads the candidate's schema version out of its *binary* (the ELF is the build artifact; the schema
+version is what `version --json` reports once the candidate can run — decide how to ask a binary that is not yet
+installed, and whether `--entrypoint`/a temporary exec is acceptable).
 
 ### 1.5 What the plan must decide (and the arms each one has)
 
-1. **How the container's `pi` becomes the fake.** (a) the smoke run starts the container with the candidate binary as
-   pi's *target* — `--entrypoint`/a symlink at `/usr/local/bin/pi` → `holosmith container fake-pi`; (b) a smoke image
-   built from the agent image with that symlink baked in (one more `docker build`, and `agent_image` points at it);
-   (c) an environment variable the backend honours (`HS_PI_BINARY`) so `agent::COMMAND` names the fake. Say which, and
-   say what `version_of`/`version_check` do — the fake must either answer the pinned version or the smoke path must
-   skip the check with a sentence saying why.
-2. **What the fixture is, and how it is versioned.** A replay must answer the **commands** the agent sends
-   (`prompt`, `get_state`, maybe `abort`) and then emit the recorded **records**. Decide the format (the five
-   `pi-turn-*.jsonl` files are records only; a header line naming the fixture's own version?), where it lives (a
-   `crates/holosmith/fixtures/` directory so the artifact can `include_str!` it, versus `tests/fixtures/` where the
-   existing five are), and how "versioned with the schema it was recorded against" is *checked* — a field compared with
-   `schema::SCHEMA_VERSION` by a test, or a filename, or both.
-3. **What the harness is, and where it lives.** A `holosmith` verb (which one? the spec's command table has none), a
-   `scripts/smoke.sh`, or a `case_smoke` in the gate. Its acceptance is "creates a session, runs a turn, asserts
-   events, deletes it; any failure is a failed promotion" and HS-078 is its caller, so its **exit code** is the
-   contract. Decide the entry point, what it prints, and what it does with a machine that has no daemon (a sentence
-   and a non-zero code, not a pass).
-4. **The smoke config's shape.** Two new keys (defaults, validation, the golden file, `KNOWN_KEYS.len()`), the
-   alternate port and the temporary data directory, and **how the prefixes reach every name**: `SessionContainer`'s
-   `s_<id>`, `network_name`'s `agents_<id>`, `reconcile`'s two sweeps (`container_names("s_")` is a substring filter,
-   so `smoke_s_` still matches), `hs_egress`/`hs_key` (whose names are constants — does a smoke run start its own
-   proxies?), and the preview listener. A prefix the sweep does not understand is a real session's container removed by
-   the next boot.
-5. **What the gate can measure.** A real-daemon smoke run needs the daemon, an image and a container; the fixture
-   replay needs neither (a `fake-pi` driven over two pipes is a `cargo test`). The rule: a `SKIP` may not fire when
-   the feature is deleted, and `case_build` (HS-076) is the newest example of a case whose always-on arm is a stand-in
-   and whose real arm is disclosed.
-6. **Which binary the harness tests.** This build's (`dist/<triple>/holosmith`) for the story's own demo, or a
-   `--binary PATH` for HS-078's candidate. If the container runs the candidate, the artifact has to get *into* the
-   image (HS-048's `archive`/`build_bounded` machinery, or a bind mount).
+1. **What `upgrade` takes and where the candidate goes.** `upgrade <binary>` with the binary a path the operator (or
+   `build`) produced. Does it copy the artifact into `releases/<tag>/` itself (HS-080 owns the layout) or require it to
+   already be there? Where does the sha256 check happen (`<out>/holosmith.sha256` exists), and what is refused —
+   a different digest, a non-static ELF (`builder::artifact_problem`), another CPU?
+2. **"Review gate acknowledged"**: a flag (`--acknowledge-review`), an interactive prompt, or a check that the
+   candidate's commit has a review recorded somewhere? Item 12's review is a human act; the spec says "that review is
+   the real gate", so the pipeline step is an *acknowledgement*, and the ADR must say what makes a promotion that
+   skipped it impossible rather than merely discouraged.
+3. **The smoke test's place and its codes.** Called in-process or spawned; before or after the drain (spec order:
+   smoke **then** drain); what a 2 means (refuse, and say the machine cannot judge it) and what a 1 means (refuse, and
+   print the sentence). The candidate is *smoked* before it is live — that is the whole point of HS-077 — so the smoke
+   run happens while the old version still serves.
+4. **The backup's shape.** `VACUUM INTO backups/app-<ts>.db` **keeping five** — is that `backup.rs`'s `Backups` with a
+   different `KEEP`, a second caller of one function, or a new file under `<data>/promotions/`? What happens when the
+   backup fails (acceptance: nothing is switched)?
+5. **The symlink and the restart.** `current` → `releases/<tag>/` — where the layout itself is HS-080's; `systemctl
+   restart holosmith.service` has **no systemd on this machine**, so the command needs a seam (`Tools`-style, a
+   `systemctl` program on `PATH`) and the gate case a stand-in. Does `upgrade` run the health poll itself or read the
+   unit's `Restart=on-failure`? The rollback arm is the same switch in reverse plus a restart.
+6. **Health for 20 s, and the rollback.** Which endpoint, which origin (`control_listen` vs `control_origin`), what
+   counts as "the new version answers" (a 200 whose `version` is the candidate's — the health payload carries it), and
+   what the rollback does about the *database* (the new version migrated it; the expand/contract rule says the symlink
+   may go back without a restore, so say that and do not restore).
+7. **The two refusals.** Draining already in progress (`drain::Ending::Refused`) and a candidate schema older than the
+   database's (`schema::verdict`). Both must be read **before** anything is switched, and both need a sentence.
+8. **What the gate can measure.** The order of the pipeline is a table of child launches: a `systemctl` stand-in, a
+   `docker` stand-in for the images, the real smoke verb (or a `smoke` stand-in that answers 0/1/2), a real drain over
+   a unix socket (`tests/drain`'s shape), and a real `VACUUM INTO` against a temp database. The *health* arm needs a
+   listener: a stand-in `python3` health responder, or this machine's own `serve` on a temp root. No `SKIP` may fire
+   when the feature is deleted.
 
 ### 1.6 The questions the plan must answer (before code)
 
-1. What is `pi` inside the smoke container, and who decides it?
-2. What does the fixture hold, where does it live, and what makes a schema change a failure rather than a surprise?
-3. What invokes the harness, what does it print, and what is its exit code on each of the four endings (pass, no
-   daemon, a failed turn, a delete that refuses)?
-4. Which names does a prefix reach, and which does it deliberately not?
-5. What does the gate measure, and what does it disclose instead?
-6. Does anything the harness needs run on the host (git, docker, a port), and is that acceptable?
+1. What is the pipeline, as a list of steps with one printed line each, and what is the exit code of each ending?
+2. What does a *refused* promotion leave behind (a backup? a copied artifact? a drained machine)?
+3. Where does the candidate live before and after, and who owns the `current` symlink (HS-080)?
+4. What is measured without systemd, and what is disclosed instead?
+5. What makes a promotion that skipped the review acknowledgement impossible?
+6. Does `rollback` exist in this story at all (the Commands table pairs them, the acceptance only mentions the
+   automatic rollback), and if not, where is it (HS-079)?
 
 ### 1.7 Acceptance, restated as checks
 
-- *`holosmith container fake-pi` replays a recorded session from inside the container, including deltas, a tool call
-  and usage* — the subcommand exists, reads pi's commands on stdin and writes the fixture's records on stdout; a test
-  drives it through `agent::launch` (or the equivalent pipes) and asserts a `message.delta`, a `tool.start`/`tool.end`
-  pair and a `usage` frame reach the event writer.
-- *a fixture recorded from a real turn is committed and versioned with the schema it was recorded against* — the file
-  is in the tree, carries its schema version, and a test compares it with `schema::SCHEMA_VERSION` (a mismatch is a
-  failure with a sentence naming both).
-- *the smoke run uses a smoke config … so it cannot touch real state* — the four settings exist and are *read*: a
-  session created under `smoke_` has a `smoke_s_<id>` container and a `smoke_agents_<id>` network (asserted), its
-  data root is the temporary one, and the real machine's rows are untouched (asserted by count before and after).
-- *the harness creates a session, runs a turn, asserts events and deletes it* — one command, one exit code, and a
-  printed line per step; the gate case runs it and asserts the row is gone and the container and network are gone.
-- *the harness runs against the real Docker daemon …* — the gate's real arm, with the disclosure for a machine that
-  has none.
+- *runs the pipeline in order* — one command, one printed line per step, and a gate case asserting the **order** of
+  the recorded children (review ack → smoke → drain → backup → switch → restart), with the pinned feature deleted
+  making the case fail rather than skip.
+- *polls health for 20 s and switches back* — a stand-in that answers for the old version and refuses the new one
+  makes the symlink move back and the restart happen twice; the sentence names the version that is live again.
+- *live sessions return to `idle`* — the drain's own promise plus a resume-on-startup: assert a session that was
+  `running` before the drain is `idle` after the candidate serves (a stub boot with a seeded row is the cheapest
+  shape, and `tests/reconcile.rs` already brings a live row back).
+- *images rebuilt only when the binary or a pin changed* — `images::Expectation::unbuilt`/`mismatches` through the
+  `Images` seam, asserted in both directions (same candidate: no build; a changed pin or binary: two builds).
+- *refusals* — a drain already in progress and a candidate whose schema is older: both refused **before** any switch,
+  with their own sentences and no backup written.
+- *prints the outcome* — the version now live and the backup path, on the last line.
 
 ### 1.8 Non-goals
 
-`upgrade` and `rollback` (HS-078/079); the release layout and the `current` symlink (HS-080); the builder container
-(HS-076, done); the diff review's policy (item 12); any screen; and any change to how a *normal* session names its
-container or network (the prefix is a smoke setting, and its default must keep `s_`/`agents_` exactly as they are).
+Any screen; `rollback` as its own verb (HS-079) except the automatic switch-back the acceptance names; the release
+layout and the `current` symlink's *home* (HS-080 — this story may use a layout, but HS-080 owns what it is); item 12's
+diff review's content (this story takes an acknowledgement, not a review); and any change to `holosmith smoke`'s or
+`holosmith drain`'s contracts.
 
 ### 1.9 The demo
 
-The harness, against the real daemon, from the shipped artifact: create a session under the smoke config, watch the
-fake pi answer, assert the frames (`message.delta`, a tool round trip, `usage`), delete it — then `docker ps -a` and
-`docker network ls` showing no `smoke_` leftovers and the machine's own data root untouched. Then the failure arm: a
-fixture with a record removed, or a `docker` stand-in that refuses, and the harness's exit code and sentence. Say
-plainly what was not measured: no real provider key (that is V3's by-hand run), no second machine, and the smoke image
-is not what a promotion ships.
+Upgrade to a deliberately broken binary (one that answers its banner but whose `/api/health` never becomes the
+candidate's) and watch `upgrade` switch back by itself, print the version now live and the backup path, and leave the
+old version serving; then upgrade to a good one and see `version` answer the new release from the `current` symlink.
+Say plainly what was not measured: no systemd here (`systemctl` is a stand-in in the gate and the demo), so the restart
+is a recorded argv; no real provider key.
 
 ### 1.10 What the next agent needs back
 
-When you write the state back (§5, step 10): §1 becomes the next issue — by `PROMPT.md`'s ranking that is `PER-110`
-(HS-078, `upgrade <binary>`) *if* HS-077 ships and its blockers are `Done` (HS-077, HS-051 and HS-075 — the last two
-already are), and `PER-109` again if it does not; check Linear's `Blocked by` list. Refresh the counts, the ADR number
-you took (**0081** is next), the last gate run's own numbers (and `web/`'s test count), and replace §9's row with this
-story's. Anything you learned that is **not** state and **not** an ADR goes into `docs/notes.md` under a new
+When you write the state back (§5, step 10): §1 becomes the next issue — `PER-111` (HS-079, `rollback`) after HS-078
+ships and `PER-112` (HS-080) after that; check Linear's `Blocked by` list. Refresh the counts, the ADR number you took
+(**0082** is next), the last gate run's own numbers (and `web/`'s test count), and replace §9's row with this story's.
+Anything you learned that is **not** state and **not** an ADR goes into `docs/notes.md` under a new
 `### Landmines: …` heading, never into §1. Then kill what you started (§5, step 11).
 
 ## 2. Environment (already repaired — do not redo)
@@ -278,6 +285,10 @@ that has never deployed warns once and starts no proxy — and the gate's `case_
 image behind for every later case.
 The machine's own `egress` network must exist for that test (`docker network create egress` is the call a boot
 makes) — a cleanup removed it once and the test failed on setup at HS-043's baseline.
+**Since HS-077 the machine also has `holosmith-smoke:0.1.0`**, the smoke image `holosmith smoke` builds from a
+candidate's bytes (a `COPY` and a `RUN` on the base this machine already has). It is cached by a label that covers the
+recipe *and* the candidate, so a rebuilt artifact rebuilds it — a few seconds, not the builder image's cold six
+minutes. `case_smoke` needs it and nothing else; `docker rmi holosmith-smoke:0.1.0` is always safe.
 
 **pi's own RPC documentation is on this machine**:
 `~/.pi/agent/install/releases/1.5.0/node_modules/@earendil-works/pi-coding-agent/docs/rpc.md` (how to start
@@ -449,8 +460,8 @@ it also prints one `ok <case>` line per case that measured something: a case tha
 line and the run ends with `SKIP n of N cases measured nothing`, so `grep -c '^ok case_'` is the number that
 proved something and a skip can never read as a pass. It takes ~15 min (both musl targets, the Docker cases,
 `case_idle_stop`'s real minute, `case_disk_quota`'s two boots, `case_preview`'s container and
-`case_doctor_full`'s self-test). As of PER-108 the run prints **97 cases and 2111 assertions**, `cargo test` is
-**1319** in 64 binaries, and `web/` is **132** tests. (The last three numbers move with every story that adds a case, a
+`case_doctor_full`'s self-test, and `case_smoke`'s three arms with no skip). As of PER-109 the run prints **98 cases
+and 2136 assertions**, `cargo test` is **1348** in 65 binaries, and `web/` is **132** tests. (The last three numbers move with every story that adds a case, a
 test or a rule; the gate prints its own, so quote the run rather than this line.) `--no-build` skips `build` and `embed`; `--keep` keeps the work dir.
 
 Some cases bring their own boot, and they are the ones a new story is most likely to collide with:
@@ -464,6 +475,7 @@ Some cases bring their own boot, and they are the ones a new story is most likel
 | `case_disk_quota` | its **own** Docker boot and `agent_image` (the worktree must be real: a stub row has none), and a `du` stand-in on `PATH` that records its argv and answers an over-cap size; it restarts that boot so the watchdog's first (post-reconcile) pass measures, then puts the shared boot back — one `SKIP` line without the daemon or the image |
 | `case_container_mounts` | no server *and* no daemon — one printed `SKIP` line when there is neither a daemon nor an image |
 | `case_build` | a `docker` stand-in on `PATH` (it records every argv and copies `dist/<host-triple>/holosmith` into the `--out` mount) plus `cargo`/`rustc` stand-ins that must never fire — so its first arm needs **no daemon**; its second arm builds the host's target in the real container when the daemon answers *and* `holosmith-builder:<version>` exists, and prints one `note` line (never a `SKIP`) when they do not |
+| `case_smoke` | **three arms, no `SKIP`**: the artifact's own `container fake-pi` over two pipes (daemon-free), a `docker` stand-in that answers `version` and refuses `build` (exit **1** and the smoke config on disk, daemon-free), then the real run — it starts its own `serve` on a port the kernel gives it with its own root, and does not touch the shared boot; it needs the daemon and nothing else, and prints one `note` (never a `SKIP`) without one. It builds `holosmith-smoke:<version>` from the candidate's bytes (a `COPY` and a `RUN` on a base this machine already has) |
 | `case_exit_classification` | `python3` (it reads a row's `expected_stop` out of `app.db`), skips without it |
 | `case_egress_proxy` | **no** server, daemon, internet or key: it starts the artifact as `proxy egress` on a loopback port and asks it four questions over a socket |
 | `case_schema_newer` | no daemon; boots the artifact over a schema-99 database |
@@ -541,8 +553,18 @@ crates/holosmith/
                             the resume command), hub.rs (the registry half: `hub host add/list/remove`, and it is a
                             **client** of this machine's own routes),
                             drain.rs (`holosmith drain [--wait]`: a std UnixStream client, and the exit code
-                            is the server's terminal word — 0 only for `drained`)
-  src/config/               mod.rs (typed Config, KeySpec walk, 33 keys), schema.rs, problem.rs,
+                            is the server's terminal word — 0 only for `drained`), smoke.rs (`holosmith smoke
+                            [--binary] [--root]`: the config, the exit code and the sentence)
+  src/smoke.rs              the smoke run (HS-077, ADR-0081): `config_text` (a valid config, written before the daemon is
+                            asked), `image`/`recipe` (the label covers recipe + candidate bytes), `ensure_image`, `run`/
+                            `execute` (0/1/2 via `Outcome::exit_code`), `drive` (banner → health → create → prompt → history
+                            → assert → delete), `assert_frames` (a delta, one tool pair by id, a non-zero usage, the turn
+                            pair), `Client` (loopback, the guard's headers, chunked bodies), `gone`/`removed`/
+                            `remove_proxies`/`finish` — cleanup on **every** ending — `CONFIG_MARKER`, `PREFIX`
+  src/fake_pi.rs            the fake pi (HS-077): `FIXTURE` (embedded), `Header` + `header`/`check`/`records` (a newer
+                            schema refuses, an older replays with one note), `replay` (every command answered with the id it
+                            was **sent**, the recording after the prompt, EOF exits 0), `FIXTURE_VERSION`
+  src/config/               mod.rs (typed Config, KeySpec walk, 36 keys), schema.rs, problem.rs,
                             render.rs, duration.rs, editor.rs
   src/backend/              mod.rs (Step, SessionBackend, `ProcessEnd`/`ExitWatcher`/`supervise`,
                             Backends::for_run(backend, ContainerSettings),
@@ -621,6 +643,11 @@ crates/holosmith/
                             `home`/`ensure_home`/`seed`/`launch_line`, `version_of`/`version_check`
                             /`version_sentence`
   templates/pi-home/settings.json  the seed's template, embedded with `include_str!` (no secrets)
+  fixtures/smoke-turn.jsonl  one header line (`{"type":"fixture","version":1,"schema":7,"recorded":"HS-032","turn":"tool"}`)
+                            then HS-032's `pi-turn-tool.jsonl` **verbatim** — a test holds both halves together
+  images/smoke.Dockerfile   the smoke image (HS-077, ADR-0081): the agent image's digest-pinned node base, `COPY
+                            holosmith`, and `/usr/local/bin/pi` a wrapper onto `holosmith container fake-pi "$@"`; no
+                            `apt-get`, because the fake replays records and the boot's self-test needs only node
   images/builder.Dockerfile, images/builder-entry.sh  the builder recipe and what it runs (HS-076, ADR-0080):
                             two stages (`AS rust` first, `AS node` last — a stage cannot copy from itself), both bases
                             digest-pinned, the musl.cc tarballs SHA-256-pinned, `build-entry.sh` copying the read-only
@@ -1090,15 +1117,17 @@ scripts/verify.sh           the one-command gate (see §3), including the two st
                             --json` from the pairs it was asked for) and `health_responder` (a `python3` that
                             answers `/api/health` for a whole case)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0080          read the recent ones before planning anything (0080 is HS-076's builder container:
+docs/adr/0001…0081          read the recent ones before planning anything (0081 is HS-077's smoke run: a host verb whose
+                            exit code is the contract, the candidate as `pi`, the fixture's header, the prefix's reach,
+                            and three gate arms with no skip; 0080 is HS-076's builder container:
                             a host verb, two digest-pinned bases, a recipe label, the ELF checks; 0079 is HS-074's
                             machine name and the tap's path; 0078 is the `--ssh` transport: four children, the
                             digest-named copy, the ELF-header arch refusal; 0077 is the hub CLI and the two deploy
-                            halves) — **0081 is the next free number**
+                            halves) — **0082 is the next free number**
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-108  each a verbatim review + a `## Resolution` table
-                            (`PER-106` is this build's newest — one P0, three P1s and eleven smaller findings, all
-                            fixed or recorded; `PER-105` the one before it)
+docs/review/PER-33…PER-109  each a verbatim review + a `## Resolution` table
+                            (`PER-109` is this build's newest — a BLOCK with one P1 (a cleanup hung on the success path)
+                            and ten smaller findings, all fixed or dismissed with a citation; `PER-108` the one before)
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -1392,16 +1421,15 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 The catalogue lives in **`docs/notes.md`** — read the **cross-cutting** sections before you start anything,
 then the sections below. It is a reference: everything there is a measurement or a review finding.
 
-| Read | Why it bears on HS-077's fake pi and smoke harness |
+| Read | Why it bears on HS-078's pipeline |
 | --- | --- |
-| Cross-cutting: *Config and docs*, then *Tests*, *Demos*, *Build and toolchain* | **Config and docs**: two new keys mean `tests/golden/config-default.toml` **and** `config/schema.rs`'s `KNOWN_KEYS.len()` (33 today), and an ADR means a line in `docs/stories/README.md` **and its count** (80 today). **Tests**: `PATH` cannot be set in a test, so a program is a `PathBuf` field in a `Tools` and a *stand-in on `PATH`* is the gate's way; a test that cannot fail is worse than no test. **Demos**: score a pid when you start one; `pgrep -f` matches unrelated processes. **Build and toolchain**: `RUSTFLAGS` is still never exported, and `Cargo.lock` stays registry-only. |
-| *Landmines: the agent launch (HS-031)* and `docs/adr/0039-*` | The launch this story has to speak to: `agent::COMMAND` (`pi --mode rpc --no-session --approve`), piped stdio, the **LF-only** JSONL reader (never split on U+2028), `response` records routed by command id, stderr in a 64 KiB tail, the exit sent after the last record, `version_of`/`version_check` against `pins/pi.txt`, and `ExitWatcher`/`Exits::record`. A fake pi must satisfy the *reader*, not the other way round. |
-| *Landmines: the mapping and the record seam (HS-032)* | The five `tests/fixtures/pi-turn-*.jsonl` files are pi **records**; `tests/rpc.rs` replays them through `rpc::Mapping`/`pump` and already writes two stand-in `pi` scripts. What is missing is the *writer* half: a program that answers the agent's commands and emits those records. Also here: a delta's node is a "kind's node", the minted message id, and the two additive keys on `message.end`. |
-| *Landmines: Docker — mounts, containers, starts (HS-027 – HS-029)*, *the startup reconcile (HS-044)* | `SessionContainer::run_args` names the container `s_<id>` and the network `agents_<id>`; `reconcile` sweeps leftovers with `Docker::container_names("s_")`, which is a **substring** filter — so a prefix has to be taught to the sweep or the next boot removes the smoke run's container (or, worse, a real one). `Docker::bounded`/`run_detached`/`remove_container_bounded` are the bounded family, and the per-session start lock is taken by the network step too. |
-| *Landmines: the image builds (HS-048)* and `docs/adr/0057-*` | `agent_image` is a config key, `agent-image:<version>` is built from `images/agent.Dockerfile` (pi installed by npm at the pinned version), and `agent_image`'s `LABEL_PI` is what `doctor` and the launch compare. A smoke image whose `pi` is the candidate binary is a *decision*, and `images::archive`/`build_bounded` is how a binary gets into an image without a context path. |
-| *Landmines: the builder container (HS-076)* | The last session's story, and the shape this one's gate case should copy: an always-on arm through a stand-in (`docker` recording argv + `cargo`/`rustc` that must never fire) and a real-daemon arm that prints a `note`, never a `SKIP`. Also the two traps: `COPY --from=<name>` needs a declared stage, and an `ENV` at the end of a Dockerfile is seen by no earlier `RUN`. |
-| *Reviews* (`docs/review/PER-108.md`, `PER-106.md`, `PER-105.md`) | The recurring lessons: a sentence claiming more than it measured; a test whose name claims two measurements and makes one; a **test that cannot fail on the code it names**; a check whose claim outran its topology. PER-108's P1 is the sharpest version for this story's class: **a recipe (or a fixture) whose claim nothing reads**. HS-077's version would be a `fake-pi` that replays records nobody asserts, or a smoke harness whose `SKIP` fires when the harness is deleted. |
-
+| Cross-cutting: *Config and docs*, then *Tests*, *Demos*, *Build and toolchain* | **Config and docs**: any new key means `tests/golden/config-default.toml` **and** `KNOWN_KEYS.len()` (36 today), and an ADR means a line in `docs/stories/README.md` **and its count** (81 today). **Tests**: a program is a `PathBuf` field in a `Tools` and a stand-in on `PATH` is the gate's way; a test that cannot fail is worse than no test. **Demos**: score a pid when you start one; `pgrep -f` matches unrelated processes. **Build and toolchain**: `RUSTFLAGS` is never exported and `Cargo.lock` stays registry-only. |
+| *Landmines: the drain and its socket (HS-051)* and `docs/adr/0060-*` | The socket's three endings (`drained`/`expired`/`refused`), the 0600/0700 modes, the stale-socket rule, and the exit code that is already "the server's terminal word" — `upgrade` must read `refused` as acceptance bullet 5's "draining is already in progress". |
+| *Landmines: the deploy, the ports and what `install` does to a key file (HS-047)*, *the service, the keys and the origins (HS-049)* and `0063`/`0064`'s siblings | How `Target`/`--root` install as the calling user, what step 5 writes into `holosmith.service` (`ExecStartPre=doctor --quick`, `Restart=on-failure`), and the two `tailscale serve` halves — none of it a second time in this story. |
+| *Landmines: the image builds (HS-048)* and `docs/adr/0057-*` | `images::{Kind, Expectation, Status, ensure}`, the `LABEL_*` skip rule, `archive`/`run_captured`, and why a version tag cannot say "same tag, different binary" — acceptance bullet 4 is that rule read in both directions. |
+| *Landmines: the builder container (HS-076)* and *`holosmith build`* | The artifact and its `.sha256` are what `upgrade` promotes; the ELF check (`builder::artifact_problem`, `default_target`) is the refusal a wrong `--binary` earns, and `case_build` is the newest gate shape. |
+| *Landmines: the fake pi and the smoke run (HS-077)* and `docs/adr/0081-*` | `smoke::run`'s 0/1/2 and what each means for a promotion, the smoke image, the fake pi's protocol, and the P1 lesson: **cleanup on the failure path** — a promotion that fails must still leave the machine as it found it. |
+| *Reviews* (`docs/review/PER-109.md`, `PER-108.md`, `PER-105.md`) | The recurring lessons: a sentence claiming more than it measured; a test whose name claims two measurements and makes one; a test that cannot fail on the code it names; a `SKIP` that fires on the bug; and (PER-109's S2) a gate assertion that compares two empty strings — a promotion's *order* claim has the same shape and needs a non-empty measurement (the recorded children) or it passes over nothing. |
 Three rules worth repeating here because they are the most expensive to relearn: **a test that cannot fail is worse
 than no test** (mutate the behaviour and watch it go red); **a gate case that SKIPs on the bug it exists to catch is
 this project's P1**; and **after any scripted Markdown edit, read the changed lines** — five such edits have cost a
@@ -1413,7 +1441,7 @@ assertion that mattered under `holder_pid: unbound variable`.
 
 ## 7. Decisions taken on the operator's behalf (do not silently undo)
 
-Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0078`, one line each in
+Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0081`, one line each in
 `docs/stories/README.md`): read the recent ones before planning, and **amend rather than rewrite** — an ADR
 a later story changes gets a "Superseded by ADR-00xx" note (0012/0013, and 0026 amended 0020). The **ADR index in
 `docs/stories/README.md` is the one part of that directory a story edits** — it is the record of the decisions,
@@ -1450,6 +1478,7 @@ docker version                                      # the daemon must answer, or
 docker image inspect pi-agent:local                 # the image the Docker stories run
 docker network ls | grep -w egress                  # the proxy test's premise (§2); `grep -x` never matches
 docker rm -f hs_egress hs_key 2>/dev/null           # so tests/container.rs runs its real path
+docker ps -a --filter name=smoke_ --format '{{.Names}}'   # empty: a smoke run leaves nothing behind (HS-077)
 scripts/verify.sh                                   # baseline green, ~15 min (it prints its own counts)
 ```
 
@@ -1474,43 +1503,42 @@ from those three; do not carry old sessions' ledgers in this file.
 If you stop before the issue ships, say so explicitly, name the next action, and leave the tree clean and the
 gates green — **a half-finished story is worse than an honest stop**.
 
-**The last shipped story** (`PER-108`, HS-076, the pinned builder container, ADR-0080; commits `40d1cdf`, `8f5558f`):
-phase 4's second story, and the one that moved the release build off the host. Five things are worth carrying.
+**The last shipped story** (`PER-109`, HS-077, the fake pi + the recorded fixture + the smoke harness, ADR-0081; commits
+`4d70e50`, `e6d3e54`, `ae6e6c6`, `b798d55`, `bb5a6c1`, `b06fa02`, `1b244aa`, `79e6def`): phase 4's third story, and the
+one that made a *successful* turn measurable by a robot. Four things are worth carrying.
 
-**The story was one sentence — "the host only orchestrates Docker" — and the work was deciding where each process
-runs.** Three things could have run a build (a script, the binary, the container), and the plan's job was to name
-which one for each step: the recipe (the binary's `include_str!`ed Dockerfile), the compile (the container's
-`scripts/build.sh`, unchanged), the tag (`git describe` on the host, handed over as an environment variable), and the
-check (the host, reading the ELF header of the bytes that landed). A story that is a *placement* question reads as a
-table of "who does this, and where", exactly as HS-074's "who writes this value" did.
+**The story's real subject was a name, not a feature.** "Run the candidate against the machine's daemon, with
+`container_prefix=smoke_`" reads like four settings; the work was finding every place a name is derived and every
+*reader* of one. A Docker boot `rm -f`s both proxies and re-runs them from **its own** config, and the key proxy mounts
+its own key store — so an unprefixed smoke run would have left the machine's live sessions failing every model call at
+an address held by a proxy with an empty store. That is why the prefix reaches five names (session container, session
+network, both proxies, the self-test's probe network) and why *every* reader composes it: `doctor`, `status`,
+`uninstall`, `deploy`, the backend's join/leave sites, the preview listener's inspect. The default is empty, so a
+normal machine's names are byte for byte what they were.
 
-**A green gate cannot see a Dockerfile.** The review's P1 was `COPY --from=rust` resolving to `rust:latest` because the
-stage was unnamed — an unpinned toolchain, and the recipe's own comment claiming the opposite. It *worked*, which is
-why it survived: the final stage happened to be the rust image, whose `ENV PATH` is what found `rustup`, so the bug
-was load-bearing in a way nothing measured. Two habits came out of it: a unit test that reads the recipe for every
-`COPY --from=` name, and the rule that a recipe's claims get a test or they are prose. The fix then produced two more
-real defects (a stage cannot copy from itself; an `ENV` at the end of a file is an environment no earlier `RUN` sees;
-a copied `CARGO_HOME` is root-owned and the build runs as the operator), each of which cost a build to find.
+**The fixture is a recording plus a header, and both halves have a reader.** `fixtures/smoke-turn.jsonl` is one header
+line — carrying the **schema it was recorded against** — and then HS-032's tool turn verbatim, embedded because the
+container runs the candidate. One test compares that number with `schema::SCHEMA_VERSION` (a mismatch names both and
+the two fixes), another asserts the body is still HS-032's bytes (a hand edit cannot pass as a recording), and the
+run's own rule is asymmetric on purpose: a newer header refuses, an older one replays with one printed note. Carrying
+a *copy* of a real recording is only honest while a test keeps it equal — that is the whole of D3.
 
-**The gate case's shape is the story's disclosure.** `case_build`'s first arm always runs — a `docker` stand-in on
-`PATH` that records every argv and writes a real static artifact into the `--out` mount, with `cargo`/`rustc`
-stand-ins that must never fire — so deleting the verb fails the case. Its second arm builds for real when the daemon
-and the image are there, and prints a `note` (never a `SKIP`) when they are not. That is the same shape HS-048 used
-for its daemon-gated build, and the reason `scripts/verify.sh` could keep its fast, offline host build without that
-being a hole: the ADR says so in one sentence.
+**The review was right about the thing that mattered, and it was the failure path.** Its P1 was `and_then` over the
+measurement: cleanup ran only on success, so the ending a promotion actually cares about (a *failed* candidate) left
+a `serve` running on a root that was then deleted under it, and four `smoke_*` names on the machine. `and_then` over a
+`Result` is a `&&`, not a `finally`. The fix is measured by rebuilding a candidate whose recording lost its tool call
+(the demo's section 3d): exit 1, the run's own container and network removed after the failure, the proxies removed,
+the root kept as the evidence the sentence points at. **Two other claims were caught claiming more than they
+measured**: a gate comparison of two empty strings (an earlier case had removed the containers) and a leak sentence
+that still named the machine's proxy from a smoke boot. Both are the shape this repository keeps re-finding.
 
-**The demo is the acceptance, and `env -i` is how it is honest.** A build with a `PATH` holding no `cargo` and no
-`rustc` proves the command *uses* none; it does not prove they are absent from the machine, and the demo says that
-out loud. The same run's fifth section is a real failure (a target the toolchain does not have), so the tail-printing
-bullet is measured by the same script that measures the happy path.
-
-**This session could not push either, and that is now five in a row.** `/run/ssh-agent.sock` did not exist,
+**This session could not push either, and that is now six in a row.** `/run/ssh-agent.sock` did not exist,
 `SSH_AUTH_SOCK` was unset, and `ssh-add -L` answered `Could not open a connection to your authentication agent`. So
-PER-103's, PER-104's, PER-105's and PER-106's commits (the last of them `7579224`/`33b5c6a`/`b3183e5`/`4740320`), this
-session's `40d1cdf`/`8f5558f` and this handoff's own commit are **local**. `git log origin/master..HEAD` is the
-measurement — do not trust a number in this file. The next session's first job is that command, then §2's single-key
-loop, before any story work. Nothing was faked, and `origin/master` is the last thing that *was* pushed.
+this session's eight commits and the handoff's own are **local**; `git log origin/master..HEAD` is the measurement —
+do not trust a number in this file. The next session's first job is that command, then §2's single-key loop, before
+any story work. Nothing was faked, and `origin/master` is the last thing that *was* pushed.
 
-The gate: **97 cases, 2111 assertions**, no `SKIP` and no `note` (so `case_build`'s real arm ran); `cargo test`
-**1319** in 64 binaries; `web/` **132**. The review found **six findings** (one P1, five P2) and all of them were fixed
-or recorded with a citation; the fix itself surfaced two more defects, both recorded in `docs/notes.md`.
+The gate: **98 cases, 2136 assertions**, no `SKIP` and no `note` (so `case_smoke`'s real arm and `case_build`'s
+container arm ran); `cargo test` **1348** in 65 binaries; `web/` **132**. The review came back **BLOCK** with one P1
+and ten smaller findings; all are fixed or dismissed with a citation, and the fixes surfaced two more defects of the
+same class, both now in `docs/notes.md`.
