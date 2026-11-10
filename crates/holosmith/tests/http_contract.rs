@@ -20,7 +20,7 @@ const AS_PUBLIC: &str =
 const AS_PRIVATE: &str = "yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw";
 
 #[tokio::test]
-async fn the_health_endpoint_answers_the_six_keys() {
+async fn the_health_endpoint_answers_the_seven_keys() {
     // The data root is this test's own: `Config::default` names the *machine's*, and a machine that has deployed
     // holds a pair — which would make the sixth key a fact about the host rather than about this test (HS-067,
     // the same hazard `health.rs`'s unit test works around).
@@ -53,12 +53,18 @@ async fn the_health_endpoint_answers_the_six_keys() {
         "the fifth key is the preview origin: {}",
         response.body
     );
-    // The sixth (HS-067) is last, `null` on a machine with no pair — so the five keys before it keep their order.
+    // The sixth (HS-067) is `null` on a machine with no pair, and the fifth keeps its place: the keys before it are
+    // the order a client reads.
     assert!(
-        response
-            .body
-            .ends_with(r#","application_server_key":null}"#),
+        response.body.contains(r#","application_server_key":null,"#),
         "a machine with no pair answers an explicit null: {}",
+        response.body
+    );
+    // The seventh (HS-074) is what this machine calls itself in a notification's payload, and a machine with no name
+    // of its own is `local` — the reserved word for *the machine whose page this is*.
+    assert!(
+        response.body.ends_with(r#","machine_name":"local"}"#),
+        "the seventh key is this machine's own name: {}",
         response.body
     );
 
@@ -75,7 +81,7 @@ async fn the_health_endpoint_answers_the_six_keys() {
     assert_eq!(
         response.body,
         format!(
-            r#"{{"name":"holosmith","version":"{}","role":"both","uptime_s":{},"preview_origin":"http://localhost:8081","application_server_key":"{AS_PUBLIC}"}}"#,
+            r#"{{"name":"holosmith","version":"{}","role":"both","uptime_s":{},"preview_origin":"http://localhost:8081","application_server_key":"{AS_PUBLIC}","machine_name":"local"}}"#,
             version(),
             // The uptime is the one field that moves; the assertion is the whole shape around it.
             response

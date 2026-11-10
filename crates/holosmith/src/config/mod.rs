@@ -243,6 +243,13 @@ pub struct Config {
     pub preview_upstream_port: u16,
     pub allowed_hosts: Vec<String>,
     pub owner: Option<String>,
+    /// What this machine calls itself in a notification's payload (HS-074, spec item 11).
+    ///
+    /// Two consumers, one value: `push::Payload::host` — the word a phone's notification carries, and the segment a
+    /// tap's path is built from — and `/api/health`'s `machine_name`, so a page can label its own row with the name
+    /// the notification will show. The default is [`crate::hosts::LOCAL`], the reserved word that means *the machine
+    /// whose page this is* (see `set_machine_name` for the contract a multi-machine deployment keeps).
+    pub machine_name: String,
     pub data_root: PathBuf,
     pub projects_root: PathBuf,
     /// The image a session's container runs (HS-027). Item 10 §3 builds it, so the default names the
@@ -306,6 +313,7 @@ impl Default for Config {
             preview_upstream_port: 3000,
             allowed_hosts: Vec::new(),
             owner: None,
+            machine_name: crate::hosts::LOCAL.to_string(),
             data_root: PathBuf::from("/var/lib/holosmith"),
             projects_root: PathBuf::from("/srv/holosmith/projects"),
             agent_image: crate::images::agent_image(),
@@ -1018,6 +1026,7 @@ control_origin = "https://control.example:8443"
 preview_origin = "https://preview.example:8444"
 allowed_hosts = ["control.example", "preview.example"]
 owner = "me@example.com"
+machine_name = "workshop"
 data_root = "/var/lib/holosmith"
 projects_root = "/srv/holosmith/projects"
 agent_image = "pi-agent:local"
@@ -1074,6 +1083,37 @@ allow = ["crates.io"]
             parse("").expect("an empty file is valid"),
             Config::default()
         );
+    }
+
+    /// HS-074's one key: what this machine calls itself in a notification's payload.
+    ///
+    /// Three arms — the default is the reserved word `local`, a registry-shaped name is accepted, and a name a
+    /// registry row could not take is refused with a sentence about the key the operator typed. The alphabet is
+    /// `hosts::name_problem`'s, because the payload's `host` becomes a registry name one hop later.
+    #[test]
+    fn the_machine_name_is_local_by_default_and_a_registry_name_otherwise() {
+        assert_eq!(Config::default().machine_name, crate::hosts::LOCAL);
+        // `EVERY_KEY` names the non-default value, so the setter is exercised by `settings()` too.
+        assert_eq!(settings().machine_name, "workshop");
+        for (text, wanted) in [
+            (
+                "machine_name = \"Work Shop\"\n",
+                "machine_name: `machine_name` must be lowercase letters, digits and `-`, \
+                 not beginning or ending with `-`",
+            ),
+            (
+                "machine_name = \"\"\n",
+                "machine_name: `machine_name` must not be empty",
+            ),
+            (
+                "machine_name = \"-workshop\"\n",
+                "machine_name: `machine_name` must be lowercase letters, digits and `-`, \
+                 not beginning or ending with `-`",
+            ),
+        ] {
+            let problem = problems_of(text);
+            assert!(problem.contains(wanted), "{text:?} answered {problem:?}");
+        }
     }
 
     #[test]

@@ -170,17 +170,38 @@ impl Refusal {
 /// because a name is compared as text in a URL and two spellings of one host is the ambiguity this rule exists to
 /// prevent.
 pub fn name_problem(name: &str) -> Option<String> {
-    if name.is_empty() {
-        return Some("`name` must not be empty".to_string());
-    }
     if name == LOCAL {
         return Some(format!(
             "`name` must not be {LOCAL:?}: that is the name this machine's own sessions are reached by"
         ));
     }
+    shape_problem(name, "name")
+}
+
+/// Why `name` is not a name a machine may call **itself** in a notification's payload, or `None` when it is.
+///
+/// The same alphabet as a registry row, because the payload's `host` is a registry name one hop later (HS-074) —
+/// with this machine's one exception: [`LOCAL`] is the reserved word that means *the machine whose page this is*,
+/// so it is the one name a machine may hold that no row may take. A server with no `machine_name` is `local`, and
+/// its notification opens `/sessions/<id>` on its own page.
+pub fn machine_name_problem(name: &str) -> Option<String> {
+    if name == LOCAL {
+        return None;
+    }
+    shape_problem(name, "machine_name")
+}
+
+/// The alphabet half of both rules, so a name and a machine's name cannot drift apart.
+///
+/// `field` is the key the sentence names, so a refusal is about the thing the operator typed: a registry row's
+/// `name` or a config file's `machine_name`.
+fn shape_problem(name: &str, field: &str) -> Option<String> {
+    if name.is_empty() {
+        return Some(format!("`{field}` must not be empty"));
+    }
     if name.len() > MAX_NAME {
         return Some(format!(
-            "`name` must be at most {MAX_NAME} characters, because it is one path segment"
+            "`{field}` must be at most {MAX_NAME} characters, because it is one path segment"
         ));
     }
     let bytes = name.as_bytes();
@@ -188,10 +209,9 @@ pub fn name_problem(name: &str) -> Option<String> {
         .iter()
         .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-');
     if bad || bytes[0] == b'-' || bytes[bytes.len() - 1] == b'-' {
-        return Some(
-            "`name` must be lowercase letters, digits and `-`, not beginning or ending with `-`"
-                .to_string(),
-        );
+        return Some(format!(
+            "`{field}` must be lowercase letters, digits and `-`, not beginning or ending with `-`"
+        ));
     }
     None
 }

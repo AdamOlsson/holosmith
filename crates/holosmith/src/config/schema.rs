@@ -119,6 +119,12 @@ pub const KNOWN_KEYS: &[KeySpec] = &[
         set: set_owner,
     },
     KeySpec {
+        path: "machine_name",
+        section: None,
+        kind: Kind::String,
+        set: set_machine_name,
+    },
+    KeySpec {
         path: "data_root",
         section: None,
         kind: Kind::String,
@@ -533,6 +539,23 @@ fn set_owner(config: &mut Config, value: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// What this machine calls itself (HS-074): the `host` a notification's payload carries, and the name the hub's
+/// registry row for it has to use, because the tap's path is `/hosts/<host>/sessions/<id>` one hop later.
+///
+/// The default is [`hosts::LOCAL`], which is not a name any *row* may take: it is the reserved word that means "the
+/// machine whose page this is", so a single-machine deployment needs no key at all and a phone's tap opens
+/// `/sessions/<id>` on the machine that sent it. A multi-machine deployment sets the name here and names the same
+/// machine in the hub's `hosts.toml`; a mismatch is visible as a `404 unknown_host` when the notification is tapped
+/// (recorded as a follow-up, not guessed at boot).
+fn set_machine_name(config: &mut Config, value: &Value) -> Result<(), String> {
+    let name = string(value)?;
+    if let Some(problem) = crate::hosts::machine_name_problem(name) {
+        return Err(problem);
+    }
+    config.machine_name = name.to_string();
+    Ok(())
+}
+
 fn set_data_root(config: &mut Config, value: &Value) -> Result<(), String> {
     config.data_root = path(value)?;
     Ok(())
@@ -804,7 +827,7 @@ mod tests {
 
     #[test]
     fn the_table_holds_the_documented_keys() {
-        assert_eq!(KNOWN_KEYS.len(), 33);
+        assert_eq!(KNOWN_KEYS.len(), 34);
     }
 
     #[test]

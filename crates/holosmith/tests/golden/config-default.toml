@@ -7,6 +7,7 @@ preview_origin = "http://localhost:8081"
 preview_upstream_port = 3000
 allowed_hosts = []
 # owner unset
+machine_name = "local"
 data_root = "/var/lib/holosmith"
 projects_root = "/srv/holosmith/projects"
 agent_image = "agent-image:0.1.0"

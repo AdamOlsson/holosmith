@@ -50,7 +50,6 @@ use tokio::time::Instant;
 use crate::clock;
 use crate::events::{Event, EventStream};
 use crate::http::AppState;
-use crate::preview;
 use crate::sessions::Status;
 use crate::sessions::state::SESSION_STATUS;
 use crate::vapid;
@@ -364,6 +363,7 @@ impl Pusher {
             let message = Message {
                 pair: pair.clone(),
                 sub: sub.clone(),
+                host: self.state.config.machine_name.clone(),
                 session_id: session_id.to_string(),
                 kind: kind.to_string(),
                 openssl: self.openssl(),
@@ -479,6 +479,10 @@ struct Payload<'a> {
 struct Message {
     pair: vapid::Pair,
     sub: String,
+    /// What this machine calls itself (HS-074): the payload's `host`, and therefore the segment a tap's path is
+    /// built from. Read from the config at the moment a notification is built, so a reload is the only thing a
+    /// changed name needs.
+    host: String,
     session_id: String,
     kind: String,
     openssl: String,
@@ -487,6 +491,21 @@ struct Message {
 }
 
 impl Message {
+    /// The plaintext this message carries: `{host, session_id, kind}` and nothing else.
+    ///
+    /// A method rather than four lines inside [`Message::send`], so the one fact a sender cannot observe from
+    /// outside — a sealed body reads the same whatever it holds — has a seam a unit test can read
+    /// (`a_message_carries_the_machines_own_name`). The value's **source** is `Pusher::announce`, the config's
+    /// `machine_name`, and the wire is the gate's `case_cross_machine`, which decrypts what arrives.
+    fn plaintext(&self) -> Result<Vec<u8>, String> {
+        serde_json::to_vec(&Payload {
+            host: &self.host,
+            session_id: &self.session_id,
+            kind: &self.kind,
+        })
+        .map_err(|error| format!("the notification's payload could not be serialised ({error})"))
+    }
+
     /// Build the request for one subscription and deliver it, answering the disposition and the **host** — never
     /// the endpoint, which is a capability URL.
     fn send(&self, row: &Stored) -> Result<(Disposition, String), String> {
@@ -501,12 +520,7 @@ impl Message {
             auth: vapid::unbase64url(&row.auth)
                 .ok_or_else(|| "a stored subscription's auth is not base64url".to_string())?,
         };
-        let plaintext = serde_json::to_vec(&Payload {
-            host: preview::HOST,
-            session_id: &self.session_id,
-            kind: &self.kind,
-        })
-        .map_err(|error| format!("the notification's payload could not be serialised ({error})"))?;
+        let plaintext = self.plaintext()?;
         let tmp = jwt::Temp::new(&self.data_root)?;
         let as_pair = encrypt::ephemeral(&self.openssl)?;
         let salt = encrypt::salt()?;
@@ -559,6 +573,37 @@ mod tests {
             SESSION_STATUS,
             &SessionStatus::transitioned(from, to, reason.map(str::to_string)).to_json(),
         )
+    }
+
+    /// What a sender cannot observe from outside: a sealed body reads the same whatever it holds, so the plaintext's
+    /// three keys and the name they carry are pinned here rather than by a recorder.
+    ///
+    /// The value's **source** is `Pusher::announce` — `state.config.machine_name` — and its **arrival** is stitched
+    /// by the gate's `case_cross_machine`, which decrypts a real push from a real peer. This test is the middle: the
+    /// message's own bytes, with a name that is not the default, so a constant would fail it.
+    #[test]
+    fn a_message_carries_the_machines_own_name_and_nothing_else() {
+        let message = Message {
+            pair: vapid::Pair {
+                public_key: "BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8".to_string(),
+                private_key: "yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw".to_string(),
+            },
+            sub: SUB.to_string(),
+            host: "workshop".to_string(),
+            session_id: "0123456789abcdef".to_string(),
+            kind: TURN_FINISHED.to_string(),
+            openssl: OPENSSL.to_string(),
+            data_root: std::path::PathBuf::from("/nonexistent"),
+            deliver: Arc::new(SslClient {
+                openssl: OPENSSL.to_string(),
+                ca_file: None,
+            }),
+        };
+        let plaintext = message.plaintext().expect("the payload serialises");
+        assert_eq!(
+            String::from_utf8(plaintext).expect("the payload is UTF-8"),
+            r#"{"host":"workshop","session_id":"0123456789abcdef","kind":"turn_finished"}"#
+        );
     }
 
     #[test]

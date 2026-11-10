@@ -21,7 +21,7 @@ pub const ASK_TIMEOUT: Duration = Duration::from_secs(3);
 /// The largest answer a probe reads before it gives up on the request being a health answer.
 const MAX_ANSWER: usize = 8 * 1024;
 
-/// Exactly six keys, in this order. `target` and the rest of the build metadata stay on the
+/// Exactly seven keys, in this order. `target` and the rest of the build metadata stay on the
 /// startup line and in `version --json`: the host registration of item 4 reads name and
 /// version, and a key nobody reads is a promise about a shape.
 ///
@@ -35,6 +35,11 @@ const MAX_ANSWER: usize = 8 * 1024;
 /// read at the moment of asking — a `server deploy` between two page loads is answered truthfully by the
 /// second. The same argument as `preview_origin`'s: the page already asks this question, and a browser needs
 /// the value before it can subscribe.
+///
+/// `machine_name` is the seventh (HS-074, ADR-0079): what this machine calls itself in a notification's payload,
+/// so a page can label its own row with the name the phone will show and a hub can read a peer's claim through the
+/// hop. It is the config key verbatim (`local` by default), not a derived name, because the tap's path and the
+/// registry's row name are the same string one hop apart and only the operator can keep them equal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Health {
     pub name: &'static str,
@@ -43,6 +48,7 @@ pub struct Health {
     pub uptime_s: u64,
     pub preview_origin: String,
     pub application_server_key: Option<String>,
+    pub machine_name: String,
 }
 
 impl Health {
@@ -55,6 +61,7 @@ impl Health {
             uptime_s: runtime.uptime_s(),
             preview_origin: config.preview_origin.as_str().to_string(),
             application_server_key: crate::vapid::public_key(&config.data_root),
+            machine_name: config.machine_name.clone(),
         }
     }
 }
@@ -189,11 +196,11 @@ mod tests {
     }
 
     #[test]
-    fn the_payload_is_exactly_six_keys_in_order() {
+    fn the_payload_is_exactly_seven_keys_in_order() {
         assert_eq!(
-            serde_json::to_string(&health(Role::Hub)).expect("six fields always serialise"),
+            serde_json::to_string(&health(Role::Hub)).expect("seven fields always serialise"),
             format!(
-                r#"{{"name":"holosmith","version":"{}","role":"hub","uptime_s":0,"preview_origin":"http://localhost:8081","application_server_key":null}}"#,
+                r#"{{"name":"holosmith","version":"{}","role":"hub","uptime_s":0,"preview_origin":"http://localhost:8081","application_server_key":null,"machine_name":"local"}}"#,
                 env!("CARGO_PKG_VERSION")
             )
         );
@@ -215,7 +222,7 @@ mod tests {
         assert!(
             serde_json::to_string(&without)
                 .expect("serialisable")
-                .ends_with(r#""application_server_key":null}"#),
+                .contains(r#""application_server_key":null,"#),
             "a machine with no pair answers an explicit null"
         );
 
