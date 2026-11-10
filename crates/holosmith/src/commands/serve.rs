@@ -502,12 +502,11 @@ pub fn run(args: ServeArgs) -> ExitCode {
             Arc::new(preview::Containers {
                 docker: Docker::new(loaded.config.docker_host.clone()),
                 port: loaded.config.preview_upstream_port,
-                network_prefix: crate::container::network_listing_prefix(
-                    &loaded.config.network_prefix,
-                ),
-                container_prefix: crate::container::container_listing_prefix(
-                    &loaded.config.container_prefix,
-                ),
+                // The **raw** config prefixes: `network_name`/`container_name` compose them, and handing them a
+                // composed one asks the daemon about `s_s_<id>` — which is a 502 from the preview listener rather than
+                // a message anywhere (measured, HS-077's first gate run).
+                network_prefix: loaded.config.network_prefix.clone(),
+                container_prefix: loaded.config.container_prefix.clone(),
             }),
             &state.tools,
         );

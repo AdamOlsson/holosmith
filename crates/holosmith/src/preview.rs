@@ -514,10 +514,11 @@ pub struct Containers {
     pub docker: Docker,
     /// The port a session's dev server listens on inside its container (the config's key).
     pub port: u16,
-    /// This run's session-network prefix (`network_prefix` + `agents_`), because the inspect call names the network
-    /// a container joined (HS-077: a smoke run's networks are its own).
+    /// This run's **raw** `network_prefix` (empty on a normal machine, `smoke_` in a smoke run, HS-077), because the
+    /// inspect call names the network a container joined and [`crate::container::network_name`] is what composes it.
     pub network_prefix: String,
-    /// This run's session-container prefix (`container_prefix` + `s_`), for the same reason.
+    /// This run's raw `container_prefix`, for the same reason: the container it inspects is that session's, and
+    /// [`crate::container::container_name`] is the one function that names it.
     pub container_prefix: String,
 }
 
