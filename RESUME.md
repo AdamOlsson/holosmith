@@ -1,4 +1,4 @@
-# RESUME — one issue per session (next: PER-106 / HS-074, cross-machine sessions and notifications)
+# RESUME — one issue per session (next: PER-108 / HS-076, build in a pinned builder container)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating procedure and
 still governs the cycle; this file is the state of the world, and it adds one rule of its own:
@@ -45,187 +45,184 @@ sandbox-specific incantation (§2).
 
 ---
 
-## 1. The issue this session picks up: `PER-106` — HS-074, cross-machine sessions and notifications
+## 1. The issue this session picks up: `PER-108` — HS-076, build in a pinned builder container
 
-**State when this file was written** (HEAD at the `Refresh the handoff after PER-105` commit, **tree clean** apart from
-the operator's own `orchestrate.sh`/`log.txt`): **74 of 80 stories Done, 6 Backlog**, all in project `Holosmith`.
-`PER-106` is `Backlog`, it is the next in `HS-###` order, and both its blockers (`HS-073`, `HS-066`) are `Done` — so
-it is eligible. Check Linear's `Blocked by` list rather than this sentence if it turns out to be a stop. **It has a
-screen** (`/settings`, the Computers screen and the session list all move), unlike the last two stories.
+**State when this file was written** (HEAD after the `Refresh the handoff after PER-106` commit, **tree clean** apart
+from the operator's own `log.txt`): **75 of 80 stories Done, 5 Backlog**, all in project `Holosmith`. `PER-108` is
+`Backlog`, it is the next in `HS-###` order, and its blocker (`HS-048`, the image builds) is `Done` — so it is
+eligible. **Check Linear's `Blocked by` list rather than this sentence if it turns out to be a stop.** It has **no
+screen**: this story is a build path, and the only user-visible surface is a command's output.
 
-The last shipped story was `PER-105` (HS-073, `--ssh` deploys, **ADR-0078**) — four commits, a review, and a gate run
-whose lessons are in `docs/review/PER-105.md`, `docs/notes.md`'s newest `### Landmines: …` section and `git log`. It
-left the CLI able to install on another machine, which is what HS-074 assumes exists: this story is the first that
-makes **the hub the only thing the operator opens** (the spec's Roles table), which means the *session* dimension of
-the hop — create, list, open, notify — rather than a new transport.
+The last shipped story was `PER-106` (HS-074, cross-machine sessions and notifications, **ADR-0079**) — three commits,
+one P0 in review and a gate case that boots two machines on one box. Its lessons are in `docs/review/PER-106.md`,
+`docs/notes.md`'s newest `### Landmines: a name across machines… (HS-074)` section and `git log`. It left the hub the
+only thing the operator has to open and the notification's payload carrying the machine's own name, which is what
+phase 4 builds on.
 
-### 1.1 The slice (verbatim from `docs/stories/phase-3-multiple-machines.md`; Linear's body is the same text)
+**The five commits of this session are unpushed** (`git log origin/master..HEAD` — no ssh agent existed; see §2).
 
-> ### HS-074 — Cross-machine sessions and notifications
+### 1.1 The slice (verbatim from `docs/stories/phase-4-self-development.md`; Linear's body is the same text)
+
+> ### HS-076 — Build in a pinned builder container
 >
-> **As** the operator **I want** one session list and one notification stream across machines **so that** the hub is
-> the only thing I open.
+> **As** the maintainer **I want** builds to never run on my host **so that** an agent-authored `build.rs` cannot
+> execute outside a container.
 >
-> - **Size:** M · **Blocked by:** HS-073, HS-066 · **Spec:** item 11, Roles
-> - **Demo:** a turn finishing on machine B notifies my phone while I am looking at machine A's sessions.
+> - **Size:** M · **Blocked by:** HS-048 · **Spec:** item 10 (step 1), Build and release
+> - **Demo:** a build runs to completion with the host having no Rust toolchain installed.
 >
 > **Acceptance**
-> - [ ] Each machine keeps its own VAPID keys and subscriptions; the app subscribes per machine it uses through the hub.
-> - [ ] Notification payload `{host, session_id, kind}` opens the right machine's session through the hub.
-> - [ ] Creating a session through the hub sets its machine explicitly, and the UI shows which machine it will run on.
-> - [ ] A machine that is unreachable degrades to a clear state per session rather than an empty list.
-> - [ ] Deleting a subscription removes it from every machine the app subscribed to.
+> - [ ] The builder image is pinned by digest and builds the static binary for the requested target.
+> - [ ] No `build.rs`, proc macro or toolchain step runs host-side; the host only orchestrates Docker.
+> - [ ] The output binary and its SHA-256 are placed where `holosmith upgrade` expects them.
+> - [ ] Build failures surface the container's log tail rather than a generic error.
+> - [ ] The diff review (HS-058) is documented as the real gate; this story only makes the build safe, not trusted.
 
 ### 1.2 The spec it closes
 
-`HolosmithSpec.md` **item 11**, verbatim (five bullets, and the last two are this story):
+`HolosmithSpec.md` **item 10, step 1**, verbatim:
 
-> - Web Push with VAPID keys generated at first start. Requires HTTPS (`tailscale serve`) and, on iOS, the app
->   installed to the home screen.
-> - Endpoints: `POST /api/push/subscribe` and `DELETE /api/push/subscribe`, table `push_subscriptions`.
-> - Triggers: a turn finished after running longer than 20 seconds; `session.status` error; a budget or timeout stop.
->   Not sent while an SSE stream for that session is open.
-> - Payload carries only `{host, session_id, kind}`, never content. Tapping opens that session.
-> - Each machine has its own keys, so the web app subscribes on every machine it uses (through the hub). The server,
->   not the containers, needs outbound access to the push services.
+> 1. Build in a pinned builder container, not on the host, so `build.rs` and proc macros never run host-side. Review the
+>    diff first (item 12); that review is the real gate.
 
-And the **Roles** section's two sentences: "A hub-only machine has no Docker and no sessions, so its Computers screen
-lists only registered servers. API paths are unchanged on every role: a hub serves `/api/hosts*`, a server serves the
-session API." No **Commands** row changes: this story adds no CLI verb.
+and the three **Build and release** bullets it touches: "Targets: x86_64 and aarch64 Linux, static musl, with SQLite
+bundled. The web app is built first and embedded in the binary"; "Self-development builds the new binary in a builder
+container (item 10); `holosmith upgrade <path>` takes it from there"; and item 10's last paragraph, "In v1 these steps
+are implemented by `holosmith upgrade <binary>` and `holosmith rollback`". The **Internal subcommands** list names
+`proxy egress`, `proxy key`, `container snapshot` and `container fake-pi` — **no build verb**, so this story's command
+is a decision (§1.5).
 
-The neighbours: **HS-075** (`PER-107`, fake pi and the smoke harness) is phase 4's first story and touches the test
-seams this story will lean on; **HS-078/079** (`PER-110`/`PER-111`) are `upgrade`/`rollback`.
+The neighbours: **HS-077** (`PER-109`, fake pi, a recorded fixture and the smoke harness — L, blocked by this story,
+and it is the promotion path's step 2); **HS-078** (`PER-110`, `upgrade <binary>`) and **HS-079** (`PER-111`,
+`rollback`), which consume what this story places; **HS-080** (`PER-112`, the release layout and `current` symlink),
+which owns the directory *shape* — so "where upgrade expects them" is a path this story must name without inventing a
+layout HS-080 will move.
 
 ### 1.3 What already exists (read this before planning)
 
-- **The payload is written and sent, and its `host` is a constant.** `push::Payload { host, session_id, kind }` is
-  serialised in `push/mod.rs` and `host` is `preview::HOST` — the literal `"local"` (`push/mod.rs:505`), which is
-  `hosts::LOCAL` (GLOSSARY's **Local**). So the *field* exists, is sealed by `push::encrypt`, and is parsed by
-  `web/src/push.ts`'s `notificationPayload`; what is missing is a value that means a **machine** to a phone. There is
-  no config key for a machine's own name, and a server's `hosts` table is not where a hub's name for it lives.
-- **The browser half already reads the host.** `web/src/push.ts` has `notificationTitle(host)` → `Holosmith · <host>`,
-  `notificationText(kind)` (five words plus a generic sentence), `notificationTag(sessionId)` (one notification per
-  session, sixteen-hex gated), `isSessionId`, `notificationPath(sessionId)` → `/sessions/<id>` **or** `/` (ADR-0072 D7:
-  a path built from untrusted text is a link this machine did not author), `machineState(origin, subscribed)` and
-  `PER_MACHINE_SENTENCE` ("each machine has its own Web Push key pair, so a phone subscribes on every machine it
-  uses"). The settings screen draws **one** row because there is one origin; `web/test/push.test.ts` owns those
-  sentences and `case_pwa` compares the served worker's bytes against them (not the screen's).
-- **`sw.ts` posts the subscription to `self.location.origin`** (`SUBSCRIBE_PATH`), once, and its
-  `pushsubscriptionchange` handler does the same — so a per-machine subscription is a change to *which* origins the
-  worker talks to, or a change to what the page does before the worker exists.
-- **The sixth health key is a machine's own application server key.** `http::health::Answer.application_server_key`
-  (HS-067, ADR-0072) is this machine's VAPID public half, `null` before the pair exists, and the page can read it for
-  **every** machine through the hop (`GET /api/hosts/<name>/health`). `PushManager.subscribe({ applicationServerKey })`
-  is per-origin and per-key, which is why "subscribe on every machine" is N calls and not one.
-- **The hop already carries both routes a per-machine subscription needs.** `http::app` registers
-  `/api/hosts/{name}/{*rest}` five times (GET/POST/PUT/PATCH/DELETE), so `POST /api/hosts/<name>/sessions` and
-  `POST /api/hosts/<name>/push/subscribe` are reachable **today**, and `http::forward` answers five statuses plus the
-  `502`/`504` pair. The hub's **own** `POST /api/sessions` is `403 sessions_disabled` (`http::error`'s
-  `SESSIONS_DISABLED`, ADR-0074) — so "create on a machine" is either a forwarded call from the page or a new body
-  key the hub forwards, and the plan must say which.
-- **`transcript.ts` already has the machine dimension the page needs.** `apiPath(host, rest)`, `sessionPath(host, id)`
-  → `/hosts/<host>/sessions/<id>`, `streamPath`/`historyPath`/`diffPath`/`previewPath`, `hostRef` (which re-roots the
-  paths a *forwarded* frame carries), `sessionCounts`, `reachText`/`lastCheckText`/`relativeTime`, `hostFailure`,
-  `createOffered(role)`, `isLocalRow`, `hostLabel` — HS-071's rules, all tested by `web/test/transcript.test.ts`.
-- **The Computers screen is the machine list.** `main.ts`'s `computersSection`/`machineCard` draw one card per
-  registry row and one section per machine on the sessions screen; a machine that is away already shows a refusal
-  sentence and `—` counts rather than `0` (`sessionCounts`, `forwards`, `forwardingNote`). "Degrades per session"
-  (acceptance bullet 4) is therefore partly built and partly *unbuilt*: nothing yet renders a peer that goes away
-  **while a session's page is open** (the stream's `502` is `http::forward`'s, and the page's reaction to it is HS-071's
-  `showState`).
-- **`case_push` owns a real receiver** (`node:https` on `127.0.0.1:0`, a CA and a `localhost` certificate, the machine's
-  VAPID pair, `SSL_CERT_FILE` around `start_serve` — the sender passes no `-CAfile` on purpose, ADR-0071), and
-  **`case_computers`/`case_forward` own the two-boot idiom** (`start_peer`/`stop_peer`, a seed naming the peer, pinned
-  ports). A cross-machine notification case is those two shapes together: a peer that *sends* a push, a hub whose page
-  subscribed to it, and a receiver that gets the right payload.
-- **`docs/notes.md`**: the cross-cutting sections, then `### Landmines: the push, the pair and the payload (HS-066)`,
-  `### Landmines: the Computers screen, and a page that knows whose session it is (HS-071)`, `### Landmines: the host
-  registry and its probe (HS-068)`, `### Landmines: the hub's forwarding (HS-069)` and `### Landmines: the ssh
-  transport… (HS-073)` — the five nearest.
+- **`scripts/build.sh` is the build, and it runs on the host.** It takes `[--target <triple>]…` (default: both musl
+  triples) and `--no-check`; it runs `scripts/build-web.sh` (npm ci, `npm test`, Vite), exports
+  `HOLOSMITH_REQUIRE_WEB=1`, then `cargo build --release --locked --target …` for each triple through the cross
+  toolchains on `PATH`, writes `dist/<triple>/holosmith` and finishes with `scripts/check-static.sh`. It needs
+  `. ~/.pi/toolchains/env.sh` — the rustup toolchain, the two musl.cc gccs and a `cc` — and **that requirement is
+  exactly what this story removes for the build it builds**. `.cargo/config.toml` carries the per-target linkers and
+  `relocation-model=static`; `Cargo.lock` is committed and registry-only.
+- **The builder's missing `.git` is already solved.** `scripts/build.sh` exports
+  `HOLOSMITH_GIT_TAG="$(git describe --tags --always --dirty …)"` with the comment "Builder containers have no `.git`,
+  so there the tag arrives in this variable instead", and `build.rs` reads the env first. That hatch exists for this
+  story and nothing yet uses it.
+- **`src/images.rs` is the *product's* image machinery, not a builder's** (HS-048, ADR-0057): `Kind {Proxy, Agent}`,
+  `Expectation::of/of_digest/mismatches/unbuilt`, `digest`/`own_digest` (a **hand-written SHA-256**, no dependency),
+  `archive` (ustar), `build_arguments`, `failure`, `Status`/`read`, `architecture`, `ensure`, the `Images` seam, and
+  the five `LABEL_*`. `images/{proxy,agent}.Dockerfile` are `include_str!`ed recipes that `server deploy`'s step 3
+  builds, and `scripts/check-static.sh` greps their markers out of the artifact. The *patterns* (a label set, a
+  digest comparison, a build failure's sentence) are reusable; the two recipes are not a builder.
+- **`pins/pi.txt` is the only pinned version in the tree** and `tests/pin_single_source.rs` fails on a second copy of
+  the literal. A builder pinned by **digest** is a new kind of pin — the story must say where it lives and how a
+  second copy is prevented (the same test's shape).
+- **The sandbox has a real Docker daemon and network** (§2), so a builder image *can* be pulled and built here; the
+  gate cannot assume either on another machine, and `case_*` may not need a pull it cannot make. The daemon is
+  host-root by another name and is granted deliberately.
+- **`scripts/verify.sh` is the gate and it calls `scripts/build.sh` in its `build` phase** (which is why
+  `check-static.sh`, the empty-root boot and `case_pwa`'s `cmp` against `web/dist` all see the artifact). A story that
+  changes how the artifact is produced changes the gate's own path: the plan must say whether `verify.sh` keeps the
+  host build (fast, offline) or goes through the container (honest, needs a pull), and if both, which one the gate
+  measures. This is the story's central risk, because a gate that silently falls back to the host build **cannot fail
+  on the thing it exists to catch**.
+- **The host has no `sudo` and no systemd**, and `/` is a small tmpfs while `~/.pi` is the large writable mount — so a
+  build's scratch space and image pulls land outside the repo. `docker run` with a bind mount of the repo is the
+  shape the sandbox can carry.
+- **`docs/notes.md`**: the cross-cutting sections, then `### Landmines: the image builds (HS-048)`, `### Landmines:
+  the deploy, the ports and what \`install\` does to a key file (HS-047)`, `### Landmines: images, dialogs and the
+  capture (HS-035)`, `### Landmines: build and toolchain` (the cross-cutting section — read this one first: it is
+  where `RUSTFLAGS`/`.cargo/config.toml`'s trap and the musl linkers live), and `### Landmines: a name across
+  machines… (HS-074)` for how the last session's gate case was built.
 
 ### 1.4 What does not exist
 
-No machine name for a machine to put in its own payload, no per-machine subscription from the page (one call, one
-origin, one row), no delete-across-machines, no machine picker on the create form, no notification path that names a
-machine, no arm anywhere that sends a push **from a peer** and reads it through the hub's page, and no per-session
-"this machine is away" state beyond HS-071's list-level one. Also absent: a `hosts` column or key that says which
-machine a *session* belongs to — because the owning machine is the URL the caller used (ADR-0074, and HS-071's
-`sessionPath` is that fact in one function).
+No builder image and no pin for one; no `--builder`/`--out` flags and no `build` verb anywhere in the CLI; no path
+that a container writes the artifact into; no failure path that surfaces a build's log tail (the
+`ImageError`/`failure` pattern is the nearest thing); no test or `case_*` that asserts the host ran no compiler; and
+nothing that writes a `.sha256` beside the artifact (`check-static.sh` computes digests in memory, `images::sha256` is
+the function). `dist/` is the host build's output today, not a release directory.
 
 ### 1.5 What the plan must decide (and the arms each one has)
 
-1. **What `host` in the payload is, given that a machine cannot read the hub's name for itself.** (a) Its own
-   `control_origin`'s host — self-known, stable under MagicDNS, but the page's paths take a **registry name** and the
-   hub's row may be named anything; (b) a new config key (`machine_name`) that an operator sets and the payload
-   carries — one more key, and `config show`'s golden file plus `KNOWN_KEYS.len()` move with it; (c) the hub's name for
-   the machine learned at registration and persisted (the registry row is the hub's, so the machine would keep a copy
-   it cannot verify); (d) the payload keeps `local` on every machine and the **hub** rewrites nothing, with the page
-   resolving `local` to "the machine whose page this is" — which cannot work for a notification, because the worker
-   runs on the hub's origin and has no page. Say which, and say what a phone does with a name the hub's registry does
-   not have.
-2. **How a create names a machine.** (a) The page calls `POST /api/hosts/<name>/sessions` for the machine the picker
-   named — no server change at all, and the answer is the peer's own row, which is what the list already draws; (b) a
-   `machine` key on the hub's own `POST /api/sessions`, forwarded — one route, but it makes the hub's create a proxy
-   and the 403 `sessions_disabled` a lie; (c) a separate hub-side route. Also: what the picker offers (every `reachable`
-   row that is not `local`?), what a `server`-role machine's own page shows, and what the *local* choice means.
-3. **How the app subscribes on every machine.** One `PushManager.subscribe` per machine, with **that machine's**
-   `application_server_key` read through the hop, posting to `POST /api/hosts/<name>/push/subscribe`; then the settings
-   screen has one row per machine (`machineState(origin, subscribed)` already words one) and a machine that is away says
-   so instead of "not subscribed". The arms: the hub's own row, a peer's row, a peer with no pair yet
-   (`application_server_key: null`), and a peer that refuses the subscription.
-4. **What deleting does when one machine is away.** The acceptance is "removes it from every machine the app subscribed
-   to", so the loop must report the machines it could not reach — the page's own `hostFailure` sentence, per row.
-5. **What "degrades per session" means.** A session's page for a peer that is away: the stream's `502 upstream_unreachable`
-   reaching `showState`, the four composer actions, and the Changes sheet — say which of them gets a sentence and which
-   gets disabled, and whether anything is invented locally.
-6. **What the gate measures, and with what.** A peer that sends a push about its own session, a hub whose page
-   subscribed to **both** machines, a `node:https` receiver that reads the payload's `host`, and a `transcript`-level
-   assertion that the notification's path names the peer. `case_push`'s receiver plus `case_computers`' two boots is
-   the shape; `npm test` is where `push.ts`'s new rules go (it has no DOM).
+1. **What invokes the build, and where it lives.** (a) a new subcommand `holosmith build --target … --out DIR`
+   (a *host* verb that orchestrates Docker — the spec's "the host only orchestrates Docker", and the CLI-by-phase
+   table adds no verb for phase 4, so this is a decision to record); (b) a script (`scripts/build.sh` gains
+   `--container`, keeping the command surface unchanged); (c) both, with the script delegating to the binary. Say
+   which, and say what happens when the daemon is absent (a sentence, not a half-build).
+2. **What the builder image is, and how it is pinned and obtained.** A Dockerfile in `images/` (the two existing
+   recipes' shape) or a third-party `rust:…`-style image pinned by digest; where the digest lives
+   (`pins/builder.txt`? a comment? the Dockerfile's `FROM` line with the pin in the file `include_str!`ed?) and how
+   `tests/pin_single_source.rs`'s one-source rule is kept; whether the image is built locally on first use
+   (`images::ensure`'s shape) or pulled (`docker pull <digest>` — the offline-machine cost); and how the cross
+   toolchains (musl.cc gccs, the `cc` shim) get into it.
+3. **Where the artifact and its digest go.** The acceptance says "where `holosmith upgrade` expects them" and
+   `upgrade` does not exist yet: `releases/<tag>/holosmith` + `holosmith.sha256` is item 10's own layout and HS-080
+   owns the symlink, so the *placement* is this story's and the *layout* is HS-080's. Decide the flag (`--out`) and
+   what a re-run does (overwrite, or refuse a directory that already holds a different digest).
+4. **How a failure surfaces the log tail.** Item 10's word is "the container's log tail": which N lines
+   (`exit.rs`'s `STDERR_LINES` is 5; a build wants more), whether `docker run`'s attached output is streamed or
+   captured, and what the exit code is. `images::failure`'s sentence is the precedent for "the thing that failed said
+   this".
+5. **What the gate measures, given that the host toolchains are present here.** The acceptance's headline ("no
+   `build.rs` runs host-side") cannot be measured by deleting the host's toolchain. The arms: (a) a `docker` stand-in
+   on `PATH` that records every argv and fakes the artifact, so the *orchestration* is measured and no host `cargo` is
+   invoked (assert by a `cargo` stand-in that must never fire — the `curl`/`wget` recorder's shape in
+   `case_deploy_ssh`); (b) a real-daemon arm that builds one target for real and `SKIP`s without the daemon or the
+   image (the `case_preview`/`case_server_deploy` shape); (c) both, with the offline arm carrying the words. The rule
+   §6 makes is that a `SKIP` may not fire when the feature is deleted, so the offline arm must be able to fail on a
+   regression.
+6. **Whether `scripts/verify.sh`'s `build` phase keeps building on the host.** It must keep producing `dist/<triple>`
+   for `check-static.sh` and `case_pwa`; the honest answer is probably "the gate keeps the host path for speed and
+   `case_build` measures the container path", disclosed in `docs/build.md` — but that is a decision with a sentence in
+   the ADR, not a silence.
 
 ### 1.6 The questions the plan must answer (before code)
 
-1. What value does `payload.host` carry, who writes it, and can a phone resolve it to a page?
-2. Which machine does a create name, through which route, and what does the picker offer?
-3. Does the worker subscribe (N calls to N machines) or does the page? What happens on iOS where the worker exists only
-   after install?
-4. What does the settings screen show per machine, and what does a delete do when a machine is away?
-5. What does a session's page show when its machine goes away, and which parts are disabled?
-6. Which `case_*` carries the words, and what does `npm test` own?
+1. Which command builds, and what does it do with no daemon, no image and no network?
+2. What is pinned, where is the pin written, and how does a second copy of it fail a test?
+3. Where do the binary and its `.sha256` land, and what does a re-run do?
+4. What does a failure print, from which source, with what exit code?
+5. How does the gate prove the host ran no compiler, on a host that has one?
+6. Does `verify.sh` still build on the host, and if so what sentence says why that is not a hole?
 
 ### 1.7 Acceptance, restated as checks
 
-- *each machine keeps its own keys and subscriptions; the app subscribes per machine through the hub* — N rows in
-  `push_subscriptions`, one per machine, each sealed to that machine's pair, and the settings screen's one row per
-  machine with its own `application_server_key` read through the hop.
-- *the payload's `host` opens the right machine's session through the hub* — the receiver's payload compared with the
-  hub's registry name for the sending peer, and `notificationPath`'s output equal to that machine's
-  `/hosts/<host>/sessions/<id>`.
-- *creating through the hub sets its machine explicitly and the UI shows it* — the create's request, the row it
-  answers (the peer's `host` fact), and the screen's machine label before and after.
-- *an unreachable machine degrades to a clear state per session rather than an empty list* — a peer that goes away
-  under an open session page: the sentence, not a blank.
-- *deleting a subscription removes it from every machine* — N `DELETE`s, and the sentences for the ones that failed.
+- *the builder image is pinned by digest and builds the static binary for the requested target* — the pin appears once
+  (`tests/pin_single_source.rs`'s shape), the build's argv names the digest and the triple, and the artifact
+  `readelf`s as static for that triple (`check-static.sh`'s two assertions, pointed at the new output).
+- *no `build.rs`, proc macro or toolchain step runs host-side; the host only orchestrates Docker* — a `cargo` stand-in
+  on `PATH` that is never invoked, plus the recorded `docker` argv being the only child.
+- *the output binary and its `.sha256` are placed where `upgrade` expects them* — the two files exist at the decided
+  path, the digest is `images::sha256`'s of the bytes, and re-running is idempotent or refuses with a sentence.
+- *build failures surface the container's log tail* — a container that exits non-zero with a recognisable last line,
+  and the command's stderr carrying it.
+- *the diff review is documented as the real gate* — a sentence in the ADR and in `docs/build.md` that this story makes
+  the build safe, not trusted.
 
 ### 1.8 Non-goals
 
-A second transport (HS-073's is done); a hub that sends a peer's push on its behalf (item 11 says each machine signs
-its own); a `sessions.host` column (ADR-0074/HS-071: the machine is the URL); `upgrade`/`rollback` (HS-078/079); the
-fake-pi harness (HS-075); any change to the five trigger words or the 20-second `LONG_TURN`.
+`upgrade` and `rollback` (HS-078/079); the release layout and the `current` symlink (HS-080); fake pi, the recorded
+fixture and the smoke harness (HS-077); the product's two images (`server deploy` step 3 owns them, HS-048); signing or
+provenance beyond a `.sha256`; and any change to the diff review's *policy* (item 12), which is documented here and
+built elsewhere.
 
 ### 1.9 The demo
 
-A hub and a peer booted on one box (`start_peer`, the `case_computers` idiom), a `node:https` receiver standing in for
-the phone, the page subscribed to **both** machines, a turn finishing on the peer, and the payload arriving with the
-peer's name and a path under `/hosts/<peer>/sessions/<id>` — then the same page with the peer stopped, showing the
-sentence rather than an empty list. Say plainly what was not measured: no real phone, no push service, no iOS, no
-second machine.
+A build on this box through the new path with the host's `PATH` stripped of the Rust toolchain (an `env -i` run, or a
+`PATH` holding only what the orchestrator needs): the container builds, the artifact lands with its digest, and
+`readelf`/`file` say static musl. Then a deliberately broken build (a `build.rs` that panics, or a bad triple) whose
+failure prints the container's last lines. Say plainly what was not measured: no second architecture if the pull fails,
+no offline machine, and the host's toolchains were *unavailable to the command*, not uninstalled.
 
 ### 1.10 What the next agent needs back
 
-When you write the state back (§5, step 10): §1 becomes the next issue — by `PROMPT.md`'s ranking that is `PER-107`
-(HS-075, fake pi and the smoke harness) *if* HS-074 ships and its blockers are `Done`, and `PER-106` again if it does
-not; check Linear's `Blocked by` list. Refresh the counts, the ADR number you took (**0079** is next), the last gate
+When you write the state back (§5, step 10): §1 becomes the next issue — by `PROMPT.md`'s ranking that is `PER-109`
+(HS-077, fake pi and the smoke harness) *if* HS-076 ships and its blockers are `Done`, and `PER-108` again if it does
+not; check Linear's `Blocked by` list. Refresh the counts, the ADR number you took (**0080** is next), the last gate
 run's own numbers (and `web/`'s test count), and replace §9's row with this story's. Anything you learned that is
 **not** state and **not** an ADR goes into `docs/notes.md` under a new `### Landmines: …` heading, never into §1. Then
 kill what you started (§5, step 11).
@@ -450,8 +447,9 @@ it also prints one `ok <case>` line per case that measured something: a case tha
 line and the run ends with `SKIP n of N cases measured nothing`, so `grep -c '^ok case_'` is the number that
 proved something and a skip can never read as a pass. It takes ~15 min (both musl targets, the Docker cases,
 `case_idle_stop`'s real minute, `case_disk_quota`'s two boots, `case_preview`'s container and
-`case_doctor_full`'s self-test). As of PER-105 the run prints **95 cases and 2064 assertions**, `cargo test` is
-**1299** in 63 binaries, and `web/` is **122** tests. `--no-build` skips `build` and `embed`; `--keep` keeps the work dir.
+`case_doctor_full`'s self-test). As of PER-106 the run prints **96 cases and 2102 assertions**, `cargo test` is
+**1298** in 63 binaries, and `web/` is **132** tests. (The last three numbers move with every story that adds a case, a
+test or a rule; the gate prints its own, so quote the run rather than this line.) `--no-build` skips `build` and `embed`; `--keep` keeps the work dir.
 
 Some cases bring their own boot, and they are the ones a new story is most likely to collide with:
 
@@ -475,6 +473,7 @@ Some cases bring their own boot, and they are the ones a new story is most likel
 | `case_machine_trust` | **its own boot, twice** (an empty `allowed_hubs`, then `["workshop"]`), a `tailscale` shim first on `PATH` (the `deploy_machine_shims` shape, paths through the environment), and `python3` for a client **bound to `127.0.0.2`** — the only way to be a peer on one box. No daemon, no image. It prints one `SKIP` line without `python3` and restores `PATH` and the shared boot |
 | `case_computers` | **two boots of its own** (`start_peer` with a `role = "server"` and its own seed naming the hub, then a `role = "hub"` boot with a seed naming the peer and a `gone` port — both on pinned control/preview ports), `python3` for `free_port` (one `SKIP` line without it), `forward_fetch <port>` for the peer's own `404`, and no daemon and no image. It restores the shared boot |
 | `case_hosts` | **its own stub boot on a pinned control port** (`start_serve <config> <data> <listen>` — a seed row naming *this* machine has to spell the port the boot will use), three `python3` **TLS** stand-ins on loopback (a healthy payload, a `302` that records each request, a payload with no `name`), a CA + `localhost` certificate with a `DNS:` SAN (so `openssl`), and `SSL_CERT_FILE` exported around both `start_serve` calls — the probe passes no `-CAfile` on purpose (ADR-0071/0073), which is what lets a private CA stand in front of it. It restores the shared boot |
+| `case_cross_machine` | **two boots of its own** (`start_peer` with `role = "server"`, `machine_name = "workshop"` and a budget of one token, then a `role = "hub"` with a seed naming it — every port pinned), `openssl` (a CA, a `localhost` certificate and the subscription's key), `node` (the receiver), `python3` (four ports, the SEC1 walk and two `app.db` reads), and **no daemon and no image**; it exports `SSL_CERT_FILE` around the peer's boot only (the sender passes no `-CAfile`), and it restores the shared boot. Its receiver and SEC1 walk are `write_push_receiver`/`write_sec1_walk`, shared with `case_push` |
 | `case_deploy_ssh` | **no shared boot, no daemon, no image**: its own `ssh` stand-in on `PATH` (records argv, runs the words after the host through `sh -c`, `$HOME` in a tree it owns) and the `tailscale` shim, plus `python3` (two ports, a `_ping` socket, one `/api/health` responder), `openssl`/`install`/`chmod`/`df`, and **both** musl artifacts (`dist/<other-triple>/holosmith` is the architecture-mismatch fixture; it prints one `SKIP` line for that arm alone under `--no-build`). It writes only into `target/verify-ssh-<pid>/` and its own `HOME` |
 
 A story is not done until the gates are green on a clean tree, and then you run the story's own demo
@@ -658,7 +657,9 @@ crates/holosmith/
                             for tests, and `Temp`: a `0700` directory under `<data>/push/tmp/` with `0600` files,
                             removed on drop), send.rs (`request`'s byte-exact head, `status_of`, `Disposition`,
                             `DELIVER_TIMEOUT` = 60 s, and `SslClient`: one `s_client` child whose streams go to files
-                            and whose wait is `try_wait` against that deadline), `OPENSSL`, `SUB`
+                            and whose wait is `try_wait` against that deadline), `OPENSSL`, `SUB`; since HS-074 the
+                            payload's `host` is the **config's** `machine_name` (read when a message is built, carried
+                            on `Message`, with `Message::plaintext` as the seam a sealed body needs)
   src/vapid.rs              the machine's Web Push key pair (HS-049, ADR-0058): `VAPID_FILE` (`vapid.toml`),
                             `Pair`, `store`, `render`, `parse`, `is_pair`, `from_der` (the SEC1 walk), `base64url`/
                             `unbase64url`; unit tests for the DER vector, RFC 4648's vectors and the three refusals
@@ -1047,7 +1048,9 @@ web/                        Vite 7 + TypeScript, four screens (`/`, `/sessions/<
                             `main.ts`'s `deleteSection` is the delete affordance, `changesSection` the
                             sheet, and `StreamTarget` carries one `showState` that patches badge, preview,
                             composer, the delete affordance and the sheet; since HS-067 `push.ts` (the
-                            notification sentences, the id→path rule, `pushState`'s five arms, the two install
+                            notification sentences, the id→path rule (`notificationPath(host, id)`, HS-074),
+                            `pushState`'s **six** arms, `machineSubscription`/`machineState`, `notificationData`,
+                            `subscriptionRoute`, the two install
                             sentences, `navLink`, `subscriptionBody`) with `test/push.test.ts`, and
                             `sw.ts` — the service worker, bundled by `vite.sw.config.ts` into `web/dist/sw.js` —
                             plus `public/manifest.webmanifest` and four PNGs under `public/icons/`); since
@@ -1058,7 +1061,9 @@ web/                        Vite 7 + TypeScript, four screens (`/`, `/sessions/<
                             `hostForceOffered`, `createOffered`, `forwards`/`forwardingNote`/`previewShown`,
                             `isLocalRow`, `hostLabel`, `hostRemoveQuestion`, `COMPUTERS_INTRO` — with `main.ts`'s
                             `computersSection`/`machineCard` as the screen and `push.ts`'s `navLinks`/`SCREENS`
-                            naming the four paths)
+                            naming the four paths — and since HS-074 the create's and the away machine's rules:
+                            `createTargets`/`startLabel`/`NO_CREATE_TARGET`, `ownLabel`, `isAwayCode`/`awaySentence`,
+                            `registryMissing`, `AWAY_DETAIL`, `STREAM_LOST`)
 web/test/transcript.test.ts 97 tests over synthetic frames, node's own runner (`npm test`)
 scripts/build-web.sh        npm ci + npm test + npm run build, asserts web/dist/index.html
 scripts/build.sh            web first, HOLOSMITH_REQUIRE_WEB=1, both musl targets → dist/<triple>/,
@@ -1071,13 +1076,14 @@ scripts/verify.sh           the one-command gate (see §3), including the two st
                             --json` from the pairs it was asked for) and `health_responder` (a `python3` that
                             answers `/api/health` for a whole case)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0078          read the recent ones before planning anything (0078 is the `--ssh` transport: four
+docs/adr/0001…0079          read the recent ones before planning anything (0079 is HS-074's machine name and the
+                            tap's path; 0080 is the next free number; 0079's neighbours: 0078 is the `--ssh` transport: four
                             children, the digest-named copy, the ELF-header arch refusal — 0079 is the next free
                             number; 0077 is the hub CLI and the two deploy halves)
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders
-docs/review/PER-33…PER-105, PER-107  each a verbatim review + a `## Resolution` table
-                            (`PER-105` is this build's newest — ten findings, nine fixed; `PER-104` the one before
-                            it)
+docs/review/PER-33…PER-107  each a verbatim review + a `## Resolution` table
+                            (`PER-106` is this build's newest — one P0, three P1s and eleven smaller findings, all
+                            fixed or recorded; `PER-105` the one before it)
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -1136,6 +1142,24 @@ GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a t
   `hub deploy` also takes `--root` (the spec's row now says so): an install tree is how an unprivileged user — and
   the gate — drives the whole thing. A hub needs `openssl` (the registry's `s_client`), so that `doctor` finding is
   **not** part of the hub carve-out.
+
+- **The hub is the only thing the operator opens (HS-074, ADR-0079).** Four *names*, no new transport. A machine calls
+  itself `machine_name` — a new config key, default `local` (the reserved word for *the machine whose page this is*),
+  validated by the registry's alphabet through `hosts::shape_problem`, and served as the **seventh `/api/health` key**
+  that the page labels its own row with (`transcript.ts`'s `ownLabel`). `push::Payload::host` is that key, so a
+  notification says `Holosmith · workshop` and a tap opens `/hosts/workshop/sessions/<id>` — `push.ts`'s
+  `notificationPath` and `transcript.ts`'s `sessionHref` are one rule spelled twice, with a test that compares them;
+  the worker carries the host in the notification's `data` (`notificationData`) because a tap handler has no page. A
+  create names its machine **in the URL** (`POST /api/hosts/<name>/sessions`, `createTargets` offering this machine
+  and the reachable rows, and only when `forwards(role)`); the hub's own `POST /api/sessions` is still `403
+  sessions_disabled`. The **page** subscribes per machine — one `pushManager.subscribe({applicationServerKey})` with
+  that machine's key read through the hop, posted to `subscriptionRoute(host)` — so the settings screen has one row
+  per machine (`machineState`, `machineSubscription`'s three words, `pushState`'s six arms), a delete loops every
+  machine and reports the ones that did not answer, and an unreachable machine is a third state rather than a `false`
+  (`awaySentence`/`isAwayCode` for the two upstream codes). A session page whose machine is away says the machine's
+  sentence and offers only a reload (`AWAY_DETAIL`), and a machine that leaves under an open page is one line above
+  the transcript (`STREAM_LOST`). `case_cross_machine` is the gate's proof: two boots, a receiver, each machine's own
+  `push_subscriptions` table, the decrypted payload, and the `502` when the peer stops.
 
 - **The host registry exists (HS-068), the hub forwards through it (HS-069) and it is trusted by address (HS-070).**
   `hosts` is one row per machine
@@ -1353,15 +1377,14 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 The catalogue lives in **`docs/notes.md`** — read the **cross-cutting** sections before you start anything,
 then the sections below. It is a reference: everything there is a measurement or a review finding.
 
-| Read | Why it bears on HS-074's cross-machine sessions and notifications |
+| Read | Why it bears on HS-076's pinned builder container |
 | --- | --- |
-| Cross-cutting: *Config and docs*, then *Tests*, *Web*, *Demos* | **Config and docs**: an ADR means a line in `docs/stories/README.md` (and its count), and a new config key moves `tests/golden/config-default.toml` **and** `KNOWN_KEYS.len()` — HS-074 is the story most likely to want one (`machine_name`) and the plan must justify it. **Tests**: `PATH` cannot be set in a test, so a program is a `PathBuf` field in a `Tools`. **Web**: `web/src/*.ts` rules are tested by `npm test` (node, no DOM); `main.ts` is the DOM and is not. **Demos**: a demo that redirects into a file it is still reading truncates it, and every `serve`/`node` child needs its pid scored when it starts. |
-| *Landmines: the push, the pair and the payload (HS-066)* | **This story's foundation.** The four trigger words plus `turn_finished`, `LONG_TURN` (20 s), the stream-open pair, the payload's three keys, the `Deliver` seam, `SslClient`'s `s_client` child and `DELIVER_TIMEOUT`, the `Temp` directory under `<data>/push/tmp/`, and `application_server_key` on health (HS-067). The payload's `host` is a **constant** there — this story is where it stops being one. |
-| *Landmines: the Computers screen, and a page that knows whose session it is (HS-071)* | The machine dimension in the page: `apiPath`/`sessionPath`/`hostRef`/`streamPath`, the one-section-per-machine list, `createOffered(role)`, `hostFailure`'s code-dropping rule, `sessionCounts`' `—` (never `0`) for a refused read, and the preview link that stays on the hub's origin. A notification's path has to agree with `sessionPath`, and a create has to agree with `createOffered`. |
-| *Landmines: the hub's forwarding (HS-069)* and *the host registry and its probe (HS-068)* | The five registrations of `/api/hosts/{name}/{*rest}` (so `POST /api/hosts/<name>/sessions` and `/push/subscribe` are reachable **today**), the `308` for `local`, the `403 not_forwarded` for `hosts/…`, the 5 s/60 s head bound, `502`/`504`, and the row's facts (`name`, `url`, `preview`, `reach`, `version`) — a hub's name for a machine is a **row name**, and a machine does not know it. |
-| *Landmines: the ssh transport, and what a copy needs (HS-073)* | The four children's shape and the two stand-ins' grammar (`-o` takes a value), `$HOME` expanding on the *target*, and the quoting rule: anything that crosses a shell needs `quote`. A notification's deep link is the same class of problem one layer up — a name from a payload is untrusted text on its way into a URL, which is why `notificationPath` gates on the id's alphabet (ADR-0072 D7). |
-| *Landmines: the service, the keys and the origins (HS-049)*, *the installable app (HS-067)* and *the registry... (HS-068)* | `case_push`'s `node:https` receiver + CA + `SSL_CERT_FILE`, `case_pwa`'s no-SKIP shape and the VAPID pair written by hand, and `case_computers`' two boots (`start_peer`/`stop_peer`, a seed that spells a port before the boot). A cross-machine notification case is those three together. |
-| *Reviews* (`docs/review/PER-105.md`, `PER-104.md`, `PER-071`…`PER-067`) | The recurring lessons: a sentence claiming more than it measured (PER-105 #1: "verbatim" across a shell), a test whose name claims two measurements and makes one, a **test that cannot fail on the code it names**, a check whose claim outran its topology (PER-102 S1), and a fan-out that assumed a role could forward (PER-103 #1). HS-074's version of that class is a "per machine" claim measured with one machine. |
+| Cross-cutting: *Build and toolchain*, then *Config and docs*, *Tests*, *Demos* | **Build and toolchain** is this story's own ground: `RUSTFLAGS` must never be exported (it disables `.cargo/config.toml`'s per-target rustflags and silently ships a static-PIE binary — ADR-0005's trap, one container out too), the musl linkers and the `cc` shim are how a musl build links at all, and `Cargo.lock` must stay registry-only. **Config and docs**: an ADR means a line in `docs/stories/README.md` **and its count** (the count was missed once and cost a finding); a new pin moves `tests/pin_single_source.rs`. **Tests**: `PATH` cannot be set in a test, so a program is a `PathBuf` field in a `Tools` — and a *stand-in on `PATH`* is the gate's way (the `docker`/`ssh`/`tailscale`/`du`/`df` shims). **Demos**: score a pid when you start one, and a demo that redirects into a file it is still reading truncates it. |
+| *Landmines: the image builds (HS-048)* and `docs/adr/0057-*` | The nearest machinery: `images.rs`'s `Kind`/`Expectation`/`digest`/`own_digest` (a **hand-written SHA-256**, no dependency — the digest this story's `.sha256` needs), `archive` (ustar), `build_arguments`, `failure`, `Status`/`read`, `architecture`, `ensure`, the `Images` seam, and the five `LABEL_*`. `images/{proxy,agent}.Dockerfile` are the recipe shape; they are the *product's* images, built on the machine that runs them, and are **not** a builder. ADR-0057 also records what a build's failure sentence looks like. |
+| *Landmines: the deploy, the ports and what `install` does to a key file (HS-047)* | `server deploy`'s seven steps and the deploy's own `Images`/`Proxies` seams: step 3 is the only place a Dockerfile is built today, `--dry-run`'s `needs`/`skipped` vocabulary is what a *plan* of a build should look like, and the `tailscale` shim is the stand-in pattern this story's `docker` stand-in will follow. |
+| *Landmines: the network self-test (HS-036)*, *the egress proxy (HS-037)* and *the disk floor (HS-062)* | Three stories that had to run a container from inside the binary and write down what a bounded child, a `spawn_blocking` seam and a `Tools`-shaped program are — including `bounded`/`attempt`/`run_detached` in `docker.rs`, which is the API a build's `docker run` should use rather than a second `Command`. |
+| *Landmines: a name across machines… (HS-074)* | How the last session's gate case was built and what it cost: the receiver/SEC1 extraction into functions, the `Content-Type` a body-less `DELETE` still needs, the hand-written VAPID literal that is a *shape* and not a curve point, and the silent `str.replace` that shipped a P0. The last one is the cheapest lesson in the file: **assert every scripted edit matched**, then `grep` for the new shape. |
+| *Reviews* (`docs/review/PER-106.md`, `PER-105.md`, `PER-104.md`) | The recurring lessons: a sentence claiming more than it measured; a test whose name claims two measurements and makes one; a **test that cannot fail on the code it names**; a check whose claim outran its topology. PER-106's P0 is the sharpest version: an edit that silently changed nothing, in a file no gate can see. HS-076's version of that class would be a `case_*` whose `SKIP` fires when the container path is deleted. |
 
 Three rules worth repeating here because they are the most expensive to relearn: **a test that cannot fail is worse
 than no test** (mutate the behaviour and watch it go red); **a gate case that SKIPs on the bug it exists to catch is
@@ -1406,7 +1429,7 @@ cd /home/adamolsson/projects/holosmith
 git status --short                                  # clean apart from log.txt/orchestrate.sh
 . ~/.pi/toolchains/env.sh                           # ALWAYS before cargo/rustc
 python3 /tmp/lin.py issues | grep -v ' Done ' | head # recreate /tmp/lin.py first (§2)
-python3 /tmp/lin.py issue PER-105                   # scoped, Backlog, the issue §1 names
+python3 /tmp/lin.py issue PER-108                   # scoped, Backlog, the issue §1 names
 docker version                                      # the daemon must answer, or a Docker check cannot be measured
 docker image inspect pi-agent:local                 # the image the Docker stories run
 docker network ls | grep -w egress                  # the proxy test's premise (§2); `grep -x` never matches
@@ -1416,7 +1439,7 @@ scripts/verify.sh                                   # baseline green, ~15 min (i
 
 If the baseline is red before you touch anything, that is the first thing you fix — and say so in Linear.
 
-Then start §5 on **§1's issue** (`PER-105`, HS-073) and stop after step 11.
+Then start §5 on **§1's issue** (`PER-108`, HS-076) and stop after step 11.
 
 Before you begin, check that the last session left nothing behind — `subagent({action:"list"})` should show
 no run in progress, `docker ps` none of its containers, and `git status --short` should look like the line
@@ -1435,49 +1458,49 @@ from those three; do not carry old sessions' ledgers in this file.
 If you stop before the issue ships, say so explicitly, name the next action, and leave the tree clean and the
 gates green — **a half-finished story is worse than an honest stop**.
 
-**The last shipped story** (`PER-105`, HS-073, `--ssh` deploys, ADR-0078; commits `1553e47`, `aa5c716`, `9d447b2`,
-`1bb7b3a`): phase 3's sixth story, and the first that moves a *command* to another machine. Five things are worth
-carrying.
+**The last shipped story** (`PER-106`, HS-074, cross-machine sessions and notifications, ADR-0079; commits `7579224`,
+`33b5c6a`, `b3183e5`): phase 3's seventh and last story, and the first where the hub is really the only thing the
+operator opens. Five things are worth carrying.
 
-**The story was "the same command, elsewhere", and everything followed from that.** A remote deploy is the four ssh
-children plus the target's own binary running `deploy::run_as` with the same `Kind`, `--root` and `--dry-run`. The
-tempting alternative — a remote step plan — would have re-decided every step's meaning one hop out, and it was refused
-once, in the plan, and never came back. When a story is about a *second place* to run machinery that exists, the
-first question is which function is allowed to be the only one, and the answer is again "the one that already is".
+**The story was four *names*, not a transport.** `/api/hosts/<name>/{*rest}` already carried every route it needed
+(five registrations, HS-069), so each acceptance bullet turned into "which machine does this string name, and who
+writes it": the payload's `host` (a new config key, `machine_name`), the create's machine (the URL), the
+subscription's machine (one key read through the hop, one route per machine), and the machine a tap opens (the
+notification's `data`). When a story is about a *dimension* rather than a mechanism, the plan is a table of "who
+writes this value" — and the answer for every one of them was "the machine that owns it, read through the hop".
 
-**Two of the four children are there because a check must precede an act.** The architecture is read from the *file's*
-own ELF header (a file that has not run cannot be asked `version --json`) and compared **before** the copy; the copy's
-digest is checked **before** the run. Both refusals are measured by the children's absence from a stand-in's log,
-which is the only assertion shape that can distinguish "did not happen" from "happened quietly".
+**The review's P0 was an edit that silently did nothing.** The change meant to put the host into the worker's
+notification `data` used an `oldText` the author had invented, so `str.replace` matched nothing, printed `ok`, and
+left every tap opening the hub's own session page. Nothing caught it because `sw.ts` has no test and `case_pwa` read
+needles that did not include the shape. Two habits: **assert every scripted replacement matched**, and then `grep` for
+the *new* shape rather than the function's name. The story's own `docs/notes.md` section records it, and it is the
+most transferable lesson from this session.
 
-**The review's P1 was a word: "verbatim".** `--config` and `--root` were argv into `Command` and therefore verbatim
-*locally*, but ssh hands the target's login shell **one string**, so a path with a space in it arrived as two words, a
-glob as a match, and a `;` as a second command. Nothing in the code, the tests or the gate could see it, because every
-path those used had no space in it. ADR-0078 promised "verbatim" and the code delivered "verbatim if it survives a
-shell"; `remote::quote` (and `"$HOME"` for the copy token) is what made the promise true. **A claim about a value
-crossing a shell needs a quoting function and a test with a space in it**, and this is the third class of "the
-sentence claimed more than the measurement" the build has recorded (PER-104's past-tense dry run and its `openssl`
-claim were the first two).
+**A rule about "whose value is this" belongs in a module `npm test` can see.** The page's state cascade (a
+`PushAction` to a row's word), the two-code "the machine is away" test, the subscribe route, and the label for this
+machine's own name all began as `main.ts` branches and ended as `push.ts`/`transcript.ts` functions with tests — the
+review asked for three of them and was right each time. `main.ts` is the one file no gate sees; every branch there is
+a claim nothing measures.
 
-**What the gate can and cannot measure decides the shape of the story.** No ssh key, no second machine, no `sudo` —
-so the gate's "remote" is a stand-in that *does what ssh does* (records argv, joins the words after the host, `sh -c`)
-plus a `--root` tree, and the "with sudo" half of the acceptance is `tests/deploy.rs`'s local recorders, disclosed in
-three places rather than glossed. The stand-in's own grammar mattered twice: it must consume `-o` **with** its value,
-and it must match the *unexpanded* `$HOME` token because the expansion is the target's.
+**What the gate can measure decided the case's shape.** A cross-machine notification on one box is two boots
+(`start_peer`/`start_serve`, pinned ports), a `node:https` receiver standing in for the phone, and one subscription per
+machine posted through the hub — and the case can assert the store (each machine's own `app.db`), the wire (the
+decrypted payload's three fields) and the refusal (`502 upstream_unreachable` naming the machine), but never the
+browser. That last sentence is written into `docs/build.md` rather than glossed, which is the only honest way to
+report a story whose UI half no gate may touch.
 
-**Two commits' worth of small traps are in `docs/notes.md`'s HS-073 section**, and two are worth memorising: a `local`
-declared without a value is **unset** in bash, so a `fail` in a case makes the EXIT trap print `holder_pid: unbound
-variable` *under* the assertion that mattered (read the `FAIL` line first); and `grep -o 'deploy-[0-9a-f]*'` counts
-the bare prefix, so a "unique names" assertion can fail as "the name is not stable" when it is really the pattern.
+**Two commits' worth of small traps** are in `docs/notes.md`'s HS-074 section: a hand-written VAPID literal is a
+*shape* and not a curve point (`ERR_CRYPTO_INVALID_JWK` from a receiver that verifies), the receiver's seventh
+argument is the `auth` secret (the wrong one fails as an empty payload, not as an error), and a body-less `DELETE`
+still needs `Content-Type: application/json` or the guard answers `403 bad_client`.
 
-The gate: **95 cases, 2064 assertions**, no `SKIP`; `cargo test` **1299** (63 binaries); `web/` **122** (unchanged — no
-screen in this story). The review found **six findings and four observations**, nine fixed and one recorded rather
-than changed (the `-t` rule's piped-stdout cost); the gate gained seven assertions for the one it found *missing* (a
-run the target refuses, with its exit code and its two streams).
+The gate: **96 cases, 2102 assertions**, no `SKIP`; `cargo test` **1298** (63 binaries); `web/` **132**. The review
+found **fifteen findings** (one P0, three P1s) and all of them were fixed or recorded with a citation; `case_pwa`
+gained three bundle needles for the one the gate could not otherwise see.
 
-**A session that cannot push must say so, and three in a row now could not.** `PER-105`'s session had no agent at all
-— `/run/ssh-agent.sock` absent, `SSH_AUTH_SOCK` unset, `ssh-add -L` answering `Could not open a connection to your
-authentication agent` — so `505c936`/`1a7f93d`/`50c7d34` (PER-103), `bcd57c2`/`8e46df1`/`89dea48`/`2beba35` (PER-104)
-and `1553e47`/`aa5c716`/`9d447b2`/`1bb7b3a` (PER-105) — and this handoff's own commit — are **local commits**. The
-next session's first job is `git log origin/master..HEAD`, then §2's single-key loop, before any story work. Nothing
-was faked, and `origin/master` is the last thing that *was* pushed.
+**This session could not push either, and that is now four in a row.** `/run/ssh-agent.sock` did not exist,
+`SSH_AUTH_SOCK` was unset, and `ssh-add -L` answered `Could not open a connection to your authentication agent`. So
+`505c936`/`1a7f93d`/`50c7d34` (PER-103), `bcd57c2`/`8e46df1`/`89dea48`/`2beba35` (PER-104),
+`1553e47`/`aa5c716`/`9d447b2`/`1bb7b3a` (PER-105), this session's `7579224`/`33b5c6a`/`b3183e5` and this handoff's own
+commit are **local commits** — fifteen. The next session's first job is `git log origin/master..HEAD`, then §2's
+single-key loop, before any story work. Nothing was faked, and `origin/master` is the last thing that *was* pushed.
