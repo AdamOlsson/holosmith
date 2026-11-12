@@ -67,6 +67,14 @@ fn main() -> ExitCode {
             wait,
             root,
         }),
+        Cmd::Rollback { to, wait, root } => {
+            commands::rollback::run(commands::rollback::RollbackArgs {
+                config: cli.config,
+                to,
+                wait,
+                root,
+            })
+        }
         Cmd::Container { action } => match action {
             ContainerAction::Snapshot => commands::container::run_snapshot(),
             ContainerAction::FakePi { pi_args } => commands::container::run_fake_pi(&pi_args),

@@ -45,6 +45,7 @@ pub mod quota;
 pub mod reconcile;
 pub mod release;
 pub mod remote;
+pub mod rollback;
 pub mod rpc;
 pub mod runtime;
 pub mod schema;

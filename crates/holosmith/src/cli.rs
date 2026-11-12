@@ -104,6 +104,27 @@ pub enum Cmd {
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
     },
+    /// Go back one release: switch `current` to the release before the live one, drain, restart and verify (HS-079).
+    ///
+    /// The emergency brake for a promotion that passed its health check but turned out to be wrong. It drains first,
+    /// switches `current` **back one release in the tree's own order**, restarts the unit and polls `/api/health` for
+    /// a process younger than that restart. There is no review acknowledgement: item 12's review is a pre-promotion
+    /// gate, and a rollback is the command that undoes a promotion. The database is never restored — the migration
+    /// rule (expand/contract) is what makes switching back safe.
+    Rollback {
+        /// The release to switch to, by tag. Absent means the release the live one replaced.
+        #[arg(long, value_name = "TAG")]
+        to: Option<String>,
+        /// How long the drain may wait for the turns that are running (`10m`, `500ms`).
+        #[arg(long, value_name = "DURATION", default_value = "10m", value_parser = parse_wait)]
+        wait: std::time::Duration,
+        /// Roll back into this install tree instead of the system paths, as the invoking user (no sudo).
+        ///
+        /// The same meaning as `upgrade --root`: the release tree, the admin socket's directory and the unit live
+        /// under it, and a privileged install (the default) requires this command to run as root.
+        #[arg(long, value_name = "DIR")]
+        root: Option<PathBuf>,
+    },
     /// Container helpers, used inside a session's container.
     Container {
         #[command(subcommand)]
