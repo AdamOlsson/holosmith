@@ -975,9 +975,10 @@ _Avoid_: Version (that is the crate's semver, not a release), build, deploy
 
 **Release tree**:
 `<install>/opt/holosmith`, holding `releases/<tag>/` and the **`current`** symlink; `--root` prefixes it, so an install
-tree carries its own. `holosmith upgrade` creates it and switches it; pruning old releases, `holosmith version`
-reporting the tag it was run from and `doctor` reporting the resolved path are HS-080's. Its machine names are
-`release::Release` and `release::ROOT`.
+tree carries its own. `holosmith upgrade` creates it and switches it; `holosmith rollback` switches it back one release,
+and its **order** — the order the releases were written onto the machine, newest first — is `Release::history`, which is
+also the order HS-080's pruning keeps. Pruning itself, `holosmith version` reporting the tag it was run from and
+`doctor` reporting the resolved path are HS-080's. Its machine names are `release::Release` and `release::ROOT`.
 _Avoid_: Releases directory, install tree (that is the whole `--root`), versions
 
 **`current`**:
@@ -998,10 +999,14 @@ drain leaves it draining, which the sentence names.
 _Avoid_: Deploy (that installs a machine), upgrade (the command), rollout, release
 
 **Rollback**:
-Pointing **`current`** back at the release it named before the switch, restarting and polling again — what a
-**promotion** does by itself when the candidate does not answer, and (HS-079) what `holosmith rollback` will do on
-demand. The database is never restored: the migration rule is what makes switching back safe. A rollback whose own
-health check fails says so with a stated next step.
+Pointing **`current`** back one **release**, restarting and polling again — what a **promotion** does by itself when the
+candidate does not answer, and what `holosmith rollback [--to TAG]` does on demand (HS-079, ADR-0083). "One back" is the
+tree's own order (`Release::history`, newest first by **mtime** — a tag is `git describe`'s answer and does not sort),
+so the target is the newest release **strictly older** than the live one unless `--to` names another; it drains first
+(joining a drain already in progress, where a promotion refuses one), and the switch is followed by `systemctl restart`
+and a `/api/health` poll for a process **younger than the restart**. The database is never restored: the migration rule
+is what makes switching back safe. A rollback whose own health check fails says so with a stated next step and does
+**not** switch again.
 _Avoid_: Revert, downgrade
 
 **Smoke run**:

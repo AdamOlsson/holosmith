@@ -1465,6 +1465,64 @@ names), and the demo does the same. Two builds of one crate version also cannot 
 a release that migrated the schema cannot start the old `serve`: the unit runs `doctor --quick` first, and `doctor`
 refuses a database a newer release wrote (ADR-0047) — a recorded follow-up, not a silence.
 
+## The rollback: `holosmith rollback`
+
+Spec item 10's other command (ADR-0083): the emergency brake for a release that passed its health check and turned out
+to be wrong. It drains, switches `current` back **one release**, restarts the unit and polls `/api/health` for a process
+younger than that restart.
+
+```bash
+sudo holosmith rollback                          # one release back, on this machine's own tree
+holosmith rollback --root target/install         # an install tree
+holosmith rollback --root target/install --to v0.1.0   # the release before that, or forward again
+```
+
+**Which release is "one back".** A release directory is named after `git describe`'s answer, so tags do not sort; the
+tree's order is the order its releases were **written** onto it (`Release::history`, newest first by mtime, the tag
+breaking a tie). The default target is the newest release strictly older than the live one. `--to TAG` names any
+release the tree holds that `current` does not already name — including a *newer* one, which is how a mistaken rollback
+is undone. HS-080's pruning keeps the newest N of the same list.
+
+There is **no `--acknowledge-review`**: item 12's review is a pre-promotion gate, and this is the command that undoes a
+promotion. `--root` and the root-or-`--root` rule are `upgrade`'s (one function, `deploy::privilege_problem`), `--wait`
+is the drain's `10m`, and the exit code is 0 only when the target release is confirmed serving.
+
+One `rollback: ` line per step, and the order is the work's:
+
+```
+rollback: target: releases/<tag> (0.1.0 (<tag>), schema 7), from releases/<live>
+rollback: unit: <install>/etc/systemd/system/holosmith.service (ExecStart through `current`)   # only when rewritten
+rollback: drain: … drained
+rollback: current: -> releases/<tag> (was releases/<live>)
+rollback: restart: systemctl restart holosmith.service
+rollback: health: 0.1.0 answered 0.4s after the restart
+rollback: live: releases/<tag> (0.1.0, <tag>), serving
+```
+
+**What it refuses, and where.** A machine with no `current` (never promoted), a `current` that is not a symlink, a link
+that names something outside `releases/<tag>`, a tree with one release, a `--to` the tree does not hold, `--to` naming
+the live release, a target release whose own `version --json` cannot be read, a target whose schema is **older than the
+database's** (with a sentence naming `doctor --quick` and the migration rule), and a machine with no unit. All of those
+happen **before the drain**, so nothing moves — the one write that happens before it is the unit, and only when its
+`ExecStart` does not already go through `current`, because a rollback must refuse *while the machine is still serving*
+rather than after it drained for nothing. A refusal after the drain leaves the machine draining and says so.
+
+A rollback that cannot confirm the target is loud rather than clever: it exits 1, leaves `current` where it is (it does
+**not** switch again), and names `systemctl status holosmith.service`, `journalctl -u holosmith.service`, the release
+now live, and `holosmith rollback --to <the one it came from>` — the way forward again.
+
+**What it does not do.** No backup (the promotion took one), no database restore (expand/contract is what makes the
+switch safe), no row and no container: the drain stops idle sessions with `server_restart` and the next boot resumes
+them. The unit is rewritten **only** when its `ExecStart` does not already go through `current`, by the writer `deploy`
+uses.
+
+**What this machine cannot measure.** No systemd: `case_rollback`'s `systemctl` stand-in stops what runs, starts what
+`current` names and records `readlink -f current` **at the moment it restarts** — which is what makes "drains first,
+then switches, then restarts" a measurement rather than the order of some printed lines. The rollback's own poll
+failing is measured by that stand-in choosing not to start a serve (`HS_BREAK_RESTART=1`). A release directory holds
+this machine's build, because its `version --json` has to run, so no second architecture. And the tree's order is a
+filesystem fact: `cp -a` preserves it, `cp -r` reverses it.
+
 ## Reproducibility
 
 Building on this machine is enough for development: `scripts/build.sh` is that path, and

@@ -2940,3 +2940,47 @@ it rather than adding a caveat beside it.
   previous release named by an older promotion, is restored `verbatim` (`Release::restore`); recomposing
   `releases/<tag>` would quietly rewrite a link that was not ours. The atomic half is shared: `switch` is `restore`
   with a relative target.
+
+### Landmines: a rollback, and what a release tree does not record (HS-079)
+
+- **A release tree records no "previous", and the only order it has is mtime.** A tag is `git describe`'s answer
+  (`f2b3886-dirty`, `0.1.0-3-gabc1234`), so sorting release directories by name puts a hash above a version tag;
+  `Release::history()` therefore sorts by each directory's modification time, newest first, with the tag as the
+  tiebreak. Two consequences worth knowing before touching it: `Release::write` rewrites the digest file on every
+  promotion, so **re-promoting an old tag makes it the newest** (which is what "the release you just put live" should
+  mean), and a directory's mtime survives a `cp -a` but not a `cp -r`, where every release becomes "just written" and
+  their order collapses to the tiebreak. HS-080's pruning keeps the newest N of the same list.
+- **A test sets a directory's mtime with `File::open(dir).set_modified(when)`** — no `touch` child, no `filetime`
+  crate. `std::fs::File::open` on a directory is fine on Linux and `set_modified` is `futimens` on the directory
+  itself, which is exactly the fact `history()` reads. Opening the directory *after* writing the release's files
+  matters: writing into it refreshes its mtime.
+- **A printed step order is not evidence of the work's order.** The first mutation tried against `case_rollback` moved
+  the switch to just *before* the shared `restart_and_poll` — which still switches before the restart — and every
+  printed line stayed in the same sequence, so the case passed. What makes the acceptance's order measurable is the
+  `systemctl` stand-in writing `readlink -f "$current"` **at the moment it restarts**: a verb that restarted first
+  records the old target, and the case fails with `case_rollback/switch/before`. Mutating it the second time (switch
+  *after* the restart and the poll) also fails four of `tests/rollback.rs`'s ten tests, which is the right ratio.
+- **`cargo test` runs before the serve phase, so a mutation that reddens a unit test never reaches the case.** When the
+  point is "can this *case* fail?", skip the earlier phases in a copy — a copy under `target/` has the right
+  `repo_root`, one at `/tmp` does not (`dirname`/`..` becomes `/`) — and remember that prefixing names inside the
+  `serve_cases` array does **not** disable them: bash splits an array literal into words, so `:  case_x` becomes two
+  entries (`:` and `case_x`) and both run. Replacing the whole array with one name is the reliable form.
+- **`promote::Real` now has two policies and a prefix**, and the difference is the drain: `Real::new` stops reading at
+  `drain::ALREADY` and answers `DrainAnswer::Already` (a promotion refuses), `Real::joining` keeps reading and joins it
+  (a rollback proceeds, because a machine left draining is the machine it exists for). The printed prefix matters more
+  than it looks: `case_upgrade` greps `^upgrade: health: no answer with ` for its own arm, which is the *candidate's*
+  poll, so the automatic switch-back now printing `upgrade: rollback: health: …` changes nothing there.
+- **`deploy::privilege_problem(target, verb)` is the two release verbs' one privilege rule** (`commands::upgrade`'s
+  private `is_root` is gone). Both verbs write the same three things and restart the same service, so one sentence
+  with the verb's name in it is honest for both — and the `--root` half is `Target::privileged`, as before.
+- **A release directory whose binary is not a runnable program cannot be a rollback target**, and the refusal comes
+  from `ask_version` failing, not from a check of the tree: the rollback reads the target's own `version --json` for
+  the version the poll waits for and the schema the database is compared with. That is also why the gate's three
+  releases are three *copies of the artifact*, and why they all report one `git_tag` — the directory name is what the
+  verb and the operator see, and the binary inside reports the tag it was built from.
+- **Deleting `app.db` under a running `serve` does not reset the machine — it unlinks the file.** The process keeps its
+  connection and keeps answering from the inode nothing names any more; the next boot creates a *new*, empty database,
+  and every session the first process reported is gone from the tree an operator can read. HS-079's demo did exactly
+  this (it forged a newer database, deleted it, and then booted), and the symptom was a `404 unknown_session` for a
+  session the drain had just reported stopping. A case that needs a database from a newer release must write it
+  **before** the boot that serves, which is what `case_rollback`'s schema arm does.
