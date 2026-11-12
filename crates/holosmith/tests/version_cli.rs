@@ -27,10 +27,10 @@ fn pin_file() -> String {
 }
 
 #[test]
-fn version_prints_four_key_value_lines_and_exits_zero() {
+fn version_prints_five_key_value_lines_and_exits_zero() {
     let stdout = stdout_of(&holosmith(&["version"]));
     let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 4, "expected four lines, got {stdout:?}");
+    assert_eq!(lines.len(), 5, "expected five lines, got {stdout:?}");
     assert_eq!(lines[0], format!("version {}", env!("CARGO_PKG_VERSION")));
     assert!(
         lines[1]
@@ -39,9 +39,15 @@ fn version_prints_four_key_value_lines_and_exits_zero() {
         "expected a non-empty git_tag line, got {:?}",
         lines[1]
     );
-    assert_eq!(lines[2], format!("pi_version {}", pin_file().trim()));
+    // The fifth fact is the **release directory the running file is in** (HS-080), and this binary is in
+    // `target/*/holosmith`, not under `releases/`: the line is always printed, and `-` is that answer.
     assert_eq!(
-        lines[3],
+        lines[2], "release -",
+        "a test binary is not in a release directory: {stdout:?}"
+    );
+    assert_eq!(lines[3], format!("pi_version {}", pin_file().trim()));
+    assert_eq!(
+        lines[4],
         format!("schema_version {}", holosmith::schema::SCHEMA_VERSION)
     );
 }
@@ -65,11 +71,17 @@ fn json_prints_one_line_with_the_contract_keys() {
         [
             "git_tag",
             "pi_version",
+            "release",
             "schema_version",
             "sqlite",
             "target",
             "version"
         ]
+    );
+    assert_eq!(
+        object["release"],
+        serde_json::Value::Null,
+        "a binary outside a release directory reports no release, and the key is still there"
     );
     assert_eq!(
         object["version"],

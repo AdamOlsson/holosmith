@@ -2846,6 +2846,21 @@ fn a_release_tree_makes_the_unit_run_through_current() {
         "the run over a broken release tree failed:\n{}",
         broken.render()
     );
+    // And step 1 says why it did not refuse: a deploy is one of the two commands that repairs a broken `current`, so
+    // the failure `doctor --quick` reports is a remark here (HS-080, `LINK_NOT_LIVE`).
+    assert_eq!(
+        line(&broken, DeployStep::Preflight).word,
+        Word::Satisfied,
+        "a broken `current` refused the deploy that repairs it: {}",
+        line(&broken, DeployStep::Preflight).sentence
+    );
+    assert!(
+        line(&broken, DeployStep::Preflight)
+            .sentence
+            .contains("step 5 rewrites"),
+        "the preflight line does not say what repairs the tree: {}",
+        line(&broken, DeployStep::Preflight).sentence
+    );
     assert_eq!(
         line(&broken, DeployStep::Service).word,
         Word::Changed,

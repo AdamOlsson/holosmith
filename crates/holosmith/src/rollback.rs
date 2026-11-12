@@ -315,8 +315,14 @@ mod tests {
     }
 
     /// A tree with the given releases, written oldest first, and `current` on the newest.
+    ///
+    /// Each call gets its own directory: the tests in this module run in parallel threads of one process, so a name
+    /// made of a constant and the pid is a scratch directory four tests share — and then one test's `world` wipes
+    /// another's mid-run (measured: it reddened the gate once as "holds <dir> (no release at all)").
     fn world(tags: &[&str]) -> (TempDir, Target, Release) {
-        let root = TempDir::new("unit");
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = TempDir::new(&format!("unit-{seq}"));
         let target = Target::resolve(Some(root.0.clone()));
         let release = Release::of(&target);
         std::fs::create_dir_all(release.releases()).expect("a release tree");

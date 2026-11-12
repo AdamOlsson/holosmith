@@ -16,6 +16,18 @@ use crate::schema::SCHEMA_VERSION;
 pub struct VersionInfo {
     pub version: String,
     pub git_tag: String,
+    /// The release directory this file was run from (HS-080), or `None` when it is not in one.
+    ///
+    /// A **different fact** from `git_tag`: the tag is what the build was made from, and this is the
+    /// `releases/<tag>/` directory the running file sits in. They agree on a machine a promotion owns, and a
+    /// hand-seeded directory (a copy of any binary) is exactly where they do not — which is why the release tree's
+    /// name, not the build's, is the one a switch, `current` and a rollback all speak in.
+    ///
+    /// `Option` with a **default**, because the other direction of this one line is a promotion: `promote::ask_version`
+    /// deserialises a *candidate's* output, and a candidate built before this key existed has no `release` in it. A
+    /// missing key is `None`; a required one would make every older binary unpromotable.
+    #[serde(default)]
+    pub release: Option<String>,
     pub pi_version: String,
     pub schema_version: u32,
     pub target: String,
@@ -24,9 +36,11 @@ pub struct VersionInfo {
 
 impl VersionInfo {
     pub fn current() -> Self {
+        let exe = std::env::current_exe().ok();
         Self {
             version: env!("CARGO_PKG_VERSION").to_string(),
             git_tag: env!("HOLOSMITH_GIT_TAG").to_string(),
+            release: exe.as_deref().and_then(crate::release::running_tag),
             pi_version: pins::pi_version().to_string(),
             schema_version: SCHEMA_VERSION,
             target: env!("HOLOSMITH_TARGET").to_string(),
@@ -34,15 +48,22 @@ impl VersionInfo {
         }
     }
 
-    /// The four `key value` lines the CLI prints, one per line, in this order.
+    /// The five `key value` lines the CLI prints, one per line, in this order.
+    ///
+    /// `release` is `-` when the running file is not in a release directory (a build in `dist/`, a test binary): the
+    /// line is always there, so a script reads the same shape whether or not this machine has promoted.
     pub fn render_human(&self) -> String {
         format!(
-            "version {}\ngit_tag {}\npi_version {}\nschema_version {}\n",
-            self.version, self.git_tag, self.pi_version, self.schema_version
+            "version {}\ngit_tag {}\nrelease {}\npi_version {}\nschema_version {}\n",
+            self.version,
+            self.git_tag,
+            self.release.as_deref().unwrap_or("-"),
+            self.pi_version,
+            self.schema_version
         )
     }
 
-    /// One line of JSON: the same four keys plus `target` and `sqlite`, no newline.
+    /// One line of JSON: the same five keys plus `target` and `sqlite`, no newline.
     pub fn render_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
@@ -56,6 +77,7 @@ mod tests {
         VersionInfo {
             version: "0.1.0".to_string(),
             git_tag: "a30e03f".to_string(),
+            release: Some("v0.1.0".to_string()),
             pi_version: pins::pi_version().to_string(),
             schema_version: SCHEMA_VERSION,
             target: "x86_64-unknown-linux-musl".to_string(),
@@ -64,13 +86,23 @@ mod tests {
     }
 
     #[test]
-    fn human_output_is_four_key_value_lines_in_order() {
+    fn human_output_is_five_key_value_lines_in_order() {
         assert_eq!(
             sample().render_human(),
             format!(
-                "version 0.1.0\ngit_tag a30e03f\npi_version {}\nschema_version {SCHEMA_VERSION}\n",
+                "version 0.1.0\ngit_tag a30e03f\nrelease v0.1.0\npi_version {}\nschema_version {SCHEMA_VERSION}\n",
                 pins::pi_version()
             )
+        );
+        // A file that is not in a release directory says so on the same line, so a script never counts lines.
+        let loose = VersionInfo {
+            release: None,
+            ..sample()
+        };
+        assert!(
+            loose.render_human().contains("\nrelease -\n"),
+            "{}",
+            loose.render_human()
         );
     }
 
@@ -94,7 +126,7 @@ mod tests {
         assert_eq!(
             json,
             format!(
-                r#"{{"version":"0.1.0","git_tag":"a30e03f","pi_version":"{}","schema_version":{SCHEMA_VERSION},"target":"x86_64-unknown-linux-musl","sqlite":"3.50.2"}}"#,
+                r#"{{"version":"0.1.0","git_tag":"a30e03f","release":"v0.1.0","pi_version":"{}","schema_version":{SCHEMA_VERSION},"target":"x86_64-unknown-linux-musl","sqlite":"3.50.2"}}"#,
                 pins::pi_version()
             )
         );

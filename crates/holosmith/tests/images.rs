@@ -883,6 +883,9 @@ fn promoted() -> VersionInfo {
     VersionInfo {
         version: "9.9.9".to_string(),
         git_tag: "v9.9.9".to_string(),
+        // A candidate being promoted need not be running out of a release directory: `release` is the tag of the
+        // directory a file is *in*, not of the build.
+        release: None,
         pi_version: holosmith::pins::pi_version().to_string(),
         schema_version: holosmith::schema::SCHEMA_VERSION,
         target: env!("HOLOSMITH_TARGET").to_string(),

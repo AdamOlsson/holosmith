@@ -121,6 +121,16 @@ const HELD_PORT: &str =
 /// make the repair unreachable and leave the operator to run one `chmod` the deploy knows how to run.
 const WRONG_MODE: &str = "; a wrong mode or owner in the install tree is what step 2 repairs, so it is a remark here and not a failure";
 
+/// The remark a broken `current` earns instead of failing the deploy — step 1's **third** divergence (HS-080).
+///
+/// `doctor --quick` fails it on purpose: the unit runs `doctor --quick` as `ExecStartPre`, and a `current` the unit
+/// executes through that resolves to nothing is a boot that cannot happen. But a deploy is one of the two commands
+/// that can **repair** it — step 5 renders the unit for the binary this run installs whenever `Release::live` names
+/// nothing, so the machine boots again on a plain path — and failing at step 1 would make that repair unreachable,
+/// exactly ADR-0058's argument for `Perms` one finding over.
+const LINK_NOT_LIVE: &str = "; the unit's `ExecStart` resolves through a `current` that is not live — step 5 rewrites \
+                             the unit to the binary this run installs, which is what makes the machine boot again";
+
 /// The remark a `--root` install carries where a system one names its service user: the half of step 2 no
 /// unprivileged tree can have.
 ///
@@ -613,6 +623,10 @@ pub fn run_as(
     let mut doctor_tools = tools.doctor.clone();
     doctor_tools.config_path = target.etc_config();
     doctor_tools.admin_dir = target.admin_dir();
+    // The release tree and the unit are the target's too, and for the same reason: the release finding reads a
+    // `current` and an `ExecStart=`, and a `--root` run must read its own (`/opt/holosmith` belongs to the machine).
+    doctor_tools.release_root = target.opt_dir();
+    doctor_tools.unit_path = target.unit_path();
     let mut report = Report {
         lines: Vec::new(),
         failed: None,
@@ -680,7 +694,8 @@ fn preflight(config: &Config, tools: &doctor::Tools, machine: &dyn Machine) -> L
         elsewhere = Some(path);
     }
     if let Some(finding) = findings.iter().find(|finding| {
-        finding.is_failure() && !matches!(finding.check, Check::Ports | Check::Perms)
+        finding.is_failure()
+            && !matches!(finding.check, Check::Ports | Check::Perms | Check::Release)
     }) {
         return Line {
             step: DeployStep::Preflight,
@@ -726,6 +741,12 @@ fn preflight(config: &Config, tools: &doctor::Tools, machine: &dyn Machine) -> L
         .any(|finding| finding.is_failure() && finding.check == Check::Perms)
     {
         sentence.push_str(WRONG_MODE);
+    }
+    if findings
+        .iter()
+        .any(|finding| finding.is_failure() && finding.check == Check::Release)
+    {
+        sentence.push_str(LINK_NOT_LIVE);
     }
     Line {
         step: DeployStep::Preflight,

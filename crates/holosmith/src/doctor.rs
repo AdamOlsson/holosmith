@@ -39,6 +39,7 @@ use crate::images::{Expectation, Kind};
 use crate::key::KEY_PROXY_ALIAS;
 use crate::preflight::{self, Check, Finding, Outcome};
 use crate::proxies;
+use crate::release::{self, Release};
 use crate::schema::{self, Verdict};
 use crate::selftest;
 
@@ -95,6 +96,11 @@ pub struct Tools {
     pub config_path: PathBuf,
     /// The admin socket's directory: [`crate::deploy::ADMIN_DIR`] on a machine.
     pub admin_dir: PathBuf,
+    /// The release tree [`crate::release::ROOT`] on a machine (HS-080), for the release finding.
+    pub release_root: PathBuf,
+    /// The unit file [`crate::deploy::UNIT_DIR`]/[`crate::deploy::UNIT_NAME`] on a machine: where the release
+    /// finding reads the `ExecStart=` that says what systemd runs.
+    pub unit_path: PathBuf,
 }
 
 impl Default for Tools {
@@ -105,6 +111,8 @@ impl Default for Tools {
             systemd: PathBuf::from(SYSTEMD_DIR),
             config_path: PathBuf::from(crate::config::DEFAULT_CONFIG_PATH),
             admin_dir: PathBuf::from(crate::deploy::ADMIN_DIR),
+            release_root: PathBuf::from(crate::release::ROOT),
+            unit_path: PathBuf::from(crate::deploy::UNIT_DIR).join(crate::deploy::UNIT_NAME),
         }
     }
 }
@@ -230,6 +238,7 @@ pub fn run(config: &Config, depth: Depth, tools: &Tools, machine: &dyn Machine) 
     let serving = (depth == Depth::Full).then(|| health_answers(config.control_listen));
     findings.extend(ports(config, serving));
     findings.push(database(config));
+    findings.push(release_tree(&tools.release_root, &tools.unit_path));
     findings.push(perms(config, tools));
     if depth == Depth::Full {
         // The notification channel is the first `--full` question, and it is **not** asked by `--quick`: `--quick` is
@@ -502,6 +511,132 @@ fn database(config: &Config) -> Finding {
                 "the database at {} could not be read without migrating it ({error}): check that this user can \
                  read the data root, because `serve` cannot open it either",
                 path.display()
+            ),
+        ),
+    }
+}
+
+/// The release tree: what `current` resolves to, and whether the unit can execute through it (HS-080, spec item 10).
+///
+/// One function with both arms, like every check here, and the arms are worth a table because the verdict is not "is
+/// the tree tidy" but "can systemd start this machine":
+///
+/// | state | outcome |
+/// | --- | --- |
+/// | `current` resolves to `releases/<tag>/holosmith` | **pass**, naming the tag and the resolved path |
+/// | it does not resolve, and the unit's `ExecStart` names this tree's `current/holosmith` | **fail** — systemd cannot exec what the link names |
+/// | it does not resolve, and the unit runs something else | **pass** — a machine that has not promoted yet |
+/// | it does not resolve, and there is no unit to read | **unknown** — no fact about what systemd would run |
+///
+/// The failure is a `--quick` failure on purpose: `--quick` is the unit's `ExecStartPre`, and a `current` the unit
+/// executes through that resolves to nothing is the boot that pre-line exists to protect — it has already happened,
+/// and the sentence names the hand fix. A machine whose unit names a plain binary is *not* that machine: `server
+/// deploy` installs a binary and writes `ExecStart=` to it, and the first promotion is what points the unit through
+/// `current`, so a broken link there is a tree nobody switched to rather than a machine that cannot start.
+///
+/// The two paths are [`Tools`]'s, not the machine's, for `perms`'s reason: a `--root` run reads its own install tree.
+fn release_tree(root: &Path, unit_path: &Path) -> Finding {
+    let tree = Release::at(root);
+    let link = tree.link();
+    let named = link.as_deref().and_then(|link| tree.tag_of(link));
+    let unit = std::fs::read_to_string(unit_path);
+    let exe = unit.as_deref().ok().and_then(release::unit_executable);
+    let through = exe.as_ref() == Some(&tree.current().join(release::BINARY));
+
+    // The pass every healthy machine answers: the link resolves, so say to what — the tag and the path, because the
+    // tag is what a `version` inside it prints and the path is what `systemctl status` would show.
+    if let Some(live) = tree.live() {
+        let tag = named.clone().unwrap_or_default();
+        let resolved = std::fs::canonicalize(&live).unwrap_or(live);
+        let sentence = match &exe {
+            Some(exe) if through => format!(
+                "{} -> releases/{tag}, and the unit's ExecStart runs {}: the release systemd starts is the one \
+                 `current` names",
+                tree.current().display(),
+                resolved.display()
+            ),
+            Some(exe) => format!(
+                "{} -> releases/{tag} ({}); the unit's ExecStart names {}, so a switch takes effect when the unit is \
+                 written again",
+                tree.current().display(),
+                resolved.display(),
+                exe.display()
+            ),
+            None => format!(
+                "{} -> releases/{tag} ({})",
+                tree.current().display(),
+                resolved.display()
+            ),
+        };
+        return Finding::pass(Check::Release, sentence);
+    }
+
+    // Everything below is a tree that does not resolve, so the sentence has to say which way it does not.
+    let state = if link.is_none() {
+        match std::fs::symlink_metadata(tree.current()) {
+            Ok(meta) if !meta.file_type().is_symlink() => format!(
+                "{} is a {} and not a symlink, and the layout is `releases/<tag>` with `current` a symlink",
+                tree.current().display(),
+                if meta.is_dir() { "directory" } else { "file" }
+            ),
+            _ => format!("{} does not exist", tree.current().display()),
+        }
+    } else {
+        match &named {
+            Some(tag) => format!(
+                "{} names releases/{tag}, and {} is not there",
+                tree.current().display(),
+                tree.binary(tag).display()
+            ),
+            None => format!(
+                "{} names {}, which is not one of this tree's releases (a link here is `releases/<tag>`)",
+                tree.current().display(),
+                link.as_deref()
+                    .map(|link| link.display().to_string())
+                    .unwrap_or_default()
+            ),
+        }
+    };
+
+    if through {
+        // The remedy names a release that exists, so an operator can copy it out of the sentence. A tree with nothing
+        // to point at needs a deploy instead, which is the only command that writes the unit and the binary.
+        let fix = match tree.history().first() {
+            Some(newest) => format!(
+                "Point it at a release that exists — `ln -sfn releases/{newest} {}`",
+                tree.current().display()
+            ),
+            None => "There is no release to point it at, so `holosmith server deploy` is what restores this machine's \
+                     boot"
+                .to_string(),
+        };
+        return Finding::fail(
+            Check::Release,
+            format!(
+                "{state}, and the unit's ExecStart ({}) names it: systemd cannot start this machine. {fix}",
+                tree.current().join(release::BINARY).display()
+            ),
+        );
+    }
+    match &exe {
+        Some(exe) => Finding::pass(
+            Check::Release,
+            format!(
+                "{state}; the unit's ExecStart names {}, so this machine does not execute through `current` — a \
+                 promotion re-points it",
+                exe.display()
+            ),
+        ),
+        None => Finding::unknown(
+            Check::Release,
+            format!(
+                "{state}, and {} names no `ExecStart=` ({}): nothing here says what systemd would run, so this machine \
+                 has never been deployed — `holosmith server deploy` writes the unit and a promotion writes the tree",
+                unit_path.display(),
+                unit.as_ref()
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "no such key".to_string())
             ),
         ),
     }

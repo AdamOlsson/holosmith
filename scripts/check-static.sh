@@ -81,9 +81,9 @@ fi
 check_version_output() {
   local label="$1" output="$2" lines keys reported
   lines="$(printf '%s\n' "$output" | wc -l)"
-  [ "$lines" -eq 4 ] || fail "$label: expected 4 lines from 'version', got $lines: $output"
+  [ "$lines" -eq 5 ] || fail "$label: expected 5 lines from 'version', got $lines: $output"
   keys="$(printf '%s\n' "$output" | cut -d' ' -f1 | paste -sd, -)"
-  [ "$keys" = "version,git_tag,pi_version,schema_version" ] ||
+  [ "$keys" = "version,git_tag,release,pi_version,schema_version" ] ||
     fail "$label: unexpected key order: $keys"
   reported="$(printf '%s\n' "$output" | sed -n 's/^pi_version //p')"
   [ "$reported" = "$pin" ] ||

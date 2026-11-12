@@ -59,6 +59,10 @@ pub enum Cmd {
         /// Everything `--quick` has, plus the network self-test, the proxies and the agent image's pi version.
         #[arg(long)]
         full: bool,
+        /// An install tree to examine instead of the machine's own paths — `server deploy --root`'s, where the
+        /// release tree, the unit, the config and the admin socket all live under DIR (HS-080).
+        #[arg(long, value_name = "DIR")]
+        root: Option<PathBuf>,
     },
     /// Store, list or remove the provider keys the key proxy uses.
     Key {

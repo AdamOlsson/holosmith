@@ -98,6 +98,12 @@ pub enum Check {
     /// It is in this enum because it is reported like every other machine question and only `doctor` asks it: no
     /// startup check runs it, because a missing notification channel must not refuse a boot (ADR-0071's D9).
     Openssl,
+    /// The release tree: what `current` resolves to, and whether the unit can execute through it (HS-080).
+    ///
+    /// One word for one question, so an operator greps `release` and finds the tree rather than a `version` line. It is
+    /// asked in **both** depths — `--quick` is the unit's `ExecStartPre`, and a `current` that resolves to nothing is
+    /// a machine systemd cannot start (see [`crate::doctor`]).
+    Release,
 }
 
 impl Check {
@@ -117,6 +123,7 @@ impl Check {
             Self::Proxy => "proxy",
             Self::Image => "image",
             Self::Openssl => "openssl",
+            Self::Release => "release",
         }
     }
 }

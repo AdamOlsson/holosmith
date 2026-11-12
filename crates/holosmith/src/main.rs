@@ -42,13 +42,14 @@ fn main() -> ExitCode {
             }
         },
         Cmd::Key { action } => commands::key::run(action, cli.config),
-        Cmd::Doctor { full, .. } => commands::doctor::run(commands::doctor::DoctorArgs {
+        Cmd::Doctor { full, root, .. } => commands::doctor::run(commands::doctor::DoctorArgs {
             config: cli.config,
             depth: if full {
                 holosmith::doctor::Depth::Full
             } else {
                 holosmith::doctor::Depth::Quick
             },
+            root,
         }),
         Cmd::Build { target, out } => commands::build::run(commands::build::BuildArgs {
             config: cli.config,

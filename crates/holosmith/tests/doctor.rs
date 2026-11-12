@@ -112,6 +112,11 @@ fn tools(dir: &TempDir, version: &str) -> Tools {
         },
         tailscale: tailscale_shim(dir, "echo '{\"BackendState\":\"Running\"}'"),
         systemd: dir.file("no-systemd-here"),
+        // The release tree and the unit are the *caller's* install tree (HS-080): a test that left these at the
+        // machine's defaults would read `/opt/holosmith` and `/etc/systemd/system/holosmith.service` on the machine
+        // running the tests — which is the one thing every `Tools` field here exists to prevent.
+        release_root: dir.file("opt/holosmith"),
+        unit_path: dir.file("etc/systemd/system/holosmith.service"),
         ..Tools::default()
     }
 }
@@ -288,6 +293,7 @@ fn a_clean_machine_passes_quick_with_its_whole_list_in_order() {
             "ports",
             "ports",
             "database",
+            "release",
             "perms"
         ],
         "the quick list is not the spec's list, in the spec's order:\n{}",
@@ -316,10 +322,100 @@ fn a_clean_machine_passes_quick_with_its_whole_list_in_order() {
     // Port 0 is the kernel's, so both port checks are the "nothing to hold" arm rather than a pass to be proud
     // of; the held-port arm is `a_held_port_is_a_failure_before_a_start_and_the_machine_serving_after_one`.
     assert_eq!(nth(&report, Check::Ports, 0).outcome, Outcome::Pass);
+    // The release arm on a machine that has been deployed by nothing: no unit, no tree, so there is no fact about
+    // what is live — `unknown`, which does not fail a boot (the four arms are the next test's).
+    assert_eq!(
+        finding(&report, Check::Release).outcome,
+        Outcome::Unknown,
+        "{}",
+        says(finding(&report, Check::Release))
+    );
     assert_eq!(
         report.render().lines().last(),
-        Some("doctor: 10 findings: 9 pass, 0 fail, 1 unknown"),
+        Some("doctor: 11 findings: 9 pass, 0 fail, 2 unknown"),
         "the tally is not one line of the report"
+    );
+}
+
+#[test]
+fn the_release_line_reports_the_resolved_path_and_the_symlink_s_health() {
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("doctor-release");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let config = config(&dir, Some(format!("unix://{}", socket.display())));
+    let tools = tools_with_real_git(&dir);
+    let release = holosmith::release::Release::at(&tools.release_root);
+    let unit = tools.unit_path.clone();
+    std::fs::create_dir_all(unit.parent().expect("a parent")).expect("the unit's directory");
+    let through = holosmith::deploy::unit_text(
+        &release.current().join(holosmith::release::BINARY),
+        false,
+        Role::Server,
+    );
+    std::fs::write(&unit, through.as_bytes()).expect("the unit is writable");
+
+    // 1. A healthy tree: the pass the acceptance asks for, naming the tag and the **resolved** path.
+    std::fs::create_dir_all(release.dir_of("v1")).expect("the release directory");
+    std::fs::write(release.binary("v1"), b"#!/bin/sh\nexit 0\n").expect("the binary");
+    std::os::unix::fs::symlink("releases/v1", release.current()).expect("the link");
+    let report = doctor::run(&config, Depth::Quick, &tools, &FakeMachine::healthy());
+    let healthy = finding(&report, Check::Release);
+    assert_eq!(healthy.outcome, Outcome::Pass, "{}", healthy.sentence);
+    assert!(
+        healthy.sentence.contains("releases/v1") && healthy.sentence.contains("current"),
+        "the pass does not name the release and the link: {}",
+        healthy.sentence
+    );
+    assert!(
+        healthy.sentence.contains("ExecStart"),
+        "the pass does not say what systemd runs: {}",
+        healthy.sentence
+    );
+
+    // 2. The link names a directory that is gone, and the unit executes through it: systemd cannot start this
+    // machine, so the check fails — and names the release that does exist, so the sentence is a fix.
+    std::fs::remove_file(release.current()).expect("the link is removable");
+    std::os::unix::fs::symlink("releases/gone", release.current()).expect("the link");
+    let report = doctor::run(&config, Depth::Quick, &tools, &FakeMachine::healthy());
+    let dangling = finding(&report, Check::Release);
+    assert_eq!(dangling.outcome, Outcome::Fail, "{}", dangling.sentence);
+    for needle in ["releases/gone", "ExecStart", "ln -sfn releases/v1"] {
+        assert!(
+            dangling.sentence.contains(needle),
+            "the failure does not say {needle:?}: {}",
+            dangling.sentence
+        );
+    }
+
+    // 3. `current` is not a symlink at all: the layout is a link, and the unit executes through what is there.
+    std::fs::remove_file(release.current()).expect("the link is removable");
+    std::fs::write(release.current(), b"").expect("a plain file");
+    let report = doctor::run(&config, Depth::Quick, &tools, &FakeMachine::healthy());
+    let plain = finding(&report, Check::Release);
+    assert_eq!(plain.outcome, Outcome::Fail, "{}", plain.sentence);
+    assert!(
+        plain.sentence.contains("not a symlink"),
+        "the failure does not name the shape: {}",
+        plain.sentence
+    );
+    std::fs::remove_file(release.current()).expect("the file is removable");
+
+    // 4. The same broken tree on a machine whose unit names a plain binary: nothing here is executed, so the broken
+    // link is a remark and not a refusal — the first deploy of every machine is exactly this state.
+    std::fs::write(
+        &unit,
+        holosmith::deploy::unit_text(Path::new("/usr/local/bin/holosmith"), false, Role::Server),
+    )
+    .expect("the unit is writable");
+    let report = doctor::run(&config, Depth::Quick, &tools, &FakeMachine::healthy());
+    let remark = finding(&report, Check::Release);
+    assert_eq!(remark.outcome, Outcome::Pass, "{}", remark.sentence);
+    assert!(
+        remark.sentence.contains("/usr/local/bin/holosmith")
+            && remark.sentence.contains("does not execute"),
+        "the pass does not say what the unit runs instead: {}",
+        remark.sentence
     );
 }
 

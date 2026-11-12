@@ -173,3 +173,46 @@ fn the_unit_names_the_path_through_current_and_a_promotion_can_read_it_back() {
         "{unit}"
     );
 }
+
+#[test]
+fn a_binary_run_from_a_release_directory_reports_that_release() {
+    // Acceptance bullet 3, measured over a real file in a real tree: the fact is *the path the file is in*, and a
+    // binary started through `current` reports the directory the link resolves to — which is what makes the live
+    // version unambiguous (HS-080).
+    let dir = TempDir::new("release-version");
+    let release = tree(&dir);
+    release.switch("v1").expect("the release is live");
+    // The test binary is the release's bytes: a copy of *a* program, which is what a hand-seeded tree holds.
+    std::fs::copy(env!("CARGO_BIN_EXE_holosmith"), release.binary("v1"))
+        .expect("the test binary is copyable");
+
+    let reported = |exe: &Path| -> String {
+        let output = std::process::Command::new(exe)
+            .args(["version"])
+            .output()
+            .expect("the copy runs");
+        assert!(output.status.success(), "version exited non-zero");
+        String::from_utf8(output.stdout).expect("version prints UTF-8")
+    };
+    assert!(
+        reported(&release.binary("v1")).contains("\nrelease v1\n"),
+        "the release directory is the fact: {}",
+        reported(&release.binary("v1"))
+    );
+    // Through the link, `current_exe` resolves the symlink (Linux reads `/proc/self/exe`), so the answer is the
+    // release directory and not the word `current`.
+    let through = release.live().expect("the tree is live");
+    assert!(
+        reported(&through).contains("\nrelease v1\n"),
+        "a binary started through `current` reports nothing: {}",
+        reported(&through)
+    );
+    // And a copy outside the tree reports no release at all, on the same line.
+    let loose = dir.file("holosmith");
+    std::fs::copy(env!("CARGO_BIN_EXE_holosmith"), &loose).expect("the test binary is copyable");
+    assert!(
+        reported(&loose).contains("\nrelease -\n"),
+        "a binary outside a release directory reports one: {}",
+        reported(&loose)
+    );
+}
