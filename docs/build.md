@@ -1413,6 +1413,58 @@ and proxy paths are the host smoke run's, which is why a story that changes any 
 exit. `case_smoke` is the gate's half: three arms — the artifact's own fake pi over two pipes, a `docker` stand-in
 that refuses the image build, and the real run when the daemon answers — with no `SKIP` in any of them.
 
+## The promotion: `holosmith upgrade <binary>`
+
+Spec item 10's pipeline as one command (ADR-0082): the review gate acknowledged, the host smoke test, the two product
+images when their labels say they changed, the drain, a database backup, the release directory, the `current` symlink,
+`systemctl restart` and a twenty-second health poll that puts the previous release back by itself if the candidate does
+not answer.
+
+```bash
+sudo holosmith upgrade releases/<tag>/holosmith --acknowledge-review   # a machine's own tree, as root
+holosmith upgrade releases/<tag>/holosmith --acknowledge-review --root target/install   # an install tree
+```
+
+`--acknowledge-review` is not a formality: item 12's diff review is the real gate, and a promotion without the word is
+refused before anything is asked of the machine. `--root DIR` is `server deploy --root`'s tree (the release tree at
+`<root>/opt/holosmith`, the admin socket at `<root>/run/holosmith`, the unit at `<root>/etc/systemd/system/`), and a
+**privileged** promotion has to run as root — it writes `/opt`, `/etc/systemd/system` and restarts a service. `--wait`
+is the drain's (`10m`), `--config` is every command's.
+
+One `upgrade: ` line per step, in this order, and the exit code is 0 only for a candidate that is live:
+
+```
+upgrade: candidate: <path> (sha256 …, 0.1.0 (v0.1.0-3-gabc1234), schema 7)
+upgrade: review: acknowledged on the command line …
+upgrade: smoke: …                        (the smoke run's own lines, then passed)
+upgrade: images: no image needed building | built 2 images: holosmith-proxy:…, agent-image:…
+upgrade: drain: … drained
+upgrade: backup: <data>/backups/app-<ts>.db (5 kept)
+upgrade: release: <install>/opt/holosmith/releases/<tag>/holosmith (sha256 …)
+upgrade: current: -> releases/<tag> (was releases/<previous>)
+upgrade: restart: systemctl restart holosmith.service
+upgrade: health: 0.1.0 answered 0.4s after the restart
+upgrade: live: 0.1.0 (<tag>), backup <path>
+```
+
+A candidate that does not answer ends with `upgrade: health: no answer with …`, `upgrade: rollback: current -> …`, a
+second restart and one of two sentences: the previous release is live again, or it did not answer either — in which
+case the message names `systemctl status`/`journalctl` and the backup.
+
+**What it refuses, and where.** A file that is not this machine's static build, a `<binary>.sha256` that names other
+bytes, a `version --json` the candidate cannot answer, a tag that is not one path segment, a candidate whose schema is
+older than the database's, a failed or unjudgeable smoke run, a daemon that will not build the images, a drain that
+expired or that somebody else started, a backup that cannot be written, a unit that is not there and a `current` that
+names something which is not a release. Every one of those leaves the machine as it found it and says so — except a
+refusal *after* the drain, which leaves the machine draining and says that the restart is what clears it.
+
+**What this machine cannot measure.** There is no systemd here, so the restart is a child: the gate's `case_upgrade`
+puts a `systemctl` stand-in on `PATH` that does what systemd would for this unit (stop what runs, start what `current`
+names), and the demo does the same. Two builds of one crate version also cannot be told apart by `/api/health` beyond
+`uptime_s`, which is why the poll requires an answer from a process **younger than the restart**. And a rollback across
+a release that migrated the schema cannot start the old `serve`: the unit runs `doctor --quick` first, and `doctor`
+refuses a database a newer release wrote (ADR-0047) — a recorded follow-up, not a silence.
+
 ## Reproducibility
 
 Building on this machine is enough for development: `scripts/build.sh` is that path, and

@@ -2878,3 +2878,65 @@ it rather than adding a caveat beside it.
   a new commit is new bytes, and `org.holosmith.smoke-recipe-sha256` covers the candidate's bytes as well as the
   recipe. It is one `COPY` and one `RUN` on a base this machine already has — measured at a few seconds — not the
   builder image's cold six minutes.
+
+### Landmines: the promotion, its order and what a binary can say (HS-078)
+
+- **"Already draining" is not `Ending::Refused`, and the acceptance bullet that needs it is not the drain's.** `Drain::run`
+  calls `Control::begin()`, prints `state: already draining` when the flag was set and then runs on to `Drained` — a
+  second drain deliberately *joins* the first (HS-051), and changing that would change a landed contract. A promotion
+  cannot ask a status question either (`Request::parse` accepts one verb), so the only honest read is the server's own
+  first line: `drain::ALREADY` is one constant, the shared client's line callback answers whether to keep reading, and
+  `upgrade` stops on it and refuses rather than waiting out ten minutes it did not start. `holosmith drain` never stops
+  reading, so its exit code is unchanged.
+- **`uptime_s` is the only fact in `/api/health` that can tell two builds of one `CARGO_PKG_VERSION` apart.** Every
+  binary this repository builds reports `0.1.0`, so a poll that compared the version alone would be satisfied by the
+  *old* process still answering during a restart, and a rollback gate arm against it could never fail. The poll
+  therefore accepts an answer only when `name` is `holosmith`, `version` is the candidate's **and** `uptime_s` is no
+  older than the time since the command issued the restart. That is falsifiable on this machine, and it is why the
+  promotion's clock starts *before* `systemctl restart` is run.
+- **A static binary's strings are not in `.rodata`: they are `movabs` immediates.** `git describe`'s tag shows up in
+  `strings` as `f2b3886-I`, because only the first eight bytes are an immediate and the rest is assembled from a
+  second. So "patch the artifact's version and tag to make a second release" is not a fixture this repository can have —
+  that arm of a gate case found it by asserting the string was present and failing. Two releases on one machine come
+  from two *builds* (or from a hand-seeded release directory), never from a byte-patched copy.
+- **`fetch_body`'s fourth argument is the body, not a header.** A `GET` whose `"Host: …"` was passed there sends the
+  header as the request's body and no `Host` at all, and the answer is `403 bad_host` — which reads like the guard
+  rejecting a correct header. `fetch` is the no-body form, and the failure a misplaced argument produces is always a
+  guard refusal two steps away from its cause.
+- **A config's port does not re-derive `control_origin`; `--port 0` does.** A case that boots its own `serve` on a
+  configured port and then sends a request with `Host: 127.0.0.1:<port>` gets `bad_host`, because the origin is still
+  the default `http://localhost:8080` and the guard compares the two. The fix is to spell `control_origin` in the config
+  to match the listener (as `case_upgrade` does), or to read the banner the way `start_serve` does.
+- **A gate case's config must name `data_root` before anything runs, or the artifact writes the machine's own tree.** The
+  smoke run's root defaults to `<data_root>/smoke`; a case whose first config omitted `data_root` left
+  `/var/lib/holosmith` behind on this machine (the path `doctor`'s `perms` measure), because the promotion's smoke step
+  used the default. Every config a case writes names `data_root` and `projects_root`, and `projects_root` may not be
+  inside `data_root` — the config refuses that pair, which is why a case's tree needs two sibling directories.
+- **`images::Expectation` was `env!`-built, and a promotion is the caller that cannot use it.** Every field — version,
+  git tag, the pinned pi — is a fact of the *building* binary, so a promotion built the promoting release's tag and then
+  read it back, while the *new* boot asks the daemon for its own version's image. `Expectation::of_release` takes a
+  `VersionInfo` and `Kind::image_of` is the one spelling of a tag; `server deploy` passes `VersionInfo::current()` and
+  behaves exactly as before. The same function (`images::outstanding`) answers both callers, so "rebuild only when the
+  binary or a pinned version changed" has one implementation.
+- **`deploy`'s step 5 must render the *promoted* unit, or the next deploy silently undoes a promotion.** Step 5 used
+  `current_exe` unconditionally; the promotion writes `ExecStart=<install>/opt/holosmith/current/holosmith`, so a deploy
+  afterwards rewrote the file back to the deployed path (a changed line, and a unit that no longer follows `current`).
+  Step 5 now prefers `Release::live(target)` when the tree resolves, which is the same function and the same
+  `unit_text`, so the bytes agree and a second deploy answers `satisfied`.
+- **`ExecStartPre=doctor --quick` makes a rollback across a schema bump impossible, and ADR-0047 says it should not be.**
+  The unit's pre-line runs the *release's* doctor, and `doctor` refuses a database a newer release wrote
+  (`Verdict::Newer`) — so the old `serve` never starts, which is exactly the state ADR-0047's "a rollback must not need a
+  restore" exists for. HS-078 measures it (the rollback's second poll and its sentence name it) and records it as a
+  follow-up; do not "fix" it by removing the pre-line (it is what stops a boot on a broken machine) or by widening
+  `doctor`'s refusal in a promotion's story.
+- **The order a promotion runs in cannot be measured by children alone.** The review acknowledgement, the backup and the
+  drain make no child process (the drain is one line to a socket; the backup is a `VACUUM INTO` in this process), so a
+  case that recorded only `docker`/`systemctl` argv could not tell a promotion that drained *after* switching from one
+  that did it in the spec's order. Two measurements, then: `promote::run` takes a `Steps` seam (`tests/upgrade.rs`
+  records the exact call order, and each refusal asserts the later calls never happened) and the gate asserts the
+  printed step lines' order plus the recorded children and their effects (a session the drain stopped is idle after, a
+  backup exists before `current` moves).
+- **A rollback must put back the target it *read*, not a target it computes.** The link an operator made absolute, or a
+  previous release named by an older promotion, is restored `verbatim` (`Release::restore`); recomposing
+  `releases/<tag>` would quietly rewrite a link that was not ours. The atomic half is shared: `switch` is `restore`
+  with a relative target.

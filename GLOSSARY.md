@@ -966,15 +966,42 @@ up.
 _Avoid_: Old schema, baseline schema, schema history
 
 **Release**:
-One built version of the binary, in its own directory, with the `current` symlink pointing at the live one.
-_Avoid_: Version, build, deploy
+One built version of the binary, in its own directory under a **release tree**, with **`current`** pointing at the live
+one. A release's directory holds exactly the two files a **release build** writes — `holosmith` and
+`holosmith.sha256` — and its name is the git tag the binary itself reports (`version --json`'s `git_tag`), so a release
+directory cannot be named after a build other than the one inside it. One tag holds one binary: a second, different
+binary under the same tag is refused with both digests named.
+_Avoid_: Version (that is the crate's semver, not a release), build, deploy
+
+**Release tree**:
+`<install>/opt/holosmith`, holding `releases/<tag>/` and the **`current`** symlink; `--root` prefixes it, so an install
+tree carries its own. `holosmith upgrade` creates it and switches it; pruning old releases, `holosmith version`
+reporting the tag it was run from and `doctor` reporting the resolved path are HS-080's. Its machine names are
+`release::Release` and `release::ROOT`.
+_Avoid_: Releases directory, install tree (that is the whole `--root`), versions
+
+**`current`**:
+The symlink systemd executes through: `<install>/opt/holosmith/current`, pointing at `releases/<tag>` **relatively**, so
+the tree can be moved. A switch creates a staged symlink and `rename`s it onto `current`, which replaces the old target
+in one step; a rollback writes back the target it read, verbatim. The unit's `ExecStart` names
+`<install>/opt/holosmith/current/holosmith`, so a restart picks a switch up — and `server deploy`'s step 5 renders that
+path once a release tree resolves, so a deploy after a promotion does not undo it.
+_Avoid_: Pointer, live link, symlink target
 
 **Promotion**:
-Moving a candidate release to live: smoke test, drain, backup, switch, verify, or roll back.
-_Avoid_: Deploy, upgrade, rollout
+Moving a candidate **release** to live, as `holosmith upgrade <binary>` performs it: the review gate acknowledged
+(`--acknowledge-review`), a **smoke run**, the two **image builds** when their labels say so, a **drain**, a database
+backup (`VACUUM INTO backups/app-<ts>.db`, five kept), the release directory written, **`current`** switched, the unit
+restarted and a twenty-second `/api/health` poll for a process **younger than the restart** — then, if it does not
+answer, the automatic **rollback**. Every refusal leaves the machine as it found it and says so; a failure *after* the
+drain leaves it draining, which the sentence names.
+_Avoid_: Deploy (that installs a machine), upgrade (the command), rollout, release
 
 **Rollback**:
-Pointing `current` back at the previous release.
+Pointing **`current`** back at the release it named before the switch, restarting and polling again — what a
+**promotion** does by itself when the candidate does not answer, and (HS-079) what `holosmith rollback` will do on
+demand. The database is never restored: the migration rule is what makes switching back safe. A rollback whose own
+health check fails says so with a stated next step.
 _Avoid_: Revert, downgrade
 
 **Smoke run**:
