@@ -2766,3 +2766,73 @@ fn wait_for_health_answers_in_milliseconds_for_both_arms() {
         "the wait overran its bound: {elapsed:?}"
     );
 }
+
+// ---- a promoted machine's unit runs through `current` (HS-078) ------------------------------------------------
+
+/// Once `current` resolves, step 5's `ExecStart` is the release tree's symlink — and a second deploy leaves the unit
+/// exactly as it found it.
+///
+/// The claim is one fact with two halves, and both are here: the *first* run writes a unit that names
+/// `<install>/opt/holosmith/current/holosmith` (so a promotion's switch is what the next boot picks up), and the
+/// *second* run's read finds those same bytes (so `server deploy`, run after a promotion, neither undoes it nor
+/// calls it changed).
+#[test]
+fn a_release_tree_makes_the_unit_run_through_current() {
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("deploy-release-tree");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let mut config = config(Some(format!("unix://{}", socket.display())));
+    config.role = Role::Hub;
+    config.control_listen = health_responder();
+    let root = dir.file("root");
+    let target = Target::resolve(Some(root.clone()));
+
+    // A release tree with one live release, before the deploy runs: this is what a promotion leaves behind.
+    let release = holosmith::release::Release::of(&target);
+    std::fs::create_dir_all(release.releases()).expect("the releases directory is creatable");
+    let bytes = b"#!/bin/sh\nexit 0\n";
+    let artifact = dir.file("v0.1.0-holosmith");
+    std::fs::write(&artifact, bytes).expect("the fixture binary is writable");
+    let digest = images::digest(&artifact).expect("the fixture binary is readable");
+    release
+        .write("v0.1.0", bytes, &digest)
+        .expect("a release is writable");
+    release.switch("v0.1.0").expect("the release is live");
+
+    let deployed = target.config(&config);
+    let tools = real_tools(&dir);
+    let machine = Fake::new();
+    let report = deploy::run_as(&deployed, &target, &tools, &machine, false, Kind::Hub);
+    assert!(!report.failed(), "the hub run failed:\n{}", report.render());
+    assert_eq!(
+        line(&report, DeployStep::Service).word,
+        Word::Changed,
+        "{}",
+        line(&report, DeployStep::Service).sentence
+    );
+    let unit = std::fs::read_to_string(target.unit_path()).expect("the unit is readable");
+    let live = format!("{}/opt/holosmith/current/holosmith", root.display());
+    assert!(
+        unit.contains(&format!("ExecStart={live} serve")),
+        "the unit does not run through `current`:\n{unit}"
+    );
+    assert!(
+        unit.contains(&format!("ExecStartPre={live} doctor --quick")),
+        "the unit's pre-line does not run the release it starts:\n{unit}"
+    );
+
+    // The second run reads the same bytes, so nothing changed and nothing was undone.
+    let again = deploy::run_as(&deployed, &target, &tools, &machine, false, Kind::Hub);
+    assert!(
+        !again.failed(),
+        "the second hub run failed:\n{}",
+        again.render()
+    );
+    assert_eq!(
+        line(&again, DeployStep::Service).word,
+        Word::Satisfied,
+        "a deploy on a promoted machine rewrote the unit: {}",
+        line(&again, DeployStep::Service).sentence
+    );
+}

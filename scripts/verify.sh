@@ -41,7 +41,12 @@
 # container build when this machine already has the builder image), the smoke run of HS-077 in three arms and with
 # no skip (`case_smoke`: the artifact's own `container fake-pi` over two pipes, a `docker` stand-in that refuses the
 # smoke image and must be exit 1 with the smoke config on disk, and the real run — a session whose turn is asserted,
-# then deleted, with the machine's two proxies compared by id before and after), and a Docker preflight that
+# then deleted, with the machine's two proxies compared by id before and after), the promotion of HS-078 in four arms
+# (`case_upgrade`: the review gate and an older-schema candidate refused before anything is asked, then a real
+# promotion over a `systemctl` stand-in that starts what `current` names and a `docker` stand-in that fakes only the two
+# product images — the step order, the images built from the candidate's digest once and never again, the backup, a
+# session the drain stopped coming back idle, and the last line naming the version and the backup — and a rollback whose
+# first restart serves nothing, so the poll gives up and the symlink goes back), and a Docker preflight that
 # refuses to start with one sentence naming the fix, with no CORS header
 # on any answer, and stopping on SIGTERM with exit 0. Each case prints `ok <case>` once it passes — a
 # case that printed SKIP withholds that line, so the log can never call a check that measured nothing a
@@ -502,6 +507,7 @@ serve_cases=(
   case_server_images
   case_build
   case_smoke
+  case_upgrade
   case_server_deploy
   case_server_service
   case_deploy_ssh
@@ -11044,6 +11050,349 @@ SHIM
   docker rm -f hs_egress hs_key >/dev/null 2>&1 || true
   # The root is the run's scratch space and goes with it, so a second run cannot inherit a first one's database.
   [ ! -e "$root/real" ] || fail "$name/root" "the run left its root behind: $root/real"
+
+  rm -rf "$root"
+}
+
+# HS-078: `holosmith upgrade <binary>`, the promotion pipeline (spec item 10, ADR-0082).
+#
+# Four arms. Two need nothing but the artifact — the review gate is a refusal, and a candidate compared against a
+# database one schema newer is a refusal — and two need the daemon: the real promotion (with a `systemctl` stand-in
+# that starts the release `current` names, a `docker` stand-in that fakes **only** the two product images so the real
+# smoke run still measures the candidate, and a real drain over a real socket), then the same promotion of a candidate
+# whose version and tag were rewritten, with a stand-in that starts the *old* release, so the health poll fails and the
+# switch goes back. No arm is a `SKIP`: deleting the verb fails arm 1 here on any machine.
+#
+# What the order is measured by: the printed step lines (each is printed by the step that does the work), and the
+# **recorded children** — the two `docker build`s must precede the `systemctl restart`, and the restart must precede the
+# health answer. What it cannot measure is a real systemd: there is none on this machine, so the "restart" is the
+# stand-in's own start of the binary `current` names, and the case says so.
+# HS-078: `holosmith upgrade <binary>`, the promotion pipeline (spec item 10, ADR-0082).
+#
+# Four arms. Two need nothing but the artifact — the review gate is a refusal, and a candidate compared against a
+# database one schema newer is a refusal, both **before** anything is asked of the machine. Two need the daemon and a
+# serving machine: the real pipeline (a `systemctl` stand-in that starts the release `current` names, a `docker`
+# stand-in that fakes **only** the two product images so the real smoke run still measures the candidate, and a real
+# drain over a real socket), and the rollback — the same promotion with a stand-in whose first restart starts nothing
+# that can serve, so the 20-second poll fails and the symlink goes back by itself.
+#
+# What the order is measured by: the printed step lines (each is printed by the step that does the work), the
+# **recorded children** (the two `docker build`s, then the `systemctl restart`), and the effects — a session the drain
+# stopped is `idle` again after the restart, and a backup exists before `current` moves. What it cannot measure is a
+# real systemd: there is none on this machine, so the "restart" is the stand-in's own start of the binary `current`
+# names, and this comment is where that is disclosed.
+case_upgrade() {
+  local name=case_upgrade root="$repo_root/target/verify-upgrade-$$"
+  local data="$root/data" projects="$root/projects" admin="$root/run/holosmith" config="$root/config.toml"
+  local bin="$root/bin" candidate="$root/candidate/holosmith" state="$root/state"
+  local docker_log="$root/docker.argv" systemctl_log="$root/systemctl.argv" serve_log="$root/serve.log"
+  local pid_file="$root/serve.pid" broken="$root/broken" version tag digest status answer port line
+  local first second session snapshots
+  rm -rf "$root"
+  mkdir -p "$bin" "$data" "$projects" "$admin" "$root/candidate" "$state"
+
+  # The candidate is this tree's artifact with the two files `holosmith build` writes beside each other, so the
+  # promotion's own ELF check, digest check and `version --json` are all measured over real bytes.
+  cp "$artifact" "$candidate"
+  digest="$(sha256sum "$candidate" | cut -d' ' -f1)"
+  printf '%s  holosmith\n' "$digest" >"$root/candidate/holosmith.sha256"
+  version="$("$artifact" version | sed -n 's/^version //p')"
+  tag="$("$artifact" version | sed -n 's/^git_tag //p')"
+  [ -n "$version" ] && [ -n "$tag" ] || fail "$name/version" "the artifact reports no version or tag"
+  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "stub"\nrole = "server"\nprojects_root = "%s"\ndata_root = "%s"\nmin_free_gb = 0\nsession_disk_soft_gb = 0\nidle_stop_min = 0\npreview_listen = "127.0.0.1:0"\n' \
+    "$owner" "$projects" "$data" >"$config"
+
+  # ---- 1. the review gate is a refusal, and it happens before anything is asked ---------------------
+  status=0
+  answer="$("$artifact" --config "$config" upgrade "$candidate" --root "$root" 2>&1)" || status=$?
+  check "$name/review/exit" 1 "$status"
+  case "$answer" in
+    *"review gate"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/review/sentence" "the refusal does not name the gate: $answer" ;;
+  esac
+  [ ! -e "$root/opt" ] ||
+    fail "$name/review/release" "a refused promotion wrote a release tree: $(find "$root" -mindepth 1 -maxdepth 2 | head -3)"
+  [ ! -e "$data/backups" ] ||
+    fail "$name/review/backup" "a refused promotion wrote a backup: $(find "$data/backups" -mindepth 1 | head -3)"
+
+  # ---- 2. a candidate older than the database is refused ------------------------------------------
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$data/app.db" <<'PY'
+import sqlite3, sys
+connection = sqlite3.connect(sys.argv[1])
+connection.execute(
+    "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL)"
+)
+for version in range(1, 9):
+    connection.execute(
+        "INSERT OR REPLACE INTO schema_version (version, name, applied_at) VALUES (?, 'a release', 0)",
+        (version,),
+    )
+connection.commit()
+PY
+    status=0
+    answer="$("$artifact" --config "$config" upgrade "$candidate" --acknowledge-review --root "$root" 2>&1)" ||
+      status=$?
+    check "$name/schema/exit" 1 "$status"
+    case "$answer" in
+      *"older than the database"*) assertions=$((assertions + 1)) ;;
+      *) fail "$name/schema/sentence" "the refusal does not name the schema: $answer" ;;
+    esac
+    [ ! -e "$root/opt" ] ||
+      fail "$name/schema/release" "a refused candidate wrote a release tree"
+    [ ! -e "$data/backups" ] ||
+      fail "$name/schema/backup" "a refused candidate wrote a backup"
+    rm -f "$data/app.db"
+  else
+    printf 'note %s: no python3 to make a database from a newer release, so the schema refusal was not measured\n' "$name"
+  fi
+
+  # Everything below starts a server whose port the promotion's health poll reads from the config, so the two have to
+  # agree: `--port 0` is what re-derives a control origin, and a config's port does not (ADR-0007), so the origin is
+  # spelled here as the listener is.
+  if ! command -v docker >/dev/null 2>&1 || ! timeout 60 docker version >/dev/null 2>&1; then
+    printf 'note %s: no Docker daemon answers, so the promotion and its rollback were not measured (the two refusals were)\n' "$name"
+    rm -rf "$root"
+    return 0
+  fi
+  port="$(free_port)"
+  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "stub"\nrole = "server"\ncontrol_listen = "127.0.0.1:%s"\ncontrol_origin = "http://127.0.0.1:%s"\nprojects_root = "%s"\nmin_free_gb = 0\nsession_disk_soft_gb = 0\nidle_stop_min = 0\npreview_listen = "127.0.0.1:0"\ndata_root = "%s"\n' \
+    "$owner" "$port" "$port" "$projects" "$data" >"$config"
+
+  # The stand-ins. `docker` fakes the **two product images** and nothing else: every other question — the smoke run's
+  # own image, its session's container and network — goes to the real daemon, so the real smoke test still runs. The
+  # labels it remembers are the `--build-arg` pairs it was given, which is how the *second* promotion reads the images
+  # as current: acceptance bullet 4's "only when the binary or a pinned version changed", in both directions.
+  cat >"$bin/docker" <<SHIM
+#!/bin/sh
+{
+  printf 'docker'
+  for argument in "\$@"; do printf ' %s' "\$argument"; done
+  printf '\n'
+} >>"$docker_log"
+case "\$1" in
+  build)
+    tag=""
+    previous=""
+    json=""
+    for argument in "\$@"; do
+      [ "\$previous" = "-t" ] && tag="\$argument"
+      previous="\$argument"
+      case "\$argument" in
+        HOLOSMITH_VERSION=*) json="\$json\"org.holosmith.version\":\"\${argument#*=}\"," ;;
+        HOLOSMITH_GIT_TAG=*) json="\$json\"org.holosmith.git-tag\":\"\${argument#*=}\"," ;;
+        HOLOSMITH_PI_VERSION=*) json="\$json\"org.holosmith.pi-version\":\"\${argument#*=}\"," ;;
+        HOLOSMITH_BINARY_SHA256=*) json="\$json\"org.holosmith.binary-sha256\":\"\${argument#*=}\"," ;;
+        HOLOSMITH_TOOLCHAINS=*) json="\$json\"org.holosmith.toolchains\":\"\${argument#*=}\"," ;;
+      esac
+    done
+    case "\$tag" in
+      holosmith-proxy:*|agent-image:*)
+        cat >/dev/null
+        printf '{%s"faked":"yes"}' "\$json" >"$state/\$tag.json"
+        printf 'faked the build of %s\n' "\$tag"
+        exit 0
+        ;;
+    esac
+    ;;
+  image)
+    tag=""
+    format=""
+    for argument in "\$@"; do
+      case "\$argument" in
+        holosmith-proxy:*|agent-image:*) tag="\$argument" ;;
+        *Config.Labels*) format="\$argument" ;;
+      esac
+    done
+    case "\$tag" in
+      holosmith-proxy:*|agent-image:*)
+        [ -f "$state/\$tag.json" ] || exit 1
+        case "\$format" in
+          "") printf 'sha256:faked\n' ;;
+          *) cat "$state/\$tag.json" ;;
+        esac
+        exit 0
+        ;;
+    esac
+    ;;
+esac
+exec "$(command -v docker)" "\$@"
+SHIM
+  # `systemctl` is what systemd would be: on `restart` it stops what is running and starts the binary the unit's
+  # `ExecStart` names — read through `current`, which is the whole point of the layout. \`HS_BREAK_FIRST\` is the
+  # failure the rollback arm injects: the first restart starts a `serve` with no config, so nothing answers the
+  # candidate's health poll and the promotion has to put the previous release back by itself.
+  cat >"$bin/systemctl" <<SHIM
+#!/bin/sh
+{
+  printf 'systemctl'
+  for argument in "\$@"; do printf ' %s' "\$argument"; done
+  printf '\n'
+} >>"$systemctl_log"
+case "\$1" in
+  daemon-reload) exit 0 ;;
+  restart)
+    if [ -f "$pid_file" ]; then
+      old="\$(cat "$pid_file")"
+      kill "\$old" 2>/dev/null || true
+      for _ in \$(seq 1 100); do kill -0 "\$old" 2>/dev/null || break; sleep 0.05; done
+    fi
+    exe="\$(readlink -f "$root/opt/holosmith/current")/holosmith"
+    if [ "\${HS_BREAK_FIRST:-0}" = 1 ] && [ ! -f "$broken" ]; then
+      : >"$broken"
+      "\$exe" serve --config /nonexistent/holosmith.toml >>"$serve_log" 2>&1 &
+    else
+      "\$exe" serve --config "$config" --admin-dir "$admin" >>"$serve_log" 2>&1 &
+    fi
+    printf '%s\n' "\$!" >"$pid_file"
+    exit 0
+    ;;
+esac
+exit 0
+SHIM
+  chmod 0755 "$bin/docker" "$bin/systemctl"
+
+  # A machine that has promoted before: one release, `current` pointing at it, and the unit a deploy wrote through it.
+  # That release is the promotion's **previous** one and what a rollback goes back to, so this case starts from the
+  # state a second promotion is in rather than from a machine with no release tree at all.
+  mkdir -p "$root/opt/holosmith/releases/old" "$root/etc/systemd/system"
+  cp "$candidate" "$root/opt/holosmith/releases/old/holosmith"
+  cp "$root/candidate/holosmith.sha256" "$root/opt/holosmith/releases/old/holosmith.sha256"
+  ln -s releases/old "$root/opt/holosmith/current"
+  printf '[Unit]\nDescription=Holosmith server\n\n[Service]\nExecStart=%s/opt/holosmith/current/holosmith serve\nRestart=on-failure\n\n[Install]\nWantedBy=multi-user.target\n' \
+    "$root" >"$root/etc/systemd/system/holosmith.service"
+
+  # The machine, serving: the same argv the stand-in replays, so the promotion's drain socket is this run's own.
+  "$artifact" serve --config "$config" --admin-dir "$admin" >>"$serve_log" 2>&1 &
+  extra_pid=$!
+  printf '%s\n' "$extra_pid" >"$pid_file"
+  for _ in $(seq 1 200); do
+    (exec 3<>/dev/tcp/127.0.0.1/"$port") 2>/dev/null && break
+    kill -0 "$extra_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  # One idle session, which the drain stops and the boot after each restart has to bring back.
+  fetch_body "${name}_create" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1:$port" "Origin: http://127.0.0.1:$port" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-upgrade-1" ||
+    fail "$name/create" "POST /api/sessions did not answer"
+  expect_status "${name}_create" "$(answer "${name}_create")" 202
+  session="$(sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p' "$WORK/responses/${name}_create.body")"
+  [ -n "$session" ] || fail "$name/create/id" "the response names no id: $(cat "$WORK/responses/${name}_create.body")"
+  for _ in $(seq 1 400); do
+    fetch "${name}_idle" GET "/api/sessions/$session" "Host: 127.0.0.1:$port" || true
+    case "$(answer "${name}_idle")" in
+      *'"status":"idle"'*) break ;;
+    esac
+    sleep 0.05
+  done
+  case "$(answer "${name}_idle")" in
+    *'"status":"idle"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/idle" "the session never reached idle: $(cat "$WORK/responses/${name}_idle.body")" ;;
+  esac
+
+  # ---- 3. the rollback: a candidate whose new version never answers ---------------------------------
+  status=0
+  HS_BREAK_FIRST=1 PATH="$bin:$PATH" "$artifact" --config "$config" upgrade "$candidate" --acknowledge-review \
+    --root "$root" --wait 30s >"$WORK/$name.rollback.out" 2>&1 || status=$?
+  check "$name/rollback/exit" 1 "$status"
+  if [ -f "$pid_file" ]; then extra_pid="$(cat "$pid_file")"; fi
+  case "$(cat "$WORK/$name.rollback.out")" in
+    *"rolled back"*"is live again"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/rollback/sentence" "the rollback did not say what is live now: $(tail -5 "$WORK/$name.rollback.out")" ;;
+  esac
+  grep -q '^upgrade: health: no answer with ' "$WORK/$name.rollback.out" ||
+    fail "$name/rollback/health" "the poll did not report giving up: $(tail -5 "$WORK/$name.rollback.out")"
+  [ "$(grep -c '^systemctl restart holosmith.service$' "$systemctl_log")" -eq 2 ] ||
+    fail "$name/rollback/restarts" "the rollback did not restart the service a second time: $(cat "$systemctl_log")"
+  check "$name/rollback/current" "releases/old" "$(readlink "$root/opt/holosmith/current")"
+  grep -q "^upgrade: live: releases/old ($version, $tag) (the candidate was not made live), backup $data/backups/app-" \
+    "$WORK/$name.rollback.out" ||
+    fail "$name/rollback/live" "the rollback's last line does not name the release and version that are live: $(tail -3 "$WORK/$name.rollback.out")"
+  # The session the drain stopped came back with the release that was switched back to.
+  for _ in $(seq 1 400); do
+    fetch "${name}_resumed" GET "/api/sessions/$session" "Host: 127.0.0.1:$port" || true
+    case "$(answer "${name}_resumed")" in
+      *'"status":"idle"'*) break ;;
+    esac
+    sleep 0.05
+  done
+  case "$(answer "${name}_resumed")" in
+    *'"status":"idle"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/resumed" "the session the drain stopped did not come back idle: $(cat "$WORK/responses/${name}_resumed.body")" ;;
+  esac
+  assertions=$((assertions + 2))
+
+  # ---- 4. the promotion, in the spec's order ------------------------------------------------------
+  status=0
+  PATH="$bin:$PATH" "$artifact" --config "$config" upgrade "$candidate" --acknowledge-review \
+    --root "$root" --wait 30s >"$WORK/$name.run.out" 2>&1 || status=$?
+  check "$name/run/exit" 0 "$status"
+  if [ -f "$pid_file" ]; then extra_pid="$(cat "$pid_file")"; fi
+
+  # The steps, in the spec's order. Each line is printed by the step that does the work, so the order of the lines is
+  # the order of the work; the recorded children below back the three that have one.
+  first=0
+  for line in "smoke: passed" "images: " "drain: drained" "backup: " "release: " "current: " "restart: " "health: " "live: "; do
+    second="$(sed -n "/^upgrade: $line/=" "$WORK/$name.run.out" | head -1)"
+    [ -n "$second" ] || fail "$name/order" "no 'upgrade: $line' line: $(cat "$WORK/$name.run.out")"
+    [ "$second" -gt "$first" ] || fail "$name/order" "'upgrade: $line' is out of order: $(cat "$WORK/$name.run.out")"
+    first="$second"
+    assertions=$((assertions + 1))
+  done
+  # The images were built by the promotion before this one, so this one reads them as current: the acceptance's "only
+  # when the binary or a pinned version changed", measured by a second promotion of the same candidate.
+  grep -q '^upgrade: images: no image needed building$' "$WORK/$name.run.out" ||
+    fail "$name/images/current" "a second promotion rebuilt the images: $(cat "$WORK/$name.run.out")"
+  [ "$(grep -c -- "^docker build -t holosmith-proxy:$version" "$docker_log")" -eq 1 ] ||
+    fail "$name/images/once" "the proxy image was built more than once for one candidate: $(cat "$docker_log")"
+  grep -qF -- "HOLOSMITH_BINARY_SHA256=$digest" "$docker_log" ||
+    fail "$name/images/digest" "the images were not built from the candidate's bytes: $(cat "$docker_log")"
+  grep -q '^systemctl restart holosmith.service$' "$systemctl_log" ||
+    fail "$name/restart" "the promotion did not restart the unit: $(cat "$systemctl_log")"
+  # The restart is the **last** child: after the drain and after the images.
+  tail -1 "$systemctl_log" | grep -qx 'systemctl restart holosmith.service' ||
+    fail "$name/restart/last" "the restart is not the last child the promotion ran: $(cat "$systemctl_log")"
+  assertions=$((assertions + 3))
+
+  # The effects: the release, the link, the backups, and the session the drain stopped.
+  check "$name/current" "releases/$tag" "$(readlink "$root/opt/holosmith/current")"
+  cmp -s "$root/opt/holosmith/releases/$tag/holosmith" "$candidate" ||
+    fail "$name/release" "the release's binary is not the candidate's bytes"
+  snapshots="$(ls "$data"/backups/app-*.db 2>/dev/null | wc -l)"
+  [ "$snapshots" -eq 2 ] ||
+    fail "$name/backup" "two promotions did not write two snapshots: $(ls "$data/backups" 2>/dev/null)"
+  head -c 15 "$data"/backups/app-*.db | grep -q 'SQLite format 3' ||
+    fail "$name/backup/db" "a snapshot is not a database: $data/backups"
+  case "$(cat "$WORK/$name.run.out")" in
+    *"stopped: 1 session with reason server_restart"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/drain/session" "the drain did not stop the idle session: $(cat "$WORK/$name.run.out")" ;;
+  esac
+  for _ in $(seq 1 400); do
+    fetch "${name}_back" GET "/api/sessions/$session" "Host: 127.0.0.1:$port" || true
+    case "$(answer "${name}_back")" in
+      *'"status":"idle"'*) break ;;
+    esac
+    sleep 0.05
+  done
+  case "$(answer "${name}_back")" in
+    *'"status":"idle"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/back" "the session the drain stopped did not come back idle: $(cat "$WORK/responses/${name}_back.body")" ;;
+  esac
+  # The last line: the version that is now live, and the backup this promotion took.
+  grep -q "^upgrade: live: $version ($tag), backup $data/backups/app-" "$WORK/$name.run.out" ||
+    fail "$name/live" "the last line does not name the version and the backup: $(tail -3 "$WORK/$name.run.out")"
+  assertions=$((assertions + 2))
+
+  kill "$extra_pid" 2>/dev/null || true
+  extra_pid=""
+  # Nothing of the run's own is left on the machine: the smoke run removed its container, its network and its proxies.
+  [ -z "$(docker ps -aq --filter 'name=smoke_' 2>/dev/null || true)" ] ||
+    fail "$name/smoke/container" "a smoke container outlived the promotion"
+  [ -z "$(docker network ls -q --filter 'name=smoke_' 2>/dev/null || true)" ] ||
+    fail "$name/smoke/network" "a smoke network outlived the promotion"
+  assertions=$((assertions + 2))
 
   rm -rf "$root"
 }

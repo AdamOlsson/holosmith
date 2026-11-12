@@ -299,3 +299,169 @@ async fn nothing_is_bundled_when_the_setting_is_off() {
     // The default is off, and off must mean "no directory, no subprocess, no cost".
     assert!(!dir.path().join("backups").exists());
 }
+
+// ---- the promotion's database snapshots (HS-078, spec item 10 step 4) -----------------------------------------
+
+/// The instants the snapshot tests take, an hour apart, from 2026-11-04T00:00:00Z.
+const SNAPSHOT_START: i64 = DAY_2026_11_04;
+
+/// A snapshot's name is `app-<YYYYMMDDTHHMMSS>.db`, and the name is the sort key the rotation reads.
+#[test]
+fn a_snapshot_is_named_after_the_second_it_was_taken_and_sorts_by_it() {
+    use holosmith::backup::Snapshots;
+    let snapshots = Snapshots::new(Path::new("/var/lib/holosmith"));
+    assert_eq!(
+        snapshots.path(SNAPSHOT_START),
+        Path::new("/var/lib/holosmith/backups/app-20261104T000000.db")
+    );
+    // The next second, and the newest one: text order is time order for a fixed-width UTC stamp.
+    assert_eq!(
+        snapshots.path(SNAPSHOT_START + 1),
+        Path::new("/var/lib/holosmith/backups/app-20261104T000001.db")
+    );
+    assert!(snapshots.path(SNAPSHOT_START) < snapshots.path(SNAPSHOT_START + 60));
+}
+
+/// Five kept, oldest first, and a file that is not a snapshot's name is neither counted nor removed.
+#[test]
+fn the_rotation_keeps_the_last_five_snapshots_and_leaves_anything_else_alone() {
+    use holosmith::backup::{KEEP_SNAPSHOTS, Snapshots};
+    let dir = TempDir::new("backup-rotation");
+    let snapshots = Snapshots::new(dir.path());
+    std::fs::create_dir_all(&snapshots.root).expect("the backups directory is creatable");
+    // A project bundle of the *other* rotation, and an operator's own database: neither is this module's.
+    std::fs::write(snapshots.root.join("holosmith-2026-11-04.bundle"), b"x")
+        .expect("the fixture bundle is writable");
+    std::fs::write(snapshots.root.join("app.db"), b"x").expect("the fixture database is writable");
+
+    let mut taken = Vec::new();
+    for step in 0..(KEEP_SNAPSHOTS + 2) {
+        let path = snapshots
+            .take(SNAPSHOT_START + step as i64 * 60, &|destination| {
+                std::fs::write(destination, b"a database").map_err(|error| error.to_string())
+            })
+            .expect("a snapshot is taken");
+        taken.push(path);
+    }
+    let mut present: Vec<String> = std::fs::read_dir(&snapshots.root)
+        .expect("the directory reads")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("app-"))
+        .collect();
+    present.sort();
+    let want: Vec<String> = taken
+        .iter()
+        .skip(2)
+        .map(|path| {
+            path.file_name()
+                .expect("a snapshot has a name")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(present, want, "the rotation did not keep the last five");
+    assert!(
+        dir.path()
+            .join("backups/holosmith-2026-11-04.bundle")
+            .exists(),
+        "the rotation deleted a project bundle"
+    );
+    assert!(
+        dir.path().join("backups/app.db").exists(),
+        "the rotation deleted the live database named app.db"
+    );
+    // No `.tmp` file outlives a take: the name that exists under `app-<ts>.db` is always a whole snapshot.
+    let leftovers: Vec<String> = std::fs::read_dir(&snapshots.root)
+        .expect("the directory reads")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".tmp"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "a partial snapshot was kept: {leftovers:?}"
+    );
+}
+
+/// The real thing: `VACUUM INTO` over a **read-only** connection produces a database the engine can open, with the
+/// rows the machine had — and a second snapshot of the same second replaces the first rather than colliding.
+#[test]
+fn a_snapshot_is_a_readable_database_and_a_second_one_in_the_same_second_replaces_it() {
+    use holosmith::backup::Snapshots;
+    use holosmith::db::{self, Reader};
+    let dir = TempDir::new("backup-vacuum");
+    let database = support::open(&dir);
+    let path = dir.database();
+    // One row, so "the snapshot holds what the machine had" is a fact rather than a schema.
+    let session = database
+        .sessions()
+        .create(
+            &holosmith::sessions::NewSession {
+                project: "holosmith".to_string(),
+                model: "claude-sonnet-4.5".to_string(),
+                thinking: "high".to_string(),
+                network: false,
+                client_key: None,
+                base_commit: None,
+            },
+            NOW,
+        )
+        .expect("a session is created");
+    drop(database);
+
+    let snapshots = Snapshots::new(dir.path());
+    let vacuum = |destination: &Path| {
+        Reader::open(&path)
+            .expect("the database opens read-only")
+            .expect("the database exists")
+            .snapshot(destination)
+            .map_err(|error| error.to_string())
+    };
+    let first = snapshots
+        .take(NOW, &vacuum)
+        .expect("the first snapshot is taken");
+    let again = snapshots
+        .take(NOW, &vacuum)
+        .expect("a second snapshot of the same second is taken");
+    assert_eq!(first, again, "one second has one snapshot's name");
+    let names: Vec<String> = std::fs::read_dir(&snapshots.root)
+        .expect("the directory reads")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("app-"))
+        .collect();
+    assert_eq!(
+        names.len(),
+        1,
+        "the same second produced two snapshots: {names:?}"
+    );
+
+    // The snapshot is a database, at the schema this build embeds, with the row that existed.
+    let reader = Reader::open(&first)
+        .expect("the snapshot opens")
+        .expect("the snapshot exists");
+    assert_eq!(
+        reader
+            .schema_version(&first)
+            .expect("the snapshot records a schema"),
+        holosmith::schema::SCHEMA_VERSION
+    );
+    let rows = reader
+        .sessions()
+        .list(None)
+        .expect("the snapshot's rows read");
+    assert!(
+        rows.iter().any(|row| row.id == session.id),
+        "the snapshot holds no row for the session: {rows:?}"
+    );
+    // And it is read-only openable while the source is still there, which is what a restore reads first.
+    assert!(
+        db::recorded_without_migrating(&first)
+            .expect("the snapshot records a schema")
+            .is_some()
+    );
+}
+
+/// The instant the snapshot tests create their row at.
+const NOW: i64 = SNAPSHOT_START + 3_600;

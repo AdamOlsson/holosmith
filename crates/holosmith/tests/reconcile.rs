@@ -82,10 +82,15 @@ fn create(state: &AppState, project: &str) -> Session {
 /// Put the row in the state the process died in. The one write no production code may make outside
 /// `Transitioner::apply`, and the only way a test can be the crash.
 fn force(state: &AppState, id: &str, status: Status) {
+    force_with(state, id, status, None);
+}
+
+/// [`force`] with the row's reason, which is what tells a drain's stop from every other one.
+fn force_with(state: &AppState, id: &str, status: Status, reason: Option<&str>) {
     let database = state.database.lock().expect("the lock is not poisoned");
     database
         .sessions()
-        .set_status(id, status, None, NOW + 1)
+        .set_status(id, status, reason, NOW + 1)
         .expect("the row is written")
         .expect("the session exists");
 }
@@ -459,4 +464,93 @@ async fn a_worktree_a_row_owns_is_not_an_orphan() {
         );
     }
     assert!(owned.exists());
+}
+
+/// Spec item 10 step 6 and HS-078's acceptance bullet 3: a session a **drain** stopped comes back on startup,
+/// with no reason carried, and no other `stopped` row does.
+#[tokio::test]
+async fn a_row_a_drain_stopped_comes_back_idle_and_one_the_sweeper_stopped_does_not() {
+    let dir = TempDir::new("reconcile-drain");
+    let root = dir.file("projects");
+    std::fs::create_dir_all(&root).expect("the projects root is creatable");
+    let state = stub_state(&dir, &root);
+    let drained = create(&state, "holosmith");
+    let swept = create(&state, "holosmith");
+    // The drain's own two facts: `stopped`, and `server_restart` as the reason. The sweeper's stop carries its own
+    // word (`idle_stop`), which is what has to keep it stopped.
+    force_with(
+        &state,
+        &drained.id,
+        Status::Stopped,
+        Some(holosmith::drain::SERVER_RESTART),
+    );
+    force_with(&state, &swept.id, Status::Stopped, Some("idle_stop"));
+
+    state.reconciler().run().await;
+
+    wait_until("the drain's session came back idle", || {
+        row(&state, &drained.id).status == Status::Idle
+    })
+    .await;
+    let back = row(&state, &drained.id);
+    assert_eq!(
+        back.status_reason, None,
+        "a resume is not a crash: the row keeps no reason at all"
+    );
+    // The other stop is untouched: a policy that stopped a session for its own reason does not get to undo itself
+    // because the process restarted.
+    let quiet = row(&state, &swept.id);
+    assert_eq!(quiet.status, Status::Stopped, "{:?}", quiet.status);
+    assert_eq!(quiet.status_reason.as_deref(), Some("idle_stop"));
+}
+
+/// The transition the boot applies to a drain's row is `resume`, not `crash_recovery`: the table admits the second
+/// only from the three live states, so wiring the drain's rows through it would be a `warn` and a row that stays
+/// `stopped` — the defect this test would otherwise have had to find at a promotion.
+#[test]
+fn the_trigger_a_row_comes_back_with_is_chosen_by_the_state_it_died_in() {
+    let mut row = Session {
+        id: "0123456789abcdef".to_string(),
+        project: "holosmith".to_string(),
+        model: "claude-sonnet-4.5".to_string(),
+        thinking: "high".to_string(),
+        worktree: String::new(),
+        base_commit: None,
+        status: Status::Stopped,
+        status_reason: Some(holosmith::drain::SERVER_RESTART.to_string()),
+        client_key: None,
+        network: false,
+        created_at: NOW,
+        last_active_at: NOW,
+        stopped_at: Some(NOW),
+        usage_in: 0,
+        usage_out: 0,
+    };
+    let recovered = reconcile::recoveries(std::slice::from_ref(&row));
+    assert_eq!(
+        recovered.len(),
+        1,
+        "a drain's stop is not a row to bring back"
+    );
+    assert_eq!(
+        recovered[0].trigger(),
+        holosmith::sessions::state::Trigger::Resume
+    );
+    for status in [Status::Starting, Status::Idle, Status::Running] {
+        row.status = status;
+        row.status_reason = None;
+        let recovered = reconcile::recoveries(std::slice::from_ref(&row));
+        assert_eq!(
+            recovered[0].trigger(),
+            holosmith::sessions::state::Trigger::CrashRecovery,
+            "a {status} row is a crash, not a drain"
+        );
+    }
+    // A `stopped` row with another reason is not this pass's at all.
+    row.status = Status::Stopped;
+    row.status_reason = Some("idle_stop".to_string());
+    assert!(reconcile::recoveries(std::slice::from_ref(&row)).is_empty());
+    // The bare `stopped` state (a resume from the page, a stop with no reason) is not either.
+    row.status_reason = None;
+    assert!(reconcile::recoveries(std::slice::from_ref(&row)).is_empty());
 }

@@ -24,6 +24,7 @@ use std::sync::Mutex;
 use holosmith::config::Config;
 use holosmith::docker::Docker;
 use holosmith::images::{self, Expectation, Kind, Log, Status};
+use holosmith::version::VersionInfo;
 
 mod support;
 use support::TempDir;
@@ -516,7 +517,7 @@ fn the_read_answers_missing_no_labels_stale_current_and_unreadable() {
     let image = images::agent_image();
     let read = |answer| {
         let fake = Labelled::answering(answer);
-        let status = images::read(&fake, Kind::Agent, &expectation);
+        let status = images::read(&fake, &expectation);
         (status, fake.asked())
     };
 
@@ -540,7 +541,12 @@ fn the_read_answers_missing_no_labels_stale_current_and_unreadable() {
     match status {
         Status::Stale(reason) => assert!(
             reason.contains("no Holosmith labels")
-                && reason.contains("not built from this binary's Dockerfile"),
+                // "this binary's" would be the wrong subject now that one read answers for another release's
+                // images as well (HS-078): the sentence names the **version** whose build it compared against.
+                && reason.contains(&format!(
+                    "not built from version {}'s Dockerfile",
+                    expectation.version
+                )),
             "{reason}"
         ),
         other => panic!("an unlabelled image read as {other:?}"),
@@ -718,6 +724,7 @@ fn a_built_proxy_image_runs_both_proxies_and_a_broken_build_leaves_no_tag() {
     // claim under test is that the Dockerfile writes the arguments it is given into the labels.
     let reported = reported(&binary);
     let expectation = Expectation {
+        kind: Kind::Proxy,
         version: reported
             .get("version")
             .expect("the artifact reports its version")
@@ -823,4 +830,135 @@ fn a_built_proxy_image_runs_both_proxies_and_a_broken_build_leaves_no_tag() {
     // package layer are already there.
     let _ = docker(&["image", "rm", "-f", TAG]);
     let _ = docker(&["image", "rm", "-f", BROKEN]);
+}
+
+// ---- what a promotion must build (HS-078, spec item 10's acceptance bullet 4) ---------------------------------
+
+/// A seam that answers each image's labels from a map, so one read can see two releases at once.
+struct Tagged {
+    labels: BTreeMap<String, BTreeMap<String, String>>,
+    asked: Mutex<Vec<String>>,
+}
+
+impl Tagged {
+    fn answering(labels: BTreeMap<String, BTreeMap<String, String>>) -> Self {
+        Self {
+            labels,
+            asked: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn asked(&self) -> Vec<String> {
+        self.asked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl images::Images for Tagged {
+    fn daemon_arch(&self) -> Result<String, String> {
+        Ok("amd64".to_string())
+    }
+
+    fn labels(&self, image: &str) -> Result<Option<BTreeMap<String, String>>, String> {
+        self.asked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(image.to_string());
+        Ok(self.labels.get(image).cloned())
+    }
+
+    fn build(&self, tag: &str, _archive: &[u8], _args: &[String]) -> Result<Log, String> {
+        Ok(Log {
+            success: true,
+            text: format!("built {tag}"),
+        })
+    }
+}
+
+/// The release a promotion is about: another version than the running binary's, and its own pin, so a read that
+/// used `env!` would answer the wrong tags and the wrong labels.
+fn promoted() -> VersionInfo {
+    VersionInfo {
+        version: "9.9.9".to_string(),
+        git_tag: "v9.9.9".to_string(),
+        pi_version: holosmith::pins::pi_version().to_string(),
+        schema_version: holosmith::schema::SCHEMA_VERSION,
+        target: env!("HOLOSMITH_TARGET").to_string(),
+        sqlite: String::new(),
+    }
+}
+
+/// The two images' label maps for `release`, keyed by tag, the way `docker image inspect` would answer them.
+fn labelled(
+    config: &Config,
+    release: &VersionInfo,
+    digest: &str,
+) -> BTreeMap<String, BTreeMap<String, String>> {
+    let mut images_by_tag = BTreeMap::new();
+    for kind in [Kind::Proxy, Kind::Agent] {
+        let expectation = Expectation::of_release(kind, config, release, digest);
+        images_by_tag.insert(expectation.tag(), labels_of(&expectation));
+    }
+    images_by_tag
+}
+
+#[test]
+fn a_promotion_builds_what_the_release_needs_and_nothing_else() {
+    let config = Config::default();
+    let digest = images::own_digest().expect("the test binary is readable");
+    let release = promoted();
+
+    // Arm one: both images already carry this release's labels. Nothing to build, and the read asked about the
+    // **candidate's** tags — `holosmith-proxy:9.9.9`, not the running binary's 0.1.0.
+    let fake = Tagged::answering(labelled(&config, &release, &digest));
+    let pending = images::outstanding(&fake, &config, &release, &digest);
+    assert!(pending.is_empty(), "{pending:?}");
+    assert_eq!(
+        fake.asked(),
+        [
+            format!("holosmith-proxy:{}", release.version),
+            format!("agent-image:{}", release.version)
+        ],
+        "the read asked about the wrong tags"
+    );
+
+    // Arm two: a different binary's bytes. Both images are stale — the digest is the one input a tag cannot
+    // describe (ADR-0057), and a promotion has to rebuild for the bytes it is making live.
+    let fake = Tagged::answering(labelled(&config, &release, "0".repeat(64).as_str()));
+    let pending = images::outstanding(&fake, &config, &release, &digest);
+    assert_eq!(pending.len(), 2, "{pending:?}");
+    for (kind, reason) in &pending {
+        assert!(
+            reason.contains("binary-sha256"),
+            "the reason for {kind:?} does not name the digest: {reason}"
+        );
+    }
+
+    // Arm three: the pin changed. **Both** recipes carry it (the proxy image labels the pin its Dockerfile was
+    // built against, because a proxy that reaches a provider is the thing a pin bump is usually about), so both are
+    // stale — the acceptance's "or a pinned version changed", measured in its own direction.
+    let mut newer_pin = release.clone();
+    newer_pin.pi_version = "0.0.0-not-the-pin".to_string();
+    let fake = Tagged::answering(labelled(&config, &release, &digest));
+    let pending = images::outstanding(&fake, &config, &newer_pin, &digest);
+    assert_eq!(pending.len(), 2, "{pending:?}");
+    for (kind, reason) in &pending {
+        assert!(
+            reason.contains("pi-version"),
+            "the reason for {kind:?} does not name the pin: {reason}"
+        );
+    }
+
+    // Arm four: a version this machine has never built. Both tags are missing, which is a build rather than a
+    // comparison — the same answer a first deploy gives.
+    let mut newer = release.clone();
+    newer.version = "10.0.0".to_string();
+    let fake = Tagged::answering(BTreeMap::new());
+    let pending = images::outstanding(&fake, &config, &newer, &digest);
+    assert_eq!(pending.len(), 2, "{pending:?}");
+    for (_, reason) in &pending {
+        assert!(reason.contains("is not on this machine"), "{reason}");
+    }
 }
