@@ -394,6 +394,14 @@ fn an_expired_or_already_running_drain_is_refused_before_the_backup() {
         let error = execute(&world, &options(&world, true), &steps)
             .expect_err("a drain that did not finish is a refused promotion");
         assert!(error.contains(fact), "{fact}: {error}");
+        // The two drain endings name the one thing that clears a drain — the restart it exists for — because
+        // finishing does not clear it (`Control` has no other writer).
+        if fact != "no socket" {
+            assert!(
+                error.contains(holosmith::deploy::UNIT_NAME),
+                "the refusal does not name the restart that clears a drain: {error}"
+            );
+        }
         assert_eq!(
             steps.trace().last().map(String::as_str),
             Some("drain"),
@@ -430,6 +438,12 @@ fn a_backup_that_cannot_be_written_leaves_the_previous_release_live() {
     let error = execute(&world, &options(&world, true), &steps)
         .expect_err("a promotion that cannot back up does not proceed");
     assert!(error.contains("backup failed"), "{error}");
+    // A refusal after the drain owes the operator the state the drain left: one clause, and every later refusal has
+    // it (`promote::draining`), because the machine keeps answering `503 draining` to creates until it is restarted.
+    assert!(
+        error.contains("draining until it is restarted"),
+        "a refusal after the drain does not say the machine is draining: {error}"
+    );
     assert_eq!(
         Release::of(&world.target).link(),
         Some(Path::new("releases/old").to_path_buf()),

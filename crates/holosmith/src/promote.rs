@@ -321,20 +321,21 @@ pub fn execute(
     match steps.drain(&target.admin_dir(), options.wait) {
         DrainAnswer::Drained => println!("upgrade: drain: drained"),
         DrainAnswer::Already => {
-            return Err(
+            return Err(format!(
                 "this machine is already draining (the drain answered `state: already draining`), so nothing was \
-                 promoted: that drain is not this command's to wait out, and `holosmith drain --wait` will say again \
-                 when it has finished — nothing was backed up and nothing was switched"
-                    .to_string(),
-            );
+                 promoted: that drain is not this command's to wait out, and a drain is cleared by the restart it \
+                 exists for (`systemctl restart {}`) rather than by finishing — nothing was backed up and nothing \
+                 was switched",
+                deploy::UNIT_NAME
+            ));
         }
         DrainAnswer::Expired => {
-            return Err(
+            return Err(format!(
                 "the drain's wait ran out with a turn still running, so nothing was promoted: this machine is still \
-                 draining and keeps refusing new work, and `holosmith drain --wait` says when it is quiet — nothing \
-                 was backed up and nothing was switched"
-                    .to_string(),
-            );
+                 draining and keeps refusing new work, and `systemctl restart {}` is what clears a drain — nothing \
+                 was backed up and nothing was switched",
+                deploy::UNIT_NAME
+            ));
         }
         DrainAnswer::Failed(sentence) => {
             return Err(format!(
@@ -344,20 +345,22 @@ pub fn execute(
     }
 
     // 5. The database, before anything is switched. A backup that cannot be written is a promotion that does not
-    //    happen — and from here on the machine is draining, which every later sentence says.
-    let backup = take_backup(config)?;
+    //    happen — and from here on the machine is draining, which every later sentence says (one clause, one helper:
+    //    `draining`).
+    let backup = take_backup(config).map_err(draining)?;
     println!(
         "upgrade: backup: {} ({} kept)",
         backup.display(),
         backup::KEEP_SNAPSHOTS
     );
 
-    // 6. The release, the unit and the switch.
+    // 6. The release, the unit and the switch. Each of these can refuse on a tree an operator has to look at, so
+    //    each refusal carries the state the drain left the machine in.
     let release = Release::of(target);
-    let previous = previous_release(&release, target)?;
-    write_release(&release, &candidate)?;
-    write_unit(target, config, &release)?;
-    release.switch(&candidate.info.git_tag)?;
+    let previous = previous_release(&release, target).map_err(draining)?;
+    write_release(&release, &candidate).map_err(draining)?;
+    write_unit(target, config, &release).map_err(draining)?;
+    release.switch(&candidate.info.git_tag).map_err(draining)?;
     println!(
         "upgrade: current: -> releases/{} (was {})",
         candidate.info.git_tag,
@@ -529,13 +532,21 @@ fn take_backup(config: &Config) -> Result<PathBuf, String> {
                 .snapshot(destination)
                 .map_err(|error| error.to_string())
         })
-        .map_err(|error| {
-            format!(
-                "the database backup failed, so nothing was switched: {error}. This machine is draining until it is \
-                 restarted (`systemctl restart {}`)"
-                , deploy::UNIT_NAME
-            )
-        })
+        .map_err(|error| format!("the database backup failed, so nothing was switched: {error}"))
+}
+
+/// The clause every refusal **after** a successful drain owes the operator.
+///
+/// The drain is the point of no return for the machine's *state*, not for the release: a promotion that fails after
+/// it has left the process draining (new creates and prompts answer `503 draining`, reads keep answering), and the
+/// only thing that clears a drain is the restart it exists for. Naming that in each sentence is what
+/// `docs/build.md`'s "every refusal leaves the machine as it found it — except after the drain" means, and it is one
+/// function so the five call sites cannot drift from it.
+fn draining(said: String) -> String {
+    format!(
+        "{said} — this machine is draining until it is restarted (`systemctl restart {}`)",
+        deploy::UNIT_NAME
+    )
 }
 
 /// What was live before the switch: the tag `current` names, and the binary to read its version back from.
@@ -712,7 +723,7 @@ fn serve_with(
             config.control_listen,
             &candidate.version,
             started,
-            WINDOW,
+            window,
         ),
         Err(sentence) => {
             println!("upgrade: restart: {sentence}");
@@ -834,8 +845,9 @@ fn rollback(
 ///
 /// Three facts, and the third is what makes the poll falsifiable: every binary this repo builds reports the same
 /// `version`, so the version alone would be satisfied by the *old* process still answering during the restart. A
-/// process younger than the restart is a process this command started, and `uptime_s` is the payload's own answer to
-/// "how long have you been running".
+/// process that says it started **after** the restart is the evidence, and `uptime_s` is the payload's own answer to
+/// "how long have you been running" — it does not say *which* binary started, which is why a promotion between two
+/// builds of one crate version is recorded as "a process started after the restart answered" and nothing more.
 fn poll(
     steps: &dyn Steps,
     listen: SocketAddr,
@@ -846,9 +858,9 @@ fn poll(
     loop {
         let last = match steps.health(listen) {
             Ok(answer) => {
-                // A process younger than the restart is one this command started: `uptime_s` is the payload's own
-                // answer to "how long have you been running", and the second of slack covers a clock that ticks
-                // between the restart and the first answer.
+                // A process that started after the restart: `uptime_s` is the payload's own answer to "how long have
+                // you been running", and the second of slack covers a clock that ticks between the restart and the
+                // first answer.
                 let fresh = answer.uptime_s <= started.elapsed().as_secs().saturating_add(1);
                 if answer.name == health::NAME && answer.version == want && fresh {
                     return Some(answer);

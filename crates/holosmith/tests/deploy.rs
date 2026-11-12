@@ -2835,4 +2835,31 @@ fn a_release_tree_makes_the_unit_run_through_current() {
         "a deploy on a promoted machine rewrote the unit: {}",
         line(&again, DeployStep::Service).sentence
     );
+
+    // A release tree whose `current` names a directory with no binary in it is *not* a live release (`Release::live`
+    // answers `None`), and the unit must fall back to the binary this run is — a unit pointing through a `current`
+    // that cannot start would be an install that never boots again.
+    std::fs::remove_file(release.binary("v0.1.0")).expect("the release binary is removable");
+    let broken = deploy::run_as(&deployed, &target, &tools, &machine, false, Kind::Hub);
+    assert!(
+        !broken.failed(),
+        "the run over a broken release tree failed:\n{}",
+        broken.render()
+    );
+    assert_eq!(
+        line(&broken, DeployStep::Service).word,
+        Word::Changed,
+        "{}",
+        line(&broken, DeployStep::Service).sentence
+    );
+    let unit = std::fs::read_to_string(target.unit_path()).expect("the unit is readable");
+    assert!(
+        !unit.contains("current/holosmith"),
+        "the unit points through a `current` with no binary behind it:\n{unit}"
+    );
+    let exe = std::env::current_exe().expect("the test binary's path is readable");
+    assert!(
+        unit.contains(&format!("ExecStart={} serve", exe.display())),
+        "the unit does not fall back to the deployed binary:\n{unit}"
+    );
 }

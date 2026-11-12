@@ -11057,19 +11057,6 @@ SHIM
 # HS-078: `holosmith upgrade <binary>`, the promotion pipeline (spec item 10, ADR-0082).
 #
 # Four arms. Two need nothing but the artifact — the review gate is a refusal, and a candidate compared against a
-# database one schema newer is a refusal — and two need the daemon: the real promotion (with a `systemctl` stand-in
-# that starts the release `current` names, a `docker` stand-in that fakes **only** the two product images so the real
-# smoke run still measures the candidate, and a real drain over a real socket), then the same promotion of a candidate
-# whose version and tag were rewritten, with a stand-in that starts the *old* release, so the health poll fails and the
-# switch goes back. No arm is a `SKIP`: deleting the verb fails arm 1 here on any machine.
-#
-# What the order is measured by: the printed step lines (each is printed by the step that does the work), and the
-# **recorded children** — the two `docker build`s must precede the `systemctl restart`, and the restart must precede the
-# health answer. What it cannot measure is a real systemd: there is none on this machine, so the "restart" is the
-# stand-in's own start of the binary `current` names, and the case says so.
-# HS-078: `holosmith upgrade <binary>`, the promotion pipeline (spec item 10, ADR-0082).
-#
-# Four arms. Two need nothing but the artifact — the review gate is a refusal, and a candidate compared against a
 # database one schema newer is a refusal, both **before** anything is asked of the machine. Two need the daemon and a
 # serving machine: the real pipeline (a `systemctl` stand-in that starts the release `current` names, a `docker`
 # stand-in that fakes **only** the two product images so the real smoke run still measures the candidate, and a real
@@ -11086,7 +11073,7 @@ case_upgrade() {
   local data="$root/data" projects="$root/projects" admin="$root/run/holosmith" config="$root/config.toml"
   local bin="$root/bin" candidate="$root/candidate/holosmith" state="$root/state"
   local docker_log="$root/docker.argv" systemctl_log="$root/systemctl.argv" serve_log="$root/serve.log"
-  local pid_file="$root/serve.pid" broken="$root/broken" version tag digest status answer port line
+  local pid_file="$root/serve.pid" broken="$root/broken" version tag digest status answer port line schema
   local first second session snapshots
   rm -rf "$root"
   mkdir -p "$bin" "$data" "$projects" "$admin" "$root/candidate" "$state"
@@ -11116,14 +11103,18 @@ case_upgrade() {
     fail "$name/review/backup" "a refused promotion wrote a backup: $(find "$data/backups" -mindepth 1 | head -3)"
 
   # ---- 2. a candidate older than the database is refused ------------------------------------------
-  if command -v python3 >/dev/null 2>&1; then
-    python3 - "$data/app.db" <<'PY'
+  # One more than the schema the **artifact** reports, read from its own `version --json`: a hard-coded number stops
+  # being "newer" the day this build ships that schema, and this arm would then fail for the wrong reason.
+  schema="$("$artifact" version | sed -n 's/^schema_version //p')"
+  if [ -n "$schema" ] && command -v python3 >/dev/null 2>&1; then
+    python3 - "$data/app.db" "$schema" <<'PY'
 import sqlite3, sys
-connection = sqlite3.connect(sys.argv[1])
+path, newer = sys.argv[1], int(sys.argv[2]) + 1
+connection = sqlite3.connect(path)
 connection.execute(
     "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL)"
 )
-for version in range(1, 9):
+for version in range(1, newer + 1):
     connection.execute(
         "INSERT OR REPLACE INTO schema_version (version, name, applied_at) VALUES (?, 'a release', 0)",
         (version,),
@@ -11363,8 +11354,12 @@ SHIM
   snapshots="$(ls "$data"/backups/app-*.db 2>/dev/null | wc -l)"
   [ "$snapshots" -eq 2 ] ||
     fail "$name/backup" "two promotions did not write two snapshots: $(ls "$data/backups" 2>/dev/null)"
-  head -c 15 "$data"/backups/app-*.db | grep -q 'SQLite format 3' ||
-    fail "$name/backup/db" "a snapshot is not a database: $data/backups"
+  # The newest snapshot is a database, not a note: SQLite's own fifteen-byte header, read from the file.
+  for snapshot in "$data"/backups/app-*.db; do
+    head -c 15 "$snapshot" | grep -q 'SQLite format 3' ||
+      fail "$name/backup/db" "a snapshot is not a database: $snapshot"
+    assertions=$((assertions + 1))
+  done
   case "$(cat "$WORK/$name.run.out")" in
     *"stopped: 1 session with reason server_restart"*) assertions=$((assertions + 1)) ;;
     *) fail "$name/drain/session" "the drain did not stop the idle session: $(cat "$WORK/$name.run.out")" ;;
