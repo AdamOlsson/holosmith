@@ -16,13 +16,23 @@
 //!   created beside the link and `rename`d onto it — the atomic replace, never an edit in place and never a
 //!   remove-then-create (acceptance bullet for HS-080, and the reason a promotion's switch is one syscall).
 //!
-//! # What this module does not own
+//! # What the layout means (HS-080)
 //!
-//! HS-080 owns what the layout *means* from here: pruning old releases to a configured count, `holosmith version`
-//! reporting the tag it was run from, and `doctor` reporting the resolved release path and the link's integrity. What
-//! HS-078 needed, and what is here, is the tree's creation (a first promotion seeds the previous release out of the
-//! binary the unit runs), the switch, and the answer "what does the unit execute" ([`Release::live`]), which
-//! `deploy`'s step 5 reads so that a later `server deploy` neither undoes a promotion nor rewrites a correct unit.
+//! Three facts follow from "releases side by side with one live pointer", and they are all here because they are all
+//! statements about the tree:
+//!
+//! * **Which ones are kept.** [`Release::prune`] keeps `keep_releases` directories — always the live release and the
+//!   one behind it (the rollback target), then the newest of the rest — by [`history`](Release::history), and never
+//!   touches a directory the tree does not recognise as a release.
+//! * **Which one is running.** [`running_tag`] answers, from the *path of the running file*, which release directory it
+//!   came out of; `holosmith version` reports it as `release`, and `std::env::current_exe` resolves the `current`
+//!   symlink, so a binary systemd started through the link reports the release it is really in.
+//! * **Whether the unit can start.** `doctor`'s release finding asks [`Release::live`] and [`unit_executable`] together,
+//!   because a `current` the unit executes through and that resolves to nothing is a machine systemd cannot start.
+//!
+//! What HS-078 needed is also here: the tree's creation (a first promotion seeds the previous release out of the binary
+//! the unit runs), the switch, and the answer "what does the unit execute" ([`Release::live`]), which `deploy`'s step
+//! 5 reads so that a later `server deploy` neither undoes a promotion nor rewrites a correct unit.
 //!
 //! Nothing here starts a process or reads a database: a release tree is directories, two files and one symlink.
 
@@ -46,6 +56,18 @@ pub const DIGEST: &str = crate::builder::DIGEST;
 
 /// The file a release's binary is written under before it is renamed into place.
 const PENDING: &str = crate::builder::PENDING;
+
+/// What [`Release::prune`] did.
+///
+/// Both lists are in [`history`](Release::history)'s order (newest first), so a caller's line reads the same way the
+/// tree does.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Pruned {
+    /// Every release the tree still holds: the protected two and the newest of the rest.
+    pub kept: Vec<String>,
+    /// The release directories this call removed.
+    pub removed: Vec<String>,
+}
 
 /// What [`Release::write`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,6 +197,73 @@ impl Release {
         history.get(at + 1).cloned()
     }
 
+    /// The tags a prune may never remove: the one `current` names, and the one [`older_than`](Self::older_than) it.
+    ///
+    /// Two tags, and both are a rollback's: a tree that cannot go back has lost the property the layout exists for.
+    /// Empty when `current` is missing or names something which is not one of this tree's releases — there is nothing
+    /// to protect then, and the history's own order is all a prune has to go on.
+    fn protected(&self) -> Vec<String> {
+        let Some(tag) = self.link().and_then(|link| self.tag_of(&link)) else {
+            return Vec::new();
+        };
+        let mut tags = vec![tag.clone()];
+        tags.extend(self.older_than(&tag));
+        tags
+    }
+
+    /// Keep the tree at `keep` releases, newest first, and never the live one or the rollback target.
+    ///
+    /// The rule, in one paragraph: the **protected** two (see [`protected`](Self::protected)) are reserved first and
+    /// count towards `keep`; the remaining room is filled with the newest entries of [`history`](Self::history); every
+    /// other release directory is removed. So a tree of exactly `keep` releases is left alone, a larger tree is pruned
+    /// to `keep`, and a count smaller than the protected set (which the config refuses) still keeps both — this
+    /// function's own floor, so a caller that passed `0` cannot delete the machine's way back.
+    ///
+    /// **Which directories may be deleted: only `history()`'s.** A directory whose name is not one path segment
+    /// (`tag_problem`) or that holds no `holosmith` is not a release — it is never counted and never touched, so an
+    /// operator's `releases/notes/` survives. A directory that *is* a release is a release however it got there: a
+    /// hand-seeded `releases/old` is in the order and may be pruned like any other, which is what "pruned to a
+    /// configured count" means for a tree somebody copied into.
+    ///
+    /// The error carries what was removed before it stopped: a prune deletes in order and stops at the first directory
+    /// it cannot delete, because continuing past a failure would report a tree it did not measure.
+    pub fn prune(&self, keep: u32) -> Result<Pruned, String> {
+        let history = self.history();
+        let protected = self.protected();
+        let reserved = history.iter().filter(|tag| protected.contains(tag)).count();
+        let mut room = (keep as usize).saturating_sub(reserved);
+        let mut kept: Vec<String> = Vec::new();
+        for tag in &history {
+            if protected.contains(tag) {
+                kept.push(tag.clone());
+            } else if room > 0 {
+                room -= 1;
+                kept.push(tag.clone());
+            }
+        }
+        let mut removed: Vec<String> = Vec::new();
+        for tag in &history {
+            if kept.contains(tag) {
+                continue;
+            }
+            let dir = self.dir_of(tag);
+            std::fs::remove_dir_all(&dir).map_err(|error| {
+                let removed = if removed.is_empty() {
+                    "nothing was removed".to_string()
+                } else {
+                    format!("releases/{} was removed", removed.join(", releases/"))
+                };
+                format!(
+                    "releases/{tag} could not be removed ({error}): a prune keeps the newest `keep_releases` and \
+                     never the live release or the one behind it, and it stops at the first directory it cannot \
+                     delete — {removed} and whatever else the tree holds is untouched"
+                )
+            })?;
+            removed.push(tag.clone());
+        }
+        Ok(Pruned { kept, removed })
+    }
+
     /// The binary systemd executes: `<install>/opt/holosmith/current/holosmith`, when the tree is live.
     ///
     /// The **path through the link**, not the directory it resolves to, because that is the whole point of the
@@ -281,6 +370,33 @@ impl Release {
         }
         Ok(())
     }
+}
+
+/// The release tag the **running file** is in: `<tree>/releases/<tag>/holosmith` answers `Some(tag)`.
+///
+/// The fact is about the *path the process was started from*, not about a build: a hand-seeded
+/// `releases/one/holosmith` (a copy of any binary, which is what the gate's fixtures are) reports `one`, while the
+/// same file's `git_tag` is the tag it was built from. That difference is the point — a release directory's name is
+/// what a promotion chose, and it is the name `current`, `releases/` and a rollback all speak in.
+///
+/// On Linux `std::env::current_exe()` reads `/proc/self/exe`, which the kernel resolves, so a binary systemd started
+/// through `current/holosmith` reports the release directory it is really in rather than the link. The rule itself is
+/// pure and takes a path, so its arms are a unit test's: the file is named `holosmith` ([`BINARY`]), its parent passes
+/// [`tag_problem`], and its grandparent is named [`RELEASES`]. Anything else — a binary in `dist/`, a file beside a
+/// release — is `None`, which the CLI prints as `-`.
+///
+/// Nothing is read from the disk: naming a release is a path's shape, and a `version` that stat'ed its own tree would
+/// answer a question the operator did not ask.
+pub fn running_tag(exe: &Path) -> Option<String> {
+    if exe.file_name()?.to_str()? != BINARY {
+        return None;
+    }
+    let dir = exe.parent()?;
+    let tag = dir.file_name()?.to_str()?;
+    if tag_problem(tag).is_some() {
+        return None;
+    }
+    (dir.parent()?.file_name()?.to_str()? == RELEASES).then(|| tag.to_string())
 }
 
 /// Why `tag` cannot name a release directory, or `None` when it can.
@@ -454,6 +570,14 @@ mod tests {
                 .expect("the release is written");
             set_mtime(&release.dir_of(tag), seconds);
         }
+
+        /// Point `current` at `tag`, relatively, the way a promotion's switch does.
+        fn link(&self, tag: &str) {
+            let release = self.release();
+            let _ = std::fs::remove_file(release.current());
+            std::os::unix::fs::symlink(Path::new(RELEASES).join(tag), release.current())
+                .expect("the link is created");
+        }
     }
 
     impl Drop for Tree {
@@ -546,5 +670,110 @@ mod tests {
         ] {
             assert_eq!(release.tag_of(other), None, "{}", other.display());
         }
+    }
+
+    #[test]
+    fn the_running_file_names_the_release_directory_it_is_in() {
+        // The shape a machine's release has: `<tree>/releases/<tag>/holosmith`.
+        assert_eq!(
+            running_tag(Path::new("/opt/holosmith/releases/v0.1.0/holosmith")),
+            Some("v0.1.0".to_string())
+        );
+        assert_eq!(
+            running_tag(Path::new(
+                "target/install/opt/holosmith/releases/f2b3886-dirty/holosmith"
+            )),
+            Some("f2b3886-dirty".to_string()),
+            "the rule is about the path's shape, so an install tree's release is a release"
+        );
+        for other in [
+            // The development build, and the artifact `build --out` writes: not in a release directory.
+            Path::new("target/x86_64-unknown-linux-musl/debug/holosmith"),
+            Path::new("dist/x86_64-unknown-linux-musl/holosmith"),
+            // A release directory's digest file, a file in the wrong tree, and a tag no directory may be named.
+            Path::new("/opt/holosmith/releases/v0.1.0/holosmith.sha256"),
+            Path::new("/opt/holosmith/v0.1.0/holosmith"),
+            Path::new("/opt/holosmith/releases/a b/holosmith"),
+            Path::new("holosmith"),
+            Path::new("releases/v0.1.0"),
+        ] {
+            assert_eq!(running_tag(other), None, "{}", other.display());
+        }
+    }
+
+    #[test]
+    fn a_prune_keeps_the_count_and_never_the_live_release_or_the_rollback_target() {
+        let tree = Tree::new("prune");
+        for (tag, seconds) in [
+            ("one", 1_000),
+            ("two", 2_000),
+            ("three", 3_000),
+            ("four", 4_000),
+        ] {
+            tree.write(tag, seconds);
+        }
+        // A directory the tree does not recognise — no binary in it — and one whose name cannot be a tag.
+        std::fs::create_dir_all(tree.release().releases().join("notes")).expect("a directory");
+        std::fs::create_dir_all(tree.release().releases().join("a b")).expect("a directory");
+        tree.link("four");
+
+        // Four releases, keep 2: the live one and the rollback target are the two newest, so the two oldest go.
+        let pruned = tree.release().prune(2).expect("the tree is prunable");
+        assert_eq!(pruned.kept, vec!["four".to_string(), "three".to_string()]);
+        assert_eq!(pruned.removed, vec!["two".to_string(), "one".to_string()]);
+        assert_eq!(tree.release().history(), pruned.kept);
+        // What it did not recognise is still there: a prune deletes only what `history` calls a release.
+        assert!(tree.release().releases().join("notes").is_dir());
+        assert!(tree.release().releases().join("a b").is_dir());
+        // A second prune with nothing to do removes nothing — the promotion that runs twice cannot fail on its own
+        // tree.
+        assert_eq!(
+            tree.release().prune(2).expect("a second prune is fine"),
+            Pruned {
+                kept: vec!["four".to_string(), "three".to_string()],
+                removed: Vec::new(),
+            }
+        );
+        // Raising the count prunes nothing either.
+        assert!(
+            tree.release()
+                .prune(9)
+                .expect("a large count is fine")
+                .removed
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_prune_reserves_the_live_release_even_when_it_is_not_the_newest() {
+        // An operator's switch, or a hand-seeded tree: `current` on the oldest release. "The newest N" alone would
+        // delete the release the machine is running, which is exactly what the acceptance forbids.
+        let tree = Tree::new("prune-oldest");
+        for (tag, seconds) in [("one", 1_000), ("two", 2_000), ("three", 3_000)] {
+            tree.write(tag, seconds);
+        }
+        tree.link("one");
+        let pruned = tree.release().prune(2).expect("the tree is prunable");
+        assert_eq!(pruned.kept, vec!["three".to_string(), "one".to_string()]);
+        assert_eq!(pruned.removed, vec!["two".to_string()]);
+        assert_eq!(
+            tree.release().link().as_deref(),
+            Some(Path::new("releases/one"))
+        );
+        assert!(tree.release().binary("one").is_file());
+    }
+
+    #[test]
+    fn a_prune_keeps_both_protected_releases_when_the_count_cannot_hold_them() {
+        // The config refuses a count below 2, so this is the function's own floor: a caller that passed 0 must not be
+        // able to delete the machine's way back.
+        let tree = Tree::new("prune-floor");
+        for (tag, seconds) in [("one", 1_000), ("two", 2_000), ("three", 3_000)] {
+            tree.write(tag, seconds);
+        }
+        tree.link("three");
+        let pruned = tree.release().prune(0).expect("the tree is prunable");
+        assert_eq!(pruned.kept, vec!["three".to_string(), "two".to_string()]);
+        assert_eq!(pruned.removed, vec!["one".to_string()]);
     }
 }

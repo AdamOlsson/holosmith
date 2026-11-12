@@ -785,12 +785,44 @@ fn serve_with(
             candidate.git_tag,
             backup.display()
         );
+        // Step 8, and the only place a prune runs: the candidate is live, so the tree may shed what it no longer
+        // needs. A promotion that failed before here, or whose candidate never answered, removes nothing — that tree
+        // is what an operator reads while diagnosing it, and the rollback target is in it.
+        prune(&Release::of(target), config.keep_releases);
         return Ok(());
     }
     // The rollback: the same switch in reverse, the same restart, and the same poll -- and **no database restore**,
     // because expand/contract is what makes switching back safe (ADR-0047). A restore would delete the work of every
     // session since the backup.
     rollback(config, target, steps, tools, window, backup, previous)
+}
+
+/// Step 8: keep the newest `keep_releases`, and never the live release or the one behind it.
+///
+/// A **warning**, never a failed promotion: the product of this command is a candidate that is serving, and a
+/// directory it could not delete leaves a tree with one release too many — a fact to print, not a reason to tell an
+/// operator that a healthy promotion failed (which would read as "roll back"). The sentence says what was removed
+/// before it stopped, because a half-done prune is the state a second run has to be able to read.
+fn prune(release: &Release, keep: u32) {
+    let held = release.history().len();
+    match release.prune(keep) {
+        Ok(done) => {
+            let removed = if done.removed.is_empty() {
+                "nothing".to_string()
+            } else {
+                done.removed
+                    .iter()
+                    .map(|tag| format!("releases/{tag}"))
+                    .collect::<Vec<String>>()
+                    .join(", ")
+            };
+            println!(
+                "upgrade: prune: kept {} of {held} (keep_releases = {keep}); removed: {removed}",
+                done.kept.len()
+            );
+        }
+        Err(said) => eprintln!("holosmith: warning: upgrade: prune: {said}"),
+    }
 }
 
 /// Put the previous link target back, restart, and say what is live now -- the promotion's failure ending.

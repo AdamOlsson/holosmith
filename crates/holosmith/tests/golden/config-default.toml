@@ -31,6 +31,7 @@ min_free_gb = 20
 session_disk_soft_gb = 10
 stopped_ttl_days = 7
 history_window = 50
+keep_releases = 5
 
 [merge]
 targets = ["main", "master"]

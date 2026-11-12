@@ -263,6 +263,12 @@ pub const KNOWN_KEYS: &[KeySpec] = &[
         set: set_history_window,
     },
     KeySpec {
+        path: "keep_releases",
+        section: None,
+        kind: Kind::Integer,
+        set: set_keep_releases,
+    },
+    KeySpec {
         path: "merge.targets",
         section: Some("merge"),
         kind: Kind::StringArray,
@@ -762,6 +768,11 @@ fn set_history_window(config: &mut Config, value: &Value) -> Result<(), String> 
     Ok(())
 }
 
+fn set_keep_releases(config: &mut Config, value: &Value) -> Result<(), String> {
+    config.keep_releases = u32_setting(value)?;
+    Ok(())
+}
+
 fn set_merge_targets(config: &mut Config, value: &Value) -> Result<(), String> {
     config.merge.targets = strings(value)?;
     Ok(())
@@ -891,7 +902,7 @@ mod tests {
 
     #[test]
     fn the_table_holds_the_documented_keys() {
-        assert_eq!(KNOWN_KEYS.len(), 36);
+        assert_eq!(KNOWN_KEYS.len(), 37);
     }
 
     #[test]

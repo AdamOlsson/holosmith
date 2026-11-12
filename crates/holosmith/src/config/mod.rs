@@ -310,6 +310,13 @@ pub struct Config {
     /// machine setting rather than a constant because the story says it is configurable, and a
     /// refusal of `0` because a client shown nothing cannot tell an empty session from a cut one.
     pub history_window: u32,
+    /// How many release directories a promotion leaves in the release tree (HS-080, spec item 10).
+    ///
+    /// A prune keeps the newest `keep_releases`, and always the live release and the one behind it (the rollback
+    /// target) — so the count is a floor of **2** and the config refuses anything smaller: a tree that cannot go back
+    /// has lost the property the layout exists for. The two protected releases count towards the number, so a machine
+    /// set to 2 holds the live one and the one it can return to, and nothing else.
+    pub keep_releases: u32,
     pub merge: Merge,
     pub publish: Publish,
     pub egress: Egress,
@@ -351,6 +358,7 @@ impl Default for Config {
             session_disk_soft_gb: 10,
             stopped_ttl_days: 7,
             history_window: 50,
+            keep_releases: 5,
             merge: Merge::default(),
             publish: Publish::default(),
             egress: Egress::default(),
@@ -683,6 +691,17 @@ fn semantic_problems(
             "history_window",
             "must be at least 1: a client replayed nothing cannot tell an empty session from a \
              truncated one",
+        );
+    }
+    if config.keep_releases < 2 {
+        report(
+            &mut problems,
+            document,
+            text,
+            "keep_releases",
+            "must be at least 2: a prune always keeps the live release and the one behind it, so \
+             a smaller count would delete the rollback target (and `0` is not `keep everything` \
+             either — raise the number instead)",
         );
     }
     if config.max_session_tokens == Some(0) {
@@ -1066,6 +1085,7 @@ min_free_gb = 5
 session_disk_soft_gb = 2
 stopped_ttl_days = 3
 history_window = 12
+keep_releases = 4
 
 [merge]
 targets = ["develop"]
@@ -1219,6 +1239,7 @@ allow = ["crates.io"]
         assert_eq!(config.session_disk_soft_gb, 2);
         assert_eq!(config.stopped_ttl_days, 3);
         assert_eq!(config.history_window, 12);
+        assert_eq!(config.keep_releases, 4);
         assert_eq!(config.merge.targets, ["develop"]);
         assert_eq!(config.publish.remotes, ["origin"]);
         assert_eq!(config.egress.allow, ["crates.io"]);
@@ -1351,6 +1372,20 @@ allow = ["crates.io"]
             "config.toml:1:1: history_window: must be at least 1: a client replayed nothing cannot \
              tell an empty session from a truncated one\n1 problem in config.toml\n"
         );
+    }
+
+    #[test]
+    fn keep_releases_cannot_be_below_the_two_a_rollback_needs() {
+        // The acceptance's "never the live one or the rollback target" is the count's floor: `1` would leave the tree
+        // one release, and `0` reads as "keep everything" to an operator and as "delete everything" to a loop.
+        for count in [0, 1] {
+            let problems = problems_of(&format!("keep_releases = {count}\n"));
+            assert!(
+                problems.contains("keep_releases: must be at least 2")
+                    && problems.contains("rollback target"),
+                "{problems}"
+            );
+        }
     }
 
     #[test]

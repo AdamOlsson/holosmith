@@ -321,6 +321,118 @@ fn a_promotion_asks_the_machine_in_the_specs_order() {
     );
 }
 
+/// One more release in the tree, with an explicit mtime: the order HS-079's `history` reads is the *test's* then.
+///
+/// `File::open(dir).set_modified` is how a directory's own mtime is set (no `touch` child, no `filetime` crate), and
+/// it has to be opened **after** the release's files are written, because writing into a directory refreshes it.
+fn seed(world: &World, tag: &str, seconds: u64) {
+    let release = Release::of(&world.target);
+    let bytes = b"#!/bin/sh\nexit 0\n";
+    let path = world.dir.file(&format!("seed-{tag}"));
+    std::fs::write(&path, bytes).expect("the fixture binary is writable");
+    let digest = images::digest(&path).expect("the fixture binary is readable");
+    release
+        .write(tag, bytes, &digest)
+        .expect("the release is writable");
+    let dir = release.dir_of(tag);
+    let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+    std::fs::File::open(&dir)
+        .expect("the release directory opens")
+        .set_modified(when)
+        .expect("the release's mtime is set");
+}
+
+#[test]
+fn a_promotion_that_succeeds_prunes_the_tree_and_keeps_the_rollback_target() {
+    let Some(mut world) = world("upgrade-prune") else {
+        eprintln!("SKIP tests/upgrade.rs: no dist/<triple>/holosmith to promote");
+        return;
+    };
+    // Five releases after this promotion: the candidate, `old`, and three older ones. `keep_releases = 4` therefore
+    // removes exactly one — and it is the oldest, not the live release and not the one behind it.
+    seed(&world, "ancient1", 1_000_000_000);
+    seed(&world, "ancient2", 1_100_000_000);
+    seed(&world, "ancient3", 1_200_000_000);
+    world.config.keep_releases = 4;
+    let release = Release::of(&world.target);
+    assert_eq!(
+        release.history(),
+        vec![
+            "old".to_string(),
+            "ancient3".to_string(),
+            "ancient2".to_string(),
+            "ancient1".to_string()
+        ],
+        "the fixture's order is not the test's"
+    );
+
+    let steps = Recorder::new(&world.info.version);
+    execute(&world, &options(&world, true), &steps).expect("the promotion should succeed");
+
+    assert!(
+        !release.dir_of("ancient1").exists(),
+        "the oldest release survived"
+    );
+    for kept in [
+        world.info.git_tag.clone(),
+        "old".to_string(),
+        "ancient3".to_string(),
+        "ancient2".to_string(),
+    ] {
+        assert!(
+            release.dir_of(&kept).is_dir(),
+            "the prune removed releases/{kept}, which it had to keep: {:?}",
+            release.history()
+        );
+    }
+    // The live one and the rollback target, which is what the acceptance names.
+    assert_eq!(
+        release.link(),
+        Some(Path::new(holosmith::release::RELEASES).join(&world.info.git_tag))
+    );
+    assert_eq!(
+        release.older_than(&world.info.git_tag).as_deref(),
+        Some("old")
+    );
+    assert!(
+        release.live().is_some(),
+        "the tree is not live after the prune"
+    );
+}
+
+#[test]
+fn a_promotion_whose_candidate_never_answers_prunes_nothing() {
+    // The prune's place is the *success* ending: a promotion that rolled back leaves the tree an operator reads while
+    // diagnosing it — and the rollback target in it — and a tree pruned before the health poll would take releases out
+    // from under a promotion that then failed.
+    let Some(mut world) = world("upgrade-prune-failed") else {
+        eprintln!("SKIP tests/upgrade.rs: no dist/<triple>/holosmith to promote");
+        return;
+    };
+    seed(&world, "ancient1", 1_000_000_000);
+    seed(&world, "ancient2", 1_100_000_000);
+    world.config.keep_releases = 2;
+    let release = Release::of(&world.target);
+
+    let mut steps = Recorder::new(&world.info.version);
+    // An answer from a process older than the restart: the version is right and the uptime is not, so the candidate
+    // is not live and the promotion rolls back.
+    steps.health = (world.info.version.clone(), 3_600);
+    execute(&world, &options(&world, true), &steps).expect_err("the candidate never became live");
+
+    assert_eq!(
+        release.history(),
+        vec![
+            world.info.git_tag.clone(),
+            "old".to_string(),
+            "ancient2".to_string(),
+            "ancient1".to_string()
+        ],
+        "a failed promotion pruned the tree: {:?}",
+        release.history()
+    );
+}
+
 #[test]
 fn a_promotion_that_skipped_the_review_is_refused_before_anything_is_asked() {
     let Some(world) = world("upgrade-unacknowledged") else {
