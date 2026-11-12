@@ -175,8 +175,9 @@ recoverable from (`VACUUM INTO backups/app-<ts>.db`, five kept).
   (verified by mutating the code and watching it fail).
 - **No second architecture**: a release directory holds this machine's build, because `version --json` has to run.
 - **No provider key.** A rollback runs no turn, so nothing here needs one.
-- **The order is a filesystem fact.** `cp -a` keeps a tree's order; `cp -r` reverses it. Nothing in this build can
-  notice, and a recorded pointer was refused rather than added (D2).
+- **The order is a filesystem fact.** `cp -a` keeps a tree's order; a `cp -r` gives every release the moment of the
+  copy, so the order collapses to the tag tiebreak (a name order, which is the thing D2 refused). Nothing in this
+  build can notice, and a recorded pointer was refused rather than added (D2).
 - **The verb's own poll failing** is measured by the stand-in choosing not to start a serve
   (`HS_BREAK_RESTART=1`), not by a release that boots and then dies.
 
@@ -186,9 +187,13 @@ recoverable from (`VACUUM INTO backups/app-<ts>.db`, five kept).
   implemented and phase 4 has one story left.
 - `release` owns the tree's **order** (`history`, `older_than`), and HS-080 prunes by it rather than inventing a second.
 - `promote` owns the sequence both verbs run: `poll`, `restart_and_poll`, `refuse_older_schema`, `draining`,
-  `write_unit`, and `Real`'s two policies. Nothing about `upgrade`'s behaviour changed except one sentence's wording
-  (the schema refusal's "Nothing was changed …" and its new `doctor --quick` clause) and the prefix on the automatic
-  switch-back's restart and health lines (`upgrade: rollback:` instead of `upgrade:`).
+  `write_unit`, and `Real`'s two policies. Three things about `upgrade`'s output changed, and none of its behaviour:
+  the schema refusal's wording ("Nothing was changed — … " and its new `doctor --quick` clause, with the remedy as a
+  parameter so each verb offers its own); the prefix on the automatic switch-back's restart and health lines
+  (`upgrade: rollback:` instead of `upgrade:`); and the giving-up line for a **restart that never happened**, which
+  `serve_with` used to print as "no answer with … in 20s" (a claim about the poll for a poll that never ran) and which
+  `poll` now prints only when it really gave up. `case_upgrade` measures the first two; the third is **not measured**,
+  because its stand-in never fails a restart, and it is recorded here rather than left as a silent widening.
 - `deploy::privilege_problem` is the two release verbs' one privilege rule; `commands::upgrade::is_root` is gone.
 - The gate gained `case_rollback` — four arms, **no Docker and no image**, because a rollback runs no smoke test and
   builds nothing — and `tests/rollback.rs` measures the order, the target choice and both endings over the `Steps`

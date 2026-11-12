@@ -1725,7 +1725,7 @@ pub fn privilege_problem(target: &Target, verb: &str) -> Option<String> {
         return None;
     }
     Some(format!(
-        "`holosmith {verb}` writes the release tree ({}), the `{}` symlink and the unit, and restarts {} — so it runs \
+        "`holosmith {verb}` writes into the release tree ({}), the `{}` symlink and the unit, and restarts {} — so it runs \
          as root, or with `--root DIR` for an install tree this user owns: nothing was changed",
         target.opt_dir().display(),
         crate::release::CURRENT,

@@ -293,6 +293,7 @@ pub fn execute(
             &candidate.digest[..12]
         ),
         candidate.info.schema_version,
+        "build the release from the current tree (`holosmith build`), or restore a database this candidate understands",
     )?;
 
     // 1. The review gate. Item 12's review is the human gate; this flag is the record of it, and the promotion has no
@@ -526,10 +527,16 @@ pub fn ask_version(binary: &Path) -> Result<VersionInfo, String> {
 /// One function with two callers and one sentence each, differing only in `subject` — the candidate a promotion is
 /// about to make live, or the release a rollback is about to switch back to. Both are the same measurement (`schema`
 /// against what the database records), which is why it is not spelled twice.
+///
+/// `remedy` is the other half of acceptance bullet 2's "with a clear explanation", and it is the one part the two
+/// verbs cannot share: what an operator should do next when it is a *candidate* that is too old (build the current
+/// tree, or restore a database it understands) is not what they should do when it is a *release in the tree*
+/// (`--to` another one).
 pub(crate) fn refuse_older_schema(
     config: &Config,
     subject: &str,
     schema: u32,
+    remedy: &str,
 ) -> Result<(), String> {
     let path = config.data_root.join(db::DATABASE_FILE);
     let recorded = db::recorded_without_migrating(&path).map_err(|error| {
@@ -549,9 +556,8 @@ pub(crate) fn refuse_older_schema(
     Err(format!(
         "{subject} reports schema {schema} and the database at {} records {recorded}: {subject} is older than the \
          database, and migrations are forward-only, so it could not read what a newer release wrote. Nothing was \
-         changed — build a release from the current tree (`holosmith build`), or restore a database this release \
-         understands. The unit runs `doctor --quick` before `ExecStart`, so this release would refuse to start on this \
-         database even if `current` named it.\n{}",
+         changed — {remedy}. The unit runs `doctor --quick` before `ExecStart`, so this release would refuse to start \
+         on this database even if `current` named it.\n{}",
         path.display(),
         schema::Verdict::Newer.sentence(recorded, schema)
     ))
@@ -721,15 +727,15 @@ pub(crate) fn write_unit(
     let directory = path.parent().unwrap_or(Path::new(deploy::UNIT_DIR));
     std::fs::create_dir_all(directory).map_err(|error| {
         format!(
-            "{} could not be created ({error}): the unit is what systemd reads, and a promotion writes it so that it \
-             runs through `current`",
+            "{} could not be created ({error}): the unit is what systemd reads, and a release verb writes it so that it \
+             it runs through `current`",
             directory.display()
         )
     })?;
     std::fs::write(&path, bytes.as_bytes()).map_err(|error| {
         format!(
-            "{} could not be written ({error}): the unit is what systemd reads, and a promotion writes it so that it \
-             runs through `current`",
+            "{} could not be written ({error}): the unit is what systemd reads, and a release verb writes it so that it \
+             it runs through `current`",
             path.display()
         )
     })?;
@@ -965,5 +971,62 @@ fn poll(
             return None;
         }
         std::thread::sleep(deploy::HEALTH_POLL.min(window - elapsed));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+
+    /// A fake admin socket that says `state: already draining` and then how the drain ended, and closes.
+    ///
+    /// That is the server's real shape when a second request arrives during somebody else's drain: `Drain::run`
+    /// prints the line, runs on to the ending, and answers it (`crate::drain`).
+    fn draining(label: &str) -> (PathBuf, std::thread::JoinHandle<()>) {
+        let dir = std::env::temp_dir().join(format!(
+            "holosmith-promote-drain-{label}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the socket's directory is creatable");
+        let path = drain::socket_path(&dir);
+        let listener = UnixListener::bind(&path).expect("the fake socket binds");
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("a client connects");
+            let mut request = [0_u8; 64];
+            let _ = std::io::Read::read(&mut stream, &mut request);
+            for line in [drain::ALREADY, "result: drained"] {
+                if std::io::Write::write_all(&mut stream, format!("{line}\n").as_bytes()).is_err() {
+                    return;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        });
+        (dir, handle)
+    }
+
+    /// The two verbs' one difference, measured where it is made rather than at the verbs that read it.
+    ///
+    /// A promotion stops on the server's first line and refuses (`DrainAnswer::Already`); a rollback joins the drain
+    /// and takes whatever ending it reaches (`Drained` here). Flipping either constructor's policy reddens this.
+    #[test]
+    fn a_promotion_refuses_a_drain_somebody_else_started_and_a_rollback_joins_it() {
+        let config = Config::default();
+        let (dir, server) = draining("promotion");
+        assert_eq!(
+            Real::new(&config).drain(&dir, std::time::Duration::from_secs(5)),
+            DrainAnswer::Already,
+            "a promotion must refuse rather than wait out a drain it did not start"
+        );
+        server.join().expect("the fake server finishes");
+
+        let (dir, server) = draining("rollback");
+        assert_eq!(
+            Real::joining(&config).drain(&dir, std::time::Duration::from_secs(5)),
+            DrainAnswer::Drained,
+            "a rollback must join the drain and take its ending"
+        );
+        server.join().expect("the fake server finishes");
     }
 }

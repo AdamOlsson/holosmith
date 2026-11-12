@@ -155,8 +155,6 @@ struct World {
     config: Config,
     target: Target,
     info: holosmith::version::VersionInfo,
-    /// The release tags, **oldest first**: `one`, `two`, `three`, with `current` on the newest.
-    tags: Vec<String>,
 }
 
 /// The three releases a rollback chooses between, named for their place rather than for a version: a release
@@ -223,7 +221,6 @@ fn world(label: &str) -> Option<World> {
         config,
         target,
         info,
-        tags: TAGS.iter().map(|tag| tag.to_string()).collect(),
     })
 }
 
@@ -491,23 +488,29 @@ fn a_unit_that_does_not_go_through_current_is_rewritten_and_a_missing_one_is_ref
 fn the_target_directory_has_to_hold_a_binary_this_machine_can_run() {
     let world = world_or_skip!("rollback-binary");
     // A release directory whose binary is not a program: `version --json` cannot be asked, so the rollback refuses
-    // before it drains anything — and the `[tags]` list is not a substitute for asking the binary.
-    std::fs::write(
-        Release::of(&world.target).binary("two"),
-        b"#!/bin/sh\nexit 9\n",
-    )
-    .expect("the release's binary is replaceable");
+    // `two` is the default target, and the tree counts it — which is the other half of this arm.
+    let release = Release::of(&world.target);
+    assert_eq!(
+        release.history(),
+        vec!["three".to_string(), "two".to_string(), "one".to_string()]
+    );
+    // Now its binary is not a program: `version --json` cannot be asked, so the rollback refuses before it drains
+    // anything — and the directory stops being a release at all, which is a place a rollback must never switch to.
+    std::fs::write(release.binary("two"), b"#!/bin/sh\nexit 9\n")
+        .expect("the binary is replaceable");
+    assert_eq!(
+        release.history(),
+        vec!["three".to_string(), "two".to_string(), "one".to_string()],
+        "a directory that still holds a *file* named `holosmith` is still a release: what it cannot do is answer"
+    );
+    // So the order accepts `two` and the *binary* refuses it, which is the honest sequence: the tree's order is
+    // about directories, and `version --json` is about the program inside one.
     let steps = recorder(&world);
-    let error = execute(&world, &options(None), &steps)
+    let error = execute(&world, &options(Some("two")), &steps)
         .expect_err("a release that cannot answer is refused");
     assert!(error.contains("has to hold a `holosmith`"), "{error}");
     assert!(steps.trace().is_empty(), "{:?}", steps.trace());
     assert_eq!(link(&world), Some(PathBuf::from("releases/three")));
     // Nothing in the tree changed either: the directory is still there for the operator to look at.
-    assert!(Release::of(&world.target).dir_of("two").is_dir());
-    // And the fixture really was a release the tree counted before it was broken.
-    assert_eq!(
-        world.tags,
-        TAGS.iter().map(|tag| tag.to_string()).collect::<Vec<_>>()
-    );
+    assert!(release.dir_of("two").is_dir());
 }

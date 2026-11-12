@@ -93,6 +93,7 @@ pub fn execute(
         config,
         &format!("releases/{tag} ({})", binary.display()),
         info.schema_version,
+        "`--to` another release in this tree, or a database this one understands",
     )?;
     println!(
         "rollback: target: releases/{tag} ({} ({}), schema {}), from releases/{current}",
@@ -110,7 +111,8 @@ pub fn execute(
             unit.display()
         ));
     }
-    promote::write_unit(target, config, &release, "rollback")?;
+    promote::write_unit(target, config, &release, "rollback")
+        .map_err(|said| format!("{said} — nothing was drained and nothing was switched"))?;
 
     // 4. The drain. From here on the machine is draining until it is restarted, so every refusal below says so
     //    (`promote::draining`, one clause for both verbs).
@@ -243,9 +245,9 @@ fn choose(release: &Release, current: &str, to: Option<&str>) -> Result<String, 
     let Some(wanted) = to else {
         if !history.iter().any(|known| known == current) {
             return Err(format!(
-                "`current` names releases/{current}, and this tree does not hold it ({}): the directory or the \
-                 `holosmith` inside it is missing, so there is no release list to go one back in. Nothing was drained \
-                 and nothing was switched",
+                "`current` names releases/{current}, and this tree holds no release by that name with a `holosmith` \
+                 in it ({}): the order to go one back in is built from the directories that do, and none of them is \
+                 the live one. Nothing was drained and nothing was switched",
                 listing(&release.releases(), &history)
             ));
         }
