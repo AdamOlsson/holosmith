@@ -1709,6 +1709,46 @@ fn proxies_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
     }
 }
 
+/// Whether this process may write [`Target`]'s tree, and the sentence when it may not.
+///
+/// The two **release verbs** — `holosmith upgrade` and `holosmith rollback` — write the release tree, the `current`
+/// symlink and the unit, and restart a system service. `server deploy` writes each of its own files as a
+/// `sudo`-prefixed child; a release verb doing the same would be a dozen escalations for one command, each asking for
+/// the same credential. So the rule is one check with one sentence: as root, or with `--root DIR` for a tree this user
+/// owns — and it lives here, next to [`Target::privileged`] and [`UNIT_NAME`], because it is a fact about the paths a
+/// release verb writes rather than about either verb.
+///
+/// A file that cannot be read answers "not root", which is the safe direction: a verb that wrongly believed it could
+/// write `/opt` would fail at the first write with a `Permission denied` instead of the sentence this returns.
+pub fn privilege_problem(target: &Target, verb: &str) -> Option<String> {
+    if !target.privileged() || running_as_root() {
+        return None;
+    }
+    Some(format!(
+        "`holosmith {verb}` writes the release tree ({}), the `{}` symlink and the unit, and restarts {} — so it runs \
+         as root, or with `--root DIR` for an install tree this user owns: nothing was changed",
+        target.opt_dir().display(),
+        crate::release::CURRENT,
+        UNIT_NAME
+    ))
+}
+
+/// Whether this process's effective uid is 0, read from `/proc/self/status`.
+///
+/// One file rather than a child (`id -u`) and rather than a dependency: `Uid:`'s second field is the effective uid,
+/// and this build is Linux-only (both release targets are).
+fn running_as_root() -> bool {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("Uid:"))
+                .and_then(|fields| fields.split_whitespace().nth(1).map(str::to_string))
+        })
+        .is_some_and(|uid| uid == "0")
+}
+
 /// Step 5: the systemd unit, rendered from this binary's own path (spec item 10 step 5, HS-049).
 ///
 /// The bytes are the deliverable, which is why the rendering is a public function of exactly three facts — where the

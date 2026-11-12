@@ -126,17 +126,41 @@ pub trait Steps {
 }
 
 /// The machine, for a real promotion: an in-process smoke run, the drain client, the daemon, and one child.
+///
+/// Two verbs ask through it — `upgrade` and `rollback` — and they differ in exactly two things, so both are fields
+/// rather than a second implementation: the **prefix** its printed lines carry, and whether a drain **somebody else
+/// started** is refused or joined (ADR-0083 D4).
 #[derive(Debug, Clone)]
 pub struct Real {
     config: Config,
     docker: crate::docker::Docker,
+    prefix: &'static str,
+    joins: bool,
 }
 
 impl Real {
+    /// The promotion's machine: its lines say `upgrade:` and it refuses a drain this request did not start.
     pub fn new(config: &Config) -> Self {
+        Self::named(config, "upgrade", false)
+    }
+
+    /// The rollback verb's machine: its lines say `rollback:`, and it **joins** a drain already in progress.
+    ///
+    /// A promotion refuses on the drain's first line because switching under a machine it did not quiet would be the
+    /// opposite of a refusal. A rollback must not: a machine left draining by a promotion that failed after its drain
+    /// is exactly the machine that needs rolling back, and nothing but a restart clears a drain — which is what a
+    /// rollback does. So the client keeps reading and `DrainAnswer::Already` cannot arise here; the verb would
+    /// proceed if it did.
+    pub fn joining(config: &Config) -> Self {
+        Self::named(config, "rollback", true)
+    }
+
+    fn named(config: &Config, prefix: &'static str, joins: bool) -> Self {
         Self {
             config: config.clone(),
             docker: crate::docker::Docker::new(config.docker_host.clone()),
+            prefix,
+            joins,
         }
     }
 }
@@ -154,24 +178,27 @@ impl Steps for Real {
 
     fn drain(&self, admin_dir: &Path, wait: Duration) -> DrainAnswer {
         let path = drain::socket_path(admin_dir);
+        let prefix = self.prefix;
+        let joins = self.joins;
         let mut already = false;
         let answer = crate::commands::drain::ask_with(
             &path,
             wait,
             crate::commands::drain::ANSWER_TIMEOUT,
             &mut |line| {
-                println!("upgrade: drain: {line}");
-                // The one line this caller reads: the machine was already draining, so this request did not start it
-                // and the promotion refuses rather than waiting out a drain somebody else began.
+                println!("{prefix}: drain: {line}");
+                // The one line this caller reads. A promotion stops on it: the machine was already draining, so this
+                // request did not start it and waiting out somebody else's drain in order to switch under a machine
+                // it did not quiet is the opposite of a refusal. A rollback joins the drain instead (ADR-0083 D4).
                 if line == drain::ALREADY {
                     already = true;
-                    false
+                    joins
                 } else {
                     true
                 }
             },
         );
-        if already {
+        if already && !joins {
             return DrainAnswer::Already;
         }
         match answer {
@@ -258,7 +285,15 @@ pub fn execute(
         candidate.info.git_tag,
         candidate.info.schema_version
     );
-    refuse_older_schema(config, &candidate)?;
+    refuse_older_schema(
+        config,
+        &format!(
+            "the candidate, {} (sha256 {})",
+            candidate.path.display(),
+            &candidate.digest[..12]
+        ),
+        candidate.info.schema_version,
+    )?;
 
     // 1. The review gate. Item 12's review is the human gate; this flag is the record of it, and the promotion has no
     //    other path to the drain.
@@ -359,7 +394,7 @@ pub fn execute(
     let release = Release::of(target);
     let previous = previous_release(&release, target).map_err(draining)?;
     write_release(&release, &candidate).map_err(draining)?;
-    write_unit(target, config, &release).map_err(draining)?;
+    write_unit(target, config, &release, "upgrade").map_err(draining)?;
     release.switch(&candidate.info.git_tag).map_err(draining)?;
     println!(
         "upgrade: current: -> releases/{} (was {})",
@@ -481,12 +516,21 @@ pub fn ask_version(binary: &Path) -> Result<VersionInfo, String> {
     })
 }
 
-/// Acceptance bullet 5's second refusal: a candidate whose schema is older than the database's.
+/// Acceptance bullet 5's second refusal: a binary whose schema is older than the database's.
 ///
 /// Read **without migrating** (`db::recorded_without_migrating`, ADR-0047): a promotion must not open the database
 /// read-write to ask a question, because that open applies the migrations and would change the very file the backup
-/// two steps later is about to take.
-fn refuse_older_schema(config: &Config, candidate: &Candidate) -> Result<(), String> {
+/// two steps later is about to take — and a rollback is deciding whether the release it is about to switch to could
+/// read this database at all.
+///
+/// One function with two callers and one sentence each, differing only in `subject` — the candidate a promotion is
+/// about to make live, or the release a rollback is about to switch back to. Both are the same measurement (`schema`
+/// against what the database records), which is why it is not spelled twice.
+pub(crate) fn refuse_older_schema(
+    config: &Config,
+    subject: &str,
+    schema: u32,
+) -> Result<(), String> {
     let path = config.data_root.join(db::DATABASE_FILE);
     let recorded = db::recorded_without_migrating(&path).map_err(|error| {
         format!(
@@ -499,17 +543,17 @@ fn refuse_older_schema(config: &Config, candidate: &Candidate) -> Result<(), Str
         // to be older than.
         return Ok(());
     };
-    if schema::verdict(recorded, candidate.info.schema_version) != schema::Verdict::Newer {
+    if schema::verdict(recorded, schema) != schema::Verdict::Newer {
         return Ok(());
     }
     Err(format!(
-        "{} reports schema {} and the database at {} records {recorded}: the candidate is older than the database, \
-         and its migrations are forward-only, so it could not read what a newer release wrote. Nothing was promoted \
-         — build the current tree (`holosmith build`) or restore a database this candidate understands.\n{}",
-        candidate.path.display(),
-        candidate.info.schema_version,
+        "{subject} reports schema {schema} and the database at {} records {recorded}: {subject} is older than the \
+         database, and migrations are forward-only, so it could not read what a newer release wrote. Nothing was \
+         changed — build a release from the current tree (`holosmith build`), or restore a database this release \
+         understands. The unit runs `doctor --quick` before `ExecStart`, so this release would refuse to start on this \
+         database even if `current` named it.\n{}",
         path.display(),
-        schema::Verdict::Newer.sentence(recorded, candidate.info.schema_version)
+        schema::Verdict::Newer.sentence(recorded, schema)
     ))
 }
 
@@ -542,7 +586,7 @@ fn take_backup(config: &Config) -> Result<PathBuf, String> {
 /// only thing that clears a drain is the restart it exists for. Naming that in each sentence is what
 /// `docs/build.md`'s "every refusal leaves the machine as it found it — except after the drain" means, and it is one
 /// function so the five call sites cannot drift from it.
-fn draining(said: String) -> String {
+pub(crate) fn draining(said: String) -> String {
     format!(
         "{said} — this machine is draining until it is restarted (`systemctl restart {}`)",
         deploy::UNIT_NAME
@@ -662,7 +706,12 @@ fn write_release(release: &Release, candidate: &Candidate) -> Result<(), String>
 /// bytes from the same function — it owns only the *path* that function is given, which is the one fact a promotion
 /// changes. A unit that already names `current/holosmith` is left byte-identical, so a second promotion writes
 /// nothing and a later `server deploy` finds the file it would have written.
-fn write_unit(target: &Target, config: &Config, release: &Release) -> Result<(), String> {
+pub(crate) fn write_unit(
+    target: &Target,
+    config: &Config,
+    release: &Release,
+    prefix: &str,
+) -> Result<(), String> {
     let path = target.unit_path();
     let exe = release.current().join(release::BINARY);
     let bytes = deploy::unit_text(&exe, target.privileged(), config.role);
@@ -690,7 +739,7 @@ fn write_unit(target: &Target, config: &Config, release: &Release) -> Result<(),
     )
     .map_err(|error| format!("{} could not be made read-only ({error})", path.display()))?;
     println!(
-        "upgrade: unit: {} (ExecStart through `current`)",
+        "{prefix}: unit: {} (ExecStart through `current`)",
         path.display()
     );
     Ok(())
@@ -710,31 +759,19 @@ fn serve_with(
 ) -> Result<(), String> {
     // The clock starts **before** the restart is asked for: the poll accepts only an answer from a process younger
     // than this instant, which is what separates the candidate from the version it replaced.
-    let started = Instant::now();
-    let restarted = steps.restart(&tools.systemctl);
-    println!(
-        "upgrade: restart: {} restart {}",
-        tools.systemctl.display(),
-        deploy::UNIT_NAME
+    let attempt = restart_and_poll(
+        config,
+        steps,
+        tools,
+        Some(candidate.version.as_str()),
+        window,
+        "upgrade",
     );
-    let answered = match restarted {
-        Ok(()) => poll(
-            steps,
-            config.control_listen,
-            &candidate.version,
-            started,
-            window,
-        ),
-        Err(sentence) => {
-            println!("upgrade: restart: {sentence}");
-            None
-        }
-    };
-    if let Some(answer) = answered {
+    if let Some(answer) = attempt.answered {
         println!(
             "upgrade: health: {} answered {:.1}s after the restart",
             answer.version,
-            started.elapsed().as_secs_f32()
+            attempt.started.elapsed().as_secs_f32()
         );
         println!(
             "upgrade: live: {} ({}), backup {}",
@@ -747,11 +784,6 @@ fn serve_with(
     // The rollback: the same switch in reverse, the same restart, and the same poll -- and **no database restore**,
     // because expand/contract is what makes switching back safe (ADR-0047). A restore would delete the work of every
     // session since the backup.
-    println!(
-        "upgrade: health: no answer with {} in {}s",
-        candidate.version,
-        window.as_secs()
-    );
     rollback(config, target, steps, tools, window, backup, previous)
 }
 
@@ -783,21 +815,17 @@ fn rollback(
         .tag
         .as_ref()
         .and_then(|tag| ask_version(&release.binary(tag)).ok());
-    let started = Instant::now();
-    let restarted = steps.restart(&tools.systemctl);
-    println!(
-        "upgrade: rollback: {} restart {}",
-        tools.systemctl.display(),
-        deploy::UNIT_NAME
+    let attempt = restart_and_poll(
+        config,
+        steps,
+        tools,
+        version.as_ref().map(|info| info.version.as_str()),
+        window,
+        // The automatic switch-back's own lines sit under `upgrade: rollback:` — it is the promotion's rollback, and
+        // the verb prints its identical sequence under `rollback:`.
+        "upgrade: rollback",
     );
-    let answered = match (&restarted, &version) {
-        (Ok(()), Some(info)) => poll(steps, config.control_listen, &info.version, started, window),
-        (Err(sentence), _) => {
-            println!("upgrade: rollback: {sentence}");
-            None
-        }
-        (Ok(()), None) => None,
-    };
+    let answered = attempt.answered;
     let live = match &version {
         Some(info) => format!("{}, {}", info.version, info.git_tag),
         None => "its own binary answers no `version --json`".to_string(),
@@ -806,7 +834,7 @@ fn rollback(
         println!(
             "upgrade: rollback: {} answered {:.1}s after the restart",
             answer.version,
-            started.elapsed().as_secs_f32()
+            attempt.started.elapsed().as_secs_f32()
         );
         // The release the link names **first**, because that is the thing an operator can see in `releases/`: a
         // release directory's name is a promotion's own choice (`releases/<tag>`), and the binary inside reports the
@@ -841,6 +869,55 @@ fn rollback(
     ))
 }
 
+/// One attempt at making a switch live: the clock, the restart, and the answer that counted.
+///
+/// The two verbs that switch `current` — a promotion's candidate and a rollback's target — ask the machine the same
+/// two questions in the same order, and only the prose of their endings differs. This type is that order, so neither
+/// can put the poll before the restart or forget that the clock starts first.
+pub(crate) struct Attempt {
+    /// When the clock started: **before** the restart was asked for, which is the fact [`poll`] compares against.
+    pub started: Instant,
+    /// What `systemctl restart` answered.
+    pub restarted: Result<(), String>,
+    /// The `/api/health` answer that counted, when one did.
+    pub answered: Option<health::Answer>,
+}
+
+/// `systemctl restart`, then the poll for a process younger than it.
+///
+/// `version` is `None` only for a release whose own binary cannot answer `version --json`: there is nothing to look
+/// for then, so the restart is still run and the poll is not. `prefix` is what the printed lines say — `upgrade`,
+/// `upgrade: rollback` or `rollback` — because three runs of this sequence are three different things to read.
+pub(crate) fn restart_and_poll(
+    config: &Config,
+    steps: &dyn Steps,
+    tools: &deploy::Tools,
+    version: Option<&str>,
+    window: Duration,
+    prefix: &str,
+) -> Attempt {
+    let started = Instant::now();
+    let restarted = steps.restart(&tools.systemctl);
+    println!(
+        "{prefix}: restart: {} restart {}",
+        tools.systemctl.display(),
+        deploy::UNIT_NAME
+    );
+    let answered = match (&restarted, version) {
+        (Ok(()), Some(want)) => poll(steps, config.control_listen, want, started, window, prefix),
+        (Err(sentence), _) => {
+            println!("{prefix}: restart: {sentence}");
+            None
+        }
+        (Ok(()), None) => None,
+    };
+    Attempt {
+        started,
+        restarted,
+        answered,
+    }
+}
+
 /// Poll `/api/health` until an answer is **this** process, or `window` elapses.
 ///
 /// Three facts, and the third is what makes the poll falsifiable: every binary this repo builds reports the same
@@ -848,12 +925,16 @@ fn rollback(
 /// process that says it started **after** the restart is the evidence, and `uptime_s` is the payload's own answer to
 /// "how long have you been running" — it does not say *which* binary started, which is why a promotion between two
 /// builds of one crate version is recorded as "a process started after the restart answered" and nothing more.
+///
+/// The giving-up sentence is printed here rather than at the callers, so that the two verbs' promises about what a
+/// failed poll sounds like cannot drift apart.
 fn poll(
     steps: &dyn Steps,
     listen: SocketAddr,
     want: &str,
     started: Instant,
     window: Duration,
+    prefix: &str,
 ) -> Option<health::Answer> {
     loop {
         let last = match steps.health(listen) {
@@ -875,8 +956,12 @@ fn poll(
         let elapsed = started.elapsed();
         if elapsed >= window {
             if !last.is_empty() {
-                println!("upgrade: health: {last}");
+                println!("{prefix}: health: {last}");
             }
+            println!(
+                "{prefix}: health: no answer with {want} in {}s",
+                window.as_secs()
+            );
             return None;
         }
         std::thread::sleep(deploy::HEALTH_POLL.min(window - elapsed));

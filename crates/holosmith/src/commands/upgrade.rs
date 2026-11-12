@@ -1,10 +1,10 @@
 //! `holosmith upgrade <binary>`: the promotion pipeline as one command (HS-078, spec item 10, ADR-0082).
 //!
 //! A **host** verb like `build` and `smoke`, and as thin: it loads the config the way every command does, resolves the
-//! install tree, refuses a promotion that needs `root` and does not have it, and hands [`crate::promote`] the four
-//! facts it cannot work out itself — the candidate, whether the review was acknowledged, the drain's wait and the
-//! root. What this module owns is the command's surface: the flag names, the one refusal that is about *privilege*
-//! rather than about the candidate, and the exit code (0 only for a candidate that is live).
+//! install tree, refuses a promotion that needs `root` and does not have it (`deploy::privilege_problem`, the rule the
+//! two release verbs share — HS-079), and hands [`crate::promote`] the four facts it cannot work out itself — the
+//! candidate, whether the review was acknowledged, the drain's wait and the root. What this module owns is the
+//! command's surface: the flag names and the exit code (0 only for a candidate that is live).
 //!
 //! # Why a privileged install must be root
 //!
@@ -50,15 +50,8 @@ pub fn run(args: UpgradeArgs) -> ExitCode {
         }
     };
     let target = Target::resolve(args.root.clone());
-    if target.privileged() && !is_root() {
-        eprintln!(
-            "holosmith: upgrade: a promotion writes the release tree ({}), the `{}` symlink and the unit, and \
-             restarts {} — so it runs as root, or with `--root DIR` for an install tree this user owns: nothing was \
-             promoted",
-            target.opt_dir().display(),
-            crate::release::CURRENT,
-            crate::deploy::UNIT_NAME
-        );
+    if let Some(said) = crate::deploy::privilege_problem(&target, "upgrade") {
+        eprintln!("holosmith: upgrade: {said}");
         return ExitCode::FAILURE;
     }
     let options = Options {
@@ -69,22 +62,4 @@ pub fn run(args: UpgradeArgs) -> ExitCode {
     };
     let steps = Real::new(&config);
     promote::run(&config, &target, &options, &steps)
-}
-
-/// Whether this process's effective uid is 0, read from `/proc/self/status`.
-///
-/// One file rather than a child (`id -u`) and rather than a dependency: `Uid:`'s second field is the effective uid,
-/// and this build is Linux-only (both release targets are). A file that cannot be read answers `false`, which is the
-/// safe direction — a promotion that wrongly believed it could write `/opt` would fail at the first write with a
-/// `Permission denied` instead of the sentence above.
-fn is_root() -> bool {
-    std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|status| {
-            status
-                .lines()
-                .find_map(|line| line.strip_prefix("Uid:"))
-                .and_then(|fields| fields.split_whitespace().nth(1).map(str::to_string))
-        })
-        .is_some_and(|uid| uid == "0")
 }
