@@ -2984,3 +2984,48 @@ it rather than adding a caveat beside it.
   this (it forged a newer database, deleted it, and then booted), and the symptom was a `404 unknown_session` for a
   session the drain had just reported stopping. A case that needs a database from a newer release must write it
   **before** the boot that serves, which is what `case_rollback`'s schema arm does.
+
+### Landmines: a count, a running file and a link's health (HS-080)
+
+- **`current_exe()` is the fact the release report is built on, and it resolves the symlink.** Linux's implementation
+  reads `/proc/self/exe`, so a binary started through `current/holosmith` reports `releases/<tag>`, not the word
+  `current` — which is exactly what makes `version`'s `release` line the unambiguous answer. Two consequences for a
+  fixture: a release directory's binary may be *any* program (the tests copy `CARGO_BIN_EXE_holosmith`; the gate copies
+  the artifact), and the rule is therefore pure over a path (`release::running_tag`) rather than a stat of the tree — a
+  `version` that read its own directory's digest would fail on every hand-seeded release.
+- **`VersionInfo` has a second direction, so a new field is a compatibility decision.** `promote::ask_version`
+  deserialises a *candidate's* `version --json`, and a candidate may be older than the reading build: `release` is
+  `Option<String>` with `#[serde(default)]` so a missing key is `None` rather than "this file cannot be promoted". The
+  serialised side always carries the key (`"release": null` off a release tree), which is what a test asserts — and the
+  human side always prints five lines, with `-` for "not in a release directory", so a script never has to count lines.
+- **A `version` shape change reaches `scripts/check-static.sh`, not just the crate's tests.** Its
+  `check_version_output` pins the line count **and** the key order for both musl artifacts, so HS-080's fifth line
+  reddened the build phase with `expected 4 lines from 'version', got 5`. Worth knowing before the gate: that script is
+  also the only place that compares the artifact's output with `pins/pi.txt`.
+- **`doctor`'s `Tools` paths are the caller's install tree, and a new check must join them.** `--root` was added to
+  `doctor` in this story for exactly this reason (`release_root`, `unit_path` beside `config_path`, `admin_dir`, all
+  four from `Target`), because a release check that spelled `/opt/holosmith` itself would read the *machine's* tree
+  during a `--root` run — HS-049's review finding, one check later. The tests' `tools()` helper must set them to the
+  `TempDir` too, or every arm silently measures the host.
+- **A check the deploy repairs must not refuse the deploy, and that is now three findings wide.** `Ports` and `Perms`
+  are exempt in `deploy`'s step 1 (ADR-0058); `Release` joins them (`LINK_NOT_LIVE`) because step 5 renders the unit
+  for the binary the run installs whenever `Release::live` names nothing. The existing HS-078 test
+  `a_release_tree_makes_the_unit_run_through_current` is what proved the exemption is load-bearing: without it, a
+  deploy over a broken `current` fails at step 1 and the machine can never be booted again by the command that
+  repaints the unit.
+- **`prune`'s protected set is "the live one and the one behind it", and the count is the total.** Reserving them
+  *inside* `keep_releases` (not on top of it) is what makes the number mean "directories the tree holds"; the two
+  alternatives are both wrong in a way a test catches — "newest N" deletes the running release when `current` is not
+  the newest, and "N plus the protected" makes the count a lie. A tree with a `current` on its oldest release is the
+  fixture that separates them.
+- **A prune is only measurable where a promotion can succeed, so it is two places.** `tests/upgrade.rs` drives
+  `promote::execute` through the `Steps` recorder (a successful promotion removes the oldest and keeps the rollback
+  target; a rolled-back one removes *nothing*, which is what makes "after the poll" falsifiable), and the gate's
+  `case_upgrade` grows two seeded releases with `touch -d @…` plus `keep_releases = 3`. `case_releases` itself is
+  daemon-free and measures the layout, `version` and `doctor` — a case that needed a promotion to check a symlink
+  would be the "case whose SKIP hides the feature" this project refuses.
+- **A shared scratch directory in a `#[cfg(test)]` module flakes the gate, and the failure reads like a bug in the
+  code under test.** `rollback.rs`'s `world()` named every tree `holosmith-rollback-unit-<pid>`; four tests in one
+  process share the pid, so one test's `TempDir::drop` wiped another's mid-run and the gate reported
+  `--to one names no release in this tree … (no release at all)`. Fixed with a per-call counter, which is the same
+  lesson `docs/notes.md`'s Tests section already carries for guards: a scratch directory belongs to one test.

@@ -970,15 +970,18 @@ One built version of the binary, in its own directory under a **release tree**, 
 one. A release's directory holds exactly the two files a **release build** writes — `holosmith` and
 `holosmith.sha256` — and its name is the git tag the binary itself reports (`version --json`'s `git_tag`), so a release
 directory cannot be named after a build other than the one inside it. One tag holds one binary: a second, different
-binary under the same tag is refused with both digests named.
+binary under the same tag is refused with both digests named. A binary run from a release directory reports that
+directory's name as `version`'s `release` line — the **running file's** directory, which a hand-seeded copy of another
+build answers without sharing its `git_tag`.
 _Avoid_: Version (that is the crate's semver, not a release), build, deploy
 
 **Release tree**:
 `<install>/opt/holosmith`, holding `releases/<tag>/` and the **`current`** symlink; `--root` prefixes it, so an install
 tree carries its own. `holosmith upgrade` creates it and switches it; `holosmith rollback` switches it back one release,
 and its **order** — the order the releases were written onto the machine, newest first — is `Release::history`, which is
-also the order HS-080's pruning keeps. Pruning itself, `holosmith version` reporting the tag it was run from and
-`doctor` reporting the resolved path are HS-080's. Its machine names are `release::Release` and `release::ROOT`.
+also the order a **prune** keeps. A **promotion** prunes it to `keep_releases` when the candidate is live,
+`holosmith version` reports the release directory the running file is in, and `doctor` reports the resolved path and
+whether the link is intact. Its machine names are `release::Release`, `release::ROOT` and `release::running_tag`.
 _Avoid_: Releases directory, install tree (that is the whole `--root`), versions
 
 **`current`**:
@@ -994,9 +997,18 @@ Moving a candidate **release** to live, as `holosmith upgrade <binary>` performs
 (`--acknowledge-review`), a **smoke run**, the two **image builds** when their labels say so, a **drain**, a database
 backup (`VACUUM INTO backups/app-<ts>.db`, five kept), the release directory written, **`current`** switched, the unit
 restarted and a twenty-second `/api/health` poll for a process **younger than the restart** — then, if it does not
-answer, the automatic **rollback**. Every refusal leaves the machine as it found it and says so; a failure *after* the
-drain leaves it draining, which the sentence names.
+answer, the automatic **rollback**, and if it does, one **prune** of the release tree. Every refusal leaves the machine
+as it found it and says so; a failure *after* the drain leaves it draining, which the sentence names.
 _Avoid_: Deploy (that installs a machine), upgrade (the command), rollout, release
+
+**Prune**:
+One promotion's last step (HS-080): `releases/` is kept at `keep_releases` directories, taking the **live** release and
+the one behind it — the **rollback** target — first, then the newest of the rest. It runs only when the candidate is
+live, so a promotion that rolled back removes nothing, and a prune that cannot delete is a warning on stderr rather
+than a failed promotion. Only `Release::history`'s entries are candidates: a directory whose name is not one path
+segment or that holds no `holosmith` is not a release and is never touched, while a hand-seeded directory that *is* one
+is prunable like any other. `keep_releases` is the count, its floor is 2, and `Release::prune` is the rule.
+_Avoid_: Cleanup, rotation, retention (that is the backups'), garbage collection
 
 **Rollback**:
 Pointing **`current`** back one **release**, restarting and polling again — what a **promotion** does by itself when the

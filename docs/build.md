@@ -1418,7 +1418,8 @@ that refuses the image build, and the real run when the daemon answers — with 
 Spec item 10's pipeline as one command (ADR-0082): the review gate acknowledged, the host smoke test, the two product
 images when their labels say they changed, the drain, a database backup, the release directory, the `current` symlink,
 `systemctl restart` and a twenty-second health poll that puts the previous release back by itself if the candidate does
-not answer.
+not answer — and, only once the candidate **is** live, one **prune** of the release tree to `keep_releases`
+directories (ADR-0084).
 
 ```bash
 sudo holosmith upgrade releases/<tag>/holosmith --acknowledge-review   # a machine's own tree, as root
@@ -1445,7 +1446,13 @@ upgrade: current: -> releases/<tag> (was releases/<previous>)
 upgrade: restart: systemctl restart holosmith.service
 upgrade: health: 0.1.0 answered 0.4s after the restart
 upgrade: live: 0.1.0 (<tag>), backup <path>
+upgrade: prune: kept 2 of 4 (keep_releases = 2); removed: releases/old, releases/older
 ```
+
+The prune is the last line because it is the last thing that happens, and it is the only line a machine that has
+pruned before can print with `removed: nothing`. **A prune that cannot delete is a warning** on stderr
+(`holosmith: warning: upgrade: prune: …`) and the promotion still exits 0: the candidate is serving, and a release
+directory that survived is not a reason to tell an operator to roll back.
 
 A candidate that does not answer ends with `upgrade: health: no answer with …`, `upgrade: rollback: current -> …`, a
 second restart and one of two sentences: the previous release is live again, or it did not answer either — in which
@@ -1464,6 +1471,59 @@ names), and the demo does the same. Two builds of one crate version also cannot 
 `uptime_s`, which is why the poll requires an answer from a process **younger than the restart**. And a rollback across
 a release that migrated the schema cannot start the old `serve`: the unit runs `doctor --quick` first, and `doctor`
 refuses a database a newer release wrote (ADR-0047) — a recorded follow-up, not a silence.
+
+## The release tree as an operator reads it (HS-080)
+
+Two releases and one pointer, and three facts about them that the commands answer without a promotion:
+
+```text
+<install>/opt/holosmith/
+  releases/<tag>/holosmith            one release's binary (and its .sha256)
+  releases/<older>/holosmith          the rollback target, and whatever else is kept
+  current -> releases/<tag>           a **relative** symlink, replaced by `rename`
+```
+
+**Which one is live.** `holosmith version` reports `release <tag>` — the directory the **running file** is in, which
+is a different fact from `git_tag` (the build's answer) and is what makes the live version unambiguous. Through
+`current` the answer is the release directory, because `current_exe()` resolves the symlink; run from `dist/` or a
+test binary the line reads `release -`, and `version --json` carries the same fact as `"release": null`. On a live
+machine:
+
+```console
+$ /opt/holosmith/current/holosmith version
+version 0.1.0
+git_tag v0.1.0-3-gabc1234
+release v0.1.0-3-gabc1234
+pi_version …
+schema_version 7
+```
+
+**How many are kept.** `keep_releases` (default **5**, and the config refuses anything below **2**): a promotion's last
+step keeps the newest that many, taking the live release and the one behind it first, then the newest of the rest. The
+rollback target is therefore never pruned, and neither is the live one — even on a tree where `current` is not the
+newest. Raise it to keep more history, lower it to 2 for a machine that only wants the way back. A directory
+`releases/` holds that is not a release — no `holosmith` in it, or a name that cannot be a tag — is never touched, and
+a hand-seeded directory that *is* one is pruned like any other.
+
+**Whether the unit can start.** `holosmith doctor --quick` reports one `release:` line, in both its arms: `pass` with
+the tag and the **resolved** path (`current -> releases/<tag>, and the unit's ExecStart runs
+/opt/holosmith/releases/<tag>/holosmith`), or `fail` with the state and the hand fix when the unit's `ExecStart`
+resolves through a `current` that does not — `does not exist`, `is not a symlink`, `names something which is not one
+of this tree's releases`, or `names releases/<tag>` with no binary in it:
+
+```console
+$ sudo holosmith doctor --quick | grep '^release'
+release: fail: /opt/holosmith/current names releases/v0.1.0, and /opt/holosmith/releases/v0.1.0/holosmith is not
+             there, and the unit's ExecStart (/opt/holosmith/current/holosmith) names it: systemd cannot start this
+             machine. point it at a release that exists — `ln -sfn releases/v0.1.0-3-gabc1234 /opt/holosmith/current`
+```
+
+A machine that has never promoted is **not** that machine: its unit names the binary `server deploy` installed, so the
+broken link (or the absent one) is a `pass` whose sentence says the unit runs something else — and a machine with
+neither a unit nor a tree is `unknown`, because there is no fact about what is live. `server deploy`'s step 1 treats
+the failure as a remark rather than a refusal (`LINK_NOT_LIVE`), because step 5 rewrites the unit for the binary that
+run installs: a deploy is one of the two commands that **repairs** a broken tree, and refusing there would make the
+repair unreachable.
 
 ## The rollback: `holosmith rollback`
 

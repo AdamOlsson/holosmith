@@ -515,6 +515,7 @@ serve_cases=(
   case_smoke
   case_upgrade
   case_rollback
+  case_releases
   case_server_deploy
   case_server_service
   case_deploy_ssh
@@ -11154,7 +11155,7 @@ PY
     return 0
   fi
   port="$(free_port)"
-  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "stub"\nrole = "server"\ncontrol_listen = "127.0.0.1:%s"\ncontrol_origin = "http://127.0.0.1:%s"\nprojects_root = "%s"\nmin_free_gb = 0\nsession_disk_soft_gb = 0\nidle_stop_min = 0\npreview_listen = "127.0.0.1:0"\ndata_root = "%s"\n' \
+  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "stub"\nrole = "server"\ncontrol_listen = "127.0.0.1:%s"\ncontrol_origin = "http://127.0.0.1:%s"\nprojects_root = "%s"\nmin_free_gb = 0\nsession_disk_soft_gb = 0\nidle_stop_min = 0\npreview_listen = "127.0.0.1:0"\nkeep_releases = 3\ndata_root = "%s"\n' \
     "$owner" "$port" "$port" "$projects" "$data" >"$config"
 
   # The stand-ins. `docker` fakes the **two product images** and nothing else: every other question — the smoke run's
@@ -11257,6 +11258,18 @@ SHIM
   cp "$candidate" "$root/opt/holosmith/releases/old/holosmith"
   cp "$root/candidate/holosmith.sha256" "$root/opt/holosmith/releases/old/holosmith.sha256"
   ln -s releases/old "$root/opt/holosmith/current"
+  # HS-080's prune arm: two older releases (explicit mtimes, so the tree's order is this case's) and a directory the
+  # tree does not recognise. After the promotion below the tree holds four releases and the config keeps three, so
+  # exactly `ancient1` goes — the live release, the rollback target (`releases/old`) and the newest of the rest stay.
+  for line in ancient1 ancient2; do
+    mkdir -p "$root/opt/holosmith/releases/$line"
+    cp "$candidate" "$root/opt/holosmith/releases/$line/holosmith"
+    cp "$root/candidate/holosmith.sha256" "$root/opt/holosmith/releases/$line/holosmith.sha256"
+  done
+  touch -d @1700000001 "$root/opt/holosmith/releases/ancient1"
+  touch -d @1700000002 "$root/opt/holosmith/releases/ancient2"
+  mkdir -p "$root/opt/holosmith/releases/keepme"
+  printf 'not a release: no holosmith here\n' >"$root/opt/holosmith/releases/keepme/README"
   printf '[Unit]\nDescription=Holosmith server\n\n[Service]\nExecStart=%s/opt/holosmith/current/holosmith serve\nRestart=on-failure\n\n[Install]\nWantedBy=multi-user.target\n' \
     "$root" >"$root/etc/systemd/system/holosmith.service"
 
@@ -11386,6 +11399,25 @@ SHIM
   grep -q "^upgrade: live: $version ($tag), backup $data/backups/app-" "$WORK/$name.run.out" ||
     fail "$name/live" "the last line does not name the version and the backup: $(tail -3 "$WORK/$name.run.out")"
   assertions=$((assertions + 2))
+
+  # HS-080: the prune is the promotion's last step, and it is the tree's own order that decides. Four releases, three
+  # kept: the live one and the rollback target (`releases/old`, which the print above names) are reserved, the newest
+  # of the rest stays, and `ancient1` is the one that goes.
+  grep -q '^upgrade: prune: kept 3 of 4 (keep_releases = 3); removed: releases/ancient1$' "$WORK/$name.run.out" ||
+    fail "$name/prune/line" "the promotion did not prune: $(tail -3 "$WORK/$name.run.out")"
+  assertions=$((assertions + 1))
+  [ ! -e "$root/opt/holosmith/releases/ancient1" ] ||
+    fail "$name/prune/removed" "the oldest release survived the prune: $(ls "$root/opt/holosmith/releases")"
+  assertions=$((assertions + 1))
+  for line in "$tag" old ancient2; do
+    [ -d "$root/opt/holosmith/releases/$line" ] ||
+      fail "$name/prune/kept" "the prune removed releases/$line: $(ls "$root/opt/holosmith/releases")"
+    assertions=$((assertions + 1))
+  done
+  # A directory the tree does not recognise is not a release: it is not counted and never deleted.
+  [ -f "$root/opt/holosmith/releases/keepme/README" ] ||
+    fail "$name/prune/unrecognised" "the prune removed a directory that is not a release"
+  assertions=$((assertions + 1))
 
   kill "$extra_pid" 2>/dev/null || true
   extra_pid=""
@@ -11646,6 +11678,136 @@ PY
 
   kill "$extra_pid" 2>/dev/null || true
   extra_pid=""
+  rm -rf "$root"
+}
+
+# HS-080: what the release layout *means* once there is more than one release in it. No daemon, no database, no
+# `python3` and no server: a release is "a copy of the artifact in a directory named by a tag", so four of them are
+# four `cp`s and four mtimes, and everything this case measures is a file the artifact itself answers. The tree's own
+# arm — the prune — is `case_upgrade`'s, because a prune only happens inside a promotion.
+#
+# Three of the five assertions that matter are the acceptance's bullets 1, 2 and 3 read off the tree (`current` is a
+# **relative** symlink, the unit's `ExecStart` goes through it, `version` names the directory the running file is in),
+# and the fourth is bullet 5: `doctor --quick --root` in both arms of its release finding, plus the two arms where the
+# answer is "this machine does not execute through the link" and "nothing has been deployed here".
+case_releases() {
+  local name=case_releases root="$repo_root/target/verify-releases-$$"
+  local tree="$root/opt/holosmith" releases="$root/opt/holosmith/releases" link="$root/opt/holosmith/current"
+  local unit="$root/etc/systemd/system/holosmith.service" config="$root/etc/holosmith/config.toml"
+  local digest status answer tag resolved line
+  rm -rf "$root"
+  install -d -m 0755 "$releases" "$root/etc/systemd/system" "$root/etc/holosmith"
+
+  # Four releases side by side, written by hand and given the mtimes that make the tree's order the test's. The
+  # unrecognised directory is the **newest** thing in `releases/` on purpose: if `history()` counted it, the doctor's
+  # remedy below would name it instead of `four`, so the filter is what that assertion measures.
+  digest="$(sha256sum "$artifact" | cut -d' ' -f1)"
+  for tag in one two three four; do
+    install -d -m 0755 "$releases/$tag"
+    cp "$artifact" "$releases/$tag/holosmith"
+    printf '%s  holosmith\n' "$digest" >"$releases/$tag/holosmith.sha256"
+  done
+  touch -d @1700000001 "$releases/one"
+  touch -d @1700000002 "$releases/two"
+  touch -d @1700000003 "$releases/three"
+  touch -d @1700000004 "$releases/four"
+  ln -s releases/four "$link"
+  install -d -m 0755 "$releases/keepme"
+  printf 'a directory the tree does not recognise: no holosmith in it, so it is not a release\n' >"$releases/keepme/README"
+  : >"$releases/stray.txt"
+
+  # The unit a promotion writes: `ExecStart` through `current`, which is what makes a switch take effect at a restart.
+  printf '[Unit]\nDescription=Holosmith server\n\n[Service]\nExecStart=%s/current/holosmith serve\nRestart=on-failure\n\n[Install]\nWantedBy=multi-user.target\n' \
+    "$tree" >"$unit"
+  chmod 0644 "$unit"
+  # The config `--root` reads: the **installed** paths, because `--root` prefixes them (`server deploy --root`'s rule).
+  printf 'owner = "%s"\nrole = "server"\nbackend = "stub"\ncontrol_listen = "127.0.0.1:0"\npreview_listen = "127.0.0.1:0"\nmin_free_gb = 0\nsession_disk_soft_gb = 0\nidle_stop_min = 0\nkeep_releases = 2\n' \
+    "$owner" >"$config"
+  chmod 0644 "$config"
+
+  # ---- 1. bullets 1 and 2: the shape, and the link is relative --------------------------------------------
+  check "$name/link" "releases/four" "$(readlink "$link")"
+  [ -f "$releases/four/holosmith" ] || fail "$name/release" "the live release holds no binary"
+  line="$(grep '^ExecStart=' "$unit" || true)"
+  check "$name/exec" "ExecStart=$tree/current/holosmith serve" "$line"
+  if [ "$(grep -c '^ExecStart=' "$unit")" -eq 1 ]; then
+    assertions=$((assertions + 1))
+  else
+    fail "$name/exec/one" "the unit has more than one ExecStart: $(cat "$unit")"
+  fi
+
+  # ---- 2. bullet 3: `version` reports the release directory the running file is in -----------------------
+  # Inside a release; through `current` (which the kernel resolves, so the answer is the directory and not the link);
+  # and from `dist/`, where there is no release to report and the line says so.
+  check "$name/version/dir" "two" "$("$releases/two/holosmith" version | sed -n 's/^release //p')"
+  check "$name/version/current" "four" "$("$link/holosmith" version | sed -n 's/^release //p')"
+  check "$name/version/loose" "-" "$("$artifact" version | sed -n 's/^release //p')"
+  "$releases/two/holosmith" version --json | grep -q '"release":"two"' ||
+    fail "$name/version/json" "the json does not carry the release: $("$releases/two/holosmith" version --json)"
+  assertions=$((assertions + 1))
+
+  # ---- 3. bullet 5, first arm: the resolved path over a healthy tree -----------------------------------------
+  status=0
+  "$artifact" doctor --quick --config "$config" --root "$root" >"$WORK/$name.healthy.out" 2>&1 || status=$?
+  check "$name/doctor/exit" 0 "$status"
+  line="$(grep '^release: pass: ' "$WORK/$name.healthy.out" || true)"
+  [ -n "$line" ] || fail "$name/doctor/pass" "a healthy tree is not a pass: $(cat "$WORK/$name.healthy.out")"
+  resolved="$(readlink -f "$releases/four/holosmith")"
+  case "$line" in
+    *"current -> releases/four"*"$resolved"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/doctor/resolved" "the pass names neither the tag nor the resolved path ($resolved): $line" ;;
+  esac
+
+  # ---- 4. bullet 5, second arm: a link that names a directory which is gone ----------------------------------
+  ln -sfn releases/gone "$link"
+  status=0
+  "$artifact" doctor --quick --config "$config" --root "$root" >"$WORK/$name.gone.out" 2>&1 || status=$?
+  check "$name/gone/exit" 1 "$status"
+  line="$(grep '^release: fail: ' "$WORK/$name.gone.out" || true)"
+  [ -n "$line" ] || fail "$name/gone/fail" "a dangling link is not a failure: $(cat "$WORK/$name.gone.out")"
+  case "$line" in
+    *"releases/gone"*"ln -sfn releases/four"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/gone/sentence" "the failure names neither the state nor the fix: $line" ;;
+  esac
+  # The remedy names `four`, the newest *release* — the unrecognised `releases/keepme` has a newer mtime and is not one.
+  case "$line" in
+    *keepme*) fail "$name/gone/unrecognised" "the remedy offers a directory the tree does not recognise: $line" ;;
+    *) assertions=$((assertions + 1)) ;;
+  esac
+
+  # ---- 5. `current` not a symlink at all ---------------------------------------------------------------------
+  rm -f "$link"
+  : >"$link"
+  status=0
+  "$artifact" doctor --quick --config "$config" --root "$root" >"$WORK/$name.file.out" 2>&1 || status=$?
+  check "$name/file/exit" 1 "$status"
+  case "$(grep '^release: fail: ' "$WORK/$name.file.out" || true)" in
+    *"not a symlink"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/file/sentence" "a regular file named `current` is not a failure that says why: $(cat "$WORK/$name.file.out")" ;;
+  esac
+  rm -f "$link"
+
+  # ---- 6. a machine that has promoted nothing: its unit names a binary, so a broken tree is not a refusal ----
+  ln -sfn releases/gone "$link"
+  printf '[Unit]\nDescription=Holosmith server\n\n[Service]\nExecStart=%s/bin/holosmith serve\n\n[Install]\nWantedBy=multi-user.target\n' \
+    "$root" >"$unit"
+  status=0
+  "$artifact" doctor --quick --config "$config" --root "$root" >"$WORK/$name.plain.out" 2>&1 || status=$?
+  check "$name/plain/exit" 0 "$status"
+  case "$(grep '^release: pass: ' "$WORK/$name.plain.out" || true)" in
+    *"$root/bin/holosmith"*"does not execute"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/plain/sentence" "the pass does not say what the unit runs instead: $(cat "$WORK/$name.plain.out")" ;;
+  esac
+
+  # ---- 7. nothing deployed: no unit and no tree, which is `unknown` and not a failure -----------------------
+  status=0
+  "$artifact" doctor --quick --config "$config" --root "$root/empty" >"$WORK/$name.none.out" 2>&1 || status=$?
+  check "$name/none/exit" 0 "$status"
+  case "$(grep '^release: ' "$WORK/$name.none.out" || true)" in
+    'release: unknown: '*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/none/unknown" "a machine with no unit and no tree is not an honest unknown: $(cat "$WORK/$name.none.out")" ;;
+  esac
+
   rm -rf "$root"
 }
 
