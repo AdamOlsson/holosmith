@@ -558,7 +558,10 @@ fn elf_machine(path: &Path, bytes: &[u8]) -> Result<Machine, String> {
 ///
 /// `sha256sum` writes `<hex>  <path>`; a `busybox` or a wrapper that adds a prefix would print something else, and
 /// that is a sentence rather than a match. The comparison is case-insensitive because a hex digest has one value.
-fn digest_of(answer: &str) -> Option<String> {
+///
+/// `pub(crate)` because a promotion reads the same format out of a `holosmith.sha256` file (HS-078): one spelling of
+/// "a `sha256sum` line's first field" for the two readers that compare it with a digest they computed.
+pub(crate) fn digest_of(answer: &str) -> Option<String> {
     let first = answer.lines().next()?.split_whitespace().next()?;
     let lowered = first.to_ascii_lowercase();
     let hex = lowered.len() == 64

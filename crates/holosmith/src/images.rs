@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::docker::Docker;
-use crate::pins;
+use crate::version::VersionInfo;
 
 /// The proxy image's Dockerfile, as the file in `crates/holosmith/images/`.
 pub const PROXY_DOCKERFILE: &str = include_str!("../images/proxy.Dockerfile");
@@ -83,12 +83,12 @@ pub const BUILD_TIMEOUT: Duration = Duration::from_secs(1200);
 /// The version rather than `latest`: an upgraded binary must build and name a different image, and a tag an
 /// operator can read back is the one fact `docker image ls` shows of what a deploy installed.
 pub fn proxy_image() -> String {
-    format!("holosmith-proxy:{}", env!("CARGO_PKG_VERSION"))
+    Kind::Proxy.image_of(env!("CARGO_PKG_VERSION"))
 }
 
 /// `agent-image:<version>`: the image a session's container runs, the same name `agent_image` defaults to.
 pub fn agent_image() -> String {
-    format!("agent-image:{}", env!("CARGO_PKG_VERSION"))
+    Kind::Agent.image_of(env!("CARGO_PKG_VERSION"))
 }
 
 /// Which of the two images.
@@ -109,9 +109,18 @@ impl Kind {
 
     /// The name this binary builds and tags it by.
     pub fn image(self) -> String {
+        self.image_of(env!("CARGO_PKG_VERSION"))
+    }
+
+    /// The same name for **another release's** version, which is the tag a promotion builds and then reads (HS-078).
+    ///
+    /// One format string per kind, because the tag a promotion creates and the tag the *new* binary will ask for at
+    /// its next boot have to be the same string: the boot composes it from its own `CARGO_PKG_VERSION`, and a
+    /// promotion composes it from the candidate's `version --json`.
+    pub fn image_of(self, version: &str) -> String {
         match self {
-            Self::Proxy => proxy_image(),
-            Self::Agent => agent_image(),
+            Self::Proxy => format!("holosmith-proxy:{version}"),
+            Self::Agent => format!("agent-image:{version}"),
         }
     }
 
@@ -137,16 +146,23 @@ impl Kind {
     }
 }
 
-/// What one image's labels must say, from this binary's own values.
+/// What one image's labels must say, from a release's own values.
 ///
-/// Built from `env!` at compile time, from the config's `agent_toolchains`, and from a **digest of the binary
-/// bytes the build will copy**: an image is current when its labels are exactly this, which is why nothing here
-/// reads a build timestamp or an image id — a rebuild of identical inputs would change both and still be
-/// current. The binary is in the list because it is the one input a tag cannot describe: two builds of the same
-/// commit (or of the same dirty tree) carry the same `git describe`, and an image built from the older one would
-/// otherwise read as current.
+/// Built from a [`VersionInfo`] — which is *this* process's values for the two callers that build images for the
+/// binary they are running (`server deploy`'s step 3 and `doctor`), and the **candidate's** for a promotion (HS-078)
+/// — from the config's `agent_toolchains`, and from a **digest of the binary bytes the build will copy**: an image
+/// is current when its labels are exactly this, which is why nothing here reads a build timestamp or an image id —
+/// a rebuild of identical inputs would change both and still be current. The binary is in the list because it is
+/// the one input a tag cannot describe: two builds of the same commit (or of the same dirty tree) carry the same
+/// `git describe`, and an image built from the older one would otherwise read as current.
+///
+/// The `kind` is a field rather than something the toolchain list implies, because the **tag** the image is read and
+/// built under is `kind`'s and now depends on the release's version: a promotion to 0.2.0 asks the daemon for
+/// `holosmith-proxy:0.2.0`, which is what the *new* boot will run, not `holosmith-proxy:0.1.0` — the tag of the
+/// binary doing the promoting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Expectation {
+    pub kind: Kind,
     pub version: String,
     pub git_tag: String,
     pub pi_version: String,
@@ -156,7 +172,7 @@ pub struct Expectation {
 }
 
 impl Expectation {
-    /// This binary's values for `kind`, with the toolchains only where the Dockerfile has them.
+    /// This **running binary's** values for `kind`, with the toolchains only where the Dockerfile has them.
     ///
     /// It reads `binary`, because the digest is a property of those bytes and nothing else: a `Expectation`
     /// without one would be a skip rule blind to the very thing the acceptance names, so the constructor cannot
@@ -173,24 +189,34 @@ impl Expectation {
     /// argument in the product is [`own_digest`], and the tests take theirs from the same function or from
     /// [`digest`] over the artifact they build.
     pub fn of_digest(kind: Kind, config: &Config, binary: &str) -> Self {
+        Self::of_release(kind, config, &VersionInfo::current(), binary)
+    }
+
+    /// The expectation for **another release**: the candidate a promotion is about to make live (HS-078).
+    ///
+    /// Every `env!` value [`of_digest`](Self::of_digest) reads is a fact of the *building* binary, and a promotion
+    /// builds images the *candidate* will run — its version in the tag, its git tag, its pinned pi, and its digest,
+    /// which is the bytes the archive hands the daemon. Reading the running binary's values there would label a
+    /// 0.2.0 image as 0.1.0's, and the next boot would find no image at the tag it asks for.
+    pub fn of_release(kind: Kind, config: &Config, release: &VersionInfo, binary: &str) -> Self {
         Self {
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            git_tag: env!("HOLOSMITH_GIT_TAG").to_string(),
-            pi_version: pins::pi_version().to_string(),
+            kind,
+            version: release.version.clone(),
+            git_tag: release.git_tag.clone(),
+            pi_version: release.pi_version.clone(),
             binary: binary.to_string(),
             toolchains: (kind == Kind::Agent).then(|| config.agent_toolchains.clone()),
         }
     }
 
-    /// The label keys this image is expected to carry: the agent's four, the proxy's three.
-    ///
-    /// Derived from `toolchains` rather than carried as a second field, because the two cannot disagree that
-    /// way: an `Expectation` with a toolchain list is the agent image's.
+    /// The tag this image is read and built under: `holosmith-proxy:<version>`, `agent-image:<version>`.
+    pub fn tag(&self) -> String {
+        self.kind.image_of(&self.version)
+    }
+
+    /// The label keys this image is expected to carry: the proxy's four, and the agent's plus its toolchain list.
     fn keys(&self) -> &'static [&'static str] {
-        match self.toolchains {
-            Some(_) => Kind::Agent.tags(),
-            None => Kind::Proxy.tags(),
-        }
+        self.kind.tags()
     }
 
     /// What one label must hold, or `None` for a key this image does not carry.
@@ -646,15 +672,20 @@ pub enum Status {
 
 /// Read one image's labels and compare them with `expectation`.
 ///
+/// The tag comes from the expectation ([`Expectation::tag`]) and not from `kind.image()`, so the image read is the
+/// image of the release being judged: a promotion asks the daemon about the candidate's version, which is what the
+/// next boot will run.
+///
 /// Every arm is an answer: a daemon that cannot answer becomes a `Missing`/`Stale` carrying what it said, because
 /// a read that failed would stop the run at step 3 in a *dry run* — and a dry run's whole job is to print the
 /// plan, including the plan for a machine it cannot fully measure. The `Result` this once had never carried an
 /// `Err`, and a signature that promises an error nothing produces invites a caller's dead arm.
-pub fn read(images: &dyn Images, kind: Kind, expectation: &Expectation) -> Status {
-    let image = kind.image();
+pub fn read(images: &dyn Images, expectation: &Expectation) -> Status {
+    let image = expectation.tag();
     match images.labels(&image) {
         Ok(Some(labels)) if expectation.unbuilt(&labels) => Status::Stale(format!(
-            "{image} carries no Holosmith labels, so it was not built from this binary's Dockerfile"
+            "{image} carries no Holosmith labels, so it was not built from version {}'s Dockerfile",
+            expectation.version
         )),
         Ok(Some(labels)) => {
             let mismatches = expectation.mismatches(&labels);
@@ -662,7 +693,8 @@ pub fn read(images: &dyn Images, kind: Kind, expectation: &Expectation) -> Statu
                 Status::Current
             } else {
                 Status::Stale(format!(
-                    "{image} does not match this binary: {}",
+                    "{image} does not match version {}: {}",
+                    expectation.version,
                     mismatches.join("; ")
                 ))
             }
@@ -673,6 +705,32 @@ pub fn read(images: &dyn Images, kind: Kind, expectation: &Expectation) -> Statu
             "{image} is there, but its labels could not be read ({said})"
         )),
     }
+}
+
+/// The images of `release` that are not on this machine or not built from its bytes, proxy first.
+///
+/// **One function with two callers**, because acceptance bullet 4 ("rebuilds the two images only when the binary or
+/// a pinned version changed") has to mean one thing for `server deploy`'s step 3 and for a promotion: the read is
+/// the labels, the reason is the read's own sentence, and an empty answer is "nothing to build". The digest is the
+/// caller's because both already have one (the deploy hashes its own bytes once; a promotion has the candidate's
+/// `.sha256`), and `release` is the version whose tag the images are read under.
+pub fn outstanding(
+    images: &dyn Images,
+    config: &Config,
+    release: &VersionInfo,
+    digest: &str,
+) -> Vec<(Kind, String)> {
+    let mut pending: Vec<(Kind, String)> = Vec::new();
+    for kind in [Kind::Proxy, Kind::Agent] {
+        let expectation = Expectation::of_release(kind, config, release, digest);
+        // The reason is the read's own sentence, so the plan says *why* a build is coming rather than only that
+        // one is.
+        match read(images, &expectation) {
+            Status::Current => {}
+            Status::Missing(reason) | Status::Stale(reason) => pending.push((kind, reason)),
+        }
+    }
+    pending
 }
 
 /// The architecture guard: `Ok(Docker's word)` when the daemon builds for this binary's target.
@@ -718,20 +776,28 @@ pub fn architecture(images: &dyn Images, target: &str) -> Result<String, String>
 /// The order is the spec's: the proxy image is what step 4 starts, so a machine that runs out of bounds or disk
 /// has the image its proxies need before the larger one. The guard runs once, before the first build, because
 /// both images are built by the same daemon and one mismatch is enough to stop.
+///
+/// `release` is the version the images are built **for** and `binary` the bytes that go inside them: the same pair
+/// for `server deploy` (this process, its own bytes) and for a promotion (the candidate, its `.sha256`). The two
+/// cannot be given from different releases, which is the defect this parameter exists to prevent.
 pub fn ensure(
     images: &dyn Images,
     binary: &Path,
     digest: &str,
+    release: &VersionInfo,
     config: &Config,
     pending: &[(Kind, String)],
 ) -> Result<String, String> {
     if pending.is_empty() {
         return Ok("no image needed building".to_string());
     }
+    // The daemon's architecture is the *building* machine's fact, so the running binary's target is what is
+    // compared with it: the candidate is this machine's build (the promotion refuses anything else) and runs nowhere
+    // else.
     architecture(images, env!("HOLOSMITH_TARGET"))?;
     for (kind, _) in pending {
-        let expectation = Expectation::of_digest(*kind, config, digest);
-        let tag = kind.image();
+        let expectation = Expectation::of_release(*kind, config, release, digest);
+        let tag = expectation.tag();
         let context = archive(kind.dockerfile(), binary)?;
         let arguments = build_arguments(&tag, &expectation);
         match images.build(&tag, &context, &arguments)? {
@@ -742,7 +808,10 @@ pub fn ensure(
             } => return Err(failure(&tag, &text)),
         }
     }
-    let tags: Vec<String> = pending.iter().map(|(kind, _)| kind.image()).collect();
+    let tags: Vec<String> = pending
+        .iter()
+        .map(|(kind, _)| kind.image_of(&release.version))
+        .collect();
     Ok(format!(
         "built {} image{}: {}",
         tags.len(),

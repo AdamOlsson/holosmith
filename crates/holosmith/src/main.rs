@@ -55,6 +55,18 @@ fn main() -> ExitCode {
             target,
             out,
         }),
+        Cmd::Upgrade {
+            binary,
+            acknowledge_review,
+            wait,
+            root,
+        } => commands::upgrade::run(commands::upgrade::UpgradeArgs {
+            config: cli.config,
+            binary,
+            acknowledge_review,
+            wait,
+            root,
+        }),
         Cmd::Container { action } => match action {
             ContainerAction::Snapshot => commands::container::run_snapshot(),
             ContainerAction::FakePi { pi_args } => commands::container::run_fake_pi(&pi_args),

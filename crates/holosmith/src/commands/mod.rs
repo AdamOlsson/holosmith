@@ -14,4 +14,5 @@ pub mod serve;
 pub mod smoke;
 pub mod status;
 pub mod uninstall;
+pub mod upgrade;
 pub mod version;

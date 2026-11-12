@@ -81,6 +81,29 @@ pub enum Cmd {
         #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,
     },
+    /// Promote a new version: the whole of spec item 10's pipeline, one printed line per step (HS-078).
+    ///
+    /// The review gate acknowledged, the host smoke test, the two images when they changed, the drain, a database
+    /// backup, the release directory, the `current` symlink, `systemctl restart` and a 20-second health poll that
+    /// puts the previous release back when the candidate does not answer. Every refusal leaves the machine as it
+    /// found it, and says so — except that a failure after the drain leaves it draining, which the sentence names.
+    Upgrade {
+        /// The candidate: the file a promotion is about to make live.
+        #[arg(value_name = "BINARY")]
+        binary: PathBuf,
+        /// Item 12's diff review, acknowledged. A promotion without it is refused: that review is the real gate.
+        #[arg(long)]
+        acknowledge_review: bool,
+        /// How long the drain may wait for the turns that are running (`10m`, `500ms`).
+        #[arg(long, value_name = "DURATION", default_value = "10m", value_parser = parse_wait)]
+        wait: std::time::Duration,
+        /// Promote into this install tree instead of the system paths, as the invoking user (no sudo).
+        ///
+        /// The same meaning as `server deploy --root`: the release tree, the admin socket's directory and the unit
+        /// live under it, and a privileged install (the default) requires this command to run as root.
+        #[arg(long, value_name = "DIR")]
+        root: Option<PathBuf>,
+    },
     /// Container helpers, used inside a session's container.
     Container {
         #[command(subcommand)]

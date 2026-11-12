@@ -1,13 +1,18 @@
 //! What the binary reports about itself. Later stories reuse these names: `/api/health` takes
 //! `version`, `serve` logs `version` and `target` on its startup line, `doctor` compares
 //! `pi_version`, and `deploy --ssh` refuses on a `target` mismatch.
+//!
+//! **One shape, two directions** (HS-078): `holosmith version --json` writes it, and a promotion reads it back out of
+//! a *candidate* binary it has not installed yet (`holosmith upgrade` runs `<binary> version --json`), because a
+//! release's version, git tag, pin and schema are facts only that binary can answer. Deserialising the same struct
+//! rather than a second reader struct is what keeps the two ends of one line from drifting.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::pins;
 use crate::schema::SCHEMA_VERSION;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionInfo {
     pub version: String,
     pub git_tag: String,

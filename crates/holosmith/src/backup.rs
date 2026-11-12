@@ -40,6 +40,20 @@ pub const BACKUPS: &str = "backups";
 /// How many days of bundles one project keeps: a week.
 pub const KEEP: usize = 7;
 
+/// How many database snapshots one machine keeps: spec item 10 step 4's "keep five".
+///
+/// A second number beside [`KEEP`] because they are two different rotations over **one** directory: a project's
+/// bundles are one per project per day (a week of days), while a promotion's snapshots are one per promotion
+/// (the last five promotions), and a run that kept one number for both would silently shorten a week to five
+/// days or a promotion history to seven.
+pub const KEEP_SNAPSHOTS: usize = 5;
+
+/// What every database snapshot is named: `app-<ts>.db`.
+///
+/// `app` is the database's own name ([`crate::db`] opens `<data>/app.db`), so the snapshot says what it is a
+/// snapshot *of* without a second suffix to read.
+pub const SNAPSHOT: &str = "app";
+
 /// How many bundles this process has written. Only used to give each attempt its own temporary name, so
 /// two creates that race on one project cannot truncate each other's file.
 static ATTEMPT: AtomicU64 = AtomicU64::new(0);
@@ -58,13 +72,15 @@ pub enum BackupError {
     Git(String),
     /// A directory could not be created, a file could not be renamed or removed.
     Files(String),
+    /// The database itself could not be written by the caller's `VACUUM INTO` (HS-078).
+    Write(String),
 }
 
 impl fmt::Display for BackupError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Git(words) => write!(formatter, "git: {words}"),
-            Self::Files(words) => write!(formatter, "{words}"),
+            Self::Files(words) | Self::Write(words) => write!(formatter, "{words}"),
         }
     }
 }
@@ -246,6 +262,142 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     };
     let year = year_of_era + era * 400 + i64::from(month <= 2);
     (year, month as u32, date as u32)
+}
+
+/// The database snapshots one machine keeps: the directory, the name, and the rotation (HS-078, spec item 10
+/// step 4).
+///
+/// One type beside [`Backups`] because they are two rotations over one directory (`<data>/backups`): a project's
+/// bundles are `<project>-<day>.bundle` and keep a week of days, while a promotion's snapshot is `app-<ts>.db` and
+/// keeps the last five promotions. The two rules share the **name is the sort key** argument and nothing else, which
+/// is why they are two types in one module rather than one type with two modes.
+///
+/// The vacuum itself is the caller's: this module is `std`-only ([`crate::db`] owns SQL), so [`take`] is handed one
+/// function that writes a database to a path it is given. That is the seam a test uses to prove the *rotation* and
+/// the rename without a database, and the seam the promotion uses to hand it `db::Reader::snapshot`.
+///
+/// [`take`]: Snapshots::take
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Snapshots {
+    /// `<data_root>/backups`.
+    pub root: PathBuf,
+}
+
+impl Snapshots {
+    /// The snapshots of the machine whose data root is `data_root`.
+    pub fn new(data_root: &Path) -> Self {
+        Self {
+            root: data_root.join(BACKUPS),
+        }
+    }
+
+    /// The name a snapshot taken at `now` takes: `<data>/backups/app-<ts>.db`.
+    ///
+    /// The stamp is UTC and fixed-width (`YYYYMMDDTHHMMSS`), so the name **is** the sort key: the prune reads no
+    /// database and opens no file to know which snapshot is oldest, which is the same argument
+    /// [`Backups::prune`] makes about a bundle's day.
+    pub fn path(&self, now: i64) -> PathBuf {
+        self.root.join(format!("{SNAPSHOT}-{}.db", stamp(now)))
+    }
+
+    /// Take a snapshot of the database with `vacuum`, prune to [`KEEP_SNAPSHOTS`], and answer its path.
+    ///
+    /// Written aside and renamed into place, so the name that exists under `app-<ts>.db` is always a whole database:
+    /// a half-written file would be a recovery point an operator would trust. A second promotion inside the same
+    /// second replaces the first one's snapshot (a rename over an existing name is atomic), because two snapshots of
+    /// one instant differ in nothing an operator can use and the **name** is what the rotation sorts by.
+    pub fn take(
+        &self,
+        now: i64,
+        vacuum: &dyn Fn(&Path) -> Result<(), String>,
+    ) -> Result<PathBuf, BackupError> {
+        std::fs::create_dir_all(&self.root).map_err(|error| {
+            BackupError::Files(format!("creating {}: {error}", self.root.display()))
+        })?;
+        let snapshot = self.path(now);
+        let partial = snapshot.with_extension(format!("db.{}.tmp", std::process::id()));
+        let _ = std::fs::remove_file(&partial);
+        if let Err(sentence) = vacuum(&partial) {
+            let _ = std::fs::remove_file(&partial);
+            return Err(BackupError::Write(sentence));
+        }
+        std::fs::rename(&partial, &snapshot).map_err(|error| {
+            let _ = std::fs::remove_file(&partial);
+            BackupError::Files(format!(
+                "renaming {} to {}: {error}",
+                partial.display(),
+                snapshot.display()
+            ))
+        })?;
+        self.prune()?;
+        Ok(snapshot)
+    }
+
+    /// Delete all but the newest [`KEEP_SNAPSHOTS`] snapshots.
+    ///
+    /// By name, and only the names this module writes: a `.tmp` file of a run that died is not a snapshot, so it is
+    /// neither counted nor deleted here — the next [`take`](Self::take) removes its own, and an operator's own file
+    /// in this directory is not this module's to remove.
+    pub fn prune(&self) -> Result<(), BackupError> {
+        let entries = match std::fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(BackupError::Files(format!(
+                    "reading {}: {error}",
+                    self.root.display()
+                )));
+            }
+        };
+        let mut snapshots: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .filter(|entry| is_snapshot_of(&entry.file_name().to_string_lossy()))
+            .map(|entry| entry.path())
+            .collect();
+        snapshots.sort();
+        let excess = snapshots.len().saturating_sub(KEEP_SNAPSHOTS);
+        for snapshot in snapshots.into_iter().take(excess) {
+            std::fs::remove_file(&snapshot).map_err(|error| {
+                BackupError::Files(format!("removing {}: {error}", snapshot.display()))
+            })?;
+        }
+        Ok(())
+    }
+}
+
+/// Whether `name` is one of this module's snapshots: `app-`, a fifteen-character stamp, `.db`.
+///
+/// The shape check is what keeps a `.tmp` file, an operator's own `app.db` and a project bundle apart: only
+/// `app-<YYYYMMDDTHHMMSS>.db` is counted by the rotation, and everything else in the directory is left alone.
+fn is_snapshot_of(name: &str) -> bool {
+    let Some(rest) = name
+        .strip_prefix(SNAPSHOT)
+        .and_then(|rest| rest.strip_prefix('-'))
+    else {
+        return false;
+    };
+    let Some(day) = rest.strip_suffix(".db") else {
+        return false;
+    };
+    day.len() == 15
+        && day.as_bytes()[8] == b'T'
+        && day
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| index == 8 || byte.is_ascii_digit())
+}
+
+/// The instant `now` as `YYYYMMDDTHHMMSS`, in UTC.
+///
+/// The day half is [`day`]'s arithmetic, split out so the two names cannot disagree about which day an instant falls
+/// in; the time half is the remainder of the day, because UTC has no leap seconds in the calendar this build uses.
+fn stamp(now: i64) -> String {
+    let (year, month, date) = civil_from_days(now.div_euclid(DAY));
+    let second_of_day = now.rem_euclid(DAY);
+    let hour = second_of_day / 3_600;
+    let minute = (second_of_day % 3_600) / 60;
+    let second = second_of_day % 60;
+    format!("{year:04}{month:02}{date:02}T{hour:02}{minute:02}{second:02}")
 }
 
 /// A path as a git argument: the one conversion every call needs, and the reason none of them takes a

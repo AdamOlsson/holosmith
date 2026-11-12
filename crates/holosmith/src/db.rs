@@ -209,6 +209,28 @@ impl Reader {
     pub fn schema_version(&self, path: &Path) -> Result<u32, DbError> {
         recorded_version(&self.connection, path)
     }
+
+    /// Write this database's bytes to `destination` with `VACUUM INTO`, over the read-only connection (HS-078,
+    /// spec item 10 step 4).
+    ///
+    /// One statement rather than a file copy for the reason item 10 names it: a copy of a live WAL database is
+    /// three files that may not agree, while `VACUUM INTO` is the engine writing a consistent, compacted database
+    /// out of a read transaction — and a **read-only** connection may run it (measured: SQLite allows it, and the
+    /// destination is a new file the caller's uid can create). `upgrade` must not open this database read-write,
+    /// because that open would migrate it before the candidate ever ran (ADR-0047).
+    ///
+    /// `VACUUM INTO` refuses to write over a file that exists, which is why the caller hands it a name that is not
+    /// there and renames afterwards (and why the caller owns the rotation: this function knows one file).
+    pub fn snapshot(&self, destination: &Path) -> Result<(), DbError> {
+        let path = destination.display().to_string();
+        self.connection
+            .execute("VACUUM INTO ?1", [&path])
+            .map(drop)
+            .map_err(|error| DbError::Snapshot {
+                destination: destination.to_path_buf(),
+                source: error,
+            })
+    }
 }
 
 /// Why the database could not be opened, or could not be migrated.
@@ -232,6 +254,11 @@ pub enum DbError {
     /// SQLite refused a statement of our own.
     Sqlite {
         path: PathBuf,
+        source: rusqlite::Error,
+    },
+    /// `VACUUM INTO` could not write the snapshot a promotion takes (HS-078).
+    Snapshot {
+        destination: PathBuf,
         source: rusqlite::Error,
     },
     /// The embedded migrations cannot be used.
@@ -266,6 +293,14 @@ impl fmt::Display for DbError {
                 path.display()
             ),
             Self::Sqlite { path, source } => write!(f, "cannot use {}: {source}", path.display()),
+            Self::Snapshot {
+                destination,
+                source,
+            } => write!(
+                f,
+                "the database could not be written to {} with `VACUUM INTO`: {source}",
+                destination.display()
+            ),
             Self::Embed(error) => write!(f, "{error}"),
         }
     }
@@ -274,7 +309,9 @@ impl fmt::Display for DbError {
 impl std::error::Error for DbError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Migration { source, .. } | Self::Sqlite { source, .. } => Some(source),
+            Self::Migration { source, .. }
+            | Self::Sqlite { source, .. }
+            | Self::Snapshot { source, .. } => Some(source),
             Self::Embed(error) => Some(error),
             Self::Pragma { .. } | Self::Busy { .. } => None,
         }

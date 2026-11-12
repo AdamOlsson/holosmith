@@ -94,6 +94,13 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// rather than parsed (`drain 12345…` truncated would otherwise be a smaller, valid wait).
 pub const MAX_REQUEST: usize = 64;
 
+/// The line the server's first answer carries when the machine was **already** draining.
+///
+/// One spelling, because it is read: `holosmith upgrade` refuses a promotion on it (acceptance: "refuses to upgrade
+/// while draining is already in progress"), and the whole difference between "this request started the drain" and
+/// "somebody else's drain is running" is that word. `state: draining` is the other first answer.
+pub const ALREADY: &str = "state: already draining";
+
 /// The path of the drain socket inside one admin directory.
 ///
 /// The one spelling both sides use: `serve` binds it and `holosmith drain` connects to it, so a machine's
@@ -246,11 +253,7 @@ impl Drain {
     /// would be indistinguishable from one that hung.
     pub async fn run(&self, wait: Duration, report: &LineSink) -> Ending {
         let started = self.control.begin();
-        report.send(if started {
-            "state: draining"
-        } else {
-            "state: already draining"
-        });
+        report.send(if started { "state: draining" } else { ALREADY });
         // A duration so large the monotonic clock cannot add it is not a wait this command can honour, and
         // refusing it is better than a panic in an `Instant` addition or a wait with no end.
         let Some(deadline) = tokio::time::Instant::now().checked_add(wait) else {

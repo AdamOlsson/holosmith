@@ -18,7 +18,9 @@
 //!    carries [`INTERRUPTED`] as its reason: spec item 8's "a running turn is recorded as `interrupted`",
 //!    which is a reason on a `session.status` event and never a state. A `starting` row needs no transition
 //!    (it is already where a provision begins); `stopped`, `error` and `deleting` are left alone — the last
-//!    one because a delete is the operator's request to retry (ADR-0023).
+//!    one because a delete is the operator's request to retry (ADR-0023) — **except** a row a drain stopped with
+//!    [`crate::drain::SERVER_RESTART`], which is the second kind of row this pass brings back (HS-078, spec item
+//!    10 step 6: "sessions that were live before the drain return to `idle` on startup").
 //! 2. **The names no row owns.** A container `s_<id>` is removed unless `<id>` is a `deleting` row (every
 //!    other container is stale or about to be replaced, and a stranded pi must stop before a new one starts
 //!    on the same worktree); an `agents_<id>` network and a `.worktrees/<id>` directory are removed only when
@@ -71,7 +73,7 @@ pub const BOUND: Duration = Duration::from_secs(10);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recovery {
     pub id: String,
-    /// `Starting`, `Idle` or `Running`. `Starting` needs no transition; `Running` carries the reason.
+    /// `Starting`, `Idle` or `Running` for a row that was live, `Stopped` for one a drain stopped.
     pub from: Status,
 }
 
@@ -80,12 +82,36 @@ impl Recovery {
     pub fn interrupted(&self) -> bool {
         self.from == Status::Running
     }
+
+    /// The table row that gets this one to `starting`.
+    ///
+    /// Two kinds of row share everything after the transition — a provision — and differ in the word that brings them
+    /// back: a row that was live needs `crash_recovery` (which admits exactly those three states), while one a drain
+    /// stopped is a *resume* (spec item 10 step 6). Choosing it here rather than at each of the pass's two loops is
+    /// what keeps the transition and the restart from disagreeing about which rows are being brought back.
+    pub fn trigger(&self) -> Trigger {
+        match self.from {
+            Status::Stopped => Trigger::Resume,
+            _ => Trigger::CrashRecovery,
+        }
+    }
 }
 
-/// The rows that were live when the process died, in id order so a pass is repeatable.
+/// The rows the reconcile brings back, in id order so a pass is repeatable.
 ///
-/// "Live" is the cap's own word (spec item 7's step 4): `starting`, `idle` and `running` are the states that
-/// name a running session, and the table's `crash_recovery` row admits exactly them.
+/// Two kinds of row, and both pass through the same rest of the pass:
+///
+/// * **The rows that were live when the process died** — "live" is the cap's own word (spec item 7's step 4):
+///   `starting`, `idle` and `running`, and the table's `crash_recovery` row admits exactly them. A `running` row
+///   carries [`INTERRUPTED`].
+/// * **The rows a drain stopped** — `stopped` with [`crate::drain::SERVER_RESTART`] as its reason. The drain stops
+///   them *because the server is going down* and the boot is what knows it is back, which is spec item 10 step 6 in
+///   as many words: "sessions that were live before the drain return to `idle` on startup". The reason word is the
+///   whole test — the sweeper's, the cap's, the quota's, the expiry's and the operator's stops carry their own — so
+///   nothing else that is `stopped` comes back.
+///
+/// A `stopped` row that is not a drain's, an `error` row and a `deleting` row are left alone: the last one because a
+/// delete is the operator's request to retry (ADR-0023).
 pub fn recoveries(rows: &[Session]) -> Vec<Recovery> {
     let mut recover: Vec<Recovery> = rows
         .iter()
@@ -93,7 +119,8 @@ pub fn recoveries(rows: &[Session]) -> Vec<Recovery> {
             matches!(
                 row.status,
                 Status::Starting | Status::Idle | Status::Running
-            )
+            ) || (row.status == Status::Stopped
+                && row.status_reason.as_deref() == Some(crate::drain::SERVER_RESTART))
         })
         .map(|row| Recovery {
             id: row.id.clone(),
@@ -328,9 +355,9 @@ impl Reconciler {
                 return;
             }
         };
-        // The transitions come first, before the sweep and before anything is restarted: every live row is
-        // `starting` before the sweeper's first tick can call it idle, and a row cannot be re-provisioned
-        // while something else is still allowed to stop it.
+        // The transitions come first, before the sweep and before anything is restarted: every row this pass
+        // brings back is `starting` before the sweeper's first tick can call it idle, and a row cannot be
+        // re-provisioned while something else is still allowed to stop it.
         for recovery in recoveries(&rows) {
             if recovery.from == Status::Starting {
                 continue;
@@ -338,7 +365,7 @@ impl Reconciler {
             let reason = recovery.interrupted().then_some(INTERRUPTED);
             if let Err(error) = self
                 .transitioner()
-                .apply(&recovery.id, Trigger::CrashRecovery, reason)
+                .apply(&recovery.id, recovery.trigger(), reason)
                 .await
             {
                 tracing::warn!(
@@ -346,7 +373,7 @@ impl Reconciler {
                     session = %recovery.id,
                     from = recovery.from.as_str(),
                     %error,
-                    "a live row could not be moved back to starting"
+                    "a row this pass brings back could not be moved to starting"
                 );
             }
         }
@@ -363,7 +390,7 @@ impl Reconciler {
                 target: "holosmith::reconcile",
                 session = %session.id,
                 from = recovery.from.as_str(),
-                "bringing back a session that was live when the process died"
+                "bringing back a session this pass holds: it was live when the process died, or a drain stopped it"
             );
             self.provisioner()
                 .with_settle_reason(recovery.interrupted().then_some(INTERRUPTED))

@@ -57,7 +57,7 @@ use std::time::{Duration, Instant};
 use crate::config::{self, Config, Role};
 use crate::docker;
 use crate::doctor::{self, Depth};
-use crate::images::{self, Expectation, Kind as ImageKind, Status};
+use crate::images::{self, Expectation, Kind as ImageKind};
 use crate::key;
 use crate::preflight::{self, Check, Outcome};
 use crate::proxies;
@@ -505,6 +505,15 @@ impl Target {
     /// `<root>/run/holosmith`: the admin socket's directory.
     pub fn admin_dir(&self) -> PathBuf {
         self.prefixed(Path::new(ADMIN_DIR))
+    }
+
+    /// `<root>/opt/holosmith`: the release tree `holosmith upgrade` promotes into (spec item 10's
+    /// `releases/<tag>/`).
+    ///
+    /// Prefixed like every installed path, and it is one the deploy itself never writes: the tree exists only once a
+    /// release has been promoted, which is why [`crate::release`] is the module that names what lives there.
+    pub fn opt_dir(&self) -> PathBuf {
+        self.prefixed(Path::new(crate::release::ROOT))
     }
 
     /// `<root>/etc/systemd/system/holosmith.service`: the unit file step 5 writes.
@@ -1540,19 +1549,13 @@ fn images_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
         Err(sentence) => return failed(DeployStep::Images, sentence),
     };
     // Both expectations up front, so the loop below and the `satisfied` sentence read the same two values.
-    let proxy = Expectation::of_digest(ImageKind::Proxy, config, &digest);
-    let agent = Expectation::of_digest(ImageKind::Agent, config, &digest);
-    // Proxy first, which is also the build order: it is the smaller image and the one step 4 needs, so a machine
-    // that runs out of room or of the build bound has what its proxies run before the larger one.
-    let mut pending: Vec<(ImageKind, String)> = Vec::new();
-    for (kind, expectation) in [(ImageKind::Proxy, &proxy), (ImageKind::Agent, &agent)] {
-        // The reason is the read's own sentence, so the plan says *why* a build is coming rather than only that
-        // one is.
-        match images::read(machine, kind, expectation) {
-            Status::Current => {}
-            Status::Missing(reason) | Status::Stale(reason) => pending.push((kind, reason)),
-        }
-    }
+    //
+    // `outstanding` is the read's one home (HS-078): a promotion asks the same question for another release's
+    // version and digest, so the *rule* -- labels, proxy first, the read's own sentence as the reason -- must not
+    // live twice.
+    let release = crate::version::VersionInfo::current();
+    let agent = Expectation::of_release(ImageKind::Agent, config, &release, &digest);
+    let pending: Vec<(ImageKind, String)> = images::outstanding(machine, config, &release, &digest);
     let remark = image_remark(config);
     if pending.is_empty() {
         // The proxy image carries four labels and the agent image five — the toolchain list is the agent's, because
@@ -1595,7 +1598,7 @@ fn images_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
             );
         }
     };
-    match images::ensure(machine, &binary, &digest, config, &pending) {
+    match images::ensure(machine, &binary, &digest, &release, config, &pending) {
         Ok(sentence) => Line {
             step: DeployStep::Images,
             word: Word::Changed,
@@ -1777,18 +1780,27 @@ fn service_line(
     dry_run: bool,
     staging: &Path,
 ) -> Line {
-    let exe = match std::env::current_exe() {
-        Ok(exe) => exe,
-        Err(error) => {
-            return failed(
-                DeployStep::Service,
-                format!(
-                    "no unit was written: this process's own path could not be read ({error}), and `ExecStart` \
-                     names it because a program resolved through systemd's `PATH` is not the binary that wrote the \
-                     unit"
-                ),
-            );
-        }
+    // `ExecStart` names the **release tree's** binary when one is live, and this process's own path otherwise.
+    //
+    // That is the one fact a promotion changes and a deploy must not undo (HS-078): a machine whose `current`
+    // symlink resolves is a machine that systemd should start *through* it, so a switch is what a restart picks up.
+    // The unit's bytes are rendered from the same function either way, which is why this read and the promotion's
+    // write agree byte for byte -- and why a second deploy on a promoted machine says `satisfied`.
+    let exe = match crate::release::Release::of(target).live() {
+        Some(live) => live,
+        None => match std::env::current_exe() {
+            Ok(exe) => exe,
+            Err(error) => {
+                return failed(
+                    DeployStep::Service,
+                    format!(
+                        "no unit was written: this process's own path could not be read ({error}), and `ExecStart` \
+                         names it because a program resolved through systemd's `PATH` is not the binary that wrote the \
+                         unit"
+                    ),
+                );
+            }
+        },
     };
     let path = target.unit_path();
     // The role the machine holds once this run is done, not the half it installs: the unit is what boots.
