@@ -1,4 +1,4 @@
-# RESUME — one issue per session (next: PER-110 / HS-078, `holosmith upgrade <binary>`)
+# RESUME — one issue per session (next: PER-112 / HS-080, release layout and `current`)
 
 You are the **orchestrator for implementing Holosmith**. `PROMPT.md` is the standing operating procedure and
 still governs the cycle; this file is the state of the world, and it adds one rule of its own:
@@ -45,180 +45,190 @@ sandbox-specific incantation (§2).
 
 ---
 
-## 1. The issue this session picks up: `PER-111` — HS-079, `holosmith rollback`
+## 1. The issue this session picks up: `PER-112` — HS-080, release layout and `current`
 
-**State when this file was written** (HEAD after the `Refresh the handoff after PER-110` commit, **tree clean** apart
-from the operator's own `log.txt`): **78 of 80 stories Done, 2 Backlog** (`PER-111`, `PER-112`), all in project
-`Holosmith`. `PER-111` is the next in `HS-###` order, its only blocker is `HS-078` (just shipped) and it is eligible —
-**check Linear's `Blocked by` list rather than this sentence if it turns out to be a stop.** It has **no screen**: its
-user-visible surface is what it prints, and its demo is a machine serving the previous release again.
+**State when this file was written** (HEAD after the `Refresh the handoff after PER-111` commit, **tree clean** apart
+from the operator's own `log.txt` and `orchestrate.sh`): **79 of 80 stories Done, 1 Backlog** (`PER-112`), all in
+project `Holosmith`. `PER-112`'s blockers are HS-047 (Done) and, in practice, HS-078/HS-079, which built and switched
+the tree — **check Linear's `Blocked by` list rather than this sentence if it turns out to be a stop.** It is the
+**last** story of phase 4: when it ships, all 80 are Done.
 
-The last shipped story was `PER-110` (HS-078, `holosmith upgrade <binary>`, **ADR-0082**) — four commits, a **BLOCK**
-review with one P1 (every refusal *after* the drain was silent about the machine draining) and six smaller findings,
-all fixed or recorded, and its lessons are in `docs/review/PER-110.md`, `docs/notes.md`'s newest
-`### Landmines: the promotion, its order and what a binary can say (HS-078)` section and `git log`.
+The last shipped story was `PER-111` (HS-079, `holosmith rollback`, **ADR-0083**) — six commits, a review with one P1
+(the `Real` drain policy was already covered in the three modules it was lifted into), 100 gate cases, and its lessons
+in `docs/review/PER-111.md`, `docs/notes.md`'s newest
+`### Landmines: a rollback, and what a release tree does not record (HS-079)` and `git log`.
 
-**It left the harness HS-079 needs, and this is the list to read first:**
+**What it left HS-080 needs, and this is the list to read first:**
 
-- **`src/release.rs`** — the release tree. `Release::{of(&Target), at(path), root, releases, current, dir_of, binary,
-  link, tag_of, live, write, switch, restore}`, `release::{ROOT ("/opt/holosmith"), RELEASES, CURRENT, BINARY, DIGEST,
-  tag_problem, unit_executable}`, `Written::{Fresh, Current}`. `link()` returns the symlink target **verbatim**;
-  `restore(&Path)` is the one atomic write a rollback needs (`switch(tag)` is `restore(Path::new("releases").join(tag))`);
-  `live()` is `<install>/opt/holosmith/current/holosmith` when the link resolves to a binary, and `None` otherwise.
-- **`src/promote.rs`** — the pipeline. `promote::{run, execute(config, target, options, steps, tools), Options,
-  Steps (smoke/images/drain/restart/health), Real, DrainAnswer, ask_version(&Path) -> VersionInfo, WINDOW (20 s)}`,
-  and the private `poll`, `draining(String)` (the clause every refusal after a drain carries), `previous_release`,
-  `write_release`, `write_unit`, `serve_with`, `rollback`. `ask_version` is the only honest reader of "what version,
-  tag and schema is this *release*" — a rollback needs the same three facts about the release it is going **to**.
-- **`src/backup.rs`** — `Snapshots::{new, path, take, prune}`, `KEEP_SNAPSHOTS` (5); `src/db.rs` —
-  `Reader::snapshot(&Path)` (`VACUUM INTO` over the read-only opener) and `recorded_without_migrating`.
-- **`src/reconcile.rs`** — a `stopped` row with `status_reason = drain::SERVER_RESTART` is resumed on the next boot
-  (`Trigger::Resume`), so the sessions a rollback's drain stops come back by themselves. `Recovery::trigger()` is the
-  one place that chooses the word. **Do not add a second rule for a rollback**: this one already covers it, and
-  `tests/reconcile.rs` is where it is measured.
-- **`src/deploy.rs`** — step 5 renders `ExecStart` through `current` when `Release::live(target)` resolves, and falls
-  back to `current_exe` when it does not; `unit_text(exe, privileged, role)`, `Target::{resolve, privileged, opt_dir,
-  admin_dir, unit_path}`, `Tools { systemctl, … }`, `UNIT_NAME`.
-- **`src/commands/drain.rs`** — `ask_with(path, wait, silence, on_line: &mut dyn FnMut(&str) -> bool) -> Result<Exchange,
-  String>`; `Exchange { ending: Option<Ending>, stopped: bool }`, `ANSWER_TIMEOUT`. The drain's first line is
-  `drain::ALREADY` when somebody else's drain is running, and `holosmith drain` never stops reading.
-- **`src/commands/upgrade.rs`** — the one refusal that is about privilege (`is_root()` reading `/proc/self/status`,
-  then "as root, or with `--root DIR`"), and the shape a `rollback` verb should copy.
-- **`scripts/verify.sh`'s `case_upgrade`** — four arms and the two stand-ins a rollback case will want: a `systemctl`
-  that records argv and starts `$(readlink -f current)/holosmith serve`, and a **selective** `docker` that fakes only
-  the two product images and passes everything else to the real daemon. `HS_BREAK_FIRST` is the injected failure.
+- **`src/release.rs` is the tree, and it is nearly all here.** `Release::{of, at, root, releases, current, dir_of,
+  binary, link, tag_of, live, write, switch, restore, history, older_than}`; `release::{ROOT, RELEASES, CURRENT,
+  BINARY, DIGEST, tag_problem, unit_executable}`; `Written::{Fresh, Current}`. `history()` is the **one order** (the
+  releases' directories newest-first by mtime, tag as tiebreak) and `older_than(tag)` is the entry behind a tag; both
+  were written for the rollback and ADR-0083 D2 says HS-080 prunes by the same list — **do not invent a second order.**
+  `live()` is `<install>/opt/holosmith/current/holosmith` when the link resolves to a binary and `None` otherwise
+  (`deploy`'s step 5 reads it, which is why a deploy after a promotion does not undo it).
+- **`src/promote.rs`** is where a release is created and switched, and therefore where a *prune* belongs if a
+  promotion is to do it: `execute`'s step 6 writes the release, `write_unit`, `switch`, and step 7 is
+  `restart_and_poll` + the automatic `rollback`. `Steps` is the seam `tests/upgrade.rs` records the call order with,
+  and `tests/rollback.rs` reuses it.
+- **`src/commands/version.rs` + `src/version.rs`** own the fourth bullet: `VersionInfo` is built from `env!`
+  (`CARGO_PKG_VERSION`, `HOLOSMITH_GIT_TAG`, `pins::pi_version()`, `SCHEMA_VERSION`, `HOLOSMITH_TARGET`, sqlite), and
+  `version --json` prints it. "Reports the release tag it was run from" is a *new* fact — the directory the running
+  file is in — and `std::env::current_exe()` on Linux resolves the symlink, so a binary started through
+  `current/holosmith` sees `…/releases/<tag>/holosmith`. Decide whether that is a new key, a new line, both, and what
+  a binary run from `dist/` reports.
+- **`src/doctor.rs`** owns the fifth bullet: `Depth::{Quick, Full}`, `Tools { preflight, tailscale, systemd,
+  config_path, admin_dir }`, `Machine`, `run(config, depth, tools, machine) -> Report`, and the per-check functions
+  (`db::recorded_without_migrating` + `schema::verdict` is the shape to copy — one function, both arms, one sentence).
+  The vocabulary is `preflight::Check` (docker, git, disk, network, systemd, merge, tailscale, ports, database, proxy,
+  image): a release finding needs a new word there, and `doctor --quick` is what the unit runs as `ExecStartPre`, so
+  decide whether a broken link **refuses** a boot (it cannot: `doctor` has no release-tree knowledge today and a
+  machine that never promoted must still serve) or is a `pass` with a remark.
+- **`src/config/`** is where a configured count lives: 36 keys, `tests/golden/config-default.toml`, and
+  `KNOWN_KEYS.len()` (36 today) — a new key means all three move, in the same commit.
+- **`scripts/verify.sh`'s `case_upgrade`** already asserts the tree (`current` == `releases/<tag>`, the release's bytes
+  == the candidate's) and that `releases/old` — the rollback's target — survives a promotion. `case_rollback` builds a
+  three-release tree with explicit mtimes (`touch -d @…`) and a `systemctl` stand-in that records what `current` names
+  **at the moment it restarts**; a prune case is a smaller version of the same fixture.
 
-**Every commit of the last seven sessions is unpushed** (`git log origin/master..HEAD` — no ssh agent existed; see §2).
-The next session's first job is that command, then §2's single-key loop, before any story work.
+**Every commit of the last eight sessions is unpushed** (`/run/ssh-agent.sock` does not exist; see §2). The next
+session's first job is `git log origin/master..HEAD`, then §2's single-key loop, before any story work.
 
 ### 1.1 The slice (verbatim from `docs/stories/phase-4-self-development.md`; Linear's body is the same text)
 
-> ### HS-079 — `holosmith rollback`
+> ### HS-080 — Release layout and `current` symlink
 >
-> **As** the operator **I want** to go back one version **so that** a release that passed its health check but is wrong
-> is one command away from gone.
+> **As** the maintainer **I want** releases side by side with one live pointer **so that** upgrade and rollback are
+> atomic and reversible.
 >
-> - **Size:** S · **Blocked by:** HS-078 · **Spec:** item 10, Commands table
-> - **Demo:** roll back a live version and see the previous one serving with its sessions intact.
+> - **Size:** S · **Blocked by:** HS-047 · **Spec:** item 10, Single binary and CLI
+> - **Demo:** two release directories exist and `systemctl status` shows the unit executing through `current`.
 >
 > **Acceptance**
-> - [ ] Points `current` at the previous release, drains first, restarts, and verifies health.
-> - [ ] Refuses when the previous release's schema expectation is violated, with a clear explanation.
-> - [ ] Sessions survive the rollback in `idle` or `stopped`, never `error` because of the rollback itself.
-> - [ ] A rollback that fails its own health check says so loudly and leaves the operator a stated next step.
+> - [ ] Releases live in `releases/<tag>/`; `current` is a symlink that systemd executes through.
+> - [ ] Switching `current` is atomic (symlink replace, never edit-in-place).
+> - [ ] `holosmith version` reports the release tag it was run from, so the live version is unambiguous.
+> - [ ] Old releases are pruned to a configured count, never the live one or the rollback target.
+> - [ ] `doctor` reports the resolved release path and whether the symlink is intact.
 
 ### 1.2 The spec it closes
 
-`HolosmithSpec.md` item 10's fifth step — "Poll `/api/health` for 20 seconds. If the new version does not answer,
-switch the symlink back and restart" — and the paragraph after the six steps: "**In v1 these steps are implemented by
-`holosmith upgrade <binary>` and `holosmith rollback`** (see Single binary and CLI), not by a separate script." The
-**Commands table**'s row is `holosmith rollback`. Item 10's layout paragraph ("Releases live in `releases/<tag>/` with a
-`current` symlink that systemd runs") is HS-080's, except the switch itself, which HS-078 wrote. Item 10's rollback
-promise is the sentence to respect: "That makes the symlink rollback safe without restoring the database" — the
-migration rule, not a restore, is what a rollback may lean on.
+`HolosmithSpec.md` item 10's layout paragraph — "Releases live in `releases/<tag>/` with a `current` symlink that
+systemd runs" — and the sentence that follows: "That makes the symlink rollback safe without restoring the database."
+The **Single binary and CLI** section is the second source: one static binary, subcommands, and the release tree as the
+thing an operator swaps. Item 10's step 5 and the six-step list are HS-078's and HS-079's; **this story is what the
+layout means once two releases exist at once**: which one is live, which ones are kept, and how a machine says both.
 
 ### 1.3 What already exists (read this before planning)
 
-- **A rollback is already implemented once, implicitly**: `promote::rollback` (private) writes the previous link target
-  back, restarts, polls and prints which of two endings happened. HS-079 is the *verb* — the same sequence reachable on
-  demand, with the previous release chosen from the tree rather than from what a promotion happened to capture, and
-  with the refusal the acceptance names. Read `promote::rollback`/`serve_with`/`poll` before deciding how much of it to
-  lift into a shared module (the same `draining`, the same two-ending sentence, the same `uptime_s` rule).
-- **"One version back" is not a fact the tree records.** HS-078 records only `current`'s target; nothing keeps a
-  "previous" pointer, and the release directories are named by git tags (`f2b3886-dirty`), which do **not** sort in
-  release order. So the story must decide what "the previous release" *is* — the next-release-name in some order, the
-  next-more-recent directory, a recorded pointer written by each promotion, or a `--to <tag>` the operator names with
-  a default derived from one of those. This is the story's central decision and it belongs in the ADR. (HS-080's
-  pruning is the story that will need the same order, so whatever this decides, write it down for HS-080.)
-- **The schema refusal the acceptance asks for is the same fact as ADR-0082's recorded limit.** `ExecStartPre=doctor
-  --quick` refuses a database a newer release wrote (`Verdict::Newer`, ADR-0047), so a rollback across a
-  schema-advancing release cannot start the old `serve`. HS-079's "refuses when the previous release's schema
-  expectation is violated, with a clear explanation" is that fact seen from the rollback's side — read `schema::verdict`,
-  `db::recorded_without_migrating`, `doctor::database` and ADR-0082's "What this does not measure" before deciding
-  whether the refusal is *this* command's (a sentence before the switch) or a loud sentence after the restart fails.
-- **Sessions are already handled**: the drain stops them with `server_restart` and the next boot — whichever release —
-  resumes them to `idle` (HS-078's `reconcile` rule). "Never `error` because of the rollback" is therefore a claim
-  about *not* introducing a second path: a rollback must drain and restart like a promotion, not stop containers itself.
-- **The gate's shapes are `case_upgrade` and `case_drain`**: a `--root` tree, a `systemctl` stand-in that starts what
-  `current` names, a pinned control port with `control_origin` spelled to match, a real stub `serve` for the drain
-  socket, and a session to watch. A rollback case can be a *smaller* `case_upgrade` (one arm for the success, one for
-  the refusal) and must not `SKIP` when the verb is deleted.
+- **Bullets 1 and 2 are landed** (HS-078): `releases/<tag>/` holding `holosmith` + `holosmith.sha256`, and `current` a
+  **relative** symlink created beside the link and `rename`d onto it (one syscall, never an edit in place). So the
+  story's job is to *measure* them, not to build them — and the gate already asserts both (`case_upgrade`) plus the
+  switch-before-restart order (`case_rollback`). What is missing is a `case_*` that says so *in those words* and a doc
+  sentence; be careful not to spend the story re-implementing HS-078.
+- **The order exists and is the rollback's**: `Release::history()` / `older_than()` (ADR-0083 D2). Pruning to a count
+  is `history()` minus the first N — and the acceptance's "never the live one or the rollback target" is therefore a
+  statement about *N ≥ 2* plus one explicit protection: if the count is 1, keeping one release would delete the
+  rollback target, so the floor must be 2 (or the protection must be spelled and the count's minimum set accordingly).
+  Say which, in the ADR.
+- **`Release::live()`** is "what systemd executes": the path *through* the link, when it resolves to a binary. It is
+  the reader `doctor` and `version` both want; a second spelling of "is the link intact" would be the review's
+  Duplicated-Code finding.
+- **`deploy`'s step 5** prefers `Release::live(target)` when the tree resolves and falls back to `current_exe`
+  otherwise, so a deploy neither undoes a promotion nor rewrites a correct unit. A `doctor` release finding must agree
+  with that rule, not add a third one.
+- **`version --json`** has six keys and `version` prints six lines; `schema_previous`, `pin_single_source` and
+  `case_verification_table` all read `version --json`'s shape, so an added key is cheap but not free: check
+  `tests/version_cli.rs` and `scripts/verify.sh`'s `version` arms before choosing the shape.
+- **The gate's fixtures**: a release is "a copy of the artifact in a directory named by a tag". Two builds of one tree
+  cannot be told apart by `/api/health` (`git_tag` is `git describe`'s answer and the *directory* name is the tag a
+  promotion chose), so a prune case must build its releases by hand and set their mtimes (`touch -d @…`), exactly as
+  `case_rollback` does.
 
 ### 1.4 What does not exist
 
-No `rollback` verb, no `--to`, no ordering of releases, no schema-expectation refusal, and no way for an operator to
-reach the automatic switch-back after the fact. `promote::poll`, `promote::draining` and `promote::rollback` are
-private; whether HS-079 lifts them into a module both verbs share, or calls `promote::execute` with a flag, is a
-decision the plan must make and the ADR must record (the reviewer will ask which of the two spells one rule twice).
+No pruning of any kind, no config key for a release count, no `version` reporting which release the running file came
+from, and no `doctor` finding about the tree (path, tag or link integrity). `release.rs`'s module doc says as much:
+"HS-080 owns what the layout *means* from here".
 
 ### 1.5 What the plan must decide (and the arms each one has)
 
-1. **What "the previous release" is**, and how it is chosen: `--to <tag>` (with what default?), the release named by
-   `current`'s link target *before* the last switch (which nothing records today), directory mtime, or a name order.
-   Arms: a tree with three releases, `current` on the newest → the chosen one; what a tree with one release refuses
-   with; what a tag that is not in the tree refuses with.
-2. **The schema expectation**: whose schema (the target release's, read through `ask_version`), compared with the
-   database's `db::recorded_without_migrating` through `schema::verdict`; which verdict refuses and what the sentence
-   says (ADR-0082's limit is the reason, so the sentence should name `doctor --quick` and what to do).
-3. **The drain**: the acceptance says "drains first", so the order is drain → switch → restart → health; what
-   `--wait` defaults to (the promotion's `10m`?), what `expired`/`already draining` mean (a rollback is *also* a
-   restart, so an already-draining machine may be exactly the machine to roll back — decide and justify).
-4. **The health poll**: the same three facts (`name`, the target release's `version`, an `uptime_s` younger than the
-   restart) — reuse `promote`'s rather than a second copy; and the acceptance's fourth bullet: a rollback whose own
-   poll fails must say so loudly and name the next step (the backup path is *not* a rollback's to offer — name
-   `systemctl status`/`journalctl` and the release that is now `current`).
-5. **The unit**: does a rollback need to rewrite it? `ExecStart` already goes through `current`, so normally no —
-   but a machine whose `current` does not resolve has a unit that names a raw binary, and the decision is whether to
-   refuse or to fix the unit. Say which.
-6. **The gate**: one `case_rollback` with a success arm (a `current` that moves back, a health answer from a fresh
-   process, a session back `idle`) and a refusal arm (a target whose schema is newer than the database's), and no
-   `SKIP` that fires when the verb is deleted.
-7. **The CLI**: `holosmith rollback [--to TAG] [--wait D] [--root DIR] [--config PATH]`, and whether it needs the
-   review acknowledgement (it should not: a rollback is the emergency brake, and item 12's review is a pre-promotion
-   gate).
+1. **Where pruning runs and what it is allowed to touch.** Arms: at the end of a successful promotion (after the
+   health poll, so a failed promotion prunes nothing), in `holosmith build` (which writes a release without promoting
+   — probably *not*), at boot (a `serve` that prunes is a second writer of the tree, and a boot is not an operator
+   act), or a verb. Recommend the promotion's last step, and say what a prune failure does to the exit code.
+2. **The count**: a config key (`keep_releases`?) with a default and a floor; what `0`/`1` mean (refused? "keep
+   everything"?); and the acceptance's protection — "never the live one or the rollback target" — as a rule
+   (`history()` minus `current` minus `older_than(current)`, keep the newest N of what remains) or as a floor on the
+   count. Also: a *hand-seeded* directory (`releases/old`) is a release in the order, so pruning may delete it — is
+   that right? (Yes, but say it, and say that a directory the tree does not recognise is never touched.)
+3. **`version`'s fact**: which release the *running file* is in. Arms: `current_exe` resolved and matched against
+   `releases/<tag>/holosmith` by the same `tag_of` rule (so a binary run from `dist/` reports nothing); a new key on
+   `version --json` (`release: null` or a tag) and a line on `version`'s text; and whether `--json`'s six keys becoming
+   seven breaks anything (`case_verification_table`, `tests/version_cli.rs`, the gate's `sed -n 's/^git_tag //p'`).
+4. **`doctor`'s finding**: the `Check` word, the arms (no tree at all; a link that resolves to a release with a binary;
+   a link that does not resolve; a link naming a missing directory; a `current` that is not a symlink), and whether any
+   of them **fails** `--quick` — remembering that `--quick` is what refuses a boot on a machine that has never
+   promoted, and that a broken link would make the unit's `ExecStart` name nothing.
+5. **The docs**: `docs/build.md`'s release section (the layout paragraph is HS-078's; the pruning and the reporting are
+   this story's), `GLOSSARY.md`'s `Release tree` entry (it already points at `history()` and says pruning is HS-080's),
+   and the ADR (0084 is next).
+6. **The gate**: one `case_releases` (or `case_release_layout`) with no daemon: a tree of four releases built by hand
+   with distinct mtimes, a promotion or a prune that keeps the configured count, the live release and the rollback
+   target intact, a directory the tree does not recognise left alone, `version`'s report from inside a release
+   directory, and a `doctor --quick` run whose release line has both arms. No `SKIP` that would fire if the pruning were
+   deleted.
 
 ### 1.6 The questions the plan must answer (before code)
 
-1. What exactly does `rollback` print, step by step, and what is its exit code for each ending?
-2. What does a *refused* rollback leave behind (a drained machine? a switched link? nothing)?
-3. Which release is "previous", and what does the command do on a tree with no previous release?
-4. What is measured without systemd, and what is disclosed instead?
-5. What makes the schema refusal impossible to skip (read before the switch, not after the restart)?
-6. Where does the shared code live, so `upgrade`'s automatic switch-back and `rollback` are one implementation?
+1. What exactly does a prune print, and what does the promotion's last line say when it removed a release?
+2. What does a refused/unwritable prune do to a promotion that otherwise succeeded — exit 0 with a warning, or 1?
+3. Which release does a `serve` started by systemd report it is running from, and what does one started from `dist/`
+   report?
+4. Does a broken `current` fail `doctor --quick`? What does that do to a boot, given `ExecStartPre=doctor --quick`?
+5. What is measured without systemd, and what is disclosed instead?
+6. What does pruning do to the *rollback* target when the count is exactly the floor?
 
 ### 1.7 Acceptance, restated as checks
 
-- *points `current` at the previous release, drains first, restarts, verifies health* — the order asserted by a `Steps`
-  recorder (drain → switch → restart → health) as well as by the printed lines; the gate's `case_rollback` measures it
-  from the artifact with the stand-ins `case_upgrade` already has.
-- *refuses when the previous release's schema expectation is violated* — a database at schema N+1 and a target whose
-  `version --json` says N: refused **before** the switch, with a sentence naming `doctor --quick` and the migration rule.
-- *sessions survive in `idle` or `stopped`, never `error`* — a session the drain stopped is `idle` after the boot
-  (`reconcile`'s rule, measured in `tests/reconcile.rs`), and the rollback does not touch a row itself.
-- *a rollback that fails its own health check says so loudly, with a stated next step* — the second poll fails and the
-  sentence names the release that is `current`, `systemctl status`/`journalctl`, and what the operator should do.
+- *releases live in `releases/<tag>/`; `current` is a symlink that systemd executes through* — the gate asserts the
+  directory shape, the relative link, and that the unit's `ExecStart` goes through `current/holosmith`; `doctor`
+  reports the resolved path.
+- *switching `current` is atomic* — `Release::restore`'s staged-symlink-and-rename is already the only writer
+  (`tests/release.rs`), and `case_rollback`/`case_upgrade` assert a switch end to end; this story adds the sentence, not
+  a second implementation.
+- *`holosmith version` reports the release tag it was run from* — a test and a gate arm run the artifact from
+  `releases/<tag>/holosmith` (and through `current`) and read the report; one run from elsewhere reports no release.
+- *old releases are pruned to a configured count, never the live one or the rollback target* — a tree of N+2 releases,
+  a prune that leaves N, `current` untouched, `older_than(current)` untouched, and a directory the tree does not
+  recognise not touched; a second prune is a no-op.
+- *`doctor` reports the resolved release path and whether the symlink is intact* — both arms of one finding, over a
+  real tree and a broken link, and the boot's arm measured too (a `serve` over a broken link either starts and says so
+  or refuses with that sentence).
 
 ### 1.8 Non-goals
 
-Any screen; pruning, `version`-from-the-release-path and `doctor`'s release reporting (**HS-080**); a second ordering or
-pruning rule (record yours for HS-080); any change to `smoke`'s or `drain`'s contracts; a database restore (item 10's
-own promise is that a rollback does not need one).
+A new verb (a prune lives inside the promotion unless the plan argues otherwise); any change to the switch, the
+rollback's choice or the order (ADR-0083 D2); a database restore; a second spelling of "what is live"; `web/` (no
+screen). Changing `docs/stories/**`.
 
 ### 1.9 The demo
 
-Roll back a machine serving a promoted release and watch the previous one serve: `current` moves, the service is
-restarted once, the health answer comes from a process younger than the restart, and a session the drain stopped is
-`idle` again. Then the refusal: a target release whose schema is older than the database's is refused with its sentence
-and nothing is switched. Say plainly what was not measured: no systemd here (`systemctl` is a stand-in), no provider
-key, and — if the rollback's own poll cannot fail on this machine — say why.
+Two (or four) release directories side by side with `current` on one, the `systemctl` stand-in printing the `ExecStart`
+it would run (through `current`), a promotion that prunes to the configured count while leaving the live release and the
+rollback target, `holosmith version` reporting the tag it was run from inside a release directory *and* through
+`current`, and `doctor --quick`'s release line in both arms (a healthy tree, and a link pointing at a directory that is
+gone). Say plainly what was not measured: no systemd (`systemctl` is a stand-in), so "systemd executes through
+`current`" is the unit's `ExecStart` plus the stand-in's argv.
 
 ### 1.10 What the next agent needs back
 
-When you write the state back (§5, step 10): §1 becomes the next issue — `PER-112` (HS-080, the release layout and
-`current`) after HS-079 ships; check Linear's `Blocked by` list. Refresh the counts, the ADR number you took
-(**0083** is next), the last gate run's own numbers (and `web/`'s test count), and replace §9's row with this story's.
-Anything you learned that is **not** state and **not** an ADR goes into `docs/notes.md` under a new
-`### Landmines: …` heading, never into §1. Then kill what you started (§5, step 11).
+When you write the state back (§5, step 10): **this is the last story** — all 80 will be Done, so §1 becomes a closing
+task rather than an issue: confirm Linear's 80 rows are `Done`, run the final gate, and record the phase-4 numbers. Take
+**0084** as the next ADR number if something new is decided, refresh the counts (the gate's own printed case and
+assertion numbers, `cargo test`'s binary count, `web/`'s test count), and replace §9's row with this story's. Anything
+you learned that is **not** state and **not** an ADR goes into `docs/notes.md` under a new `### Landmines: …` heading,
+never into §1. Then kill what you started (§5, step 11).
 
 ## 2. Environment (already repaired — do not redo)
 
@@ -444,8 +454,8 @@ it also prints one `ok <case>` line per case that measured something: a case tha
 line and the run ends with `SKIP n of N cases measured nothing`, so `grep -c '^ok case_'` is the number that
 proved something and a skip can never read as a pass. It takes ~15 min (both musl targets, the Docker cases,
 `case_idle_stop`'s real minute, `case_disk_quota`'s two boots, `case_preview`'s container and
-`case_doctor_full`'s self-test, and `case_smoke`'s three arms with no skip). As of PER-110 the run prints **99 cases
-and 2174 assertions**, `cargo test` is **1372** in 67 binaries, and `web/` is **132** tests. (The last three numbers move with every story that adds a case, a
+`case_doctor_full`'s self-test, and `case_smoke`'s three arms with no skip). As of PER-111 the run prints **100 cases
+and 2208 assertions**, `cargo test` is **1389** in 69 binaries, and `web/` is **132** tests. (The last three numbers move with every story that adds a case, a
 test or a rule; the gate prints its own, so quote the run rather than this line.) `--no-build` skips `build` and `embed`; `--keep` keeps the work dir.
 
 Some cases bring their own boot, and they are the ones a new story is most likely to collide with:
@@ -466,6 +476,7 @@ Some cases bring their own boot, and they are the ones a new story is most likel
 | `case_key_proxy_request` | a stand-in `openssl` on `PATH`; asserts the bytes the key proxy really sends |
 | `case_server_deploy`, `case_server_service` | two halves each: an **offline** one (`python3` for a `_ping` socket / a `/api/health` responder) and an **online** one (the daemon and an image) that drives a `--root` deploy with `deploy_machine_shims`' `tailscale` on `PATH`; they remove `hs_egress`/`hs_key` before and after, and `case_server_images` must have run first |
 | `case_preview` | **its own boot** (stub backend, own data root, `preview_listen = "127.0.0.1:0"`) and, for its second half, the daemon and `agent_image` — it makes its own `s_<id>` container on an `--internal` `agents_<id>` and prints one `SKIP` line without them; the first half always runs and puts the shared boot back |
+| `case_rollback` | **no daemon, no image, no python3 for the served arms**: its own `--root` tree of three releases (`touch -d @…` for the order), a real `serve` on a pinned port with `control_origin` spelled to match, a `systemctl` stand-in that records `readlink -f current` **at the moment it restarts** and, for the last arm, starts nothing (`HS_BREAK_RESTART=1`). Its schema arm needs `python3` (one `note` line without it) and runs **before** the boot: a database written under a running `serve` is unlinked, not reset |
 | `case_pwa` | **nothing** — no daemon, no image, no `openssl`, no `node`, no `python3`: its own stub boot and its own data root with a hand-written VAPID pair written into `secrets/`, then the health answer's sixth key compared with that string and `null` after the file goes. It has **no `SKIP` arm at all**, on purpose. It restores the shared boot (`stop_serve`/`start_serve`), so it sits right after `case_push` |
 | `case_push` | **no daemon, no image**: its own stub boot, a `node:https` receiver on `127.0.0.1:0` (so `node`), a CA and a `localhost` certificate plus the machine's VAPID pair (so `openssl`), and `python3` for the SEC1 walk and `app.db`. It exports `SSL_CERT_FILE` around `start_serve` and unsets it at once — the sender passes no `-CAfile` on purpose (ADR-0071), which is what lets a private CA stand in front of it. It holds an SSE stream open **across** a turn (a raw `/dev/tcp` descriptor, because `fetch_stream` closes its socket and releases the guard) |
 | `case_forward` | **two boots of its own** (a `role = "server"` and a `role = "hub"` with a `hosts.toml` naming it — `start_peer`/`stop_peer`, its own admin dir, `forward_fetch <port>`), a `python3` silent peer for the `504`, and — for the preview arms only — the daemon and `agent_image` (one `SKIP` line without them; the API half needs no daemon). It puts the shared boot back |
@@ -532,8 +543,8 @@ crates/holosmith/
   src/cli.rs                clap: version, config {validate,show,edit}, serve [--port|--data-dir|--backend],
                             proxy {egress --listen --allow}
   src/commands/             version.rs, config.rs, serve.rs, proxy.rs, doctor.rs, key.rs, container.rs,
-                            upgrade.rs (`holosmith upgrade`: the config, the root-or-`--root` refusal with
-                            `is_root()` reading `/proc/self/status`, and the exit code),
+                            upgrade.rs (`holosmith upgrade`: the config, `deploy::privilege_problem`'s refusal and the
+                            exit code), rollback.rs (`holosmith rollback`: the same three, over `Real::joining`),
                             deploy.rs (both deploys' command: the config, `DeployArgs {config, kind, dry_run, root}`,
                             the tail — `deploy: role:`/`url:`/`next:`, a dry run's role line saying `would be` — and
                             the resume command), hub.rs (the registry half: `hub host add/list/remove`, and it is a
@@ -541,18 +552,32 @@ crates/holosmith/
                             drain.rs (`holosmith drain [--wait]`: a std UnixStream client, and the exit code
                             is the server's terminal word — 0 only for `drained`), smoke.rs (`holosmith smoke
                             [--binary] [--root]`: the config, the exit code and the sentence)
-  src/release.rs            the release tree (HS-078, ADR-0082): `ROOT` (`/opt/holosmith`), `RELEASES`, `CURRENT`,
+  src/release.rs            the release tree (HS-078, ADR-0082; the tree's ORDER since HS-079, ADR-0083): `ROOT`
+                            (`/opt/holosmith`), `RELEASES`, `CURRENT`,
                             `BINARY`/`DIGEST` (`builder`'s two names), `tag_problem` (one path segment), `unit_executable`
                             (the `ExecStart=` reader), `Release::{of(&Target), at, root, releases, current, dir_of,
                             binary, link (verbatim), tag_of, live (the path *through* `current`), write (binary + digest,
                             one tag holding one binary), switch (a relative link renamed onto `current`), restore (any
-                            target, verbatim)}`, `Written::{Fresh, Current}`
-  src/promote.rs            the promotion pipeline (HS-078, ADR-0082): `WINDOW` (20 s), `Options {candidate,
-                            acknowledge_review, wait, window}`, `Steps` (the seam: `smoke`/`images`/`drain`/`restart`/
-                            `health`), `Real`, `DrainAnswer::{Drained, Expired, Already, Failed}`, `run`, `execute`,
-                            `ask_version` (the candidate's own `version --json`), and the private `read_candidate`,
-                            `refuse_older_schema`, `take_backup`, `previous_release` (the seeding rule), `write_release`,
-                            `write_unit`, `serve_with`, `rollback`, `poll`, `draining`
+                            target, verbatim), history (every release, newest first by mtime, tag as tiebreak: the ONE
+                            order, and HS-080 prunes by it), older_than(tag) (the newest release strictly older than it)}`,
+                            `Written::{Fresh, Current}`
+  src/promote.rs            the promotion pipeline (HS-078, ADR-0082) and the sequence both release verbs share (HS-079):
+                            `WINDOW` (20 s), `Options {candidate, acknowledge_review, wait, window}`, `Steps` (the seam:
+                            `smoke`/`images`/`drain`/`restart`/`health` — a rollback calls it too and never touches the
+                            first two), `Real::{new (refuses a drain somebody started; its lines say `upgrade:`), joining
+                            (the rollback's: joins it; lines say `rollback:`)}, `DrainAnswer::{Drained, Expired, Already,
+                            Failed}`, `run`, `execute`, `ask_version` (a binary's own `version --json`), `Attempt` +
+                            `restart_and_poll` (clock → restart → poll; THREE call sites), `refuse_older_schema(config,
+                            subject, schema, remedy)`, `draining` and `write_unit` (`pub(crate)`; the one writer of the
+                            unit's bytes), and the private `read_candidate`, `take_backup`, `previous_release` (the
+                            seeding rule), `write_release`, `serve_with`, `rollback`, `poll`.
+                            `deploy::privilege_problem(target, verb)` is the two release verbs' one root-or-`--root` rule
+  src/rollback.rs           the rollback verb (HS-079, ADR-0083): `Options {to, wait, window}`, `execute(config, target,
+                            options, steps, tools)`, `run`, and the private `live` (the trees with no `current` to go back
+                            from), `choose` (`--to`, or `older_than(live)`; its refusals list the tree), `not_live` (the
+                            loud ending: the journal, the release now `current`, `--to` back, and that the database was
+                            not restored). Order: target → schema → unit → drain → switch → restart → poll. Writes no
+                            row, stops no container, takes no backup, restores nothing
   src/smoke.rs              the smoke run (HS-077, ADR-0081): `config_text` (a valid config, written before the daemon is
                             asked), `image`/`recipe` (the label covers recipe + candidate bytes), `ensure_image`, `run`/
                             `execute` (0/1/2 via `Outcome::exit_code`), `drive` (banner → health → create → prompt → history
@@ -998,7 +1023,10 @@ crates/holosmith/
                             never move under `migrations/`
   scripts/schema-snapshot.sh  the release step that regenerates it (`<data root>/app.db`, read-only open)
   src/{serve,web,logging,clock,version,pins}.rs
-  tests/                    release (HS-078: the tree's switch/restore/write refusals and the unit's `ExecStart`),
+  tests/                    release (HS-078: the tree's switch/restore/write refusals and the unit's `ExecStart`; HS-079's
+                            `history`/`older_than` order over real mtimes), rollback (HS-079: ten tests over the `Steps`
+                            seam — the order and the switch before the restart, the target choice, both pre-drain
+                            refusals with an empty trace, the joined drain, both endings, the unit),
                             upgrade (HS-078: the pipeline's order through the `Steps` recorder, each refusal with the
                             later calls never made, the rollback and its two endings, the digest and schema refusals;
                             skips without `dist/`), trust (HS-070: the decision table over shims — every arm, the identity parser's
@@ -1118,7 +1146,9 @@ scripts/verify.sh           the one-command gate (see §3), including the two st
                             --json` from the pairs it was asked for) and `health_responder` (a `python3` that
                             answers `/api/health` for a whole case)
 scripts/import-linear.py    the MCP plumbing /tmp/lin.py reuses
-docs/adr/0001…0082          read the recent ones before planning anything (0082 is HS-078's promotion: its thirteen
+docs/adr/0001…0083          read the recent ones before planning anything (0083 is HS-079's rollback: the tree's order
+                            `history`/`older_than`, the verb's flags, the joining drain, the loud ending and the
+                            `cp -a`/`cp -r` limit; 0082 is HS-078's promotion: its thirteen
                             decisions, the two limits it records — no systemd, and `ExecStartPre=doctor --quick` versus a
                             rollback across a schema bump — and the review's six answers; 0081 is HS-077's smoke run: a host verb whose
                             exit code is the contract, the candidate as `pi`, the fixture's header, the prefix's reach,
@@ -1130,11 +1160,13 @@ docs/adr/0001…0082          read the recent ones before planning anything (008
 docs/build.md               prerequisites, gates, verify.sh, guards, migrations, placeholders, and the three verbs of
                             phase 4 (`build`, `smoke`, `upgrade` — the last with what it refuses and what this machine
                             cannot measure)
-docs/review/PER-33…PER-110  each a verbatim review + a `## Resolution` table
-                            (`PER-110` is this build's newest — a BLOCK with one P1 (every refusal after the drain was
-                            silent about the machine draining), two P2s (`Options.window` was not the poll's window;
-                            the "already draining" sentence named a remedy that cannot work) and four P3s, all fixed
-                            or recorded with a citation; `PER-109` the one before)
+docs/review/PER-33…PER-111  each a verbatim review + a `## Resolution` table
+                            (`PER-111` is this build's newest — one P1 (`Real`'s two drain policies were asserted only
+                            from the verbs that read them, so flipping the constructor reddened nothing), five P2/P3
+                            fixed (a promotion's remedy on a rollback's refusal; a refusal contradicting its own
+                            listing; the shared unit writer speaking as a promotion; an assertion comparing a constant
+                            with itself; two different claims about `cp -r`), three dismissed with a citation;
+                            `PER-110` the one before)
 docs/stories/               the 80 story slices — the dependency order and definition of done
 GLOSSARY.md                 the domain vocabulary. Check it BEFORE inventing a term.
 ```
@@ -1428,15 +1460,15 @@ Working artifacts (`/tmp` is ephemeral; the durable record is Linear + `docs/rev
 The catalogue lives in **`docs/notes.md`** — read the **cross-cutting** sections before you start anything,
 then the sections below. It is a reference: everything there is a measurement or a review finding.
 
-| Read | Why it bears on HS-079's rollback |
+| Read | Why it bears on HS-080's release layout and pruning |
 | --- | --- |
-| Cross-cutting: *Config and docs*, then *Tests*, *Demos*, *Build and toolchain* | **Config and docs**: a new config key means `tests/golden/config-default.toml` **and** `KNOWN_KEYS.len()` (36 today — a rollback needs none, so prefer flags), and an ADR means a line in `docs/stories/README.md` **and its count** (82 today). **Tests**: a program is a `PathBuf` field in a `Tools` and a stand-in on `PATH` is the gate's way; a test that cannot fail is worse than no test. **Demos**: score a pid when you start one; `pgrep -f` matches unrelated processes. |
-| *Landmines: the promotion, its order and what a binary can say (HS-078)* and `docs/adr/0082-*` | The three things this story inherits: "already draining" is the drain's **first line** and not its `Refused` ending; the health poll needs `uptime_s` younger than the restart because every binary here reports `0.1.0`; and the recorded limit — `ExecStartPre=doctor --quick` refuses a database a newer release wrote, which is exactly the refusal the acceptance asks a rollback for. |
-| *Landmines: the drain and its socket (HS-051)* and `docs/adr/0060-*` | The socket's three endings and its modes; a rollback that drains first reuses `commands::drain::ask_with` and inherits the "a timeout is not a dead socket" rule. |
-| *Landmines: the deploy, the ports and what `install` does to a key file (HS-047)*, *the service, the keys and the origins (HS-049)* | `Target`/`--root`, what step 5 writes into `holosmith.service` (`ExecStartPre=doctor --quick`, `Restart=on-failure`) and the perms findings a `--root` tree needs — a rollback writes no unit, but it reads the one it restarts. |
-| *Landmines: the startup reconcile (HS-044)* and *the drain (HS-051)* | `reconcile` resumes `stopped · server_restart` rows on the next boot: that is already the acceptance's "sessions survive in `idle` or `stopped`", so a rollback must not write rows itself. |
-| *Landmines: the fake pi and the smoke run (HS-077)* | Only if the rollback's gate arm wants to promote first: a smoke run is the slowest thing in a case and `case_upgrade`'s stand-ins are the ones to copy. |
-| *Reviews* (`docs/review/PER-110.md`, `PER-109.md`) | The recurring lessons: a sentence claiming more than it measured; a test that cannot fail on the code it names; a gate assertion that passes over nothing; and (PER-110's P1) a *class* of refusal that owes the operator the state it left the machine in. |
+| Cross-cutting: *Config and docs*, then *Tests*, *Demos*, *Build and toolchain* | **Config and docs**: a configured release count is a **new key**, so `tests/golden/config-default.toml`, `KNOWN_KEYS.len()` (36 today → 37) and `config show`'s rendering all move in the same commit; an ADR means a line in `docs/stories/README.md` **and its count** (83 today). **Tests**: a program is a `PathBuf` field in a `Tools` and a stand-in on `PATH` is the gate's way; a test that cannot fail is worse than no test. **Demos**: score a pid when you start one; `pgrep -f` matches unrelated processes. |
+| *Landmines: a rollback, and what a release tree does not record (HS-079)* and `docs/adr/0083-*` | The order is **`Release::history`** (mtime, newest first, tag tiebreak) and `older_than` is one step back — ADR-0083 D2 says HS-080 prunes by the same list. Also there: `File::open(dir).set_modified` is how a test sets a directory's mtime (no `touch` child), a printed step order is not evidence of the work's order, and deleting `app.db` under a running `serve` unlinks it rather than resetting the machine. |
+| *Landmines: the promotion, its order and what a binary can say (HS-078)* and `docs/adr/0082-*` | Where a release is created and switched (`promote::execute`'s steps 6–7), the seeding rule for a first promotion (`previous_release`), and why `deploy`'s step 5 goes through `Release::live`: so a deploy after a promotion does not undo it. A prune belongs at the end of that pipeline, and `Steps` is the seam a test records the order with. |
+| *Landmines: the doctor, the ports and a read-only open (HS-045)*, *the deploy (HS-047)*, *the service, the keys and the origins (HS-049)* and `docs/adr/0054-*` | `doctor`'s shape: one function per check with both arms, `preflight::Finding`/`Check` as the vocabulary, `Depth::{Quick, Full}` and the fact that **`--quick` is the unit's `ExecStartPre`** — so a release finding that *fails* on a machine that never promoted would refuse a boot. `Target::unit_path`/`opt_dir` are the paths it would report. |
+| *Landmines: `status`, `logs` and `uninstall` (HS-050)* | `holosmith version`'s surface and the two readers a new key would touch: `tests/version_cli.rs`, `tests/schema_previous.rs` and the gate's `sed -n 's/^git_tag //p'`. "The tag it was run from" is `current_exe` resolved, which is a *different* fact from `git_tag` (the build's). |
+| *Landmines: the fake pi and the smoke run (HS-077)* | Only if the gate's prune arm promotes first: a smoke run is the slowest thing in a case, and `case_upgrade`/`case_rollback`'s stand-ins are the ones to copy. A prune case needs neither: a hand-built tree of four releases with `touch -d @…` is the whole fixture. |
+
 Three rules worth repeating here because they are the most expensive to relearn: **a test that cannot fail is worse
 than no test** (mutate the behaviour and watch it go red); **a gate case that SKIPs on the bug it exists to catch is
 this project's P1**; and **after any scripted Markdown edit, read the changed lines** — five such edits have cost a
@@ -1448,7 +1480,7 @@ assertion that mattered under `holder_pid: unbound variable`.
 
 ## 7. Decisions taken on the operator's behalf (do not silently undo)
 
-Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0081`, one line each in
+Almost every hard-to-reverse decision is an ADR (`docs/adr/0001` … `0083`, one line each in
 `docs/stories/README.md`): read the recent ones before planning, and **amend rather than rewrite** — an ADR
 a later story changes gets a "Superseded by ADR-00xx" note (0012/0013, and 0026 amended 0020). The **ADR index in
 `docs/stories/README.md` is the one part of that directory a story edits** — it is the record of the decisions,
@@ -1480,7 +1512,7 @@ cd /home/adamolsson/projects/holosmith
 git status --short                                  # clean apart from log.txt/orchestrate.sh
 . ~/.pi/toolchains/env.sh                           # ALWAYS before cargo/rustc
 python3 /tmp/lin.py issues | grep -v ' Done ' | head # recreate /tmp/lin.py first (§2)
-python3 /tmp/lin.py issue PER-111                   # scoped, Backlog, the issue §1 names
+python3 /tmp/lin.py issue PER-112                   # scoped, Backlog, the issue §1 names
 docker version                                      # the daemon must answer, or a Docker check cannot be measured
 docker image inspect pi-agent:local                 # the image the Docker stories run
 docker network ls | grep -w egress                  # the proxy test's premise (§2); `grep -x` never matches
@@ -1491,7 +1523,7 @@ scripts/verify.sh                                   # baseline green, ~20 min (i
 
 If the baseline is red before you touch anything, that is the first thing you fix — and say so in Linear.
 
-Then start §5 on **§1's issue** (`PER-111`, HS-079) and stop after step 11.
+Then start §5 on **§1's issue** (`PER-112`, HS-080) and stop after step 11.
 
 Before you begin, check that the last session left nothing behind — `subagent({action:"list"})` should show
 no run in progress, `docker ps` none of its containers, and `git status --short` should look like the line
@@ -1510,45 +1542,41 @@ from those three; do not carry old sessions' ledgers in this file.
 If you stop before the issue ships, say so explicitly, name the next action, and leave the tree clean and the
 gates green — **a half-finished story is worse than an honest stop**.
 
-**The last shipped story** (`PER-110`, HS-078, `holosmith upgrade <binary>`, ADR-0082; commits `4f98017`, `940ba59`,
-`f71aec0`, `76e2c4e`): phase 4's fourth story, and the one that made a promotion a single command. Five things are
-worth carrying.
+**The last shipped story** (`PER-111`, HS-079, `holosmith rollback`, ADR-0083; commits `1d9f3c7`, `3c527d3`,
+`ccea1d7`, `e61b1eb`, `ac7ab65`, `e7ba0cc`): phase 4's fifth story, and the one that made the implicit switch-back a
+command. Four things are worth carrying.
 
-**The pipeline is one command, and its order is a claim that needed two measurements.** The spec's six steps plus the
-two images and the health poll; the review's first finding was that only some of them make a child a gate case can
-record (the review acknowledgement, the backup and the drain make none), so `promote::run` takes a `Steps` seam for
-`tests/upgrade.rs` to record the exact call order, and `case_upgrade` measures the same order from the artifact with
-the recorded children and the effects. A claim about order needs both, or it is a claim about a print statement.
+**The story's centre was a question nobody had written down: what is "one version back"?** The tree records no
+previous pointer, and a tag is `git describe`'s answer, so a name order is not an order at all (`f2b3886-dirty` sorts
+above `v0.1.0`). What a tree *does* record is when each release was written onto it, so the answer is the directory's
+mtime, newest first, tag as tiebreak — `Release::history`/`older_than`, in `release` rather than in the verb because
+HS-080's pruning needs the same order. ADR-0083 D2 records the road not taken (a pointer file) and why.
 
-**Three landed modules had to learn about a *second* release.** `images`' expectation was built from `env!` — the
-building binary's version, tag and pin — and a promotion builds the *candidate's* tags, which is what the new boot asks
-the daemon for; `deploy`'s step 5 rendered `ExecStart` from `current_exe`, so a deploy after a promotion silently undid
-it; and `reconcile` brought back only rows that were live, so the sessions a drain stopped never returned. Each was a
-one-line assumption that "this binary" meant "the only release", and each now has one function both callers use.
+**The cheapest way to get this wrong is a sentence, not a line.** The review found that the schema refusal — one
+measurement, correctly shared between the two verbs — also shared a *remedy*: a rollback was told to "build the release
+from the current tree", which is a promotion's advice. The measurement is shared and the remedy is now a parameter.
+The same class appeared one level down: `write_unit`'s failures spoke as a promotion when the rollback calls the same
+writer, and carried no statement of the machine's state. Both were fixed by making the shared function say less and its
+callers say the rest.
 
-**The health poll needed a third fact.** Every binary this repository builds reports `0.1.0`, so a poll comparing the
-version is satisfied by the old process still answering during a restart — and a rollback gate arm against it could
-never fail. `uptime_s` was already in the payload; an answer now counts only when it comes from a process that started
-after the restart. The review then caught the poll's *doc* claiming more than that ("a process this command started"),
-which is the same over-claim one level down.
+**"Both readings are tested" was true of the verbs and false of the machine.** The P1 was that `Real`'s two drain
+policies were only ever asserted through the `Steps` recorders in `tests/*.rs` — so flipping `Real::joining`'s flag
+reddened nothing anywhere. It is now measured where it is made, over a fake admin socket, in a `#[cfg(test)]` module in
+`promote.rs`. That module existed for nothing else, which is why the lift did not notice.
 
-**The drain's "already draining" is not its `Refused` ending.** `Drain::run` deliberately runs on to `Drained` when the
-flag was already set (a second drain joins the first), so acceptance bullet 5's refusal had to be the server's own first
-line — `drain::ALREADY`, read by the client's line callback, which can now stop. That one is in `docs/notes.md` as a
-landmine because it is not visible from the drain's API.
+**A gate case for an order needs a witness, not a print.** Moving the switch to just before the shared
+`restart_and_poll` kept every printed line in the same sequence and the case passed; moving it *after* the restart is
+what fails, because the `systemctl` stand-in records `readlink -f current` **at the moment it restarts**. The landmine
+section in `docs/notes.md` says so, and also records the second trap: a mutation that reddens a unit test never reaches
+the serve phase, so proving a *case* can fail means skipping the earlier phases in a copy under `target/` (a copy in
+`/tmp` gets the wrong `repo_root`, and prefixing names inside `serve_cases` does not disable them — bash splits the
+array literal into two words).
 
-**The review's P1 was a class, not a line.** Every refusal *after* the drain owes the operator "this machine is
-draining until it is restarted", and only one of the six said so — while three documents this session wrote claimed
-they all did. `draining` is one clause applied to all of them now, and the sentence that named `holosmith drain --wait`
-as the remedy was wrong too (nothing clears a drain but a restart). A P2 was a real defect the test could not see:
-`serve_with` passed `WINDOW` instead of the `window` it was given, so the test's 60 ms window was ignored and its
-rollback case waited the spec's 20 seconds.
+**This session could not push either, and that is now eight in a row.** `/run/ssh-agent.sock` did not exist,
+`SSH_AUTH_SOCK` was unset, and `ssh-add -L` answered "Could not open a connection to your authentication agent". So this
+session's six commits and the handoff's own are **local**; `git log origin/master..HEAD` is the measurement — do not
+trust a number in this file. Nothing was faked; `origin` is at `f2b3886`.
 
-**This session could not push either, and that is now seven in a row.** `/run/ssh-agent.sock` did not exist,
-`SSH_AUTH_SOCK` was unset, and `ssh-add -L` answered "Could not open a connection to your authentication agent". So
-this session's four commits and the handoff's own are **local**; `git log origin/master..HEAD` is the measurement —
-do not trust a number in this file. Nothing was faked, and `origin/master` is the last thing that *was* pushed.
-
-The gate: **99 cases, 2174 assertions**, no `SKIP` and no `note` (so `case_upgrade`'s daemon arms ran); `cargo test`
-**1372** in 67 binaries; `web/` **132**. The review came back **BLOCK** with one P1, two P2s and four P3s; all are
-fixed except S5 (the `dist/` guard on `tests/upgrade.rs`), which is recorded in `docs/review/PER-110.md`.
+The gate: **100 cases, 2208 assertions**, no `SKIP` and no `note` (so `case_rollback`'s required arms ran); `cargo test`
+**1389** in 69 binaries; `web/` **132**. The review came back with one P1, five P2/P3 fixed and three dismissed with a
+citation, all recorded in `docs/review/PER-111.md`.
