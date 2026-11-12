@@ -125,6 +125,56 @@ impl Release {
         (!tag.is_empty() && tag_problem(tag).is_none()).then(|| tag.to_string())
     }
 
+    /// Every release this tree holds, **newest first**.
+    ///
+    /// This is the tree's one *order*, and it is the order the releases were **written onto this machine**: a
+    /// directory's modification time, which the kernel sets when [`write`](Self::write) creates it (and refreshes when
+    /// a re-promotion rewrites the same bytes' digest). A directory whose name is not one path segment, or that holds
+    /// no `holosmith` binary, is not a release and is skipped — a release a rollback cannot start is not a place to go
+    /// back to.
+    ///
+    /// It is deliberately **not** a name order. A release directory is named after `git describe`'s answer
+    /// (`f2b3886-dirty`, `0.1.0-3-gabc1234`), so sorting by name would put a hash above a version tag and a rollback
+    /// would walk into whichever build happened to sort next. Two entries written in the same instant are ordered by
+    /// tag, so the order is total and two runs of this function agree about it.
+    ///
+    /// HS-080's pruning keeps the newest N of this list; that is why the order lives here rather than in a verb.
+    pub fn history(&self) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(self.releases()) else {
+            return Vec::new();
+        };
+        let mut found: Vec<(std::time::SystemTime, String)> = Vec::new();
+        for entry in entries.flatten() {
+            let Some(tag) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if tag_problem(&tag).is_some() {
+                continue;
+            }
+            let path = entry.path();
+            if !path.join(BINARY).is_file() {
+                continue;
+            }
+            let Ok(modified) = std::fs::metadata(&path).and_then(|meta| meta.modified()) else {
+                continue;
+            };
+            found.push((modified, tag));
+        }
+        found.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+        found.into_iter().map(|(_, tag)| tag).collect()
+    }
+
+    /// The release one step back from `tag`: the newest one **strictly older** than it in [`history`](Self::history).
+    ///
+    /// `None` when `tag` is the oldest release the tree holds, or is not in the tree at all, or the tree holds one
+    /// release — each is a tree a rollback has nowhere to go back to in, and each is a different sentence at the
+    /// caller.
+    pub fn older_than(&self, tag: &str) -> Option<String> {
+        let history = self.history();
+        let at = history.iter().position(|known| known == tag)?;
+        history.get(at + 1).cloned()
+    }
+
     /// The binary systemd executes: `<install>/opt/holosmith/current/holosmith`, when the tree is live.
     ///
     /// The **path through the link**, not the directory it resolves to, because that is the whole point of the
@@ -377,6 +427,103 @@ mod tests {
         );
         assert_eq!(unit_executable("[Unit]\nDescription=x\n"), None);
         assert_eq!(unit_executable("ExecStart=\n"), None);
+    }
+
+    /// A tree under a temporary directory, removed on drop: the tests below measure real directories' mtimes.
+    struct Tree(PathBuf);
+
+    impl Tree {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("holosmith-release-{label}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(path.join(RELEASES)).expect("a temporary release tree");
+            Self(path)
+        }
+
+        fn release(&self) -> Release {
+            Release::at(&self.0)
+        }
+
+        /// Write one release with an explicit mtime, so the order is the test's and not the clock's.
+        fn write(&self, tag: &str, seconds: u64) {
+            let release = self.release();
+            let digest = "0".repeat(64);
+            release
+                .write(tag, b"not a real binary", &digest)
+                .expect("the release is written");
+            set_mtime(&release.dir_of(tag), seconds);
+        }
+    }
+
+    impl Drop for Tree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Set a directory's own mtime, which is the fact [`Release::history`] orders by.
+    fn set_mtime(path: &Path, seconds: u64) {
+        let directory = std::fs::File::open(path).expect("the directory is open");
+        let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+        directory.set_modified(when).expect("the mtime is set");
+    }
+
+    #[test]
+    fn the_history_is_the_order_the_releases_were_written_in() {
+        let tree = Tree::new("history");
+        tree.write("v0.1.0", 1_000);
+        tree.write("f2b3886-dirty", 3_000);
+        tree.write("0.1.0-3-gabc1234", 2_000);
+        // A name order is not the order: sorted by name this would be `0.1.0-3-gabc1234`, `f2b3886-dirty`,
+        // `v0.1.0`, and a rollback would walk into a hash.
+        assert_eq!(
+            tree.release().history(),
+            vec![
+                "f2b3886-dirty".to_string(),
+                "0.1.0-3-gabc1234".to_string(),
+                "v0.1.0".to_string()
+            ]
+        );
+        // One step back, from each place: this is what the verb's default target is.
+        assert_eq!(
+            tree.release().older_than("f2b3886-dirty"),
+            Some("0.1.0-3-gabc1234".to_string())
+        );
+        assert_eq!(
+            tree.release().older_than("0.1.0-3-gabc1234"),
+            Some("v0.1.0".to_string())
+        );
+        assert_eq!(
+            tree.release().older_than("v0.1.0"),
+            None,
+            "the oldest has nothing behind it"
+        );
+        assert_eq!(tree.release().older_than("not-a-release"), None);
+    }
+
+    #[test]
+    fn a_directory_that_is_not_a_release_is_not_in_the_history() {
+        let tree = Tree::new("skipped");
+        tree.write("real", 1_000);
+        // A directory whose name cannot be a tag, one that holds no binary, and one that is a plain file.
+        std::fs::create_dir_all(tree.release().releases().join("a b")).expect("a directory");
+        std::fs::create_dir_all(tree.release().releases().join("empty")).expect("a directory");
+        std::fs::write(tree.release().releases().join("stray.txt"), b"").expect("a file");
+        assert_eq!(tree.release().history(), vec!["real".to_string()]);
+        assert_eq!(tree.release().older_than("real"), None);
+    }
+
+    #[test]
+    fn two_releases_written_in_one_instant_still_have_an_order() {
+        // A tie in mtime is broken by tag, so the list is total and a rollback's default target is not a coin toss.
+        let tree = Tree::new("ties");
+        tree.write("beta", 5_000);
+        tree.write("alpha", 5_000);
+        assert_eq!(
+            tree.release().history(),
+            vec!["alpha".to_string(), "beta".to_string()]
+        );
     }
 
     #[test]
