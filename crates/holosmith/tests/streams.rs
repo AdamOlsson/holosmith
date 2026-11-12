@@ -1,4 +1,4 @@
-//! `GET /api/sessions/:id/events` over a real socket (HS-010, ADR-0014).
+//! `GET /api/sessions/:id/events` over a real socket (ADR-0014).
 //!
 //! Each row of the story's acceptance is one test here, with two exceptions that are proved
 //! where the code is rather than by waiting: the keep-alive interval
@@ -341,7 +341,7 @@ async fn a_lagged_subscriber_gets_stream_lagged_and_is_closed() {
         last.data
     );
 
-    // A stream that ended by lagging releases its registration like any other: HS-066 must not be
+    // A stream that ended by lagging releases its registration like any other: must not be
     // told a browser is still attached to a session it dropped.
     let session_id = session.id.clone();
     wait_until("the lagged stream releases its count", || {
@@ -420,7 +420,7 @@ async fn closing_a_stream_ends_it_without_a_panic() {
     append(&state, &session, "session.status").await;
     let _ = stream.take(1, PATIENCE).await;
 
-    // What the delete flow (HS-019) does: the stream ends cleanly, at a block boundary.
+    // What the delete flow does: the stream ends cleanly, at a block boundary.
     assert_eq!(state.streams.close(&session.id), 1);
     assert!(
         stream.next_block(PATIENCE).await.is_none(),
@@ -459,7 +459,7 @@ async fn the_registry_releases_a_closed_stream() {
 
     let mut stream = Sse::connect(served.addr, &session.id, None).await;
     // Registered by the handler, not by this test: the count is the "SSE open on this session"
-    // registration HS-066 reads.
+    // registration reads.
     let session_id = session.id.clone();
     let registry = state.streams.clone();
     wait_until("the stream registers itself", || {

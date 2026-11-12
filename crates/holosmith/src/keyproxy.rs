@@ -1,4 +1,4 @@
-//! `holosmith proxy key`: the plaintext-to-TLS side of the key proxy (HS-039, spec item 2).
+//! `holosmith proxy key`: the plaintext-to-TLS side of the key proxy (spec item 2).
 //!
 //! Pi is configured with a provider `baseUrl` of `http://key-proxy:8080/<provider>` and a per-session
 //! **dummy** key. A request therefore arrives here in plaintext, on a session network, carrying a value that
@@ -249,7 +249,7 @@ pub fn parse(head: &str) -> Result<Head, RouteError> {
 /// the client sent, and only headers that mean the same thing upstream.
 ///
 /// **The body is part of the request, not an argument to its length.** A head with a `Content-Length` and no
-/// bytes is a request the provider waits out and then drops, which is the shape HS-039 shipped and HS-040's
+/// bytes is a request the provider waits out and then drops, which is the shape shipped and that story's
 /// V3 run measured: every model call failed with `the provider closed the connection before answering`, and
 /// the unit tests passed because they asserted the header.
 ///
@@ -654,7 +654,7 @@ fn head_end(buffer: &[u8]) -> Option<usize> {
 
 /// The request body, starting with whatever arrived in the same read as the head.
 ///
-/// This is the P1 the review of HS-039 found: a client that writes head and body in one `send` leaves the
+/// This is the P1 the review found: a client that writes head and body in one `send` leaves the
 /// body in the head's last read, and a `read_exact` from the socket alone waits forever for bytes that are
 /// already in memory. [`read_head`] now hands the leftover over, and this function seeds the body with it.
 async fn read_body<R>(stream: &mut R, head: &Head, leftover: Vec<u8>) -> Result<Vec<u8>, String>
@@ -835,7 +835,7 @@ mod tests {
 
     #[test]
     fn the_upstream_request_is_the_head_and_then_the_body() {
-        // The defect HS-040's V3 run measured: `upstream` wrote a `Content-Length` from `body.len()` and
+        // The defect the V3 run measured: `upstream` wrote a `Content-Length` from `body.len()` and
         // never appended the body, so every model call was a request the provider waited out and dropped.
         // The assertions are `ends_with` and "exactly one Content-Length", because a head-only request that
         // names the right length is what the old tests pinned.

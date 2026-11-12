@@ -1,4 +1,4 @@
-# holosmith: the smoke image (HS-077, spec item 10 step 2)
+# holosmith: the smoke image
 #
 # A session's smoke container runs **the candidate** as its agent: `/usr/local/bin/pi` is a two-line wrapper onto
 # `holosmith container fake-pi`, so the launch, the ready handshake, the JSONL framing and the version check a

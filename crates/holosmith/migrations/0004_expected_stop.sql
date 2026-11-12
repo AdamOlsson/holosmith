@@ -1,4 +1,4 @@
--- HS-030: the expected-stop flag (schema 4). One bit on the row, saying "we asked this session's
+-- the expected-stop flag (schema 4). One bit on the row, saying "we asked this session's
 -- container to stop".
 --
 -- Spec item 6: "The server records an expected-stop flag before every `docker stop -t 10`. Exit with

@@ -1,4 +1,4 @@
-//! `POST /api/sessions/:id/publish`: push a session's branch to a remote this machine may push to (HS-057,
+//! `POST /api/sessions/:id/publish`: push a session's branch to a remote this machine may push to (,
 //! spec item 12's publish paragraph).
 //!
 //! The route is a `POST`, so every mutating guard applies and the manifest records it [`Mutating`] — and it is
@@ -32,8 +32,8 @@
 //! …/changes` is unchanged by one too: the branch did not move, so `ahead`, `behind`, `dirty` and `mergeable`
 //! are the same answers as before.
 //!
-//! **The CI warning is not here.** `touches_ci` is the changes view's field (HS-052) and the warning before the
-//! confirm step is HS-058's sheet; this route reads none of it, and the answer is exactly three keys (ADR-0066
+//! **The CI warning is not here.** `touches_ci` is the changes view's field and the warning before the
+//! confirm step is the sheet; this route reads none of it, and the answer is exactly three keys (ADR-0066
 //! D11). A publish whose answer carried a flag the route never computed would be a claim about a diff it did not
 //! read.
 
@@ -231,7 +231,7 @@ fn parse_body(bytes: &[u8]) -> Result<Parsed, ApiError> {
         Some(_) => return Err(ApiError::bad_publish_body()),
     };
     // The machine's one alphabet for a branch name (`config::is_ref_name`, which `merge.targets` is validated
-    // with, and which HS-057 extended with git's component rules — no empty component, none beginning with `.`,
+    // with, and which extended with git's component rules — no empty component, none beginning with `.`,
     // none ending in `.lock`). A name git's own `check-ref-format` refuses is the body's shape, not a state and
     // not a machine problem: without the alphabet the same name would reach `git push`, which refuses the
     // refspec with `fatal: invalid refspec` **before** contacting a remote — a `500` for what is the client's

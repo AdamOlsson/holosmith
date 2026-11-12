@@ -1,4 +1,4 @@
--- HS-069: a machine's preview origin (schema 7). The second origin a registry row knows.
+-- a machine's preview origin (schema 7). The second origin a registry row knows.
 --
 -- Spec item 3 asks the hub's preview listener to forward `/<host>/<id>/*` to "that machine's preview listener",
 -- and item 3 also gives that listener an origin of its own (the preview server listens on
@@ -9,7 +9,7 @@
 -- what that is.
 --
 -- The value is **measured, never supplied**: it comes from the peer's own `/api/health` answer, whose fifth key
--- has carried `preview_origin` since HS-041. `POST /api/hosts` does not accept it (a caller-supplied origin would
+-- has carried `preview_origin`. `POST /api/hosts` does not accept it (a caller-supplied origin would
 -- point a hub anywhere, ADR-0016's rule), and a row no probe has completed stays NULL — which refuses a forwarded
 -- preview with a sentence naming the probe instead of dialling a guess.
 --

@@ -1,4 +1,4 @@
-//! Every statement that reads or writes the `events` table (HS-009).
+//! Every statement that reads or writes the `events` table.
 //!
 //! The repository borrows the open `Database`'s connection, exactly as `sessions` does, and this
 //! file is the only one with an events statement. A test below walks `src/**` and fails if one
@@ -23,7 +23,7 @@ const INSERT: &str =
 ///
 /// The **only** kind whose payload this file looks inside, and it does so for one reason: a session's
 /// spend is the sum of what its messages cost, and the writer's transaction is the one place where the
-/// event's row and the session's tally can commit together (HS-023, ADR-0013). Every other kind is
+/// event's row and the session's tally can commit together (ADR-0013). Every other kind is
 /// opaque here. A payload that carries no `usage`, or one that is not two non-negative integers, is a
 /// message whose cost is unknown — reported as `None` rather than as zeros, because a backend that
 /// cannot say what it spent must not look like one that spent nothing. The budget's own `None` handling
@@ -34,7 +34,7 @@ fn usage(payload: &str) -> Option<(u64, u64)> {
     Some((counts.get("in")?.as_u64()?, counts.get("out")?.as_u64()?))
 }
 
-/// The read a client makes with its last-seen seq (HS-010): one session, after `?2`, in order.
+/// The read a client makes with its last-seen seq: one session, after `?2`, in order.
 const SELECT_SINCE: &str = "SELECT session_id, seq, type, payload, created_at FROM events \
      WHERE session_id = ?1 AND seq > ?2 ORDER BY seq ASC LIMIT ?3";
 
@@ -44,7 +44,7 @@ const SELECT_SINCE: &str = "SELECT session_id, seq, type, payload, created_at FR
 const LATEST: &str = "SELECT max(seq) FROM events WHERE session_id = ?1";
 
 /// The message-bearing rows of one session, **newest first**: what a truncated replay's cut is
-/// computed from (HS-061).
+/// computed from.
 ///
 /// `message.delta` and `message.snapshot` are the two kinds that name a message and carry its text;
 /// a message has at least one of them, and compaction replaces a run of the first with the second.
@@ -54,7 +54,7 @@ const LATEST: &str = "SELECT max(seq) FROM events WHERE session_id = ?1";
 const MESSAGES_BACKWARDS: &str = "SELECT seq, payload FROM events \
      WHERE session_id = ?1 AND type IN (?2, ?3) ORDER BY seq DESC";
 
-/// How many turn boundaries sit below a seq (HS-061).
+/// How many turn boundaries sit below a seq.
 ///
 /// A truncated replay or a history page starts partway through the log, so the first `turn.start` it
 /// carries is not turn 1. The client numbers a turn from the frames it has seen, so the count of the
@@ -63,14 +63,14 @@ const TURNS_BELOW: &str = "SELECT count(*) FROM events \
      WHERE session_id = ?1 AND type = ?2 AND seq < ?3";
 
 /// One page of history: the events below `?2`, **newest first**, so a full page is the rows nearest the
-/// cursor rather than the oldest ones (HS-061). The caller reverses it: a page is delivered in order.
+/// cursor rather than the oldest ones. The caller reverses it: a page is delivered in order.
 const SELECT_BEFORE: &str = "SELECT session_id, seq, type, payload, created_at FROM events \
      WHERE session_id = ?1 AND seq < ?2 ORDER BY seq DESC LIMIT ?3";
 
-/// Every event of one session: the delete flow's half of removing it (HS-019).
+/// Every event of one session: the delete flow's half of removing it.
 const DELETE_LOG: &str = "DELETE FROM events WHERE session_id = ?1";
 
-/// The `message.end` rows of one session that are past the cutoff, oldest first (HS-060).
+/// The `message.end` rows of one session that are past the cutoff, oldest first.
 ///
 /// `type` and `created_at` are filtered in SQL rather than in Rust so a session that has nothing to
 /// compact costs one index range scan and no payload parsing. **No `LIMIT` here**, and that is
@@ -83,7 +83,7 @@ const DELETE_LOG: &str = "DELETE FROM events WHERE session_id = ?1";
 const COMPLETED: &str = "SELECT seq, payload, created_at FROM events \
      WHERE session_id = ?1 AND type = ?2 AND created_at < ?3 ORDER BY seq ASC";
 
-/// The message ids this session has already folded into a snapshot (HS-060).
+/// The message ids this session has already folded into a snapshot.
 ///
 /// Read so an old message is not folded twice: its `message.end` row stays — compaction removes deltas
 /// and nothing else — so without this a pass would keep re-reading a message whose text is already one
@@ -106,7 +106,7 @@ const DELTAS: &str = "SELECT seq, payload FROM events \
 /// own and an `IN` list of them would be a second spelling of what the read already answered.
 const DELETE_ROW: &str = "DELETE FROM events WHERE session_id = ?1 AND seq = ?2";
 
-/// Where a truncated replay starts, and how many turns closed before it (HS-061).
+/// Where a truncated replay starts, and how many turns closed before it.
 ///
 /// `before_seq` is both the seq of the first event the replay carries and the value a client passes as
 /// `?before=` for the next older page, because the history endpoint's cursor is exclusive. One number
@@ -118,7 +118,7 @@ pub struct Truncation {
     pub turns_before: u32,
 }
 
-/// What one compaction pass did to one session (HS-060).
+/// What one compaction pass did to one session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Compaction {
     /// Messages whose delta rows became one snapshot.
@@ -178,7 +178,7 @@ impl<'a> EventRepository<'a> {
     /// sees a seq the batch did not commit.
     ///
     /// **An event whose session has gone is dropped, and the rest of the batch still commits**
-    /// (HS-019). A row can vanish between a producer's append and this commit — the delete flow
+    /// A row can vanish between a producer's append and this commit — the delete flow
     /// moves a session to `deleting` and then removes its row — and an event with no counter to
     /// bump is unrepresentable rather than an error. Refusing the batch for it would also drop
     /// every *other* session's event in the same window, which is the failure this rule prevents;
@@ -187,7 +187,7 @@ impl<'a> EventRepository<'a> {
     ///
     /// `pub(crate)` because the writer thread is the only caller: anything else inserting a row
     /// here could assign a seq outside the one writer, which is what "exactly one writer assigns
-    /// seq" forbids (ADR-0013, PER-41 S3).
+    /// seq" forbids (ADR-0013).
     pub(crate) fn insert_batch(&self, events: &[NewEvent]) -> Result<Vec<Event>, RepoError> {
         let sqlite = |error| RepoError::sqlite("insert_batch", error);
         // `unchecked_transaction` because the repository borrows the database's one connection
@@ -195,7 +195,7 @@ impl<'a> EventRepository<'a> {
         // database's mutex across this call, so nothing else in the process is writing.
         let transaction = self.connection.unchecked_transaction().map_err(sqlite)?;
         // One borrow for the whole batch: the counter bump and the tally are both statements against
-        // the sessions table, run through this transaction (HS-023 added the second).
+        // the sessions table, run through this transaction.
         let sessions = SessionRepository::new(&transaction);
         let mut assigned = Vec::with_capacity(events.len());
         for event in events {
@@ -204,7 +204,7 @@ impl<'a> EventRepository<'a> {
                 .map_err(RepoError::Sessions)?
             else {
                 // The session was removed under this event: nothing can carry its seq, so it is
-                // dropped. `debug`, not `warn`: since HS-019 this is an ordinary race with a
+                // dropped. `debug`, not `warn`: this is an ordinary race with a
                 // delete, not a producer bug.
                 tracing::debug!(
                     target: "holosmith::events",
@@ -226,7 +226,7 @@ impl<'a> EventRepository<'a> {
                     ],
                 )
                 .map_err(sqlite)?;
-            // The session's spend follows from its log, so the two commit together (HS-023). After the
+            // The session's spend follows from its log, so the two commit together. After the
             // insert, so a batch that fails on an event leaves neither the row nor the tally behind.
             if event.kind == MESSAGE_END
                 && let Some((input, output)) = usage(&event.payload)
@@ -241,7 +241,7 @@ impl<'a> EventRepository<'a> {
         Ok(assigned)
     }
 
-    /// Delete every event of one session, inside the caller's transaction (HS-019).
+    /// Delete every event of one session, inside the caller's transaction.
     ///
     /// One statement and no transaction of its own: the delete flow removes the log and the
     /// session row together, so the transaction is
@@ -269,7 +269,7 @@ impl<'a> EventRepository<'a> {
     }
 
     /// Where a replay that starts partway through the log begins, or `None` when the whole log fits in
-    /// `window` messages (HS-061, spec item 15).
+    /// `window` messages (spec item 15).
     ///
     /// "The beginning of the 50th most recent message" is a **backwards** scan: the newest
     /// message-bearing rows are read in descending seq, and the distinct `message_id`s they name are
@@ -328,7 +328,7 @@ impl<'a> EventRepository<'a> {
         }))
     }
 
-    /// How many `turn.start` rows sit below `seq` (HS-061).
+    /// How many `turn.start` rows sit below `seq`.
     pub fn turns_before(&self, session_id: &str, seq: i64) -> Result<u32, RepoError> {
         let count: i64 = self
             .connection
@@ -340,7 +340,7 @@ impl<'a> EventRepository<'a> {
     }
 
     /// One page of history: up to `limit` events of one session below `before`, **in seq order**
-    /// (HS-061).
+    ///
     ///
     /// The cursor is exclusive and the page is read newest-first so a full page is the rows nearest the
     /// cursor; the reversal is what makes the answer a page a client can prepend. Stability under
@@ -367,16 +367,16 @@ impl<'a> EventRepository<'a> {
     /// The newest seq a reader can see, or `None` when the session has no events.
     ///
     /// Named for what it answers rather than for the counter: it is `max(seq)` over the rows that
-    /// still exist, so HS-060's compaction moves it backwards, while `sessions.last_seq` is the
+    /// still exist, so the compaction moves it backwards, while `sessions.last_seq` is the
     /// counter that never does and that seq assignment reads (ADR-0013). No production caller
-    /// today — it exists for HS-010's last-seen-seq reads and its tests.
+    /// today — it exists for the last-seen-seq reads and its tests.
     pub fn newest_visible_seq(&self, session_id: &str) -> Result<Option<i64>, RepoError> {
         self.connection
             .query_row(LATEST, [session_id], |row| row.get(0))
             .map_err(|error| RepoError::sqlite("newest_visible_seq", error))
     }
 
-    /// Fold this session's old messages into one snapshot each (HS-060, spec item 15).
+    /// Fold this session's old messages into one snapshot each (spec item 15).
     ///
     /// A message is eligible when it has a `message.end` row older than `cutoff`; it is folded when it
     /// still has delta rows and no snapshot already. The fold concatenates the `text` deltas and the
@@ -584,7 +584,7 @@ mod tests {
     ///
     /// `insert_batch` is `pub(crate)` and the tests below are why it is still tested: the writer
     /// swallows a refused batch (it logs and drops it), so no integration test can observe the
-    /// refusal — the seam has to be here (PER-41 S3).
+    /// refusal — the seam has to be here.
     fn database() -> Connection {
         let mut connection = Connection::open_in_memory().expect("an in-memory database opens");
         let migrations = schema::embedded().expect("the embedded migrations are usable");
@@ -624,7 +624,7 @@ mod tests {
         }
     }
 
-    /// One `message.delta` of `message` (HS-061's tests read the message ids a log holds).
+    /// One `message.delta` of `message`.
     fn delta(session: &Session, message: &str, text: &str) -> NewEvent {
         NewEvent {
             session_id: session.id.clone(),
@@ -886,7 +886,7 @@ mod tests {
 
     #[test]
     fn an_event_for_a_gone_session_is_dropped_and_the_rest_of_the_batch_commits() {
-        // HS-019: a delete can remove a row between an append and this commit. The event has no
+        // a delete can remove a row between an append and this commit. The event has no
         // counter to bump, so it is unrepresentable — and refusing the batch would throw away the
         // *other* sessions' events that share the same 25 ms window.
         let connection = database();

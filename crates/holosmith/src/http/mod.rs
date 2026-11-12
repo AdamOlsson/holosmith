@@ -10,7 +10,7 @@ mod forward;
 pub mod guard;
 pub mod health;
 mod history;
-// `pub(crate)` since HS-072: `holosmith hub host` is a **client** of these three routes, and a client that
+// `pub(crate)`: `holosmith hub host` is a **client** of these three routes, and a client that
 // re-declared `HostList` would be a second spelling of one wire shape.
 pub(crate) mod hosts;
 mod merge;
@@ -27,7 +27,7 @@ pub use app::{
 pub use guard::Guards;
 pub use streams::KEEP_ALIVE_INTERVAL;
 
-/// The delete flow's second half, named for its one caller outside this module (HS-064).
+/// The delete flow's second half, named for its one caller outside this module.
 ///
 /// The forced-session expiry's daily job runs the *same* removal an operator's `DELETE` does — that is the
 /// whole of item 15's "using the delete flow from item 9" — and this is the one name it may reach, rather than

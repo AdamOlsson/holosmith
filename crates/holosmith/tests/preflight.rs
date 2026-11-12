@@ -1,4 +1,4 @@
-//! The preflight (HS-024, spec item 10 §1): what a machine must have, and the sentences it fails with.
+//! The preflight (spec item 10 §1): what a machine must have, and the sentences it fails with.
 //!
 //! These tests drive `preflight::check_with` against a machine they build: `git` and `df` are scripts the
 //! test wrote (the `Tools` seam), and the daemon is a unix socket the test answers itself. That is the only
@@ -28,7 +28,7 @@ use support::TempDir;
 /// `exec` of a file that *any* process holds open for writing fails with `ETXTBSY` ("Text file busy"),
 /// and `std::process::Command`'s fork happens on another thread's behalf: the child inherits the write
 /// descriptor of a shim written a moment earlier and keeps it until its own `exec` finishes. Measured at
-/// roughly 3 runs in 40 before this lock (PER-56's note), which is what made the gate redden at random.
+/// roughly 3 runs in 40 before this lock, which is what made the gate redden at random.
 /// Every test in this file writes shims and then runs them, and nothing else in this binary forks, so
 /// serialising each whole body is the whole fix.
 fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
@@ -73,11 +73,11 @@ fn tools(dir: &TempDir, version: &str, available_kb: u64) -> Tools {
     Tools {
         git: git_shim(dir, version),
         df: df_shim(dir, available_kb),
-        // The soft cap's program (HS-063): no preflight check runs it, so this test never cares which it is.
+        // The soft cap's program: no preflight check runs it, so this test never cares which it is.
         du: std::path::PathBuf::from("du"),
-        // The Web Push sender's (HS-066): no preflight check runs it either.
+        // The Web Push sender's: no preflight check runs it either.
         openssl: std::path::PathBuf::from("openssl"),
-        // Machine trust's whois (HS-070): no preflight check runs it.
+        // Machine trust's whois: no preflight check runs it.
         tailscale: std::path::PathBuf::from("tailscale"),
     }
 }

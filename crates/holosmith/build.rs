@@ -12,7 +12,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../pins/pi.txt");
     // Without this line a new migration file is silently left out of the binary (ADR-0009).
     println!("cargo:rerun-if-changed=migrations");
-    // The two Dockerfiles `src/images.rs` embeds (HS-048): a reworded one is a different binary.
+    // The two Dockerfiles `src/images.rs` embeds: a reworded one is a different binary.
     println!("cargo:rerun-if-changed=images");
     println!("cargo:rerun-if-env-changed=HOLOSMITH_GIT_TAG");
     println!("cargo:rerun-if-env-changed=HOLOSMITH_WEB_DIST");

@@ -1,4 +1,4 @@
-//! Machine-to-machine trust as two listeners meet it (HS-070, spec item 4, V11).
+//! Machine-to-machine trust as two listeners meet it (spec item 4, V11).
 //!
 //! `trust`'s own unit tests drive the decision table with a shim; this file drives the two listeners *over a
 //! socket*, which is where the interesting parts live: the control listener reads the connection's address out of

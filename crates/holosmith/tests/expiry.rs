@@ -1,4 +1,4 @@
-//! The stopped-session expiry (HS-064, spec item 15, decision D3).
+//! The stopped-session expiry (spec item 15, decision D3).
 //!
 //! Everything here runs without a daemon: the stub backend is the delete flow's other end, and it
 //! *records* the calls it is given, which is how "the snapshot runs first" and "the flow ran, not a second
@@ -57,7 +57,7 @@ fn session_at(state: &AppState, key: &str, status: Status, at: i64) -> Session {
 }
 
 /// How long a test waits for the flow's own removal task: the row goes off the request path, so "the row is
-/// gone" is a fact that arrives shortly after the pass, not with it (HS-020's "a background call is not there
+/// gone" is a fact that arrives shortly after the pass, not with it (the "a background call is not there
 /// when the answer is").
 const PATIENCE: Duration = Duration::from_secs(10);
 
@@ -333,7 +333,7 @@ async fn every_reason_into_stopped_sets_the_clock_and_the_resume_clears_it() {
                 .expect("the row is there")
         };
         // A window, not an equality: `Transitioner::apply` reads its own `clock::unix_now()`, so a run that
-        // crosses a second boundary would flake an exact assertion (HS-017's `last_active_at` lesson). The
+        // crosses a second boundary would flake an exact assertion. The
         // claim is "the transition recorded when it happened", and this is that claim without the race.
         let stopped_at = row
             .stopped_at

@@ -1,4 +1,4 @@
-//! `holosmith upgrade <binary>`: the pipeline's order and its refusals (HS-078, spec item 10).
+//! `holosmith upgrade <binary>`: the pipeline's order and its refusals (spec item 10).
 //!
 //! Acceptance bullet 1 is a claim about **order** — "runs the spec's pipeline in order" — and the parts of that order a
 //! gate case cannot record are the drain, the backup and the review acknowledgement: none of them is a child. So the
@@ -321,7 +321,7 @@ fn a_promotion_asks_the_machine_in_the_specs_order() {
     );
 }
 
-/// One more release in the tree, with an explicit mtime: the order HS-079's `history` reads is the *test's* then.
+/// One more release in the tree, with an explicit mtime: the order the `history` reads is the *test's* then.
 ///
 /// `File::open(dir).set_modified` is how a directory's own mtime is set (no `touch` child, no `filetime` crate), and
 /// it has to be opened **after** the release's files are written, because writing into a directory refreshes it.

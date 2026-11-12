@@ -1,4 +1,4 @@
-// The app's installability and notification rules (HS-067, spec item 11; ADR-0072).
+// The app's installability and notification rules (spec item 11; ADR-0072).
 //
 // This module is the **one** home of every string and every branch the browser half of item 11 shows or takes:
 // the four notification sentences `web/src/sw.ts` draws in a worker, the "which path does this tap open" rule,
@@ -16,20 +16,20 @@
 // (ADR-0007) — so this is the page's own path and nothing else's.
 export const SETTINGS_PATH = "/settings";
 
-// The Computers screen (HS-071): the fourth screen, and the one that is not about this machine alone. Its path is
+// The Computers screen: the fourth screen, and the one that is not about this machine alone. Its path is
 // here for `SETTINGS_PATH`'s reason — the header's list of screens is the only thing that has to know all of them,
 // and a path spelled in two places is a link that 404s on one of them.
 export const COMPUTERS_PATH = "/computers";
 
-// The two push routes HS-066 built. The page never spells either anywhere else.
+// The two push routes built. The page never spells either anywhere else.
 export const SUBSCRIBE_PATH = "/api/push/subscribe";
 
-// Which machine a subscription is stored on, and therefore which machine's key signs for it (HS-074).
+// Which machine a subscription is stored on, and therefore which machine's key signs for it.
 //
 // This machine's own route for `local`, and a peer's for a name — the hub's forwarding route reaching that machine's
 // own `POST`/`DELETE /api/push/subscribe`, which is the same path shape `transcript.ts`'s `apiPath` builds. It is
 // spelled here because `push.ts` cannot import `transcript.ts` (node's ESM resolver wants an extension on every hop,
-// HS-071), and `web/test/push.test.ts` compares this with `apiPath(host, "push/subscribe")` over a table of machines:
+// ), and `web/test/push.test.ts` compares this with `apiPath(host, "push/subscribe")` over a table of machines:
 // two spellings, one test that makes the second safe.
 export function subscriptionRoute(host: string): string {
   if (host === "" || host === LOCAL_NAME) {
@@ -84,7 +84,7 @@ export function isSessionId(id: string): boolean {
 // Which path a tap opens: the session the payload names **on the machine the payload names**, or the sessions list
 // for anything else.
 //
-// Two untrusted pieces now, and two alphabets (HS-074). The id is `sessions::is_id`'s sixteen lowercase hex; the host
+// Two untrusted pieces now, and two alphabets. The id is `sessions::is_id`'s sixteen lowercase hex; the host
 // is a registry name one hop later — `hosts::name_problem`'s alphabet, lowercase letters, digits and `-`, at most 63,
 // not beginning or ending with `-` — because `/hosts/<host>/sessions/<id>` is answered by the hub's forwarding route,
 // which refuses a name it does not have with its own `404 unknown_host`. A path built from arbitrary text is a link
@@ -92,7 +92,7 @@ export function isSessionId(id: string): boolean {
 //
 // `local` (and an empty host) is *this machine*: `/sessions/<id>`, the path a server's own page is at. This is the
 // same rule as `transcript.ts`'s `sessionHref`, which cannot be imported here (`npm test`'s ESM resolver wants an
-// extension on every hop, HS-071's landmine) — `web/test/push.test.ts` asserts the two agree over a table of hosts,
+// extension on every hop, the landmine) — `web/test/push.test.ts` asserts the two agree over a table of hosts,
 // so the second spelling cannot drift.
 const HOST_NAME = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
@@ -107,7 +107,7 @@ export function notificationPath(host: string, sessionId: string): string {
 }
 
 // The `data` a notification carries to its own tap handler: the two fields `notificationclick` needs and nothing
-// else (HS-074).
+// else.
 //
 // A second shape rather than the payload: the browser parses the payload out of the sealed record for the `push`
 // handler, and `notificationclick` later reads whatever this worker hung on the notification. Keeping the pair
@@ -139,7 +139,7 @@ export function notificationPayload(value: unknown): NotificationPayload | null 
 // What `pushManager.subscribe` asks the server to store: `{endpoint, p256dh, auth}`.
 //
 // The browser hands back `{endpoint, keys: {p256dh, auth}}` (`PushSubscription::toJSON`), so the two key fields
-// have to be lifted out of `keys` — the server's route takes them at the top level (HS-066) and a body with a
+// have to be lifted out of `keys` — the server's route takes them at the top level and a body with a
 // nested `keys` object is `422 bad_body`. Keys the browser gives as `null` are left out rather than sent as
 // null: the route reads a missing field as the body's shape, which is the honest answer.
 export type SubscriptionBody = { endpoint: string; p256dh: string; auth: string };
@@ -184,7 +184,7 @@ export type PushFacts = {
   subscribed: boolean;
   // Whether the page is running as the installed app (`display-mode: standalone`, or iOS's `navigator.standalone`).
   installed: boolean;
-  // The sentence of a machine that did **not** answer this page's read (HS-074), or `null` when it did. Since HS-074
+  // The sentence of a machine that did **not** answer this page's read, or `null` when it did. Since
   // the settings screen has one row per machine and those rows are read through the hub, so a peer that is away is a
   // third state rather than a `false`: both facts a row would show — the machine's key and the row it stores — are
   // things only that machine can answer, and "not subscribed" is a claim about a machine nothing measured.
@@ -305,7 +305,7 @@ export function isIos(userAgent: string, maxTouchPoints: number): boolean {
   return userAgent.includes("Macintosh") && maxTouchPoints > 1;
 }
 
-// One machine's row on the settings screen, and what it says about the subscription **on that machine** (HS-074).
+// One machine's row on the settings screen, and what it says about the subscription **on that machine**.
 //
 // Three words, not two: `away` is a machine this page could not read, and a `false` there would be a claim about a
 // machine nothing measured (the rule `COUNTS_UNKNOWN`'s `—` keeps one screen over). `subscribed` is read from the
@@ -314,7 +314,7 @@ export function isIos(userAgent: string, maxTouchPoints: number): boolean {
 export type MachineSubscription = "subscribed" | "not-subscribed" | "unreachable";
 
 // Which word a control's arm earns on its own row, or `null` while nothing has been read — a row that has not asked
-// its machine yet must not say "not subscribed" (the `false`-is-a-claim rule HS-071's `COUNTS_UNKNOWN` keeps).
+// its machine yet must not say "not subscribed" (the `false`-is-a-claim rule 's `COUNTS_UNKNOWN` keeps).
 //
 // `pushState`'s action is the input, so the row and the control cannot disagree: `unsubscribe` is the only arm that
 // means a subscription exists, `away` is the only one that means the machine did not answer (GLOSSARY's **Reach**
@@ -348,7 +348,7 @@ export const PER_MACHINE_SENTENCE =
 // rather than in the DOM.
 //
 // One link per **other** screen, and never one to the page you are on: a link to the page you are reading is a
-// no-op the operator has to read before ignoring it (HS-067's rule). Since HS-071 there are three screens — the
+// no-op the operator has to read before ignoring it. Since there are three screens — the
 // sessions list at `/`, the Computers screen at `COMPUTERS_PATH`, and this one — so the header carries two links
 // where it carried one, and this is the reason `case_pwa`'s `id="nav-link"` needle became a class name.
 export type NavLink = { href: string; label: string };

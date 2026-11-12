@@ -1,4 +1,4 @@
-//! The changes view's summary: what a session changed, and whether it can merge (HS-052, spec item 12).
+//! The changes view's summary: what a session changed, and whether it can merge (spec item 12).
 //!
 //! Item 12's first bullet, in full:
 //!
@@ -22,7 +22,7 @@
 //! Five readings, and each one has a decision behind it (ADR-0061):
 //!
 //! - **`ahead`** is [`Worktree::ahead`] — `rev-list --count <base>..agent/<id>` — reused rather than
-//!   re-spelled, because "ahead" has one definition in this build (HS-025's command, the glossary's entry).
+//!   re-spelled, because "ahead" has one definition in this build (the glossary's entry).
 //! - **`behind`** is the same question from the other side: `rev-list --count agent/<id>..<target>`, the
 //!   commits the target has that the branch does not.
 //! - **`files[]`** is `diff --numstat` + `diff --name-status` between the base commit and the head, i.e. the
@@ -35,19 +35,19 @@
 //! - **`mergeable`** is `merge-tree --write-tree`, item 12's own command, which writes a tree object and
 //!   touches no working tree. It is a **fallible** question — no target, a conflict, a git too old, a
 //!   repository git cannot read — so the field is a `bool | null` with a sibling sentence, never a `false`
-//!   for "I could not look" (HS-050's review, T1: a `bool` over a fallible question invents a measurement).
+//!   for "I could not look" (T1: a `bool` over a fallible question invents a measurement).
 //!
 //! Three readings are made host-safe on purpose, and each one is a bug if it is removed:
 //!
 //! - **`--no-ext-diff --no-textconv --no-renames`** on both diff reads, so a repository's `diff.external`, a
 //!   `.gitattributes` textconv filter or a rename detection cannot change the numbers a client sees.
-//! - **`-z`** so `core.quotePath` cannot hand back a quoted path — the same class as HS-025's
+//! - **`-z`** so `core.quotePath` cannot hand back a quoted path — the same class as that story's
 //!   `worktree list --porcelain` measurement, where a path with a non-ASCII byte is printed raw.
 //! - **`--untracked-files=normal`** on the status and **`--no-optional-locks`** on the whole command, so a
 //!   repository config cannot hide an untracked file and a read taken while the agent is committing does not
 //!   fail because git wanted to refresh an index somebody else holds.
 //!
-//! The module's **second** answer is the unified diff itself ([`diff`], HS-053): `GET
+//! The module's **second** answer is the unified diff itself ([`diff`]): `GET
 //! /api/sessions/:id/changes/diff?path=` — item 12's next bullet, "the unified diff, capped at 256 KB, computed
 //! with `--no-ext-diff --no-textconv`". It shares this module for the reason [`basis`] exists rather than being
 //! copied: the refusals and the base/head resolution are one rule, and a second file with its own copy would be
@@ -55,8 +55,8 @@
 //! [`COUNT_MAX`] counted), a marker that says how much was withheld, and one new refusal — a `path` that is not
 //! in [`Changes::files`].
 //!
-//! What this module does not do: no write, no fetch, no lock. The merge is HS-054's, and `touches_ci`'s
-//! *consumer* is HS-058's (which reads [`CI_PATHS`] through [`touches_ci`], so the warning before a publish
+//! What this module does not do: no write, no fetch, no lock. The merge is that story's, and `touches_ci`'s
+//! *consumer* is the (which reads [`CI_PATHS`] through [`touches_ci`], so the warning before a publish
 //! cannot become a second predicate).
 
 use std::io::Read;
@@ -75,7 +75,7 @@ use crate::worktree::{GitError, Worktree, git_command, git_error, git_error_from
 ///
 /// **`.git/hooks` is deliberately not in the set.** A diff can never contain a path under `.git/` — git does
 /// not track its own directory — so "hook directories" means the ones a repository keeps in its *own* tree,
-/// which is what `.husky/` and `.githooks/` are. Publish (HS-058) reads this constant through
+/// which is what `.husky/` and `.githooks/` are. Publish reads this constant through
 /// [`touches_ci`]; a second predicate would be a second answer to one question.
 pub const CI_PATHS: &[&str] = &[
     ".github/",
@@ -146,7 +146,7 @@ pub struct FileChange {
     pub deletions: Option<u64>,
 }
 
-/// The options the Changes sheet's two decisions offer (HS-058), in one key.
+/// The options the Changes sheet's two decisions offer, in one key.
 ///
 /// One key rather than two because the sheet asks one question — "what may I do with this branch from here?" —
 /// and answers it from one fetch (ADR-0067). The two lists are asked differently on purpose:
@@ -234,7 +234,7 @@ impl Changes {
         let dirty = dirty(&worktree.path).map_err(ChangesError::Git)?;
         let existing = existing_targets(repository, targets).map_err(ChangesError::Git)?;
         // The first existing target is the one the summary is *about* and the one a picker preselects; the rest of
-        // the list is the picker's options (HS-058). One walk, two answers.
+        // the list is the picker's options. One walk, two answers.
         let target = existing.first().cloned();
         let behind = match &target {
             Some(target) => {
@@ -276,13 +276,13 @@ impl Changes {
 }
 
 /// The four refusals both answers share, then the branch's tip: what a patch and a summary are both measured
-/// from, and — since HS-054 — what a **merge** is measured from too.
+/// from, and what a **merge** is measured from too.
 ///
 /// Extracted rather than copied, because "what is this session's diff base" must have one answer: the diff
 /// endpoint's refusals are the summary's, byte for byte (ADR-0062), and the order is the reason a pruned
 /// worktree whose directory is back answers `409` rather than a `500` from a read inside it.
 ///
-/// `pub(crate)` since HS-054: `merge.rs` is a *writer* and therefore a module of its own, but "there is no
+/// `pub(crate)`: `merge.rs` is a *writer* and therefore a module of its own, but "there is no
 /// worktree to merge" is the same four facts and the same four sentences the changes view already answers, so
 /// it is imported rather than spelled again.
 ///
@@ -757,7 +757,7 @@ fn args<'a>(command: [&'a str; 3], base: &'a str, head: &'a str) -> Vec<&'a str>
 /// Ignored files do not count: `status` does not list them without `--ignored`, and they are not work — the
 /// WIP snapshot's `add -A` would not store them either.
 ///
-/// `pub(crate)` since HS-054, whose `409 target_dirty` asks the same question of the **checkout** that holds the
+/// `pub(crate)`, whose `409 target_dirty` asks the same question of the **checkout** that holds the
 /// target rather than of the session's worktree: one definition of work, two directories.
 pub(crate) fn dirty(worktree: &Path) -> Result<bool, GitError> {
     let args = [
@@ -775,12 +775,12 @@ pub(crate) fn dirty(worktree: &Path) -> Result<bool, GitError> {
 
 /// The branches of `targets` this repository has, in the config's order.
 ///
-/// `[merge] targets` defaults to `["main", "master"]` because a machine has one of them (HS-043), and the
+/// `[merge] targets` defaults to `["main", "master"]` because a machine has one of them, and the
 /// order is the answer: "the UI preselects the first" is `[0]` of this list, and the list itself is the
-/// picker's options (HS-058, ADR-0067). A name that is not there is not a target — the same reading the
+/// picker's options (ADR-0067). A name that is not there is not a target — the same reading the
 /// delete's keep-rule makes when it asks whether a branch is merged.
 ///
-/// The walk does not stop at the first hit any more, and that is the one cost HS-058 added to this read: a
+/// The walk does not stop at the first hit any more, and that is the one cost added to this read: a
 /// repository with `main` and `master` asks git twice instead of once.
 fn existing_targets(repository: &Path, targets: &[String]) -> Result<Vec<String>, GitError> {
     let mut existing = Vec::new();
@@ -831,7 +831,7 @@ fn merge_arguments(target: &str, branch: &str) -> [String; 4] {
 ///
 /// The refs are fully qualified so that a tag named `main` cannot be merged instead of the branch, and the
 /// order is the merge's: `merge-tree <target> <branch>` is "merge the session branch into the target", which
-/// is what HS-054 will run. The order is pinned by [`tests::the_merge_trial_asks_for_the_target_first`],
+/// is what will run. The order is pinned by [`tests::the_merge_trial_asks_for_the_target_first`],
 /// because a conflict is symmetric — `merge-tree A B` and `merge-tree B A` find the same paths — so no
 /// fixture can tell the two apart even though the sentence a conflict produces would name the wrong side.
 ///
@@ -988,7 +988,7 @@ mod tests {
     fn the_merge_trial_asks_for_the_target_first() {
         // A conflict is symmetric — `merge-tree A B` and `merge-tree B A` name the same paths — so no fixture
         // can distinguish the order. The vector is pinned instead, because the order is what makes the sentence
-        // "the merge conflicts in …" about merging the branch *into the target* (HS-054's own direction).
+        // "the merge conflicts in …" about merging the branch *into the target*.
         assert_eq!(
             merge_arguments("main", "agent/0123456789abcdef"),
             [

@@ -36,7 +36,7 @@ h2 {
   opacity: 0.7;
 }
 
-/* One link per other screen (HS-071), so they need separating: three screens mean two links and two adjacent
+/* One link per other screen, so they need separating: three screens mean two links and two adjacent
    link texts with nothing between them read as one word. */
 .machine-nav {
   display: flex;
@@ -96,7 +96,7 @@ section {
   font-family: ui-monospace, monospace;
 }
 
-/* The session screen's link to what the agent built, on the preview listener's own origin (HS-041). It sits in
+/* The session screen's link to what the agent built, on the preview listener's own origin. It sits in
    the meta row with the other facts about the session — and inherits that row's `opacity`, which a group setting
    cannot be undone by a child, so the underline is what marks it as the one thing there you can open. It is
    hidden by the page when the session has no container. */
@@ -173,7 +173,7 @@ button:disabled {
 }
 
 
-/* The session screen (HS-014): one transcript, one composer. */
+/* The session screen: one transcript, one composer. */
 .session-link {
   color: inherit;
   text-decoration: none;
@@ -225,7 +225,7 @@ button:disabled {
   white-space: pre-wrap;
 }
 
-/* A tool call (HS-015): the call's name, then its output, in its own block so it is never mistaken
+/* A tool call: the call's name, then its output, in its own block so it is never mistaken
    for something the agent said. */
 .tool {
   border-left: 2px solid color-mix(in srgb, currentColor 20%, transparent);
@@ -262,7 +262,7 @@ button:disabled {
   margin-top: 0.25rem;
 }
 
-/* One link per picture a tool's result carried (HS-035): the bytes are a file, so the block names them rather
+/* One link per picture a tool's result carried: the bytes are a file, so the block names them rather
    than carrying them. */
 .tool-images {
   display: flex;
@@ -283,14 +283,14 @@ button:disabled {
   opacity: 0.8;
 }
 
-/* A message's usage (HS-015): a quiet line inside the block it belongs to. */
+/* A message's usage: a quiet line inside the block it belongs to. */
 .usage {
   font-size: 0.75rem;
   opacity: 0.6;
   margin-top: 0.25rem;
 }
 
-/* The operator's guidance, drawn where it landed in the turn (HS-017): its own block, marked so it is
+/* The operator's guidance, drawn where it landed in the turn: its own block, marked so it is
    never mistaken for something the agent said, and its text keeps the line breaks the composer's
    textarea produced — the same rule `.text` follows. */
 .steer {
@@ -310,7 +310,7 @@ button:disabled {
   white-space: pre-wrap;
 }
 
-/* Something the turn could not do (HS-035): one block per turn.error frame, drawn like a steer's and marked
+/* Something the turn could not do: one block per turn.error frame, drawn like a steer's and marked
    so an operator can see it was the machine that acted, not them. */
 .turn-error {
   border-left: 2px solid color-mix(in srgb, #b3261e 55%, transparent);
@@ -329,7 +329,7 @@ button:disabled {
   white-space: pre-wrap;
 }
 
-/* A machine policy ending the session (HS-063): the per-session disk cap's `error` frame. Drawn like a turn
+/* A machine policy ending the session: the per-session disk cap's `error` frame. Drawn like a turn
    error's — the machine acted, not the operator — in the same red, because both are the server saying it had
    to stop something. Its own class so the two can diverge, and so the label can say which policy it was. */
 .session-error {
@@ -387,7 +387,7 @@ textarea {
   margin: 0.5rem 0 0;
 }
 
-/* The delete affordance (HS-043). It sits apart from the composer because it is not an action on the turn,
+/* The delete affordance. It sits apart from the composer because it is not an action on the turn,
    and the confirm is laid out as a block of its own so a phone wraps the two buttons under the question
    rather than beside it. No `display` here fights the `[hidden]` rule below: the block is written above it
    and states the same property, so the later rule wins. */
@@ -409,11 +409,11 @@ textarea {
   margin: 0 0 0.25rem;
   font-size: 0.875rem;
   opacity: 0.8;
-  /* The publish confirm's second line is the CI warning (HS-058), and it is a sentence of its own. */
+  /* The publish confirm's second line is the CI warning, and it is a sentence of its own. */
   white-space: pre-line;
 }
 
-/* The Changes sheet (HS-058). A folded section rather than an overlay: the transcript stays where it was, a
+/* The Changes sheet. A folded section rather than an overlay: the transcript stays where it was, a
    merge's notice cannot be dismissed by Escape, and one `hidden` attribute is the whole fold. The diff is a
    `pre` because a patch's own line breaks *are* its content. */
 .changes {
@@ -511,7 +511,7 @@ textarea {
   display: none;
 }
 
-/* The Sessions screen's groups (HS-071): one section per machine, the machine's name as its heading. The
+/* The Sessions screen's groups: one section per machine, the machine's name as its heading. The
    heading is a level below the screen's own, because a group is a part of one list rather than a screen — and it
    is what "shows which machine owns each session" looks like when the rows themselves do not repeat it. */
 .machine-group + .machine-group {
@@ -525,7 +525,7 @@ textarea {
   opacity: 0.8;
 }
 
-/* The Computers screen (HS-071). A card per machine, the same shape as a session's row: a bordered block with
+/* The Computers screen. A card per machine, the same shape as a session's row: a bordered block with
    its own name and facts, and the one sentence it has to say. */
 .computers-intro {
   margin: 0 0 0.75rem;

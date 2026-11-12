@@ -1,4 +1,4 @@
-// The installable app's rules (HS-067, spec item 11; ADR-0072), tested without a browser.
+// The installable app's rules (spec item 11; ADR-0072), tested without a browser.
 //
 // `npm test` is the only gate that can see a sentence, and no gate may need a browser, so everything the settings
 // screen and the service worker decide is a pure function in `web/src/push.ts` and is asserted here: the four
@@ -125,7 +125,7 @@ test("a tap opens the named session, and anything else opens the list", () => {
 });
 
 test("the payload's host is a path segment, and only a registry name gets one", () => {
-  // The machine the session lives on (HS-074): the hub's own forwarding route, which is what makes the tap open
+  // The machine the session lives on: the hub's own forwarding route, which is what makes the tap open
   // *that* machine's session rather than this page's own.
   assert.equal(notificationPath("workshop", ID), `/hosts/workshop/sessions/${ID}`);
   assert.equal(notificationPath("build-box-2", ID), `/hosts/build-box-2/sessions/${ID}`);
@@ -150,7 +150,7 @@ test("the payload's host is a path segment, and only a registry name gets one", 
 });
 
 test("the tap's path and the screen's path are the same rule, spelled twice", () => {
-  // `push.ts` cannot import `transcript.ts` (`npm test`'s ESM resolver wants an extension on every hop, HS-071), so
+  // `push.ts` cannot import `transcript.ts` (`npm test`'s ESM resolver wants an extension on every hop), so
   // the two spellings are compared here rather than merged. This is the test that makes the second spelling safe.
   // The table is exactly what both are called with in practice: `local` and names a registry row can hold. A name
   // that could not be a row — `""`, `"../evil"`, `"Work Shop"` — is `notificationPath`'s own business and is
@@ -236,7 +236,7 @@ test("the control the screen offers, one arm at a time", () => {
   assert.deepEqual(pushState(facts({ permission: "denied" })).action, "blocked");
   assert.deepEqual(pushState(facts({ supported: false })).action, "unsupported");
   assert.deepEqual(pushState(facts({ hasKey: false })).action, "no-key");
-  // A machine that did not answer (HS-074): its own sentence, and no control.
+  // A machine that did not answer: its own sentence, and no control.
   assert.deepEqual(pushState(facts({ away: "workshop could not be reached" })).action, "away");
 });
 
@@ -351,7 +351,7 @@ test("the machine's row names the machine and whether it is subscribed", () => {
 });
 
 test("the header offers every other screen and never itself", () => {
-  // Three screens since HS-071, so two links on every page — and one fewer than the screens on each.
+  // Three screens, so two links on every page — and one fewer than the screens on each.
   for (const screen of SCREENS) {
     const links = navLinks(screen.href);
     assert.equal(links.length, SCREENS.length - 1, screen.href);
@@ -484,7 +484,7 @@ test("the shell links the manifest and an apple-touch icon", () => {
   assert.match(shell, /name="apple-mobile-web-app-capable" content="yes"/);
 });
 
-// ---- the two shapes a tap needs, and the route a machine's key is stored on (HS-074) ----------------
+// ---- the two shapes a tap needs, and the route a machine's key is stored on ----------------
 
 test("the notification's data carries the host with the id, so a tap can name a machine", () => {
   // The `push` handler hangs this on the notification and `notificationclick` reads it back; the two halves were

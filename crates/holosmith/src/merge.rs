@@ -1,4 +1,4 @@
-//! The merge: a session's branch landed on a target branch (HS-054 and HS-055, spec item 12's rules 2, 3
+//! The merge: a session's branch landed on a target branch (and, spec item 12's rules 2, 3
 //! and 4).
 //!
 //! Item 12's rules 2–4, in full, are what this module answers:
@@ -30,7 +30,7 @@
 //!   target's own facts; what it does *not* inherit is the sentences, which `http::merge` writes for its own
 //!   request (a `409` on a merge that says "there is nothing to review" is about the wrong request).
 //! - **Every answer is measured, never inferred from git's English.** `merge-base --is-ancestor` exits 0/1 as
-//!   an answer (the same shape HS-043's keep-rule reads), `update-ref`'s compare-and-swap is the race-free
+//!   an answer (the same shape 's keep-rule reads), `update-ref`'s compare-and-swap is the race-free
 //!   guard, a failed `git merge --ff-only` is classified by re-measuring two facts of our own — the ancestry
 //!   and the checkout's status — and a non-zero exit from a **real** merge is classified by reading the index's
 //!   unmerged paths ([`unmerged`]), not by looking for a sentence in git's stderr.
@@ -45,7 +45,7 @@
 //!   still a fast-forward and this module does not learn a second write.
 //!
 //! What this module does not do: none of rule 1's guards and no `delete_session` — both are the *route's*
-//! (HS-056, ADR-0065: a session row is not this module's to read), no publish (HS-057), and no UI (HS-058 owns
+//! (ADR-0065: a session row is not this module's to read), no publish, and no UI (a later change owns
 //! the Changes sheet and the Resolve-with-agent affordance — ADR-0064). It also does not touch the database: a
 //! merge is neither a state transition nor an event, and the changes view is **unchanged** by one — `ahead`
 //! counts the branch's commits and the branch did not move.
@@ -445,7 +445,7 @@ impl MergeError {
 ///
 /// A session row is *not* consulted and *not* written: this function knows a worktree, a request and the
 /// config's list. Rule 1's two guards — a running turn and the session's own uncommitted work — are the
-/// **route's**, because they are facts about a row and this module is handed none (HS-056, ADR-0065 D1); the
+/// **route's**, because they are facts about a row and this module is handed none (ADR-0065 D1); the
 /// route asks them before calling this, which is also why a refused merge makes no temporary directory at all.
 pub fn merge(
     worktree: &Worktree,
@@ -472,7 +472,7 @@ pub fn merge(
         target: target.to_string(),
     })?;
     let landing = request.strategy.landing();
-    // The fast-forward test comes **before** the checkout question, and that order is HS-054's: "the target has
+    // The fast-forward test comes **before** the checkout question, and that order is that story's: "the target has
     // commits the branch does not" is a fact about the request, while `target_checked_out`'s advice ("check out
     // another branch in that worktree") would send the operator to a second refusal. A `merge` or a `squash` does
     // not ask it — a target that has moved on is the ordinary case a real merge exists for — and for those the
@@ -593,7 +593,7 @@ fn apply(
     }
     let new = head_of(path)?;
     // A landing that produced no commit is a no-op, and the answer says so by naming the target's own commit
-    // rather than by inventing a refusal for a request that is already satisfied (HS-054's second merge).
+    // rather than by inventing a refusal for a request that is already satisfied.
     Ok(if new == old { old } else { new })
 }
 
@@ -783,7 +783,7 @@ fn target_head(repository: &Path, reference: &str) -> Result<Option<String>, Git
 /// Whether `older` is an ancestor of (or equal to) `newer` — `git merge-base --is-ancestor`'s own two answers.
 ///
 /// Exit 0 and exit 1 are the answer; anything else is a question that could not be asked, which is a failure
-/// rather than a `false`. The same command HS-043's keep-rule reads, for the same reason: a build that reads
+/// rather than a `false`. The same command the keep-rule reads, for the same reason: a build that reads
 /// another program's exit code as a boolean must say which codes it is reading.
 fn is_ancestor(repository: &Path, older: &str, newer: &str) -> Result<bool, GitError> {
     let args = ["merge-base", "--is-ancestor", older, newer];
@@ -808,7 +808,7 @@ fn checkout_of(repository: &Path, branch: &str) -> Result<Option<PathBuf>, GitEr
         // A **prunable** registration has no working tree — the directory is gone and `git worktree prune` has
         // not run — so the target is not really checked out there and there is nothing to move. Counting it
         // would refuse a merge the operator can perform, with advice ("check out another branch in that
-        // worktree") that cannot be followed; the ref is the right arm instead. HS-052's landmine is exactly
+        // worktree") that cannot be followed; the ref is the right arm instead. the landmine is exactly
         // such a registration.
         .filter(|checkout| !checkout.prunable)
         .find(|checkout| checkout.branch.as_deref() == Some(branch))
@@ -818,7 +818,7 @@ fn checkout_of(repository: &Path, branch: &str) -> Result<Option<PathBuf>, GitEr
 /// Whether `path` is the repository's own checkout, by git's spelling or after resolution.
 ///
 /// `git worktree list --porcelain` prints resolved paths, and a projects root may be reached through a symlink
-/// (HS-025's measurement), so the two spellings of one directory are compared after `canonicalize` when the
+/// so the two spellings of one directory are compared after `canonicalize` when the
 /// raw comparison fails. A path that cannot be resolved is not the repository: the refusal is the safe side.
 fn is_the_repository(path: &Path, repository: &Path) -> bool {
     if path == repository {

@@ -1,4 +1,4 @@
-//! The two embedded Dockerfiles, the label read and the build's own shapes (HS-048, ADR-0057).
+//! The two embedded Dockerfiles, the label read and the build's own shapes (ADR-0057).
 //!
 //! Two halves, and the split is the design:
 //!
@@ -84,7 +84,7 @@ fn each_embedded_dockerfile_is_the_file_in_images_and_carries_its_marker() {
         );
         // The marker is what `scripts/check-static.sh` greps the built artifact for: it is how the gate proves the
         // recipe is *inside* the binary rather than beside it.
-        let marker = format!("# holosmith: embedded {word} image (HS-048)");
+        let marker = format!("# holosmith: embedded {word} image");
         assert!(
             embedded.contains(&marker),
             "the {word} Dockerfile has no marker line `{marker}`"
@@ -542,7 +542,7 @@ fn the_read_answers_missing_no_labels_stale_current_and_unreadable() {
         Status::Stale(reason) => assert!(
             reason.contains("no Holosmith labels")
                 // "this binary's" would be the wrong subject now that one read answers for another release's
-                // images as well (HS-078): the sentence names the **version** whose build it compared against.
+                // images as well: the sentence names the **version** whose build it compared against.
                 && reason.contains(&format!(
                     "not built from version {}'s Dockerfile",
                     expectation.version
@@ -832,7 +832,7 @@ fn a_built_proxy_image_runs_both_proxies_and_a_broken_build_leaves_no_tag() {
     let _ = docker(&["image", "rm", "-f", BROKEN]);
 }
 
-// ---- what a promotion must build (HS-078, spec item 10's acceptance bullet 4) ---------------------------------
+// ---- what a promotion must build (spec item 10's acceptance bullet 4) ---------------------------------
 
 /// A seam that answers each image's labels from a map, so one read can see two releases at once.
 struct Tagged {

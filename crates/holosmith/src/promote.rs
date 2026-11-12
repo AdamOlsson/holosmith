@@ -1,4 +1,4 @@
-//! `holosmith upgrade <binary>`: spec item 10's promotion pipeline (HS-078).
+//! `holosmith upgrade <binary>`: spec item 10's promotion pipeline.
 //!
 //! Item 10's six steps, in the order the acceptance names them, are this module's one function:
 //!
@@ -30,12 +30,12 @@
 //!
 //! # What it does not do
 //!
-//! No `rollback` verb (HS-079) beyond the automatic switch back; no pruning of old releases, no `doctor` reporting of
-//! the resolved release path and no `version`-from-the-release-path (HS-080); no provider call (the smoke run's own
+//! No `rollback` verb beyond the automatic switch back; no pruning of old releases, no `doctor` reporting of
+//! the resolved release path and no `version`-from-the-release-path; no provider call (the smoke run's own
 //! limit, ADR-0081); and no database restore. One measured limit is recorded rather than fixed: the unit runs
 //! `ExecStartPre=<exe> doctor --quick` through `current` too, and `doctor` refuses a database a *newer* release
-//! wrote — so a rollback across a release that migrated the schema cannot start the old `serve`. That line is
-//! HS-049's and the refusal is ADR-0047's; this module's second poll measures it and the ADR records it.
+//! wrote — so a rollback across a release that migrated the schema cannot start the old `serve`. That line
+//! belongs to a later change and the refusal is ADR-0047's; this module's second poll measures it and the ADR records it.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

@@ -1,4 +1,4 @@
-//! RFC 8291's `aes128gcm` message: one ECDH child, three HMACs, and the body a push service delivers (HS-066).
+//! RFC 8291's `aes128gcm` message: one ECDH child, three HMACs, and the body a push service delivers.
 //!
 //! The algorithm is the RFC's §3.4 and it is order-sensitive in two places that a plausible rewrite gets wrong:
 //! the `key_info` string is `"WebPush: info" ‖ 0x00 ‖ ua_public ‖ as_public` and the trailing `0x00` is a

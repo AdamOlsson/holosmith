@@ -1,6 +1,6 @@
 # The registry has its own rules, and a failed health check is a row
 
-HS-068 is the first phase-3 story, and it is where the build stops being one machine. Everything before it assumes
+This is the first phase-3 story, and it is where the build stops being one machine. Everything before it assumes
 "the machine" is the one you are talking to; this story adds the list of *other* machines, the two routes that write
 it, the optional seed file every machine is given, and — the first of its kind in this build — **an outbound request
 to another machine**.
@@ -58,14 +58,14 @@ what a health answer is.
 `last_error`, `last_checked_at`. Additive, so `docs/schema/previous.sql` stays whatever the last release refreshed it
 to (a release step) and `tests/schema_previous.rs` passes untouched.
 
-**`name` is the identity.** A name is what the operator picks and what HS-069 forwards with (`/<host>/<id>/*`), so
+**`name` is the identity.** A name is what the operator picks and what forwards with (`/<host>/<id>/*`), so
 `POST /api/hosts` is an **upsert** on this key: registering a machine twice is the operator retrying, and the seed's
 "the file wins on conflicts" is the same statement. Two names may name one URL — an alias is not a conflict, and
 resolving it would be inventing which row the operator meant.
 
 **`url` is a `config::Origin`, not a free URL.** `Origin::parse` already refuses a scheme that is not http(s), a
 path, a query, a fragment and whitespace — which is the acceptance's first clause for free — and a registry row is an
-origin because the probe asks `GET /api/health` at it and nothing else, and HS-069 will append the path it forwards.
+origin because the probe asks `GET /api/health` at it and nothing else, and will append the path it forwards.
 The column is TEXT and the type is the reader's.
 
 **`reach` plus `last_error` is one row's two facts, not a probe history.** Item 16 says "marked unreachable with the
@@ -95,7 +95,7 @@ the unprivileged range, plus the port a URL means when it leaves the port out. A
 Item 11's `push::LONG_TURN` is the precedent for a policy the spec names and no key spells; `KNOWN_KEYS` stays 32 and
 the golden config does not move.
 
-**`local` is a reserved name** (`422 bad_host_name`), because HS-069 spells *this* machine's sessions with it. A
+**`local` is a reserved name** (`422 bad_host_name`), because spells *this* machine's sessions with it. A
 registered host called `local` would make every forwarded path ambiguous, and the ambiguity would arrive at the first
 request rather than at registration.
 
@@ -124,15 +124,15 @@ host rule or port rule. This is deliberate and it is the ADR's one asymmetry:
 - `hosts.toml` is on the machine's own disk, written by the operator, and is as trusted as `config.toml` (which names
   a Docker host, a projects root and a merge target).
 - `POST /api/hosts` exists for values that arrive over a network from a browser, which is what the predicate is for.
-  HS-071's "Add and remove are available with the same validation as `POST /api/hosts`" is about *those* paths, and
-  HS-072's `hub host add` likewise.
+  the "Add and remove are available with the same validation as `POST /api/hosts`" is about *those* paths, and
+  the `hub host add` likewise.
 
 The cost is that an operator's file can point a hub at a URL no API call could create. The hub forwards only to what
 its own file says, the file is root-owned on a deployed machine, and the alternative — a seed that cannot express
 `http://127.0.0.1:8080` — would make the file unable to describe the one host that is always there. It is also what
 lets a machine with no tailnet measure the probe at all (D10).
 
-## D7 — the delete's refusal is about the **local** row, and HS-069 owns the rest
+## D7 — the delete's refusal is about the **local** row, and a later change owns the rest
 
 Item 4's last bullet: "removing a host is refused while it has live sessions, unless forced". A hub owns no sessions;
 a **server** does. So:
@@ -143,7 +143,7 @@ a **server** does. So:
   `running`, item 8's cap's own set — is above zero, `409 host_busy` with the count, and `?force=true` (the delete's
   existing spelling, `force_requested` reused) removes it anyway.
 - A **remote** row's delete is not refused. Its sessions are not this machine's to count, and pretending otherwise
-  would mean a `409` with no measurement behind it. HS-069's forwarding is what will answer it honestly, and HS-071's
+  would mean a `409` with no measurement behind it. the forwarding is what will answer it honestly, and that story's
   Computers screen is what will show the counts.
 
 A **local row is not probed**: asking this process to reach itself over its own origin is a question about the boot
@@ -219,9 +219,9 @@ tailnet host, and Tailscale's own certificate.
 
 ## Rejected
 
-- **A `hosts` route that forwards** — HS-069's, and a forwarder inside the registry would put a timeout budget and a
+- **A `hosts` route that forwards** — that story's, and a forwarder inside the registry would put a timeout budget and a
   stream policy in a table's module.
-- **`role` and session counts on the row** — HS-071's acceptance names them, and a column nothing reads is a promise
+- **`role` and session counts on the row** — the acceptance names them, and a column nothing reads is a promise
   about a shape (the health payload's rule). The `version` column is the exception, because the probe had to read it
   to accept the answer at all.
 - **Deleting a row because a probe failed** — item 16 says "not removed", and a machine that is off is the row's most

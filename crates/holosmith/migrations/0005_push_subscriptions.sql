@@ -1,4 +1,4 @@
--- HS-066: the machine's Web Push subscriptions (schema 5). One row per endpoint a browser registered.
+-- the machine's Web Push subscriptions (schema 5). One row per endpoint a browser registered.
 --
 -- Spec item 11 names it: "Endpoints: `POST /api/push/subscribe` and `DELETE /api/push/subscribe`, table
 -- `push_subscriptions`", with three things earning a notification — "a turn finished after running longer than 20
@@ -9,7 +9,7 @@
 -- notification twice, which no client could tell from a bug in this build.
 --
 -- `p256dh` and `auth` are **rows here and not files under `secrets/`**, unlike the machine's own keys
--- (ADR-0050's `keys.toml` and HS-049's `vapid.toml`). Those two are this machine's identity: written once by a
+-- (ADR-0050's `keys.toml` and 's `vapid.toml`). Those two are this machine's identity: written once by a
 -- deploy, never rewritten, and mounted nowhere. A subscription is the opposite in every respect — it arrives over
 -- HTTP at any moment, there is one per browser rather than one per machine, and a phone that re-subscribes
 -- overwrites its own row. A file per subscription would be a directory of rename-written files nothing reads as a

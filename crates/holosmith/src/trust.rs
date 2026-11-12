@@ -1,4 +1,4 @@
-//! Machine-to-machine trust: which machines may drive this one (HS-070, spec item 4, V11).
+//! Machine-to-machine trust: which machines may drive this one (spec item 4, V11).
 //!
 //! Item 4's last bullet is two rules, and this module is the second: "a machine accepts forwarded calls only from
 //! peers listed in `allowed_hubs`, verified with the Tailscale LocalAPI whois of the remote address". The first —
@@ -16,7 +16,7 @@
 //! daemon who that address is. `tailscale whois --json <ip>` is one child ([`PROGRAM`], one deadline), and its answer
 //! names a node. The list holds **machine names**, so the comparison is the node's short name — `hub` out of
 //! `hub.tailnet1a2b.ts.net` — because that is the name the registry keys rows by, the name item 16's one file
-//! copied to every machine spells, and the name `hub host add` (HS-072) will collect.
+//! copied to every machine spells, and the name `hub host add` will collect.
 //!
 //! `UserProfile.Login` is deliberately **not** what is compared: the login is the *owner*, and it is identical on
 //! every node the operator has — so comparing it would admit the stray node this story exists to refuse.
@@ -186,7 +186,7 @@ impl Refusal {
     ///
     /// The constants are [`crate::http::error`]'s because the envelope is: this module owns the decision, the
     /// listener owns the code, and a literal here would be the second spelling of a word a client keys on
-    /// (`docs/notes.md`'s envelope rule).
+    /// (the envelope rule).
     pub fn code(&self) -> &'static str {
         match self {
             Self::NotListed { .. } => crate::http::error::PEER_NOT_ALLOWED,

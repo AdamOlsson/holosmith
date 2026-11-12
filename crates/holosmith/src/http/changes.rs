@@ -1,4 +1,4 @@
-//! `GET /api/sessions/:id/changes`: what a session changed and whether it can merge (HS-052, spec item 12).
+//! `GET /api/sessions/:id/changes`: what a session changed and whether it can merge (spec item 12).
 //!
 //! The route is a `GET`, so every guard applies exactly as it does to its neighbours and the manifest records
 //! it `ReadOnly` — nothing here writes, on any surface. It is also the one session route whose work is **host
@@ -87,7 +87,7 @@ pub(crate) async fn respond(state: &AppState, id: &str) -> Response {
     let worktree = Worktree::of(&state.config.projects_root, &session.project, &session.id);
     let targets = state.config.merge.targets.clone();
     // The publish's list, handed through unchanged: this read does not ask whether the repository *has* each
-    // remote, because that is the publish route's question and its own sentence (HS-058, ADR-0067).
+    // remote, because that is the publish route's question and its own sentence (ADR-0067).
     let remotes = state.config.publish.remotes.clone();
     let read = tokio::task::spawn_blocking(move || {
         Changes::read(&worktree, &base_commit, &targets, &remotes)
@@ -102,7 +102,7 @@ pub(crate) async fn respond(state: &AppState, id: &str) -> Response {
     }
 }
 
-/// Answer one session's unified diff: 200 and the patch as text, or an envelope (HS-053).
+/// Answer one session's unified diff: 200 and the patch as text, or an envelope.
 ///
 /// The scope is the summary's, in the same order and for the same reasons: one lock for the row (never held
 /// across an `.await`), the row's `base_commit` or the same `409 no_worktree`, the worktree from the naming
@@ -174,7 +174,7 @@ fn diff_refusal(error: DiffError) -> ApiError {
     }
 }
 
-/// The `path` a request names, decoded, or `None` when it names none (HS-053).
+/// The `path` a request names, decoded, or `None` when it names none.
 ///
 /// No `path` is the whole branch, which is why absence and an empty value are different: `?path=` names the
 /// empty name, which no file has, so it is a `404` rather than a request for everything. Every other parameter
@@ -200,7 +200,7 @@ fn path_of(query: Option<&str>) -> Option<String> {
 /// failing the request, because the value's only use is to be compared with a path git printed, and a literal
 /// `%zz` is simply a name no file has. **Nothing here is a path**: the result is compared, never joined.
 ///
-/// Shared with `http::push` since HS-066, whose `DELETE` names its row through the query: one reader, so two routes
+/// Shared with `http::push`, whose `DELETE` names its row through the query: one reader, so two routes
 /// cannot disagree about what a client that escaped its value sent.
 pub(super) fn decode(value: &str) -> String {
     let bytes = value.as_bytes();

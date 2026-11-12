@@ -1,4 +1,4 @@
-//! The abort ladder: the one routine that ends a turn that will not end itself (HS-016, ADR-0020).
+//! The abort ladder: the one routine that ends a turn that will not end itself (ADR-0020).
 //!
 //! `POST /api/sessions/{id}/abort` answers 202 and this is what happens next, off the request's
 //! task, so the answer never waits for a grace period (spec item 16). Two rungs, in the spec's
@@ -17,8 +17,8 @@
 //!
 //! Four rules it keeps:
 //!
-//! - **It is shared, and its reason is a parameter.** HS-022's turn timeout, HS-023's budget and
-//!   HS-019's delete climb the same ladder and pass their own reason, so the two-rung shape lives once
+//! - **It is shared, and its reason is a parameter.** the turn timeout, the budget and
+//!   the delete climb the same ladder and pass their own reason, so the two-rung shape lives once
 //!   ([`Ladder::climb`]'s `reason`). [`Ladder::end_turn`] is that shape without the way back, which is
 //!   what a delete needs: it ends the turn and then removes the session, so resuming it would
 //!   provision a container only to delete it.
@@ -34,9 +34,9 @@
 //!   means the other owner ended the turn first, which is a race by construction and not a bug.
 //!
 //! The resume after rung 2 goes through the provisioner — `stopped -> starting` by `resume`, then
-//! the four steps back to `idle` — which is the flow HS-018's `POST /resume` reuses. It does not
+//! the four steps back to `idle` — which is the flow the `POST /resume` reuses. It does not
 //! call [`SessionBackend::resume`]: whether a resumed session runs every provisioning step or only
-//! the container's is HS-025's and HS-028's question, and answering it here would be a guess.
+//! the container's is a later question, and answering it here would be a guess.
 
 use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -143,7 +143,7 @@ impl Ladder {
 
     /// End the running turn for `session` and answer how, **without** bringing the session back.
     ///
-    /// This is [`Self::climb`] minus the resume, and it exists for the delete flow (HS-019): a
+    /// This is [`Self::climb`] minus the resume, and it exists for the delete flow: a
     /// session about to be removed wants its turn over — the snapshot must not race the agent — and
     /// it emphatically does not want a fresh container provisioned on the way out.
     ///
@@ -253,7 +253,7 @@ impl Ladder {
             }
         }
         // Through the stopper, not the backend: spec item 6's flag is written before the call, so the
-        // exit this stop produces is classified as ours rather than as a crash (HS-030).
+        // exit this stop produces is classified as ours rather than as a crash.
         if let Err(error) = self.stopper().stop(session).await {
             // Best effort, like the provisioner's undo: the row already says `stopped`, and the
             // operator can delete a session whose container outlived it.
@@ -270,7 +270,7 @@ impl Ladder {
     /// Bring a session the ladder stopped back to `idle`, through the provisioner.
     ///
     /// `stopped -> starting` is the table's `resume` row and the four steps are the provisioner's,
-    /// which is the same path HS-018's endpoint will take. A failure here leaves the row `stopped`
+    /// which is the same path the endpoint will take. A failure here leaves the row `stopped`
     /// with its reason, which is a state an operator can see and act on.
     async fn resume(&self, session: &Session) {
         match self
@@ -329,7 +329,7 @@ impl Ladder {
         )
     }
 
-    /// The one stop routine, wired to this ladder's two handles (HS-030).
+    /// The one stop routine, wired to this ladder's two handles.
     ///
     /// The forced rung stops the container the same way the sweeper and the eviction do, so the
     /// expected-stop flag is written in one place for all three.

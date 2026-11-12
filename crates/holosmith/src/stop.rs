@@ -1,7 +1,7 @@
-//! The one way a session's container is stopped (HS-030, spec item 6).
+//! The one way a session's container is stopped (spec item 6).
 //!
-//! Four policies stop a container — the create's eviction (HS-020), the idle stop (HS-021), the abort ladder's
-//! second rung (HS-016) and the drain (HS-051) — and every one of them must record the same fact first: **this
+//! Four policies stop a container — the create's eviction, the idle stop, the abort ladder's
+//! second rung and the drain — and every one of them must record the same fact first: **this
 //! stop was ours**. Spec item 6 makes that flag the whole of the exit classification's first case
 //! ("Exit with the flag set means `stopped`"), and a classification that read a flag nobody wrote would
 //! call every policy stop a crash.
@@ -15,7 +15,7 @@
 //! records it and hands the backend a stop that has already been announced — which is also the order
 //! every caller already uses for the *state*: the row moves before the container does (ADR-0020).
 //!
-//! Since HS-042 the snapshot runs **before** the flag and the container stop, because spec item 9 says so.
+//! Since the snapshot runs **before** the flag and the container stop, because spec item 9 says so.
 //! It is not that the worktree would disappear with the container — it lives on the host — but that the
 //! spec's order is "snapshot, then stop", and a stop that returned before the ref existed would be a stop
 //! whose promise depended on a later task.
@@ -59,7 +59,7 @@ impl Stopper {
         // Spec item 9's "a stop never loses uncommitted work": take the snapshot before the flag and the
         // container, because after the stop there may be no process left to write the worktree. A failure is
         // logged and the stop goes ahead — the stop's caller asked for a container to be stopped, not for a
-        // git command to veto it (HS-019's delete is where a failure is a refusal).
+        // git command to veto it.
         if let Err(error) = self.backend.snapshot(session).await {
             tracing::error!(
                 target: "holosmith::stop",

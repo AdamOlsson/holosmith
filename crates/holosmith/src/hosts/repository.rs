@@ -1,4 +1,4 @@
-//! Every statement that reads or writes a `hosts` row (HS-068, spec items 4 and 16).
+//! Every statement that reads or writes a `hosts` row (spec items 4 and 16).
 //!
 //! The repository borrows the open `Database`'s connection rather than owning one, exactly as `sessions`, `events`
 //! and `push_subscriptions` do, and this file is the only one with a `hosts` statement — a test below walks `src/**`
@@ -20,7 +20,7 @@ use crate::sessions::RepoError;
 
 /// The seven columns a row is, in the order every statement below reads them and [`host`] unpacks them.
 ///
-/// `preview` is **last** because it is the column HS-069 added (migration `0007`): appending it leaves every index
+/// `preview` is **last** because it is the column added (migration `0007`): appending it leaves every index
 /// this file already used where it was, which is one fewer thing for a reader to re-derive from a diff.
 const COLUMNS: &str = "name, url, reach, version, last_error, last_checked_at, preview";
 
@@ -137,7 +137,7 @@ fn host_row(row: &Row<'_>) -> rusqlite::Result<Host> {
     let reach: String = row.get(2)?;
     let reach = Reach::parse(&reach).map_err(|error| corrupt(2, error))?;
     // A NULL is a row no probe has carried a preview origin for, which is not corruption; a text that is not an
-    // origin is, and it names the column it was in (HS-069, ADR-0074).
+    // origin is, and it names the column it was in (ADR-0074).
     let preview: Option<String> = row.get(6)?;
     let preview = match preview {
         Some(preview) => Some(Origin::parse(&preview).map_err(|error| corrupt(6, error))?),

@@ -1,4 +1,4 @@
-//! `holosmith hub host`: the registry's own routes, called from this machine (HS-072).
+//! `holosmith hub host`: the registry's own routes, called from this machine.
 //!
 //! The spec's Commands table asks `hub host add|list|remove` to "perform the same checks as `POST /api/hosts`", and
 //! the only way for a second caller to perform the *same* checks is to be a client of the route that owns them. So

@@ -1,4 +1,4 @@
-// The probe the startup self-test runs inside a container (HS-036).
+// The probe the startup self-test runs inside a container.
 //
 // It is handed the addresses a session network must not reach and its verdict is its **exit code**, because
 // that is the one thing `docker run` reports without parsing anything: 0 means nothing was reachable, 9 means

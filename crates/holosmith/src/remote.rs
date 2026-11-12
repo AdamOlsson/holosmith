@@ -1,5 +1,5 @@
 //! The `--ssh` half of a deploy: send this build to another machine, verify the copy, and run the deploy there
-//! (HS-073, ADR-0078).
+//! (ADR-0078).
 //!
 //! The story changes only **how** a deploy reaches a machine, and that is the whole shape of this module: it
 //! builds four `ssh` children, checks what they answer, and hands the target the same command line the operator
@@ -356,7 +356,7 @@ impl Machine {
 
     /// The ELF header's `e_machine`, which is what a file *is* rather than what a name says about it.
     ///
-    /// `pub(crate)` since HS-076: a release build reads its own artifact's machine from these bytes, and the
+    /// `pub(crate)`: a release build reads its own artifact's machine from these bytes, and the
     /// 62/183 mapping is one place.
     pub(crate) fn of_elf(machine: u16) -> Option<Self> {
         match machine {
@@ -559,7 +559,7 @@ fn elf_machine(path: &Path, bytes: &[u8]) -> Result<Machine, String> {
 /// `sha256sum` writes `<hex>  <path>`; a `busybox` or a wrapper that adds a prefix would print something else, and
 /// that is a sentence rather than a match. The comparison is case-insensitive because a hex digest has one value.
 ///
-/// `pub(crate)` because a promotion reads the same format out of a `holosmith.sha256` file (HS-078): one spelling of
+/// `pub(crate)` because a promotion reads the same format out of a `holosmith.sha256` file: one spelling of
 /// "a `sha256sum` line's first field" for the two readers that compare it with a digest they computed.
 pub(crate) fn digest_of(answer: &str) -> Option<String> {
     let first = answer.lines().next()?.split_whitespace().next()?;

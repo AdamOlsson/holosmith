@@ -1,6 +1,6 @@
-//! The backend conformance suite (HS-024, spec item 10 §1): what "the backend works" means.
+//! The backend conformance suite (spec item 10 §1): what "the backend works" means.
 //!
-//! Two backends implement [`SessionBackend`], and every story from HS-025 on adds behaviour to one of them.
+//! Two backends implement [`SessionBackend`], and every story on adds behaviour to one of them.
 //! The suite is where that behaviour is defined once and run against both: a case here is a promise the
 //! trait makes, not a story's demo, so a backend that adds a step adds its case here and the other backend
 //! is asked the same question.
@@ -8,7 +8,7 @@
 //! Today it holds three promises: **`undo` and `delete` are infallible for a session nothing was
 //! provisioned for** (teardown of work that was never done is not a failure), **a failure names the thing
 //! it could not do** (that sentence reaches the row's `status_reason` and the transcript), and **a worktree
-//! step that fails names the worktree**. HS-028 (container) and HS-031 (pi) add the cases their behaviour
+//! step that fails names the worktree**. (container) and (pi) add the cases their behaviour
 //! needs; a case that only one backend can satisfy is written with a note saying so, never silently
 //! skipped — and so far there is none: the worktree step's *effects* are one backend's, and they are
 //! tested in `tests/worktree.rs`, while the promise both backends keep about it is the sentence.
@@ -91,7 +91,7 @@ async fn conformance<B: SessionBackend>(backend: &B, label: &str, failures: Fail
         "{label}: the refusal does not name {:?}: {error}",
         failures.named
     );
-    // Case 3: a backend with no repository keeps nothing and claims nothing (HS-043). Both answer it — the
+    // Case 3: a backend with no repository keeps nothing and claims nothing. Both answer it — the
     // stub mounts no repository at all (ADR-0015), and this suite's Docker backend has a projects root with
     // none in it — so the delete's answer is three nulls rather than a promise about names that do not exist.
     assert_eq!(
@@ -155,7 +155,7 @@ async fn the_stub_backend_records_no_worktree() {
 async fn the_docker_backend_passes_the_conformance_suite() {
     // A projects root with no repository in it: the worktree step's own failure is what case 3 reads. The
     // agent step is this build's named refusal — the worktree, network and container steps are real from
-    // HS-025/HS-028, and each names what it could not do when it fails (`tests/worktree.rs` and
+    // those stories, and each names what it could not do when it fails (`tests/worktree.rs` and
     // `tests/container.rs` are where their effects are asserted).
     let dir = TempDir::new("contract-docker");
     let docker = DockerBackend::new(ContainerSettings::at(

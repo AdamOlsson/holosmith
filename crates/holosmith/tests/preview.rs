@@ -1,4 +1,4 @@
-//! The preview listener as a browser and a dev server meet it (HS-041, spec item 3, V7).
+//! The preview listener as a browser and a dev server meet it (spec item 3, V7).
 //!
 //! Every test starts the real [`preview::serve`] on an ephemeral port and talks HTTP/1.1 over a socket, so
 //! each answer is one a browser gets. The dev server is a stub the test owns — a listener that records the
@@ -153,7 +153,7 @@ impl Listening {
             database,
             upstream: Arc::new(Stub { answer: upstream }),
             tools: holosmith::preflight::Tools::default(),
-            // HS-070: no `allowed_hubs`, so the listener verifies nobody and these tests measure the routing.
+            // no `allowed_hubs`, so the listener verifies nobody and these tests measure the routing.
             trust: holosmith::trust::Trust::of(
                 &holosmith::config::Config::default(),
                 &holosmith::preflight::Tools::default(),

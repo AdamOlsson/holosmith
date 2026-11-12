@@ -1,4 +1,4 @@
-//! The release tree: `releases/<tag>/`, `current`, and the unit's `ExecStart` (HS-078, spec item 10).
+//! The release tree: `releases/<tag>/`, `current`, and the unit's `ExecStart` (spec item 10).
 //!
 //! Item 10's first paragraph — "releases live in `releases/<tag>/` with a `current` symlink that systemd runs" — is
 //! three claims, and each is measured here over a real directory: a release is a binary **and** its digest, one tag
@@ -6,7 +6,7 @@
 //! *through* the link (so a later `server deploy` renders the one unit that follows a promotion).
 //!
 //! No daemon, no database and no process: this is a module of directories and one symlink, and a test that needed
-//! either of the other two would be measuring somebody else's story. HS-080 owns what the layout means from here
+//! either of the other two would be measuring somebody else's story. a later change owns what the layout means from here
 //! (pruning, `doctor`'s report, `version` from the release path); what is asserted below is what a promotion needs.
 
 use std::os::unix::fs::PermissionsExt;
@@ -178,7 +178,7 @@ fn the_unit_names_the_path_through_current_and_a_promotion_can_read_it_back() {
 fn a_binary_run_from_a_release_directory_reports_that_release() {
     // Acceptance bullet 3, measured over a real file in a real tree: the fact is *the path the file is in*, and a
     // binary started through `current` reports the directory the link resolves to — which is what makes the live
-    // version unambiguous (HS-080).
+    // version unambiguous.
     let dir = TempDir::new("release-version");
     let release = tree(&dir);
     release.switch("v1").expect("the release is live");

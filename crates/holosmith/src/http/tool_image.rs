@@ -1,4 +1,4 @@
-//! `GET /api/sessions/:id/tool-image/:tool_id/:index`: one image a tool returned (HS-035).
+//! `GET /api/sessions/:id/tool-image/:tool_id/:index`: one image a tool returned.
 //!
 //! An image in a tool result cannot go in an event payload — the log is replayed to a phone on every reconnect
 //! and folded by compaction (ADR-0032, ADR-0041) — so it is a file beside the tool's text
@@ -49,7 +49,7 @@ pub(crate) async fn respond(
     index: &str,
 ) -> Response {
     // The row first: an id the table does not hold is not a directory to look in, and a delete's leftovers
-    // (HS-043's keep-rules) must not be reachable through a session nobody can see.
+    //  must not be reachable through a session nobody can see.
     let known = {
         let database = state
             .database

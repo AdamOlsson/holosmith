@@ -107,7 +107,7 @@ impl Origin {
     /// The same scheme and host on another port. `--port` moves the control listener and the
     /// control origin together, so the browser's `Origin` header keeps matching the address
     /// the operator was told to open. A port that is the scheme's default is left out, because
-    /// a browser never sends `:80` or `:443` in `Origin` and HS-005 compares the two as text.
+    /// a browser never sends `:80` or `:443` in `Origin` and compares the two as text.
     /// An origin with no scheme, which [`Self::parse`] refuses, is returned unchanged rather
     /// than guessed at.
     pub fn with_port(&self, port: u16) -> Self {
@@ -125,7 +125,7 @@ impl Origin {
     ///
     /// `None` for text that is not an origin at all, which [`Self::parse`] already refuses and a deserialised value
     /// may still be — and for a port that is not a number (`:abc`, `:99999`), which is the one answer a caller must
-    /// be able to tell apart from "no port": HS-068's port rule refuses the first and accepts the second.
+    /// be able to tell apart from "no port": the port rule refuses the first and accepts the second.
     pub fn port(&self) -> Option<u16> {
         let parts = self.parts()?;
         match parts.port {
@@ -136,7 +136,7 @@ impl Origin {
 
     /// The authority without its port — the host alone, an IPv6 literal still bracketed.
     ///
-    /// HS-068's host predicate reads it: the registry cares which *host* a row names, and the port is another
+    /// the host predicate reads it: the registry cares which *host* a row names, and the port is another
     /// sentence with its own rule.
     pub fn host(&self) -> Option<&str> {
         Some(self.parts()?.host)
@@ -181,7 +181,7 @@ struct Parts<'a> {
 
 /// The port a browser leaves out of `Origin` for this scheme, if it is one of the two we serve.
 ///
-/// `pub(crate)` because HS-068's port rule asks the same question of a registry row's URL, and a second 80/443 table
+/// `pub(crate)` because the port rule asks the same question of a registry row's URL, and a second 80/443 table
 /// is the kind of copy that drifts.
 pub(crate) fn default_port(scheme: &str) -> Option<u16> {
     match scheme {
@@ -225,7 +225,7 @@ pub struct Egress {
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
     pub role: Role,
-    /// The backend `serve` runs unless `--backend` names another one for this run (HS-011).
+    /// The backend `serve` runs unless `--backend` names another one for this run.
     /// A machine setting rather than a flag because a dev instance should not have to remember
     /// one on every start, and `docker` because the stub is opt-in (ADR-0001).
     pub backend: Backend,
@@ -233,7 +233,7 @@ pub struct Config {
     pub preview_listen: SocketAddr,
     pub control_origin: Origin,
     pub preview_origin: Origin,
-    /// The TCP port a session's own dev server listens on **inside its container** (HS-041, spec item 3).
+    /// The TCP port a session's own dev server listens on **inside its container** (spec item 3).
     ///
     /// The preview listener forwards `/<host>/<id>/…` here, on the address the container has on its own
     /// private network. One key for every session because each container has its own network namespace, so
@@ -243,7 +243,7 @@ pub struct Config {
     pub preview_upstream_port: u16,
     pub allowed_hosts: Vec<String>,
     pub owner: Option<String>,
-    /// What this machine calls itself in a notification's payload (HS-074, spec item 11).
+    /// What this machine calls itself in a notification's payload (spec item 11).
     ///
     /// Two consumers, one value: `push::Payload::host` — the word a phone's notification carries, and the segment a
     /// tap's path is built from — and `/api/health`'s `machine_name`, so a page can label its own row with the name
@@ -252,12 +252,12 @@ pub struct Config {
     pub machine_name: String,
     pub data_root: PathBuf,
     pub projects_root: PathBuf,
-    /// The image a session's container runs (HS-027). Item 10 §3 builds it, so the default names the
+    /// The image a session's container runs. Item 10 §3 builds it, so the default names the
     /// image a deployed machine already has: `agent-image:<this binary's version>` — from
-    /// [`crate::images::agent_image`], which is the one place that name is spelled. HS-031 compares the
-    /// image's pi version with the pinned one, and HS-048 builds it for the machine it deploys to.
+    /// [`crate::images::agent_image`], which is the one place that name is spelled. compares the
+    /// image's pi version with the pinned one, and builds it for the machine it deploys to.
     pub agent_image: String,
-    /// The Debian packages the agent image installs beyond git, openssl and CA certificates (HS-048).
+    /// The Debian packages the agent image installs beyond git, openssl and CA certificates.
     ///
     /// The spec's "the toolchains named in the config": `docs/build.md`'s table says a machine's image
     /// carries the toolchains its projects use, so they are a key rather than a constant — and the image's
@@ -266,22 +266,22 @@ pub struct Config {
     /// git), so it is not refused; a blank name is, because `apt-get install ""` is a build failure whose line
     /// names nothing.
     pub agent_toolchains: Vec<String>,
-    /// What one session's container may use (HS-028, spec item 6's resource limits): whole CPUs,
+    /// What one session's container may use (spec item 6's resource limits): whole CPUs,
     /// mebibytes of memory, and a process count. Three integers because a config value has no decimal
     /// and Docker's `--cpus` accepts the integer form; the defaults are `docs/build.md`'s flag list.
     pub container_cpus: u32,
     pub container_memory_mb: u64,
     pub container_pids: u64,
-    /// The prefix in front of every session **container** name (HS-077, spec item 10 step 2).
+    /// The prefix in front of every session **container** name (spec item 10 step 2).
     ///
     /// The build's own prefix is `s_` ([`crate::container::NAME_PREFIX`]), so a machine with `smoke_` here names a
     /// session's container `smoke_s_<id>`. The default is empty, which leaves a normal machine's names exactly
     /// `s_<id>`; a smoke run's names then cannot collide with them, and neither run's startup reconcile can sweep
     /// the other's, because the sweep's prefix is composed the same way and compared with `strip_prefix` rather than
-    /// with Docker's **substring** name filter (HS-044). When it is not empty it must end with `_`, so the composed
+    /// with Docker's **substring** name filter. When it is not empty it must end with `_`, so the composed
     /// name can never merge the two halves (`smoke` would give `smokes_<id>`, which reads as neither).
     pub container_prefix: String,
-    /// The prefix in front of every session **network** name, `agents_<id>` composed the same way (HS-077).
+    /// The prefix in front of every session **network** name, `agents_<id>` composed the same way.
     ///
     /// Two keys rather than one because two different sweeps read the two names and a machine may want one without
     /// the other; the smoke config sets both, and both must be empty or end with `_`.
@@ -297,20 +297,20 @@ pub struct Config {
     pub max_session_tokens: Option<u64>,
     pub abort_grace: Duration,
     pub min_free_gb: u64,
-    /// The per-session disk soft cap, in whole GB (HS-063, spec item 14): a session whose worktree grows past
+    /// The per-session disk soft cap, in whole GB (spec item 14): a session whose worktree grows past
     /// this is stopped with reason `disk_quota`, and `0` is the off switch (no watchdog, no `du`). A worktree's
     /// size includes everything under it — `target/` and `node_modules/` as much as `src/` — so a large Rust
     /// project should raise it rather than rebuild from scratch on every resume; caches are per session by
     /// design (D2), which is why one session's build tree is its own to answer for.
     pub session_disk_soft_gb: u64,
     pub stopped_ttl_days: u64,
-    /// How many messages a client that opens a stream with no `Last-Event-ID` is replayed (HS-061).
+    /// How many messages a client that opens a stream with no `Last-Event-ID` is replayed.
     /// The newest `history_window` messages, plus a `history.truncated` frame naming where the
     /// replay started; older history is paged with `GET /api/sessions/{id}/events/history`. A
     /// machine setting rather than a constant because the story says it is configurable, and a
     /// refusal of `0` because a client shown nothing cannot tell an empty session from a cut one.
     pub history_window: u32,
-    /// How many release directories a promotion leaves in the release tree (HS-080, spec item 10).
+    /// How many release directories a promotion leaves in the release tree (spec item 10).
     ///
     /// A prune keeps the newest `keep_releases`, and always the live release and the one behind it (the rollback
     /// target) — so the count is a floor of **2** and the config refuses anything smaller: a tree that cannot go back
@@ -401,7 +401,7 @@ impl Config {
     ///
     /// `--port` moves the control listener and the control origin's port, keeping its scheme
     /// and host; the preview listener and origin are not touched. `--data-dir` replaces the
-    /// data root. Neither creates a directory: HS-004 owns the data root.
+    /// data root. Neither creates a directory: a later change owns the data root.
     ///
     /// `--port 0` is the one case where the origin cannot be written here: the port is the
     /// kernel's to pick, so `serve` re-derives the origin from the bound port after `bind`.
@@ -833,7 +833,7 @@ fn semantic_problems(
 ///
 /// A port of `0` is the kernel's to choose, so two of them are not a collision: `127.0.0.1:0` is how a test
 /// (and `--port 0`) asks for a free port, and the two listeners would be given different ones. The rule is
-/// about sharing a port, not about sharing a spelling of "any" (HS-041).
+/// about sharing a port, not about sharing a spelling of "any".
 fn preview_listen_problem(config: &Config, note: &str) -> Option<String> {
     let one_is_ephemeral = config.control_listen.port() == 0 || config.preview_listen.port() == 0;
     (!one_is_ephemeral && config.control_listen == config.preview_listen).then(|| {
@@ -975,7 +975,7 @@ fn normalized(path: &Path) -> PathBuf {
 
 /// A host name or bracketed IPv6 literal as the `Host` allow-list spells it: no scheme, no
 /// path, no port. A browser sends `Host: [::1]:8080`, so the literal needs its brackets and
-/// `allowed_hosts` must be able to hold one (HS-005 matches it against that header).
+/// `allowed_hosts` must be able to hold one.
 fn is_host_name(name: &str) -> bool {
     if let Some(literal) = name
         .strip_prefix('[')
@@ -991,7 +991,7 @@ fn is_host_name(name: &str) -> bool {
 
 /// A branch name `merge` may write, kept conservative on purpose (item 12).
 ///
-/// `pub(crate)` since HS-057: a publish's `branch` names a ref too, and this is the machine's one alphabet for
+/// `pub(crate)`: a publish's `branch` names a ref too, and this is the machine's one alphabet for
 /// "a name git will accept as a branch" — a second predicate would be a second answer to that question
 /// (ADR-0063's import-not-copy rule, which is why `changes::basis` is `pub(crate)` for the merge).
 pub(crate) fn is_ref_name(name: &str) -> bool {
@@ -1008,7 +1008,7 @@ pub(crate) fn is_ref_name(name: &str) -> bool {
                 || matches!(character, '~' | '^' | ':' | '?' | '*' | '[' | '\\')
         })
         // Git's **component** rules, which the checks above do not reach: no empty component (so `a//b` and a
-        // leading `/` are out), no component beginning with `.`, and none ending in `.lock`. HS-057 measured
+        // leading `/` are out), no component beginning with `.`, and none ending in `.lock`. measured
         // them: `git push` refuses `refs/heads/a.lock`, `.hidden` and `a/.b` with `fatal: invalid refspec`
         // before it contacts a remote, and `git check-ref-format` refuses exactly those.
         && !name
@@ -1123,7 +1123,7 @@ allow = ["crates.io"]
         );
     }
 
-    /// HS-074's one key: what this machine calls itself in a notification's payload.
+    /// the one key: what this machine calls itself in a notification's payload.
     ///
     /// Three arms — the default is the reserved word `local`, a registry-shaped name is accepted, and a name a
     /// registry row could not take is refused with a sentence about the key the operator typed. The alphabet is
@@ -1154,7 +1154,7 @@ allow = ["crates.io"]
         }
     }
 
-    /// HS-077's two keys: empty by default, and a prefix that can be composed into a name.
+    /// the two keys: empty by default, and a prefix that can be composed into a name.
     ///
     /// The empty value is the one a normal machine has, so it is asserted by name rather than left to the golden
     /// file: a default that changed would rename every container on the machine. The four refusals are the two rules
@@ -1340,7 +1340,7 @@ allow = ["crates.io"]
 
     #[test]
     fn backend_must_be_stub_or_docker() {
-        // HS-011's config key: the two words are the ones `--backend` accepts, so a third spelling
+        // the config key: the two words are the ones `--backend` accepts, so a third spelling
         // is a problem here rather than a backend nobody can select.
         assert_eq!(
             problems_of("backend = \"Podman\"\n"),
@@ -1665,7 +1665,7 @@ allow = ["crates.io"]
 
     #[test]
     fn a_bracketed_ipv6_literal_can_be_allow_listed() {
-        // A browser sends `Host: [::1]:8080`, so HS-005 has to be able to match `[::1]`.
+        // A browser sends `Host: [::1]:8080`, so has to be able to match `[::1]`.
         let config = parse(
             "control_listen = \"[::1]:8080\"\npreview_listen = \"[::1]:8081\"\n\
              allowed_hosts = [\"[::1]\", \"[2001:db8::1]\"]\n",
@@ -1805,7 +1805,7 @@ allow = ["crates.io"]
 
     #[test]
     fn the_default_path_is_the_one_the_spec_names() {
-        // Pure, so it runs on the machine class HS-003 deploys to, where a real config file
+        // Pure, so it runs on the machine class deploys to, where a real config file
         // makes the loader tests below take their skip.
         let resolved = ConfigPath::resolve(None);
         assert_eq!(resolved.path, PathBuf::from(DEFAULT_CONFIG_PATH));
@@ -1893,7 +1893,7 @@ allow = ["crates.io"]
 
     #[test]
     fn an_origin_answers_its_own_host_and_port_or_neither() {
-        // The three readers HS-068 needed — and the one rule they share: a bracketed IPv6 literal may itself contain
+        // The three readers needed — and the one rule they share: a bracketed IPv6 literal may itself contain
         // colons, so only the brackets delimit its host, and a literal that is not closed is not an origin rather
         // than a host somebody guessed at.
         let cases = [

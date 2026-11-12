@@ -1,5 +1,5 @@
 //! The provisioner: the background work that turns an accepted session into a running one,
-//! reporting progress by step (HS-011).
+//! reporting progress by step.
 //!
 //! `POST /api/sessions` writes the row and answers 202; this is what happens next, off the
 //! request's task, so a slow start never looks like a failed tap (spec item 7). It runs the four
@@ -16,7 +16,7 @@
 //! - **No lock is held across an `.await`.** Every status write is one synchronous block through
 //!   `Arc<Mutex<Database>>` (ADR-0012/ADR-0013); the guard is not `Send`, so the compiler
 //!   enforces it, and the event writer's commit can never wait on this task.
-//! - **This is not a state machine.** HS-012 owns the table and the one function that writes a
+//! - **This is not a state machine.** a later change owns the table and the one function that writes a
 //!   state. The provisioner asks it for `starting → idle` (`PiReady`) or `starting → error`
 //!   (`ProvisioningFailed`) and emits the four step reports itself, because a step beginning is
 //!   not a state change: its payload says `from: starting, to: starting, step: …`.
@@ -42,13 +42,13 @@ pub struct Provisioner {
     backend: Backends,
     database: Arc<Mutex<Database>>,
     events: EventWriter,
-    /// What a finished agent process's exit means, once the pi step has left one running (HS-031).
+    /// What a finished agent process's exit means, once the pi step has left one running.
     ///
     /// Built here from the row database rather than passed in: the data root is the directory the database
     /// lives in ([`Exits::for_database`]), so the two handles this runner already has are all an exit's
     /// consequences need.
     exits: Exits,
-    /// What the success ending records when the run is a **recovery** rather than a request (HS-044).
+    /// What the success ending records when the run is a **recovery** rather than a request.
     ///
     /// `None` — every provisioner a create or a resume builds — settles to a bare `idle`. A startup
     /// recovery of a row that was `running` settles to `idle` **with** `interrupted`, so the reason survives
@@ -70,7 +70,7 @@ impl Provisioner {
         }
     }
 
-    /// The same provisioner, settling with `reason` (HS-044).
+    /// The same provisioner, settling with `reason`.
     ///
     /// The reconcile is the only caller: a row that was `running` when the process died comes back `idle`
     /// with `interrupted` as the row's reason, which is the badge the operator reads and the one fact the
@@ -96,10 +96,10 @@ impl Provisioner {
         let mut completed: Vec<Step> = Vec::new();
         for step in Step::ALL {
             // Somebody else may have ended this session's provisioning: a delete moves the row to
-            // `deleting` (HS-019) whatever state it was in, and this task must then stop building
+            // `deleting` whatever state it was in, and this task must then stop building
             // resources for a session that is going away. Nothing is undone — the delete's
             // `SessionBackend::delete` is what removes them, and undoing here would race it. A
-            // step already in flight when the row moved is HS-044's to make safe.
+            // step already in flight when the row moved is the to make safe.
             if !self.still_starting(&session.id) {
                 tracing::info!(
                     target: "holosmith::provisioner",
@@ -119,7 +119,7 @@ impl Provisioner {
                         completed.push(step);
                     }
                     self.record(&session, provisioned);
-                    // A fresh container has not been asked to stop (spec item 6, HS-030). The flag is
+                    // A fresh container has not been asked to stop (spec item 6). The flag is
                     // cleared here rather than by the backend, which may not write a row (ADR-0019), and
                     // here rather than at the resume: this is the one step that makes a *new* container,
                     // and a flag left over from the last one would call its first crash an expected stop.
@@ -128,7 +128,7 @@ impl Provisioner {
                     }
                     // The last step left a process running, and its exit is the server's to record: the
                     // backend hands it over and a task of this one's watching calls `Exits::record` when
-                    // it arrives (HS-031, ADR-0038). Done *after* the step reported success, so a stack that
+                    // it arrives (ADR-0038). Done *after* the step reported success, so a stack that
                     // never became ready has no watcher.
                     if step == Step::Pi {
                         self.supervise(&session).await;
@@ -152,7 +152,7 @@ impl Provisioner {
         self.settle(&session).await;
     }
 
-    /// Watch the agent process the pi step left running, and record how it ends (HS-031).
+    /// Watch the agent process the pi step left running, and record how it ends.
     ///
     /// A task of its own rather than a branch here: this run is over once the session is `idle`, and an
     /// agent process outlives it by hours. The backend answers `None` when it has no process to supervise
@@ -183,7 +183,7 @@ impl Provisioner {
     /// A backend cannot write the row (ADR-0019), so a step that creates something the row names answers
     /// with it and this is the writer. The worktree step is the only one so far: its path and the commit
     /// its branch starts from are the row's `worktree` and `base_commit`, and every reader of a session's
-    /// work — the changes sheet (HS-061), the mounts (HS-027) and the delete's teardown — names one of
+    /// work — the changes sheet, the mounts and the delete's teardown — names one of
     /// them.
     ///
     /// A failed write is logged and provisioning carries on. The resource exists either way, so failing
@@ -210,7 +210,7 @@ impl Provisioner {
         }
     }
 
-    /// Clear the expected-stop flag once the container step has made a new container (HS-030).
+    /// Clear the expected-stop flag once the container step has made a new container.
     ///
     /// A failed write is logged and provisioning carries on, for [`Self::record`]'s reason: the container
     /// exists either way, and the price of a flag that was not cleared is a misclassified exit rather than
@@ -219,7 +219,7 @@ impl Provisioner {
     /// **The ordering this depends on, and how it is kept:** the *previous* container's exit must not be
     /// classified as a crash after this clear has reset the flag. It cannot be: a launch has a generation,
     /// and an exit whose generation is no longer the session's current one answers
-    /// [`crate::backend::ProcessEnd::NotCurrent`] and is never classified (HS-031, ADR-0039). So the
+    /// [`crate::backend::ProcessEnd::NotCurrent`] and is never classified (ADR-0039). So the
     /// ladder's immediate resume after rung two is safe without waiting for anything.
     fn clear_expected_stop(&self, session: &Session) {
         let database = self.database.lock().unwrap_or_else(PoisonError::into_inner);

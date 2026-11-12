@@ -1,6 +1,6 @@
 # The push is signed by `openssl` and encrypted in-crate
 
-HS-066 is spec item 11, whose three middle bullets are the whole of it: "Endpoints: `POST /api/push/subscribe`
+This is spec item 11, whose three middle bullets are the whole of it: "Endpoints: `POST /api/push/subscribe`
 and `DELETE /api/push/subscribe`, table `push_subscriptions`", "Triggers: a turn finished after running longer
 than 20 seconds; `session.status` error; a budget or timeout stop. Not sent while an SSE stream for that session is
 open", and "Payload carries only `{host, session_id, kind}`, never content. Tapping opens that session." Its last
@@ -87,7 +87,7 @@ the guard is dropped, the machine's pair is read next (absent or unreadable is *
 machine that never deployed has no pair and that must not be an error per notification), and then each subscription
 is built and delivered on `spawn_blocking`. No database lock spans a `spawn_blocking` or a child.
 
-## D5 — the `sub` claim amends ADR-0058's "HS-066 decides it"
+## D5 — the `sub` claim amends ADR-0058's " decides it"
 
 ADR-0058 left the file without one because "a JWT's `sub` claim is not key material… the consumer that signs with
 this pair decides it". Decided: `mailto:<config owner>` — the operator's Tailscale login, the same identity the
@@ -100,7 +100,7 @@ a push service compares.
 ## D6 — `host` is GLOSSARY's **Local**, and the payload is three keys
 
 `host` is `preview::HOST` (`"local"`, GLOSSARY's **Local**: "the host name a server uses for its own sessions"), so
-HS-069's forwarder and HS-074's cross-machine push inherit one spelling rather than a second vocabulary. `kind` is
+the forwarder and the cross-machine push inherit one spelling rather than a second vocabulary. `kind` is
 one of the four words above — three of which the build already uses for the same fact, so a client reads one
 vocabulary: `error` is the event kind item 11's second clause names, and the two stop reasons are the words
 `turn.rs` already writes on the row. The payload is a `#[derive(Serialize)]` struct with exactly three fields, and
@@ -157,4 +157,4 @@ HTTP, and `LONG_TURN` is twenty seconds with no key to shorten it. Those are `te
 paced past a fifty-millisecond threshold for `turn_finished`, the transitioner's own `unexpected_exit` row for
 `error`, and the ladder's rung 2 for the two reason words. What no test here measures is a real push service, a real
 browser subscription, iOS's installed-to-home-screen requirement and the tap that opens a session: the receiver
-stands in for the first two, and the last two are HS-067's.
+stands in for the first two, and the last two are that story's.

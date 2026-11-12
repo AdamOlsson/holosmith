@@ -1,6 +1,6 @@
 # The expiry is the delete flow's own second half on a daily tick
 
-HS-064 is spec item 15's retention bullet: "a daily job deletes sessions that have been stopped for more than
+This is spec item 15's retention bullet: "a daily job deletes sessions that have been stopped for more than
 7 days (config `stopped_ttl_days`, default 7), using the delete flow from item 9. A snapshot runs first; if it
 fails, the session is skipped and retried the next day. Sessions in error are never auto-deleted. […] The
 Sessions screen shows the days remaining on each stopped session." The key, the column and the flow all
@@ -129,7 +129,7 @@ one place to be wrong instead of two.
 On the page it is `expiryText(stoppedAt, ttlDays, now)` in `transcript.ts`, a pure function with the clock
 passed in, because a sentence is a rule and `npm test` is the only gate that can see one (`main.ts` keeps
 `Date.now()`). `stoppedDetail(state, reason, expires)` joins it to `stoppedNotice(reason)` with `" · "`, and
-stays the one function both the row's construction and the `session.status` patch path call (HS-020's
+stays the one function both the row's construction and the `session.status` patch path call (that story's
 two-places rule). The window reaches the patch path through the DOM — `<ul id="session-list"
 data-stopped-ttl-days="7">` — because `main.ts` keeps no state beyond the DOM; a row a create prepends reads
 the same attribute.
@@ -139,12 +139,12 @@ drop a day the moment a second passes; `remaining <= 0` is "past its retention w
 reached yet, not an error), and one day is "within a day" rather than "in 1 days". **The wording never says
 the session will be deleted** — the job snapshots first and skips a row whose snapshot fails, so a session on
 that list can outlive its window with its work intact, and a sentence promising a delete would be a claim the
-server refuses to make. The HS-064 placeholder title (`RETAINED`, "days remaining arrives with HS-064") is
+server refuses to make. The placeholder title (`RETAINED`, "days remaining arrives with ") is
 deleted with the story it named.
 
 ## D9 — no migration, and the six reasons into `stopped` are one witness
 
-`stopped_at` has been column 13 of `0002_sessions.sql` since HS-007, and `set_status` has moved it since
+`stopped_at` has been column 13 of `0002_sessions.sql`, and `set_status` has moved it since
 ADR-0016 — `now` when the state becomes `stopped`, `NULL` otherwise. So acceptance bullet 1 is a *witness*,
 not code, and the story's version of it is one test that drives `Transitioner::apply` through all six reasons
 the machine stops a session by itself (`abort_ladder`/`forced_abort`, `evict`, `idle_stop`, `drain`/

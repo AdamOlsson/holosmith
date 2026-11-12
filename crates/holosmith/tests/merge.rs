@@ -1,5 +1,5 @@
-//! The merge over a real repository: the fast-forward (HS-054) and the two strategies that build a commit
-//! (HS-055), spec item 12's rules 2, 3 and 4.
+//! The merge over a real repository: the fast-forward and the two strategies that build a commit
+//! spec item 12's rules 2, 3 and 4.
 //!
 //! Every acceptance bullet of both stories is a *git* fact — a ref that moved or did not, a working tree that
 //! changed or did not, a hook that ran or did not, a commit whose parents are these two and not those — so these
@@ -20,7 +20,7 @@
 //! - **the temporary-directory assertions** read the filesystem (`<data>/merge` and the registration list) after
 //!   a success, a conflict and a refusal that happened *after* the landing — "removed afterwards even on failure"
 //!   is a fact about a directory, not about a return value;
-//! - **the keep-rule test** asks HS-043's function after each strategy, because a squash leaves the branch a
+//! - **the keep-rule test** asks the function after each strategy, because a squash leaves the branch a
 //!   non-ancestor of the target and that has a consequence for a delete nobody has built yet.
 //!
 //! The unrelated [identity] claim is measured the only way it can be on a machine that has a global `user.name`:
@@ -523,7 +523,7 @@ fn a_prunable_registration_is_not_a_checkout_and_the_merge_lands_by_the_ref() {
     // The `409 target_checked_out` arm must be about a working tree, and a registration git calls **prunable**
     // has none: the directory is gone and `git worktree prune` has not run. Counting it would refuse a merge the
     // operator can perform, with advice ("check out another branch in that worktree") that cannot be followed —
-    // and this build leaves such registrations behind routinely (HS-052's landmine is exactly one). Dropping the
+    // and this build leaves such registrations behind routinely. Dropping the
     // `prunable` filter in `checkout_of` turns this test from a `200` into that refusal.
     let fixture = Fixture::new("merge-pruned-registration");
     fixture.commit("a.txt", b"a\n", "the session's change");
@@ -632,7 +632,7 @@ fn a_worktree_that_is_gone_is_the_changes_view_s_refusal() {
     }
 }
 
-// --- the two strategies (HS-055) ---------------------------------------------------------------------------
+// --- the two strategies ---------------------------------------------------------------------------
 
 #[test]
 fn a_merge_makes_one_commit_with_two_parents_the_old_target_first() {
@@ -885,7 +885,7 @@ fn the_fast_forward_refusal_comes_before_the_checkout_one_and_the_landings_do_no
     // checked out in somebody else's worktree answers `not_fast_forward` by the default strategy — because "check
     // out another branch in that worktree and merge again" would send the operator straight to a second refusal —
     // and `target_checked_out` by `merge`, which asks the checkout question first because asking it after the
-    // landing would have built a commit for nothing. HS-054's order for its own path is therefore preserved, and
+    // landing would have built a commit for nothing. the order for its own path is therefore preserved, and
     // the two new strategies' order is deliberate rather than a side effect of one shared function.
     let fixture = Fixture::new("merge-refusal-order");
     fixture.commit("a.txt", b"a\n", "the session's change");
@@ -925,12 +925,12 @@ fn the_fast_forward_refusal_comes_before_the_checkout_one_and_the_landings_do_no
 
 #[test]
 fn a_squash_keeps_the_branch_a_merge_does_not() {
-    // HS-043's keep-rule, asked after each strategy — the interaction the handoff's notes named and this story
+    // the keep-rule, asked after each strategy — the interaction the handoff's notes named and this story
     // has to decide rather than discover. `Worktree::merged_into` is `git merge-base --is-ancestor agent/<id>
     // <target>`, and a **squash** writes a commit whose only parent is the old target, so the branch's tip is not
     // an ancestor and the branch is *kept* — which is honest (the branch carries the session's own history, and
     // the target does not have it) and which makes rule 5's "the branch is deleted because it is merged" a fact
-    // HS-056 must decide for this strategy, not a fact it can read off git. A `merge` commit, by contrast, has the
+    //  must decide for this strategy, not a fact it can read off git. A `merge` commit, by contrast, has the
     // branch's tip as a parent, so the same question answers yes and the branch is not kept.
     let merged = Fixture::new("keep-rule-merge");
     merged.commit("a.txt", b"a\n", "the session's change");
@@ -968,7 +968,7 @@ fn a_squash_keeps_the_branch_a_merge_does_not() {
 
 #[test]
 fn the_commit_a_merge_landed_is_not_a_branch_to_keep_and_one_that_moved_is() {
-    // Rule 5's rule, at the function that answers it (HS-056, ADR-0065 D6): the commit a request **landed** is
+    // Rule 5's rule, at the function that answers it (ADR-0065 D6): the commit a request **landed** is
     // not work to keep, whatever the ancestry question says — and the comparison is against the branch's **tip**,
     // so a branch that moved after the merge measured it is the ordinary question's and is kept. Both halves are
     // here because only the pair distinguishes "the request's fact" from "keep everything" and from "delete
@@ -1365,7 +1365,7 @@ async fn every_bad_request_moves_no_ref() {
         (r#"{"target":"main","strategy":"rebase"}"#, "bad_strategy"),
         // A `strategy` that is not a string at all is the *body's* shape rather than a value outside the
         // vocabulary, so it is `bad_body` — the same answer the create gives a numeric `model`. It was
-        // `bad_strategy` under HS-054, where every strategy check was a string comparison; the change is
+        // `bad_strategy`, where every strategy check was a string comparison; the change is
         // deliberate and ADR-0064 records it.
         (r#"{"target":"main","strategy":3}"#, "bad_body"),
         (r#"{"target":"main","message":""}"#, "bad_body"),
@@ -1720,7 +1720,7 @@ async fn a_target_checked_out_in_another_worktree_is_a_409_at_the_wire() {
     served.finish().await.expect("the server stops");
 }
 
-// --- rule 1's two guards, and rule 5's `delete_session` (HS-056) -------------------------------------------
+// --- rule 1's two guards, and rule 5's `delete_session` -------------------------------------------
 
 /// One state change through the table's own function, the way `tests/delete.rs` drives a row it must hold in a
 /// state no request of its own would produce: a running turn and a `deleting` row are both things the API

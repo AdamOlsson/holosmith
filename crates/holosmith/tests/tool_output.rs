@@ -1,5 +1,5 @@
-//! `GET /api/sessions/:id/tool-output/:tool_id` and the file behind it (HS-033, spec item 15), plus
-//! `GET /api/sessions/:id/tool-image/:tool_id/:index` for the pictures a tool's result carried (HS-035).
+//! `GET /api/sessions/:id/tool-output/:tool_id` and the file behind it (spec item 15), plus
+//! `GET /api/sessions/:id/tool-image/:tool_id/:index` for the pictures a tool's result carried.
 //!
 //! The store's own rules — the cap, the marker, the id allow-list — are unit tests in `tool.rs`; what only a
 //! socket can answer is the *endpoint*: that it serves the bytes, that it answers the envelope for a session
@@ -204,7 +204,7 @@ async fn a_session_the_table_does_not_hold_and_a_file_that_is_not_there_are_the_
 
 #[tokio::test]
 async fn a_deleted_sessions_output_is_not_reachable() {
-    // The row is the gate as well as the key: a directory a delete left behind (HS-043 owns what survives it)
+    // The row is the gate as well as the key: a directory a delete left behind
     // must not be readable through a session nobody can see.
     let dir = TempDir::new("tool-output-deleted");
     let state = support::state_in(&dir, config(&dir));
@@ -298,7 +298,7 @@ async fn an_image_id_that_cannot_be_a_filename_is_not_a_file_to_read() {
     // The canary sits exactly where a join without the id rule lands. The stored name is `<id>-<index>.png`, so
     // the id `..%2Fsecret` with index 0 becomes `<data>/sessions/<id>/tool/../secret-0.png`. A canary one level
     // further away, or named for another index, would never be reached and every assertion below would pass
-    // with the id rule deleted (HS-033's review made the same point about its own canary).
+    // with the id rule deleted.
     let session_dir = dir.path().join("sessions").join(&session.id);
     std::fs::write(session_dir.join("secret-0.png"), "not yours").expect("a file to reach for");
 

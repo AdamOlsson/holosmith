@@ -1,4 +1,4 @@
-//! The release tree: `releases/<tag>/` and the `current` symlink systemd runs (HS-078, spec item 10).
+//! The release tree: `releases/<tag>/` and the `current` symlink systemd runs (spec item 10).
 //!
 //! Item 10's first paragraph is the whole of this module: "releases live in `releases/<tag>/` with a `current`
 //! symlink that systemd runs". Three facts follow, and each is a decision this file owns:
@@ -14,9 +14,9 @@
 //!   overwritten ([`crate::builder::Placement`]'s rule, one level out).
 //! * **How it is switched.** `current` is a **relative** symlink (`releases/<tag>`), so the tree stays relocatable,
 //!   created beside the link and `rename`d onto it — the atomic replace, never an edit in place and never a
-//!   remove-then-create (acceptance bullet for HS-080, and the reason a promotion's switch is one syscall).
+//!   remove-then-create (acceptance bullet for, and the reason a promotion's switch is one syscall).
 //!
-//! # What the layout means (HS-080)
+//! # What the layout means
 //!
 //! Three facts follow from "releases side by side with one live pointer", and they are all here because they are all
 //! statements about the tree:
@@ -30,7 +30,7 @@
 //! * **Whether the unit can start.** `doctor`'s release finding asks [`Release::live`] and [`unit_executable`] together,
 //!   because a `current` the unit executes through and that resolves to nothing is a machine systemd cannot start.
 //!
-//! What HS-078 needed is also here: the tree's creation (a first promotion seeds the previous release out of the binary
+//! What needed is also here: the tree's creation (a first promotion seeds the previous release out of the binary
 //! the unit runs), the switch, and the answer "what does the unit execute" ([`Release::live`]), which `deploy`'s step
 //! 5 reads so that a later `server deploy` neither undoes a promotion nor rewrites a correct unit.
 //!
@@ -160,7 +160,7 @@ impl Release {
     /// would walk into whichever build happened to sort next. Two entries written in the same instant are ordered by
     /// tag, so the order is total and two runs of this function agree about it.
     ///
-    /// HS-080's pruning keeps the newest N of this list; that is why the order lives here rather than in a verb.
+    /// the pruning keeps the newest N of this list; that is why the order lives here rather than in a verb.
     pub fn history(&self) -> Vec<String> {
         let Ok(entries) = std::fs::read_dir(self.releases()) else {
             return Vec::new();

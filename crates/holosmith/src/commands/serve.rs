@@ -63,7 +63,7 @@ pub fn run(args: ServeArgs) -> ExitCode {
     //
     // The **mode** is `server deploy`'s: 0755. `create_dir_all` uses the process's umask, which is 0775 on a
     // machine whose umask is 0002, and `doctor`'s `perms` finding compares the tree with the modes the deploy
-    // writes (HS-049) — so a root this process made would make the *next* boot's `ExecStartPre` fail a finding
+    // writes — so a root this process made would make the *next* boot's `ExecStartPre` fail a finding
     // nothing changed. Only a directory this call created is reset: an operator's own mode is theirs.
     let created = !loaded.config.data_root.exists();
     if let Err(error) = std::fs::create_dir_all(&loaded.config.data_root) {
@@ -95,17 +95,17 @@ pub fn run(args: ServeArgs) -> ExitCode {
     }
     let backend = loaded.config.backend;
     // The preflight, once, before anything is opened or bound: a machine that cannot run a Docker
-    // session must fail here rather than mid-turn (HS-024, spec item 10 §1), and the sentence it fails
+    // session must fail here rather than mid-turn (spec item 10 §1), and the sentence it fails
     // with is the fix. Every complaint is reported at once — the rule `config validate` follows, because
     // a machine missing two things should take two edits and one restart. A stub run needs no daemon and
-    // no free space beyond its own database, so only a Docker run is checked; `doctor` (HS-045) runs the
+    // no free space beyond its own database, so only a Docker run is checked; `doctor` runs the
     // same `preflight::check` on demand, which is what makes the two print the same words.
     //
     // A `hub` is not checked at all: it runs no sessions, and spec item 10 §6's `hub deploy` runs "steps
     // 1 (without the Docker and git checks), 2 (without the docker group), 5, 6 and 7". A hub without a
     // daemon is the normal hub.
     //
-    // Since HS-062 the predicate is `disk::guarded`, and it is written there rather than here because three
+    // Since the predicate is `disk::guarded`, and it is written there rather than here because three
     // places ask it: this boot, and the two request paths that start work. A create on a full disk answers
     // 507 with its own sentence, and it must agree with this boot about *whether* the floor applies at all —
     // the story's "`doctor` reports the same measurement, so the two never disagree", one level down.
@@ -122,7 +122,7 @@ pub fn run(args: ServeArgs) -> ExitCode {
                 "the docker preflight passed"
             );
             // Two things that need a daemon which answered the preflight, and neither of which a stub run or a
-            // hub does at all (HS-036, spec item 2).
+            // hub does at all (spec item 2).
             //
             // The **egress network** is the machine's own, not a session's: the proxies attached to it are what
             // a container's only route out runs through, so it is created here, once, rather than by each of
@@ -145,14 +145,14 @@ pub fn run(args: ServeArgs) -> ExitCode {
                 ),
             }
             // The **egress proxy** on that network: one container per machine, and the only route out a
-            // session's container has (HS-037, spec item 2). It is started here rather than per session because
+            // session's container has (spec item 2). It is started here rather than per session because
             // it is the machine's; the network step joins it to a session's own network when that session
             // allowed internet access, which is item 2's "topology, not configuration". A failure is one
             // `warn`: a machine without a proxy still serves sessions, and those sessions reach nothing
             // outside their own network — the off case the spec already supports.
             start_egress_proxy(&loaded.config);
             // The **key proxy** on the same network: the only thing that holds a real provider key, joined to
-            // every session network by the network step (HS-039). Like the egress proxy it is the machine's,
+            // every session network by the network step. Like the egress proxy it is the machine's,
             // started once and replaced on every boot, and every failure is a `warn`: a machine without it
             // still serves its control UI, and its sessions fail a model call with a sentence rather than
             // refusing to exist.
@@ -201,7 +201,7 @@ pub fn run(args: ServeArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // The **hosts seed** (HS-068, spec item 16): "each machine reads an optional `hosts.toml` at startup and merges
+    // The **hosts seed** (spec item 16): "each machine reads an optional `hosts.toml` at startup and merges
     // it into its hosts table (the file wins on conflicts), so one file copied to every machine keeps the lists
     // aligned". It runs here — after the database exists, before the listener binds and before any request could read
     // the table — because a registry that filled itself after the first `GET /api/hosts` would answer two different
@@ -248,7 +248,7 @@ pub fn run(args: ServeArgs) -> ExitCode {
     let version = VersionInfo::current();
     let listen = loaded.config.control_listen;
     // Read before the async body takes the rest: the admin directory is the run's (`--admin-dir`) or the
-    // machine's, and the socket's path is that one value plus `drain::SOCKET_NAME` (HS-051).
+    // machine's, and the socket's path is that one value plus `drain::SOCKET_NAME`.
     let admin_dir = args
         .admin_dir
         .unwrap_or_else(|| PathBuf::from(crate::deploy::ADMIN_DIR));
@@ -280,7 +280,7 @@ pub fn run(args: ServeArgs) -> ExitCode {
         if ephemeral_origin {
             loaded.config.control_origin = loaded.config.control_origin.with_port(bound.port());
         }
-        // The **preview listener** (HS-041, spec item 3): the second listener, on its own origin, which serves
+        // The **preview listener** (spec item 3): the second listener, on its own origin, which serves
         // only `/<host>/<id>/*` and no API. It binds here — before the banner, so the banner can print the
         // address the kernel gave, exactly as the control line does — and a bind that fails is one `warn`
         // rather than a refusal: the control UI is the screen an operator needs when something else on the
@@ -317,7 +317,7 @@ pub fn run(args: ServeArgs) -> ExitCode {
         // `tailscale` is elsewhere) is one value rather than two spellings of one.
         let tools = crate::preflight::Tools::default();
         let guards = Guards::from_config_with(&loaded.config, &tools);
-        // Machine-to-machine trust (HS-070) is a fact about the config rather than about this boot, and the banner
+        // Machine-to-machine trust is a fact about the config rather than about this boot, and the banner
         // is exactly eight lines (`tests/serve_cli.rs`): so it is said at `debug!`, and the empty-list arm is a
         // recorded risk (ADR-0075) rather than a startup warning.
         tracing::debug!(
@@ -343,17 +343,17 @@ pub fn run(args: ServeArgs) -> ExitCode {
                 crate::container::ContainerSettings::of(&loaded.config),
             ),
             // One flag per process, shared by every clone of this state: the socket's task sets it and the
-            // handlers read it (HS-051). Never persisted — a restart is exactly what it exists to precede.
+            // handlers read it. Never persisted — a restart is exactly what it exists to precede.
             drain: crate::drain::Control::new(),
             // Rule 2's "one merge per project at a time": one map per process, shared by every clone, so two
-            // requests cannot merge into one project at once (HS-054).
+            // requests cannot merge into one project at once.
             merges: crate::merge::Merges::new(),
-            // HS-062's floor measures the data root on the request path, with the same `df` this boot's
+            // the floor measures the data root on the request path, with the same `df` this boot's
             // preflight used: the machine's own program, resolved through `PATH`, which a test swaps for a shim.
             tools,
             forwarding: crate::forward::Forwarding::default(),
         };
-        // The **startup reconcile** (HS-044, V9): what a `kill -9` left behind, put right **before any
+        // The **startup reconcile** (V9): what a `kill -9` left behind, put right **before any
         // policy or request can read a row**. It is awaited rather than spawned, and both reasons are
         // measurements:
         //
@@ -409,7 +409,7 @@ pub fn run(args: ServeArgs) -> ExitCode {
             "the compaction task is running"
         );
         let compactor = state.compactor().spawn();
-        // The **per-session disk soft cap** (HS-063, spec item 14) joins the two policies above, wired the same
+        // The **per-session disk soft cap** (spec item 14) joins the two policies above, wired the same
         // way and for the same reason: built before the state is handed to the router, spawned after the
         // reconcile so no row it reads is half-recovered, and absent (`None`) when `session_disk_soft_gb` is
         // `0`. Its own state is a `debug` line rather than a banner line, because the startup contract is the
@@ -437,7 +437,7 @@ pub fn run(args: ServeArgs) -> ExitCode {
                 None
             }
         };
-        // The **stopped-session expiry** (HS-064, spec item 15) is the fourth policy and is wired like the three
+        // The **stopped-session expiry** (spec item 15) is the fourth policy and is wired like the three
         // above: built before the state is handed to the router, spawned after the reconcile so no row it reads is
         // half-recovered, and reported by a `debug` line rather than a banner line — the startup contract is the
         // eight lines `tests/serve_cli.rs` pins byte for byte.
@@ -453,7 +453,7 @@ pub fn run(args: ServeArgs) -> ExitCode {
             "the stopped-session expiry is running"
         );
         let expiry = state.expiry().spawn();
-        // The **Web Push notification task** (HS-066, spec item 11) is the fifth policy and is wired like the four
+        // The **Web Push notification task** (spec item 11) is the fifth policy and is wired like the four
         // above: built before the state is handed to the router, spawned after the reconcile, and reported by a
         // `debug` line rather than a banner line — the startup contract is the eight lines `tests/serve_cli.rs` pins
         // byte for byte.
@@ -468,7 +468,7 @@ pub fn run(args: ServeArgs) -> ExitCode {
             "the Web Push notification task is running"
         );
         let pusher = notification.spawn();
-        // The **admin socket** (HS-051, spec item 10 step 3): the one way to drain this machine, and the one thing
+        // The **admin socket** (spec item 10 step 3): the one way to drain this machine, and the one thing
         // in the build that is deliberately *not* an HTTP route — the API table says "not reachable over HTTP",
         // and a second listener outside `App` is what that sentence means. It is bound here, beside the two
         // policies and after the reconcile, so a drain that arrives during boot sees the rows the pass left
@@ -492,7 +492,7 @@ pub fn run(args: ServeArgs) -> ExitCode {
             }
         };
         // The preview listener's own context: the origin an upgrade must come from, the rows, and the one
-        // question it cannot answer itself — where a session's container is on its own network (HS-041).
+        // question it cannot answer itself — where a session's container is on its own network.
         let preview_context = preview::Context::of(
             &loaded.config,
             Arc::clone(&state.database),
@@ -501,7 +501,7 @@ pub fn run(args: ServeArgs) -> ExitCode {
                 port: loaded.config.preview_upstream_port,
                 // The **raw** config prefixes: `network_name`/`container_name` compose them, and handing them a
                 // composed one asks the daemon about `s_s_<id>` — which is a 502 from the preview listener rather than
-                // a message anywhere (measured, HS-077's first gate run).
+                // a message anywhere (measured).
                 network_prefix: loaded.config.network_prefix.clone(),
                 container_prefix: loaded.config.container_prefix.clone(),
             }),
@@ -571,7 +571,7 @@ pub fn run(args: ServeArgs) -> ExitCode {
         // back — a message already POSTed is a browser's notification — which is why aborting is the honest end: the
         // task stops asking, and the messages handed to a push service were never this process's to recall.
         pusher.abort();
-        // And the admin socket (HS-051): a drain that started is finished or abandoned with the process, so its
+        // And the admin socket: a drain that started is finished or abandoned with the process, so its
         // accept loop must not hold the runtime open a moment longer than the listeners do. The socket *file* is
         // not removed here — a `serve` that is killed leaves one behind on purpose, and the next boot probes it
         // and unlinks it if it is dead (`drain::listen`), which is the only rule that also covers a `kill -9`.
@@ -610,7 +610,7 @@ fn unavailable(config: &Config, error: &std::io::Error) {
     );
 }
 
-/// Start the machine's egress proxy container, replacing one an earlier run left behind (HS-037).
+/// Start the machine's egress proxy container, replacing one an earlier run left behind.
 ///
 /// Called once per Docker boot, after the `egress` network exists, from [`run`]'s startup path — so it is
 /// synchronous, and every failure is a `warn` rather than a refusal (see the call site for why). The recipe
@@ -635,7 +635,7 @@ fn start_egress_proxy(config: &Config) {
     }
 }
 
-/// Start the machine's key proxy container, replacing one an earlier run left behind (HS-039).
+/// Start the machine's key proxy container, replacing one an earlier run left behind.
 ///
 /// [`crate::proxies::start_key`] is the recipe, and it is the same one `server deploy`'s step 4 runs (ADR-0056).
 /// The policy here is the boot's: a proxy that did not start costs its own `warn` and this run still serves its
@@ -660,7 +660,7 @@ fn start_key_proxy(config: &Config) {
 ///
 /// They are written directly rather than logged as events so they survive any
 /// `HOLOSMITH_LOG` filter: an operator reading `journalctl` sees the addresses the process
-/// bound, the origin HS-005 will compare a browser's `Origin` against, the config it read, and
+/// bound, the origin will compare a browser's `Origin` against, the config it read, and
 /// the database it opened and migrated, even when diagnostics are off.
 fn banner(
     filter: &str,
@@ -680,7 +680,7 @@ fn banner(
     eprintln!("data_root {}", loaded.config.data_root.display());
     eprintln!("control_listen {bound}");
     eprintln!("control_origin {}", loaded.config.control_origin.as_str());
-    // HS-041 binds it, so this line reports the address the kernel gave (a `127.0.0.1:0` preview is how a
+    //  binds it, so this line reports the address the kernel gave (a `127.0.0.1:0` preview is how a
     // test asks for one) or, in as many words, that this run has no preview listener and why.
     eprintln!("preview_listen {preview}");
     eprintln!(

@@ -1,4 +1,4 @@
-//! `holosmith uninstall`: the inverse of `server deploy`'s install, keeping the data (HS-050, spec's Commands
+//! `holosmith uninstall`: the inverse of `server deploy`'s install, keeping the data (, spec's Commands
 //! table).
 //!
 //! Four things are removed, in this order, and each is a **read** followed by an **apply** so that a second run is
@@ -248,7 +248,7 @@ pub struct Args {
 /// counted in, stops the command before any child runs and is printed as one sentence — the shape the deploy's own
 /// refusals established (ADR-0055's resume line, ADR-0056's steps). The difference matters to the caller: a refusal
 /// carries no step lines and no resume command, because running the same command again would be refused the same way.
-/// Since HS-072 the deploy has no refusal of its own (a role is not a reason to refuse a deploy), so this is now the
+/// Since the deploy has no refusal of its own (a role is not a reason to refuse a deploy), so this is now the
 /// only command in the build whose `Err` is one.
 ///
 /// A failed *step* stops the run inside the report, for the deploy's reason: later steps would describe a machine
@@ -434,7 +434,7 @@ fn unit(target: &Target, tools: &Tools) -> Line {
 /// `disable --now` that exits non-zero over a unit systemd has not loaded is a *remark* (the file's removal is the
 /// deliverable), and a `systemctl` that could not be run at all — a machine with no systemd, or none on `PATH` — is
 /// not systemd saying "no such unit". Collapsing the two made the `nothing` line assert something no program had
-/// said (HS-050's review, T4), which is the one thing these reports refuse to do.
+/// said (T4), which is the one thing these reports refuse to do.
 enum Answer {
     /// Exit zero.
     Yes,
@@ -520,7 +520,7 @@ fn remove(path: &Path, recursive: bool, target: &Target, tools: &Tools) -> Resul
 /// to work around.
 fn proxies(config: &Config, machine: &dyn Machines) -> Line {
     // The names this run's config composes (`hs_egress`/`hs_key`, or a smoke run's `smoke_hs_egress`/`smoke_hs_key`,
-    // HS-077) — the same two [`crate::proxies::names`] answers, so a teardown and a boot never disagree about which
+    // ) — the same two [`crate::proxies::names`] answers, so a teardown and a boot never disagree about which
     // containers are "the proxies".
     let names = crate::proxies::names(config);
     let existing: Vec<&str> = names

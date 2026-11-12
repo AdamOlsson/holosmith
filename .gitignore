@@ -4,11 +4,7 @@
 # Artifacts: scripts/build.sh writes dist/<target-triple>/holosmith
 /dist/
 
-# Frontend build output; the app itself lands in HS-003 (ADR-0004)
+# Frontend build output; the app is embedded in the binary (ADR-0004)
 /web/dist/
 /node_modules/
 /web/node_modules/
-
-# Python bytecode from scripts/import-linear.py
-__pycache__/
-*.pyc

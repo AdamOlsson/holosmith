@@ -1,4 +1,4 @@
-//! The assembled service as a client sees it, and the two ways it stops (HS-003).
+//! The assembled service as a client sees it, and the two ways it stops.
 //!
 //! Every test starts the real `App` on an ephemeral port and talks HTTP/1.1 over a socket, so
 //! the status, the headers and the bytes are the ones a browser gets. No client crate: the
@@ -22,7 +22,7 @@ const AS_PRIVATE: &str = "yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw";
 #[tokio::test]
 async fn the_health_endpoint_answers_the_seven_keys() {
     // The data root is this test's own: `Config::default` names the *machine's*, and a machine that has deployed
-    // holds a pair — which would make the sixth key a fact about the host rather than about this test (HS-067,
+    // holds a pair — which would make the sixth key a fact about the host rather than about this test (,
     // the same hazard `health.rs`'s unit test works around).
     let dir = TempDir::new("health-six-keys");
     let config = Config {
@@ -53,14 +53,14 @@ async fn the_health_endpoint_answers_the_seven_keys() {
         "the fifth key is the preview origin: {}",
         response.body
     );
-    // The sixth (HS-067) is `null` on a machine with no pair, and the fifth keeps its place: the keys before it are
+    // The sixth is `null` on a machine with no pair, and the fifth keeps its place: the keys before it are
     // the order a client reads.
     assert!(
         response.body.contains(r#","application_server_key":null,"#),
         "a machine with no pair answers an explicit null: {}",
         response.body
     );
-    // The seventh (HS-074) is what this machine calls itself in a notification's payload, and a machine with no name
+    // The seventh is what this machine calls itself in a notification's payload, and a machine with no name
     // of its own is `local` — the reserved word for *the machine whose page this is*.
     assert!(
         response.body.ends_with(r#","machine_name":"local"}"#),

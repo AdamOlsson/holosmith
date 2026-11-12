@@ -25,18 +25,18 @@ const MAX_ANSWER: usize = 8 * 1024;
 /// startup line and in `version --json`: the host registration of item 4 reads name and
 /// version, and a key nobody reads is a promise about a shape.
 ///
-/// `preview_origin` is the fifth (HS-041): the session screen links to `/<host>/<id>/` on it, and this is
+/// `preview_origin` is the fifth: the session screen links to `/<host>/<id>/` on it, and this is
 /// where the page already looks — it fetches health before either screen draws, so the link costs no request
 /// and no second route. The alternative, injecting the value into the app shell, would break
 /// `case_app_shell`'s byte-for-byte comparison and would be a dynamic value in a static asset (ADR-0051).
 ///
-/// `application_server_key` is the sixth (HS-067, ADR-0072): the Web Push pair's **public** half, which is what
+/// `application_server_key` is the sixth (ADR-0072): the Web Push pair's **public** half, which is what
 /// `pushManager.subscribe` needs and what nothing served before. `null` is a machine with no pair, and it is
 /// read at the moment of asking — a `server deploy` between two page loads is answered truthfully by the
 /// second. The same argument as `preview_origin`'s: the page already asks this question, and a browser needs
 /// the value before it can subscribe.
 ///
-/// `machine_name` is the seventh (HS-074, ADR-0079): what this machine calls itself in a notification's payload,
+/// `machine_name` is the seventh (ADR-0079): what this machine calls itself in a notification's payload,
 /// so a page can label its own row with the name the phone will show and a hub can read a peer's claim through the
 /// hop. It is the config key verbatim (`local` by default), not a derived name, because the tap's path and the
 /// registry's row name are the same string one hop apart and only the operator can keep them equal.
@@ -71,14 +71,14 @@ pub fn respond(health: &Health) -> Json<Health> {
     Json(health.clone())
 }
 
-/// The four facts of the payload a **client** reads back, plus the one a **hub** needs (HS-069): what
+/// The four facts of the payload a **client** reads back, plus the one a **hub** needs: what
 /// `holosmith status` prints, what [`crate::doctor`]'s port check asks about, what the host registry's probe
 /// registers a host by, and where that host's preview listener answers.
 ///
 /// Four fields originally, not six, because `application_server_key` is the app shell's business and `role` is this
-/// machine's config where a client reads it as a fact about the other machine. `name` joined in HS-068 because a
+/// machine's config where a client reads it as a fact about the other machine. `name` joined because a
 /// *third* caller does use it: `POST /api/hosts` refuses an answer whose payload is not a Holosmith's, and item 4
-/// spells that as "the reply must carry the Holosmith name and version fields". `preview_origin` joins in HS-069
+/// spells that as "the reply must carry the Holosmith name and version fields". `preview_origin` joins
 /// for the same reason one step further out: the registry's row needs the peer's **preview** origin to forward
 /// `/<host>/<id>/*` to it (ADR-0074), and this payload is where a machine says what that is.
 ///
@@ -106,7 +106,7 @@ pub fn parse_answer(body: &str) -> Result<Answer, serde_json::Error> {
 
 /// Ask `listen` for `GET /api/health` and read the answer back, or say why there is none.
 ///
-/// One reader, two callers, and that is the point (HS-050): `holosmith status` prints the `uptime_s` and
+/// One reader, two callers, and that is the point: `holosmith status` prints the `uptime_s` and
 /// `doctor`'s port check asks whether anything answers at all, so "this machine is serving" has one meaning in
 /// the binary rather than two hand-written requests that can drift.
 ///

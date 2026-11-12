@@ -1,4 +1,4 @@
-//! `holosmith hub`: deploy a hub, or manage the registry it forwards with (HS-072).
+//! `holosmith hub`: deploy a hub, or manage the registry it forwards with.
 //!
 //! Two very different commands behind one word because the spec's Commands table puts them there: `hub deploy` is
 //! [`crate::commands::deploy`] with [`crate::deploy::Kind::Hub`] — the same seven-step report, five of the steps and

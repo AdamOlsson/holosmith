@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Write docs/schema/previous.sql: the schema the **previous release** shipped (HS-075, ADR-0047).
+# Write docs/schema/previous.sql: the schema the **previous release** shipped (ADR-0047).
 #
 # A release step, not a story step. Run it against a database the *previous* release migrated — the simplest way is
 # to start that release's binary once with an empty `--data-dir` — and commit the result.
@@ -64,7 +64,7 @@ trap 'rm -f "$tmp"' EXIT
 
 {
   printf '%s\n' \
-    '-- The schema the **previous** release shipped, as a fact a test can compare against (HS-075, ADR-0047).' \
+    '-- The schema the **previous** release shipped, as a fact a test can compare against (ADR-0047).' \
     '--' \
     '-- This file is NOT a migration: it does not live in `crates/holosmith/migrations` (that directory is embedded' \
     '-- in the binary and byte-grepped by scripts/check-static.sh), and nothing applies it. `tests/schema_previous.rs`' \

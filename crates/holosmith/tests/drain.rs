@@ -1,4 +1,4 @@
-//! The drain: the socket, the wait, the stop and the refusals (HS-051, spec item 10 step 3).
+//! The drain: the socket, the wait, the stop and the refusals (spec item 10 step 3).
 //!
 //! Every test drives the production values — [`drain::listen`], [`drain::spawn`], [`drain::Drain::run`] and, for
 //! the refusals, the real `App` over HTTP — so what is asserted is the behaviour an operator meets rather than a

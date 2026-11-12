@@ -1,5 +1,5 @@
 #!/bin/sh
-# What the pinned builder container runs (HS-076). One argument: the target triple.
+# What the pinned builder container runs. One argument: the target triple.
 #
 # The source is mounted **read-only** at `/src` and copied into the container's own `/build`, so a build cannot
 # write to the operator's tree — not `target/`, not `node_modules/`, and not the repository itself. The copy is the

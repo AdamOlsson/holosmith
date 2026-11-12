@@ -1,6 +1,6 @@
 # The drain is a socket and a process flag, and it is not a shutdown
 
-HS-051 is spec item 10 step 3 — "Drain: `holosmith admin drain --wait 10m` over a local unix socket. It refuses new
+This is spec item 10 step 3 — "Drain: `holosmith admin drain --wait 10m` over a local unix socket. It refuses new
 creates and prompts (503 `draining`), waits for running turns, then stops idle sessions with reason
 `server_restart`" — plus item 8's `idle → stopped` row, item 10 step 6, and the API table's `Admin unix socket`
 row (*`drain` command, not reachable over HTTP*). Almost none of it is new mechanism: the transition table already
@@ -12,8 +12,8 @@ decisions that could each be taken a different way by a later reader.
 
 The spec spells the command twice. Item 10 step 3 says `holosmith admin drain --wait 10m`; the **Commands table**
 (spec item 11) says `holosmith drain [--wait 10m]`, and the story's own acceptance — "`holosmith drain [--wait
-10m]` talks to a local unix socket" — repeats the table. The table wins, for HS-050's reason: the Commands table
-is the surface the spec presents as the command set, and HS-050 took the table over the prose in the same
+10m]` talks to a local unix socket" — repeats the table. The table wins, for the reason: the Commands table
+is the surface the spec presents as the command set, and took the table over the prose in the same
 situation. There is **no `admin` subcommand group**: a group with one verb in it is a second spelling for one
 command, and the non-goals leave every other admin verb out.
 
@@ -24,8 +24,8 @@ anything is loaded. The default is `10m`, which is spec item 10 step 3's own val
 ## D2 — The socket is `<admin dir>/drain.sock`, and the admin directory is the only path both sides compute
 
 `crate::deploy::ADMIN_DIR` (`/run/holosmith`) is step 2's directory: created **0700**, chowned to the service user,
-re-created on every deploy because `/run` is a tmpfs (HS-049). That is exactly the directory a socket needs, and
-its comment already said "path fixed by HS-051". The socket is `drain.sock` inside it, from one
+re-created on every deploy because `/run` is a tmpfs. That is exactly the directory a socket needs, and
+its comment already said "path fixed ". The socket is `drain.sock` inside it, from one
 `drain::socket_path`, so a server and a client cannot disagree about a path.
 
 `serve` and `drain` both take **`--admin-dir PATH`**, and nothing else selects it. Not a config key: the admin
@@ -65,11 +65,11 @@ server → state: draining | state: already draining
 
 Milliseconds rather than a unit suffix, because the client has already converted the flag with the config's parser
 and a second duration grammar on the wire is a second thing to get wrong. The grammar is deliberately one verb — a
-`status` verb would be the second admin verb §1.8's non-goals exclude, and `holosmith status` (HS-050) is where
+`status` verb would be the second admin verb §1.8's non-goals exclude, and `holosmith status` is where
 that fact already lives.
 
 **The terminal word is the exit code**: `drained` is 0 and everything else is 1. That is the promotion's contract
-(HS-078 will consume it): 0 must mean "the machine is quiet, go" and 1 everything else, and the two arms that are
+0 must mean "the machine is quiet, go" and 1 everything else, and the two arms that are
 easy to confuse — a `--wait` that ran out and a socket that was not there — must not both read as success.
 `expired` is deliberately not a success: acceptance bullet 4 says the expiry "returns non-zero and leaves the drain
 state active rather than silently succeeding".
@@ -125,7 +125,7 @@ work under a session's name, and allowing it would let a client defeat the drain
 which would say nothing can be done about it. The sentence names the drain and the `--wait`, because those are the
 two things the operator needs: what is happening, and where to read the end of it.
 
-The create's refusal rides the **refusal slot `slot_for` already carries** (HS-026's `refuse_project`), which is
+The create's refusal rides the **refusal slot `slot_for` already carries**, which is
 the ordering that matters: after the idempotency lookup (so a retry of a key still answers its own row) and before
 the cap (so a refused create never evicts an idle session on its way to saying no). While draining, the project's
 git questions are not asked at all — a draining machine starts nothing whatever the project looks like — and the
@@ -152,7 +152,7 @@ be the "silently succeeding" the acceptance names.
 ## D7 — The stop is the table plus `Stopper`, and the drain is the fourth policy that stops something
 
 For each `idle` row: `Transitioner::apply(&id, Trigger::Drain, Some(SERVER_RESTART))`, then the container's stop in
-a spawned task through `Stopper`, which writes `sessions.expected_stop` **before** the backend's stop (HS-030,
+a spawned task through `Stopper`, which writes `sessions.expected_stop` **before** the backend's stop (,
 spec item 6). Row first, container second — ADR-0020's order and every other policy's: the row is what the next
 boot reads, so a wedged `docker stop` must not hold the command up.
 
@@ -193,7 +193,7 @@ a `TempDir` path, which is also what lets them run in parallel.
 
 ## What this ADR does not decide
 
-The drain's *caller* — `upgrade`/`rollback` (HS-078/HS-079). A `status` line for the drain state (a second surface
+The drain's *caller* — `upgrade`/`rollback` (those stories). A `status` line for the drain state (a second surface
 for one fact, and `holosmith status` is deliberately a reader that does not ask the process anything new). A hub
-forwarding the drain (phase 3, HS-072). An un-drain, a second admin verb, and any UI affordance for draining: none
+forwarding the drain (phase 3). An un-drain, a second admin verb, and any UI affordance for draining: none
 is asked for, and each would be a new surface for a state the restart clears.

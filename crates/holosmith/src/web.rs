@@ -48,7 +48,7 @@ pub fn asset(path: &str) -> Option<(&'static [u8], &'static str)> {
 /// The content type for the extensions the app ships. Anything else is a byte stream: the
 /// set is closed on purpose, so a future asset type arrives with a story and a test.
 ///
-/// `webmanifest` is HS-067's: a manifest served as `application/octet-stream` is a manifest Chrome does not
+/// `webmanifest` is that story's: a manifest served as `application/octet-stream` is a manifest Chrome does not
 /// install from, and no browser is available to this build's gate to notice.
 pub fn content_type(path: &str) -> &'static str {
     match path.rsplit_once('.').map(|(_, extension)| extension) {
@@ -101,7 +101,7 @@ mod tests {
         if std::env::var("HOLOSMITH_REQUIRE_WEB").as_deref() != Ok("1") {
             return;
         }
-        // HS-067's installability, as far as the embedded bytes can prove it: the shell names the manifest, the
+        // the installability, as far as the embedded bytes can prove it: the shell names the manifest, the
         // manifest and the worker are files the app carries, and the worker is JavaScript rather than the shell
         // (a `/sw.js` answered by the fallback's shell would register a page as a service worker, and every
         // browser refuses it — silently).

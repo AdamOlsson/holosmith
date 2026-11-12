@@ -1,4 +1,4 @@
-//! The browser-facing guards as a client meets them (HS-005, ADR-0010).
+//! The browser-facing guards as a client meets them (ADR-0010).
 //!
 //! Every test starts the real `App` on an ephemeral port and talks HTTP/1.1 over a socket, so
 //! each answer is the one a browser gets. The configs are built by field assignment rather

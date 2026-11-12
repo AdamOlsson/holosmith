@@ -1,4 +1,4 @@
-//! The token budget (HS-023): a session's spend is persisted, and a ceiling ends the turn that spends it.
+//! The token budget: a session's spend is persisted, and a ceiling ends the turn that spends it.
 //!
 //! The tally is the *writer's*, so these tests read the row: every `message.end` the stub emits adds its
 //! counts to `usage_in` / `usage_out` inside the transaction that assigns the event's seq (ADR-0013's
@@ -89,7 +89,7 @@ async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
 ///
 /// The tally is the event writer's, and the writer commits every 25 ms (ADR-0013), so a turn this test has
 /// already awaited can still be one commit behind: the row is the fact, but not instantly. Waiting for the
-/// value is the rule every story since HS-017 has had to relearn; sampling once is a coin toss — and this
+/// value is the rule every story has had to relearn; sampling once is a coin toss — and this
 /// file's first draft did exactly that and flaked in the gate.
 async fn wait_for_usage(state: &AppState, id: &str, input: u64, output: u64) {
     wait_until("the tally is committed", || {
@@ -217,7 +217,7 @@ async fn a_turn_that_spends_the_budget_ends_with_the_reason() {
 async fn a_turn_that_settles_over_its_ceiling_is_labelled_without_a_climb() {
     // The stub's turn lasts twelve frames of a millisecond, so the first poll (a hundred) falls after the
     // turn has already answered: there is nothing left to abort, and the row still has to say what
-    // happened — HS-022's settle-after-the-deadline shape. The label is also the *only* thing this ending
+    // happened — the settle-after-the-deadline shape. The label is also the *only* thing this ending
     // can carry, so an absent ladder is what proves the path is the settle's and not the poll's.
     let dir = TempDir::new("budget-settled");
     let stub = paced(1);
@@ -373,7 +373,7 @@ async fn an_unset_budget_never_ends_a_turn() {
 #[tokio::test]
 async fn a_backend_that_reports_no_usage_cannot_trip_the_budget() {
     // Spec item 13's contingency: the counts stay zero and a ceiling of 1 is never reached, so the turn
-    // runs to its end. The screen's sentence is what tells the operator (HS-023's own rule,
+    // runs to its end. The screen's sentence is what tells the operator (its own rule,
     // `budgetNotice` in `web/src/transcript.ts`).
     let dir = TempDir::new("budget-no-usage");
     let stub = paced(1).omitting_usage();
@@ -441,7 +441,7 @@ const REAL_OUT: u64 = 76 + 5;
 
 /// Queue the fixture's frames on `state`'s writer through the production mapping — no agent, no container.
 ///
-/// This is the "real backend" half of HS-034: the numbers in the row come from a provider's own report as pi
+/// This is the "real backend" half: the numbers in the row come from a provider's own report as pi
 /// printed it, mapped by `rpc::Mapping`, and nothing here writes a count by hand.
 async fn replay_real_turn(state: &AppState, session: &Session) {
     let mut mapping = holosmith::rpc::Mapping::new(&session.id);
@@ -466,9 +466,9 @@ async fn replay_real_turn(state: &AppState, session: &Session) {
 #[tokio::test]
 async fn a_real_turns_usage_becomes_the_sessions_tally_and_trips_the_ceiling() {
     // The acceptance's third bullet, honestly: a container cannot complete a turn before the key proxy exists
-    // (HS-039), so "against the real backend" is a real turn's *records* through the production mapping and a
+    // so "against the real backend" is a real turn's *records* through the production mapping and a
     // real runner over the row they land in. Every number below is the provider's; only the container is
-    // HS-046's verification run.
+    // the verification run.
     let dir = TempDir::new("budget-real");
     let stub = paced(200);
     let state = with_stub(state_in(&dir, Config::default()), stub.clone());

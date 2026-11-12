@@ -1,4 +1,4 @@
-//! The daily project backup: one git bundle per project per day, on the host (HS-065).
+//! The daily project backup: one git bundle per project per day, on the host.
 //!
 //! Spec item 1's `project_backup` setting, and the "Known risks" line that motivates it: several
 //! sessions share one project repository, so an agent that damages it damages every session's base.
@@ -72,7 +72,7 @@ pub enum BackupError {
     Git(String),
     /// A directory could not be created, a file could not be renamed or removed.
     Files(String),
-    /// The database itself could not be written by the caller's `VACUUM INTO` (HS-078).
+    /// The database itself could not be written by the caller's `VACUUM INTO`.
     Write(String),
 }
 
@@ -264,7 +264,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (year, month as u32, date as u32)
 }
 
-/// The database snapshots one machine keeps: the directory, the name, and the rotation (HS-078, spec item 10
+/// The database snapshots one machine keeps: the directory, the name, and the rotation (, spec item 10
 /// step 4).
 ///
 /// One type beside [`Backups`] because they are two rotations over one directory (`<data>/backups`): a project's

@@ -1,4 +1,4 @@
-//! `holosmith server deploy` and `holosmith hub deploy`: install one half of this machine (HS-047, HS-072).
+//! `holosmith server deploy` and `holosmith hub deploy`: install one half of this machine.
 //!
 //! Thin on purpose, and thin in the same places `doctor` is: the config is read the way every command reads it (so
 //! `--config` means one thing and a file with a problem is a refusal before any step runs), and everything an
@@ -162,7 +162,7 @@ fn resume(args: &DeployArgs) -> String {
 }
 
 /// The run that happens on another machine: send this binary there, verify the copy, and let the target's own
-/// binary run the same command (HS-073, ADR-0078).
+/// binary run the same command (ADR-0078).
 ///
 /// **The target's binary is the one that runs `deploy::run_as`**, with this run's `Kind`, `--root` and `--dry-run` —
 /// so a `hub deploy --ssh` installs the hub's five steps and builds nothing, and there is no second step plan

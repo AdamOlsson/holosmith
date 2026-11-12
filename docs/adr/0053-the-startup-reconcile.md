@@ -1,6 +1,6 @@
 # The startup reconcile is one awaited pass, and a row owns its names
 
-HS-044 is spec items 6, 7 and 8's crash sentence, and V9 is the measurement:
+This is spec items 6, 7 and 8's crash sentence, and V9 is the measurement:
 
 > Startup reconcile uses `docker ps -a --filter name=s_`, removes any leftover container, then restarts
 > sessions that were live. … At startup, any row still in `starting` is either resumed or set to `error`,
@@ -9,7 +9,7 @@ HS-044 is spec items 6, 7 and 8's crash sentence, and V9 is the measurement:
 > seq and no container name conflict.
 
 The state machine already had the trigger — `Trigger::CrashRecovery`, `{starting, idle, running} → starting`,
-written by HS-012 and called by nobody — so this story is the pass that drives it, and the decisions below are
+written and called by nobody — so this story is the pass that drives it, and the decisions below are
 about what the pass may touch.
 
 ## A `kill -9` observes nothing, which is why a pass is needed at all
@@ -102,7 +102,7 @@ calls are **bounded** (`Docker::bounded`), and a listing that does not finish is
 the reconcile is on the startup path, and a daemon that answers the preflight and then wedges must cost a bound,
 not the control UI. A network removal gained the same bound (`remove_network_bounded`).
 
-## One consequence on HS-060's rule: compaction may fold a `starting` row
+## One consequence on the rule: compaction may fold a `starting` row
 
 A crash recovery parks every live row in `starting` for as long as its re-provision takes, so the compaction
 task's first pass (which is immediate at startup, ADR-0032) now meets rows in a state it used to exclude
@@ -124,5 +124,5 @@ than the window. The alternative — waiting a tick — would make a restart slo
 
 A second pass leaves the same names and the same idle rows: everything it removed is gone, and everything it
 kept is kept for the same reason. It is **not** a no-op — the live rows are restarted again, which is what a
-reconcile is. That is why `doctor` (HS-045) and HS-046's verification run may call it, and why the fact is
+reconcile is. That is why `doctor` and the verification run may call it, and why the fact is
 recorded here rather than discovered there.

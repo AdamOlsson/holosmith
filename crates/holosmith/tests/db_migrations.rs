@@ -1,4 +1,4 @@
-//! The database `serve` opens and the migrations it applies (HS-004, ADR-0009).
+//! The database `serve` opens and the migrations it applies (ADR-0009).
 //!
 //! Every test here drives the public path — `Database::open`, `apply_pending` and the real
 //! binary — against a temporary file, because WAL cannot be proved on `:memory:`.
@@ -281,7 +281,7 @@ fn start_serve(dir: &TempDir, name: &str, data_root: &Path) -> (std::process::Ch
     .expect("the config is writable");
     let stderr = dir.file(&format!("{name}.err"));
     // `--admin-dir` under this test's own directory: `serve` binds the machine's admin socket
-    // (`/run/holosmith/drain.sock`) by default, and a test must never take it (HS-051).
+    // (`/run/holosmith/drain.sock`) by default, and a test must never take it.
     let admin = dir.file("run/holosmith");
     let child = Command::new(env!("CARGO_BIN_EXE_holosmith"))
         .args([
@@ -415,7 +415,7 @@ fn an_older_binary_on_a_newer_database_warns_and_continues() {
             dir.path().to_str().expect("the temp path is UTF-8"),
             "--port",
             "0",
-            // This test's own admin directory, so the run cannot bind the machine's admin socket (HS-051).
+            // This test's own admin directory, so the run cannot bind the machine's admin socket.
             "--admin-dir",
             dir.file("run/holosmith")
                 .to_str()
@@ -443,7 +443,7 @@ fn an_older_binary_on_a_newer_database_warns_and_continues() {
         .status();
     let _ = child.wait();
 
-    // The message and the sentence beside it: HS-075 made one function own the words, so the boot names both
+    // The message and the sentence beside it: made one function own the words, so the boot names both
     // numbers and the command that *would* refuse — `doctor`, which is the half that fails a start rather than a
     // rollback.
     assert!(
@@ -489,7 +489,7 @@ fn the_binary_exits_one_and_says_which_migration_statement_failed() {
             dir.path().to_str().expect("the temp path is UTF-8"),
             "--port",
             "0",
-            // This test's own admin directory, so the run cannot bind the machine's admin socket (HS-051).
+            // This test's own admin directory, so the run cannot bind the machine's admin socket.
             "--admin-dir",
             dir.file("run/holosmith")
                 .to_str()

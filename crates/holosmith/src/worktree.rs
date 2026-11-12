@@ -1,7 +1,7 @@
-//! The session worktree: one git worktree and one branch per session, on the host (HS-025).
+//! The session worktree: one git worktree and one branch per session, on the host.
 //!
 //! Spec item 1 names five host commands; this module is those five, the naming rule they share, and
-//! since HS-026 the read that says a repository must not be mounted at all:
+//!  the read that says a repository must not be mounted at all:
 //!
 //! ```text
 //! git worktree add -b agent/<id> <projects>/.worktrees/<id> HEAD
@@ -14,12 +14,12 @@
 //! **No fetch, anywhere.** The session branch is created from a commit the project repository already
 //! has, so there is nothing to bring in from a remote and nothing here names one.
 //!
-//! Since HS-026 the module also holds the readings that say a repository must not be mounted at all
+//! Since the module also holds the readings that say a repository must not be mounted at all
 //! ([`refuse`]): they are the same kind of question — what does this repository say about itself — and
 //! they run before the first `worktree add`, so a refused create leaves nothing behind. They are not
 //! one of the five commands, and they write nothing.
 //!
-//! Since HS-043 the module also holds the rule that says what a **teardown** leaves in the repository
+//! Since the module also holds the rule that says what a **teardown** leaves in the repository
 //! ([`Retained`], [`Worktree::retained`]): branch `agent/<id>` when it has commits beyond its base and
 //! is not merged into a target branch, and `refs/holosmith/wip/<id>` when its tree differs from the
 //! branch's. It is here rather than in the delete flow for the reason ADR-0029 gives: `remove` is the
@@ -67,7 +67,7 @@ pub const BRANCH_PREFIX: &str = "agent/";
 pub struct Worktree {
     /// 16 lowercase hex characters: what the branch, the directory and the snapshot ref are named for.
     ///
-    /// Kept as a field since HS-043 as well as the branch, because the snapshot ref
+    /// Kept as a field as well as the branch, because the snapshot ref
     /// (`refs/holosmith/wip/<id>`) is the one name this struct does not carry in `branch` or `path`.
     pub id: String,
     /// `<projects_root>/<project>`: the repository the branch lives in, and where git runs.
@@ -75,7 +75,7 @@ pub struct Worktree {
     /// `project` is one path segment — the create validates it with `validate_project` before a row
     /// exists, so this path cannot leave the projects root.
     pub repository: PathBuf,
-    /// `<projects_root>/.worktrees/<id>`: the session's files, and the container's `/work` (HS-027).
+    /// `<projects_root>/.worktrees/<id>`: the session's files, and the container's `/work`.
     pub path: PathBuf,
     /// `agent/<id>`.
     pub branch: String,
@@ -158,7 +158,7 @@ impl Worktree {
     /// How many commits the branch has that `base_commit` does not: the story's second command.
     ///
     /// The story's own demonstration — "commit in it, see `ahead` increment" — is this number, and the
-    /// surface that publishes it is `GET /api/sessions/:id/changes` (spec item 12, HS-061), which is why
+    /// surface that publishes it is `GET /api/sessions/:id/changes` (spec item 12), which is why
     /// the number is neither a column nor an endpoint here: a list endpoint that ran git per row would be
     /// a second data path over the same repository.
     pub fn ahead(&self, base_commit: &str) -> Result<u64, GitError> {
@@ -170,7 +170,7 @@ impl Worktree {
         })
     }
 
-    /// What a teardown of this session must leave in the repository (HS-043, spec item 9).
+    /// What a teardown of this session must leave in the repository (spec item 9).
     ///
     /// Two questions, each answered by the repository itself:
     ///
@@ -182,7 +182,7 @@ impl Worktree {
     ///   recovery command), which is why a session that settled with nothing uncommitted names nothing
     ///   (ADR-0049 removes the ref in exactly that case).
     ///
-    /// **`landed`** is a request's own knowledge, not a second question (HS-056, spec item 12's rule 5): the
+    /// **`landed`** is a request's own knowledge, not a second question (spec item 12's rule 5): the
     /// commit a **merge** measured and put in a target. A branch whose tip *is* that commit has nothing the
     /// target lacks, so it is not kept — `git merge-base --is-ancestor` cannot see a `squash` (its commit has
     /// only the old target as a parent) and the request is better placed than the ref to say so. Comparing the
@@ -227,7 +227,7 @@ impl Worktree {
     /// Remove the worktree, its branch and its registration: the story's teardown.
     ///
     /// `retained` is [`Worktree::retained`]'s answer: the branch it names is **not** deleted, because it
-    /// holds work nothing else has (HS-043). The registration and the directory go either way — a branch
+    /// holds work nothing else has. The registration and the directory go either way — a branch
     /// is a name in the repository, not a copy of the worktree, and the files the agent left are the
     /// snapshot's subject rather than the branch's.
     ///
@@ -238,7 +238,7 @@ impl Worktree {
     /// can never be removed.
     ///
     /// A *directory* that exists but is not registered as a worktree is left alone: git will not remove
-    /// it, and an orphan from a crashed run is HS-044's to prune. Every path this module drives leaves
+    /// it, and an orphan from a crashed run is the to prune. Every path this module drives leaves
     /// the registration clean, which is what that story starts from.
     pub fn remove(&self, retained: &Retained) -> Result<(), GitError> {
         if !self.repository.is_dir() {
@@ -260,7 +260,7 @@ impl Worktree {
     /// The path is compared after `canonicalize`, because `git worktree list --porcelain` prints the
     /// resolved path and a projects root may be reached through a symlink.
     ///
-    /// Public since HS-052, which asks the same question of the same repository from the changes view: a
+    /// Public, which asks the same question of the same repository from the changes view: a
     /// pruned worktree's directory can still be there, and every read inside it would then fail with "not a
     /// git repository". One question, one function — [`crate::changes`] does not spell it again.
     pub fn registered(&self) -> Result<bool, GitError> {
@@ -293,7 +293,7 @@ impl Worktree {
     /// `rev-parse --verify --quiet` answers 1 for "no such ref" and prints nothing; any other failure is
     /// a real one and is reported, because a repository that cannot be read is not a missing branch.
     ///
-    /// Public since HS-052: the changes view's `head` is this commit, not the worktree's checkout, because
+    /// Public: the changes view's `head` is this commit, not the worktree's checkout, because
     /// `ahead`, `behind` and the file list are all about the branch.
     pub fn branch_head(&self) -> Result<Option<String>, GitError> {
         let args = ["rev-parse", "--verify", "--quiet", &self.branch_ref()];
@@ -307,7 +307,7 @@ impl Worktree {
         }
     }
 
-    /// Whether `agent/<id>` is already merged into one of the configured targets (HS-043).
+    /// Whether `agent/<id>` is already merged into one of the configured targets.
     ///
     /// One `merge-base --is-ancestor` per target, and **only per target this repository has**: the
     /// config's default list names both `main` and `master` because a machine has one of them, so a name
@@ -336,7 +336,7 @@ impl Worktree {
         Ok(if asked { Merged::No } else { Merged::Unasked })
     }
 
-    /// `refs/holosmith/wip/<id>` when it exists and holds work the branch does not (HS-043).
+    /// `refs/holosmith/wip/<id>` when it exists and holds work the branch does not.
     ///
     /// `git diff --quiet <ref> <branch>` is the whole question, and git spells it as one: exit 0 means the
     /// two revisions have the same tree, exit 1 means they differ. With no branch there is nothing to be
@@ -395,7 +395,7 @@ impl Worktree {
         git_command(&self.repository, args)
     }
 }
-/// What a teardown leaves in the repository, and — when it can say — what is there (HS-043).
+/// What a teardown leaves in the repository, and — when it can say — what is there.
 ///
 /// Two answers, because the rule and the report are the same decision:
 ///
@@ -459,7 +459,7 @@ impl Retained {
     }
 }
 
-/// The answer to "is this branch already in a target?" (HS-043), with the third answer the two booleans
+/// The answer to "is this branch already in a target?", with the third answer the two booleans
 /// cannot carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Merged {
@@ -475,7 +475,7 @@ enum Merged {
 /// The project repository `project` lives in, under the machine's projects root: `<projects>/<project>`.
 ///
 /// A function rather than a second `join` at each site, because a create needs the repository *before* a
-/// session — and the id [`Worktree::of`] would build a worktree from — exists (HS-026).
+/// session — and the id [`Worktree::of`] would build a worktree from — exists.
 ///
 /// `project` is one path segment: the create's `validate_project` is what keeps it inside the projects
 /// root, so this is the naming rule and not the guard.
@@ -483,7 +483,7 @@ pub fn repository_of(projects_root: &Path, project: &str) -> PathBuf {
     projects_root.join(project)
 }
 
-/// Why a project's repository must not be mounted into a session's container (HS-026, spec item 1).
+/// Why a project's repository must not be mounted into a session's container (spec item 1).
 ///
 /// Three refusals the spec names, plus the fourth answer that is not a policy: a repository git cannot
 /// read has not been checked at all, and saying it may be mounted would be a lie.
@@ -516,7 +516,7 @@ const CONFIG_READ: &[&str] = &[
 ];
 
 /// Whether `repository` may be mounted into a session's container, and why not when it may not
-/// (HS-026).
+///
 ///
 /// The checks are spec item 1's, and they run in that order — the cheapest and most fundamental first:
 ///
@@ -555,17 +555,17 @@ pub fn refuse(repository: &Path) -> Result<(), Refusal> {
     }
 }
 
-/// Every worktree path `repository` registers, in git's own (resolved) spelling (HS-044).
+/// Every worktree path `repository` registers, in git's own (resolved) spelling.
 ///
 /// The startup reconcile's reader. A directory under `<projects>/.worktrees/` that no row owns is an orphan,
 /// and whether a repository registered it decides how it goes: a registered one is taken with
 /// `git worktree remove` (which cleans the administrative entry too, and with [`Retained::Unknown`] keeps the
 /// branch), an unregistered one is left to the filesystem because nothing registered anything.
 ///
-/// A path is printed raw and unquoted by `--porcelain` (HS-025's measurement), which is why the caller
+/// A path is printed raw and unquoted by `--porcelain`, which is why the caller
 /// compares canonicalised parents rather than trusting one spelling of the projects root.
 ///
-/// Since HS-054 this is [`checkouts`] with the branches dropped: one parser of one command, because a second
+/// Since this is [`checkouts`] with the branches dropped: one parser of one command, because a second
 /// one would be a second answer to "what does git's listing say".
 pub fn registrations(repository: &Path) -> Result<Vec<PathBuf>, GitError> {
     Ok(checkouts(repository)?
@@ -574,14 +574,14 @@ pub fn registrations(repository: &Path) -> Result<Vec<PathBuf>, GitError> {
         .collect())
 }
 
-/// One checkout git has registered for a repository, and the branch it has checked out (HS-054).
+/// One checkout git has registered for a repository, and the branch it has checked out.
 ///
 /// `branch` is the **short** name (`main`, not `refs/heads/main`), because that is the word the rest of the
 /// build uses — the config's `[merge] targets` and the request's `target` — and `None` means the checkout holds
 /// a detached HEAD, which is not a branch and therefore cannot be "the target checked out somewhere".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checkout {
-    /// The path git printed, which `--porcelain` prints resolved and unquoted (HS-025's measurement).
+    /// The path git printed, which `--porcelain` prints resolved and unquoted.
     pub path: PathBuf,
     /// The branch this checkout has checked out, or `None` when its HEAD is detached.
     pub branch: Option<String>,
@@ -592,11 +592,11 @@ pub struct Checkout {
     /// wants every registration it can compare against the filesystem, and the merge wants only the ones with a
     /// **working tree**. A prunable registration has none, so refusing a merge because the target is "checked
     /// out" there would refuse for a reason that is not true — the merge goes through the ref instead, and
-    /// HS-052's landmine is exactly such a registration.
+    /// the landmine is exactly such a registration.
     pub prunable: bool,
 }
 
-/// Every checkout `repository` registers, with the branch each one holds (HS-054).
+/// Every checkout `repository` registers, with the branch each one holds.
 ///
 /// `git worktree list --porcelain` prints one block per checkout — `worktree <path>`, `HEAD <sha>`, then
 /// either `branch refs/heads/<name>` or `detached`, and `prunable <reason>` when the directory is gone —
@@ -636,7 +636,7 @@ fn parse_checkouts(listing: &str) -> Vec<Checkout> {
 }
 
 // The four functions below are the crate's one way to spawn git: `Command::new("git")` appears here and
-// nowhere else in `src/` (HS-025), which is why HS-052's changes view calls them into this module rather
+// nowhere else in `src/`, which is why the changes view calls them into this module rather
 // than writing a fifth `-C` and a fifth error sentence. They are `pub(crate)` and not `pub` because the
 // `GitError` sentence they build is an operator's, not an API's.
 
@@ -708,7 +708,7 @@ pub(crate) fn git_command(repository: &Path, args: &[&str]) -> String {
 ///
 /// Two answers, because two readers need different halves: the provisioner wants the base commit (for the
 /// row) and whether the worktree is this provision's doing (for the undo, see [`Provisioned`]'s
-/// `undoable`), and HS-061's changes sheet wants the base alone.
+/// `undoable`), and the changes sheet wants the base alone.
 ///
 /// [`Provisioned`]: crate::backend::Provisioned
 #[derive(Debug, Clone, PartialEq, Eq)]

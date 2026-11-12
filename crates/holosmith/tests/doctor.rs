@@ -1,4 +1,4 @@
-//! `doctor`: the machine's fitness, check by check (HS-045, spec item 10 §1 and §7, V2).
+//! `doctor`: the machine's fitness, check by check (spec item 10 §1 and §7, V2).
 //!
 //! These tests drive `doctor::run` over a machine they build: `git`, `df` and `tailscale` are scripts the test
 //! wrote (the `Tools` seam), systemd is a directory this test makes or leaves out, and the daemon questions are a
@@ -82,7 +82,7 @@ fn df_shim(dir: &TempDir, available_kb: u64) -> PathBuf {
     )
 }
 
-/// An `openssl` shim answering `version` with `version` — the one question `doctor --full` asks it (HS-066).
+/// An `openssl` shim answering `version` with `version` — the one question `doctor --full` asks it.
 ///
 /// A shim rather than the machine's own binary, for the reason `git` and `df` are shims here: ADR-0071's D9 justifies
 /// the `Tools` field as *this* seam, and a test that ran the host's `openssl` would pass on this machine and fail on
@@ -112,7 +112,7 @@ fn tools(dir: &TempDir, version: &str) -> Tools {
         },
         tailscale: tailscale_shim(dir, "echo '{\"BackendState\":\"Running\"}'"),
         systemd: dir.file("no-systemd-here"),
-        // The release tree and the unit are the *caller's* install tree (HS-080): a test that left these at the
+        // The release tree and the unit are the *caller's* install tree: a test that left these at the
         // machine's defaults would read `/opt/holosmith` and `/etc/systemd/system/holosmith.service` on the machine
         // running the tests — which is the one thing every `Tools` field here exists to prevent.
         release_root: dir.file("opt/holosmith"),
@@ -484,7 +484,7 @@ fn a_held_port_is_a_failure_before_a_start_and_the_machine_serving_after_one() {
                     let _ = stream.set_nonblocking(false);
                     let mut request = [0_u8; 512];
                     let _ = stream.read(&mut request);
-                    // The payload, not a bare 200: the reader parses it (HS-050), so `{}` would be "a port
+                    // The payload, not a bare 200: the reader parses it, so `{}` would be "a port
                     // somebody else holds" rather than this machine serving.
                     let body = r#"{"name":"holosmith","version":"verify","role":"server","uptime_s":0,"preview_origin":"http://localhost:8081","application_server_key":null}"#;
                     let answer = format!(
@@ -905,7 +905,7 @@ fn full_adds_the_self_test_the_proxies_and_the_image() {
     assert_eq!(says(network), "a container reached 1.1.1.1:443");
     assert!(report.failed());
 
-    // A wrong pi is the other image arm: the sentence is the one HS-031 fails a session with, naming both
+    // A wrong pi is the other image arm: the sentence is the one fails a session with, naming both
     // versions.
     let wrong_pi = FakeMachine {
         image_pi: Ok("0.0.0-not-the-pinned-one".to_string()),
@@ -1205,7 +1205,7 @@ fn the_installed_paths_modes_and_owners_are_one_finding() {
     );
 }
 
-// --- the openssl finding (HS-066, ADR-0071's D9) ---------------------------------------------------------
+// --- the openssl finding (ADR-0071's D9) ---------------------------------------------------------
 
 /// `--full` reports which `openssl` this machine's `PATH` resolves, and `--quick` does not ask at all.
 ///

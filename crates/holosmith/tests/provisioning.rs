@@ -1,6 +1,6 @@
 //! The provisioner, end to end: a create hands off to the background task, the four steps arrive
 //! as `session.status` events, and the session ends `idle` — or `error` with a reason and no
-//! partial resources (HS-011).
+//! partial resources.
 //!
 //! Two ways of watching are used on purpose. The event log is read from the database for the
 //! rules that are about *what was recorded* — the step order, the payload shape, exactly one
@@ -171,7 +171,7 @@ async fn a_create_provisions_the_four_steps_in_order_and_ends_idle() {
     assert_eq!(settled_row.status_reason, None);
     assert_eq!(
         settled_row.worktree, "",
-        "the stub creates no worktree, so the row keeps '' (HS-007)"
+        "the stub creates no worktree, so the row keeps ''"
     );
 
     served.finish().await.expect("a clean shutdown");
@@ -179,7 +179,7 @@ async fn a_create_provisions_the_four_steps_in_order_and_ends_idle() {
 
 #[tokio::test]
 async fn a_scripted_agent_exit_reaches_the_row_through_the_server() {
-    // HS-031: after a successful pi step the provisioner hands the backend's exit watcher to a task of its
+    // after a successful pi step the provisioner hands the backend's exit watcher to a task of its
     // own, and that task records what the exit means (`Exits::record`). The stub's scripted exit is the only
     // way to prove that wiring without Docker — and the row's ending is the classifier's, not this test's:
     // a process that dies without the expected-stop flag is `error` with the tail of what it printed
@@ -331,7 +331,7 @@ async fn a_failure_at_a_named_step_undoes_what_completed_and_ends_error() {
     let reason = "the stub backend was told to fail at the container step";
     let events = committed_status_events(&state, &id, 4).await;
     // Three steps were announced, then the transition; the failing step is the one the last
-    // announcement named, because a step is announced before it runs (HS-011) and a transition
+    // announcement named, because a step is announced before it runs and a transition
     // carries no step of its own.
     assert_eq!(
         steps(&events),
@@ -370,8 +370,8 @@ async fn a_failure_at_a_named_step_undoes_what_completed_and_ends_error() {
 
 #[tokio::test]
 async fn the_docker_backend_refuses_a_project_that_is_not_there() {
-    // Without HS-024 there is no Docker backend, and `--backend` defaults to it. HS-025 asked a create
-    // against a projects root holding no repository to end `error` with git's sentence; HS-026 moved that
+    // Without there is no Docker backend, and `--backend` defaults to it. asked a create
+    // against a projects root holding no repository to end `error` with git's sentence; moved that
     // question to the create, so the answer is now the create's own 422 and no row at all — a session that
     // never existed cannot be resumed, and the operator reads the fix before anything is written. What a
     // Docker create of a *safe* project then does (the worktree step, then the network step's refusal) is

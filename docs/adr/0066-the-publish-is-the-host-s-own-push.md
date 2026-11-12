@@ -1,6 +1,6 @@
 # The publish is the host's own `git push` of our branch to somebody else's ref
 
-HS-057 is the last route of spec item 12, and the only one in this build whose subject is **not** a ref of ours:
+This is the last route of spec item 12, and the only one in this build whose subject is **not** a ref of ours:
 a merge writes `refs/heads/<target>` in the project repository, and a publish writes `refs/heads/<something>` in
 a repository this machine does not own, over whatever transport `git remote` names, as the user the server runs
 as. ADR-0063 and ADR-0064 already decided what a write to the project repository may assume; ADR-0065 decided
@@ -160,34 +160,34 @@ The ordering is also why an unlisted remote is never handed to git: `publish.rem
 ## D10 — `changes::basis` is the worktree read, its four refusals in this route's words, and "no commits" is not a refusal
 
 The branch's tip and the four "there is nothing here" facts are the changes view's (`changes::basis`, imported,
-`pub(crate)` since HS-054), answered as this route's `409 no_worktree` with **publish**'s sentences — a refusal
+`pub(crate)`), answered as this route's `409 no_worktree` with **publish**'s sentences — a refusal
 that said "there is nothing to review" would be about another request (ADR-0063 D1, ADR-0008).
 
 A branch with nothing beyond its base commit is **pushable**. Item 12's subject is the branch, and "there is
-nothing to publish" is `ahead`'s question — the Changes sheet's, and HS-058's to show — not a rule this route
+nothing to publish" is `ahead`'s question — the Changes sheet's, and the to show — not a rule this route
 invents. The test publishes a fixture with no session commit and reads the base commit on the remote.
 
 A gone worktree is refused even though the ref alone would be enough to push, because a publish of a session
 whose working tree has vanished is not what the operator means; the sentence names the resume, which is what
 makes the branch's commits reachable again (`Worktree::ensure` adopts a branch that already exists).
 
-## D11 — `touches_ci` is the changes view's, this route reads none of it, and the warning is HS-058's
+## D11 — `touches_ci` is the changes view's, this route reads none of it, and the warning is that story's
 
 Item 12's bullet — "`touches_ci` is true when the diff changes `.github/`, other CI files or hook directories,
 and the UI shows a warning before confirm" — is two facts: the flag, which is `changes::touches_ci` and has been
-measured since HS-052 (a directory prefix or a file name, the two arms exclusive, an added file counting), and
+measured (a directory prefix or a file name, the two arms exclusive, an added file counting), and
 the warning, which belongs to a sheet this phase has no screen for. So the route computes neither and the answer
 carries no flag; ADR-0064 D10's precedent (the Resolve-with-agent affordance) is the same recording rather than
 ticking.
 
-The sentence HS-058's confirm step will show, so it is a decision and not a guess:
+The sentence the confirm step will show, so it is a decision and not a guess:
 
 > this branch changes CI configuration, so publishing it may run workflows in the remote repository
 
 ## D12 — Rule 6's 60 seconds stays the hub's
 
 "Returns `{merged_commit, target, strategy}`. The hub timeout for merge and publish is 60 seconds" — the timeout
-belongs to the hub's forwarding client (HS-069, whose slice already carries "default 5 s; merge and publish use
+belongs to the hub's forwarding client (, whose slice already carries "default 5 s; merge and publish use
 60 s"), and a server-side ceiling would be a second, guessed answer that a slow remote would hit before the
 client's own. ADR-0065 D8 recorded the same for the merge; a push is bounded by the operator's patience and by
 `git`'s own transport timeouts, and it cannot prompt (D8).
@@ -244,4 +244,4 @@ them, a rewound branch as `409 push_rejected` with the remote's refs unchanged, 
 
 What it cannot measure, said plainly: no container and no real GitHub credential (a bare repository on the host
 needs neither, which is the point), no hub (so rule 6's 60 seconds has no client, D12), no UI (the confirm step
-and the CI warning are HS-058's), and no signed push (D6).
+and the CI warning are that story's), and no signed push (D6).

@@ -139,11 +139,11 @@ pub fn check_embed(migrations: &[Migration]) -> Result<u32, EmbedError> {
     Ok(previous)
 }
 
-/// What a database's recorded schema version means to this binary (HS-075, spec item 10).
+/// What a database's recorded schema version means to this binary (spec item 10).
 ///
 /// One function rather than a comparison at each caller, because the callers must not disagree:
 /// [`crate::db::apply_pending`] decides whether to migrate, the startup banner prints the number this verdict is
-/// about (the **recorded** one), and `doctor` (HS-045) will decide whether to refuse.
+/// about (the **recorded** one), and `doctor` will decide whether to refuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     /// The database is already the schema this binary embeds.
@@ -170,7 +170,7 @@ pub const fn verdict(recorded: u32, binary: u32) -> Verdict {
 
 impl Verdict {
     /// The sentence an operator reads, which is the same one in the banner's words, in the startup `warn`, and in
-    /// `doctor`'s refusal — one spelling of one fact (HS-020's lesson, one level up).
+    /// `doctor`'s refusal — one spelling of one fact (one level up).
     pub fn sentence(self, recorded: u32, binary: u32) -> String {
         match self {
             Self::Same => format!("the database is at this release's schema ({binary})"),

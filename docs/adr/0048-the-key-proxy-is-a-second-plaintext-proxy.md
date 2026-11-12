@@ -1,6 +1,6 @@
 # The key proxy is a second plaintext proxy, and its allow-list is a provider table
 
-Spec item 2's credential half has one sentence with teeth: a real provider key never enters a container. HS-037
+Spec item 2's credential half has one sentence with teeth: a real provider key never enters a container.
 built the network's half — a session's network is `--internal`, and the egress proxy is the only route out.
 This story builds the other half: pi talks to `http://key-proxy:8080/<provider>` with a per-session **dummy**
 key, and one container on the `egress` network holds the real key and does the TLS. The decisions below are the
@@ -68,7 +68,7 @@ Three consequences are recorded rather than hidden:
 
 `Store::dummy_for(session)` mints `hs-dummy-<32 random bytes>` on first use and returns the same value on a
 resume or a restart. `DockerBackend::start_container` writes `models.json` from the current store on every
-start: it contains the key proxy's URL, the dummy key and nothing else. `settings.json` keeps HS-031's
+start: it contains the key proxy's URL, the dummy key and nothing else. `settings.json` keeps that story's
 seed-only-if-absent rule, because pi writes its own state there; `models.json` is this build's file and is
 rewritten so a resumed session sees a key that is still in the store.
 
@@ -86,7 +86,7 @@ session.
 
 The self-test gains the inverse of ADR-0046's pair: after the bare probe it joins `hs_key` and asks for
 `key-proxy:8080` **alone**, requiring an answer. That is not a verdict about isolation — a missing key proxy is
-HS-039's `warn` — but it is the only boot-time measurement that the one legitimate address on an off network
+the `warn` — but it is the only boot-time measurement that the one legitimate address on an off network
 actually resolves.
 
 ## What the network does and does not enforce

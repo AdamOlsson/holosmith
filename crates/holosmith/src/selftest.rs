@@ -1,4 +1,4 @@
-//! The startup self-test: this machine's isolation, measured rather than asserted (HS-036, spec item 2).
+//! The startup self-test: this machine's isolation, measured rather than asserted (spec item 2).
 //!
 //! Spec item 2 makes the checkbox advisory and the *network* the enforcement: a session's network is
 //! `--internal`, so there is no route out, and the environment proxies only decide which of the two allowed
@@ -12,7 +12,7 @@
 //! 1. create a **temporary internal network** ([`NETWORK`], reused if a previous run left it),
 //! 2. run **one container from the image sessions run** on it, with [`PROBE`] as its command,
 //! 3. ask that container to reach the internet, the host **and the egress proxy's alias**, and read its **exit
-//!    code** — nothing may answer, which is spec item 2's off case (HS-038),
+//!    code** — nothing may answer, which is spec item 2's off case,
 //! 4. join the machine's egress proxy to that same network and ask again, about the alias only: it must answer
 //!    now, or the first measurement would have been silence for the wrong reason (an alias that never resolves
 //!    passes a check for a proxy that is not there at all),
@@ -45,10 +45,10 @@ use crate::preflight::{Check, Complaint};
 /// The temporary network the probe runs on. Removed whatever the outcome.
 ///
 /// A name of its own rather than a session's (`agents_<id>`), so an operator who finds it after a crash can
-/// tell what it was, and so the orphan sweep HS-044 owns can leave it alone.
+/// tell what it was, and so the orphan sweep a later change owns can leave it alone.
 pub const NETWORK: &str = "holosmith-selftest";
 
-/// The three names one self-test uses, composed from the run's two prefixes (HS-077).
+/// The three names one self-test uses, composed from the run's two prefixes.
 ///
 /// The probe's network and the two proxy containers are the self-test's only names, and since a smoke run owns a
 /// machine's names as well as its own, all three carry its prefix: a smoke boot probes `smoke_holosmith-selftest`,
@@ -67,7 +67,7 @@ impl Names {
     ///
     /// The config is taken **whole** rather than as two `&str`s: two sibling strings of one type can be passed the
     /// wrong way round, and that mistake is invisible whenever the two are equal — which is every machine but a
-    /// smoke run (HS-077's review, S4).
+    /// smoke run (S4).
     pub fn of(config: &crate::config::Config) -> Self {
         Self {
             egress: crate::container::proxy_name(&config.container_prefix),
@@ -82,7 +82,7 @@ impl Names {
 pub const PUBLIC: &str = "1.1.1.1:443";
 
 /// The address the egress proxy answers on from a session's network — and therefore the address that must **not**
-/// answer on a network whose session asked for no internet access (HS-038, spec item 2's off case).
+/// answer on a network whose session asked for no internet access (spec item 2's off case).
 ///
 /// The alias a session's container resolves the proxy by, not the proxy's container name
 /// ([`crate::container::PROXY_ALIAS`]): the alias is what Docker's embedded DNS answers, so a name that does not
@@ -90,12 +90,12 @@ pub const PUBLIC: &str = "1.1.1.1:443";
 /// not joined to, against `connected` on one where it is. That is the cleanest "nothing answers" there is, and it
 /// is the only fact that tells "off" from "the proxy is missing by accident".
 ///
-/// **The key proxy is not here yet.** HS-039 adds it, and it belongs in this list: the off case's promise is that
+/// **The key proxy is not here yet.** adds it, and it belongs in this list: the off case's promise is that
 /// only the key proxy answers. A target nothing answers today would prove nothing, which is why it is one entry
 /// and not two with a comment.
 pub const PROXY_TARGET: &str = "egress-proxy:3128";
 
-/// The key proxy's alias, which **must answer** on a session network (HS-039, spec item 2).
+/// The key proxy's alias, which **must answer** on a session network (spec item 2).
 ///
 /// It is deliberately not in [`Runner::targets`]: that list is things nothing may reach. This is the one
 /// legitimate answer on a session network whose Internet access is off, so it is the second half of the pair:
@@ -194,7 +194,7 @@ pub trait Runner {
     /// Run the probe on `network` and answer what it reported.
     fn probe(&self, network: &str, image: &str, targets: &[String]) -> Result<Report, String>;
     /// The egress proxy's container name, when a container by that name is running. `None` is a machine that runs
-    /// sessions without a proxy (HS-037 warns about it rather than refusing), and it is why the pair below is not
+    /// sessions without a proxy, and it is why the pair below is not
     /// measured — not a verdict about isolation.
     fn proxy(&self, name: &str) -> Option<String>;
     /// Attach the proxy called `name` to `network` under the alias a session's container resolves it by.
@@ -313,7 +313,7 @@ pub fn run_with(runner: &dyn Runner, names: &Names, image: &str) -> Outcome {
     let report = runner.probe(network, image, &targets);
     // …and then the same network with the proxy on it, before the network goes. This is what makes the silence
     // above mean something: an alias that never resolves would pass the off case for a proxy that is not there
-    // at all, which is the bug the off case exists to catch (HS-038).
+    // at all, which is the bug the off case exists to catch.
     pair(runner, names, image);
     key_pair(runner, names, image);
     runner.remove_network(network);
@@ -330,7 +330,7 @@ pub fn run_with(runner: &dyn Runner, names: &Names, image: &str) -> Outcome {
 /// **nothing but the alias**, and leave again.
 ///
 /// Not a verdict, and deliberately so. A proxy that will not join, or that is not built on this machine, is
-/// HS-037's `warn` and not a statement about isolation — refusing the boot over it would take the control UI down
+/// the `warn` and not a statement about isolation — refusing the boot over it would take the control UI down
 /// for a machine whose sessions otherwise work. What it buys is the *discrimination*: the off case's silence is
 /// only evidence if the same network reports the proxy the moment it is attached, and no other check in the build
 /// puts the two facts side by side at startup.
@@ -381,7 +381,7 @@ fn pair(runner: &dyn Runner, names: &Names, image: &str) {
 /// The key proxy's half of the off case: join it to the probe's network, ask for its alias alone, and require
 /// **an answer**.
 ///
-/// This is the inverse of [`pair`] and it is not a verdict either. A key proxy that is missing is HS-039's
+/// This is the inverse of [`pair`] and it is not a verdict either. A key proxy that is missing is that story's
 /// `warn`, not a machine that leaks; what the line buys is the discrimination "the alias resolves on a session
 /// network" that no unit test can make at boot.
 fn key_pair(runner: &dyn Runner, names: &Names, image: &str) {
@@ -496,7 +496,7 @@ mod tests {
         Names::of(&crate::config::Config::default())
     }
 
-    /// The ruling HS-077 rests on, as one test: a prefix reaches **all three** names, and the empty prefix changes
+    /// The ruling rests on, as one test: a prefix reaches **all three** names, and the empty prefix changes
     /// none of them. The five-name version of this claim is `tests/reconcile.rs`'s and `tests/container.rs`'s; this is
     /// the half that would otherwise silently keep probing the machine's proxies from a smoke boot.
     #[test]
@@ -799,7 +799,7 @@ mod tests {
         assert!(sentence.contains("refused"), "{sentence}");
     }
 
-    /// HS-038's off case, as three reports. The proxy answering where nothing should leave is its **own**
+    /// the off case, as three reports. The proxy answering where nothing should leave is its **own**
     /// finding — a different fix from a leaking bridge — and a direct leak alongside it is the worse of the two,
     /// so it keeps the isolation sentence.
     #[test]
@@ -905,7 +905,7 @@ mod tests {
 
     #[test]
     fn a_proxy_that_does_not_answer_the_pair_is_not_a_verdict_about_isolation() {
-        // Joined and silent: the machine's proxy is broken, which HS-037 makes a `warn` — it fails a download,
+        // Joined and silent: the machine's proxy is broken, which makes a `warn` — it fails a download,
         // not a session — so the isolation is still `Passed` and nothing is refused. The join and the leave still
         // happened, or a machine whose proxy is fine would drift into this arm unscathed.
         let fake = Fake::paired(Report {

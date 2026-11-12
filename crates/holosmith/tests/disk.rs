@@ -1,4 +1,4 @@
-//! The disk floor at the wire (HS-062, spec item 14): "session creation and resume fail with 507 below
+//! The disk floor at the wire (spec item 14): "session creation and resume fail with 507 below
 //! `min_free_gb`".
 //!
 //! Every test here owns a `df` the test wrote and a state whose run provisions containers as far as the floor
@@ -72,7 +72,7 @@ fn answer(available_gb: u64) -> String {
 /// A `df` that prints whatever `<dir>/df-answer` holds, and the path of that file.
 ///
 /// The stand-in is a file the *test* rewrites, which is what lets one server boot on a healthy machine and then
-/// cross the floor: the boot refuses below it (HS-024), so a case about the request paths cannot simply start
+/// cross the floor: the boot refuses below it, so a case about the request paths cannot simply start
 /// with a small disk. Nothing here talks to a real filesystem; `cat` is all the program does.
 fn stand_in(dir: &TempDir, available_gb: u64) -> (PathBuf, PathBuf) {
     let answer_path = dir.write("df-answer", &answer(available_gb));
@@ -117,9 +117,9 @@ fn floored_state(dir: &TempDir, df: PathBuf, min_free_gb: u64) -> AppState {
     state.tools = Tools {
         git: PathBuf::from("git"),
         df,
-        // The soft cap's program (HS-063); this test is about `df`.
+        // The soft cap's program; this test is about `df`.
         du: PathBuf::from("du"),
-        // The Web Push sender's (HS-066); this test is about `df` too.
+        // The Web Push sender's; this test is about `df` too.
         openssl: PathBuf::from("openssl"),
         ..Tools::default()
     };
@@ -246,9 +246,9 @@ async fn the_boot_and_the_request_paths_read_one_number() {
         &Tools {
             git: PathBuf::from("git"),
             df: df.clone(),
-            // The soft cap's program (HS-063); this test is about `df`.
+            // The soft cap's program; this test is about `df`.
             du: PathBuf::from("du"),
-            // The Web Push sender's (HS-066); this test is about `df` too.
+            // The Web Push sender's; this test is about `df` too.
             openssl: PathBuf::from("openssl"),
             ..Tools::default()
         },
@@ -277,9 +277,9 @@ async fn the_boot_and_the_request_paths_read_one_number() {
     state.tools = Tools {
         git: PathBuf::from("git"),
         df,
-        // The soft cap's program (HS-063); this test is about `df`.
+        // The soft cap's program; this test is about `df`.
         du: PathBuf::from("du"),
-        // The Web Push sender's (HS-066); this test is about `df` too.
+        // The Web Push sender's; this test is about `df` too.
         openssl: PathBuf::from("openssl"),
         ..Tools::default()
     };
@@ -326,7 +326,7 @@ async fn a_resume_below_the_floor_is_a_507_and_leaves_the_row_alone() {
     let state = floored_state(&dir, df, FLOOR);
     let served = Served::start(http::router(state.clone()), GRACE).await;
 
-    // A `stopped` row, reached the way the policies reach one: the API has no stop endpoint (HS-018's note).
+    // A `stopped` row, reached the way the policies reach one: the API has no stop endpoint.
     let id = created_id(&post_create(served.addr, "disk-floor-resume").await);
     wait_status(&state, &id, Status::Idle).await;
     Transitioner::new(std::sync::Arc::clone(&state.database), state.events.clone())
@@ -446,9 +446,9 @@ async fn a_stub_run_is_not_measured_at_all() {
     state.tools = Tools {
         git: PathBuf::from("git"),
         df,
-        // The soft cap's program (HS-063); this test is about `df`.
+        // The soft cap's program; this test is about `df`.
         du: PathBuf::from("du"),
-        // The Web Push sender's (HS-066); this test is about `df` too.
+        // The Web Push sender's; this test is about `df` too.
         openssl: PathBuf::from("openssl"),
         ..Tools::default()
     };
@@ -465,7 +465,7 @@ async fn a_stub_run_is_not_measured_at_all() {
 async fn a_create_at_the_cap_refuses_the_floor_instead_of_evicting() {
     let _one = one_at_a_time().await;
     // `create_locked` raises its refusal between the idempotency key and the cap, so a create that cannot run
-    // answers its own refusal rather than stopping somebody else's session (HS-026's rule, ADR-0068 D1). One live
+    // answers its own refusal rather than stopping somebody else's session (ADR-0068 D1). One live
     // session at a cap of one is what makes that order observable: raised after the cap, this create would evict
     // the idle session on its way to saying no.
     let dir = TempDir::new("disk-cap");
@@ -508,9 +508,9 @@ async fn a_floor_of_zero_does_not_need_a_df_at_all() {
     state.tools = Tools {
         git: PathBuf::from("git"),
         df: PathBuf::from("/nonexistent-holosmith-df"),
-        // The soft cap's program (HS-063); this test is about `df`.
+        // The soft cap's program; this test is about `df`.
         du: PathBuf::from("du"),
-        // The Web Push sender's (HS-066); this test is about `df` too.
+        // The Web Push sender's; this test is about `df` too.
         openssl: PathBuf::from("openssl"),
         ..Tools::default()
     };

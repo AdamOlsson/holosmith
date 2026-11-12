@@ -1,8 +1,8 @@
 # The disk soft cap is a watchdog over the row's own worktree, and it ends a turn with the ladder's second rung
 
-HS-063 is spec item 14's second sentence: "`session_disk_soft_gb` (default 10): a watchdog runs `du` on each
+This is spec item 14's second sentence: "`session_disk_soft_gb` (default 10): a watchdog runs `du` on each
 live session's worktree every 5 minutes. Over the limit it emits an `error` event with code `disk_quota`,
-aborts the turn and stops the session (resumable after cleanup)." The key has existed since HS-034 and nothing
+aborts the turn and stops the session (resumable after cleanup)." The key has existed and nothing
 read it. Six things here were open, and one of them — how a *periodic* policy ends a *turn* — is the part the
 next story of this shape will copy.
 
@@ -23,14 +23,14 @@ The reader is `du -sk -- <worktree>`, synchronously, on `spawn_blocking`, with t
 first — a `du` of a multi-gigabyte tree is hundreds of milliseconds, and the compactor's "hold the mutex
 because the fold is synchronous" argument does not transfer to a subprocess. It goes through
 `preflight::Tools`, which gains a `du` beside `git` and `df`: that struct is the build's one way to put a
-program under a test's control, because this crate denies `unsafe` and cannot set `PATH` (HS-024, HS-062).
+program under a test's control, because this crate denies `unsafe` and cannot set `PATH`.
 
 No `--one-file-system`: it is a GNU option, `du` here must be a POSIX utility, and the cap's point is that
 everything under the worktree counts — `target/`, `node_modules/`, and a nested mount too. The arithmetic is
 in `u128`: `du` answers KiB and the key is whole GiB, so `size_kib > limit_gb * 1024 * 1024`, which cannot wrap
 for an absurd config value. A `du` that is missing, refuses, or prints something that is not a `du -sk`
 answer measures **nothing**: no conclusion is drawn, the row is untouched and the next tick asks again —
-"a check that cannot run is not a pass", which item 14's `.is` rule and HS-062's four arms already say.
+"a check that cannot run is not a pass", which item 14's `.is` rule and the four arms already say.
 
 ## D3 — the candidates are the rows, and the predicate is a pure function
 
@@ -45,7 +45,7 @@ event — a row this policy stopped is no longer a candidate, so "an event per t
 The `running` arm calls `end_turn(session, DISK_QUOTA)`: rung 1 clears the queue and asks the agent to abort,
 rung 2 — the table's `abort_ladder` row, with *this* caller's reason — moves `running → stopped`, and the
 container goes through `Stopper`, so `expected_stop` is written before the stop. That is the third caller of
-the shape the turn timeout (HS-022) and the token budget (HS-060) use, and the reason word is the caller's
+the shape the turn timeout and the token budget use, and the reason word is the caller's
 exactly as `turn_timeout` and `budget_exceeded` are.
 
 **`climb` is not used.** It is the same two rungs *plus the way back*: a forced stop is resumed at once,
@@ -82,11 +82,11 @@ whether the work is still there reads `status`, and a client that wants to know 
 
 On the client side the frame gets a `parseFrame` branch, a transcript block and a third word in
 `stoppedNotice` — each a pure `transcript.ts` function with a node test, because no gate may need a browser
-(HS-058's rule).
+
 
 ## D6 — the first pass waits for the boot's own re-provisioning
 
-The startup reconcile moves every live row to `starting` and restarts its provisioning (HS-044), so a pass
+The startup reconcile moves every live row to `starting` and restarts its provisioning, so a pass
 taken the instant the task spawns would find no candidate at all. That pass is the one that matters most — a
 session can already be over its cap when the machine comes back — so `run` waits until no row is `starting`
 (100 ms poll), bounded at 60 s so a wedged row is a delay and not a policy that never runs. Then it sweeps and

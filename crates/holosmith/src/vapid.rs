@@ -1,4 +1,4 @@
-//! The machine's Web Push key pair (HS-049, spec item 10 step 2's "Generate the VAPID keys").
+//! The machine's Web Push key pair (spec item 10 step 2's "Generate the VAPID keys").
 //!
 //! One file, `<data root>/secrets/vapid.toml`, mode 0600: a P-256 key pair as two base64url strings — the 65-byte
 //! uncompressed public point (leading `0x04`) and the 32-byte private scalar. It is a **separate file** from
@@ -15,7 +15,7 @@
 //! itself: the crate has no encoder dependency and no `unsafe` to reach one with.
 //!
 //! **The file holds no configuration.** A JWT's `sub` claim is not key material, so it is not stored here; the
-//! consumer that signs with this pair decides it (HS-066), and it must read this file as it is.
+//! consumer that signs with this pair decides it, and it must read this file as it is.
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -24,7 +24,8 @@ use std::path::{Path, PathBuf};
 pub const VAPID_FILE: &str = "vapid.toml";
 
 /// The file's first line, so a reader who opens it by hand knows why it is never rewritten.
-const HEADER: &str = "# The machine's Web Push key pair (HS-049). `server deploy` writes this once and never rewrites it.";
+const HEADER: &str =
+    "# The machine's Web Push key pair. `server deploy` writes this once and never rewrites it.";
 
 /// The pair as the file carries it: base64url, no padding.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,7 +132,7 @@ pub fn unbase64url(text: &str) -> Option<Vec<u8>> {
 }
 
 /// The machine's **application server key** — the pair's public half, which is public by design: it is the `k=` of
-/// every JWT this machine signs and the value a browser hands to `pushManager.subscribe` (HS-067, ADR-0072).
+/// every JWT this machine signs and the value a browser hands to `pushManager.subscribe` (ADR-0072).
 ///
 /// `None` when this machine has no pair, and also when the file is there and is not one: a browser must not be
 /// handed a key that is not a key, and the two states are the same answer to the only question the caller asks.

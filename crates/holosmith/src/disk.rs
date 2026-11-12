@@ -1,4 +1,4 @@
-//! The free-space floor: one measurement, three readers (HS-062, spec item 14).
+//! The free-space floor: one measurement, three readers (spec item 14).
 //!
 //! Item 14's first sentence is "`min_free_gb` (default 20): session creation and resume fail with 507 below
 //! it", and item 10 §1 puts the same floor in the boot's preflight, which `doctor --quick` prints as well.
@@ -8,7 +8,7 @@
 //! root yet") is not the create's ("free some space"). "The same measurement" is then a function call rather
 //! than a convention two modules have to keep in step (ADR-0068).
 //!
-//! The measurement is `df -Pk` rather than `statvfs` for HS-024's reason: the crate denies `unsafe`, so the
+//! The measurement is `df -Pk` rather than `statvfs` for the reason: the crate denies `unsafe`, so the
 //! syscall is not reachable without a `libc` dependency, and a POSIX `df` is on every machine item 10 §1
 //! describes.
 //!
@@ -206,7 +206,7 @@ mod tests {
     ///
     /// `http/disk.rs` and not `http/sessions.rs` — the file that holds `prompt`, `abort` and `steer` beside the
     /// two starts must stay *checked*, or the guard would exempt exactly where a disk read on a turn's path would
-    /// be added. That is why the refusal has a module of its own (PER-94's review).
+    /// be added. That is why the refusal has a module of its own.
     const THE_MEASURED_HALF: &str = "disk.rs";
     const THE_BOOT: &str = "preflight.rs";
     const THE_REQUEST_PATHS: &str = "http/disk.rs";

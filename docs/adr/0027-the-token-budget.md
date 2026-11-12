@@ -1,6 +1,6 @@
 # The token budget counts a column the writer adds to, and the runner is what trips it
 
-HS-023 is spec item 13's second row: at `max_session_tokens` the turn is aborted through the shared ladder
+This is spec item 13's second row: at `max_session_tokens` the turn is aborted through the shared ladder
 with reason `budget_exceeded`. Two questions had to be answered before any code — **where the tally is
 written**, and **who compares it with the ceiling** — and a third, smaller one about a turn that settles
 over its ceiling before anybody notices.
@@ -44,7 +44,7 @@ climb is never spawned after the first: two climbs would ask a second abort of a
 ending, and the row has one `status_reason` anyway. A turn that trips the budget *and* its deadline records
 the one that fired first.
 
-`None` builds no poll at all, the reading HS-021 and HS-022 gave their own keys: a key the operator did not
+`None` builds no poll at all, the reading and gave their own keys: a key the operator did not
 set should cost nothing. `0` is not this story's to decide — the config validator already refuses it with
 `must be at least 1, or unset`.
 
@@ -52,7 +52,7 @@ set should cost nothing. `0` is not this story's to decide — the config valida
 
 The poll runs every hundred milliseconds; the stub's turn emits `message.end` one frame before it ends, and
 a real agent's message usually ends the turn too. So a turn can *settle* between two polls with the tally
-already over the ceiling. Nothing is left to abort, and the honest answer is the one HS-022 already gave for
+already over the ceiling. Nothing is left to abort, and the honest answer is the one already gave for
 a turn that finished after its deadline: record the reason on the ending it wrote. `Turn::finished` therefore
 gives the budget one last look in its `Settled` arm only — the row reads `idle · budget_exceeded`, the
 `session.status` frame carries it, and the *next* turn trips on its first poll, before it does any work. An
@@ -82,7 +82,7 @@ validator accepts — but the operator has to be told, or a ceiling that is sile
 is on. The precise claim is that **the budget counts what was reported**: a backend that reports usage for
 one message and not the next under-counts, and no rule here can detect it, because a message with no counts
 is indistinguishable from a free one at the session's row. Per-message honesty is the backend's to keep
-(HS-034's mapping is where pi's usage becomes this frame), and the sentence below is what says the count is
+and the sentence below is what says the count is
 not to be trusted as a total. The screen's sentence is a rule about the *stream*, not about the row's total:
 `budgetNotice({settled, usage})` in `web/src/transcript.ts` says nothing until a turn has settled, and says
 `no usage reported — the token budget has nothing to count` when one settles without a `message.end` that
@@ -100,7 +100,7 @@ and never a config key, because nothing an operator runs should be able to blind
 
 ## What this story left alone
 
-**Not the totals on the screen.** HS-034 draws `usage_in · usage_out` on the session screen; this story only
+**Not the totals on the screen.** draws `usage_in · usage_out` on the session screen; this story only
 makes the columns non-zero, which is what turns them from decoration into a fact.
 
 **No new config key, no schema change, no migration, no new endpoint.** `max_session_tokens` was in the

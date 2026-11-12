@@ -1,4 +1,4 @@
-//! The two routes a browser's subscription is stored through (HS-066, spec item 11).
+//! The two routes a browser's subscription is stored through (spec item 11).
 //!
 //! `POST /api/push/subscribe` stores one subscription; `DELETE /api/push/subscribe?endpoint=…` forgets one. Both
 //! answer `204` on success and neither has a `GET`: there is nothing a client would do with the list, and a route

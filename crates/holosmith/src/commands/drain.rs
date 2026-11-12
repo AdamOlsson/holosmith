@@ -1,4 +1,4 @@
-//! `holosmith drain [--wait 10m]`: refuse new work and wait for the turns that are running (HS-051).
+//! `holosmith drain [--wait 10m]`: refuse new work and wait for the turns that are running.
 //!
 //! The client half of [`crate::drain`], and deliberately small: one unix socket, one request line, then whatever
 //! the server says until it says `result: <word>`. It is hand-written like [`crate::http::health::ask`] — a
@@ -75,7 +75,7 @@ pub fn run(args: DrainArgs) -> ExitCode {
 /// `ending` is the `result:` line's word, or `None` when the exchange ended before one arrived — either the
 /// server stopped talking (see [`ask_with`]) or the caller's callback asked to stop. `stopped` says which of the
 /// two it was, because the callers treat them differently: `holosmith drain` never stops early, while a
-/// promotion stops on the drain's own first line when the machine was already draining (HS-078's acceptance:
+/// promotion stops on the drain's own first line when the machine was already draining (the acceptance:
 /// "refuses to upgrade while draining is already in progress").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Exchange {

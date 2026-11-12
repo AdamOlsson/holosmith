@@ -1,4 +1,4 @@
-//! `--ssh` deploys: the four children, every refusal, and the streaming run (HS-073, ADR-0078).
+//! `--ssh` deploys: the four children, every refusal, and the streaming run (ADR-0078).
 //!
 //! These tests drive [`holosmith::remote`] over a target they build, for the reason `tests/deploy.rs` gives about the
 //! deploy itself: the subject is *another machine*, so the only way to test it without a second machine is to hand

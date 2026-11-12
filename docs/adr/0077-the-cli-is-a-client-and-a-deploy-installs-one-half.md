@@ -1,6 +1,6 @@
 # The hub's CLI is a client of its own routes, and a deploy installs one half of a machine
 
-HS-072 is the spec's third way into machinery this build already had: the deploy's seven steps and the host
+This is the spec's third way into machinery this build already had: the deploy's seven steps and the host
 registry's rules. The acceptance is five bullets — a hub deploy that runs steps 1 (without the Docker and git
 checks), 2 (without the docker group), 5, 6 and 7 and builds nothing; `hub host add/list/remove` with `POST
 /api/hosts`' own checks; `--dry-run`; `server deploy` then `hub deploy` yielding `both` **with the API unchanged**;
@@ -135,7 +135,7 @@ machine is never told to run a command whose only answer is "there is no key pro
 
 All seven steps are still evaluated and printed, in the spec's order and with the spec's numbers, so a reader diffs a
 server run and a hub run line for line and the gate's `1..7` order assertion stays true for both. `Images` and
-`Proxies` answer `Word::Skipped` — the word's **first producer since HS-049** — and each line names what a hub has no
+`Proxies` answer `Word::Skipped` — the word's **first producer ** — and each line names what a hub has no
 work for rather than saying nothing was needed.
 
 `Word::Skipped`'s doc comment changes with it: it was "another story owns this step's body" and is now "this run's
@@ -146,8 +146,8 @@ mistake two unbuilt images for two successes.
 ## D6 — `status` reads the registry table
 
 `machines <n>` (a measured count, so a machine with no rows still prints a fact) and one `machine <name>` line per
-row, through a new `db::Reader::hosts()` — the read-only open of `recorded_without_migrating`'s precedent (HS-045,
-HS-050), so `status` needs no server, no lock and no second writer.
+row, through a new `db::Reader::hosts()` — the read-only open of `recorded_without_migrating`'s precedent (,
+), so `status` needs no server, no lock and no second writer.
 
 The row **is** the answer to the acceptance's last bullet. `reach`, `version`, `last_error` and `last_checked_at` are
 the last probe's facts (ADR-0073), which is as old as the boot (ADR-0074 D5) — and `checked <n>s ago` is the sentence
@@ -157,7 +157,7 @@ does because a page can afford it and a registry row cannot.
 
 `hosts::facts(host, now)` is one function with two callers — `status` and `hub host list` print the same words for a
 machine — and `now` is a parameter for `clock`'s own reason. `NO_REGISTRY` is **deleted** with its test: "no hub has
-registered a machine with this one, and the registry that would hold one is phase 3 (HS-068)" was false twice over.
+registered a machine with this one, and the registry that would hold one is phase 3" was false twice over.
 
 A failed read is one `machines fail:` line and **no** row lines, which is the session counts' rule one table over: an
 empty list over a read that failed would be a claim about a machine nobody could look at.
@@ -186,7 +186,7 @@ Two things it does not do, deliberately. It does **not** assert that no image ta
 earlier case is not this case's fact — the claim that a hub deploy builds nothing is `tests/deploy.rs`'s, where the
 `Fake` records every build and every daemon call and the test asserts both lists empty. And it does **not** reach a
 real tailnet, a real unit or a second machine: step 6's origins exist only in the shim's answer, systemd is absent,
-and `--ssh` is HS-073's.
+and `--ssh` is that story's.
 
 The `409 host_busy` arm is the one that needed a trick, and it is the seed's: `POST /api/hosts` refuses loopback
 (`host_problem`) while `hosts.toml` is not filtered by that rule (ADR-0073 D9), so the row that names this machine
@@ -196,10 +196,10 @@ can only be a seeded one — and a seed needs the port before the boot, which is
 ## D8 — what carries forward
 
 `GLOSSARY.md` gains **Hub deploy** and **Deploy half**, and amends **Service user** (a hub's joins no group) and
-**Step**/`skipped` (a role's word, not only a story's). HS-073 (`--ssh`) inherits the `Kind`-shaped step plan: a
-remote run reuses `run_as` unchanged and changes only how it reaches the machine. HS-078/079 (`upgrade`/`rollback`)
+**Step**/`skipped` (a role's word, not only a story's). (`--ssh`) inherits the `Kind`-shaped step plan: a
+remote run reuses `run_as` unchanged and changes only how it reaches the machine. those stories (`upgrade`/`rollback`)
 re-run a deploy's steps and must take the same `Kind`, or an upgrade of a hub-only machine would try to build images.
-HS-074 owns cross-machine sessions and the notification deep link.
+A later change owns cross-machine sessions and the notification deep link.
 
 The follow-up this story leaves: `?force=true` inside `host_busy`'s message is the API's vocabulary in a terminal,
 and a sentence that named the caller's flag would need the API to know who is calling it.

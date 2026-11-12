@@ -1,14 +1,14 @@
-//! `holosmith doctor`: the machine's fitness, printed (HS-045, spec item 10 §1 and §7).
+//! `holosmith doctor`: the machine's fitness, printed (spec item 10 §1 and §7).
 //!
 //! The command is thin on purpose: it reads the config the other commands read (so `--config` means the same
 //! thing everywhere and a file with a problem is a refusal before any check runs), asks [`crate::doctor`] for the
 //! report, prints it and answers with the exit code. Everything an operator has to act on is in the lines
 //! themselves — that is the acceptance's "one actionable line per failure" — so nothing here reformats them.
 //!
-//! `--root DIR` is `server deploy --root`'s tree (HS-080): the four install paths `doctor` reads — the config the
+//! `--root DIR` is `server deploy --root`'s tree: the four install paths `doctor` reads — the config the
 //! deploy wrote, the admin socket, the release tree and the unit — are built under `DIR` exactly as the deploy's
 //! step 1 builds them, so a tree an unprivileged run installed can be examined without root and a check cannot
-//! compare it against the machine's own `/etc` and `/opt` (HS-049's review, one check later).
+//! compare it against the machine's own `/etc` and `/opt` (one check later).
 
 use std::path::PathBuf;
 use std::process::ExitCode;

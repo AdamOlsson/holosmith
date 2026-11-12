@@ -1,4 +1,4 @@
-//! The daily project backup (HS-065, spec item 1's `project_backup`).
+//! The daily project backup (spec item 1's `project_backup`).
 //!
 //! Two halves: the module against a real git repository in a `TempDir`, and the create's own behaviour
 //! over a socket — one bundle a day, and a failed bundle that does not stop a session. Every test that
@@ -300,7 +300,7 @@ async fn nothing_is_bundled_when_the_setting_is_off() {
     assert!(!dir.path().join("backups").exists());
 }
 
-// ---- the promotion's database snapshots (HS-078, spec item 10 step 4) -----------------------------------------
+// ---- the promotion's database snapshots (spec item 10 step 4) -----------------------------------------
 
 /// The instants the snapshot tests take, an hour apart, from 2026-11-04T00:00:00Z.
 const SNAPSHOT_START: i64 = DAY_2026_11_04;

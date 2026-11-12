@@ -1,4 +1,4 @@
-//! The per-session disk soft cap (HS-063, spec item 14): a session that hoards disk is stopped, so one bad
+//! The per-session disk soft cap (spec item 14): a session that hoards disk is stopped, so one bad
 //! build cannot starve the others.
 //!
 //! The policy is a task rather than an endpoint, so these tests call its one pass — `Quota::sweep` is public

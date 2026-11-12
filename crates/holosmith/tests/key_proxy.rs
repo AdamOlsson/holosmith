@@ -1,6 +1,6 @@
-//! The key proxy's listener and dummy-key check (HS-039).
+//! The key proxy's listener and dummy-key check.
 //!
-//! The forwarding half is a real TLS connection to a provider and is HS-040's verification; what this file
+//! The forwarding half is a real TLS connection to a provider and is the verification; what this file
 //! proves without the internet is the part that must never be wrong: a request with no valid dummy never
 //! reaches a provider, a known provider with no stored key answers 503, and the route parser cannot be told a
 //! host.

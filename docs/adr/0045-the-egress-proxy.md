@@ -2,10 +2,10 @@
 
 Spec item 2 moves enforcement from an environment variable to the network: a session's network is
 `--internal`, so nothing leaves it, and the only thing attached to it that has a route out is a proxy this
-build starts and controls. HS-036 measured the first half. HS-037 is the second: `src/egress.rs`, the
+build starts and controls. An earlier change measured the first half. This is the second: `src/egress.rs`, the
 `holosmith proxy egress` subcommand, and the container that runs it (`hs_egress`, item 10 §3's deploy step
 names it). This records the five decisions that were not forced, and the one gap it deliberately leaves to
-HS-038.
+
 
 ## The proxy is a second mode of the binary, and the container runs *this* image
 
@@ -24,7 +24,7 @@ container that mounts nothing else.
 
 Three consequences, recorded rather than hidden:
 
-- **The deploy step's `holosmith-proxy:<version>` becomes optional rather than required.** When HS-048 builds
+- **The deploy step's `holosmith-proxy:<version>` becomes optional rather than required.** When builds
   that image, the mount disappears and the image changes; that is one field on [`EgressProxy`], which is why
   `EgressProxy::of` takes the machine's `Config` and not a `ContainerSettings`.
 - **The proxy is replaced on every boot** (`rm -f`, then `run`). The allow-list is an argument, so a changed
@@ -103,7 +103,7 @@ network" is one step, and its report already means "the session has a network".
 configuration, so a session created with it off is a network the proxy is not joined to — the same
 `HTTPS_PROXY` in the container either way, and nothing answering on it. Leaving that unconditional for one
 story would ship a machine whose checkbox is ignored, which is the kind of gap a later story quietly blesses;
-so HS-037 honours the flag even though **HS-038** owns the UI, the off-case self-test and the demo.
+so honours the flag even though **** owns the UI, the off-case self-test and the demo.
 
 **A failure is a `warn`, never a refusal**, and the reason is item 2's own framing: an unreachable proxy fails
 a package download, not a session. It is also what keeps a machine whose proxy image is not built yet able to
@@ -126,16 +126,16 @@ Two details that a later story would otherwise undo:
 
 ## What is left, on purpose
 
-- **The host-binding gap is not closed here, and it is now HS-046's to record.** ADR-0044 measured that a
+- **The host-binding gap is not closed here, and it is now the to record.** ADR-0044 measured that a
   container can reach anything the host binds to `0.0.0.0` at its own network's bridge address — the control
   listener included. This proxy refuses to *tunnel* to such an address, but a container that speaks to the
   gateway directly never asks the proxy, so item 4's guards remain that path's defence. Closing it (a firewall
   on the bridge, or a network driver that does not answer) is the phase-1 verification run's decision, and it is
   named here rather than dropped.
 - The provider hosts are **not** on the allow-list, because the key proxy is what makes a model call work
-  (HS-039). `NO_PROXY=key-proxy` is already in the launcher's environment for that reason.
+  `NO_PROXY=key-proxy` is already in the launcher's environment for that reason.
 - HTTPS is opaque to a `CONNECT` tunnel, so an allow-listed host is an exfiltration channel. Item 2 lists that
   as an accepted risk; this ADR repeats it because the log line's *bytes* are the only thing that can be said
   about a request's content.
-- An orphaned `hs_egress` after a crash is HS-044's reconcile, and a proxy that is not running is one `warn`
+- An orphaned `hs_egress` after a crash is the reconcile, and a proxy that is not running is one `warn`
   at boot.

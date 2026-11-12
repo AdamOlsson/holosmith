@@ -557,7 +557,7 @@ fn set_owner(config: &mut Config, value: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// What this machine calls itself (HS-074): the `host` a notification's payload carries, and the name the hub's
+/// What this machine calls itself: the `host` a notification's payload carries, and the name the hub's
 /// registry row for it has to use, because the tap's path is `/hosts/<host>/sessions/<id>` one hop later.
 ///
 /// The default is [`hosts::LOCAL`], which is not a name any *row* may take: it is the reserved word that means "the
@@ -584,7 +584,7 @@ fn set_projects_root(config: &mut Config, value: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// The image a session's container runs (HS-027). A name Docker resolves, so an empty string is not a
+/// The image a session's container runs. A name Docker resolves, so an empty string is not a
 /// typo this can catch — it is one Docker refuses with its own sentence, which is the honest place for it.
 fn set_agent_image(config: &mut Config, value: &Value) -> Result<(), String> {
     let image = string(value)?;
@@ -595,7 +595,7 @@ fn set_agent_image(config: &mut Config, value: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// The packages the agent image installs (HS-048). An empty list is a legitimate machine — an image with git,
+/// The packages the agent image installs. An empty list is a legitimate machine — an image with git,
 /// openssl and CA certificates and no toolchain — so only a blank *name* is refused: `apt-get install ""` is a
 /// build that fails on a line naming nothing, and a build is the wrong place to discover a typo.
 fn set_agent_toolchains(config: &mut Config, value: &Value) -> Result<(), String> {
@@ -660,7 +660,7 @@ fn set_network_prefix(config: &mut Config, value: &Value) -> Result<(), String> 
     Ok(())
 }
 
-/// What a container or network prefix must be, or `None` when it is one (HS-077).
+/// What a container or network prefix must be, or `None` when it is one.
 ///
 /// Two rules, both about the name it is composed into. **Empty is the default** and means the build's own prefix
 /// alone, so a machine's names are exactly `s_<id>`/`agents_<id>`. A non-empty one is **Docker's name alphabet**

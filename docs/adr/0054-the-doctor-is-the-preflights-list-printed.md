@@ -1,6 +1,6 @@
 # The doctor is the preflight's list, printed, with a depth flag
 
-HS-045 is spec item 10 §1 and §7, V2, and the CLI's `holosmith doctor [--quick or --full]` row — the slice's
+This is spec item 10 §1 and §7, V2, and the CLI's `holosmith doctor [--quick or --full]` row — the slice's
 acceptance, which is also the issue body, is:
 
 > `--quick`: Linux with systemd where applicable, Docker reachable, git ≥ 2.38, Tailscale logged in, free disk
@@ -49,7 +49,7 @@ That is ADR-0044's rule ("we could not measure is not we measured a leak") appli
 and it is what makes the command runnable on the machine this build's gate runs on: no systemd
 (`/proc/1/comm` is `bwrap`, `/run/systemd/system` does not exist) and a `tailscale` CLI whose daemon answers
 `failed to connect to local tailscaled`. `serve` by hand is a supported way to run (`docs/build.md`), so a check
-that refused here would make `doctor` unrunnable on a perfectly good machine — and `server deploy` (HS-049) is
+that refused here would make `doctor` unrunnable on a perfectly good machine — and `server deploy` is
 where systemd and Tailscale become deploy prerequisites, which is where a refusal belongs.
 
 Two checks make the vocabulary honest rather than a way to hide:
@@ -94,7 +94,7 @@ ADR-0047 promised "`serve` continues on a newer database and `doctor` refuses" a
 writes, and `doctor --quick` is `ExecStartPre`. `db::recorded_without_migrating` is the second opener — SQLite's
 own `SQLITE_OPEN_READ_ONLY` flag, then the same two statements `apply_pending` decides on — and
 `schema::verdict` answers `Same`/`Older` (both `pass`, with the verdict's own sentence) or `Newer` (`fail` with
-`schema::Verdict::sentence`, the string `serve` warns with). `Verdict::sentence`'s "`doctor` (HS-045, not built
+`schema::Verdict::sentence`, the string `serve` warns with). `Verdict::sentence`'s "`doctor` (, not built
 yet)" was amended in the same commit, because it is no longer true.
 
 A missing file is `pass`, not a finding: a machine that has never served has no database, and `serve` creates one.
@@ -122,7 +122,7 @@ which is the release `--write-tree` arrived in; so a git that lacks the flag fai
 reaches the trial, which reports `unknown` with the sentence "not measured: the git check above failed … the
 trial-merge fallback is not implemented because a git older than 2.38 cannot run item 12's mergeability check at
 all". A fallback that can only run on a machine doctor has already refused is dead code with a maintenance cost,
-and the merge feature (HS-053+) is where a real host's need would land. A git shim reporting 2.37 is the test
+and the merge feature is where a real host's need would land. A git shim reporting 2.37 is the test
 that keeps that sentence true, and it also proves the two findings do not double-count one cause: the run has
 exactly one failure.
 
@@ -136,14 +136,14 @@ exactly one failure.
   are removed inside `run`, and the gate asserts the network's absence afterwards.
 - **`proxy`** is two lines, `hs_egress` and `hs_key`, read with `Docker::running` and **never started**: `serve`
   owns them (ADR-0045/ADR-0048), a stopped container keeps its name, and the sentence says to restart the server.
-- **`image`** is HS-031's own question on demand: `agent::version_of` (a `docker run --rm --network none pi
+- **`image`** is its own question on demand: `agent::version_of` (a `docker run --rm --network none pi
   --version`) and `agent::version_check`, so the sentence a mismatch produces is the one a session fails with. An
   image that will not run is a failure naming the build step and `agent_image`, which is what makes the failing
   arm provable without building an image.
 - They are **not measured** (`unknown`) when the `docker` check failed: one failure, one line, and no cascade of
   four sentences blaming a daemon for the thing that is wrong with the daemon.
 
-`ExecStartPre=holosmith doctor --quick` was HS-049's line to write, and there was no unit file to change here.
+`ExecStartPre=holosmith doctor --quick` was the line to write, and there was no unit file to change here.
 **Amended by ADR-0058:** the line is written (as `ExecStartPre=<the binary> doctor --quick`; the *path* is the
 decision ADR-0058 records), and `doctor --quick` gained a sixth kind of machine fact, `perms` — which is therefore
 also what `ExecStartPre` refuses on.

@@ -1,4 +1,4 @@
-//! `POST /api/sessions/:id/merge`: land a session's branch on a target (HS-054, HS-055 and HS-056, spec item
+//! `POST /api/sessions/:id/merge`: land a session's branch on a target (, and, spec item
 //! 12's rules 1–6).
 //!
 //! The route is a `POST`, so every mutating guard applies and the manifest records it [`Mutating`] — and it is
@@ -65,7 +65,7 @@ use crate::worktree::Worktree;
 /// The body's fields, exactly: any other key is `unknown_field`, the create's own rule.
 ///
 /// All four are read: `message` names a commit for the two strategies that make one, and `delete_session` runs
-/// the delete flow after a landing (HS-056 built it; it was the last field this build refused).
+/// the delete flow after a landing.
 const FIELDS: [&str; 4] = ["target", "strategy", "message", "delete_session"];
 
 /// `target` is not one of the configured `[merge] targets`: the config, not the repository, is what refused.
@@ -79,16 +79,16 @@ const MISSING_TARGET: &str = "`target` must be a branch this repository has: tha
 /// `strategy` is not one of the spec's three words at all — a malformed request rather than a missing feature.
 const BAD_STRATEGY: &str = "`strategy` must be `ff-only`, `merge` or `squash`";
 
-/// A merge of a session whose turn is running (HS-056, spec item 12's rule 1).
+/// A merge of a session whose turn is running (spec item 12's rule 1).
 ///
 /// The same `session_running` code a prompt gets while a turn runs, and a sentence that describes **this**
 /// request: nothing was merged, and the operator's move is to wait or to abort.
 const RUNNING: &str = "a turn is running in this session, so nothing was merged; wait for it to end, or abort it, and merge again";
 
-/// A merge of a session whose worktree holds uncommitted work (HS-056, rule 1).
+/// A merge of a session whose worktree holds uncommitted work (rule 1).
 ///
 /// "Only commits are merged", so the refusal names the two things that are true: nothing was merged, and the
-/// next step is a commit. The offer to *make* that commit is HS-058's Changes-sheet affordance; ADR-0065 names
+/// next step is a commit. The offer to *make* that commit is the Changes-sheet affordance; ADR-0065 names
 /// the prompt it sends, because a sentence the operator reads and a prompt the agent gets should not be two
 /// guesses.
 const DIRTY_WORKTREE: &str = "the session has uncommitted work, so nothing was merged; ask the agent to commit it, then merge again";
@@ -385,7 +385,7 @@ mod tests {
 
     #[test]
     fn all_three_of_the_spec_s_strategies_are_accepted_and_the_absent_one_is_ff_only() {
-        // HS-054 refused two of these with `422 unsupported`; HS-055 builds them, so the request that names one
+        //  refused two of these with `422 unsupported`; builds them, so the request that names one
         // is the contract's request. What `parse_body` must get right is the **word to variant** mapping — the
         // rest of the story is what `merge::merge` does with it.
         assert_eq!(

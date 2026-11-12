@@ -1,7 +1,7 @@
 # What a token count is, and what "no usage" means
 
-HS-023 built the budget against the stub, and its own review recorded the hole: the ceiling was exercised
-against a script's numbers, so nothing had yet said what a *provider's* numbers mean. HS-034 is that story,
+ built the budget against the stub, and its own review recorded the hole: the ceiling was exercised
+against a script's numbers, so nothing had yet said what a *provider's* numbers mean. This is that story,
 and it turns out to be two decisions and one piece of evidence.
 
 Spec item 13 is one line long: "Sessions gain `usage_in` and `usage_out`, updated from the `usage` on
@@ -11,7 +11,7 @@ repeats it as "a real turn … reports usage".
 ## A prompt's cached part is part of what it cost
 
 pi reports six counters per assistant message: `input`, `output`, `cacheRead`, `cacheWrite`, `reasoning` and
-`totalTokens`. HS-032's mapping kept the first two and deferred the rest here, on purpose.
+`totalTokens`. the mapping kept the first two and deferred the rest here, on purpose.
 
 Keeping only `input` would make the budget a fraction of the bill: a conversation with a system prompt and a
 growing transcript is mostly **cache reads** — the second message of the committed tool fixture reports 93
@@ -47,7 +47,7 @@ usage frame *had* arrived, and the budget counted a zero for ever.
 
 Spec item 13 has one condition — "if pi does not report usage, the budget is disabled" — so this build has one
 answer: a total of zero emits **no** `usage` key at all, exactly as a message with no `usage` object does. The
-screen's sentence (`budgetNotice`, HS-023) and the disabled ceiling then agree by construction, because both
+screen's sentence (`budgetNotice`) and the disabled ceiling then agree by construction, because both
 read the frame rather than a separate flag.
 
 Corollary, and the reason the rule is on the *sum* rather than on `input`: a message whose entire prompt was
@@ -63,7 +63,7 @@ from where it lives, and they are why it lives there:
 
 - **It is keyed on the log**, so it says the same thing after a reload, after a reconnect, and after a history
   page has been folded in. `history.truncated`'s `turns_before` is what keeps "a turn settled" true for a
-  windowed replay (HS-061).
+  windowed replay.
 - **It is one sentence, not one per turn.** A `warn` in the server log would be either per-turn noise or
   per-session memory for a log line; the row already says `0`, and the operator reading the screen is the one
   who needs to know.
@@ -73,7 +73,7 @@ So: no new column, no new key, no server-side warning. ADR-0027's budget stays e
 ## "Against the real backend", honestly
 
 A container cannot complete a turn in this build: its network is `--internal` and it holds no provider key
-until the key proxy exists (HS-039), which is what `case_docker_turn` asserts by reading pi's own refusal on
+until the key proxy exists, which is what `case_docker_turn` asserts by reading pi's own refusal on
 the row. So the phase's "against the real backend, not only the stub" is answered with the closest thing that
 exists:
 
@@ -82,7 +82,7 @@ exists:
   real turn, captured with the operator's own credentials — maps it through the production `rpc::Mapping`,
   appends the frames to a real writer, asserts the **row's** two columns are that turn's counts, and then runs
   the real `Turn::run` over that row with a ceiling one token below it and asserts `budget_exceeded`.
-- **The container is HS-046's.** The phase-1 verification run replays this on a live host with the proxy in
+- **The container is that story's.** The phase-1 verification run replays this on a live host with the proxy in
   place, and V3 is where the whole path (deltas, a tool round trip, usage) is confirmed end to end.
 
 Recorded rather than glossed: until then, the ceiling's *arithmetic* is proven against real records and its

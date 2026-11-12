@@ -1,6 +1,6 @@
 # The cap stops a sleeping session rather than refusing the create
 
-HS-020 is the story that makes the cap a policy instead of a wall: a create on a full machine stops the
+This is the story that makes the cap a policy instead of a wall: a create on a full machine stops the
 least recently active idle session and takes its slot. Four things had to be decided, and the third is
 the one this story really is.
 
@@ -43,7 +43,7 @@ cannot detect. Here the direction is even cheaper — the row becomes `stopped` 
 whatever the container does — so the `stop` is **spawned**, not awaited, and its failure is logged.
 
 Spawning is spec item 7's rule, not laziness: an answer never waits for container work, which is why
-provisioning, the turn and the ladder are tasks too. It matters the day HS-024 makes `stop` a real
+provisioning, the turn and the ladder are tasks too. It matters the day makes `stop` a real
 `docker stop`: ten seconds of it between a tap and its 202 is exactly the stall item 7 removed. The
 order still holds — the row moves before the task is spawned — and the operator can still delete a
 session whose container outlived it.
@@ -66,7 +66,7 @@ One word wide, deliberately. A forced abort did not preserve work in the same se
 reason must not be softened by a sentence written for the cap; inventing reassurance for either would be
 a claim about work nobody saved. The function lives in `transcript.ts` rather than in `main.ts` because
 that file's rules are tested without a browser (`npm test`), and the list row uses it in the span it
-already reserves for a stopped session's detail (HS-064's days-remaining line takes the same one).
+already reserves for a stopped session's detail.
 
 ## What this story left alone
 
@@ -76,8 +76,8 @@ resume from stranding a row in `starting`. That is still true, and giving the re
 be a second policy change with no bullet behind it — so a resume on a full machine still refuses, and a
 create now evicts. The asymmetry is deliberate and recorded rather than accidental.
 
-**Nothing evicts on a timer.** An idle session is only stopped when a create needs its slot; HS-021's
-idle stop is the policy that stops one because it has been quiet, and HS-044's drain the policy that
+**Nothing evicts on a timer.** An idle session is only stopped when a create needs its slot; that story's
+idle stop is the policy that stops one because it has been quiet, and the drain the policy that
 stops them all.
 
 ## Consequences
@@ -92,7 +92,7 @@ stops them all.
   sentence that says nothing was idle and a backend that was never called); and that `error` takes no
   slot.
 - The bits the story did not build are now evidence rather than assumption: the cap counts the three
-  live states (`live_count`, HS-008) and `max_live_sessions` is validated `≥ 1` by the config's semantic
+  live states (`live_count`) and `max_live_sessions` is validated `≥ 1` by the config's semantic
   pass — both hold, and the tests above depend on the first and run on the second.
 - `web/test/transcript.test.ts` grows three cases for `stoppedNotice`/`stoppedDetail`, and
   `npm test` is 21.

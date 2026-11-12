@@ -1,4 +1,4 @@
-//! Exit classification (HS-030, spec item 6): "I stopped it" is a different row from "it died".
+//! Exit classification (spec item 6): "I stopped it" is a different row from "it died".
 //!
 //! Two halves, and they are proved differently:
 //!
@@ -9,8 +9,8 @@
 //!   (expected, clean, failed) through the server's own wiring.
 //!
 //! **No test here starts a container.** The exit a real container produces cannot be observed in this
-//! build at all: the container runs detached (ADR-0036) until HS-031 attaches pi's stdio, and `--rm`
-//! removes it a moment after it stops (ADR-0037). HS-031 is the caller of `Exits::record`; what is
+//! build at all: the container runs detached (ADR-0036) until attaches pi's stdio, and `--rm`
+//! removes it a moment after it stops (ADR-0037). This is the caller of `Exits::record`; what is
 //! proved here is what that call *means* — the flag, the two transitions and the session log.
 
 use std::net::SocketAddr;
@@ -131,7 +131,7 @@ async fn idle_session(state: &AppState, key: &str) -> Session {
     row(state, &session.id)
 }
 
-/// The classifier this state's database and data root give, which is what HS-031 will build.
+/// The classifier this state's database and data root give, which is what will build.
 fn exits(state: &AppState, dir: &TempDir) -> Exits {
     Exits::new(
         Arc::clone(&state.database),

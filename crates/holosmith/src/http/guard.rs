@@ -43,7 +43,7 @@ pub struct Guards {
     control_origin: String,
     /// The tailnet login the requests must come from, when one is configured.
     owner: Option<String>,
-    /// The machine-to-machine check (HS-070): not a header's, and asked after these four.
+    /// The machine-to-machine check: not a header's, and asked after these four.
     trust: crate::trust::Trust,
 }
 

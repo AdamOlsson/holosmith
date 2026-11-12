@@ -1,4 +1,4 @@
-# holosmith: embedded proxy image (HS-048)
+# holosmith: embedded proxy image
 #
 # Both of the machine's proxies run this one image. `hs_egress` and `hs_key` are the same static binary with a
 # different subcommand, so the image is the artifact on a minimal base and nothing else — no shell scripts, no

@@ -1,4 +1,4 @@
-//! A tool call's full output, kept in a file rather than in the log (HS-033).
+//! A tool call's full output, kept in a file rather than in the log.
 //!
 //! Spec item 15 asks for "the full output of a tool call, inspectable"; the log is read by a phone, replayed
 //! on every reconnect and folded by compaction, so a two-megabyte `cat` in a payload would make the transcript
@@ -12,7 +12,7 @@
 //! the mapping answers a [`crate::rpc::Mapped::Tool`] carrying the whole output and the pump hands it here.
 //!
 //! **The cap.** [`CAP`] is the spec's 5 MB, and it is a constant rather than a config key for the reason
-//! HS-021's tick and ADR-0032's window are: it is a rule of the contract, not a property of a machine. The
+//! the tick and ADR-0032's window are: it is a rule of the contract, not a property of a machine. The
 //! body is truncated on a **char boundary**, so a file under `<tool_id>.txt` is always valid UTF-8, and one
 //! marker line follows it naming how much was dropped — a reader must be able to tell a short answer from a
 //! cut one without a header.
@@ -30,7 +30,7 @@
 //! there and named `<tool_id>.txt` is followed by `std::fs::read`, and nothing in this build can create one: the
 //! container's mounts are the worktree and the agent's own directory, not the data root's session directory.
 //!
-//! **An image in a result is a second file under the same rule** (HS-035): `<tool_id>-<block index>.<ext>`,
+//! **An image in a result is a second file under the same rule**: `<tool_id>-<block index>.<ext>`,
 //! where the extension comes from pi's `mimeType` and a type this build cannot name is kept anyway under
 //! `.bin`. The bytes are base64 in the record and decoded here (`decode_base64`) rather than in the mapping,
 //! the bound is checked from the encoded length *before* anything is allocated, and the frame carries
@@ -130,7 +130,7 @@ pub struct Stored {
     pub reference: String,
 }
 
-/// One image block of a tool's result, before anything is stored (HS-035).
+/// One image block of a tool's result, before anything is stored.
 ///
 /// pi's block is `{"type": "image", "mimeType": "image/png", "data": "<base64>"}` inside
 /// `tool_execution_end.result.content`. The mapping answers one of these and the pump stores it, for the same

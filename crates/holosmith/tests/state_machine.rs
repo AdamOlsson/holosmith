@@ -1,4 +1,4 @@
-//! The one state machine over a real database (HS-012, ADR-0016).
+//! The one state machine over a real database (ADR-0016).
 //!
 //! The table itself and the illegal-move matrix are proved in `sessions/state.rs`'s unit tests,
 //! where no database is in the way. This file proves the half that needs one: the refusal leaves
@@ -86,7 +86,7 @@ async fn committed_events(
 
 #[tokio::test]
 async fn an_illegal_move_is_refused_leaves_the_row_alone_and_emits_nothing() {
-    // HS-012's demo: attempt the moves the table does not have, get a refusal with from and
+    // the demo: attempt the moves the table does not have, get a refusal with from and
     // trigger, and find the row exactly as it was.
     let dir = TempDir::new("state-illegal");
     let state = state_with_writer(&dir, Config::default(), WriterOptions::default());
@@ -222,7 +222,7 @@ async fn stopped_at_is_set_by_the_transition_into_stopped_and_cleared_by_the_one
 
 #[tokio::test]
 async fn the_expirys_row_admits_stopped_and_nothing_else() {
-    // HS-064, spec item 15: the daily job's move is the table's narrow `expire` row, not the delete's `any`
+    // spec item 15: the daily job's move is the table's narrow `expire` row, not the delete's `any`
     // one — a request may end a running turn first and is entitled to any state, while a job that destroys a
     // forgotten session must do it to *this* one. The row that matters is the refused one: a session the
     // operator resumed in the window between the pass's read and this write is left alone, and the table is

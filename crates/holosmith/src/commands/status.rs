@@ -1,4 +1,4 @@
-//! `holosmith status`: the machine's four facts, printed (HS-050, spec's Commands table).
+//! `holosmith status`: the machine's four facts, printed (spec's Commands table).
 //!
 //! Thin on purpose, and thin in the same place `doctor` is: the config is read the way every command reads it (so
 //! `--config` means one thing and a file with a problem is a refusal before anything is measured), one daemon

@@ -1,4 +1,4 @@
-//! The startup reconcile: what a crash left behind, put right before anybody is served (HS-044, V9).
+//! The startup reconcile: what a crash left behind, put right before anybody is served (V9).
 //!
 //! A `kill -9` of the server takes three things with it that nothing else in this build can put back:
 //!
@@ -19,12 +19,12 @@
 //!    which is a reason on a `session.status` event and never a state. A `starting` row needs no transition
 //!    (it is already where a provision begins); `stopped`, `error` and `deleting` are left alone — the last
 //!    one because a delete is the operator's request to retry (ADR-0023) — **except** a row a drain stopped with
-//!    [`crate::drain::SERVER_RESTART`], which is the second kind of row this pass brings back (HS-078, spec item
+//!    [`crate::drain::SERVER_RESTART`], which is the second kind of row this pass brings back (, spec item
 //!    10 step 6: "sessions that were live before the drain return to `idle` on startup").
 //! 2. **The names no row owns.** A container `s_<id>` is removed unless `<id>` is a `deleting` row (every
 //!    other container is stale or about to be replaced, and a stranded pi must stop before a new one starts
 //!    on the same worktree); an `agents_<id>` network and a `.worktrees/<id>` directory are removed only when
-//!    **no row** has that id. **Never a branch, never a ref** (HS-043, ADR-0052): the worktree's directory and
+//!    **no row** has that id. **Never a branch, never a ref** (ADR-0052): the worktree's directory and
 //!    its registration go, the branch and `refs/holosmith/wip/<id>` stay.
 //! 3. **The restarts.** After the sweep, so no new container races a stale one.
 //!
@@ -39,7 +39,7 @@
 //!
 //! **Idempotent in [`crate::worktree`]'s sense, not in the sense of doing nothing:** a second pass leaves the
 //! same names and the same idle rows, but it restarts the live sessions again. That is what a reconcile is,
-//! and it is why HS-045's `doctor` and HS-046's verification run may call it as well.
+//! and it is why the `doctor` and the verification run may call it as well.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -136,7 +136,7 @@ pub fn recoveries(rows: &[Session]) -> Vec<Recovery> {
 /// A `deleting` row is the one exception: its container is the delete's to remove, and a reconcile that took
 /// it would be finishing somebody's teardown for them (ADR-0023).
 ///
-/// `prefix` is the **composed** one (`container_prefix` + `s_`, HS-077): a smoke boot passes `smoke_s_`, so its
+/// `prefix` is the **composed** one (`container_prefix` + `s_`): a smoke boot passes `smoke_s_`, so its
 /// sweep can neither see nor take the machine's `s_<id>` containers, and the machine's own boot cannot see its.
 fn containers_to_remove(rows: &[Session], names: &[String], prefix: &str) -> Vec<String> {
     names
@@ -193,7 +193,7 @@ pub struct Swept {
     pub failures: Vec<(PathBuf, String)>,
 }
 
-/// Remove the worktree directories no row owns, and **never a branch or a ref** (HS-043, ADR-0052).
+/// Remove the worktree directories no row owns, and **never a branch or a ref** (ADR-0052).
 ///
 /// Two shapes, because the repository is what decides which one applies:
 ///
@@ -263,7 +263,7 @@ pub fn sweep_worktrees(projects_root: &Path, orphans: &[String]) -> Swept {
 /// The id a registered worktree path names, when it sits directly under `<projects>/.worktrees/`.
 ///
 /// Both sides are canonicalised because `git worktree list --porcelain` prints the **resolved** path while
-/// the projects root may be reached through a symlink (HS-025's measurement).
+/// the projects root may be reached through a symlink.
 fn worktree_id(path: &Path, root: &Path) -> Option<String> {
     let root = std::fs::canonicalize(root).ok()?;
     let parent = std::fs::canonicalize(path.parent()?).ok()?;
@@ -294,7 +294,7 @@ pub struct Reconciler {
     backend: Backends,
     docker: Docker,
     projects_root: PathBuf,
-    /// `container_prefix` + `s_`: the prefix this run's own containers carry (HS-077), and the prefix its sweep
+    /// `container_prefix` + `s_`: the prefix this run's own containers carry, and the prefix its sweep
     /// strips. Composed once here, because the two halves must be the same string — a sweep that listed with one and
     /// stripped with another would either miss its own leftovers or take somebody else's container.
     container_prefix: String,
@@ -309,7 +309,7 @@ impl Reconciler {
     ///
     /// A function of the config rather than two initialisers inside [`Reconciler::new`], so a test can ask what a
     /// smoke run's reconciler will sweep without a database — the wiring a unit test of the composer cannot see
-    /// (HS-077's review, S4).
+    /// (S4).
     pub fn prefixes(config: &Config) -> (String, String) {
         (
             container_listing_prefix(&config.container_prefix),
@@ -662,7 +662,7 @@ mod tests {
         );
     }
 
-    /// HS-077's other half: a sweep with a **composed** prefix takes only its own run's names.
+    /// the other half: a sweep with a **composed** prefix takes only its own run's names.
     ///
     /// The empty prefix is today's behaviour (the two tests above) and this one is the smoke run's: a boot whose
     /// config says `smoke_` lists `smoke_s_`, strips `smoke_s_`, and must neither see the machine's `s_<id>` nor its

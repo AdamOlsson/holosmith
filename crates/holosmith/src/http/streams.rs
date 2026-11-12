@@ -1,4 +1,4 @@
-//! `GET /api/sessions/:id/events`: one session's event stream (HS-010, ADR-0014).
+//! `GET /api/sessions/:id/events`: one session's event stream (ADR-0014).
 //!
 //! A `GET`, so every guard applies exactly as it does to the other read-only routes and nothing
 //! new is needed for it (ADR-0010). The body is built in [`crate::events::stream`]; this file
@@ -66,7 +66,7 @@ fn known(state: &AppState, session_id: &str) -> Result<bool, crate::sessions::Re
 
 /// Where the replay starts: the seq after the client's last-seen one, or `0` — which
 /// [`stream::attach`] reads as "this client has nothing" and answers with a windowed replay plus a
-/// `history.truncated` frame (HS-061).
+/// `history.truncated` frame.
 ///
 /// Absent, empty, non-numeric and non-positive all mean "no resume point". They are deliberately not
 /// distinguished: a browser that has seen no `id` sends no header at all, and a value it cannot use is

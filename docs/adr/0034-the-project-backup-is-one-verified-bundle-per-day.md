@@ -1,6 +1,6 @@
 # The project backup is one verified bundle per project per day, taken by the create
 
-HS-065 is spec item 1's `project_backup` setting and the "Known risks" line it answers: several sessions
+This is spec item 1's `project_backup` setting and the "Known risks" line it answers: several sessions
 share one project repository, so an agent that damages the checkout damages every session's base. The
 recovery point is a git bundle — the whole repository, every branch and tag, in one file — and the story
 fixes four things about it: when it runs, how often, what is kept, and what happens when it fails.

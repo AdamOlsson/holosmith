@@ -1,4 +1,4 @@
-//! One session by id, and the screen that opens with it (HS-014).
+//! One session by id, and the screen that opens with it.
 //!
 //! Every test starts the real `App` on an ephemeral port and talks HTTP/1.1 over a socket, so the
 //! status, the headers and the bytes are the ones a browser gets. Each test owns its `TempDir`, so
@@ -55,7 +55,7 @@ async fn create(addr: std::net::SocketAddr, key: &str) -> Response {
 }
 
 /// A response that must be the ADR-0008 envelope for `code`: status, `content-type` and code, all
-/// three, because a status-only assertion is how the wrong code ships (HS-005's review).
+/// three, because a status-only assertion is how the wrong code ships.
 fn assert_envelope(response: &Response, status: u16, code: &str) {
     assert_eq!(response.status, status, "{}", response.body);
     assert_eq!(

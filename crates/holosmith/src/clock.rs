@@ -3,10 +3,10 @@
 //! `now` is passed into the database and the repository rather than read inside them, so a test
 //! asserts the value it wrote instead of racing the clock (ADR-0009, ADR-0011). This module is
 //! the only place that asks the operating system what time it is: the startup's migration
-//! timestamp (HS-004) and a create's `created_at`/`last_active_at` (HS-008). It also holds [`minutes`],
+//! timestamp and a create's `created_at`/`last_active_at`. It also holds [`minutes`],
 //! which asks the clock nothing but is the one spelling of "a config key in minutes" the idle stop
-//! (HS-021) and the turn timeout (HS-022) both read, and [`days`], which is the same arithmetic for the one
-//! key measured in days (HS-064's `stopped_ttl_days`).
+//!  and the turn timeout both read, and [`days`], which is the same arithmetic for the one
+//! key measured in days.
 
 /// How many seconds a day is, named once: the multiplier [`days`] uses and the one the stopped-session
 /// expiry's cutoff is stated in.

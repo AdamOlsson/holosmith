@@ -1,9 +1,9 @@
-//! `holosmith smoke`: the candidate's own proof against the real daemon (HS-077, spec item 10 step 2).
+//! `holosmith smoke`: the candidate's own proof against the real daemon (spec item 10 step 2).
 //!
 //! Item 10's pipeline is "build it in a container, then smoke test it on the host": run the candidate with a smoke
 //! config — alternate port, a temporary data directory, `container_prefix=smoke_`, `network_prefix=smoke_` — against
 //! the real Docker daemon, using a fake pi in the image that replays the session recorded in phase 1: create a
-//! session, run a turn, delete it. HS-078's `upgrade <binary>` is this module's caller, so **the exit code is the
+//! session, run a turn, delete it. the `upgrade <binary>` is this module's caller, so **the exit code is the
 //! contract**:
 //!
 //! * **0** — the candidate passed. It served a session, ran a turn whose frames were the recorded turn's, deleted it,
@@ -82,12 +82,12 @@ pub const PROMPT: &str = "holosmith smoke: replay the recorded turn";
 /// one's database). Deleting an operator-supplied path on a guess is not acceptable, so the guess is this line: a
 /// directory is the smoke run's only when its `config.toml` begins with it. Anything else is refused by name.
 pub const CONFIG_MARKER: &str =
-    "# holosmith smoke: written by `holosmith smoke` (HS-077); removed when the run passes";
+    "# holosmith smoke: written by `holosmith smoke`; removed when the run passes";
 
 /// The largest answer one HTTP call reads before it gives up on the answer being one.
 const MAX_ANSWER: usize = 4 * 1024 * 1024;
 
-/// How the run ended, which is the exit code HS-078 reads.
+/// How the run ended, which is the exit code reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     /// The candidate passed every step.
@@ -125,7 +125,7 @@ pub fn image() -> String {
 /// The recipe label's value for this Dockerfile and these candidate bytes.
 ///
 /// The Dockerfile **and** the program, because either changing makes a different image: a fixed tag over a changed
-/// recipe is the defect `builder::LABEL_RECIPE` exists to prevent, and one over a *different binary* is HS-048's P1
+/// recipe is the defect `builder::LABEL_RECIPE` exists to prevent, and one over a *different binary* is the P1
 /// in another container.
 pub fn recipe(dockerfile: &str, binary: &[u8]) -> String {
     let mut both = Vec::with_capacity(dockerfile.len() + binary.len() + 1);
@@ -412,7 +412,7 @@ fn execute(config: &Config, binary: &Path, root: &Path) -> Result<(), Ending> {
     let measured = drive(&log, pid, &mut session);
     // **Cleanup runs on every ending, not only a passing one.** `and_then` over the measurement would skip all of
     // this exactly when a promotion needs it: a candidate left serving a root about to be removed, and four names
-    // left on a machine the next boot has to sweep (HS-077's review, P1).
+    // left on a machine the next boot has to sweep (P1).
     let stopped = stop(&mut server);
     let proxies = remove_proxies(&docker);
     // On a pass the delete already took them, so this waits for its own promise; on a failure they are ours to
@@ -1003,7 +1003,7 @@ fn removed(docker: &Docker, id: &str) -> Result<(), String> {
 /// The root's ending: removed after a pass, kept after a failure, kept on request either way.
 ///
 /// A pass with an unremovable root is a **failure**: the directory holds a database, a worktree and the candidate's
-/// log, and a second run that inherited them would answer about a previous candidate (HS-077's review, P2). A
+/// log, and a second run that inherited them would answer about a previous candidate (P2). A
 /// failure keeps it on purpose — it is the evidence an operator reads, and the smoke config in it is what a
 /// refusal's sentence points at.
 fn finish(root: &Path, passed: bool) -> Result<(), String> {
@@ -1312,7 +1312,7 @@ mod tests {
 
     /// The smoke recipe runs the **agent image's** base, by the same digest — three recipes, one pinned node.
     ///
-    /// A drift here is the defect HS-048's P1 and ADR-0080's `COPY --from` both were: an image built from a base
+    /// A drift here is the defect the P1 and ADR-0080's `COPY --from` both were: an image built from a base
     /// nobody pinned, which nothing in a green gate would notice.
     #[test]
     fn the_smoke_recipe_names_the_agent_images_base() {
@@ -1427,7 +1427,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// The exit codes are the contract HS-078 branches on, and the two failures are told apart.
+    /// The exit codes are the contract branches on, and the two failures are told apart.
     #[test]
     fn the_exit_codes_are_pass_failed_and_could_not_run() {
         assert_eq!(Outcome::Passed.exit_code(), 0);

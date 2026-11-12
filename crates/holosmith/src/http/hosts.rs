@@ -1,8 +1,8 @@
-//! The host registry's three routes (HS-068, spec item 4).
+//! The host registry's three routes (spec item 4).
 //!
 //! `GET /api/hosts` answers the table, `POST /api/hosts` registers one machine, and `DELETE /api/hosts/{name}`
-//! forgets one. All three are the registry's own rows and nothing else: no route here forwards a request (HS-069
-//! owns that), and none of them authenticates a peer (HS-070).
+//! forgets one. All three are the registry's own rows and nothing else: no route here forwards a request (
+//! owns that), and none of them authenticates a peer.
 //!
 //! The refusals are ADR-0008's codes, and the split between them is the client's next step rather than the transport
 //! status:
@@ -48,7 +48,7 @@ const FIELDS: [&str; 2] = ["name", "url"];
 ///
 /// One key, and a wrapper rather than a bare array for `SessionList`'s reason: the sessions list already carries
 /// facts about the machine beside its rows, and a host list is the shape a second fact joins without moving the first.
-/// It derives **both** halves because HS-072's CLI is a client of this route: a second struct for the read side would
+/// It derives **both** halves because the CLI is a client of this route: a second struct for the read side would
 /// be a second spelling of one wire shape.
 #[derive(Debug, Serialize, serde::Deserialize)]
 pub struct HostList {
@@ -117,7 +117,7 @@ pub async fn register(state: &AppState, body: Result<Bytes, BytesRejection>) -> 
 ///
 /// Spec item 4's "removing a host is refused while it has live sessions" is asked of the **local** row — the one whose
 /// origin is this machine's own — because a *remote* row's sessions are not this machine's to count. That is the one
-/// reading this build can answer honestly (HS-069's forwarding is what will answer it for another machine), and the
+/// reading this build can answer honestly, and the
 /// ADR says so rather than pretending a hub can see a server's rows.
 pub async fn remove(state: &AppState, name: &str, query: RawQuery) -> Response {
     // The query is read before the row: a typo in `?force` must not remove anything it was not forced to.

@@ -1,6 +1,6 @@
 # The merge's guards are the route's, and the branch a `delete_session` merge leaves is the one it landed
 
-HS-056 is the last of spec item 12's merge: rule 1's two guards, rule 5's `delete_session` and rule 6's pair of
+This is the last of spec item 12's merge: rule 1's two guards, rule 5's `delete_session` and rule 6's pair of
 timeouts. ADR-0063 and ADR-0064 already decided what a *write* to the project repository is allowed to assume —
 its own module, the changes view's rules by import, every answer measured rather than parsed out of git's
 English, and one way a ref moves. This ADR decides only what a *session* adds to that: when the route refuses,
@@ -14,7 +14,7 @@ to a failed delete (**D7**).
 
 `merge::merge` moves a ref between a worktree, a request and the config's target list. ADR-0063 says in as many
 words that a session row "is *not* consulted and *not* written", and that "whether the session may be merged at
-all (a running turn, uncommitted work) is HS-056's rule 1" — so rule 1 goes where the row is, in the handler, and
+all (a running turn, uncommitted work) is the rule 1" — so rule 1 goes where the row is, in the handler, and
 `merge()` is unchanged. It keeps exactly one question asked twice, `listed`, because that one is a *precondition*
 the module can ask of itself.
 
@@ -91,7 +91,7 @@ the sheet will render:
 
 > the session has uncommitted work, so nothing was merged; ask the agent to commit it, then merge again
 
-The offer itself is HS-058's (ADR-0064 D10's precedent: there is no screen, so there is nothing to put a button
+The offer itself is the (ADR-0064 D10's precedent: there is no screen, so there is nothing to put a button
 on). What this ADR can do for that story is name the prompt, so it inherits a decision instead of inventing one:
 
 > Commit every change in the working tree, with a message that describes it, and tell me the commit's hash.
@@ -106,7 +106,7 @@ unsupported` for, and **`unsupported` retires with it** (`D9`).
 ## D5 — The delete flow's request half is one function, and the merge's fact travels into the keep-rule
 
 `DELETE /api/sessions/{id}` was a handler body; it is now `sessions::deletion(state, id, force, landed)`, and the
-route is its wrapper. Copying the sequence into the merge's handler would have re-derived HS-043's rules by hand,
+route is its wrapper. Copying the sequence into the merge's handler would have re-derived the rules by hand,
 and ADR-0052's whole point is that the snapshot, the keep-rule and the removal are *one* decision:
 
 1. the row, and the `deleting` re-run;
@@ -168,7 +168,7 @@ A `squash`'s landing commit does **not** have the branch's tree when the target 
 keeps the target's content on the paths it changed, so "the trees are equal" is a coincidence of the gate's
 fixture (where `main` was the branch's parent) and not an invariant — the review caught the ADR asserting it, and
 this is the stronger statement that makes the deletion safe. The tip comparison is what closes the window ADR-0063
-and `docs/notes.md` already knew about: `merge()` writes the commit `basis` read, so an agent's commit after that
+and an earlier development note already knew about: `merge()` writes the commit `basis` read, so an agent's commit after that
 read is a commit nothing landed — and if the branch has moved, the keep-rule keeps it.
 
 The cost is named rather than hidden: after a squash the branch's commit messages and its shape are gone. That is
@@ -200,9 +200,9 @@ removes none. A failure here is a machine failure (an unwritable index), not a d
 ## D8 — The 60 seconds has no client in this build, and saying so is the decision
 
 Rule 6's last sentence: "The hub timeout for merge and publish is 60 seconds (the default stays 5)." There is no
-hub: forwarding is phase 3 (HS-069 / PER-101), whose slice already carries the line "Default forwarding timeout is
+hub: forwarding is phase 3 (those stories), whose slice already carries the line "Default forwarding timeout is
 5 s; merge and publish use 60 s" — that story has the number and this one does not. There is also no *client* for
-either route: the Changes sheet, its Merge button and the Publish button are HS-058's.
+either route: the Changes sheet, its Merge button and the Publish button are that story's.
 
 Implementing it here would mean one of two wrong things:
 
@@ -211,14 +211,14 @@ Implementing it here would mean one of two wrong things:
 - a `60 s` ceiling on the merge's blocking task — which the spec does not ask for, and which would invent a code
   for "the git work outran the clock", a sentence no rule of item 12 has.
 
-So the pair is recorded, not ticked: HS-069 owns the forwarding client's two numbers and HS-058 owns the buttons'.
+So the pair is recorded, not ticked: both the forwarding client's two numbers and the buttons' belong to later changes.
 The one thing this build can say about it is why a single default would be wrong, which is in
-`docs/notes.md`'s landmines so the next agent does not "fix" it by adding a `timeout` to the shared helper.
+the landmines so the next agent does not "fix" it by adding a `timeout` to the shared helper.
 
 ## D9 — `unsupported` retires with its last field
 
 `422 unsupported` existed for exactly two requests ADR-0063 could not honour — a `strategy` that made a commit,
-and `delete_session`. HS-055 built the first and this story builds the second, so the code, its constructor and
+and `delete_session`. built the first and this story builds the second, so the code, its constructor and
 its last wire-table row go. An envelope code the server can never send is a promise it does not make, and
 `docs/build.md` and `tests/merge.rs` are edited rather than left describing a code nothing produces.
 
@@ -227,7 +227,7 @@ its last wire-table row go. An envelope code the server can never send is a prom
 The delete flow removes the worktree, the branch, the network, the container and the session's own directory. It
 does not touch `<data>/merge/<id>`: that directory is a merge's, `clear` already removes a leftover from a killed
 run before the next landing (ADR-0064 D1), and a delete that swept it would be a second owner of a path with one.
-HS-044's reconcile does not mention it either, for the same reason.
+the reconcile does not mention it either, for the same reason.
 
 ## The gate case
 

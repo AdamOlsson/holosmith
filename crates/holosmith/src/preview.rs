@@ -1,4 +1,4 @@
-//! The preview listener: a session's own dev server, on its own origin (HS-041, spec item 3, V7).
+//! The preview listener: a session's own dev server, on its own origin (spec item 3, V7).
 //!
 //! Item 3 asks for a **second listener** that serves only `/<host>/<id>/*` (HTTP and WebSocket), has no API
 //! routes, checks an upgrade's `Origin`, and uses `local` as the host name of this machine's own sessions.
@@ -41,7 +41,7 @@ use crate::tunnel::{self, Tunnel};
 
 /// The host name a server uses for its own sessions (spec item 3, GLOSSARY's **Local**).
 ///
-/// Every other name is another machine's, which the hub forwards (HS-069). Keeping the segment a **value**
+/// Every other name is another machine's, which the hub forwards. Keeping the segment a **value**
 /// is what makes that story a forwarder rather than a second parser: [`Route::strip`] already answers which
 /// host a path names.
 pub const HOST: &str = "local";
@@ -68,7 +68,7 @@ pub const DRAIN: Duration = crate::serve::DEFAULT_SHUTDOWN_GRACE;
 /// The host name and the session id of one preview request, and what the upstream is asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Route {
-    /// The first path segment: `local` on this machine (HS-069 forwards the rest).
+    /// The first path segment: `local` on this machine.
     pub host: String,
     /// The second: a session id.
     pub id: String,
@@ -92,7 +92,7 @@ impl Route {
     /// path with no trailing slash is the upstream's root, which is why `/local/<id>` and `/local/<id>/` are
     /// the same request.
     ///
-    /// **Whose host it is, is not this function's decision** (HS-069): a hub serves another machine's sessions
+    /// **Whose host it is, is not this function's decision**: a hub serves another machine's sessions
     /// under that machine's registered name, so the host segment is a *value* the caller resolves against the
     /// registry ([`plan`]) rather than a rule this splitter can apply. Nor is the id's alphabet one: a peer's
     /// session is none of this machine's business, and the local arm answers "no such session" from its own table
@@ -155,7 +155,7 @@ pub enum Refusal {
     /// The request line is not a path this listener serves.
     NotAPath { path: String },
     /// The first segment names no host this machine's registry holds — so it is not a preview this machine serves,
-    /// on any role (HS-069: a name that *is* a row is forwarded, and a machine that forwards nothing says so with
+    /// on any role (: a name that *is* a row is forwarded, and a machine that forwards nothing says so with
     /// [`Refusal::NotForwarded`] instead).
     UnknownHost(String),
     /// The second segment is not a session id, or no row holds it.
@@ -175,9 +175,9 @@ pub enum Refusal {
         expected: String,
         sent: Option<String>,
     },
-    /// This machine's role forwards nothing, so another machine's name is not a preview it can reach (HS-069).
+    /// This machine's role forwards nothing, so another machine's name is not a preview it can reach.
     NotForwarded { host: String },
-    /// The machine that asked is not one this machine takes calls from (HS-070, spec item 4, V11).
+    /// The machine that asked is not one this machine takes calls from (spec item 4, V11).
     ///
     /// One variant for both of the trust check's refusals, because this listener's own vocabulary is one sentence in
     /// plain text: [`crate::trust::Refusal`] owns the words (a peer and the node the tailnet named for it, never an
@@ -185,9 +185,9 @@ pub enum Refusal {
     /// arm, so the log line a test greps is the one a reader expects.
     Peer { refusal: crate::trust::Refusal },
     /// The registry knows the host but not where its previews answer: no probe has carried a `preview_origin` from
-    /// it yet (HS-069, ADR-0074).
+    /// it yet (ADR-0074).
     NoPreview { host: String },
-    /// A hub dialled the host's preview origin and got nothing, or could not dial it at all (HS-069).
+    /// A hub dialled the host's preview origin and got nothing, or could not dial it at all.
     PeerUnreachable {
         host: String,
         origin: String,
@@ -418,7 +418,7 @@ pub fn rewrite(head: &str, target: &Target<'_>, upgrade: bool) -> String {
                 wrote_host = true;
                 out.push_str(&format!("Host: {}\r\n", target.host));
             }
-            // The **hub is the author of a forwarded request** (HS-069): a peer's listener compares an upgrade's
+            // The **hub is the author of a forwarded request**: a peer's listener compares an upgrade's
             // `Origin` against the preview origin it serves, and the browser's is this machine's. A local request
             // keeps the client's origin (`Target::origin` is `None`): the container is the upstream, and what the
             // browser said about itself is still true.
@@ -514,7 +514,7 @@ pub struct Containers {
     pub docker: Docker,
     /// The port a session's dev server listens on inside its container (the config's key).
     pub port: u16,
-    /// This run's **raw** `network_prefix` (empty on a normal machine, `smoke_` in a smoke run, HS-077), because the
+    /// This run's **raw** `network_prefix` (empty on a normal machine, `smoke_` in a smoke run), because the
     /// inspect call names the network a container joined and [`crate::container::network_name`] is what composes it.
     pub network_prefix: String,
     /// This run's raw `container_prefix`, for the same reason: the container it inspects is that session's, and
@@ -534,7 +534,7 @@ impl Containers {
     ///
     /// Two methods rather than two calls inline, so the composition is assertable without a daemon: passing a
     /// *composed* prefix here asks about `s_s_<id>`, which arrives as a `502` on a preview request and nothing else
-    /// (measured while this story's first gate run was red — HS-077's review, S4).
+    /// (measured while this story's first gate run was red — 's review, S4).
     fn container_of(&self, session: &str) -> String {
         crate::container::container_name(&self.container_prefix, session)
     }
@@ -586,13 +586,13 @@ pub struct Context {
     /// The rows, so a path naming nothing is a `404` rather than a failed connection.
     pub database: Arc<Mutex<Database>>,
     /// Which parts of the system this machine runs: `Roles` gives preview forwarding to a `hub` and a `both`, and a
-    /// `server` answers another machine's name as one it does not serve (HS-069).
+    /// `server` answers another machine's name as one it does not serve.
     pub role: crate::config::Role,
     pub upstream: Arc<dyn Upstream>,
     /// The programs a peer hop runs. Only `openssl` today, for a `https` peer's preview origin — the same child the
     /// host probe and the forwards route use (ADR-0071/ADR-0073/ADR-0074).
     pub tools: crate::preflight::Tools,
-    /// Which machines may drive this listener (HS-070): the same decision the control listener asks, spelled in
+    /// Which machines may drive this listener: the same decision the control listener asks, spelled in
     /// this listener's own words (`Refusal::Peer`).
     pub trust: crate::trust::Trust,
 }
@@ -619,7 +619,7 @@ impl Context {
         }
     }
 
-    /// Whether the machine that opened this connection may drive this listener at all (HS-070).
+    /// Whether the machine that opened this connection may drive this listener at all.
     ///
     /// The whois is a child, so it runs on the blocking pool: an accept loop must keep accepting while one peer is
     /// being verified. A blocking task that died is still a machine this listener verified nobody for, and
@@ -690,7 +690,7 @@ impl Context {
 pub enum Plan {
     /// This machine's own session: resolve its container and tunnel to it (spec item 3's `local`).
     Local,
-    /// Another machine's session: relay the exchange to that machine's preview listener (HS-069).
+    /// Another machine's session: relay the exchange to that machine's preview listener.
     Peer(crate::config::Origin),
 }
 
@@ -829,7 +829,7 @@ where
 /// time through [`tunnel::pump_both`].
 pub async fn handle(mut stream: TcpStream, context: &Context) {
     // The address the connection came from, before anything is read: it is what machine-to-machine trust asks the
-    // Tailscale daemon about (HS-070). `peer_addr` fails on a socket that has already been shut down, and that is a
+    // Tailscale daemon about. `peer_addr` fails on a socket that has already been shut down, and that is a
     // machine whose identity cannot be read — which the check refuses rather than waves through.
     let caller = stream.peer_addr().ok().map(|address| address.ip());
     let head = match tunnel::read_head(&mut stream, MAX_HEAD, HEAD_TIMEOUT).await {
@@ -846,7 +846,7 @@ pub async fn handle(mut stream: TcpStream, context: &Context) {
     };
     // Item 4's machine rule, **before** this listener's own: whether this machine takes calls from the caller at all
     // precedes whether the caller's `Origin` is one an upgrade may carry, and it is the same decision the control
-    // listener makes — so a stranger's preview is refused in the words `crate::trust` owns (HS-070).
+    // listener makes — so a stranger's preview is refused in the words `crate::trust` owns.
     match context.admits(caller).await {
         Ok(admitted) => admitted.log(),
         Err(refusal) => {
@@ -865,7 +865,7 @@ pub async fn handle(mut stream: TcpStream, context: &Context) {
     };
     // Item 3's one rule, checked before anything is asked of the machine or of a peer: an upgrade from anywhere but
     // **this** listener's preview origin never reaches a dev server. On a hub's forwarded request the origin is the
-    // hub's, and the peer applies the same rule again with its own (HS-069, ADR-0074).
+    // hub's, and the peer applies the same rule again with its own (ADR-0074).
     if parsed.upgrade && !context.from_preview_origin(parsed.origin.as_deref()) {
         let refusal = Refusal::ForeignOrigin {
             expected: context.origin.as_str().to_string(),
@@ -1004,7 +1004,7 @@ async fn local(
     );
 }
 
-/// Another machine's session: the same exchange, relayed to that machine's **preview listener** (HS-069).
+/// Another machine's session: the same exchange, relayed to that machine's **preview listener**.
 ///
 /// The request is re-authored, not merely copied: the first path segment becomes [`HOST`] — the peer's own name for
 /// its sessions, which is what its listener would otherwise refuse — and `Host` and `Origin` become the peer's
@@ -1144,7 +1144,7 @@ mod tests {
     }
 
     /// The inspect names are composed **once**, from the raw prefixes: a composed one would ask the daemon about
-    /// `s_s_<id>` and the listener would answer `502` (HS-077's review, S4).
+    /// `s_s_<id>` and the listener would answer `502` (S4).
     #[test]
     fn the_inspect_names_are_composed_once_from_the_raw_prefix() {
         let plain = Containers {
@@ -1212,7 +1212,7 @@ mod tests {
 
     #[test]
     fn the_host_is_a_value_and_a_name_the_registry_does_not_hold_is_refused_by_the_decision() {
-        // HS-069: `strip` splits, and `plan` decides. A name nobody registered is still the 404 it was, with a
+        // `strip` splits, and `plan` decides. A name nobody registered is still the 404 it was, with a
         // sentence that names the name — the answer a browser opening an old link gets on a hub.
         let route = Route::strip("/studio/0123456789abcdef/").expect("a preview path");
         assert_eq!(route.host, "studio");
@@ -1279,7 +1279,7 @@ mod tests {
 
     #[test]
     fn a_segment_that_is_not_a_session_id_is_the_local_tables_answer() {
-        // The id's alphabet is the row's, not the path's (HS-069): a peer's session is none of this machine's
+        // The id's alphabet is the row's, not the path's: a peer's session is none of this machine's
         // business, and the local arm answers "no session is called that" from its own table.
         for path in [
             "/local/nope/",

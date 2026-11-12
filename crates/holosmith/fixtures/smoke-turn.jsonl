@@ -1,4 +1,4 @@
-{"type":"fixture","version":1,"schema":7,"recorded":"HS-032","turn":"tool"}
+{"type":"fixture","version":1,"schema":7,"recorded":"real pi turn","turn":"tool"}
 {"id":"req-1","type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}
 {"type":"agent_start"}
 {"type":"turn_start"}

@@ -1,4 +1,4 @@
-//! `uninstall`: the words, the tree, the refusal and the privilege (HS-050, spec's Commands table).
+//! `uninstall`: the words, the tree, the refusal and the privilege (spec's Commands table).
 //!
 //! The discipline is `tests/deploy.rs`'s, for the reason that story recorded: a teardown is a set of claims about
 //! *a host* — its unit, its systemd, its daemon, its paths — so every claim that can be handed in is, and the two

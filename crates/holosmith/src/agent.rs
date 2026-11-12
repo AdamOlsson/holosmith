@@ -1,4 +1,4 @@
-//! The agent process: pi in RPC mode over a container's stdio (HS-031).
+//! The agent process: pi in RPC mode over a container's stdio.
 //!
 //! Spec item 2 launches one agent per session as `pi --mode rpc` inside the session's container, and item
 //! 6's run line is `docker run -i …` — attached, with the container's stdin and stdout on the server's side
@@ -62,7 +62,7 @@ pub const SETTINGS: &str = "settings.json";
 /// Embedded rather than read from disk, because the binary is the product (item 10 §1): a deployment has
 /// no `templates/` next to the executable. The two fields are patched per session from the row
 /// ([`seed`]); the key proxy's `models.json` is a second file written beside this one by the Docker
-/// backend (HS-039), because it carries the session's dummy key and is therefore not part of this
+/// backend, because it carries the session's dummy key and is therefore not part of this
 /// secret-free template.
 pub const TEMPLATE: &str = include_str!("../templates/pi-home/settings.json");
 
@@ -70,7 +70,7 @@ pub const TEMPLATE: &str = include_str!("../templates/pi-home/settings.json");
 ///
 /// `PI_OFFLINE=1` keeps pi from refreshing anything (item 2's D1 text), `PI_SKIP_VERSION_CHECK=1` stops its
 /// `pi.dev` request, `PI_TELEMETRY=0` stops install/update telemetry, and `NO_PROXY=key-proxy` makes the
-/// provider calls through the key proxy skip the egress proxy that is not there yet (item 2 §3, HS-037).
+/// provider calls through the key proxy skip the egress proxy that is not there yet (item 2 §3).
 /// The fifth variable is the agent directory, which is a path and so is not in this table.
 pub const ENVIRONMENT: [(&str, &str); 4] = [
     ("NO_PROXY", "key-proxy"),
@@ -90,7 +90,7 @@ pub const READY_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long one line that is not a command may take to reach the agent's stdin.
 ///
 /// The RPC extension UI protocol is the only writer besides [`Agent::request`]: a dialog the client answers
-/// with an `extension_ui_response` (HS-035). It is a small write, so the bound is short, and it lives here
+/// with an `extension_ui_response`. It is a small write, so the bound is short, and it lives here
 /// rather than being a caller's argument because a bound somebody has to remember to pass is a bound somebody
 /// will forget — and the thing it protects against is a process that stopped reading its stdin, which would
 /// otherwise pin the agent's stdin mutex for the session's life.
@@ -124,7 +124,7 @@ pub fn home(data_root: &Path, session_id: &str) -> PathBuf {
 /// files pi itself wrote into it (`auth.json`, `models-store.json`) — and overwriting them would be this
 /// module deciding that the agent's own state is disposable. `models.json` is the exception, and it is
 /// written by the backend rather than here: it carries the session's dummy key, which must follow the key
-/// store on a resume (HS-039). The row cannot change a session's model or
+/// store on a resume. The row cannot change a session's model or
 /// thinking after the create (no endpoint does), so a settings file that is already there is still the
 /// right one, and one that is not is written from [`TEMPLATE`] with the row's two preferences.
 ///
@@ -351,7 +351,7 @@ pub struct Agent {
     /// Command id → the caller waiting for its answer. A `std` mutex, never held across an `await`: it is
     /// touched for one insert and one removal.
     waiting: Arc<Mutex<HashMap<String, oneshot::Sender<Reply>>>>,
-    /// Where the stdout reader publishes the records it does not route as a `response` (HS-032).
+    /// Where the stdout reader publishes the records it does not route as a `response`.
     records: Arc<Slots>,
     session_id: String,
 }
@@ -454,7 +454,7 @@ impl Agent {
         ))
     }
 
-    /// Subscribe to the records this agent prints from now on (HS-032).
+    /// Subscribe to the records this agent prints from now on.
     ///
     /// Taken before a command is written, so the records that command causes cannot arrive before there is
     /// somebody to receive them. Every call is an independent subscription: a turn's own.
@@ -481,7 +481,7 @@ impl Agent {
         }
         // The write is bounded as well as the answer (`docs/rpc.md`: honour stdin backpressure). A process
         // that stops reading its stdin would otherwise hold the mutex for ever, and the bound would never
-        // start: the handshake's payload is tiny, but HS-032's commands are not, and a session stuck in
+        // start: the handshake's payload is tiny, but the commands are not, and a session stuck in
         // `starting` because a `write_all` blocked is exactly the hang the bound exists to prevent.
         if let Err(error) = self.write_line(&command, timeout).await {
             self.forget(id);
@@ -507,7 +507,7 @@ impl Agent {
         waiting.remove(id);
     }
 
-    /// Write one JSONL line to the agent's stdin, for the sub-protocol that is not a command (HS-035).
+    /// Write one JSONL line to the agent's stdin, for the sub-protocol that is not a command.
     ///
     /// An extension's dialog is answered this way: pi is **blocked** until the `extension_ui_response` with the
     /// request's id arrives (`docs/rpc-extension-ui.md`), so the line is not a request that something answers —
@@ -544,7 +544,7 @@ impl Agent {
     ///
     /// `get_state` rather than a bare "hello", because it is a documented command whose answer carries the
     /// session id and the model — so a `success: true` proves the loop is running and the runtime has
-    /// loaded, which is what "ready" has to mean for the next step to be a prompt (HS-032).
+    /// loaded, which is what "ready" has to mean for the next step to be a prompt.
     pub async fn ready(&self) -> Result<Reply, AgentError> {
         let reply = self
             .request(
@@ -579,8 +579,8 @@ fn exit_code(status: &std::process::ExitStatus) -> i32 {
 /// Splitting is [`AsyncBufReadExt::read_until`] on `b'\n'`, which is the only separator the protocol has;
 /// one trailing `\r` is stripped so a CRLF peer is still readable (`docs/rpc.md`). Two destinations: a
 /// `response` goes to the command waiting on its id, and every other record is **published** to the session's
-/// turn ([`Slots`]), which is what lets `crate::rpc::Mapping` decide what it means (HS-032) and what will let
-/// HS-035 answer an extension's UI request. Only a line that is not JSON, or a `response` nobody is waiting for,
+/// turn ([`Slots`]), which is what lets `crate::rpc::Mapping` decide what it means and what will let
+///  answer an extension's UI request. Only a line that is not JSON, or a `response` nobody is waiting for,
 /// is counted and dropped — never fatal: a reader that dies on a frame it does not understand would take the
 /// session with it.
 async fn read_records(
@@ -632,7 +632,7 @@ async fn read_records(
         };
         if record.get("type").and_then(Value::as_str) != Some("response") {
             // Session events, extension UI records and pi's own bookkeeping: published for the turn's mapping
-            // (HS-032) and for the extension UI requests (HS-035). `send` fails when no turn is listening,
+            //  and for the extension UI requests. `send` fails when no turn is listening,
             // which is not an error — a steer's records and a settle after the pump has returned both land
             // there.
             if let Some(sender) = records.sender() {

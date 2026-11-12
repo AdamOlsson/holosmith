@@ -1,8 +1,8 @@
-//! What provisioning and the session lifecycle actually do, behind one trait (HS-011).
+//! What provisioning and the session lifecycle actually do, behind one trait.
 //!
 //! Two backends exist from this story on: the in-process **stub backend** that runs the whole
 //! lifecycle with no Docker, git or agent binary (ADR-0001), and the **Docker backend** that
-//! HS-025 fills in. `runtime::Backend` is which one *this run* uses — a choice — and
+//!  fills in. `runtime::Backend` is which one *this run* uses — a choice — and
 //! [`SessionBackend`] is the behaviour both must provide. The two are different things with
 //! similar names, so the selector stays in [`crate::runtime`] and the trait lives here.
 //!
@@ -83,7 +83,7 @@ impl Serialize for Step {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendError {
     /// The backend does not implement this operation in this build: the Docker backend until the
-    /// story that fills the operation in (HS-025 and after), and nothing else. Carrying the step keeps
+    /// story that fills the operation in, and nothing else. Carrying the step keeps
     /// the reason specific.
     Unsupported {
         step: Option<Step>,
@@ -140,7 +140,7 @@ impl fmt::Display for BackendError {
 
 impl std::error::Error for BackendError {}
 
-/// How a turn ended, as the backend saw it (HS-016).
+/// How a turn ended, as the backend saw it.
 ///
 /// The backend reports what happened to the turn it was asked to run; the runner still chooses the
 /// table row (ADR-0019: the backend emits, the server decides). Two answers are enough for both
@@ -156,7 +156,7 @@ pub enum TurnEnd {
     Aborted,
 }
 
-/// What one provisioning step made that the row records (HS-025).
+/// What one provisioning step made that the row records.
 ///
 /// A backend **emits** frames and cannot write the row (ADR-0019), so a step that creates something the
 /// row names answers with it and the provisioner writes it. Three of the four steps record nothing, and
@@ -165,7 +165,7 @@ pub enum TurnEnd {
 ///
 /// An enum rather than a struct of `Option` fields, so a step that records something *cannot* answer
 /// half of it: the worktree's path and its base commit are one fact about one worktree, and `ahead`
-/// (HS-061) is measured from the second.
+///  is measured from the second.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Provisioned {
     /// The step built nothing the row names.
@@ -173,7 +173,7 @@ pub enum Provisioned {
     /// The worktree step made this session's worktree: where it is, and the commit its branch starts
     /// from. The row's `worktree` and `base_commit` columns are these two values (spec item 1).
     Worktree {
-        /// `<projects>/.worktrees/<id>`, as the row stores it and as HS-027 mounts it at `/work`.
+        /// `<projects>/.worktrees/<id>`, as the row stores it and as mounts it at `/work`.
         path: String,
         /// The commit `agent/<id>` starts from.
         base_commit: String,
@@ -205,7 +205,7 @@ impl Provisioned {
     }
 }
 
-/// What the end of a supervised agent process means for its session (HS-031).
+/// What the end of a supervised agent process means for its session.
 ///
 /// The server's exit policy ([`crate::exit`]) classifies an exit with three questions — was this stop
 /// asked for, did it exit 0, what did it print — and this is the fourth: **is this exit still about the
@@ -285,10 +285,10 @@ pub trait SessionBackend {
     ///
     /// The backend **emits** a turn's frames and never decides a state (D6): it is handed the
     /// writer, because the frames are the backend's own output, and it has no `Transitioner`, so a
-    /// state change stays the server's. The stub scripts a turn and HS-032 pumps pi's RPC into the
+    /// state change stays the server's. The stub scripts a turn and pumps pi's RPC into the
     /// same writer.
     ///
-    /// The answer says **how** the turn ended (HS-016), which is the one thing the server cannot
+    /// The answer says **how** the turn ended, which is the one thing the server cannot
     /// observe: `Settled` is the agent finishing, `Aborted` is an [`Self::abort`] or [`Self::stop`]
     /// cutting the turn short. It is not a state decision — the runner maps it onto the table
     /// (`agent_settled` or `abort_completed`) — but without it the two rows would be
@@ -314,7 +314,7 @@ pub trait SessionBackend {
     ///
     /// Returns once the agent has been told, not once the turn has stopped: the turn's own
     /// `start_turn` answers [`TurnEnd::Aborted`] when the agent gets there, and the ladder is what
-    /// waits for it (HS-016, ADR-0020).
+    /// waits for it (ADR-0020).
     async fn abort(&self, session: &Session) -> Result<(), BackendError>;
 
     /// Stop the container, keeping the worktree, the history and the events.
@@ -323,21 +323,21 @@ pub trait SessionBackend {
     /// Bring a stopped session back, with the same id.
     async fn resume(&self, session: &Session) -> Result<(), BackendError>;
 
-    /// Remove everything the session owns, keeping what `retained` names (HS-043).
+    /// Remove everything the session owns, keeping what `retained` names.
     ///
     /// `retained` is [`Self::retained`]'s answer, handed rather than recomputed: the request that answered
     /// 202 is what told the operator what survives, so the teardown must apply *that* decision or the two
     /// can disagree about a commit that landed between them.
     async fn delete(&self, session: &Session, retained: &Retained) -> Result<(), BackendError>;
 
-    /// What a teardown of `session` must leave in its repository (HS-043, spec item 9).
+    /// What a teardown of `session` must leave in its repository (spec item 9).
     ///
     /// `targets` is the config's `[merge] targets` — the branches a merge would land in, and therefore the
     /// branches that answer "is this already merged?". It travels as an argument because the answer is the
     /// repository's (a backend question) and the list is the machine's (a config question).
     ///
     /// `landed` is a request's own knowledge rather than a question for the repository: the commit a **merge**
-    /// measured and put in a target, when the request that is deleting is the one that landed it (HS-056, spec
+    /// measured and put in a target, when the request that is deleting is the one that landed it (, spec
     /// item 12's rule 5). [`Worktree::retained`] decides what it is worth — a branch whose tip is that commit is
     /// not kept, and one that has moved since is the ordinary question's (ADR-0065 D6).
     ///
@@ -353,7 +353,7 @@ pub trait SessionBackend {
     /// Record uncommitted work without touching the branch or the working tree.
     async fn snapshot(&self, session: &Session) -> Result<(), BackendError>;
 
-    /// Hand over the supervision of the agent process a successful pi step left running (HS-031).
+    /// Hand over the supervision of the agent process a successful pi step left running.
     ///
     /// Called once, after [`Step::Pi`], by the provisioner — the one place that has both the database and
     /// the events an exit's consequences need (ADR-0019). `None` means "this backend has no process to
@@ -371,7 +371,7 @@ pub trait SessionBackend {
 #[derive(Debug, Clone)]
 pub enum Backends {
     Stub(StubBackend),
-    /// Boxed since HS-077: the Docker backend carries the whole [`ContainerSettings`](crate::container::ContainerSettings),
+    /// Boxed: the Docker backend carries the whole [`ContainerSettings`](crate::container::ContainerSettings),
     /// and the two name prefixes grew it past the size where an enum variant is worth inlining. One value lives in
     /// `AppState` for the process's life, so the indirection is free and the alternative — a `Box` in every field that
     /// did not need one — is worse.
@@ -382,8 +382,8 @@ impl Backends {
     /// The backend `runtime::Backend` selects, in the machine `container` describes.
     ///
     /// The container settings are what the Docker backend needs to name anything at all: a session's
-    /// worktree and repository hang off the projects root (HS-025), and a container needs an image, a
-    /// daemon's address and its limits (HS-028). The stub needs none of it and ignores it — it provisions
+    /// worktree and repository hang off the projects root, and a container needs an image, a
+    /// daemon's address and its limits. The stub needs none of it and ignores it — it provisions
     /// nothing outside the process (ADR-0015).
     pub fn for_run(backend: Backend, container: ContainerSettings) -> Self {
         match backend {
@@ -400,7 +400,7 @@ impl Backends {
         }
     }
 
-    /// Whether the project this create names may be mounted, and why not when it may not (HS-026).
+    /// Whether the project this create names may be mounted, and why not when it may not.
     ///
     /// The question belongs to the backend that mounts a repository: a stub session has no repository at
     /// all, so it refuses nothing and every stub test and the gate's stub boot need no project on disk

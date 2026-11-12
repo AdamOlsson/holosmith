@@ -1,4 +1,4 @@
-//! `holosmith hub host`: the registry's own routes, from this machine (HS-072).
+//! `holosmith hub host`: the registry's own routes, from this machine.
 //!
 //! The CLI is a **client**, so the thing worth measuring is the request it sends and the answer it makes of the reply
 //! — not a mock of `hosts::register`, which would prove nothing about "the same checks as `POST /api/hosts`". Every

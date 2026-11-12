@@ -1,6 +1,6 @@
 # The Computers screen reads each machine over the hop it already forwards with
 
-HS-071 is item 4's *other* half. The registry landed in HS-068, the forwarding in HS-069, the trust in HS-070 — and
+This is item 4's *other* half. The registry landed, the forwarding, the trust — and
 the page still knew nothing about machines at all: `web/src/main.ts` fetched `/api/sessions` and
 `/api/sessions/<id>`, built the preview link from **this** machine's `health.preview_origin`, and every affordance
 spelled its own `/api/…` path. ADR-0074 D10 named the missing function (`apiPath(host, rest)`) and recorded the limit
@@ -63,7 +63,7 @@ of step with what is on screen. A row carries its host in `data-host`, because t
 **The session's page names its machine in the address**: `/sessions/<id>` is this machine's and
 `/hosts/<host>/sessions/<id>` is another's — the API's own prefix, one level out. A query string would have been the
 cheaper change and the second spelling of "whose session is this"; the segment means a reload lands on the same
-machine's transcript, and HS-074's host-aware notification has a path to link to instead of inventing one.
+machine's transcript, and the host-aware notification has a path to link to instead of inventing one.
 
 **The author of a session's address is the page that fetched it, and nothing on the server changed.** No
 `sessions.host` column: the owning machine is in the URL the caller used (ADR-0074's own sentence), and a row
@@ -127,7 +127,7 @@ The Add form validates nothing. The rules are `POST /api/hosts`' (ADR-0073) — 
 message)` prints the envelope's `message` **verbatim** for exactly those three codes (`bad_host_name`,
 `bad_host_url`, `not_holosmith`), keeping the code in front of every other, because a code is a word to act on only
 where it names something the operator cannot see in the form. That is `createFailure`'s rule for a project's
-refusals, one screen over, and it is HS-072's rule too: the CLI and the form showing two sentences for one refusal is
+refusals, one screen over, and it is the rule too: the CLI and the form showing two sentences for one refusal is
 the fork this decision exists to prevent.
 
 Removal is a request to **this** machine's registry and never a forwarded one — a registry is each machine's own,
@@ -143,7 +143,7 @@ verdict is an answer the server already has, and the page holds no state (ADR-00
 `/api/health`'s `role` is the whole of it: `createOffered(role)` is `role !== "hub"`. A hub runs no sessions and
 refuses `POST /api/sessions` with `403 sessions_disabled` (ADR-0074), so a form there is a form whose only answer is
 that refusal — no new field, no probe, and no client-side guess about Docker. The create still posts to this machine
-only; creating a session **on a peer** is HS-074's, and inventing it here would put a second machine's name in a form
+only; creating a session **on a peer** is that story's, and inventing it here would put a second machine's name in a form
 whose validation story belongs to that story.
 
 ## D8 — what the gate can measure, and what only the demo can
@@ -172,8 +172,8 @@ list a fourth screen joins instead of a branch in `main.ts`).
 ## D9 — what carries forward
 
 `GLOSSARY.md` gains **Computers screen** and amends **Sessions screen** (grouped by machine) and **Session screen**
-(its path can name another machine); **Local** already carried the reserved name these paths use. HS-072 must reuse
-these registration sentences rather than spell its own; HS-074 owns the host-aware notification deep link this
+(its path can name another machine); **Local** already carried the reserved name these paths use. must reuse
+these registration sentences rather than spell its own; a later change owns the host-aware notification deep link this
 address shape makes possible; and "a machine that forwards nothing offers no remote preview" is recorded here rather
 than fixed, because a `server`-role machine is not a front door and making one into one is a topology decision no
 story owns.

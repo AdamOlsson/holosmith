@@ -1,4 +1,4 @@
-//! `doctor`: whether this machine is fit to run sessions (HS-045, spec item 10 §1 and §7, V2).
+//! `doctor`: whether this machine is fit to run sessions (spec item 10 §1 and §7, V2).
 //!
 //! The command is two depths of **one list**, because that is how the spec uses it: `doctor --quick` is what
 //! `server deploy` step 1 runs and what the unit file runs as `ExecStartPre` (item 10 §5), and `doctor --full`
@@ -16,7 +16,7 @@
 //!   `serve` by hand is a supported way to run (ADR-0054).
 //! - **`doctor` starts nothing that outlives it.** The self-test removes its own network and probe container,
 //!   the image question is a `docker run --rm --network none`, and the proxies are *read*, not started. There is
-//!   no unit file to write: `ExecStartPre=holosmith doctor --quick` is HS-049's line, and this story's contract
+//!   no unit file to write: `ExecStartPre=holosmith doctor --quick` is the line, and this story's contract
 //!   is the exit code and one actionable line per failure.
 //!
 //! The one check that is a measurement rather than a question is [`merge`] — V2's "`git merge-tree --write-tree`
@@ -86,7 +86,7 @@ impl std::fmt::Display for Depth {
 /// The last two are the install tree's two machine-wide paths, and they are a seam for a different reason: the
 /// tree `perms` reads is the tree the *caller* installed. `server deploy --root DIR` writes `<DIR>/etc/…` and
 /// `<DIR>/run/…`, so a check that spelled the system paths itself would compare the host's real install against a
-/// target's data root and hand the operator a `chown` on a file the run never wrote (HS-049's review, SPEC-1).
+/// target's data root and hand the operator a `chown` on a file the run never wrote (SPEC-1).
 #[derive(Debug, Clone)]
 pub struct Tools {
     pub preflight: preflight::Tools,
@@ -96,7 +96,7 @@ pub struct Tools {
     pub config_path: PathBuf,
     /// The admin socket's directory: [`crate::deploy::ADMIN_DIR`] on a machine.
     pub admin_dir: PathBuf,
-    /// The release tree [`crate::release::ROOT`] on a machine (HS-080), for the release finding.
+    /// The release tree [`crate::release::ROOT`] on a machine, for the release finding.
     pub release_root: PathBuf,
     /// The unit file [`crate::deploy::UNIT_DIR`]/[`crate::deploy::UNIT_NAME`] on a machine: where the release
     /// finding reads the `ExecStart=` that says what systemd runs.
@@ -140,7 +140,7 @@ pub trait Machine {
     /// The network self-test, whose bare probe is the network-off probe (ADR-0044/ADR-0046).
     ///
     /// The names come from the run's own config ([`selftest::Names`]), because a smoke run's probes and proxies carry
-    /// its prefix (HS-077) and a machine's own do not.
+    /// its prefix and a machine's own do not.
     fn selftest(&self, names: &selftest::Names, image: &str) -> selftest::Outcome;
 }
 
@@ -258,7 +258,7 @@ pub fn run(config: &Config, depth: Depth, tools: &Tools, machine: &dyn Machine) 
         let isolation = selftest::Names::of(config);
         findings.push(network(machine, &isolation, image, docker_ok, because));
         // The two proxies by the names this run's config composes, so a smoke run's `doctor` looks at its own
-        // (`smoke_hs_egress`, HS-077) rather than at the machine's.
+        // (`smoke_hs_egress`) rather than at the machine's.
         let names = proxies::names(config);
         findings.push(proxy(machine, &names[0], PROXY_ALIAS, docker_ok, because));
         findings.push(proxy(
@@ -274,7 +274,7 @@ pub fn run(config: &Config, depth: Depth, tools: &Tools, machine: &dyn Machine) 
 }
 
 /// Whether `openssl` runs, which a Web Push notification needs and nothing else in this build's request path does
-/// (HS-066, ADR-0071's D9).
+/// (ADR-0071's D9).
 ///
 /// **`--full` only**, and that is a decision rather than an ordering accident: `doctor --quick` is the unit's
 /// `ExecStartPre` (item 10 §5), so a check there refuses a boot. A missing notification channel is not a machine that
@@ -325,7 +325,7 @@ fn openssl(program: &Path) -> Finding {
 /// Whether this machine has systemd, where "not there" is a fact rather than a failure.
 ///
 /// `/run/systemd/system` exists exactly while systemd is the init, and its absence is the supported way to run
-/// `serve` by hand (docs/build.md says so). A `server deploy` (HS-049) is where systemd becomes a prerequisite,
+/// `serve` by hand (docs/build.md says so). A `server deploy` is where systemd becomes a prerequisite,
 /// and that step is where the refusal belongs — refusing here would make `doctor` unrunnable on the machine that
 /// runs no systemd and serves perfectly well.
 fn systemd(dir: &Path) -> Finding {
@@ -342,7 +342,7 @@ fn systemd(dir: &Path) -> Finding {
         Check::Systemd,
         format!(
             "{} is not there, so this machine has no systemd: `serve` by hand is supported and needs none, and \
-             `server deploy` (HS-049) is where systemd becomes a prerequisite",
+             `server deploy` is where systemd becomes a prerequisite",
             dir.display()
         ),
     )
@@ -469,10 +469,10 @@ fn port(listen: SocketAddr, label: &str, serving: Option<bool>) -> Finding {
 /// from "something else holds the port".
 ///
 /// Public because it has two callers and must answer both the same way: this module's port check, and `server
-/// deploy`'s step 7, which waits on it before it calls a unit's start successful (HS-049). A second copy of the
+/// deploy`'s step 7, which waits on it before it calls a unit's start successful. A second copy of the
 /// request would be a second meaning of "serving".
 ///
-/// **A wrapper, not a request.** Since HS-050 the request itself is [`crate::http::health::ask`], because
+/// **A wrapper, not a request.** Since the request itself is [`crate::http::health::ask`], because
 /// `holosmith status` reads the same payload for the same reason and two hand-written probes would be two
 /// meanings of "this machine is answering".
 pub fn health_answers(listen: SocketAddr) -> bool {
@@ -496,7 +496,7 @@ fn database(config: &Config) -> Finding {
         ),
         Ok(Some(recorded)) => match schema::verdict(recorded, schema::SCHEMA_VERSION) {
             // The one sentence, from the one comparison: `serve` warns with this string and `doctor` refuses with
-            // it (HS-075, ADR-0047).
+            // it (ADR-0047).
             Verdict::Newer => Finding::fail(
                 Check::Database,
                 Verdict::Newer.sentence(recorded, schema::SCHEMA_VERSION),
@@ -517,7 +517,7 @@ fn database(config: &Config) -> Finding {
     }
 }
 
-/// The release tree: what `current` resolves to, and whether the unit can execute through it (HS-080, spec item 10).
+/// The release tree: what `current` resolves to, and whether the unit can execute through it (spec item 10).
 ///
 /// One function with both arms, like every check here, and the arms are worth a table because the verdict is not "is
 /// the tree tidy" but "can systemd start this machine":
@@ -655,7 +655,7 @@ fn release_tree(root: &Path, unit_path: &Path) -> Finding {
 }
 
 /// The installed paths' modes and owners, against the one reference a machine has: its own data root's owner
-/// (spec item 10 step 2's modes, HS-049's "a wrong mode fails `doctor`").
+/// (spec item 10 step 2's modes).
 ///
 /// One check rather than one per path: a [`Finding`] is one check and one sentence, and a tree whose modes are
 /// wrong is usually wrong in one way an operator fixes with one `chmod`. The reference is deliberately **not** a
@@ -1025,7 +1025,7 @@ fn proxy(
 /// Whether the configured agent image runs the pi this binary is built for **and carries this binary's labels**
 /// (spec's build-and-release note: "`doctor` fails if the agent image's pi differs from it").
 ///
-/// The pi question is the same two functions HS-031 asserts with at a launch — [`agent::version_of`] and
+/// The pi question is the same two functions asserts with at a launch — [`agent::version_of`] and
 /// [`agent::version_check`] — asked on demand, so the sentence an operator reads here is the one a session would
 /// fail with. The labels are the second half the pi version cannot answer: an image can run the pinned pi and
 /// still carry toolchains or a git tag that this binary did not build, which is why `server deploy`'s step 3
@@ -1255,7 +1255,7 @@ mod tests {
         drop(held);
         // The last arm asks about a port **this test has just taken and released**, and it takes a fresh one rather
         // than `listen`: `port` binds and drops the address it is given, and a parallel test binding `:0` in that gap
-        // can be handed the port we just freed — measured as `AddrInUse` in a gate run (HS-077), which is a flake in
+        // can be handed the port we just freed — measured as `AddrInUse` in a gate run, which is a flake in
         // this test and not a fact about the machine.
         let probe = TcpListener::bind("127.0.0.1:0").expect("a port is bindable");
         let fresh = probe.local_addr().expect("the bound address is known");

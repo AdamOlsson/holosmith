@@ -1,6 +1,6 @@
 # A promotion is one command, and its pipeline is the spec's order
 
-HS-078 is spec item 10's closing sentence — "In v1 these steps are implemented by `holosmith upgrade <binary>` and
+This is spec item 10's closing sentence — "In v1 these steps are implemented by `holosmith upgrade <binary>` and
 `holosmith rollback` (see Single binary and CLI), not by a separate script" — and the acceptance is a list of six
 things that have to be true at once: the review gate acknowledged, a host smoke test, a drain, a database backup, a
 symlink switch and a restart, **in that order**, with a twenty-second health poll that puts the previous release back
@@ -11,7 +11,7 @@ Two limits are recorded rather than fixed. **No systemd exists here**: the promo
 `systemctl` program, and the gate and the demo drive that program with a stand-in, so the restart is a recorded argv
 plus the process the stand-in starts — never a boot. And **a rollback across a release that migrated the schema cannot
 start the old `serve`**, because the unit runs `ExecStartPre=<exe> doctor --quick` through `current` and `doctor`
-refuses a database a newer release wrote (ADR-0047's own refusal). That line is HS-049's and the refusal is a landed
+refuses a database a newer release wrote (ADR-0047's own refusal). That line belongs to a later change and the refusal is a landed
 contract, so this story makes the second poll *measure* it and the sentence name it, and leaves the fix to a follow-up.
 
 ## D1 — the verb is `holosmith upgrade <BINARY> [--acknowledge-review] [--root DIR] [--wait D] [--config PATH]`
@@ -80,9 +80,9 @@ written **relative** (`releases/<tag>`), so an install tree can be moved as a wh
 target it read, **verbatim** — including one an operator made absolute — because putting back a different spelling of
 it would be a change nobody asked for.
 
-**HS-080 owns what the layout means from here**: pruning old releases to a configured count, `holosmith version`
+**A later change owns what the layout means from here**: pruning old releases to a configured count, `holosmith version`
 reporting the tag it was run from, and `doctor` reporting the resolved release path and the link's integrity. What
-HS-078 owns, and what is in `src/release.rs`, is the tree's creation, the switch, and the answer "what does the unit
+What a later change owns, and what is in `src/release.rs`, is the tree's creation, the switch, and the answer "what does the unit
 execute".
 
 ## D5 — the unit's `ExecStart` is what is live, and a promotion makes it run through `current`
@@ -211,7 +211,7 @@ bullet 3.
 It belongs to the **boot**, not to the promotion. A promotion is followed by a restart by construction, and the boot is
 what knows the machine is back; nothing else may resurrect a `stopped` row, so the sweeper's, the cap's, the quota's,
 the expiry's and the operator's stops stay stopped. The one ending where this does not help is a rollback to a release
-built *before* this story, whose `serve` has no such rule: those rows stay `stopped · server_restart`, which HS-079's
+built *before* this story, whose `serve` has no such rule: those rows stay `stopped · server_restart`, which that story's
 own acceptance allows ("sessions survive the rollback in `idle` **or** `stopped`") and the next boot of any release
 from this story onwards resumes. Writing the rows from the promotion instead was considered and refused: it would be a
 second writer of the state machine's rows for one ending, and the spec says "on startup".
@@ -220,16 +220,16 @@ second writer of the state machine's rows for one ending, and the spec says "on 
 
 - **No systemd.** `systemctl restart` is a child, and the gate and the demo put a stand-in on `PATH` that does what
   systemd would do for this unit (stop what runs, start what `current` names). A real unit booting a real release on a
-  real machine is not measured here; `deploy`'s `case_server_service` measures the unit's *bytes*, and HS-080's demo is
+  real machine is not measured here; `deploy`'s `case_server_service` measures the unit's *bytes*, and the demo is
   where `systemctl status` shows the unit executing through `current`.
 - **No provider call.** The smoke run's own limit (ADR-0081): the key proxy is started and joined, never exercised.
 - **No second architecture.** The candidate must be this machine's build, so an aarch64 promotion is a case nobody ran.
 - **Two builds of one release cannot be told apart by `/api/health`** beyond `uptime_s`: the payload carries the crate
   version, not the git tag. A promotion between two commits that share a version is verified by "a process younger than
   the restart answered", which is what the line says.
-- **The rollback is not a verb.** `holosmith rollback` and "go back one version" are HS-079's; this story has the
+- **The rollback is not a verb.** `holosmith rollback` and "go back one version" are that story's; this story has the
   automatic switch-back the acceptance names.
-- **The layout's meaning** — pruning, `version` from the release path, `doctor`'s report — is HS-080's.
+- **The layout's meaning** — pruning, `version` from the release path, `doctor`'s report — is that story's.
 
 ## Consequences
 
@@ -243,4 +243,4 @@ second writer of the state machine's rows for one ending, and the spec says "on 
   stopped, which is what item 10 step 6 asked for and what the drain's reason word was for.
 - One follow-up, recorded rather than fixed: `ExecStartPre=doctor --quick` refuses a newer database, so a rollback
   across a schema-advancing release cannot start the old `serve`. The two claims — ADR-0047's "a rollback must not need
-  a restore" and the unit's pre-line — contradict each other, and the fix is HS-045's or HS-049's, not item 10's.
+  a restore" and the unit's pre-line — contradict each other, and the fix is that story's or that story's, not item 10's.

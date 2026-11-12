@@ -1,7 +1,7 @@
 # The checkbox is topology, and the off case is measured by a name that does not resolve
 
 Spec item 2 gives the operator one checkbox — "Internet access" — and one promise behind it: **"off" means off**.
-HS-013 drew the checkbox, HS-037 built the proxy and the join, and the wiring between them turned out to be
+ drew the checkbox, built the proxy and the join, and the wiring between them turned out to be
 already true: `sessions.network` is a column, `POST /api/sessions` parses it, `DockerBackend::apply_proxy` joins
 the machine's `hs_egress` to the session's network when the row says so and leaves it when it does not, on the
 create *and* on `resume`, and `SessionContainer::run_args` emits `HTTPS_PROXY=http://<id>@egress-proxy:3128`
@@ -11,7 +11,7 @@ the choice is a rule, and that V6 is a gate rather than a checklist somebody ran
 
 ## Off is a name that does not resolve, not a timeout
 
-HS-036's self-test already ran its probe container on a temporary internal network with **no proxy joined to
+the self-test already ran its probe container on a temporary internal network with **no proxy joined to
 it** — topologically exactly a session network that asked for no internet — but it only asked whether the
 internet and the host answer. A proxy on the wrong network, which is what "the checkbox does not work" looks
 like, was invisible to it: the probe would report nothing reachable and the boot would pass.
@@ -36,7 +36,7 @@ if the alias answers the moment something is: otherwise a build whose `join_netw
 exact bug the off case exists to catch — passes it, because a name that never resolves is indistinguishable from a
 proxy that is not there. So after the off probe the self-test joins the machine's `hs_egress` to the same network
 under the alias and asks again, about the alias alone, and leaves. That half is **not a verdict**: a proxy that
-will not join or is not running is HS-037's `warn` (it fails a download, not a session — refusing the boot over it
+will not join or is not running is the `warn` (it fails a download, not a session — refusing the boot over it
 would take the control UI down for a machine whose sessions otherwise work), and it is logged as one `debug` line
 when it works and one `warn` when it does not. What it buys is the discrimination, at boot, that no other check
 makes.
@@ -55,9 +55,9 @@ that separates "this session asked for no internet" from "the proxy is missing b
 
 **What is deliberately not in the list yet: the key proxy.** Both acceptance bullets that mention it — bullet 1's
 "only the key proxy is reachable" and bullet 5's "nothing but the key proxy answers" — need a container that does
-not exist until HS-039. Today the off case measures *nothing* answering, which is the same measurement with the
+not exist until. Today the off case measures *nothing* answering, which is the same measurement with the
 one legitimate answer removed; a target nothing answers would make the sentence about it a claim rather than a
-measurement. HS-039's job is therefore not to add a name to `targets()` (a target must not answer) but a **second
+measurement. the job is therefore not to add a name to `targets()` (a target must not answer) but a **second
 question**: the alias that is *expected* to answer on a session network. `decide` gets that shape when there is
 something to point it at.
 
@@ -68,9 +68,9 @@ both cases, and only the topology differs (ADR-0045). So the phrase the session 
 `transcript.ts` (`networkText`, `internet on` / `internet off`) with a test rather than a ternary in `main.ts`, on
 the rule that a sentence an operator reads is a rule here (`createFailure`, `budgetNotice`, `stoppedNotice`).
 
-**The rendered output is byte-identical to what HS-013 shipped**, and that is deliberate: phase 1b says nothing in
+**The rendered output is byte-identical to what shipped**, and that is deliberate: phase 1b says nothing in
 it "may require a UI or API change", and this story's acceptance bullet 4 ("visible in the UI") was already
-satisfied by HS-013's checkbox and HS-013's meta span. The story therefore adds **no element, no listener and no
+satisfied by the checkbox and the meta span. The story therefore adds **no element, no listener and no
 style** — only the tested spelling of an existing string. An explanation *under* the checkbox was drafted and cut
 for exactly this reason: it is a new visible element, and it belongs to the story that owns the form, not to a
 phase that forbids UI work. (Nothing was lost by cutting it: the operator already has the screen's own phrase, and
@@ -109,6 +109,6 @@ self-test's probe is built on, for the reason ADR-0044 gives: one image, and the
   `hs_egress` to `holosmith-selftest` by hand — the self-test's own network is created and removed within one
   run, and `apply_proxy` only ever joins `agents_<id>` — so it is a misconfiguration an operator made, and the
   alternative (a `warn` on a line nobody reads) is what lets "off" quietly become "on".
-- The gate's Docker cases now end with `?force=true` deletes: the WIP snapshot a delete asks for is HS-042's, so
+- The gate's Docker cases now end with `?force=true` deletes: the WIP snapshot a delete asks for is that story's, so
   a Docker session with a worktree answers `409 unsaved_work` until then.
-- Orphaned `agents_*` networks from a crashed run are still HS-044's; this story removes the two it makes.
+- Orphaned `agents_*` networks from a crashed run are still that story's; this story removes the two it makes.

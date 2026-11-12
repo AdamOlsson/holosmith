@@ -1,6 +1,6 @@
 # The preview listener is a byte tunnel to the container's own address
 
-HS-041 is spec item 3, and item 3's V7 is the measurement that decides its shape: *"that the host can reach a
+This is spec item 3, and item 3's V7 is the measurement that decides its shape: *"that the host can reach a
 container's IP on an internal network (needed for the preview). Fallback: run the preview proxy as a container
 on the session network."*
 
@@ -31,8 +31,8 @@ re-measures the same fact through the artifact: it starts a container on `--inte
 ## A third byte listener, not a second router
 
 The preview listener is `src/preview.rs`: raw TCP, read a head → decide → connect → relay the rewritten head →
-`pump_both` until both sides close. That makes it the third tunnel in this binary, after `egress` (HS-037) and
-`keyproxy` (HS-039), and each of the three reasons is a fact about this repository rather than a preference:
+`pump_both` until both sides close. That makes it the third tunnel in this binary, after `egress` and
+`keyproxy`, and each of the three reasons is a fact about this repository rather than a preference:
 
 * **Transparency is the whole feature.** A dev server emits chunked bodies, SSE and `101 Switching Protocols`. A
   tunnel forwards those bytes; a proxy built on an HTTP stack has to *decode* chunked framing to re-frame it, and
@@ -86,7 +86,7 @@ needs its own configuration — that is a dev server's `base` setting, not this 
 | Request | Answer |
 | --- | --- |
 | `/api/health`, `/api/sessions`, `/` on the preview port | `404`, plain text, naming `/<host>/<id>/` |
-| `/<other-host>/<id>/…` — another machine's | `404`; the host segment is a **value** `Route::strip` returns, so HS-069 forwards it rather than adding a parser |
+| `/<other-host>/<id>/…` — another machine's | `404`; the host segment is a **value** `Route::strip` returns, so forwards it rather than adding a parser |
 | a second segment that is not a session id, or no row holds | `404` |
 | the row exists but its container is not running, or nothing answers at its address | `502`, naming the address |
 | an **upgrade** whose `Origin` is missing or is not `preview_origin` | `403`, naming both origins |
@@ -111,7 +111,7 @@ both drains start together; a listener that ends on its own stops the other, so 
 behind outlives the process.
 
 A preview bind that fails is **one `warn`, and the boot continues**: the control UI is the screen an operator
-needs when something else on the machine already holds that port (HS-036's rule), and `config` already refuses
+needs when something else on the machine already holds that port, and `config` already refuses
 `preview_listen == control_listen`, which is the collision that is a mistake rather than an accident. The banner
 line says it in as many words — `preview_listen unavailable (<addr>: <reason>)` — so the line can never claim a
 listener this run does not have. **The banner is still eight lines**; stderr is eight lines plus that one `warn`,

@@ -1,11 +1,11 @@
 # The session event stream: subscribe before replay, drop a lagging subscriber, count what is open
 
-HS-008's create answers with an `events` URL and HS-009 builds the durable log behind it; HS-010 is
+the create answers with an `events` URL and builds the durable log behind it; This is
 the endpoint that joins them. Four decisions come due at once. The stream has to resume from a
 `Last-Event-ID` without a hole between the history it replays and the events it forwards. A
 subscriber that stops reading must not be allowed to grow the server or hold up another subscriber.
 "Stream closes cleanly when the session is deleted" needs something that knows which sessions have a
-stream open — HS-019 will close them and HS-066 will ask before it pushes. And the 15 s heartbeat has
+stream open — will close them and will ask before it pushes. And the 15 s heartbeat has
 to exist without becoming a second thing that writes to the same connection.
 
 The spec settles none of the four beyond the acceptance bullets, so this records the shape chosen
@@ -58,7 +58,7 @@ notice it, so the client is missing an event for good. Subscribe first can only 
 exactly the case the acceptance calls out.
 
 `read_since` takes `u32::MAX` as its limit rather than a page size: this story replays everything
-after the client's last seq, and HS-061 owns "the 50th most recent message", `history.truncated` and
+after the client's last seq, and a later change owns "the 50th most recent message", `history.truncated` and
 `GET …/events/history`. A window invented here would be that story's decision made in the wrong one.
 
 The writer has **one** broadcast channel for every session (ADR-0013), so step 3 drops an event whose
@@ -91,7 +91,7 @@ first, and asserts it sees exactly `[1, 2]` and nothing in the meantime.
 Each subscriber has its own task and a bounded channel of 64 frames in front of the response body. A
 client that stops reading fills the channel, the task blocks on the send, and the subscription behind
 it falls through the writer's 1024-event ring. The writer never waits for any of this: `broadcast::send`
-is what HS-009 measured as non-blocking, so one slow client cannot delay a commit or another session's
+is what measured as non-blocking, so one slow client cannot delay a commit or another session's
 stream.
 
 On `RecvError::Lagged(skipped)` the task sends one frame — `event: stream_lagged`, `data:
@@ -114,8 +114,8 @@ subscriber that reads gets every event in order while the other one is not polle
 
 `StreamRegistry` is `Clone` (one `Arc`), lives in `AppState`, and holds per session an open-stream
 count and one `oneshot::Sender<()>` per open stream. `open` returns a `StreamGuard`; `close(session)`
-fires every signal for that session and answers how many it fired; `count` is what HS-066 reads later.
-A "which sessions have an open stream" list has no caller yet, so it is not written: HS-066 adds it
+fires every signal for that session and answers how many it fired; `count` is what reads later.
+A "which sessions have an open stream" list has no caller yet, so it is not written: adds it
 back when it actually reads it.
 
 The count is released by `StreamGuard`'s `Drop`, and the guard lives in the stream's task, so every
@@ -125,15 +125,15 @@ send is only available when there is something to send: the send fails, or — f
 silent — the loop's reclaim tick finds the response body's receiver gone (`mpsc::Sender::is_closed`,
 polled every few seconds). That branch writes no frame: the heartbeat is axum's `KeepAlive` and
 nothing else's. Without it an idle stream whose client vanished would park forever and keep its count,
-`closers` slot and registry entry, which is exactly the stale count HS-066 must not read. A line at the
+`closers` slot and registry entry, which is exactly the stale count must not read. A line at the
 end of the handler would not: the handler's future can be dropped mid-body when the client goes away,
 and ADR-0007's drain deadline cuts open connections without running anything after them. A leaked
-count would make HS-066 think a deleted session still has a browser attached.
+count would make think a deleted session still has a browser attached.
 
 Each registration carries an id, so a guard can remove its own closer on the way out; without it the
 closer list would grow with every stream that ever opened on a long-lived session.
 
-`close` is synchronous and idempotent, which is what HS-019's delete flow needs: firing the signals
+`close` is synchronous and idempotent, which is what the delete flow needs: firing the signals
 is all this side can do, and the guards release the count as each stream ends.
 
 ## The keep-alive is axum's, and `Last-Event-ID` is the seq
@@ -147,7 +147,7 @@ the body writes *nothing* for 300 ms, which is what a stray comment line would b
 
 The SSE `id` is the seq, so the client's `Last-Event-ID` needs no translation. `Last-Event-ID: n`
 replays from `n + 1`; absent, empty, non-numeric and non-positive all start at the beginning, because
-this story promises a whole stream and HS-061 owns the truncation rule.
+this story promises a whole stream and a later change owns the truncation rule.
 
 The route is `GET /api/sessions/{id}/events`, registered through `Routes::get` so the manifest says
 `ReadOnly` (axum 0.8 spells a capture `{id}`; the spec writes `:id`). Because it is a `GET`, the
@@ -156,9 +156,9 @@ before the registry is touched, so an unknown id never registers a stream.
 
 ## What this story does not decide
 
-No `history.truncated` or the 50th-message rule (HS-061), no `GET …/events/history` (HS-061), no
-coalescing (HS-059), no compaction (HS-060), no Web Push (HS-066 reads `count` and nothing else
-here), no delete flow (HS-019 calls `close`), no producer (HS-011), no UI, no new crate beyond the
+No `history.truncated` or the 50th-message rule, no `GET …/events/history`, no
+coalescing, no compaction, no Web Push (reads `count` and nothing else
+here), no delete flow, no producer, no UI, no new crate beyond the
 `futures-core` edge above, and no change to the guards, to `fetch`, or to the sixteen `verify.sh`
 cases that shipped. The `retry:` field, a per-session subscriber cap and a configurable channel depth
 are all left unset rather than guessed.

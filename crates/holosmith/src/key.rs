@@ -1,4 +1,4 @@
-//! The machine's provider keys and each session's dummy key (HS-039, spec item 2).
+//! The machine's provider keys and each session's dummy key (spec item 2).
 //!
 //! The story's promise is a negative one: a real provider key never enters a session container. Two files
 //! make that true and this module owns both:
@@ -11,7 +11,7 @@
 //!
 //! `keys.toml` carries both halves because the proxy has no database: the provider keys are what it swaps in,
 //! and the session table is what lets it answer "is this dummy key still valid?". Deleting a session removes
-//! its row here ([`Store::revoke`]), which is the HS-019 hook's whole body.
+//! its row here ([`Store::revoke`]), which is the hook's whole body.
 //!
 //! **Writes are temp-file + rename.** The file must never be observable half-written: a proxy reading it at
 //! the wrong moment would answer 503 for a key the operator just saved. The temporary file is created with
@@ -131,7 +131,7 @@ pub const PROVIDERS: &[Provider] = &[
     },
     // opencode.ai's Go gateway serves two API shapes under one host, and a row is one (host, path, auth)
     // triple — so this row is the anthropic-messages shape, which is what pi's `claude-haiku-5-5` (the model
-    // HS-040 verified V3 with) speaks. The openai-completions shape would be a second row,
+    //  verified V3 with) speaks. The openai-completions shape would be a second row,
     // `opencode-go-openai`, with `/inference/go/openai/v1` and `Bearer`; ADR-0050 says why that is a row rather
     // than a per-request choice.
     Provider {
@@ -331,7 +331,7 @@ impl Store {
 /// Two creators make the data root (`serve`'s boot and this store, which `key set` calls before any deploy), and the
 /// deploy's step 2 writes it with a third: they have to agree, or a machine that ran the documented next step
 /// (`holosmith key set <provider>`) would leave a data root at the umask's 0775 and `doctor`'s `perms` finding would
-/// report a mode nothing in the product chose (HS-049). `create_dir_all` is what reaches the data root here — the
+/// report a mode nothing in the product chose. `create_dir_all` is what reaches the data root here — the
 /// store lives one level below it — so the mode is set only when the parent did not exist, and an operator's own
 /// mode is left alone.
 fn create_directories(directory: &Path) -> io::Result<()> {
@@ -562,7 +562,7 @@ pub const KEY_PROXY_PORT: u16 = 8080;
 /// The container's name. `hs_key`, one per machine.
 pub const KEY_PROXY_NAME: &str = "hs_key";
 
-/// The name a run with this container prefix gives it: `hs_key`, or `smoke_hs_key` (HS-077).
+/// The name a run with this container prefix gives it: `hs_key`, or `smoke_hs_key`.
 ///
 /// Prefixed for [`crate::container::proxy_name`]'s reason, and the key proxy is the sharper half of that reason: it
 /// mounts the key store of the config it was started from, so an unprefixed smoke run's proxy would replace the
@@ -606,7 +606,7 @@ mod tests {
     /// Three creators write that directory's mode — `serve`'s boot, this store, and `server deploy`'s step 2 — and
     /// `doctor`'s `perms` finding compares it with the deploy's 0755. `create_dir_all` would give the umask's 0775,
     /// which is the mode this machine's umask produces, so a permissive-umask machine is the one this test bites on
-    /// (HS-049).
+    ///
     #[test]
     fn the_data_root_the_key_store_makes_is_the_mode_the_deploy_writes() {
         let scratch = Scratch::new("root-mode");

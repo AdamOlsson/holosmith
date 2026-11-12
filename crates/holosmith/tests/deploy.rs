@@ -1,4 +1,4 @@
-//! `server deploy`: the seven steps, the words, the install tree and the two proxies (HS-047, spec item 10).
+//! `server deploy`: the seven steps, the words, the install tree and the two proxies (spec item 10).
 //!
 //! These tests drive [`deploy::run`] over a machine they build, and that is the same discipline `tests/doctor.rs`
 //! established for the same reason: a deploy is a set of claims about *a host* — its daemon, its git, its paths —
@@ -15,7 +15,7 @@
 //! own read, and a fake answer would not exercise the wait.
 //!
 //! ADR-0056 is the design these assert: a step is a read and an apply, `skipped` is never `satisfied`, a failure
-//! stops the run, and the proxies' recipe is the boot's own. Since HS-049 every step applies, so a run meant to reach
+//! stops the run, and the proxies' recipe is the boot's own. Since every step applies, so a run meant to reach
 //! the end needs a control listener that answers `/api/health` and a `health_wait` short enough to give up on.
 
 use std::collections::BTreeMap;
@@ -142,7 +142,7 @@ fn doctor_tools(dir: &TempDir) -> doctor::Tools {
             df: df_shim(dir),
             du: PathBuf::from("du"),
             openssl: PathBuf::from("openssl"),
-            // Machine trust's whois (HS-070): no deploy step runs it, so the name is enough.
+            // Machine trust's whois: no deploy step runs it, so the name is enough.
             tailscale: PathBuf::from("tailscale"),
         },
         tailscale: tailscale_serve_shim(
@@ -244,7 +244,7 @@ fn recording_tools(dir: &TempDir, calls: &Path, sudo_calls: &Path) -> deploy::To
     }
 }
 
-/// The body a stand-in for `/api/health` answers: `Health`'s six keys, because the reader parses them (HS-050) —
+/// The body a stand-in for `/api/health` answers: `Health`'s six keys, because the reader parses them —
 /// a `200` with anything else is "a port somebody else holds", which is a different fact from "this machine serves".
 pub const HEALTH_PAYLOAD: &str = r#"{"name":"holosmith","version":"verify","role":"server","uptime_s":0,"preview_origin":"http://localhost:8081","application_server_key":null}"#;
 
@@ -515,7 +515,7 @@ impl proxies::Containers for Fake {
 impl doctor::Machine for Fake {
     /// The state the same fake answers [`proxies::Containers`]' question with. Step 7 runs `doctor --full`, which
     /// reads the two proxies, so a run meant to reach the end has to see what step 4 started — otherwise the deploy
-    /// would fail on a finding about the containers it had just brought up (HS-049).
+    /// would fail on a finding about the containers it had just brought up.
     fn running(&self, name: &str) -> bool {
         <Self as proxies::Containers>::running(self, name)
     }
@@ -731,7 +731,7 @@ fn the_seven_steps_are_the_specs_order() {
 #[test]
 fn the_report_prints_the_tally_and_no_owner_list() {
     // A report built by hand: the shape is the acceptance's, and the claims that matter are the summary's four
-    // counts (always present, so a reader can diff two runs) and the absence of the owner list HS-049 removed —
+    // counts (always present, so a reader can diff two runs) and the absence of the owner list removed —
     // every step has a body now, so a line naming who owns what remains would name a story that is done.
     let report = Report {
         lines: vec![
@@ -836,7 +836,7 @@ fn a_dry_run_lists_the_steps_and_creates_nothing() {
         report.render()
     );
     // Step 1's plan is its read, step 3's is a build of both images, and steps 5, 6 and 7 are plans too: a dry run
-    // reads the machine for every step, so nothing is left to a later story any more (HS-049).
+    // reads the machine for every step, so nothing is left to a later story any more.
     assert_eq!(line(&report, DeployStep::Preflight).word, Word::Satisfied);
     assert_eq!(
         line(&report, DeployStep::Files).word,
@@ -993,7 +993,7 @@ fn a_second_run_is_satisfied_and_changes_nothing() {
         "the second run failed:\n{}",
         second.render()
     );
-    // Every step, not just the three that were the whole install in HS-047: a second deploy changes nothing at all.
+    // Every step, not just the three that were the whole install: a second deploy changes nothing at all.
     for step in DeployStep::ALL {
         assert_eq!(
             line(&second, step).word,
@@ -1026,7 +1026,7 @@ fn an_existing_key_file_is_never_rewritten() {
     // The tree a previous deploy left, with a real key in the store **and modes a looser umask left behind**: the
     // two things a deploy must handle differently. `install` would truncate the bytes, so a mode it does own is
     // repaired with `chmod`, which touches nothing — and the fixture starts wrong on purpose, because a mode that is
-    // already right makes the repair's only assertion a comparison of the fixture with itself (HS-049's review,
+    // already right makes the repair's only assertion a comparison of the fixture with itself (the review,
     // STD-1: with the fixture at 0600, deleting `ItemKind::Kept`'s `Action::Mode` arm left the whole suite green).
     deployed_data_root(&deployed.data_root);
     let secrets = deployed.data_root.join(key::SECRETS_DIR);
@@ -1790,7 +1790,7 @@ fn step_four_starts_both_proxies_and_the_second_run_reads_running() {
 
 #[test]
 fn the_two_halves_union_into_both_and_nothing_is_refused() {
-    // HS-072 deleted `deploy::refusal`: a role is no longer a reason to refuse a deploy, and the spec's Roles table
+    //  deleted `deploy::refusal`: a role is no longer a reason to refuse a deploy, and the spec's Roles table
     // ("running `server deploy` and `hub deploy` on the same machine makes it `both`") is a function instead. Every
     // arm is here because the union is symmetric in one direction and not the other, and the asymmetry is the bug a
     // one-line implementation gets wrong: `server` on a `hub` is `both`, and `hub` on a `server` is `both`, but
@@ -2125,7 +2125,7 @@ fn a_fresh_install_still_measures_the_disk_floor_the_data_root_will_land_on() {
 fn a_root_install_says_which_half_of_step_two_it_did_not_do() {
     // A `--root` install creates no service user and runs no chown, because the tree is the invoking user's. A step
     // that reports a pass must say so, or "all 7 paths are present with their modes" reads as the whole of item 10
-    // step 2 when the user and the ownership were never read (HS-049).
+    // step 2 when the user and the ownership were never read.
     let _serial = one_at_a_time();
     let dir = TempDir::new("deploy-root-remark");
     let socket = dir.file("docker.sock");
@@ -2165,7 +2165,7 @@ fn a_root_install_says_which_half_of_step_two_it_did_not_do() {
     );
 }
 
-// ---- the service user, the pair and the ownership (HS-049) -------------------------------
+// ---- the service user, the pair and the ownership -------------------------------
 
 #[test]
 fn the_service_user_and_its_docker_group_are_read_before_they_are_made() {
@@ -2767,7 +2767,7 @@ fn wait_for_health_answers_in_milliseconds_for_both_arms() {
     );
 }
 
-// ---- a promoted machine's unit runs through `current` (HS-078) ------------------------------------------------
+// ---- a promoted machine's unit runs through `current` ------------------------------------------------
 
 /// Once `current` resolves, step 5's `ExecStart` is the release tree's symlink — and a second deploy leaves the unit
 /// exactly as it found it.
@@ -2847,7 +2847,7 @@ fn a_release_tree_makes_the_unit_run_through_current() {
         broken.render()
     );
     // And step 1 says why it did not refuse: a deploy is one of the two commands that repairs a broken `current`, so
-    // the failure `doctor --quick` reports is a remark here (HS-080, `LINK_NOT_LIVE`).
+    // the failure `doctor --quick` reports is a remark here (`LINK_NOT_LIVE`).
     assert_eq!(
         line(&broken, DeployStep::Preflight).word,
         Word::Satisfied,

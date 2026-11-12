@@ -1,8 +1,8 @@
-//! `holosmith upgrade <binary>`: the promotion pipeline as one command (HS-078, spec item 10, ADR-0082).
+//! `holosmith upgrade <binary>`: the promotion pipeline as one command (spec item 10, ADR-0082).
 //!
 //! A **host** verb like `build` and `smoke`, and as thin: it loads the config the way every command does, resolves the
 //! install tree, refuses a promotion that needs `root` and does not have it (`deploy::privilege_problem`, the rule the
-//! two release verbs share — HS-079), and hands [`crate::promote`] the four facts it cannot work out itself — the
+//! two release verbs share —), and hands [`crate::promote`] the four facts it cannot work out itself — the
 //! candidate, whether the review was acknowledged, the drain's wait and the root. What this module owns is the
 //! command's surface: the flag names and the exit code (0 only for a candidate that is live).
 //!

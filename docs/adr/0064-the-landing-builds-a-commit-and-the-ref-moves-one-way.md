@@ -1,7 +1,7 @@
 # The two landing strategies build a commit in a temporary worktree, then hand it to the one way a ref moves
 
-HS-055 is the second half of spec item 12's merge: the `merge` and `squash` strategies (rule 2's temporary
-worktree, rule 3's conflict) on top of HS-054's `ff-only` and rule 4. ADR-0063 already decided what a *write* to
+This is the second half of spec item 12's merge: the `merge` and `squash` strategies (rule 2's temporary
+worktree, rule 3's conflict) on top of the `ff-only` and rule 4. ADR-0063 already decided what a *write* to
 the project repository is allowed to assume — its own module, the changes view's rules by import, every answer
 measured rather than parsed out of git's English, `Merges` as the per-project lock. This ADR decides only what
 the two new strategies add, and it reuses rule 4 **unchanged** as the way the target moves: a `merge` commit
@@ -138,7 +138,7 @@ strategy and a `200` with two parents by `merge`, in one test. Making the test r
 tests red.
 
 **The two orders are different on purpose.** `ff-only` asks the ancestry question *before* the checkout one,
-which is HS-054's order and the right one: "the target has commits the branch does not" is a fact about the
+which is the order and the right one: "the target has commits the branch does not" is a fact about the
 request, while `target_checked_out`'s advice ("check out another branch in that worktree and merge again") would
 send the operator straight to a second refusal. The two landing strategies ask the checkout question first,
 because for them the ancestry question does not exist and a `409 target_checked_out` should cost no temporary
@@ -160,11 +160,11 @@ worktree's hooks are the **common** git directory's, so a project's hook is just
 `<data>/merge/<id>` as from the checkout — which is why `-c core.hooksPath=/dev/null` is on the shared prefix
 rather than on the merge alone. `no_hook_runs_for_either_strategy` writes `post-merge`, `post-checkout`,
 `pre-commit` and `commit-msg` scripts into a real repository and asserts no marker appears for either strategy;
-deleting the flag from `hooks_flag()` turns it and HS-054's `a_hook_does_not_run` red.
+deleting the flag from `hooks_flag()` turns it and the `a_hook_does_not_run` red.
 
 ## D8 — The lock waits; `409 merge_in_progress` is not written
 
-Rule 2 allows "waits or returns 409". HS-054's `Merges` already waits, and a `try_lock` refusal would add a
+Rule 2 allows "waits or returns 409". the `Merges` already waits, and a `try_lock` refusal would add a
 second kind of answer for a request that is not wrong. Nothing changed in the lock.
 
 What *is* new is that the wait is now observable in an outcome, which it was not for `ff-only`: two `merge`s of
@@ -190,23 +190,23 @@ the three fields are the contract's and `http::merge` already builds them from a
 it, `merge()` consumes it, and `Strategy` is a type because the strategies differ in **which commands run**, not
 in a word on the wire.
 
-## D10 — The fifth acceptance bullet is HS-058's, and this ADR says so loudly
+## D10 — The fifth acceptance bullet is that story's, and this ADR says so loudly
 
 The bullet reads: *"The UI offers 'Resolve with agent', which prompts the session to merge the target into its
 branch and fix conflicts, then retries."*
 
 There is no screen to put it on. The Changes sheet — the file list, the diff, the target and strategy picker, the
-Merge button — is HS-058, and a phase-2 story that adds a button to a screen the next story rewrites is work
-thrown away. HS-038 set the precedent — ADR-0046 cut the Internet-access checkbox's copy for the same reason,
-that it was a new visible element and belonged to the story that owned the form (`docs/notes.md`'s HS-038
-landmine states the rule in as many words). **HS-058 implements this affordance against
+Merge button — is, and a phase-2 story that adds a button to a screen the next story rewrites is work
+thrown away. set the precedent — ADR-0046 cut the Internet-access checkbox's copy for the same reason,
+that it was a new visible element and belonged to the story that owned the form (an earlier development note's
+landmine states the rule in as many words). ** implements this affordance against
 this route's `409 conflict` and its `conflicts` list**, and the story's acceptance is answered with that pointer
-rather than a tick. What HS-055 builds is everything the affordance needs: a refusal a client can act on, naming
+rather than a tick. What builds is everything the affordance needs: a refusal a client can act on, naming
 the paths, with a sentence that already says what the prompt should say.
 
-## D11 — A squash keeps the branch, and that makes rule 5 a question HS-056 has to decide
+## D11 — A squash keeps the branch, and that makes rule 5 a question has to decide
 
-HS-043's keep-rule is `git merge-base --is-ancestor agent/<id> refs/heads/<target>` (`Worktree::merged_into`), and
+the keep-rule is `git merge-base --is-ancestor agent/<id> refs/heads/<target>` (`Worktree::merged_into`), and
 a **squash** writes a commit whose only parent is the old target — so after a squash the branch's tip is *not* an
 ancestor of the target, `merged_into` answers `No`, and `retained` **keeps** `agent/<id>`.
 
@@ -214,24 +214,24 @@ That is the honest answer and not a gap in this story. The branch carries the se
 target does not have: a squash deliberately leaves them out of the target's history, so "this branch's commits
 are in the target" is false, and a teardown that deleted it would delete the only place they still exist (the
 WIP ref is a tree, not a history). What it does change is rule 5's sentence — "The branch `agent/<id>` is then
-deleted because it is merged" — which **HS-056** cannot implement by re-asking git after a squash. Its
+deleted because it is merged" — which **** cannot implement by re-asking git after a squash. Its
 `delete_session` request already knows a merge just succeeded, so the evidence it needs is the answer it got,
 not a second ancestry question; and where it chooses to ask git anyway, the honest version is the *tree*
 comparison (`git diff --quiet <branch> <target>`), not ancestry.
 
 `a_squash_keeps_the_branch_a_merge_does_not` asks `Worktree::retained` after each strategy and requires
 `branch: None` after a `merge` and `branch: Some(agent/<id>)` after a `squash`. It is the interaction, recorded
-as a measurement rather than as prose, so HS-056 meets it as a red test if it assumes otherwise.
+as a measurement rather than as prose, so meets it as a red test if it assumes otherwise.
 
 Two smaller record-keeping decisions this story made while the review was read back:
 
-- **`{"strategy": 3}` is now `422 bad_body`** where HS-054 answered `bad_strategy`: a `strategy` that is not a
+- **`{"strategy": 3}` is now `422 bad_body`** where answered `bad_strategy`: a `strategy` that is not a
   string is the *body's* shape rather than a value outside the vocabulary, which is the create's own split
   (`bad_body` for a numeric `model`). The wire table in `tests/merge.rs` asserts it.
 - **`git worktree prune` is what clears a registration whose directory is gone**, and git only calls it
   `prunable` when the record is unreachable — which is why the test that measures it asserts `"prunable "` with
   its reason and a fixture label that does not contain the word. The first version of that test was **vacuous**:
-  its fixture was called `strategy-prunable`, and the word was in the listing's own path. HS-054's
+  its fixture was called `strategy-prunable`, and the word was in the listing's own path. that story's
   `a_prunable_registration_is_not_a_checkout_and_the_merge_lands` had the identical defect (fixture
   `merge-prunable`) and is fixed here for the same reason.
 
@@ -258,11 +258,11 @@ the refusal table is still walked end to end — three facts on two codes, which
 ## What this ADR does not decide
 
 Rule 1's two guards (`session_running`, `dirty_worktree`) and `delete_session: true` — still `422 unsupported`
-at the time of writing, and built by HS-056 (ADR-0065) —
-with no new sentence — are HS-056, which also owns the 60-second merge/publish timeout **and, per D11, the
+at the time of writing, and built (ADR-0065) —
+with no new sentence — are, which also owns the 60-second merge/publish timeout **and, per D11, the
 question of what "the branch is deleted because it is merged" means after a squash**, which it cannot answer by
-re-asking git. Publish is HS-057. The
-Changes sheet, the target and strategy picker and the Resolve-with-agent affordance are HS-058 (D10). The hub is
+re-asking git. Publish is. The
+Changes sheet, the target and strategy picker and the Resolve-with-agent affordance are (D10). The hub is
 phase 3. `worktree.rs`'s create refusals are untouched, and the merge's git commands are still unbounded: a
-timeout on the *request* is HS-056's, and an arbitrary bound on a git command the operator asked for would be
+timeout on the *request* is that story's, and an arbitrary bound on a git command the operator asked for would be
 this module inventing a policy it was not given.

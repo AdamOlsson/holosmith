@@ -1,4 +1,4 @@
-//! The hub's forwarding, as a client meets it (HS-069, spec item 3, ADR-0074).
+//! The hub's forwarding, as a client meets it (spec item 3, ADR-0074).
 //!
 //! Four groups, one per thing the story had to get right:
 //!
@@ -669,7 +669,7 @@ impl Preview {
             database: Arc::clone(&state.database),
             upstream: Arc::new(Never),
             tools: Tools::default(),
-            // HS-070: this test's machine lists no hubs, so its preview listener verifies nobody (the config's own
+            // this test's machine lists no hubs, so its preview listener verifies nobody (the config's own
             // default, and the arm the ACLs-only fallback is).
             trust: holosmith::trust::Trust::of(config, &Tools::default()),
         };

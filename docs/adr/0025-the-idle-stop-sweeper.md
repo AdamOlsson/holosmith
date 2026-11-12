@@ -1,6 +1,6 @@
 # The idle stop is a sweeper on a fixed tick
 
-HS-021 is spec item 13's second row: `idle_stop_min` (default 30) means "an idle session becomes
+This is spec item 13's second row: `idle_stop_min` (default 30) means "an idle session becomes
 `stopped`, freeing a slot". Nothing about that fits an endpoint — no client sends it, and no request
 waits for it — so the story's real content is four small decisions about a task.
 
@@ -15,7 +15,7 @@ when it could have awaited one.
 
 `Sweeper::run` is `sweep`, then sleep, forever. The first pass is immediate, so a process that restarted
 with quiet sessions applies the policy now rather than a tick from now. The task's handle is aborted after
-`serve::run` returns: the drain and the **Drain** of item 10 (HS-044) are somebody else's, and a shutdown
+`serve::run` returns: the drain and the **Drain** of item 10 are somebody else's, and a shutdown
 must not wait for a tick to come round.
 
 ## The tick is a constant, not a config key
@@ -37,7 +37,7 @@ policy. It is stated in the case's own comment rather than hidden.
 ## `0` is the off switch
 
 The config layer accepts any non-negative integer for `idle_stop_min` and its semantic pass has no floor
-for it. HS-022's acceptance says in as many words that `0` disables `turn_timeout_min`; item 13 puts the
+for it. the acceptance says in as many words that `0` disables `turn_timeout_min`; item 13 puts the
 two keys in one table of runaway controls, so reading one as "disabled at zero" and the other as "stop
 everything" would be two meanings for one number. `0` therefore disables the idle stop, and `0` is not an
 error: an operator who does not want the policy should not have to argue with the config validator, and
@@ -53,7 +53,7 @@ an operator *does* get without asking is the one per stop, and that is the story
 ## One apply per candidate, the row before the container, and the container spawned
 
 The candidate read is `SessionRepository::idle_before(cutoff)`: every `idle` row whose `last_active_at`
-is older than `now - idle_stop_min`, quietest first. Every candidate, not one — `oldest_idle` (HS-020)
+is older than `now - idle_stop_min`, quietest first. Every candidate, not one — `oldest_idle`
 answers the cap's question ("whose slot can I have?") and has no time bound; a sweep that stopped one
 session per tick would make a stop's latency a function of how many sessions the operator left alone.
 
@@ -80,22 +80,22 @@ operator it did would be a false claim about a machine that had plenty. What the
 that matters — nothing was deleted, and a resume continues the session — and that is the same promise
 because it is the same stop.
 
-The sentence lives in `web/src/transcript.ts` and not in `main.ts` for HS-020's reason, and the review of
+The sentence lives in `web/src/transcript.ts` and not in `main.ts` for the reason, and the review of
 that story is why: the span it fills is written twice, once when a row is drawn and once when a
 `session.status` frame turns a live row into a stopped one. The sweeper's stop arrives by the second path
 — the operator is watching a session they left open — so one function is the whole point.
 
 ## What this story left alone
 
-**Not the drain.** HS-044 stops every session for a restart, and it will reuse nothing here: a drain is
+**Not the drain.** stops every session for a restart, and it will reuse nothing here: a drain is
 one pass over all live sessions with its own reason, not a policy about quiet ones.
 
 **Not the cap.** A sweep stops a session because it was quiet; a create stops one because the machine is
 full. They share the table row's shape and the reason-word convention, and nothing else — the cap's
 eviction stays inside the create's own flow (ADR-0024), and the sweep takes no lock the create holds.
 
-**Not a stopped session's fate.** HS-064 deletes sessions that have been `stopped` for `stopped_ttl_days`;
-this story only produces more of them, and its `stopped_at` is the column HS-064 will read.
+**Not a stopped session's fate.** deletes sessions that have been `stopped` for `stopped_ttl_days`;
+this story only produces more of them, and its `stopped_at` is the column will read.
 
 ## Consequences
 
@@ -121,5 +121,5 @@ this story only produces more of them, and its `stopped_at` is the column HS-064
   **process-wide**: every case from `start_serve` on runs with a sweeper, so no later case may leave a
   session `idle` for a minute. The case is placed where the table is empty (just after
   `case_delete_session`) for that reason as well as for the cap of one.
-- The reason vocabulary is now four words: `forced_abort`, `deleted`, `evicted`, `idle_stop`. HS-022's
-  `turn_timeout` and HS-023's `budget_exceeded` join them.
+- The reason vocabulary is now four words: `forced_abort`, `deleted`, `evicted`, `idle_stop`. that story's
+  `turn_timeout` and the `budget_exceeded` join them.

@@ -1,5 +1,5 @@
 // The transcript's rules, folded over synthetic frames. There is no browser on the machine these
-// gates run on, so these are the tests the session screen gets: the wire format HS-015's producer
+// gates run on, so these are the tests the session screen gets: the wire format the producer
 // emits, the append-or-replace rule per message id, a tool call's own block and order, a message's
 // usage, the turn boundary, the composer's affordance matrix and the 10k-delta budget (ADR-0018).
 //
@@ -239,11 +239,11 @@ test("a tool call is its own block, in its own order, never a message", () => {
       type: "tool-end",
       toolId: "tool-1",
       output: "1  // The app",
-      // HS-033's three keys: a frame written without them (a durable log) parses with all three `null`.
+      // the three keys: a frame written without them (a durable log) parses with all three `null`.
       status: null,
       durationMs: null,
       outputRef: null,
-      // HS-035's key: a frame written before it existed carries no pictures, which is the empty list.
+      // the key: a frame written before it existed carries no pictures, which is the empty list.
       images: [],
     },
   );
@@ -408,7 +408,7 @@ test("Steer and Abort exist only while a turn runs", () => {
 });
 
 test("Resume exists in exactly the two states the transition table resumes from", () => {
-  // HS-018: the table has two `resume` rows — `stopped` and `error` — so those are the two states whose
+  // the table has two `resume` rows — `stopped` and `error` — so those are the two states whose
   // one action is Resume, and no other state offers it.
   for (const state of ["stopped", "error"] as SessionState[]) {
     assert.deepEqual(
@@ -431,7 +431,7 @@ test("the stream is the ADR-0014 path and no resume parameter is invented", () =
 });
 
 test("an evicted session's row says nothing was deleted", () => {
-  // HS-020's reason word, and spec item 9's promise: the cap stops a session, it never removes one.
+  // the reason word, and spec item 9's promise: the cap stops a session, it never removes one.
   const notice = stoppedNotice("evicted");
   assert.ok(notice !== null, "an evicted row said nothing");
   assert.match(notice, /nothing was deleted/);
@@ -439,7 +439,7 @@ test("an evicted session's row says nothing was deleted", () => {
 });
 
 test("a session stopped for sitting idle says so, and says nothing was deleted", () => {
-  // HS-021's reason word. The cap's sentence is wrong here — an idle stop did not run out of room —
+  // the reason word. The cap's sentence is wrong here — an idle stop did not run out of room —
   // but the promise is the same one, and spec item 9's "nothing is deleted" covers this stop too:
   // the worktree, the transcript and the row are all still there, and a resume continues the session.
   const notice = stoppedNotice("idle_stop");
@@ -451,7 +451,7 @@ test("a session stopped for sitting idle says so, and says nothing was deleted",
 });
 
 test("a session stopped by the disk cap says so, and promises the same nothing", () => {
-  // HS-063's reason word, which is also the event's code (spec item 14). It is the third machine-written
+  // the reason word, which is also the event's code (spec item 14). It is the third machine-written
   // reason, so it gets the third sentence: the cause differs from the other two (the worktree's size, not a
   // slot and not quiet), the promise does not, and the fix is the one an operator can actually take — clean
   // the worktree up — rather than "resume it" alone, which would trip the same cap again.
@@ -475,7 +475,7 @@ test("every other reason is the caller's to show, so no sentence is invented for
     "deleted",
     "turn_timeout",
     "server_restart",
-    // HS-030's clean exit: `stopped · pi_exit` is the whole message, and the badge already carries it.
+    // the clean exit: `stopped · pi_exit` is the whole message, and the badge already carries it.
     "pi_exit",
   ]) {
     assert.equal(stoppedNotice(reason), null, String(reason));
@@ -492,7 +492,7 @@ test("a badge shows a one-word reason as it is", () => {
 });
 
 test("interrupted is a reason on an idle row, not a state and not a notice", () => {
-  // HS-044: a `kill -9` mid-turn comes back as an `idle` row whose reason says what happened to the turn.
+  // a `kill -9` mid-turn comes back as an `idle` row whose reason says what happened to the turn.
   // The badge is the only place the operator learns it — so it has to render, and it must not borrow a
   // sentence from the two reasons that promise nothing was lost (`stoppedNotice` is for stopped rows, and
   // an interrupted turn is not a loss to explain but a fact to state).
@@ -504,7 +504,7 @@ test("interrupted is a reason on an idle row, not a state and not a notice", () 
 });
 
 test("a badge shows a multi-line reason's last line, clipped", () => {
-  // HS-030's unexpected exit is the first reason that is more than a sentence: the last few lines the
+  // the unexpected exit is the first reason that is more than a sentence: the last few lines the
   // container printed, one per line. The badge has room for one of them, and the useful one is the last —
   // the error itself rather than the oldest line of the tail. `session.log` keeps all of it.
   const tail = "error: no turn will run\nstack: frame 3\nstack: frame 0";
@@ -520,7 +520,7 @@ test("a badge shows a multi-line reason's last line, clipped", () => {
 });
 
 test("the detail line says the same thing whether the row was drawn or turned", () => {
-  // HS-020's lesson from the review: the span is written twice — by `sessionRow` when the list is
+  // the lesson from the review: the span is written twice — by `sessionRow` when the list is
   // drawn, and by `applyStatus` when a `session.status` frame turns a live row into a stopped one,
   // which is how an eviction arrives while the operator watches. One function, so they cannot differ.
   assert.equal(stoppedDetail("stopped", "evicted"), stoppedNotice("evicted"));
@@ -539,7 +539,7 @@ test("the detail line says the same thing whether the row was drawn or turned", 
 });
 
 test("a stopped row counts the days it has left, in whole days, from the machine's window", () => {
-  // HS-064, spec item 15: the row carries `stopped_at`, the answer carries `stopped_ttl_days`, and the page
+  // spec item 15: the row carries `stopped_at`, the answer carries `stopped_ttl_days`, and the page
   // adds them. `now` is passed in so these are facts about the arithmetic and not about when the suite ran.
   const now = 1_700_000_000;
   // Just stopped: the whole window is left.
@@ -581,7 +581,7 @@ test("the days-remaining sentence never claims the session will be deleted", () 
 });
 
 test("the detail line carries the stop's sentence and the countdown, and only on a stopped row", () => {
-  // HS-064 joins the two facts a stopped row has. One function, because the span is written by `sessionRow` and
+  //  joins the two facts a stopped row has. One function, because the span is written by `sessionRow` and
   // by `applyStatus` — and a row that is not stopped shows neither.
   const idle = stoppedNotice("idle_stop");
   assert.ok(idle !== null);
@@ -625,7 +625,7 @@ test("the screen reads which machine's session it is from the address", () => {
 });
 
 test("a steer is one block per frame, drawn once, and it is not a message", () => {
-  // HS-017's frame: `turn.steer` with the operator's guidance. It carries no message id because it
+  // the frame: `turn.steer` with the operator's guidance. It carries no message id because it
   // has nothing a later frame would update, so the model does no bookkeeping for it at all.
   const frame = parseFrame("turn.steer", JSON.stringify({ text: "and the lexer too" }));
   assert.deepEqual(frame, { type: "steer", text: "and the lexer too" });
@@ -656,7 +656,7 @@ test("a steer with no text is dropped, and a non-string text with it", () => {
 });
 
 test("a cancelled extension dialog is one block per frame, drawn once, and it is not a message", () => {
-  // HS-035's frame: `turn.error` with the reason and the method an extension asked for. It has no message id
+  // the frame: `turn.error` with the reason and the method an extension asked for. It has no message id
   // for a steer's reason — one frame, one block, nothing a later frame would update — so the model keeps no
   // bookkeeping for it and the block lands where in the turn it happened.
   const frame = parseFrame(
@@ -716,7 +716,7 @@ test("a turn error with no reason is dropped, and one that is not an object with
 });
 
 test("a machine policy's event is one block, and it is not a turn error", () => {
-  // HS-063's frame: the `error` kind with the API's code and the sentence the server composed from the
+  // the frame: the `error` kind with the API's code and the sentence the server composed from the
   // measurement. It has no message id for a steer's reason — one frame, one block, nothing that continues it —
   // and it must not be mistaken for `turn.error`, which is about the agent failing at something the turn asked
   // for. The two are distinct frame kinds on purpose, so a client can render one without guessing at the other.
@@ -802,7 +802,7 @@ test("10k deltas are 10k appends into one block, never a re-render", () => {
 });
 
 test("the budget's sentence needs a settled turn and no reported usage", () => {
-  // Spec item 13's contingency, as a rule (HS-023). Four cases, and the two that must stay silent are
+  // Spec item 13's contingency, as a rule. Four cases, and the two that must stay silent are
   // the two a row's totals cannot tell apart: "no turn has run yet" and "the agent did report usage".
   assert.equal(
     budgetNotice({ settled: 0, usage: false }),
@@ -859,7 +859,7 @@ test("a message.end with no usage is dropped, so it cannot claim a spend of zero
   assert.equal(parseFrame("message.end", '{"message_id":"m1"}'), null);
   assert.equal(parseFrame("message.end", '{"message_id":"m1","usage":{}}'), null);
   assert.equal(parseFrame("message.end", '{"message_id":"m1","usage":{"in":"1","out":2}}'), null);
-  // A count is a non-negative integer, the same rule the writer's tally applies in Rust (HS-023): a
+  // A count is a non-negative integer, the same rule the writer's tally applies in Rust: a
   // negative or fractional cost is not a cost, and rendering one would show a number the budget never
   // added.
   assert.equal(parseFrame("message.end", '{"message_id":"m1","usage":{"in":-5,"out":340}}'), null);
@@ -873,7 +873,7 @@ test("a message.end with no usage is dropped, so it cannot claim a spend of zero
 });
 
 test("a project's refusal is its sentence alone, and every other answer keeps its code", () => {
-  // HS-026: the three refusals are about the project, and the story asks the page to explain them in
+  // the three refusals are about the project, and the story asks the page to explain them in
   // one sentence rather than to show a code the phone cannot act on. The codes are the contract and
   // the page still refuses to hide a *different* failure behind a sentence alone: a client that cannot
   // tell `bad_project` from silence would not know the request never reached a repository.
@@ -896,7 +896,7 @@ test("the three project refusals are three codes, not one code and three sentenc
 });
 
 test("a coalesced delta renders exactly like the deltas it replaced", () => {
-  // HS-059 merges the deltas of one message and kind inside one commit into one row. The page must not be
+  //  merges the deltas of one message and kind inside one commit into one row. The page must not be
   // able to tell: a delta is one appended text node, so one frame of the whole sentence and three frames of
   // its parts are the same block, the same order and the same text (ADR-0018).
   const many = new Transcript();
@@ -939,7 +939,7 @@ function turnOf(changes: Change[]): number {
 }
 
 test("a windowed transcript numbers its turns like a whole-log one", () => {
-  // HS-061: the page numbers a turn from the `turn.start` frames it has seen. A replay that starts at the
+  // the page numbers a turn from the `turn.start` frames it has seen. A replay that starts at the
   // 50th most recent message has seen none of the turns before it, so without the frame's `turns_before`
   // the first turn on screen would be labelled "turn 1" while the log says turn 40.
   const whole = new Transcript();
@@ -993,7 +993,7 @@ test("a page folded at its own turn base continues the live transcript's numberi
 });
 
 test("a tool.end carries the verdict, the duration and the output's own address", () => {
-  // HS-033's three keys, and the two ways a frame can arrive without them: a row written before they
+  // the three keys, and the two ways a frame can arrive without them: a row written before they
   // existed (a durable log) and a producer whose store refused the file.
   assert.deepEqual(
     parseFrame(
@@ -1073,7 +1073,7 @@ test("a message.end that reports nothing is the same as one that reports no usag
 });
 
 test("a tool.end names the pictures its result carried, and one it cannot link is dropped", () => {
-  // HS-035: the frame carries the block's index, pi's mime and the path that serves the bytes — never a byte of
+  // the frame carries the block's index, pi's mime and the path that serves the bytes — never a byte of
   // the picture, for the reason a tool's output is a file (the log is replayed on every reconnect).
   const payload = JSON.stringify({
     tool_id: "call_1",
@@ -1125,7 +1125,7 @@ test("a tool.end names the pictures its result carried, and one it cannot link i
 });
 
 test("the Internet-access phrase is two words, and neither promises a route", () => {
-  // HS-038: spec item 2's checkbox is **topology**, so the page must not describe it as a setting with a direct
+  // spec item 2's checkbox is **topology**, so the page must not describe it as a setting with a direct
   // route behind it. The assertions are about what each case *claims*, because a phrase that read the same either
   // way would make the checkbox look inert — which is the bug the story is about.
   assert.equal(networkText(true), "internet on");
@@ -1133,7 +1133,7 @@ test("the Internet-access phrase is two words, and neither promises a route", ()
   assert.notEqual(networkText(true), networkText(false));
   for (const phrase of [networkText(true), networkText(false)]) {
     // The feature's name is the checkbox's label, not the state's: "internet access" would not say which way it
-    // is set, and it is not what the session screen's own span has ever said (HS-013's markup).
+    // is set, and it is not what the session screen's own span has ever said.
     assert.doesNotMatch(phrase, /access/i, phrase);
     // Nor a configuration: the environment is identical in both cases (ADR-0045), so naming one would be a lie
     // about the difference and would send an operator looking for something to change.
@@ -1141,7 +1141,7 @@ test("the Internet-access phrase is two words, and neither promises a route", ()
   }
 });
 
-// ---- the preview link (HS-041) --------------------------------------------------------------
+// ---- the preview link --------------------------------------------------------------
 
 // The session screen's link to what the agent built is the preview listener's own origin plus the path the
 // listener parses. Two rules, because either half can be wrong on its own: the host segment (that is the
@@ -1181,7 +1181,7 @@ test("a preview is offered exactly by the states that have a container", () => {
   }
 });
 
-// ---- what a delete keeps (HS-043, spec item 9) ------------------------------------------------
+// ---- what a delete keeps (spec item 9) ------------------------------------------------
 
 // The session screen's sentence after a delete was accepted. The command comes from the answer, so these
 // cases are about the three shapes the server can send and never about the command's spelling: a second
@@ -1247,7 +1247,7 @@ test("the refused-snapshot sentence offers a decision, not a query string", () =
   assert.equal(FORCED_DELETE_LABEL, "Delete anyway");
 });
 
-// --- the Changes sheet's rules (HS-058) ----------------------------------------------------------
+// --- the Changes sheet's rules ----------------------------------------------------------
 //
 // The sheet is the first screen since phase 1 with rules of its own, and `npm test` is the only gate that can see
 // them: no `case_*` may need a browser. Every assertion below is a sentence or a branch the screen shows.
@@ -1441,7 +1441,7 @@ test("the two prompts are the sentences the ADRs fixed, and they are not each ot
     COMMIT_PROMPT,
     "Commit every change in the working tree, with a message that describes it, and tell me the commit's hash.",
   );
-  // ADR-0064 D10 left the Resolve affordance to HS-058; item 12 says what it does, and the prompt says the same.
+  // ADR-0064 D10 left the Resolve affordance; item 12 says what it does, and the prompt says the same.
   assert.ok(RESOLVE_PROMPT.includes("conflicts"), RESOLVE_PROMPT);
   assert.ok(RESOLVE_PROMPT.includes("commit"), RESOLVE_PROMPT);
   assert.notEqual(COMMIT_PROMPT, RESOLVE_PROMPT);
@@ -1483,7 +1483,7 @@ test("a sheet's failure is the envelope's code and message, even for a project r
   assert.notEqual(sheetFailure("git_not_directory", "x"), createFailure("git_not_directory", "x"));
 });
 
-// ---- the machine a request is for (HS-071, ADR-0076) -----------------------------------------
+// ---- the machine a request is for (ADR-0076) -----------------------------------------
 //
 // A hub serves one page and every machine's data, so every path the page spells takes the host it is for. These
 // are the rules `main.ts` cannot get wrong silently: a path with the wrong prefix is a 404 on a machine that never
@@ -1695,7 +1695,7 @@ test("a session's action is spelled on the machine that owns it", () => {
   }
 });
 
-// ---- the machine a create names (HS-074) -----------------------------------------------------------
+// ---- the machine a create names -----------------------------------------------------------
 
 test("a create may name this machine or a reachable peer, and nothing else", () => {
   const origin = "https://hub.tail.ts.net";
@@ -1741,7 +1741,7 @@ test("an away machine's sentences name what the page cannot do", () => {
 });
 
 test("an away machine's own words, and the two codes that earn them", () => {
-  // The two codes the hub answers for a forwarded call it could not deliver (HS-074) — the rule that keeps
+  // The two codes the hub answers for a forwarded call it could not deliver — the rule that keeps
   // `upstream_unreachable: workshop could not be reached` off a screen.
   assert.equal(isAwayCode("upstream_unreachable"), true);
   assert.equal(isAwayCode("upstream_timeout"), true);

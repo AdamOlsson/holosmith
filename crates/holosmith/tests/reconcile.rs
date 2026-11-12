@@ -1,10 +1,10 @@
-//! The startup reconcile (HS-044, V9): what a `kill -9` leaves behind, put right before anybody is served.
+//! The startup reconcile (V9): what a `kill -9` leaves behind, put right before anybody is served.
 //!
 //! These tests are the daemon-free half, and deliberately so: the row a crash leaves is a *row*, and the
 //! sweep's repository rules are host `git`. A machine without Docker is a supported machine (a hub), and it
 //! must be able to prove that a `running` row comes back, that a `starting` one is resumed or fails with a
 //! sentence, that a delete's row is left alone, and that a worktree no row owns goes while its branch and its
-//! snapshot ref stay (HS-043, ADR-0052). The container half is the gate's `case_reconcile_orphans` and the
+//! snapshot ref stay (ADR-0052). The container half is the gate's `case_reconcile_orphans` and the
 //! story's demo, on a real daemon.
 //!
 //! The crash itself is a **write**, not a kill: `set_status` is the state the process died in, and that is the
@@ -123,7 +123,7 @@ fn counter(state: &AppState, id: &str) -> i64 {
 }
 
 /// Wait for a payload to be **committed**: a row is written before its event is (the writer's 25 ms tick),
-/// so "the row says idle" is not "the log holds the transition" (HS-018's lesson).
+/// so "the row says idle" is not "the log holds the transition".
 async fn wait_for_payload(state: &AppState, id: &str, payload: &str) {
     wait_until("the transition was committed", || {
         log(state, id).iter().any(|event| event.payload == payload)
@@ -366,7 +366,7 @@ async fn a_recovery_never_resets_the_seq_counter() {
 }
 
 /// The sweep's worktree half on a real repository: an orphan directory goes, its registration goes, and the
-/// two names a delete keeps survive (HS-043, ADR-0052).
+/// two names a delete keeps survive (ADR-0052).
 #[tokio::test]
 async fn an_orphan_worktree_goes_and_its_branch_and_snapshot_ref_stay() {
     let dir = TempDir::new("reconcile-worktree");
@@ -466,7 +466,7 @@ async fn a_worktree_a_row_owns_is_not_an_orphan() {
     assert!(owned.exists());
 }
 
-/// Spec item 10 step 6 and HS-078's acceptance bullet 3: a session a **drain** stopped comes back on startup,
+/// Spec item 10 step 6 and the acceptance bullet 3: a session a **drain** stopped comes back on startup,
 /// with no reason carried, and no other `stopped` row does.
 #[tokio::test]
 async fn a_row_a_drain_stopped_comes_back_idle_and_one_the_sweeper_stopped_does_not() {

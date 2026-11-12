@@ -1,11 +1,11 @@
 //! One prompt, one turn: `POST /api/sessions/{id}/prompt` answers 202 with the now-`running` row,
 //! the stub's script arrives as events, `agent_settled` takes the session back to `idle`, and
-//! `last_active_at` moves at both ends (HS-015).
+//! `last_active_at` moves at both ends.
 //!
 //! Every refusable state is produced the way the server produces it: `starting` by prompting a
 //! session the slow stub has not finished provisioning, `running` by prompting twice, and `stopped`
 //! and `error` by driving the one state function directly — there is no endpoint for either yet
-//! (HS-018 and HS-019 own them). The turn itself is read off the wire, because the stream is what a
+//! The turn itself is read off the wire, because the stream is what a
 //! browser sees.
 
 use std::net::SocketAddr;
@@ -80,7 +80,7 @@ fn created_id(response: &Response) -> String {
 }
 
 /// A response that must be the ADR-0008 envelope for `code`: status, `content-type` and code, all
-/// three, because a status-only assertion is how the wrong code ships (HS-005's review).
+/// three, because a status-only assertion is how the wrong code ships.
 fn assert_envelope(response: &Response, status: u16, code: &str) {
     assert_eq!(response.status, status, "{}", response.body);
     assert_eq!(
@@ -124,7 +124,7 @@ async fn wait_idle(state: &AppState, id: &str) {
 }
 
 /// Move a session with the one state function, the way the stories that own those moves will:
-/// `stopped` needs HS-018's endpoint and `error` needs a failed turn or a dead container.
+/// `stopped` needs the endpoint and `error` needs a failed turn or a dead container.
 async fn drive(state: &AppState, id: &str, trigger: Trigger) {
     Transitioner::new(Arc::clone(&state.database), state.events.clone())
         .apply(id, trigger, None)
@@ -193,7 +193,7 @@ async fn the_turn_settles_the_session_and_moves_last_active_at() {
         "last_active_at did not move: {before} -> {}",
         after.last_active_at
     );
-    // HS-042: every `agent_settled` takes a WIP snapshot before the row moves. This is the only test
+    // every `agent_settled` takes a WIP snapshot before the row moves. This is the only test
     // that names the site; deleting the call in `Turn::finished` must make it red.
     assert!(
         stub.calls().contains(&Call::Snapshot),
@@ -205,7 +205,7 @@ async fn the_turn_settles_the_session_and_moves_last_active_at() {
 
 #[tokio::test]
 async fn a_snapshot_that_fails_does_not_turn_a_finished_turn_into_an_error() {
-    // HS-042's other half: a git failure is reported in the log and does not change the turn's ending. The
+    // the other half: a git failure is reported in the log and does not change the turn's ending. The
     // session finished its work; losing that fact because a ref could not be written would be worse than a
     // missing ref (the delete's `409 unsaved_work` is where a failure is a refusal).
     let dir = TempDir::new("turns-snapshot-fails");
@@ -312,7 +312,7 @@ async fn the_stream_carries_the_scripts_six_kinds_in_order_and_the_turn_settles(
         .collect();
     // Seven, because this test paces one frame per 30 ms and the writer commits every 25 ms: the stub's
     // scripted deltas each land in their own batch, which is exactly the case coalescing leaves alone. A pace
-    // below the window would make this a smaller number (HS-059), and the assertion would have to say what it
+    // below the window would make this a smaller number, and the assertion would have to say what it
     // meant instead.
     assert_eq!(deltas.len(), 7, "three thinking, two text, two text again");
     let first = message_id(start + deltas[0]);
@@ -468,7 +468,7 @@ fn the_prompt_route_is_recorded_mutating() {
 
 #[tokio::test]
 async fn a_burst_of_deltas_is_fewer_rows_than_frames_and_keeps_its_text() {
-    // HS-059 on the live path: the stub's script emits seven deltas, and they arrive inside **one** commit —
+    //  on the live path: the stub's script emits seven deltas, and they arrive inside **one** commit —
     // the writer is given a two-second window here, which is longer than a whole zero-paced turn, so "inside
     // one commit" is a fact of this test rather than a hope about the host's speed. The log therefore holds
     // the script's three *runs* (thinking, then text, then text after the tool call) rather than seven rows,

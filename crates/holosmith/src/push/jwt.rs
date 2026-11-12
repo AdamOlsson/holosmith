@@ -1,4 +1,4 @@
-//! The VAPID JWT (RFC 8292) and the little DER writer the two `openssl` children need (HS-066, ADR-0071).
+//! The VAPID JWT (RFC 8292) and the little DER writer the two `openssl` children need (ADR-0071).
 //!
 //! A Web Push request carries `Authorization: vapid t=<jwt>, k=<public key>`. The JWT is ES256 over
 //! `{typ,alg}.{aud,exp,sub}`, and **the signature is not written here**: P-256 scalar multiplication is ~400

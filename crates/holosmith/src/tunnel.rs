@@ -1,8 +1,8 @@
 //! Moving bytes between two sockets, and reading one request head: the mechanism this binary's
 //! byte-level listeners share.
 //!
-//! Three listeners in this binary are byte tunnels rather than apps — the egress proxy (HS-037), the key
-//! proxy (HS-039) and the preview listener (HS-041) — because what they carry is not theirs to understand:
+//! Three listeners in this binary are byte tunnels rather than apps — the egress proxy, the key
+//! proxy and the preview listener — because what they carry is not theirs to understand:
 //! a `CONNECT` tunnel is opaque TLS, a forwarded provider call is a request whose body must reach the wire
 //! byte for byte (ADR-0050), and a preview carries whatever a dev server emits, chunked framing, an SSE
 //! body or a WebSocket handshake. Each of them decides *policy* in its own module; this one moves *bytes*.
@@ -26,7 +26,7 @@ use tokio::net::TcpStream;
 pub enum Tunnel {
     Egress,
     Preview,
-    /// The hub's preview hop (HS-069): one machine's preview listener relaying to another's.
+    /// The hub's preview hop: one machine's preview listener relaying to another's.
     Forward,
 }
 
@@ -101,7 +101,7 @@ pub async fn read_head(stream: &mut TcpStream, max: usize, within: Duration) -> 
 /// ended. [`Tunnel`] decides which listener's tracing target the two `debug` lines carry, because a target
 /// has to be a literal for the macro and an egress failure under a preview's name would be a lie.
 ///
-/// **Generic in both ends since HS-069.** The client is a socket this listener accepted and the upstream is a
+/// **Generic in both ends.** The client is a socket this listener accepted and the upstream is a
 /// socket it dialled — and on a hub's preview hop that dial is `openssl s_client`'s two pipes rather than a
 /// `TcpStream` (ADR-0074), so both parameters are "something readable and writable" and neither is a concrete
 /// socket type. Behaviour is unchanged: the same two loops, the same counts, the same shutdown.

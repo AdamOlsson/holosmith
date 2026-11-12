@@ -126,7 +126,7 @@ check_serve_in_empty_root() {
 
   # --share-net puts the sandbox beside the host's loopback, which is the only way to fetch
   # the port it bound; the filesystem is still empty. `--backend stub` because this run is about the
-  # artifact's own linking, not about a machine's choice: a Docker run checks the host first (HS-024),
+  # artifact's own linking, not about a machine's choice: a Docker run checks the host first,
   # and this sandbox has no daemon, no `git` and no `df` — which is the point of the empty root.
   bwrap "${prefix[@]}" --bind "$dir/data" /data --share-net "${inner[@]}" \
     serve --backend stub --port 0 --data-dir /data >"$dir/serve.log" 2>"$dir/serve.err" &
@@ -245,16 +245,16 @@ for target in "${targets[@]}"; do
     fail "$bin carries the placeholder page: it was built without web/dist (run scripts/build.sh)"
   fi
 
-  # Both Dockerfiles are `include_str!`ed into the binary (HS-048), because a deploy runs on a machine that has
+  # Both Dockerfiles are `include_str!`ed into the binary, because a deploy runs on a machine that has
   # the artifact and nothing else. Each file's marker comment is the evidence: read from the source, for the
   # placeholder marker's reason — a reworded marker must fail here loudly rather than leave this grep looking for
   # a string no file carries any more.
   for dockerfile in proxy agent; do
-    marker="$(sed -n "s/.*# holosmith: embedded \\(.*\\) image (HS-048).*/\\1/p" \
+    marker="$(sed -n "s/.*# holosmith: embedded \\(.*\\) image.*/\\1/p" \
       "crates/holosmith/images/$dockerfile.Dockerfile")"
     [ "$marker" = "$dockerfile" ] ||
       fail "cannot read the $dockerfile marker from crates/holosmith/images/$dockerfile.Dockerfile"
-    grep -q "holosmith: embedded $marker image (HS-048)" "$bin_abs" ||
+    grep -q "holosmith: embedded $marker image" "$bin_abs" ||
       fail "$bin does not carry the $marker Dockerfile: server deploy's step 3 would have no recipe to build"
   done
 

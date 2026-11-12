@@ -1,6 +1,6 @@
 # The build runs in a pinned builder container, and the host only orchestrates Docker
 
-HS-076 is spec item 10's first step — "Build in a pinned builder container, not on the host, so `build.rs` and proc
+This is spec item 10's first step — "Build in a pinned builder container, not on the host, so `build.rs` and proc
 macros never run host-side. Review the diff first (item 12); that review is the real gate" — and the three **Build and
 release** bullets it touches. Its subject is one sentence long and its implementation is six decisions, because
 "never on the host" is a claim about *where a process runs*, and this repository has three processes that could run
@@ -16,7 +16,7 @@ judge what they do. Item 12's diff review is the gate, and it happens before any
 build, and where it lives"):
 
 - **`scripts/build.sh --container`** was refused because a script is not the product. The operator, and an agent in a
-  worktree, run the binary; HS-078's `upgrade <binary>` is a subcommand of the same program, and a build path that
+  worktree, run the binary; the `upgrade <binary>` is a subcommand of the same program, and a build path that
   only exists inside a checkout is a second entry point for the pipeline item 10 describes as one.
 - **Both** — the script delegating to the binary — was refused as two spellings of one behaviour in one story, and
   because the script's own path is still needed (D6).
@@ -30,7 +30,7 @@ artifact; `holosmith build` is the release's.
 ## D2 — the builder image is ours, and it is pinned twice
 
 `crates/holosmith/images/builder.Dockerfile`, `include_str!`ed like the two product recipes (ADR-0057) and built
-locally on first use from a ustar archive on stdin — the same archive argument as HS-048: the daemon may not share this
+locally on first use from a ustar archive on stdin — the same archive argument as: the daemon may not share this
 process's filesystem, so a *path* is not a build context.
 
 Why not a published image pinned by digest:
@@ -90,7 +90,7 @@ exist keep theirs; what a `pins/builder.txt` would add is a second place to read
 ## D4 — the artifact is checked by the host, and placed where `upgrade` will read it
 
 `--out DIR`, default `releases/<tag>` for the tag the mounted tree has — item 10's `releases/<tag>/` layout, whose
-`current` symlink is HS-080's. Two files: `holosmith` and `holosmith.sha256` in `sha256sum -c`'s format.
+`current` symlink is that story's. Two files: `holosmith` and `holosmith.sha256` in `sha256sum -c`'s format.
 
 The container writes `DIR/.holosmith.new`; the host then
 
@@ -107,14 +107,14 @@ The container writes `DIR/.holosmith.new`; the host then
 
 ## D5 — a failure prints the container's tail, and the exit code is 1
 
-The container's output goes to a **file**, never a pipe (HS-048's 64 KiB deadlock), and a failed build prints the last
+The container's output goes to a **file**, never a pipe, and a failed build prints the last
 40 lines of it to stderr after one sentence naming the target and the image, then exits 1. Forty because a build's
 last lines are the compiler saying what is wrong and `exit.rs`'s five are a container's dying words. A bound that
 expires is its own sentence — an image build that could not reach the network, a build that did not finish.
 
 `Docker::build_bounded` was generalised to `run_captured(arguments, input, bound)` for this: one primitive for "a
 docker child whose output is a file and whose deadline is real", used by the two image builds and now by the container
-run. Its signature and behaviour for HS-048's callers are unchanged.
+run. Its signature and behaviour for the callers are unchanged.
 
 ## D6 — `scripts/verify.sh` keeps building on the host, and that is not a hole
 
@@ -128,7 +128,7 @@ What keeps that from being a silence is `case_build`, and its shape is the decis
   *real* static artifact into the `--out` mount, and `cargo`/`rustc` stand-ins that record any call and fail. It
   measures the recipe in the `--build-arg`, the two mounts, the tag the container is handed, the placement, the
   digest, the idempotent re-run, the refusal of a different binary, and the refusal of the wrong machine's artifact —
-  and it **fails if the verb is deleted**, which is the rule a `SKIP` may not break (RESUME §6).
+  and it **fails if the verb is deleted**, which is the rule a `SKIP` may not break (the gate rule).
 - **the real arm runs when the machine can**: a daemon and the builder image already built. It asserts what only a
   real build can (`file` says statically linked, `readelf -d` finds no dynamic section, the digest is the file's).
   Without them it prints one note rather than a `SKIP`, because a `SKIP` here would fire exactly when the feature is
@@ -148,4 +148,4 @@ No second architecture beyond the two the image carries (the cross toolchains ar
 aarch64 artifact was not built in the container in this story's demo), no offline machine (a cold image needs the
 network for its bases, its toolchains and its registries), and the host's toolchains were *unavailable to the command*
 in the demo, not uninstalled. Signing and provenance beyond a `.sha256` are out of scope, and `upgrade`/`rollback`
-(HS-078/079) and the release layout's `current` symlink (HS-080) are the next two stories.
+(those stories) and the release layout's `current` symlink are the next two stories.

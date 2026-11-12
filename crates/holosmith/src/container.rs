@@ -1,10 +1,10 @@
-//! The session's container: the four mounts and the hardening flags, in one value (HS-027).
+//! The session's container: the four mounts and the hardening flags, in one value.
 //!
 //! Spec item 1 names the mounts and says why they are shaped the way they are, and V1 is the check that
 //! they actually behave that way. This module is that list as data — a [`Mounts`] value built from the
 //! machine's projects root and the session's id — plus the [`SessionContainer`] that turns it into a
-//! `docker run` argument vector. Nothing here talks to the daemon: HS-028's container step runs it,
-//! HS-036 adds the session's network, and [`crate::preflight`] already said whether the daemon answers.
+//! `docker run` argument vector. Nothing here talks to the daemon: the container step runs it,
+//!  adds the session's network, and [`crate::preflight`] already said whether the daemon answers.
 //!
 //! ```text
 //! -v <worktree>:/work
@@ -48,7 +48,7 @@ pub const WORKDIR: &str = "/work";
 /// The variable that tells anything inside the container which session it is (spec item 1).
 pub const SESSION_ID_ENV: &str = "HS_SESSION_ID";
 
-/// The variable that tells a session's container which port the preview listener forwards to (HS-041).
+/// The variable that tells a session's container which port the preview listener forwards to.
 ///
 /// The machine pins the number (`preview_upstream_port`) and the listener dials it, so an agent that picked a
 /// port of its own would build something nobody can open. One `--env` closes that: the number the config names
@@ -61,11 +61,11 @@ pub const NAME_PREFIX: &str = "s_";
 /// The prefix of every session network: `agents_<id>` (spec item 2).
 pub const NETWORK_PREFIX: &str = "agents_";
 
-/// The egress proxy's container (HS-037, spec item 2).
+/// The egress proxy's container (spec item 2).
 ///
 /// One per machine, not one per session: it is attached to the machine's `egress` network and, per session,
 /// to that session's own network ([`PROXY_ALIAS`] is how a container finds it). The name is item 10's
-/// (`hs_egress`) because `uninstall` and `doctor` (HS-045) both have to find it by name.
+/// (`hs_egress`) because `uninstall` and `doctor` both have to find it by name.
 pub const PROXY_NAME: &str = "hs_egress";
 
 /// The name a session's container resolves the egress proxy by (spec item 2's `http://egress-proxy:3128`).
@@ -79,7 +79,7 @@ pub const PROXY_ALIAS: &str = "egress-proxy";
 /// The variable a session's container finds the proxy in, and the only route out it has (spec item 2).
 pub const PROXY_ENV: &str = "HTTPS_PROXY";
 
-/// How long starting the proxy container may take before the boot gives up on it (HS-037).
+/// How long starting the proxy container may take before the boot gives up on it.
 ///
 /// A **bound on the startup path**, for the reason [`crate::selftest::PROBE_TIMEOUT`] is one and
 /// [`crate::docker`]'s bounded calls exist: a `docker run` that has to pull the image, or a daemon that accepts
@@ -93,12 +93,12 @@ pub const PROXY_START_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// The session id is the proxy's **username**, which is how a request is attributed to a session (item 2), and
 /// the password is empty — nothing checks it, and a secret in an environment variable is exactly what item 2
 /// forbids. `NO_PROXY=key-proxy` ([`crate::agent::ENVIRONMENT`]) keeps a provider call off this route: the key
-/// proxy is what makes a model work (HS-039), not this one.
+/// proxy is what makes a model work, not this one.
 pub fn proxy_url(session_id: &str) -> String {
     format!("http://{session_id}@{PROXY_ALIAS}:{}", crate::egress::PORT)
 }
 
-/// A session's private network: `agents_<id>`, with this run's network prefix in front of it (HS-077).
+/// A session's private network: `agents_<id>`, with this run's network prefix in front of it.
 ///
 /// The prefix is a value rather than a constant because the **smoke run** (item 10 step 2) must not touch the
 /// machine's own names: a machine with `network_prefix = "smoke_"` names it `smoke_agents_<id>`. It is passed in
@@ -109,7 +109,7 @@ pub fn network_name(prefix: &str, session_id: &str) -> String {
     format!("{prefix}{NETWORK_PREFIX}{session_id}")
 }
 
-/// A session's container: `s_<id>`, with this run's container prefix in front of it (HS-077).
+/// A session's container: `s_<id>`, with this run's container prefix in front of it.
 ///
 /// The twin of [`network_name`] and named for the same reason: [`crate::container::NAME_PREFIX`] alone is the
 /// build's half of the name, and a caller that spells the other half itself is a caller that can drift from the
@@ -118,7 +118,7 @@ pub fn container_name(prefix: &str, session_id: &str) -> String {
     format!("{prefix}{NAME_PREFIX}{session_id}")
 }
 
-/// The prefix a run's container names carry, for the **listing and stripping** a sweep does (HS-077).
+/// The prefix a run's container names carry, for the **listing and stripping** a sweep does.
 ///
 /// [`container_name`] composes one name; the reconcile does the other direction, and the two must be the same string:
 /// Docker's `name=` filter is a **substring** match, so the listing is wider than the rule (`s_` also answers
@@ -200,7 +200,7 @@ impl Mount {
 /// them.
 ///
 /// A struct rather than a `Vec<Mount>` so a caller cannot drop one: all four git mounts are the isolation,
-/// and three of them without the fourth is a weaker thing than the spec describes. The fifth is HS-031's:
+/// and three of them without the fourth is a weaker thing than the spec describes. The fifth is that story's:
 /// pi's own directory, which is not an isolation rule but the place pi keeps its configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mounts {
@@ -373,7 +373,7 @@ impl Default for Limits {
 pub struct ContainerSettings {
     /// The machine's projects root: `<projects>/.worktrees/<id>` and `<projects>/<project>` hang off it.
     pub projects_root: PathBuf,
-    /// The machine's data root: `<data>/sessions/<id>/pi-home` is the agent's directory (HS-031), which is
+    /// The machine's data root: `<data>/sessions/<id>/pi-home` is the agent's directory, which is
     /// a mount source, and `<data>/sessions/<id>/session.log` is where the launch line goes.
     ///
     /// It has to be a path the **daemon** can see, because that directory is bind-mounted into the
@@ -385,12 +385,12 @@ pub struct ContainerSettings {
     /// The daemon's address, as `docker -H` takes it; `None` is the CLI's own default.
     pub docker_host: Option<String>,
     pub limits: Limits,
-    /// The prefix in front of every session container name (`container_prefix`, HS-077). Empty on a normal machine.
+    /// The prefix in front of every session container name (`container_prefix`). Empty on a normal machine.
     pub container_prefix: String,
-    /// The prefix in front of every session network name (`network_prefix`, HS-077). Empty on a normal machine.
+    /// The prefix in front of every session network name (`network_prefix`). Empty on a normal machine.
     pub network_prefix: String,
     /// The port a session's dev server is expected to listen on inside its container, from
-    /// `preview_upstream_port` (HS-041): the preview listener forwards `/<host>/<id>/…` to it, so the container
+    /// `preview_upstream_port`: the preview listener forwards `/<host>/<id>/…` to it, so the container
     /// is told it as `HS_PREVIEW_PORT` rather than left to guess a number the listener would not forward to.
     pub preview_port: u16,
 }
@@ -442,7 +442,7 @@ impl ContainerSettings {
 
 /// One session's container: the image it runs, the name it takes, and how it is mounted.
 ///
-/// HS-028 added the lifecycle flags (`--rm`, `-i`, `--init`), the network and the limits; HS-031 turns the
+///  added the lifecycle flags (`--rm`, `-i`, `--init`), the network and the limits; turns the
 /// container into the agent, so the run vector also carries pi's five environment variables and the
 /// command itself. This story's half is one builder on purpose: a second place that spells `--cap-drop ALL`
 /// or the launch command would be a place to forget it.
@@ -450,21 +450,21 @@ impl ContainerSettings {
 pub struct SessionContainer {
     /// The image the container runs: `agent_image` (spec item 10 §3 builds it).
     pub image: String,
-    /// `s_<id>`: how the container is named, and how HS-029 finds a leftover one.
+    /// `s_<id>`: how the container is named, and how finds a leftover one.
     pub name: String,
     /// The session id, as `HS_SESSION_ID` carries it and as the name carries it.
     pub session_id: String,
-    /// `agents_<id>`: the private network this container joins, and the only one it joins (HS-028).
+    /// `agents_<id>`: the private network this container joins, and the only one it joins.
     pub network: String,
-    /// `<data>/sessions/<id>/pi-home`: pi's own directory, as `PI_CODING_AGENT_DIR` carries it (HS-031).
+    /// `<data>/sessions/<id>/pi-home`: pi's own directory, as `PI_CODING_AGENT_DIR` carries it.
     pub home: PathBuf,
-    /// The model the row chose, as `--model` carries it (HS-031).
+    /// The model the row chose, as `--model` carries it.
     pub model: String,
-    /// The thinking level the row chose, as `--thinking` carries it (HS-031).
+    /// The thinking level the row chose, as `--thinking` carries it.
     pub thinking: String,
     pub mounts: Mounts,
     pub limits: Limits,
-    /// The port the preview listener forwards to inside this container (HS-041), carried as
+    /// The port the preview listener forwards to inside this container, carried as
     /// [`PREVIEW_PORT_ENV`].
     pub preview_port: u16,
 }
@@ -498,10 +498,10 @@ impl SessionContainer {
     /// Everything up to the image is a flag, so the image is the first non-flag argument and whatever runs
     /// inside the container follows it. The vector is **attached** (`-i`, no `--detach`): the server holds
     /// this process's stdin and stdout, which is pi's RPC channel, and its exit code, which is what
-    /// [`crate::exit`] classifies (HS-031, ADR-0036's "until HS-031").
+    /// [`crate::exit`] classifies (ADR-0036's "until ").
     ///
     /// `--user` is deliberately absent. The image's own default user is what runs the agent, and the
-    /// deploy step (HS-047) is what guarantees that user is the one that owns the host's files. Naming a
+    /// deploy step is what guarantees that user is the one that owns the host's files. Naming a
     /// uid here would be a second, guessed answer to a question the image already answers — so the
     /// question is *asserted* instead: `id -u` in the container is not `0` (the gate's case checks it).
     pub fn run_args(&self) -> Vec<String> {
@@ -571,7 +571,7 @@ impl SessionContainer {
     }
 }
 
-/// The egress proxy's container: the machine's one route out, as a `docker run` vector (HS-037, spec item 2).
+/// The egress proxy's container: the machine's one route out, as a `docker run` vector (spec item 2).
 ///
 /// Three things about it are load-bearing and easy to lose:
 ///
@@ -650,7 +650,7 @@ impl EgressProxy {
     }
 }
 
-/// The machine's key proxy container (HS-039, spec item 2): one `hs_key`, on `egress`, joined to every
+/// The machine's key proxy container (spec item 2): one `hs_key`, on `egress`, joined to every
 /// session network under the alias `key-proxy`.
 ///
 /// It is the same shape as [`EgressProxy`] with two differences that are the story:
@@ -692,7 +692,7 @@ impl KeyProxy {
     /// because the file must never be observable half-written; a *file* bind mount pins the inode, so a
     /// container started before the first create would go on reading the file as it was at mount time. Every
     /// session's dummy is written by that rename, so a file mount makes the proxy answer `bad-key` for every
-    /// session that was created after it started — which is all of them. HS-040's V3 run measured exactly that
+    /// session that was created after it started — which is all of them. the V3 run measured exactly that
     /// (`session=- … status=bad-key`); a directory mount resolves `keys.toml` at read time, so a rename inside
     /// it is visible.
     pub fn mount(&self) -> PathBuf {
@@ -727,7 +727,7 @@ impl KeyProxy {
         // `serve` (or `server deploy`) runs as, and `--cap-drop ALL` takes `DAC_OVERRIDE` with everything else: a
         // container running as uid 0 without that capability cannot read a file owned by the machine's user. It
         // then fails to prepare the store it can see, exits 1, and `--restart unless-stopped` loops it — which is
-        // exactly what HS-048's first gate run measured, because the image the proxies ran *before* this story
+        // exactly what the first gate run measured, because the image the proxies ran *before* this story
         // happened to carry uid 1000 as its user. Taking the owner from the file makes the identity a fact
         // rather than an accident of the base image, and it is the same rule a session's container follows
         // (ADR-0035). No owner (a path that is not there yet) means no flag; `start_key` refuses that case before
@@ -798,7 +798,7 @@ mod tests {
         SessionContainer::of(&settings(), &session("holosmith", "0123456789abcdef"))
     }
 
-    /// HS-077's composition, in one place: the empty prefix is today's name byte for byte, and `smoke_` is the smoke
+    /// the composition, in one place: the empty prefix is today's name byte for byte, and `smoke_` is the smoke
     /// run's. Six names, because a prefix that reached only some of them is exactly the bug the story cannot afford.
     #[test]
     fn a_prefix_is_composed_into_every_name_the_build_derives() {
@@ -889,7 +889,7 @@ mod tests {
         );
     }
 
-    /// D2 (spec item 14, HS-063): two sessions of one project share no host path except the project's own
+    /// D2 (spec item 14): two sessions of one project share no host path except the project's own
     /// `.git` tree, so neither can see the other's build and package caches.
     ///
     /// The caches D2 names are *inside* the paths a session mounts and nowhere else: `target/` and
@@ -1057,7 +1057,7 @@ mod tests {
         );
     }
 
-    /// The container is attached and runs pi (HS-031): no `--detach`, one `-i`, and the agent's command.
+    /// The container is attached and runs pi: no `--detach`, one `-i`, and the agent's command.
     #[test]
     fn the_container_is_attached_and_runs_pi_in_rpc_mode() {
         let container = container();
@@ -1093,7 +1093,7 @@ mod tests {
     }
 
     /// The launch variables of spec item 2 — the agent's directory and the four switches — and the one port
-    /// HS-041 adds: what the preview listener will forward to, so the container is told rather than left to guess.
+    ///  adds: what the preview listener will forward to, so the container is told rather than left to guess.
     #[test]
     fn the_launch_environment_is_the_agent_directory_four_switches_and_the_preview_port() {
         let container = container();
@@ -1115,7 +1115,7 @@ mod tests {
                 "PI_OFFLINE=1".to_string(),
                 "PI_SKIP_VERSION_CHECK=1".to_string(),
                 "PI_TELEMETRY=0".to_string(),
-                // The only route out, with this session's id as the proxy's username (HS-037, item 2).
+                // The only route out, with this session's id as the proxy's username (item 2).
                 "HTTPS_PROXY=http://0123456789abcdef@egress-proxy:3128".to_string(),
             ]
         );
@@ -1258,7 +1258,7 @@ mod tests {
         );
         // The file itself must not be a mount source: `Store` writes it by rename, and a file bind mount pins
         // the inode, so the proxy would keep reading the store as it was when the container started — every
-        // session's dummy would be unknown (HS-040's V3 run measured `session=- … status=bad-key`).
+        // session's dummy would be unknown.
         assert!(
             !arguments.iter().any(|argument| argument
                 == "/var/lib/holosmith/secrets/keys.toml:/var/lib/holosmith/secrets/keys.toml:ro"),
@@ -1291,7 +1291,7 @@ mod tests {
         // The store is a 0700 directory and a 0600 file belonging to the user `serve` runs as, and the container
         // is `--cap-drop ALL`, which takes root's `DAC_OVERRIDE` with it. A container running as uid 0 therefore
         // cannot read the machine's own key file: it fails to prepare a store it can see, exits 1, and
-        // `--restart unless-stopped` loops it — measured at HS-048's first gate run, where the old proxy image
+        // `--restart unless-stopped` loops it — measured at the first gate run, where the old proxy image
         // only worked because its base's user happened to be uid 1000. Taking the owner from the file makes the
         // identity explicit, and this is the test that keeps it from decaying back into "whatever the base says".
         use std::os::unix::fs::MetadataExt as _;
@@ -1383,7 +1383,7 @@ mod tests {
     #[test]
     fn a_source_of_the_wrong_kind_is_named_as_the_wrong_kind() {
         // The failure this catches is a repository whose `.git` is a *file* (a submodule or a linked
-        // worktree), which HS-026 refuses at the create; the mount check is the second line of defence
+        // worktree), which refuses at the create; the mount check is the second line of defence
         // and says which source it was rather than "not there".
         let dir = crate::container::tests::scratch("wrong-kind");
         let projects = dir.join("projects");

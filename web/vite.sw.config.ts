@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 
-// The service worker, on its own (HS-067, ADR-0072 D4).
+// The service worker, on its own (ADR-0072 D4).
 //
 // A second build because a worker needs a **fixed** URL — `/sw.js`, at scope `/` — and the app's build hashes
 // every entry it emits. Library mode is Vite's supported way to say "one file, this name": `fileName` is the

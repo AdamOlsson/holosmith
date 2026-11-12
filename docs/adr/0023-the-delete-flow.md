@@ -1,6 +1,6 @@
 # The delete flow: what the request does, what the task does, and what survives
 
-HS-019 is the first story that destroys something, and the spec's one sentence about it (item 9's
+This is the first story that destroys something, and the spec's one sentence about it (item 9's
 "Delete flow (returns 202, state `deleting`): abort if running; snapshot; `docker stop`; `git worktree
 remove --force`; remove the session directory and network; delete the row. If the snapshot fails,
 delete returns 409 `unsaved_work` unless `?force=true`") contains a tension the code has to resolve:
@@ -44,14 +44,14 @@ in `error` answers immediately.
 A rung-2 stop also means the container is gone, so the snapshot that follows may legitimately fail —
 a Docker backend cannot `docker exec` into a dead container. That is the `409 unsaved_work` an
 operator then forces past, and it is the truth rather than a bug: the work could not be saved. The
-stub backend records calls instead of running them, so nothing in phase 1 reaches that path; HS-024's
+stub backend records calls instead of running them, so nothing in phase 1 reaches that path; that story's
 real container will.
 
 ## `SessionBackend::delete` is the whole of the backend's teardown
 
 The spec names four host-side steps (`docker stop`, `git worktree remove --force`, the session
 directory, the network). They are one trait call, `delete`, because the trait already says what they
-are — "Remove everything the session owns" — and because splitting them would give HS-024 five call
+are — "Remove everything the session owns" — and because splitting them would give five call
 sites to keep in one order instead of one implementation.
 
 A backend that **cannot** delete is a special case worth its own branch: `BackendError::Unsupported`
@@ -93,7 +93,7 @@ would be dead weight that only a future vacuum removes. So `sessions::repository
 log and the row in **one** transaction — the log first, through the events repository's own statement,
 so no `events` SQL lives in the sessions repository.
 
-That has a consequence in the writer, which is where this story had to change an HS-009 invariant. An
+That has a consequence in the writer, which is where this story had to change an invariant. An
 event is committed by bumping its session's `last_seq`, so an event whose session has gone has no seq
 to carry. Until now `insert_batch` refused the whole batch with `UnknownSession`. That would have been
 wrong twice over: the `deleting` transition is *itself* a queued event, and the removal happens
@@ -113,22 +113,22 @@ Two smaller consequences, both about code that outlives the row:
   would build four steps' worth of resources for a session that is going away and then log an `error!`
   for the `pi_ready` the table refuses. It now looks at the row at each step boundary and returns
   quietly; nothing is undone, because the delete's `backend.delete` is what removes the resources.
-  A step already in flight when the row moved is still a window, and closing it is HS-024's: a real
+  A step already in flight when the row moved is still a window, and closing it is that story's: a real
   `docker run` racing a `docker rm` is a question about the Docker backend, not about this flow.
-- **Revoking the session's dummy key is a named no-op.** No session has a key until HS-039 issues
+- **Revoking the session's dummy key is a named no-op.** No session has a key until issues
   one, and deleting the call site would leave "key revoked on delete" as a promise with nowhere to
-  land. `deleter::revoke_key` is where HS-039 writes its code.
+  land. `deleter::revoke_key` is where writes its code.
 
 ## Two deferrals, recorded so they are not rediscovered
 
 **No UI.** The acceptance is API-only, and a destructive affordance needs a confirmation step and a
-"the snapshot failed — delete anyway?" path, which is the sheet the hub owns (HS-057+). A page that
+"the snapshot failed — delete anyway?" path, which is the sheet the hub owns. A page that
 fired this request from a row would be the mis-tap the story's own "as/so that" is about.
 
 **Nothing verifies that the work is recoverable.** A snapshot writes `refs/holosmith/wip/<id>`, and
 spec item 9 says the branch and the ref survive the delete — but this flow removes the session's
 directory, and with it the worktree the branch is checked out in. Recovery is `git branch rescue
-refs/holosmith/wip/<id>` in the shared repository, which HS-024's Docker teardown must not break.
+refs/holosmith/wip/<id>` in the shared repository, which the Docker teardown must not break.
 
 ## Consequences
 
@@ -141,10 +141,10 @@ refs/holosmith/wip/<id>` in the shared repository, which HS-024's Docker teardow
   repeat `DELETE` on a `deleting` row re-running the removal without a second snapshot; `404` after the
   removal and for an unknown id; `403 bad_client` without the client header; and the route recorded
   `Mutating`.
-- `Ladder::end_turn` is the shape HS-022's turn timeout and HS-023's budget climb, and
+- `Ladder::end_turn` is the shape the turn timeout and the budget climb, and
   `the_ladder_ends_a_turn_without_bringing_the_session_back` pins both halves of its contract.
 - `scripts/verify.sh` grows three cases — the round trip, the unknown id and the missing client header
   — for 35 cases; it also grows `wait_for_gone`, because a 202 is a promise and the row is the proof.
 - The delete can leave a `stopped` row behind — a running turn it had to stop (reason `deleted`) and
-then would not remove — but a delete that succeeds leaves no row at all, and HS-020's eviction is
+then would not remove — but a delete that succeeds leaves no row at all, and the eviction is
 still the first producer of a stop the operator did not ask for.

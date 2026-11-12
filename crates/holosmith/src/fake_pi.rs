@@ -1,4 +1,4 @@
-//! The fake pi: a container's `pi` that replays a recorded turn (HS-077, spec item 10 step 2).
+//! The fake pi: a container's `pi` that replays a recorded turn (spec item 10 step 2).
 //!
 //! Item 10's second step must run a **successful** turn against the real daemon with no provider key on the machine,
 //! and the build has no such turn in it: a session's container is on an `--internal` network with a dummy key, so pi
@@ -7,7 +7,7 @@
 //! this module: a program that speaks pi's side of the RPC protocol (`docs/rpc.md`) into the launch's two pipes and
 //! prints a turn that was recorded once, from a real one.
 //!
-//! **The recording is HS-032's, byte for byte.** `fixtures/smoke-turn.jsonl` is one header line and then the 69
+//! **The recording is that story's, byte for byte.** `fixtures/smoke-turn.jsonl` is one header line and then the 69
 //! records of `tests/fixtures/pi-turn-tool.jsonl`: `agent_start`, deltas, one tool round trip, non-zero usage and a
 //! closing `agent_settled`. The header carries the fixture's own version and **the schema it was recorded against**,
 //! and a test compares that number with [`crate::schema::SCHEMA_VERSION`], so a schema change that arrives without a
@@ -38,7 +38,7 @@ use std::io::{self, BufRead, Write};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-/// The recording: one header line, then HS-032's tool turn verbatim.
+/// The recording: one header line, then the tool turn verbatim.
 pub const FIXTURE: &str = include_str!("../fixtures/smoke-turn.jsonl");
 
 /// The fixture format's own version — what a line of the file means, not what the database is.
@@ -60,7 +60,7 @@ pub struct Header {
     pub schema: u32,
     /// Which story recorded it. Free prose: it is for a reader, not for a machine.
     pub recorded: String,
-    /// Which of HS-032's turns it is (`text`, `thinking`, `tool`, `image`, `extension-ui`).
+    /// Which of the turns it is (`text`, `thinking`, `tool`, `image`, `extension-ui`).
     pub turn: String,
 }
 
@@ -264,7 +264,7 @@ mod tests {
             header.schema,
             crate::schema::SCHEMA_VERSION
         );
-        assert_eq!(header.recorded, "HS-032");
+        assert_eq!(header.recorded, "real pi turn");
         assert_eq!(header.turn, "tool");
         // An older recording replays with one note; a newer one is refused with both numbers in the sentence.
         let older = Header {
@@ -285,9 +285,9 @@ mod tests {
     }
 
     /// The claim "recorded from a real turn" is only true while the records are the recording's: this compares the
-    /// committed fixture's body with HS-032's own file, byte for byte. A hand edit fails here, naming both files.
+    /// committed fixture's body with its own file, byte for byte. A hand edit fails here, naming both files.
     #[test]
-    fn the_body_is_hs_032_s_recording_verbatim() {
+    fn the_body_is_the_recording_verbatim() {
         let recorded = include_str!("../tests/fixtures/pi-turn-tool.jsonl");
         let body: Vec<&str> = FIXTURE.lines().skip(1).collect();
         let original: Vec<&str> = recorded.lines().collect();
@@ -303,7 +303,7 @@ mod tests {
             assert_eq!(
                 mine,
                 theirs,
-                "record {} of fixtures/smoke-turn.jsonl differs from HS-032's tests/fixtures/pi-turn-tool.jsonl",
+                "record {} of fixtures/smoke-turn.jsonl differs from tests/fixtures/pi-turn-tool.jsonl",
                 index + 1
             );
         }

@@ -1,4 +1,4 @@
-//! The publish: a session's branch pushed to a remote this machine is allowed to push to (HS-057, spec item
+//! The publish: a session's branch pushed to a remote this machine is allowed to push to (, spec item
 //! 12's publish paragraph).
 //!
 //! Item 12's paragraph, in full, is what this module answers:
@@ -50,7 +50,7 @@
 //!
 //! What this module does not do: no `confirm` (the **route's** field, ADR-0065 D4's shape), no config read
 //! (the handler passes the two lists), no session row (ADR-0063's "a row is not consulted"), no
-//! `touches_ci` (the changes view's flag, and the warning HS-058's), and no fetch: a publish pushes what is
+//! `touches_ci` (the changes view's flag, and the warning 's), and no fetch: a publish pushes what is
 //! committed, and a remote that has moved on is a refusal the operator resolves by fetching.
 
 use std::path::Path;

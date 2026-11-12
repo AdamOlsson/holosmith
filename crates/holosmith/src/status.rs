@@ -1,4 +1,4 @@
-//! `holosmith status`: the machine, as one line per fact (HS-050, spec's Commands table).
+//! `holosmith status`: the machine, as one line per fact (spec's Commands table).
 //!
 //! The shape is `holosmith version`'s — `key value`, one fact per line — and every value has `doctor`'s three
 //! arms (ADR-0054): what was **measured**, what could not be measured (`unknown: <sentence>`) and what failed to
@@ -18,7 +18,7 @@
 //! | `uptime` | `GET /api/health` ([`crate::http::health::ask`]): [`Runtime::uptime_s`] is the one owner of "how long has this process been up" |
 //! | `sessions <status>` | `sessions` rows, through a **read-only** [`crate::db::Reader`] |
 //! | `proxy <name>` | `preflight::daemon` first (did it answer?), then [`crate::proxies::running`] |
-//! | `machines <n>`, `machine <name>` | the `hosts` table, through the same read-only [`crate::db::Reader`] (HS-072) |
+//! | `machines <n>`, `machine <name>` | the `hosts` table, through the same read-only [`crate::db::Reader`] |
 //!
 //! The proxy pair is the one line family whose first question is *whether it could be asked at all*: `Docker::running`
 //! folds every daemon error into `false`, so a `status` that asked it alone would print `not running` for a machine
@@ -76,7 +76,7 @@ use crate::version::VersionInfo;
 
 /// The sentence the "other machines" line carried until there was a registry to read.
 ///
-/// **Deleted by HS-072**, with its test: the registry exists, `serve` merges and re-probes it at every boot, and
+/// **Deleted**, with its test: the registry exists, `serve` merges and re-probes it at every boot, and
 /// `hub host` writes it — so "no hub has registered a machine with this one" was a sentence about a build that no
 /// longer exists. An empty table is `machines 0`, which is a measurement; the module doc's table says where the fact
 /// comes from now.
@@ -196,7 +196,7 @@ fn proxies(config: &Config, machine: &dyn proxies::Containers) -> Vec<Line> {
         .collect()
 }
 
-/// The registry: the row count, then one line per machine (HS-072, spec's Commands table).
+/// The registry: the row count, then one line per machine (spec's Commands table).
 ///
 /// This is what the acceptance's last bullet asks for — "`status` on a hub reports the health of every registered
 /// machine" — and the answer is the table, because the table **is** the last health of every registered machine.
@@ -466,7 +466,7 @@ mod tests {
 
     #[test]
     fn every_registered_machine_is_one_line_of_its_own_last_probe() {
-        // HS-072's acceptance: `status` on a hub reports the health of every registered machine, and the row **is**
+        // the acceptance: `status` on a hub reports the health of every registered machine, and the row **is**
         // that health — the last probe's answer, taken at the boot (ADR-0073, ADR-0074 D5). Backdating one row is
         // what makes `checked <n>s ago` a measurement rather than a word: the clock is the machine's, so a row a
         // minute old cannot read as `0s ago`.

@@ -1,4 +1,4 @@
-//! `holosmith container fake-pi`, measured as a process (HS-077, spec item 10 step 2).
+//! `holosmith container fake-pi`, measured as a process (spec item 10 step 2).
 //!
 //! The smoke run needs a container's `pi` that replays a recorded turn, and the only honest place to measure that is
 //! a real process over two real pipes: [`holosmith::agent::launch`] is the *shipped* reader — it splits records on LF

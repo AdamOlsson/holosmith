@@ -1,6 +1,6 @@
 # History truncation and pagination
 
-HS-061 is spec item 15's third sentence: "a new device opening a session must not hang the phone". The log
+This is spec item 15's third sentence: "a new device opening a session must not hang the phone". The log
 is append-only in spirit and unbounded in practice — a 200k-event session is what a long turn looks like —
 and until this story a client opening the stream with no `Last-Event-ID` was replayed **all** of it. The
 story decides where a replay starts, what it says about what it skipped, and how a client gets the rest.

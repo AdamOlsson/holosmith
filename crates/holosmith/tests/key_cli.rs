@@ -1,4 +1,4 @@
-//! `holosmith key` and the files it owns (HS-039, spec item 2).
+//! `holosmith key` and the files it owns (spec item 2).
 //!
 //! The CLI is driven as the operator runs it, so the stdin-only rule, the mode of `keys.toml` and the fact that
 //! `key list` never prints a value are real assertions rather than a unit test of a helper.

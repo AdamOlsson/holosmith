@@ -1,18 +1,18 @@
 # The list object, one stream per visible session, and where the form's default comes from
 
-HS-003 shipped an app shell that renders the health payload and nothing else. HS-013 is the story
+ An earlier change shipped an app shell that renders the health payload and nothing else. This is the story
 that makes the product usable at all: the operator has to see the sessions the machine holds and
 start one from a phone. The spec settles what the screen shows (item 2's Internet-access checkbox,
 item 8's states, item 15's retention) but not the list's body, not where the checkbox's default
 comes from, not how many streams a page opens, and not what a page does with a retry. Each of those
-is cheap now and hard to change once HS-014 reuses it, so this records the choices.
+is cheap now and hard to change once reuses it, so this records the choices.
 
 ## The list is one object, and the machine setting rides on it
 
 `GET /api/sessions` answers `{"sessions":[…],"network_default":false}`.
 
 An object rather than a bare array, for two reasons. A bare array cannot grow a field without
-breaking every client, and HS-061 adds paging metadata to this answer. And `{"sessions":…}` cannot
+breaking every client, and adds paging metadata to this answer. And `{"sessions":…}` cannot
 be mistaken for ADR-0008's `{"code","message"}`: a client that reads `response.json()` can tell
 which of the two it got without looking at the status first.
 
@@ -23,7 +23,7 @@ that can drift from the columns, and the create's answer is already the same row
 client therefore decodes one thing whether a session arrived from the list or from a 202.
 
 `network_default` rides here rather than on `/api/health` because the health payload is pinned at
-four keys (ADR-0009's banner rule and HS-003's payload test; **amended by ADR-0051**, which makes it five by adding
+four keys (ADR-0009's banner rule and the payload test; **amended by ADR-0051**, which makes it five by adding
 `preview_origin`, the one setting a screen needs on a phone and the only vehicle that costs no new request) and because the screen needs both
 answers to draw itself. One round trip, no new endpoint. The alternative — a `GET /api/config` that
 the browser could read a single boolean out of — hands the browser the machine's whole configuration
@@ -32,7 +32,7 @@ one setting on the screen, that argument belongs in that story's ADR, not here.
 
 The order is the repository's `list(None)` order, `last_active_at DESC, id ASC`. Neither the
 handler nor the page sorts: two sorts are one that can disagree with a future paging cursor. The
-repository's state filter has no caller yet and nothing here invents one; HS-061 owns paging, and
+repository's state filter has no caller yet and nothing here invents one; a later change owns paging, and
 with it any filter or truncation this answer later carries.
 
 The handler takes the database lock in one synchronous block, calls `list(None)`, and maps a failure
@@ -72,9 +72,9 @@ Two frame shapes, one handler:
 
 Exactly one source per live row, and none for a dead one: the same function that opens a row's
 stream closes it, and it runs both when a row is drawn and after every frame, so a session that
-returns to a live state (HS-018's resume) gets a source again. `beforeunload` closes all of them,
+returns to a live state gets a source again. `beforeunload` closes all of them,
 because a source the page forgets keeps a registration alive on the server until it notices — and
-HS-066 reads that count to decide whether to push.
+ reads that count to decide whether to push.
 
 The stream URL is derived from the id. The create's answer carries `events` and a list element does
 not, but both spell `/api/sessions/{id}/events`, and deriving it is what lets one rule open a stream
@@ -99,11 +99,11 @@ the renderer is where the injection class is excluded rather than where it is re
 
 The relative time ("3 min ago") is computed once, from `last_active_at`, when the row is drawn. No
 frame carries a time, so a tick would only make the label look fresher than the answer behind it.
-HS-014 rebuilds this row for the session screen and owns the question then.
+ rebuilds this row for the session screen and owns the question then.
 
 ## The retry keeps its key; the next create does not
 
-`crypto.randomUUID()` makes the key on submit, and HS-008's rule decides what happens to it:
+`crypto.randomUUID()` makes the key on submit, and the rule decides what happens to it:
 
 - **A 202 drops the key.** The next press is a new intent, and answering it with the old session
   would be exactly the silent collision an idempotency key is supposed to prevent. A key is a
@@ -119,18 +119,18 @@ a page that waited for the first frame would show nothing while a container step
 
 ## A stopped session's days remaining is a placeholder
 
-The story says "wired to HS-064; placeholder until then". The row renders an em dash with a `title`
-naming HS-064, never a number: a fabricated "7 days" that HS-064 later changes is a figure the
+The story says "wired; placeholder until then". The row renders an em dash with a `title`
+naming, never a number: a fabricated "7 days" that later changes is a figure the
 operator will have planned around, and `stopped_at` is on the row, so the temptation to divide it is
 real.
 
 ## Not decided here
 
-- Paging and the history window (HS-061), which add fields to this list object and truncate the
+- Paging and the history window, which add fields to this list object and truncate the
   stream's replay.
-- A global or multiplexed stream. HS-066's open-stream count is the nearest thing to one, and it is
+- A global or multiplexed stream. the open-stream count is the nearest thing to one, and it is
   read on the server, not by a page.
-- Eviction, idle stop and the retention number (HS-020, HS-021, HS-064), and the refresh tick that
+- Eviction, idle stop and the retention number, and the refresh tick that
   will make a long-open page's relative times and states current.
 - What the page does when the list request itself fails: it renders the envelope and stops, exactly
   as the health path already did. A retry button is a decision for the story that adds error
@@ -157,16 +157,16 @@ real.
   shell is still Vite and TypeScript, `EventSource`, `crypto.randomUUID` and `fetch` are the
   platform, and no framework, router or state library arrives with the first list.
 - A list element is the whole `Session` row, so the list answers `client_key` as well. It is already
-  in the create's 202 and behind the same guards, and HS-014 and HS-061 inherit it: an idempotency
+  in the create's 202 and behind the same guards, and inherit it: an idempotency
   key is extracted material, not a credential, and hiding one copy would leave the other.
 - The form's initial `project`, `model` and `thinking` are literals (`holosmith`,
-  `claude-sonnet-4.5`, `high`), because no endpoint enumerates projects or models yet. HS-025 and
-  HS-031 are where those lists exist, and the literals become their defaults rather than a second
+  `claude-sonnet-4.5`, `high`), because no endpoint enumerates projects or models yet. and
+   are where those lists exist, and the literals become their defaults rather than a second
   vocabulary.
 - `crypto.randomUUID` exists only in a secure context, and the control listener is plain HTTP unless
   it sits behind `tailscale serve`. The page therefore generates the key with `randomUUID` when it
   can and with one `getRandomValues` fallback formatted as a v4 UUID when it cannot: the same
   CSPRNG, no second generator, and no dead form on the dev instance. A browser with neither shows
   the reason in the form's error line instead of doing nothing.
-- HS-014 reuses the row's source for the transcript; HS-015 to HS-017 add the composer; HS-061 adds
+- reuses the row's source for the transcript; add the composer; adds
   the paging fields this object was shaped to accept.

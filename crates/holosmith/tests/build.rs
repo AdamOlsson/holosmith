@@ -1,4 +1,4 @@
-//! The builder container's rules that need a filesystem or an ELF header: HS-076's placement, its artifact check,
+//! The builder container's rules that need a filesystem or an ELF header: the placement, its artifact check,
 //! and the one invariant that ties its two pinned bases to the agent image's.
 //!
 //! What is *pure* — the argv vectors, the recipe's own digest, the tail, the archive — is a unit test in

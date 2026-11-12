@@ -1,4 +1,4 @@
--- The schema the **previous** release shipped, as a fact a test can compare against (HS-075, ADR-0047).
+-- The schema the **previous** release shipped, as a fact a test can compare against (ADR-0047).
 --
 -- This file is NOT a migration: it does not live in `crates/holosmith/migrations` (that directory is embedded
 -- in the binary and byte-grepped by scripts/check-static.sh), and nothing applies it. `tests/schema_previous.rs`
@@ -37,14 +37,14 @@ CREATE TABLE sessions (
     project        TEXT NOT NULL,
     model          TEXT NOT NULL,
     thinking       TEXT NOT NULL,
-    worktree       TEXT NOT NULL,              -- '' until the provisioner runs (HS-007's note)
+    worktree       TEXT NOT NULL,              -- '' until the provisioner runs
     base_commit    TEXT,                       -- NULL until a worktree exists
     status         TEXT NOT NULL,              -- starting|idle|running|stopped|error|deleting
     status_reason  TEXT,
     client_key     TEXT UNIQUE,                -- idempotency key; NULL is not a key, and UNIQUE allows many
     network        INTEGER NOT NULL DEFAULT 0, -- internet access, read back as a bool
     created_at     INTEGER NOT NULL,
-    last_active_at INTEGER NOT NULL,           -- LRU eviction (spec item 7, HS-020)
+    last_active_at INTEGER NOT NULL,           -- LRU eviction (spec item 7)
     stopped_at     INTEGER,                    -- set when the status becomes stopped, cleared on resume
     usage_in       INTEGER NOT NULL DEFAULT 0,
     usage_out      INTEGER NOT NULL DEFAULT 0

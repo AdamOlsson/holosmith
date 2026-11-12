@@ -1,4 +1,4 @@
-//! The pinned pi version lives in `pins/pi.txt` and nowhere else (HS-001 criterion 3).
+//! The pinned pi version lives in `pins/pi.txt` and nowhere else.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -57,7 +57,7 @@ fn no_other_tracked_file_contains_the_pin() {
     );
 }
 
-/// The digest the builder recipe's rust base is pinned to (HS-076), read out of the recipe itself.
+/// The digest the builder recipe's rust base is pinned to, read out of the recipe itself.
 ///
 /// A builder image's pin is its `FROM` line, the same place the two product recipes keep theirs. What this test
 /// adds is the rule `pins/pi.txt` has: the value lives in **one** file, so a second copy — in a doc, a review, or a

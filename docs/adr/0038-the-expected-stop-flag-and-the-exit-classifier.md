@@ -1,6 +1,6 @@
 # The expected-stop flag is a column, and the classifier is a pure function with no observer yet
 
-HS-030 is spec item 6's last paragraph: "The server records an expected-stop flag before every `docker stop
+This is spec item 6's last paragraph: "The server records an expected-stop flag before every `docker stop
 -t 10`. Exit with the flag set means `stopped`. Exit code 0 without the flag means `stopped` with reason
 `pi_exit`. Any other exit means `error` with the last stderr lines." It replaces the earlier
 clean-exit-means-ended rule, and `session.log` (item 15) is where the lines are kept.
@@ -11,7 +11,7 @@ clean-exit-means-ended rule, and `session.log` (item 15) is where the lines are 
 marker file in the session's directory, for three reasons:
 
 - it must outlive the process that wrote it — a restart between the write and the exit is exactly the case
-  where the row is the only witness, and HS-044's reconcile reads rows, not directories;
+  where the row is the only witness, and the reconcile reads rows, not directories;
 - it is written and read in one place, with the row's other facts, through the repository ADR-0009 made
   the only writer of `sessions`;
 - a delete takes it with the row, and a row is what names a container in the first place.
@@ -32,8 +32,8 @@ observer sees the same flag and calls a crash a stop we asked for.
 ## One routine records the flag, and three policies use it
 
 `src/stop.rs`'s `Stopper` is `set_expected_stop(…, true)` followed by the backend's `stop`, and it is the
-**only** production path to a `docker stop`: the sweeper (HS-021), the create's eviction (HS-020) and the
-abort ladder's forced rung (HS-016/022/023) all go through it. Three copies of the write is two copies a
+**only** production path to a `docker stop`: the sweeper, the create's eviction and the
+abort ladder's forced rung (those stories) all go through it. Three copies of the write is two copies a
 test cannot see, and the forgotten one turns an ordinary eviction into an `error` row.
 
 The flag is the **server's**, not the backend's: a backend may emit frames but may not write a row
@@ -64,7 +64,7 @@ now the failure arm only.
 | clear | ≠ 0 | `error`, reason = the last five non-empty stderr lines (`Trigger::UnexpectedExit`) |
 
 `classify` is that table as a function with no I/O, so its four cells are unit tests rather than a container:
-the story asks for exactly that, and it is the part HS-031 can call without owning any state. The reason is
+the story asks for exactly that, and it is the part can call without owning any state. The reason is
 bounded at `STDERR_LINES = 5` because the row's reason is read on a phone; a process that printed nothing
 gets a sentence naming its exit code instead of an empty reason.
 
@@ -74,8 +74,8 @@ state function. Every failure is one `warn` line: the process has already stoppe
 what an operator needs and a write that failed is not a second incident.
 
 The log is the session's **stderr plus the server's own launch line**, and nothing else. Item 15's
-"`session.log` holds stderr only" is what keeps a *tool's* output out of it (HS-033 gives each tool call its
-own file); HS-031 puts the launch line there because "which command did we run" is the first question a
+"`session.log` holds stderr only" is what keeps a *tool's* output out of it (gives each tool call its
+own file); puts the launch line there because "which command did we run" is the first question a
 failed launch asks and there is no row column for it. The writer refuses an id that is not a bare path
 segment, so the one place in the crate that turns a string into a directory cannot be used to write outside
 `<data>/sessions/`.
@@ -90,34 +90,34 @@ change: the row says what happened, and only the badge decides how much of it fi
 
 **Nothing observes a container's exit in this build**, so `Exits::record` has no production caller yet:
 
-- the container runs **detached** on `sleep infinity` (ADR-0036) until HS-031 attaches pi's stdio, and a
+- the container runs **detached** on `sleep infinity` (ADR-0036) until attaches pi's stdio, and a
   detached container's stdout is gone, so there is no exit code and no stderr to read;
 - `--rm` removes the container a moment after it stops (measured, ADR-0037), so there is nothing left to
   `inspect` or `docker logs` afterwards;
 - a Docker-backed create still ends `error` at the **pi** step, so no Docker session reaches `idle`, let
   alone a turn.
 
-A watcher (`docker events`, a `docker wait` raced against `--rm`) would be a second mechanism HS-031 deletes
-when it attaches the process it is actually supervising. So HS-030 owns **the decision, the flag and the
-record**; **HS-031 owns the observation** and is the caller of `Exits::record`.
+A watcher (`docker events`, a `docker wait` raced against `--rm`) would be a second mechanism deletes
+when it attaches the process it is actually supervising. So a later change owns **the decision, the flag and the
+record**; **A later change owns the observation** and is the caller of `Exits::record`.
 
-**And one constraint HS-031 inherits, which is not reachable in this build.** The flag is cleared by a new
+**And one constraint inherits, which is not reachable in this build.** The flag is cleared by a new
 container's provisioning, but a forced rung **resumes immediately** (`Ladder::climb` ends the turn and then
 brings the session back), so the resume's container step can clear the flag *before* the stopped container's
 exit is recorded. `classify` then reads "no flag" and turns an `idle` row `error` over a stop the server
-asked for. The production ordering HS-031 must keep is therefore: **record the previous container's exit
+asked for. The production ordering must keep is therefore: **record the previous container's exit
 before the next container is provisioned** — await the supervisor's report between the rungs and the resume
 — or key the flag to the container's incarnation rather than to the session. `provisioner.rs`'s clear cites
 this, and `tests/exit.rs`'s forced-rung test uses `end_turn` rather than the production `climb` for exactly
 that reason: the ladder's own resume is what would reorder it, and there is nothing to observe today. The demo is therefore
 half-showable — the flag from the shipped artifact, the three outcomes from `tests/exit.rs` — which is the
-same honesty ADR-0029 applied to HS-025's `ahead`.
+same honesty ADR-0029 applied to the `ahead`.
 
 Two consequences recorded rather than papered over:
 
-- **`AppState::exits()` is not added.** A wiring helper with no production caller is dead wiring; HS-031 adds
+- **`AppState::exits()` is not added.** A wiring helper with no production caller is dead wiring; adds
   it with the caller.
-- **The log writer is private to `src/exit.rs`.** HS-031 needs it for the launch line and for streaming
+- **The log writer is private to `src/exit.rs`.** needs it for the launch line and for streaming
   stderr; it will lift it then, and what it must not do is append the same lines twice — `record` writes
   what it was given.
 

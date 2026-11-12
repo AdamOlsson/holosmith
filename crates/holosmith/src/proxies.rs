@@ -1,4 +1,4 @@
-//! The machine's two proxies, started by one recipe (HS-037, HS-039, HS-047, spec item 2 and item 10 step 4).
+//! The machine's two proxies, started by one recipe (spec item 2 and item 10 step 4).
 //!
 //! Two callers have to end with one `hs_egress` and one `hs_key` running on the machine's `egress` network:
 //! `serve`'s boot, and `server deploy`'s step 4. ADR-0056 records why the recipe lives here rather than in either
@@ -14,7 +14,7 @@
 //!   key file that is not a file is a start that cannot work — said in the words of what is actually
 //!   wrong rather than about the container it turned into (ADR-0035's measurement).
 //! - **The image is checked first.** Both containers run `holosmith-proxy:<version>`, built by `server deploy`'s
-//!   step 3 from the Dockerfile embedded in this binary (HS-048), and a machine that has never deployed has no
+//!   step 3 from the Dockerfile embedded in this binary, and a machine that has never deployed has no
 //!   such image: `docker run` would then try to *pull* a name that is not in any registry, which fails with a
 //!   sentence about a registry rather than about the step that has not run (ADR-0057).
 //! - **The key file is prepared before the directory holding it is mounted**
@@ -48,7 +48,7 @@ pub const START_TIMEOUT: Duration = container::PROXY_START_TIMEOUT;
 
 /// The two proxies' container names for this run, in the order [`running`] answers: `[egress, key]`.
 ///
-/// A function of the config rather than a constant since HS-077, because a smoke run's two proxies are its own
+/// A function of the config rather than a constant, because a smoke run's two proxies are its own
 /// (`smoke_hs_egress`, `smoke_hs_key`): an unprefixed start would replace the machine's live key proxy — whose mount
 /// is *its* key store — with one holding an empty store, and drop the egress proxy's per-session network joins. A
 /// caller that names one at a time (`doctor`'s proxy findings, a teardown) composes it the same way from its own
@@ -147,7 +147,7 @@ impl Containers for Docker {
     }
 }
 
-/// Start the machine's egress proxy container, replacing one an earlier run left behind (HS-037).
+/// Start the machine's egress proxy container, replacing one an earlier run left behind.
 ///
 /// The only route out of a session's container (spec item 2): one container per machine, attached to the `egress`
 /// network and, per session, to that session's own network. It is **replaced on every start** because the
@@ -169,7 +169,7 @@ pub fn start_egress(config: &Config, containers: &dyn Containers) -> Result<Star
     })
 }
 
-/// Start the machine's key proxy container, replacing one an earlier run left behind (HS-039).
+/// Start the machine's key proxy container, replacing one an earlier run left behind.
 ///
 /// The only thing in this build that holds a real provider key: it validates a session's dummy key and swaps in
 /// the real one, over TLS, from a directory mounted read-only ([`KeyProxy::mount`]). The key file is created

@@ -1,6 +1,6 @@
 # The deploy is a list of steps, each a read and an apply
 
-HS-047 is spec §"What `server deploy` does" and the CLI's `holosmith server deploy [--ssh user@host]
+This is spec §"What `server deploy` does" and the CLI's `holosmith server deploy [--ssh user@host]
 [--binary PATH] [--dry-run]` row, and the slice's acceptance says four things about behaviour: it "runs
 steps 1–7 from the spec in order, each checking current state first"; `--dry-run` "lists the steps and their
 planned actions without doing anything"; a failure "stops at the failing step, leaves the machine in a
@@ -27,19 +27,19 @@ the number is the spec's order and the word is the check's outcome. The words ar
 | `failed` | the read or the apply failed; the run stops here |
 
 **A `skipped` step is never `satisfied`.** Four of the seven steps have no body in this release — step 3's
-image builds are HS-048's, and steps 5, 6 and 7 are HS-049's — and the wrong answer is a step that prints
+image builds are that story's, and steps 5, 6 and 7 are the — and the wrong answer is a step that prints
 "already satisfied" over a check that read nothing, which is the P1 shape ADR-0055 names. So a skipped step
 carries the owning story in its sentence, in the dry run and in the real run alike, and the report's summary
 says how many steps are still other stories' (`deploy: incomplete: 4 of 7 steps belong to later stories`).
-**Amended by ADR-0057:** HS-048 fills step 3, so the count is three and the example reads
+**Amended by ADR-0057:** fills step 3, so the count is three and the example reads
 `deploy: incomplete: 3 of 7 steps belong to later stories`.
-**Amended by ADR-0058:** HS-049 fills steps 5, 6 and 7, so **nothing** in `server deploy` is `skipped`: the owner
+**Amended by ADR-0058:** fills steps 5, 6 and 7, so **nothing** in `server deploy` is `skipped`: the owner
 table, the three `skipped` sentences and the `deploy: incomplete:` line are deleted, and the tally keeps its shape
 with `skipped` always zero.
 
 **A step that is only half this release's says which half it did.** Step 2 creates the four paths the tree
 already writes and does **not** create the service user or the VAPID keys, so its line always carries
-`; the service user (in the docker group) and the VAPID keys are HS-049's, and this step does not read them`.
+`; the service user (in the docker group) and the VAPID keys are that story's, and this step does not read them`.
 The same rule as `skipped`, one level down: a line that reports a pass must say what it did *not* read, or
 "all 6 paths are present with their modes" reads as the whole of item 10 step 2 when it is three of its five
 items. **Amended by ADR-0058:** step 2 does all five of its items, so the `REMAINDER` remark is gone and the line
@@ -51,12 +51,12 @@ acceptance's failure semantics are about a *failing* step, so a machine that got
 install ends 0 and says `deploy: incomplete: 4 of 7 steps belong to later stories` in the same breath. A
 script that reads only the exit code will believe a partial install succeeded; the `incomplete` line is
 printed on every run that reaches the end, not only when something was skipped, so the distinction is never
-carried by the exit code alone. When HS-048 and HS-049 land, the same command stops skipping and the same
+carried by the exit code alone. When and land, the same command stops skipping and the same
 run ends 0 having installed everything — no second entry point, no flag to remove.
-**Amended by ADR-0058:** HS-049 landed, so nothing is skipped and the `incomplete` line is gone: the exit code and
+**Amended by ADR-0058:** landed, so nothing is skipped and the `incomplete` line is gone: the exit code and
 the tally now say the same thing, and a run that reaches step 7 installed everything this release can install.
 
-**Step 7 is HS-049's entirely** — both its `/api/health` wait and its `doctor --full`. The wait is
+**Step 7 is the entirely** — both its `/api/health` wait and its `doctor --full`. The wait is
 unsatisfiable here because nothing starts `serve` (step 5 is the unit file) and `doctor --full` asserts the
 image step 3 builds, so on a machine where step 3 is skipped the last step would fail for a reason another
 story owns; the first draft of this story's plan proposed waiting against a boot the *gate* had started, which
@@ -68,13 +68,12 @@ skipped; this paragraph is the record of why the step could not be satisfied her
 **Step 2 is split, and the split lives here rather than in the story file.** This story creates the data
 directory, `/etc/holosmith/config.toml`, the 0700 secrets directory with its 0600 `keys.toml` and the admin
 socket directory — the four paths the tree already writes (`key::Store::ensure_file`, `config::render`), which
-is what the handoff assigned it. The **service user** and the **VAPID keys** are HS-049's: its slice claims
-both, `useradd`/`usermod` are absent from this machine (measured), and VAPID has no consumer until HS-066, so
-writing them now would be a file whose shape HS-049's consumer would have to change. `docs/stories/**` is the
-source the Linear issues were imported from and is not edited, so HS-049 will *extend* step 2 rather than
-rewrite it, and this paragraph is the instruction that says so. The admin socket directory's path is
-`/run/holosmith` (`<root>/run/holosmith` under `--root`) — the spec names the directory and no path, so HS-051
-may keep or move it.
+is what the handoff assigned it. The **service user** and the **VAPID keys** belong to later changes: their
+slices claim both, `useradd`/`usermod` are absent from this machine (measured), and VAPID has no consumer yet,
+so writing them now would be a file whose shape the consumer would have to change. A later change will
+*extend* step 2 rather than rewrite it, and this paragraph is the instruction that says so. The admin
+socket directory's path is `/run/holosmith` (`<root>/run/holosmith` under `--root`) — the spec names the
+directory and no path, so a later change may keep or move it.
 
 ## `--root` is the install tree, and privilege follows it
 
@@ -89,7 +88,7 @@ than left to be inferred.
 Privilege follows the same flag: with no `--root` the paths are the system's, so each file action is one child
 prefixed by `sudo`; with `--root` the tree is the invoking user's, so the same child runs without it. The
 deploy never reads *its own* uid — a `getuid` is not reachable without `libc` anyway, and "may I write this tree" is a
-property of the tree, not of the caller. **Amended by ADR-0058:** privilege is still the flag's, but HS-049's step 2
+property of the tree, not of the caller. **Amended by ADR-0058:** privilege is still the flag's, but the step 2
 does read a uid — the *service user's*, from `id -u`, and `stat`'s answer for each installed root — because the tree
 `serve` runs as is the thing the unit's `User=` names, and a tree written by `sudo install` is not that user's until
 it is chowned. The distinction the sentence was drawing survives: nothing here asks this process who it is. A missing `sudo` is a step failure with a sentence, not a panic, and
@@ -145,7 +144,7 @@ that records the calls, with no daemon — the `doctor::Machine` pattern.
 
 Steps 5 and 6 were **not measured**: this machine has no systemd (`/proc/1/comm` is `bwrap`,
 `/run/systemd/system` is absent) and no `tailscaled` answering, which is the same fact `doctor` renders as
-`unknown` (ADR-0054) and the reason they are HS-049's steps. Step 3 builds nothing, so step 4's proxies run
+`unknown` (ADR-0054) and the reason they are the steps. Step 3 builds nothing, so step 4's proxies run
 whatever `agent_image` names — on this machine `pi-agent:local`, tagged by hand as `docs/build.md` says.
 **Amended by ADR-0057:** step 3 builds both images from the Dockerfiles embedded in the binary, and the proxies
 run `holosmith-proxy:<version>` instead of whatever `agent_image` names.
@@ -153,7 +152,6 @@ run `holosmith-proxy:<version>` instead of whatever `agent_image` names.
 stand-ins and `tests/deploy.rs`'s recorders — and a machine without systemd or a Tailscale daemon **fails** at the
 step that needs it instead of skipping it.
 
-**"A fresh host ends with a working HTTPS URL" (phase 2's exit criterion) is therefore HS-048's and HS-049's
-demo, not this story's.** What this story proves is the framework and the three steps whose machinery exists:
+**"A fresh host ends with a working HTTPS URL" (phase 2's exit criterion) is therefore a later change's demo, not this story's.** What this story proves is the framework and the three steps whose machinery exists:
 the order, the words, the dry run that creates nothing, the second run that changes nothing, and a failure
 that stops at its step with the earlier steps' effects still on disk and the resume command last.

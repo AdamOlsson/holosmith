@@ -1,6 +1,6 @@
 # The hardened `.git` mounts are one value, and V1 passes as specified
 
-HS-027 is spec item 1's mount list and the **V1** verification row: with the four mounts in place, three
+This is spec item 1's mount list and the **V1** verification row: with the four mounts in place, three
 writes must fail (`.git/hooks`, `.git/config`, renaming `.git/hooks`), three git commands must work
 (`commit`, `branch`, `worktree list`), and the process must be unable to remount or unmount. V1's own
 fallback column says what to do if that is not true: mount only `.git/objects`, `refs`, `logs` and
@@ -44,11 +44,11 @@ directory is new to the container and the `gitdir` it points at is mounted at it
 ## `--user` is not passed, and the non-root requirement is asserted instead
 
 The spec says the container is not root. There are two ways to get there: name a uid in the run arguments,
-or let the image's default user do it. Naming a uid is a guess about a mapping the deploy step (HS-047)
+or let the image's default user do it. Naming a uid is a guess about a mapping the deploy step
 owns, and a wrong guess is worse than none — it would give the agent's files to a uid the host does not
 own, which shows up as "permission denied" in the middle of a turn. So the image's own user runs the agent,
 and the requirement is *checked* instead: the gate reads `id -u` in the container and fails if it is `0`.
-An image whose default user is root is a broken image, and HS-031 (the real pi launch) is where the image's
+An image whose default user is root is a broken image, and (the real pi launch) is where the image's
 contents are the subject.
 
 ## A mount whose source is missing is refused before `docker run`
@@ -66,10 +66,10 @@ before noticing that Docker had created empty directories instead of mounting fi
 
 ## The container step is not filled by this story
 
-A container with no session network is HS-028's (`--network agents_<id>`, the limits, the lifecycle flags)
-and the network itself is HS-036's. So `Step::Container` keeps refusing and naming HS-028, and
+A container with no session network is the (`--network agents_<id>`, the limits, the lifecycle flags)
+and the network itself is that story's. So `Step::Container` keeps refusing and naming, and
 `case_worktree`'s assertion that a Docker-backed create ends `error` at the network step with a reason
-naming HS-027 stays true until HS-028/HS-036 change it. What this story adds is the value those steps use,
+naming stays true until those stories change it. What this story adds is the value those steps use,
 plus the measurement that says the mounts hold.
 
 ## Consequence: `agent_image` is a config key
@@ -78,7 +78,7 @@ An argument builder with no image cannot run a container, so the image became a 
 string, defaulting to `agent-image:<this binary's version>` — the name spec item 10 §3 builds. It is a
 machine setting rather than a constant for the same reason `backend` is: a development machine holds an
 image under whatever name it built it (this one has `pi-agent:local`), and a key is how it says so without
-a rebuild. HS-031 is where the image's *contents* start to matter (its pi version must equal `pins/pi.txt`).
+a rebuild. This is where the image's *contents* start to matter (its pi version must equal `pins/pi.txt`).
 
 One consequence worth knowing: the default carries the binary's version, so `tests/golden/config-default.toml`
 pins it and **a version bump makes that golden stale** — the same rule as a new config key, for the same

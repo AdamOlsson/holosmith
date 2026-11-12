@@ -1,4 +1,4 @@
-//! The SSE body, and the subscribe-replay-live assembly behind it (HS-010, ADR-0014).
+//! The SSE body, and the subscribe-replay-live assembly behind it (ADR-0014).
 //!
 //! `Sse` wants a `futures_core::Stream`, which the workspace has no combinator for, so the one
 //! impl this crate needs is written out here over the channel a task fills. The task is where
@@ -43,7 +43,7 @@ use crate::db::Database;
 pub(crate) const STREAM_LAGGED: &str = "stream_lagged";
 
 /// The event kind a client listens for to learn the replay it is receiving does not reach the
-/// beginning of the log (HS-061).
+/// beginning of the log.
 ///
 /// Not a stored kind: it is the stream's own answer about its own replay, so it carries no SSE `id`
 /// — a browser would otherwise resume past a seq that does not exist. The payload is
@@ -60,7 +60,7 @@ const BODY_QUEUE: usize = 64;
 
 /// How much history one replay reads: everything from the cut the truncation rule picks.
 ///
-/// Deliberately not a second window. HS-061's "50th most recent message" decides where a replay
+/// Deliberately not a second window. the "50th most recent message" decides where a replay
 /// *starts* (see [`crate::events::repository::EventRepository::truncation_point`]); once it has
 /// started, the whole tail is sent, because a client that is going to render the newest messages needs
 /// every frame between the cut and now. Paging the tail would be a second, invisible truncation.
@@ -70,7 +70,7 @@ const REPLAY_LIMIT: u32 = u32::MAX;
 ///
 /// The body's channel is the only thing that notices a dropped response body, and a send is only
 /// attempted when there is a frame to send. So a client that vanishes while its session is silent
-/// would otherwise park the task forever with its registration alive — and HS-066 reads that count
+/// would otherwise park the task forever with its registration alive — and reads that count
 /// to decide whether to push. A few seconds: one timer wake per open stream, and the count is only
 /// ever read for a decision, never polled.
 const RECLAIM_INTERVAL: Duration = Duration::from_secs(5);
@@ -139,7 +139,7 @@ impl Stream for EventBody {
 /// `window` is the config's `history_window`: how many messages a replay that starts at the
 /// beginning is allowed to carry. It is read here, in the read step, and only when the client named
 /// no resume point — a reconnecting client already knows where it is, and truncating under it would
-/// throw away events it is entitled to (HS-061).
+/// throw away events it is entitled to.
 pub(crate) fn attach(
     writer: &EventWriter,
     database: &Mutex<Database>,

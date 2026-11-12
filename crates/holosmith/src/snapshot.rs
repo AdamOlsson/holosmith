@@ -1,4 +1,4 @@
-//! The WIP snapshot: uncommitted work saved without touching the branch or the working tree (HS-042,
+//! The WIP snapshot: uncommitted work saved without touching the branch or the working tree (,
 //! spec item 9).
 //!
 //! Spec item 9's script is four git commands over a **temporary index**:
@@ -18,7 +18,7 @@
 //! with the commit, so a tracked file that the agent deleted is staged as a deletion rather than ignored.
 //!
 //! **When the tree equals HEAD's tree the ref is deleted instead of written.** That is "nothing to save"
-//! in one shape rather than a ref pointing at a commit identical to the branch's HEAD: HS-043's keep-rule
+//! in one shape rather than a ref pointing at a commit identical to the branch's HEAD: the keep-rule
 //! is "the wip ref differs from the branch", and a ref that does not differ is noise.
 //!
 //! Synchronous and `std` only, like [`crate::worktree`]: one program, one answer. The Docker backend runs
@@ -192,7 +192,7 @@ fn run(
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// The ref a session's snapshot lives at. Used by the delete flow's recovery sentence (HS-043).
+/// The ref a session's snapshot lives at. Used by the delete flow's recovery sentence.
 pub fn reference(id: &str) -> String {
     format!("{REF_PREFIX}{id}")
 }

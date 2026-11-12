@@ -1,4 +1,4 @@
-//! `ANY /api/hosts/{name}/{*rest}`: one machine's call, relayed to another (HS-069, spec item 3, ADR-0074).
+//! `ANY /api/hosts/{name}/{*rest}`: one machine's call, relayed to another (spec item 3, ADR-0074).
 //!
 //! The spec gives the hub the `/api/hosts*` prefix ("a hub serves `/api/hosts*`, a server serves the session API")
 //! and says API paths are unchanged on every role, so a forwarded call is the peer's own path under this machine's

@@ -1,12 +1,12 @@
-//! The preflight: what this machine must have before it can run a session (HS-024, spec item 10 §1).
+//! The preflight: what this machine must have before it can run a session (spec item 10 §1).
 //!
 //! Item 10 §1 puts the same checks in two places — `holosmith doctor --quick`, which the unit file runs
 //! as `ExecStartPre` — and that is deliberate: a machine that fails one of them must fail *at startup*,
 //! not halfway through a turn, and the sentence the operator reads must be the same one either way. This
-//! module is the list and the sentences; HS-045's `doctor` is the command that prints them on demand, and
+//! module is the list and the sentences; the `doctor` is the command that prints them on demand, and
 //! `serve` is the one that refuses.
 //!
-//! Three checks are answered here, because they are the three `serve` refuses on. Everything else HS-045's
+//! Three checks are answered here, because they are the three `serve` refuses on. Everything else that story's
 //! `doctor` asks — systemd, the merge trial, Tailscale, the ports, the database's schema, the proxies and the
 //! image's pi version — lives in [`crate::doctor`], which assembles those three and the rest into one report.
 //! The network self-test needs a container and lives in [`crate::selftest`]; it reports through the same
@@ -71,7 +71,7 @@ pub enum Check {
     Disk,
     /// The machine's network isolation, measured by [`crate::selftest`] rather than by a command here.
     ///
-    /// It is in this enum because it is reported the same way and refuses the same way, and because HS-045's
+    /// It is in this enum because it is reported the same way and refuses the same way, and because that story's
     /// `doctor` has to print it beside the other three. [`check`] never answers it: it needs a container, so it
     /// lives in its own module and `serve` adds its complaint to this list.
     Network,
@@ -87,18 +87,18 @@ pub enum Check {
     Ports,
     /// The database's schema against this binary's, read without migrating it (ADR-0047).
     Database,
-    /// The installed paths' owners and modes — the one check the deploy's own output must satisfy (HS-049).
+    /// The installed paths' owners and modes — the one check the deploy's own output must satisfy.
     Perms,
     /// Whether the machine's `hs_egress`/`hs_key` proxies are up.
     Proxy,
     /// Whether the configured agent image runs the pinned pi.
     Image,
-    /// Whether `openssl` runs, which the Web Push sender needs (HS-066) and nothing on the request path does.
+    /// Whether `openssl` runs, which the Web Push sender needs and nothing on the request path does.
     ///
     /// It is in this enum because it is reported like every other machine question and only `doctor` asks it: no
     /// startup check runs it, because a missing notification channel must not refuse a boot (ADR-0071's D9).
     Openssl,
-    /// The release tree: what `current` resolves to, and whether the unit can execute through it (HS-080).
+    /// The release tree: what `current` resolves to, and whether the unit can execute through it.
     ///
     /// One word for one question, so an operator greps `release` and finds the tree rather than a `version` line. It is
     /// asked in **both** depths — `--quick` is the unit's `ExecStartPre`, and a `current` that resolves to nothing is
@@ -138,7 +138,7 @@ impl fmt::Display for Check {
 /// the fix.
 ///
 /// The sentence is *data* as well as text, because two readers print it: `serve`, which then refuses, and
-/// HS-045's `doctor`, which prints the same words on demand. A `DockerBackend` carrying it would be a third
+/// the `doctor`, which prints the same words on demand. A `DockerBackend` carrying it would be a third
 /// opinion about a machine the startup already refused, which is why it does not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Complaint {
@@ -256,11 +256,11 @@ impl fmt::Display for Finding {
 /// a parameter rather than an environment variable because this crate denies `unsafe`, so `set_var` is not
 /// reachable — and because an environment a second test could see is a flake waiting to happen.
 ///
-/// `git` and `df` are the startup check's (HS-024) and `df` is the disk floor's, on both request paths
-/// (HS-062); `du` is the per-session soft cap's watchdog (HS-063), which is neither a request path nor a
+/// `git` and `df` are the startup check's and `df` is the disk floor's, on both request paths
+/// `du` is the per-session soft cap's watchdog, which is neither a request path nor a
 /// startup check — so the value rides here because this is the one place a test can own a program. `openssl` is
-/// the Web Push sender's (HS-066), a background task's program like `du`, and it is here for the same reason.
-/// `tailscale` is machine-to-machine trust's (HS-070): the whois both listeners run on a request path, which a
+/// the Web Push sender's, a background task's program like `du`, and it is here for the same reason.
+/// `tailscale` is machine-to-machine trust's: the whois both listeners run on a request path, which a
 /// test can only stand in for by naming a shim.
 #[derive(Debug, Clone)]
 pub struct Tools {
@@ -313,7 +313,7 @@ pub fn report_with(config: &Config, tools: &Tools) -> Vec<Finding> {
     vec![daemon(config), git(&tools.git), disk(config, &tools.df)]
 }
 
-/// Whether the daemon answers, asked on its own — the check `holosmith status`'s two proxy lines rest on (HS-050).
+/// Whether the daemon answers, asked on its own — the check `holosmith status`'s two proxy lines rest on.
 ///
 /// One function, two callers: [`report_with`]'s list and `status`, which asks it **first** so that a daemon nobody
 /// could reach makes both proxy lines `unknown:` instead of `not running`. That distinction is the whole of ADR-0054
@@ -537,7 +537,7 @@ fn parse_git_version(text: &str) -> Option<(u64, u64)> {
 
 /// `min_free_gb` free on the data root's filesystem.
 ///
-/// The measurement itself lives in [`crate::disk`] since HS-062, because two more readers want the same
+/// The measurement itself lives in [`crate::disk`], because two more readers want the same
 /// number: the two request paths that start work. What stays here is this check's **sentences** — four for the
 /// four ways the measurement can fail to happen, and the two that name the numbers — which are the boot's and
 /// `doctor`'s, not a create's (ADR-0068).

@@ -1,10 +1,10 @@
-//! The cap and eviction (HS-020): a create on a full machine stops the least recently active `idle`
+//! The cap and eviction: a create on a full machine stops the least recently active `idle`
 //! session and takes its slot. Nothing is deleted — the victim keeps its history, its worktree path and
 //! its events — and a machine with nothing idle refuses the create with `409 cap_reached` instead.
 //!
 //! Two states are driven rather than produced: `running` and `error` have no endpoint that puts a
 //! session there (the prompt's turn runner and a container's death own them), so the tests that need
-//! them call the one state function, as HS-016's forced rung and HS-018's stop do. `idle` is produced
+//! them call the one state function, as the forced rung and the stop do. `idle` is produced
 //! the way the product produces it, by letting a fast stub provision.
 
 use std::net::SocketAddr;
@@ -106,10 +106,14 @@ fn events(state: &AppState, session: &str) -> Vec<(i64, String, Value)> {
 /// Push a session's `last_active_at` into the past, so "least recently active" is a fact rather than a
 /// race between two touches in the same second.
 fn age(state: &AppState, id: &str, seconds: i64) {
+    age_at(state, id, holosmith::clock::unix_now() - seconds);
+}
+
+fn age_at(state: &AppState, id: &str, at: i64) {
     let database = state.database.lock().expect("the lock is not poisoned");
     database
         .sessions()
-        .touch(id, holosmith::clock::unix_now() - seconds)
+        .touch(id, at)
         .expect("the row is touched");
 }
 
@@ -141,7 +145,7 @@ async fn drive(state: &AppState, id: &str, trigger: Trigger, reason: Option<&str
 
 /// The eviction and the removal are different things, so every assertion about "nothing was deleted"
 /// reads the backend's calls: a `Stop` is the cap making room, a `Delete` would be data loss, and the
-/// `Snapshot` before the `Stop` is HS-042 keeping the victim's uncommitted work.
+/// `Snapshot` before the `Stop` is keeping the victim's uncommitted work.
 fn lifecycle(stub: &holosmith::backend::StubBackend, id: &str) -> Vec<Call> {
     stub.recorded()
         .into_iter()
@@ -276,8 +280,9 @@ async fn two_idle_sessions_of_the_same_age_are_ordered_by_id() {
     wait_status(&state, &second, Status::Idle).await;
 
     // The same instant for both, an hour ago: not "who was touched last" either.
-    age(&state, &first, 3600);
-    age(&state, &second, 3600);
+    let at = holosmith::clock::unix_now() - 3600;
+    age_at(&state, &first, at);
+    age_at(&state, &second, at);
     let (smallest, other) = if first < second {
         (first.clone(), second.clone())
     } else {

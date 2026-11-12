@@ -1,4 +1,4 @@
-//! `holosmith container snapshot`: spec item 9's script as a mode of this binary (HS-042).
+//! `holosmith container snapshot`: spec item 9's script as a mode of this binary.
 //!
 //! The container has `/work` as its working directory and `HS_SESSION_ID` in its environment (spec item 6's
 //! run line), so this command needs no arguments: the worktree is `.`, the session id is the variable, and
@@ -11,7 +11,7 @@ use crate::fake_pi;
 use crate::snapshot;
 
 /// A session id as the database makes it. The id is joined into a temporary path, so the rule is
-/// [`crate::sessions::is_id`]'s — the one home for "what is a session id" (HS-041).
+/// [`crate::sessions::is_id`]'s — the one home for "what is a session id".
 fn valid_id(id: &str) -> bool {
     crate::sessions::is_id(id)
 }
@@ -50,7 +50,7 @@ pub fn run_snapshot() -> ExitCode {
     }
 }
 
-/// `holosmith container fake-pi`: be pi for the smoke run (HS-077, spec item 10 step 2).
+/// `holosmith container fake-pi`: be pi for the smoke run (spec item 10 step 2).
 ///
 /// Two answers and one job. `--version` is the pinned pi version, because `agent::version_of` asks the image's `pi`
 /// which release it is and the smoke image's `pi` is this binary — answering the pin makes that check *measured*

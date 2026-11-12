@@ -1,4 +1,4 @@
-//! `holosmith serve` as the operator runs it (HS-003).
+//! `holosmith serve` as the operator runs it.
 //!
 //! Every test drives `CARGO_BIN_EXE_holosmith`: the startup lines, the exit codes, the signals
 //! and the files left behind are the real ones. `kill` is a process, not a syscall, so the
@@ -23,7 +23,7 @@ use support::TempDir;
 /// It names a data root inside the directory: without one, `serve` would create and migrate the
 /// default `/var/lib/holosmith`, so the tests would write machine state and fail wherever that
 /// path is not writable (ADR-0009). It names the **stub** backend for the same reason: a Docker run
-/// runs the preflight first and refuses on a machine without a daemon (HS-024), and these tests are
+/// runs the preflight first and refuses on a machine without a daemon, and these tests are
 /// about the banner, the signals, the data root and the health payload, not about which backend a
 /// machine would pick — `the_default_backend_is_docker_and_the_log_line_says_so` is the one that asks
 /// that, and it gives itself a daemon. `serve`-specific, so it stays here rather than in `support`.
@@ -71,7 +71,7 @@ impl Server {
         let stderr = dir.file("serve.err");
         // The admin socket goes under this test's own directory, for the reason `--data-dir` does: this sandbox
         // lets an unprivileged user write the machine's paths, and a boot that bound `/run/holosmith/drain.sock`
-        // would be writing this machine's real admin socket (HS-051). Two tests booting at once would then also
+        // would be writing this machine's real admin socket. Two tests booting at once would then also
         // be racing for one socket.
         let admin = dir.file("run/holosmith");
         let child = Command::new(env!("CARGO_BIN_EXE_holosmith"))
@@ -165,7 +165,7 @@ impl Drop for Server {
     }
 }
 
-/// A preview port another process holds is one `warn` and a banner line, not a refusal (HS-041, ADR-0051).
+/// A preview port another process holds is one `warn` and a banner line, not a refusal (ADR-0051).
 ///
 /// The control UI is the screen an operator needs when something else on the machine is holding a port, so a
 /// preview that cannot bind must not take it down — and the banner must say what happened rather than claim a
@@ -289,7 +289,7 @@ fn the_startup_lines_are_exact_and_name_the_bound_port() {
         lines[5],
         format!("control_origin http://localhost:{}", server.port)
     );
-    // HS-041 binds the preview listener, so its line is the address the kernel gave — like the control
+    //  binds the preview listener, so its line is the address the kernel gave — like the control
     // line above, and for the same reason: `127.0.0.1:0` is what the config may say, and the banner is where
     // the real port is readable. Two listeners, two addresses, one line each, and still exactly eight.
     let preview = lines[6]
@@ -348,7 +348,7 @@ fn the_role_in_the_config_file_reaches_the_health_payload() {
 
 #[test]
 fn the_backend_comes_from_the_config_file() {
-    // HS-011: `backend = "stub"` is selectable from the file *and* by `--backend`, and the flag
+    // `backend = "stub"` is selectable from the file *and* by `--backend`, and the flag
     // wins — the same precedence `--port` and `--data-dir` already follow (ADR-0006).
     let dir = TempDir::new("backend");
     let config = dir.write(
@@ -375,7 +375,7 @@ fn the_backend_comes_from_the_config_file() {
 fn a_flag_backend_wins_over_the_config_file() {
     // The override this asserts *is* the Docker backend, so the machine has to pass the preflight: a
     // socket that answers `_ping`, and `min_free_gb = 0` so the real `df` on this sandbox's small disk
-    // cannot fail a test that is about which backend the flag chose (HS-024). The `git` check still runs
+    // cannot fail a test that is about which backend the flag chose. The `git` check still runs
     // against the host's own git, which is what a Docker run on this machine would use.
     let dir = TempDir::new("backend-flag");
     let socket = docker_ping_socket(&dir);
@@ -410,7 +410,7 @@ fn a_flag_backend_wins_over_the_config_file() {
 #[test]
 fn the_default_backend_is_docker_and_the_log_line_says_so() {
     // ADR-0001: the stub is opt-in, so a machine that says nothing about the backend runs the
-    // Docker one — and since HS-024 a Docker run checks the machine first, so this test brings a daemon
+    // Docker one — and a Docker run checks the machine first, so this test brings a daemon
     // that answers `_ping` and sets `min_free_gb = 0` so the real `df` on this sandbox's small disk cannot
     // fail it. That the banner appears at all is therefore half the assertion: the preflight passed.
     let dir = TempDir::new("backend-default");
@@ -441,7 +441,7 @@ fn the_default_backend_is_docker_and_the_log_line_says_so() {
 fn a_hub_is_not_checked_for_docker_because_it_runs_no_sessions() {
     // Spec item 10 §6: `hub deploy` runs the startup steps "without the Docker and git checks". A hub with
     // the default `backend = "docker"` and no daemon anywhere is the normal hub, so it must boot — and it
-    // boots even though `min_free_gb` is the default 20 and this sandbox has 3 (HS-024).
+    // boots even though `min_free_gb` is the default 20 and this sandbox has 3.
     let dir = TempDir::new("hub-no-docker");
     let config = dir.write(
         "config.toml",
@@ -641,7 +641,7 @@ fn a_data_dir_that_cannot_be_created_is_reported_before_anything_binds() {
 
 #[test]
 fn the_data_root_serve_creates_is_the_mode_the_deploy_writes_whatever_the_umask() {
-    // HS-049: `doctor`'s `perms` finding compares the install tree with the modes `server deploy` writes, and the
+    // `doctor`'s `perms` finding compares the install tree with the modes `server deploy` writes, and the
     // data root's is 0755. `create_dir_all` uses the process's umask — 0775 on a machine whose umask is 0002 — so a
     // root `serve` made itself would fail the *next* boot's `ExecStartPre` over a mode nothing changed. `umask` is
     // a shell builtin and this crate denies `unsafe`, so the permissive umask arrives through a shell.
@@ -650,7 +650,7 @@ fn the_data_root_serve_creates_is_the_mode_the_deploy_writes_whatever_the_umask(
     let data = dir.file("data");
     let stderr = dir.file("serve.err");
     // `--admin-dir` for the reason `--data-dir` is here: a boot in a test must not bind the machine's own
-    // `/run/holosmith/drain.sock` (HS-051), and this one spawns `serve` without `Server::start`'s helper.
+    // `/run/holosmith/drain.sock`, and this one spawns `serve` without `Server::start`'s helper.
     let admin = dir.file("run/holosmith");
     let mut child = Command::new("sh")
         .arg("-c")
@@ -702,7 +702,7 @@ fn the_binary_serves_the_app_from_a_directory_that_holds_only_the_binary() {
     );
     let stderr = elsewhere.file("serve.err");
     // The admin socket stays under this test's own directory, because a `serve` in a test must never bind the
-    // machine's `/run/holosmith/drain.sock` (HS-051), and this spawn does not go through `Server::start`.
+    // machine's `/run/holosmith/drain.sock`, and this spawn does not go through `Server::start`.
     let admin = elsewhere.file("run/holosmith");
     let mut child = Command::new(&binary)
         .args([

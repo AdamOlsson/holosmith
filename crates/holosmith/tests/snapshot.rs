@@ -1,4 +1,4 @@
-//! The WIP snapshot (HS-042): one ref, a temporary index, and a branch that does not move.
+//! The WIP snapshot: one ref, a temporary index, and a branch that does not move.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

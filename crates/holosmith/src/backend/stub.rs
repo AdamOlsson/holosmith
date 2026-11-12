@@ -13,7 +13,7 @@
 //! argument and not a config key, because it paces a stub rather than describing the machine
 //! (ADR-0006's table is machine settings).
 //!
-//! A turn is a *script*: the stub emits the frames ADR-0018 and HS-015 pin — a boundary, thinking and
+//! A turn is a *script*: the stub emits the frames ADR-0018 and pin — a boundary, thinking and
 //! text deltas on one message id, a tool call, usage and the closing boundary — so the API, the
 //! stream and every rendering path of the session screen are exercisable with no agent process. The
 //! words live in [`StubBackend::script`] and nowhere else.
@@ -40,8 +40,8 @@ pub const DEFAULT_STEP_DELAY: Duration = Duration::from_millis(200);
 
 // The kinds a turn's script emits, in the order `StubBackend::script` emits them: three are
 // ADR-0018's (`turn.start`, `message.delta`, `turn.end`), and `tool.start`, `tool.end` and
-// `message.end` are HS-015's payloads for the rendering paths HS-033 and HS-034 fill in. The names
-// themselves live in `crate::events`, because the writer reads `message.end`'s usage (HS-023).
+// `message.end` are the payloads for the rendering paths and fill in. The names
+// themselves live in `crate::events`, because the writer reads `message.end`'s usage.
 
 /// The stub's turn counter, and the instant it was first asked to mint one.
 ///
@@ -108,14 +108,14 @@ struct StubState {
     /// Sessions whose running turn has been asked to stop, by `abort` or by `stop`. The turn loop
     /// reads and clears the entry between frames, so the flag lives at most as long as one turn.
     stopping: Mutex<HashSet<String>>,
-    /// Whether an `abort` is ignored, which is how a test produces a rung-2 ladder (HS-016).
+    /// Whether an `abort` is ignored, which is how a test produces a rung-2 ladder.
     ignores_abort: bool,
-    /// Whether a `snapshot` fails, which is how a test produces HS-019's `409 unsaved_work`.
+    /// Whether a `snapshot` fails, which is how a test produces the `409 unsaved_work`.
     fails_snapshot: bool,
     /// Whether a turn's `message.end` carries no usage, which is how a test produces the backend
-    /// spec item 13 says the token budget cannot count (HS-023).
+    /// spec item 13 says the token budget cannot count.
     omits_usage: bool,
-    /// A scripted process end for [`SessionBackend::supervise`], if a test asked for one (HS-031).
+    /// A scripted process end for [`SessionBackend::supervise`], if a test asked for one.
     exits: Mutex<Option<super::ProcessEnd>>,
     /// Sessions this stub has already handed a watcher for: one process, one exit.
     supervised: Mutex<HashSet<String>>,
@@ -159,7 +159,7 @@ impl StubBackend {
         self
     }
 
-    /// The same stub, told to ignore `abort` — the hung agent HS-016's rung 2 exists for.
+    /// The same stub, told to ignore `abort` — the hung agent the rung 2 exists for.
     ///
     /// `clear_queue` and `abort` are still recorded and still answer `Ok`; the running turn simply
     /// does not stop, so the ladder's grace expires and the forced rung fires. Like
@@ -173,7 +173,7 @@ impl StubBackend {
     }
 
     /// The same stub, told to fail its `snapshot` — the session with uncommitted work the delete flow
-    /// refuses to remove (HS-019, spec item 9).
+    /// refuses to remove (spec item 9).
     ///
     /// `delete` still works, so a test can prove that `?force=true` is what turns the refusal into a
     /// removal. Like [`Self::failing_at`] and [`Self::ignoring_abort`] this is a constructor argument
@@ -187,7 +187,7 @@ impl StubBackend {
     }
 
     /// The same stub, with turns that report no usage — the backend spec item 13's contingency is
-    /// about, where the agent cannot say what a message cost (HS-023).
+    /// about, where the agent cannot say what a message cost.
     ///
     /// The frame is still emitted, with its message id and without the `usage` object, which is what a
     /// real backend mapping a protocol that reports nothing would send: the message ended, and its cost
@@ -203,7 +203,7 @@ impl StubBackend {
     }
 
     /// The same stub, with a scripted process end: [`super::SessionBackend::supervise`] answers a watcher
-    /// that reports this exit, once per session (HS-031).
+    /// that reports this exit, once per session.
     ///
     /// Like [`Self::failing_at`] this is a constructor argument and not a config key: it is how the server's
     /// supervision path is proved without Docker, and nothing an operator runs should be able to make a
@@ -472,7 +472,7 @@ impl SessionBackend for StubBackend {
 
     /// A scripted process end, once per session, or `None` when this stub was not told to script one.
     ///
-    /// The stub has no process, so without this the server's half of HS-031 — the provisioner spawning
+    /// The stub has no process, so without this the server's half — the provisioner spawning
     /// the task that calls [`crate::exit::Exits::record`] — would only be provable by driving a real
     /// container. The exit is delivered immediately: the row is then moved from whichever state it is in
     /// (`starting` before the settle, `idle` after), which is exactly the table's `unexpected_exit` row and
@@ -660,7 +660,7 @@ mod tests {
         );
 
         // The hung agent: the abort is recorded and answered, and the turn runs to the end anyway,
-        // which is the state HS-016's second rung exists for.
+        // which is the state the second rung exists for.
         let stub = StubBackend::new(Duration::from_millis(1)).ignoring_abort();
         let turn = running_turn(stub.clone(), &session, &events);
         tokio::time::sleep(Duration::from_millis(2)).await;

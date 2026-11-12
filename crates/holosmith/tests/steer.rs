@@ -1,11 +1,11 @@
-//! Steer (HS-017): `POST /api/sessions/{id}/steer` hands guidance to the running turn, answers 202
+//! Steer: `POST /api/sessions/{id}/steer` hands guidance to the running turn, answers 202
 //! with the row, and records what was delivered as a `turn.steer` frame so the transcript can show
 //! it. A steer changes no state — the table has no row for it — so the event and `last_active_at` are
 //! the whole of its effect on the session.
 //!
 //! Every state a refusal needs is produced the way the server produces it: `idle` by letting a fast
 //! stub provision, `running` by prompting, and `stopped` by driving the table's `idle_stop` row,
-//! because HS-018's endpoint does not exist yet.
+//! because the endpoint does not exist yet.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -146,7 +146,7 @@ async fn wait_running(state: &AppState, id: &str) {
     .await;
 }
 
-/// Move a session with the one state function, the way HS-018's endpoint will: `stopped` is
+/// Move a session with the one state function, the way the endpoint will: `stopped` is
 /// reachable from `idle` by the table's `idle_stop` row.
 async fn drive(state: &AppState, id: &str, trigger: Trigger) {
     Transitioner::new(std::sync::Arc::clone(&state.database), state.events.clone())
@@ -169,7 +169,7 @@ async fn a_steer_answers_the_running_row_and_records_what_was_delivered() {
         "the prompt is accepted"
     );
     wait_running(&state, &id).await;
-    // HS-015's acceptance: `last_active_at` moves on prompt, settle **and steer**. The clock is whole
+    // the acceptance: `last_active_at` moves on prompt, settle **and steer**. The clock is whole
     // seconds, so "it moved" a second later would be satisfied by the settle alone — the row is pushed
     // into the past first, and only the steer's own touch can bring it back. The read below is
     // immediate, not a `wait_until`: the handler touches before it answers, and the turn it is running
@@ -231,7 +231,7 @@ async fn a_steer_answers_the_running_row_and_records_what_was_delivered() {
 
 #[tokio::test]
 async fn a_steer_is_refused_with_the_states_own_code() {
-    // `idle`: there is no turn to steer, which is the code HS-016 added to the family.
+    // `idle`: there is no turn to steer, which is the code added to the family.
     let idle = TempDir::new("steer-refused-idle");
     let idle_state = with_stub(state_in(&idle, Config::default()), fast_stub());
     let idle_served = Served::start(http::router(idle_state.clone()), GRACE).await;

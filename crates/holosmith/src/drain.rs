@@ -1,4 +1,4 @@
-//! The drain: refusing new work until the machine is quiet enough to restart (HS-051, spec item 10 step 3).
+//! The drain: refusing new work until the machine is quiet enough to restart (spec item 10 step 3).
 //!
 //! Item 10's promotion runs `drain` between the smoke test and `systemctl restart`, so that an upgrade does
 //! not kill a turn somebody is watching. The drain is therefore **not** a shutdown: it flips one flag, waits
@@ -26,7 +26,7 @@
 //! Item 10 step 3 says "over a local unix socket" and the API table says "not reachable over HTTP". That is
 //! one decision with one consequence: no route, no guard, no CORS layer, no `App` — so a phone that can reach
 //! the control origin still cannot drain the machine, and the only caller is a process that can open a file in
-//! `/run/holosmith`. The directory is step 2's, created 0700 and chowned to the service user (HS-049), which
+//! `/run/holosmith`. The directory is step 2's, created 0700 and chowned to the service user, which
 //! is why the socket needs no authentication of its own: being able to open it *is* the authorisation.
 //!
 //! # Why the wait is a poll over the rows
@@ -40,7 +40,7 @@
 //!
 //! It is not [`crate::serve`]'s process shutdown (SIGTERM → stop accepting → a bounded grace → exit): a
 //! successful drain leaves the process serving reads and refusing work, and the restart is somebody else's
-//! (HS-078's `upgrade`). It is not the idle stop ([`crate::sweeper`], one policy on a timer) and not the
+//! It is not the idle stop ([`crate::sweeper`], one policy on a timer) and not the
 //! eviction ([`crate::http::sessions`], inside a create): it is the fourth policy that stops something, and
 //! the only one that is asked for by an operator rather than by a rule.
 
@@ -109,7 +109,7 @@ pub fn socket_path(admin_dir: &Path) -> PathBuf {
     admin_dir.join(SOCKET_NAME)
 }
 
-/// The process's draining bit (HS-051).
+/// The process's draining bit.
 ///
 /// `Clone` because it is an `Arc` and every handler holds one through [`crate::http::AppState`]: the flag is
 /// read on the request path and set on the socket's task, and those are different tasks by construction.
@@ -212,7 +212,7 @@ impl Ending {
     }
 }
 
-/// The drain's sequence: the flag, the wait, the stop and the report (HS-051).
+/// The drain's sequence: the flag, the wait, the stop and the report.
 ///
 /// `Clone` for [`crate::sweeper::Sweeper`]'s reason: `serve` builds one and hands it to the socket's accept
 /// loop, which clones it per connection — the fields are an `Arc`, a sender and two `Clone` handles, so a
@@ -533,7 +533,7 @@ fn describe(wait: Duration) -> String {
 /// Three facts, each a measurement this project has paid for:
 ///
 /// - **The directory is step 2's, and a `serve` that is not the machine's has to make its own.** On a deployed
-///   host `/run/holosmith` exists, 0700, chowned to the service user (HS-049) — a tmpfs entry a reboot empties,
+///   host `/run/holosmith` exists, 0700, chowned to the service user — a tmpfs entry a reboot empties,
 ///   which is why the deploy re-creates it. A hand-run `serve` (`--admin-dir`, a dev instance, a gate case) may
 ///   be the first thing on a tree that has never been deployed, so it is created here, 0700, and only when it
 ///   is absent: an operator's own mode is theirs (the data root's rule).

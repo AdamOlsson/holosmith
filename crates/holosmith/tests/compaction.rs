@@ -1,4 +1,4 @@
-//! Compaction (HS-060, spec item 15): an old message's deltas become one snapshot.
+//! Compaction (spec item 15): an old message's deltas become one snapshot.
 //!
 //! The job is a task rather than an endpoint, so the tests call its one pass — `Compactor::sweep` is public
 //! for exactly that reason, as `Sweeper::sweep` and `Deleter::remove` are — and assert the log, the seqs and
@@ -142,7 +142,7 @@ fn log(state: &AppState, session: &str) -> Vec<Event> {
 
 /// Wait until the log satisfies `done`: the writer commits on its own tick, and **coalescing means the
 /// number of rows a message becomes is not the number of events a test appended** (ADR-0031) — so a test
-/// waits for the row it means, never for a count. Waiting on a count is how HS-059's own live-path test
+/// waits for the row it means, never for a count. Waiting on a count is how its own live-path test
 /// passed for the wrong reason.
 async fn wait_for_log(
     state: &AppState,

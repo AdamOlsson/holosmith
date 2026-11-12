@@ -1,6 +1,6 @@
 # `status` is the health endpoint's client, and `uninstall` owns its own words
 
-HS-050 is the spec's Commands table rows 9–11: `holosmith status`, `holosmith logs [-f] [--session ID]` and
+This is the spec's Commands table rows 9–11: `holosmith status`, `holosmith logs [-f] [--session ID]` and
 `holosmith uninstall [--purge]`. All three are readers or a teardown of state earlier stories already own, so this
 ADR records the readings and the one new shape, not a design invented for the occasion.
 
@@ -20,7 +20,7 @@ Lines, in this order, each from the reader that already owned it:
 | `uptime` | `GET /api/health` — `Health::of`'s `uptime_s`, `Runtime::uptime_s`'s one owner |
 | `sessions <status>` ×6 | the `sessions` table, through a read-only open |
 | `proxy hs_egress`, `proxy hs_key` | `proxies::running(config, machine)` |
-| `machines` | nothing yet: the registry is HS-068 |
+| `machines` | nothing yet: the registry is |
 
 `role` and `version` are **this machine's config and this binary**, never the health payload's copies. Both are
 facts a CLI always has, so a `status` on a stopped machine still describes the machine; a line that took them from
@@ -28,7 +28,7 @@ the server would print nothing at all precisely when an operator runs `status`. 
 hidden: `version` is the version of the binary the operator ran, and a hand-started older `serve` on the same
 machine would have its own.
 
-`machines` is `unknown:` with a sentence naming **HS-068**, not `none` and not `0`: "no machine has registered" and
+`machines` is `unknown:` with a sentence naming ****, not `none` and not `0`: "no machine has registered" and
 "the thing that would register one does not exist" are different facts, and on a phase-2 machine only the second is
 true. `GLOSSARY.md`'s *Health endpoint* already said the command "also asks other machines"; this is that sentence
 until there is something to ask.
@@ -44,7 +44,7 @@ daemon that is down, an account outside the `docker` group — so a `status` tha
 (the same finding `serve`'s refusal and `doctor` rest on, ADR-0028/ADR-0054) is asked **first**, and a daemon that
 does not answer makes both lines `unknown: whether it is running was not measured: …`. A missing daemon is *not* a
 failure of this command: describing a machine whose daemon is down is what `status` is for, unlike `doctor --quick`,
-whose question is "may `serve` run here" (HS-050's review, T1).
+whose question is "may `serve` run here" (T1).
 
 ## D2 — uptime is asked, not recorded
 
@@ -108,7 +108,7 @@ log is one sentence naming the path.
 
 **The journald arm reads no config.** `--config` belongs to the `--session` arm, where a data root is needed, so a
 machine whose `config.toml` is broken — which is exactly the machine an operator runs `logs` on — still prints its
-unit's log (HS-050's review, S4). Every other command refuses a broken file before it does anything, and that
+unit's log (S4). Every other command refuses a broken file before it does anything, and that
 difference is deliberate: this one arm reads nothing from it.
 
 ## D5 — `uninstall` is not a deploy, and does not print its words
@@ -134,7 +134,7 @@ teardown's commonest answer and the one the acceptance's idempotency asks for.
 
 It keeps the data root (`app.db`, every session's `session.log`, `secrets/keys.toml`, `secrets/vapid.toml`), the
 projects and their worktrees and branches, the two images, the **deployed `config.toml` and the admin directory**
-(`/run/holosmith`, which HS-051's socket is created in — neither is data and neither is named by the spec's teardown
+(`/run/holosmith`, which the socket is created in — neither is data and neither is named by the spec's teardown
 row, so removing them is a later story's decision and one sentence here) — and **the sessions' own containers and
 `agents_*` networks**, which belong to the rows the kept data describes: a boot's reconcile owns them (ADR-0053), and
 a plain `uninstall` that killed a live session would destroy a turn it was never asked about. The `data: kept:` line
@@ -160,7 +160,7 @@ sentence rather than failing the run, because the data root is the deliverable.
 
 The refusal's reader is the **same** read-only `db::Reader` `status` uses, and "there is no database" is
 `ErrorKind::NotFound` only: any other stat failure is a refusal with its reason, because a purge that cannot count the
-rows it is about to describe must not delete them (HS-050's review, T2).
+rows it is about to describe must not delete them (T2).
 
 The refusal — `live_count() > 0` and no `--force` — happens **before any child runs**, and is a refusal rather than a
 report: one sentence on stderr, exit 1, nothing removed. A run that removed the unit and then discovered it could
@@ -180,7 +180,7 @@ command that just ran, with its own flags made absolute) because re-running is t
   `status` asks the address in the config, so a shared boot would leave the uptime line honestly `unknown` and the
   case would skip on the thing it exists to catch. It asserts role and version against the boot's own answer, uptime
   against `/api/health`'s `uptime_s`, the six counts against the sessions list's own length, both proxy lines against
-  the daemon, and that the machines line names HS-068.
+  the daemon, and that the machines line names.
 - `case_logs` needs no server: a `journalctl` stand-in on `PATH` records the argv and prints two lines, and a data
   root this case wrote holds a session log. The `-f` *follow* is `logs.rs`'s unit test — a line appended after the
   first read is printed — because a shell case can only prove that the flag is passed on.
@@ -193,5 +193,5 @@ command that just ran, with its own flags made absolute) because re-running is t
 `tests/uninstall.rs`'s recorders (and a privileged run's unit *file* is untestable here, because `/etc/systemd/system`
 is not this user's to write — the case's `--root` arm and `docs/build.md`'s by-hand procedure are the two proofs);
 no `journalctl` for a unit, so the server arm's real journal is a stand-in's; and no host registry, so `status`'s
-machines line names HS-068 instead of a health it cannot ask for. Those three are the ship note's "said plainly",
+machines line names instead of a health it cannot ask for. Those three are the ship note's "said plainly",
 not gaps found later.

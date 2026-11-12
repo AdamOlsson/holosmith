@@ -1,10 +1,10 @@
 # The transition table as data, one function that applies it, and how "impossible" is enforced
 
-HS-011 gave the product its first state changes: the provisioner wrote `starting → idle` and
+ gave the product its first state changes: the provisioner wrote `starting → idle` and
 `starting → error` straight through the repository's status write, with the event payload
 `{step, status, reason}`. Twelve more stories will change a session's state — prompt, abort, evict,
 idle stop, drain, resume, delete, crash recovery — and every one of them would otherwise decide for
-itself which moves are legal. HS-012 is the story that moves that decision into one table before
+itself which moves are legal. This is the story that moves that decision into one table before
 there is a second caller to disagree with the first.
 
 The spec settles the states and their triggers (item 8) but not how they are represented, what a
@@ -22,9 +22,9 @@ row by row, and a test does exactly that.
 Two rows need saying out loud, and both say "the row is one change":
 
 - `running` + `abort_ladder` ends in `stopped`. The spec's cell continues "then immediate resume" —
-  that is a *second* row (`stopped` + `resume`), which HS-022 chains. Two rows, two events, two
+  that is a *second* row (`stopped` + `resume`), which chains. Two rows, two events, two
   writes: a single row with a sequence in it would be a second mechanism for the same thing.
-- `any` + `delete` reaches `deleting`. "then removed" is the row's removal, which is HS-019's flow
+- `any` + `delete` reaches `deleting`. "then removed" is the row's removal, which is the flow
   and not a state.
 
 Recovery is the one row whose `from` needed interpreting. The spec's cell says "server crash", which
@@ -32,11 +32,11 @@ is not a state, so the row admits the states that were **live** when the process
 `starting`, `idle`, `running` — and not the two that need no recovery. That matters: a row admitted
 from `stopped` would go through the same write that clears `stopped_at`, restarting item 15's
 7-day retention clock and counting a stopped session live again. A row caught mid-`deleting` is
-HS-044's decision, and until then the table refuses it rather than restarting a session somebody
+the decision, and until then the table refuses it rather than restarting a session somebody
 asked to delete.
 
 The table reaches exactly the spec's six states. `ended` is not one of them and cannot be spelled:
-it is not a `Status` variant, and `Status`'s parse (HS-007) refuses it. `interrupted` is a *reason*
+it is not a `Status` variant, and `Status`'s parse refuses it. `interrupted` is a *reason*
 — the one the crash-recovery row carries — and `tests/state_machine.rs` proves that: recovery takes
 a `running` session to `starting` with `status_reason = "interrupted"`.
 
@@ -84,22 +84,22 @@ resume", and it is why the move is one function rather than a helper beside each
 {"from":"starting","to":"idle","step":null,"reason":null}             the transition it led to
 ```
 
-Four keys, always present, explicit `null`s — the rule the session row follows. HS-011's payload was
+Four keys, always present, explicit `null`s — the rule the session row follows. the payload was
 `{step, status, reason}`; `status` becomes `to` and `from` joins it, so an event names the change it
 reports rather than only where it ended. A provisioning step report is a payload with `step` set and
 `from == to`: a step beginning changes no state, which is also why it is *not* a table row and not a
 call to `apply` — the provisioner emits it directly and writes nothing. The two real transitions the
-provisioner makes are `apply(PiReady)` and `apply(ProvisioningFailed)`, so HS-011's direct status
+provisioner makes are `apply(PiReady)` and `apply(ProvisioningFailed)`, so the direct status
 writes are gone.
 
 A transition's payload carries `step: null`. A failure therefore names its failing step through the
 step report that preceded it, which is always the same step, because a step is announced before it
-runs (HS-011's rule).
+runs.
 
 ## "Impossible outside it" is a source-level rule, not a type
 
 The repository's `set_status` is still `pub`, and that is deliberate: `tests/session_repository.rs`
-is HS-007's proof that the repository can update a state at all, and it lives outside the crate, so
+is the proof that the repository can update a state at all, and it lives outside the crate, so
 a `pub(crate)` write would delete real coverage to buy a compile error.
 
 The rule is enforced where this repository already enforces its other seams — by a test that walks
@@ -120,11 +120,11 @@ writes a state directly is testing the repository, not the product.
   reports claim the unchanged state and the fifth is exactly
   `{"from":"starting","to":"idle","step":null,"reason":null}`. 20 cases, 60 assertions.
 - `tests/sessions_api.rs`'s stopped-session test no longer writes `stopped` directly — it waits for
-  the provisioner's `idle` and then applies the table's `evict` row, which is what the product does
-  (HS-011 and HS-012 together made the old shortcut illegal).
+  the provisioner's `idle` and then applies the table's `evict` row, which is what the product does.
+
 - `Trigger`'s variants are `pub`, so the twelve that no story calls yet are the API the next twelve
-  stories will use rather than dead code. HS-013 onward reaches `apply` through `AppState`'s
+  stories will use rather than dead code. The transitioner reaches `apply` through `AppState`'s
   transitioner, and none of them needs to touch the table to add a state — only a story that adds a
   *trigger* does, which is spec item 8's business.
-- HS-019 (delete), HS-020 (evict), HS-021 (idle stop), HS-022 (abort ladder), HS-044 (recovery) and
-  HS-051 (drain) all have their row already. The one thing they must not do is write `status`.
+- (delete), (evict), (idle stop), (abort ladder), (recovery) and
+   (drain) all have their row already. The one thing they must not do is write `status`.

@@ -1,6 +1,6 @@
 # The mapping layer: pi's records become the transcript's frames
 
-HS-032 is the story that makes a turn real. HS-031 put pi's RPC stdio in the server's hands and stopped at
+This is the story that makes a turn real. An earlier change put pi's RPC stdio in the server's hands and stopped at
 the ready handshake; this story reads what pi says next and turns it into the contract ADR-0018/0019 pinned,
 so the operator watches text and thinking arrive instead of waiting for a summary. Spec item 15 is the event
 stream, V8 the awkward frames the layer must survive, and the story's acceptance names the four things that
@@ -32,7 +32,7 @@ pi's `message_start`/`message_end` carry a message with `content`, `usage` and `
 the mapping mints `msg-<process instant>-<counter>`: the process's start instant supplies the range a restart
 would otherwise reuse, and a process-wide counter supplies the rest. It is the stub's shape (`msg-<nanos>-<n>`)
 for the stub's reason — a restart that began again at `msg-1` would fold a new turn's deltas into a previous
-turn's block against a durable log (HS-011).
+turn's block against a durable log.
 
 A delta with no `message_start` behind it (a lagged subscriber, or a provider that skipped one) **opens** the
 message rather than minting an id per delta, and logs one `debug` line: the text is kept, and one message stays
@@ -64,11 +64,11 @@ table pinned `message.end` as `{"message_id", "usage": {"in", "out"}}`, so this 
 - `stop_reason` is pi's `stopReason` (`stop`, `length`, `toolUse`, `error`, `aborted`, …) verbatim; the words
   are pi's, and paraphrasing them would be this build inventing a taxonomy.
 - `tool_calls` is the message's tool-call **names**, in order. A summary, not a record of the calls: their
-  arguments, output and status are `tool.start`/`tool.end`, which are HS-033's, and duplicating them here would
+  arguments, output and status are `tool.start`/`tool.end`, which are that story's, and duplicating them here would
   put a tool's whole output in the log twice.
-- `usage` stays optional: emitted when pi reports both counts, omitted when it does not (HS-023's rule for a
+- `usage` stays optional: emitted when pi reports both counts, omitted when it does not (the rule for a
   backend that cannot report usage). `in` is pi's `input` and `out` its `output`; the cache counters are
-  deliberately **not** folded in — HS-034 owns "real token counts" and with it any decision about how a cached
+  deliberately **not** folded in — a later change owns "real token counts" and with it any decision about how a cached
   prompt is counted, and inventing the arithmetic here would make that story's numbers disagree with this one's.
 
   **Amended by ADR-0042:** the two clauses above are answered, and the second no longer holds. `in` is now pi's
@@ -86,7 +86,7 @@ that payload is pinned exactly (ADR-0031).
 pi's `turn_start`/`turn_end` bracket **one assistant response** — its `docs/json.md` says "a turn is one assistant
 response plus any tool calls and tool results produced by that response" — and a run can hold several of them once
 retries, steering or tool calls are involved. The contract's turn is the prompt: the stub emits one
-`turn.start`/`turn.end` pair per prompt, `turns_before` numbers the log by those rows (HS-061), and the page counts
+`turn.start`/`turn.end` pair per prompt, `turns_before` numbers the log by those rows, and the page counts
 a turn from `turn.start` and a settled turn from `turn.end`.
 
 So `rpc::pump` writes the pair itself — `turn.start` before the first frame, `turn.end` when pi settles — and pi's
@@ -108,8 +108,8 @@ everything else answers `TurnEnd::Settled`.
 The mapping keeps **two** counters, because two different things are happening:
 
 - **Declined**: a record pi documents and this contract has no frame for — `agent_start`/`agent_end`, pi's
-  `turn_start`/`turn_end`, the queue and level updates, the compaction and retry records, `toolcall_*` (HS-033's),
-  `extension_ui_request` (HS-035's), and `response` (the reader's to route; the mapping meets one only when a
+  `turn_start`/`turn_end`, the queue and level updates, the compaction and retry records, `toolcall_*`,
+  `extension_ui_request`, and `response` (the reader's to route; the mapping meets one only when a
   fixture is replayed verbatim). Declining these is the design, so they are one `debug` line per turn at most.
 - **Unknown**: a record type, a nested event type, or a shape the documentation does not describe. That is the
   one worth an operator's attention — a pi release that grew a frame this build should map — so it is a `warn`,
@@ -139,7 +139,7 @@ for its session to be deleted. The reader takes the sender out of the slot as it
 ## The other four turn operations, because nothing else owns them
 
 `steer`, `clear_queue` and `abort` are pi's own commands (`docs/rpc-commands.md`) and stopped refusing here
-too: no story between this one and HS-046 owns them, and HS-046 is the gate that runs every phase-1 flow
+too: no story between this one and a later change owns them, and a later change is the gate that runs every phase-1 flow
 against a real Docker host. Each is one `request` bounded by its own timeout, and the ladder still bounds rung
 one by what is left of `abort_grace` (ADR-0020). The `turn.steer` **frame** stays the prompt route's
 (`http::sessions::record_steer`, ADR-0021): a backend that also wrote it would put two blocks in the transcript
@@ -147,7 +147,7 @@ for one instruction.
 
 ## A removal the server provokes is never news — including the container step's
 
-The resume flow exposed a real bug that HS-031's generation had only half closed. `start_container` begins with
+The resume flow exposed a real bug that the generation had only half closed. `start_container` begins with
 `docker rm -f s_<id>` (spec item 6), which ends the attached `docker run` of the session's *previous* agent. That
 exit arrives **before** the new launch registers its generation, so it is still "current" when it is classified:
 the row becomes `error` with "the container exited 137 and printed nothing", and the provisioner stops at the
@@ -171,15 +171,15 @@ own `remove_container`, and there is one place a removal can happen rather than 
 
 `--no-session` (ADR-0039) means pi keeps no session file and the transcript lives in Holosmith's event log. It
 follows that a resumed session — a new container, a new pi process — starts with **no context**: the operator sees
-the whole transcript and the agent does not. HS-031's ADR handed this revisit to this story; the honest answer is
+the whole transcript and the agent does not. the ADR handed this revisit to this story; the honest answer is
 that a mapping cannot invent it. Replaying the log into a new pi (as a prompt preamble, or as pi's own session
 file) is a product decision with a cost — a token bill for every resume — and it needs a story of its own. It is
 recorded here, in the ADR and in the ship note, rather than discovered later as a bug.
 
 ## The fixture is captured by hand, and refreshed by a release step
 
-There is no provider key in a session's container (HS-039 builds the key proxy) and the session's network is
-`--internal` (HS-028), so a prompt on a real session is *refused by pi* before a stream exists. That is what the
+There is no provider key in a session's container and the session's network is
+`--internal`, so a prompt on a real session is *refused by pi* before a stream exists. That is what the
 gate's `case_docker_turn` asserts, and it is a different observable from a hang: the row leaves `running` for
 `error` carrying pi's own sentence, the container is still alive, and resume-and-prompt works a second time.
 
@@ -201,11 +201,11 @@ otherwise only unit-tested). Refreshing them is a release step, not a story step
 
 ## What this story does not decide
 
-- Tool calls, their arguments, their output and `output_ref` are HS-033's.
-- The missing-usage warning a session screen shows is HS-034's; this story only stops inventing zeroes.
-- Images in a tool result and extension UI requests are HS-035's, and the record subscription is the seam they
+- Tool calls, their arguments, their output and `output_ref` are that story's.
+- The missing-usage warning a session screen shows is that story's; this story only stops inventing zeroes.
+- Images in a tool result and extension UI requests are that story's, and the record subscription is the seam they
   will use.
-- Fold cache counters into `usage` — HS-034 (**decided by ADR-0042**: they are folded in, and a zero
+- Fold cache counters into `usage` — (**decided by ADR-0042**: they are folded in, and a zero
   report emits no `usage` key at all).
 - Replay a session's transcript into a resumed agent, so a resume is not an amnesiac turn — unowned, and named
   above.

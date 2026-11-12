@@ -1,4 +1,4 @@
-//! `GET /api/sessions/:id/events/history`: one older page of a session's log (HS-061).
+//! `GET /api/sessions/:id/events/history`: one older page of a session's log.
 //!
 //! The stream carries the newest messages and says where it stopped (`history.truncated`); this
 //! endpoint answers what came before that. It is the second half of one rule — the cursor a
@@ -127,7 +127,7 @@ pub(crate) async fn respond(state: &AppState, session_id: &str, query: RawQuery)
     (StatusCode::OK, Json(page)).into_response()
 }
 
-/// Read `before` and `limit` out of the query, or refuse the request (HS-061).
+/// Read `before` and `limit` out of the query, or refuse the request.
 ///
 /// `before` is **required**: a client that pages history without naming where to start is asking for
 /// the newest page, which is what the stream already gave it. Every other parameter is ignored rather

@@ -1,6 +1,6 @@
 # The project's refusals are the create's 422, read on the request's path
 
-HS-026 is spec item 1's third bullet: three repositories that must not be mounted into a session's
+This is spec item 1's third bullet: three repositories that must not be mounted into a session's
 container, each refused with its own code. Four decisions follow from making a *background* refusal an
 *answer*: where it is decided, who asks, what is read, and what a retry means.
 
@@ -14,7 +14,7 @@ row exists, and they answer ADR-0008's envelope with their own code. A session t
 exist at all, which is what the story's fourth bullet ("a refused session leaves nothing behind") means once
 the 202 is gone: no row, no directory, no branch, nothing to resume or delete.
 
-The consequence is a change to HS-025's behaviour, recorded rather than papered over: a create naming a
+The consequence is a change to the behaviour, recorded rather than papered over: a create naming a
 project the machine does not hold used to be accepted and end `error` with git's sentence ("the worktree
 step: …"), resumable once the repository was cloned. It is now refused with `422 git_not_directory`, because
 a project with no `.git` is one of the shapes the spec refuses. A *direct* backend provision of such a
@@ -32,7 +32,7 @@ answers `Ok(())`. Three reasons for that placement rather than the handler's:
 - the projects root belongs to the backend, and the handler would otherwise have to reach through the
   backend's private fields to name the repository;
 - the question is the same shape as the other host reads the backend already owns, so a second backend
-  (HS-068's hub, HS-073's `--ssh`) answers it too.
+   answers it too.
 
 The rules themselves are `worktree::refuse`, beside the module that already runs git on the host — the
 repository is what the worktree is made from, and one module owning "everything this machine asks a project
@@ -41,7 +41,7 @@ repository" is one place to read.
 ## What is read, and why those readings
 
 - **`.git` is a directory.** A `.git` *file* is a linked worktree's or a submodule checkout's shape, and the
-  repository it points at is not the path HS-027 mounts.
+  repository it points at is not the path mounts.
 - **No submodules: no `.gitmodules` and no `.git/modules`.** The spec names the hooks that live under
   `.git/modules`. `.gitmodules` is the declaration, and it is enough on its own: it is checked out into the
   session's own worktree, so an agent holding `/work` can run `git submodule update --init`, and git then

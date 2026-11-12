@@ -1,7 +1,7 @@
 # The key proxy's request is its bytes, and its store is a directory
 
-HS-040 is a verification story: V3, V4 and V5 are the checks that say spec item 2's credential path actually
-works. Running them against a real provider key found two defects in HS-039's proxy. Both are recorded here,
+This is a verification story: V3, V4 and V5 are the checks that say spec item 2's credential path actually
+works. Running them against a real provider key found two defects in the proxy. Both are recorded here,
 because each one is a shape a later reader would otherwise restore: a `Content-Length` with no body, and a file
 bind mount over a file that is written by rename.
 
@@ -63,7 +63,7 @@ table stays exact — a missing provider is a refusal that names what is support
   environment variable, measured against the proxy's own log: a competing `auth.json` reaches the proxy as
   `status=bad-key`, and a competing `OPENCODE_API_KEY` does not displace the `models.json` dummy. So the check's
   pass condition holds only while the seeded pi-home carries no `auth.json` and the container environment
-  carries no provider key — which is what HS-039 already does, and the fallback sentence ("remove the other
+  carries no provider key — which is what already does, and the fallback sentence ("remove the other
   sources from the seeded pi-home and the container environment") is the rule that keeps it true.
 
 V3's failure fallback (a per-session spend-limited key in the environment) is not needed and was not taken; the

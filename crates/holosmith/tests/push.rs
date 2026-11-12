@@ -1,4 +1,4 @@
-//! Web Push (HS-066, spec item 11): the two routes, the trigger table, the three triggers and the stream rule.
+//! Web Push (spec item 11): the two routes, the trigger table, the three triggers and the stream rule.
 //!
 //! The story's own rules are what these tests own, and each group is a different kind of measurement:
 //!
@@ -114,7 +114,7 @@ async fn mutate(addr: std::net::SocketAddr, method: &str, path: &str, payload: &
     request(addr, &text).await
 }
 
-/// A create, which is the one mutating request here that also carries an `Idempotency-Key` (HS-008).
+/// A create, which is the one mutating request here that also carries an `Idempotency-Key`.
 async fn create(addr: std::net::SocketAddr, key: &str) -> Response {
     let payload = r#"{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}"#;
     let text = format!(
@@ -861,7 +861,7 @@ fn the_disposition_table_is_one_removal_and_everything_else_kept() {
 fn no_session_container_carries_a_subscription_the_pair_or_the_word_push() {
     // The label deliberately avoids the word under test: this suite's scratch directories are named after the
     // test, and a `TempDir::new("push-containers")` would put "push" into a container's own home path.
-    let dir = TempDir::new("hs066-containers");
+    let dir = TempDir::new("notify-containers");
     let state = state_in(&dir, config(&dir));
     let session = {
         let database = state.database.lock().expect("the lock is not poisoned");
@@ -920,7 +920,7 @@ fn no_session_container_carries_a_subscription_the_pair_or_the_word_push() {
     }
 }
 
-/// HS-067's one server-side claim: the browser can learn this machine's **application server key** from the
+/// the one server-side claim: the browser can learn this machine's **application server key** from the
 /// endpoint the page already fetches, and the value there is the pair's own public half — byte for byte, not a
 /// re-derivation — which is what makes "each machine's keys are independent" a fact rather than a hope.
 ///

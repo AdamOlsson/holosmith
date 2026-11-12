@@ -1,4 +1,4 @@
-//! The database the binary opens at startup, and the migrations it applies (HS-004, ADR-0009).
+//! The database the binary opens at startup, and the migrations it applies (ADR-0009).
 //!
 //! `open` is the whole contract: the four pragmas the spec names are set in a fixed order and
 //! read back, then every pending migration is applied in one transaction. The transaction is
@@ -47,7 +47,7 @@ impl Default for OpenOptions {
 
 /// An open, migrated database. Held for the process lifetime; the connection stays private, and a
 /// handler reaches it only through the `Arc<Mutex<Database>>` ADR-0012 introduced and ADR-0013
-/// keeps. HS-009 adds the single writer for events on top of that lock; a database actor that
+/// keeps. adds the single writer for events on top of that lock; a database actor that
 /// funnels every read and write through one task is not part of it.
 pub struct Database {
     /// The one connection this process has. `sessions` and `events` lend it to their repositories
@@ -104,7 +104,7 @@ impl Database {
         self.schema_version
     }
 
-    /// Every read and write of a `sessions` row (HS-007).
+    /// Every read and write of a `sessions` row.
     ///
     /// The repository borrows this database's connection, so the connection itself stays private.
     /// A handler reaches it only through the `Arc<Mutex<Database>>` that ADR-0012 introduced and
@@ -113,7 +113,7 @@ impl Database {
         SessionRepository::new(&self.connection)
     }
 
-    /// Every read and write of an `events` row (HS-009).
+    /// Every read and write of an `events` row.
     ///
     /// Like [`Self::sessions`], the repository borrows this database's connection rather than
     /// owning one. The writer thread is the only caller in production: it takes the lock, runs
@@ -122,7 +122,7 @@ impl Database {
         EventRepository::new(&self.connection)
     }
 
-    /// Every read and write of a `push_subscriptions` row (HS-066).
+    /// Every read and write of a `push_subscriptions` row.
     ///
     /// The same borrow as [`Self::sessions`] and [`Self::events`], and the rule those two already keep: a
     /// subscription is read under the lock, the guard is dropped, and only then does anything leave the machine.
@@ -131,7 +131,7 @@ impl Database {
         PushRepository::new(&self.connection)
     }
 
-    /// Every read and write of a `hosts` row (HS-068, spec items 4 and 16).
+    /// Every read and write of a `hosts` row (spec items 4 and 16).
     ///
     /// The same borrow as the three above. The registry's *probe* is the one thing that must not happen under this
     /// lock: a health check leaves the machine and can take seconds. `http::hosts::register` probes inside
@@ -153,7 +153,7 @@ impl fmt::Debug for Database {
 }
 
 /// An open, **read-only** connection: what a report reads a database with, so that reading a machine cannot
-/// migrate it (HS-045's rule, HS-050's second reader).
+/// migrate it.
 ///
 /// [`Database::open`] applies every pending migration before it answers, which is what a *start* wants and what a
 /// command that only describes a machine must not do: `doctor` refuses a database from a newer release rather than
@@ -174,7 +174,7 @@ impl Reader {
     pub fn open(path: &Path) -> Result<Option<Self>, DbError> {
         // `NotFound` is the only "there is nothing to read". `Path::exists()` answers `false` for **any** stat
         // failure, which would turn "this user may not look inside the data root" into "this machine has never
-        // served" — and one caller of this opener decides whether to delete the tree over that answer (HS-050).
+        // served" — and one caller of this opener decides whether to delete the tree over that answer.
         match std::fs::metadata(path) {
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -197,7 +197,7 @@ impl Reader {
 
     /// Every read of a `hosts` row, borrowed from this connection.
     ///
-    /// HS-072's `holosmith status` asks the registry a question a running `serve` writes: the facts are the last
+    /// the `holosmith status` asks the registry a question a running `serve` writes: the facts are the last
     /// boot's probe (ADR-0073), so a read-only open answers them without a lock, a second writer or a server. This is
     /// the same repository the routes write through, so a row's columns are read in one place and a column a later
     /// migration adds cannot be missed here.
@@ -210,7 +210,7 @@ impl Reader {
         recorded_version(&self.connection, path)
     }
 
-    /// Write this database's bytes to `destination` with `VACUUM INTO`, over the read-only connection (HS-078,
+    /// Write this database's bytes to `destination` with `VACUUM INTO`, over the read-only connection (,
     /// spec item 10 step 4).
     ///
     /// One statement rather than a file copy for the reason item 10 names it: a copy of a live WAL database is
@@ -256,7 +256,7 @@ pub enum DbError {
         path: PathBuf,
         source: rusqlite::Error,
     },
-    /// `VACUUM INTO` could not write the snapshot a promotion takes (HS-078).
+    /// `VACUUM INTO` could not write the snapshot a promotion takes.
     Snapshot {
         destination: PathBuf,
         source: rusqlite::Error,
@@ -418,8 +418,8 @@ pub fn apply_pending(
     now: i64,
 ) -> Result<u32, DbError> {
     let recorded = recorded_version(conn, path)?;
-    // One decision, in `schema::verdict`, because the banner, the `warn` below and `doctor` (HS-045) all report the
-    // same fact and a second comparison is a second chance to disagree (HS-075).
+    // One decision, in `schema::verdict`, because the banner, the `warn` below and `doctor` all report the
+    // same fact and a second comparison is a second chance to disagree.
     match schema::verdict(recorded, schema::SCHEMA_VERSION) {
         // Item 10: rolling `current` back to an older binary must not need a restore, and expand/contract is what
         // makes continuing safe. `doctor` is where this refuses; `serve` says so once and carries on.
@@ -488,7 +488,7 @@ fn recorded_version(conn: &Connection, path: &Path) -> Result<u32, DbError> {
         .map_err(sqlite_error_about(path))
 }
 
-/// The schema version recorded in the database at `path`, read **without** migrating it (HS-045).
+/// The schema version recorded in the database at `path`, read **without** migrating it.
 ///
 /// [`Database::open`] applies every pending migration, which is what a *start* wants and what `doctor` must not
 /// do: ADR-0047's "a newer database" question has to be answered before anything writes to the file, and
@@ -584,7 +584,7 @@ mod tests {
 
     #[test]
     fn a_database_can_be_read_without_being_migrated() {
-        // `doctor`'s reader (HS-045): the file is opened read-only and never written, so a start on a database
+        // `doctor`'s reader: the file is opened read-only and never written, so a start on a database
         // from a newer release can be refused instead of migrated (ADR-0047).
         let file = TempPath::new("recorded-without-migrating");
         assert_eq!(

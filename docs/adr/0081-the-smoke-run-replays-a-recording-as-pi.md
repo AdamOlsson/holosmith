@@ -1,6 +1,6 @@
 # The smoke run replays a recording as `pi`, and owns every name it makes
 
-HS-077 is spec item 10's second step — "run the candidate with a smoke config (alternate port, temporary data
+This is spec item 10's second step — "run the candidate with a smoke config (alternate port, temporary data
 directory, `container_prefix=smoke_`, `network_prefix=smoke_`) against the real Docker daemon, using a fake pi in the
 image that replays the session recorded in phase 1. Create a session, run a turn, delete it" — and the sentence it
 serves is short: **a bad release is caught by a robot, not by the operator at midnight.** So the deliverable is not a
@@ -15,8 +15,8 @@ recording, and `server deploy`'s step 3 still builds the two product images.
 ## D1 — the verb is `holosmith smoke [--binary PATH] [--root DIR]`, and its exit code is the contract
 
 A **host** verb, for ADR-0080 D1's reason spelled the other way round: the spec says item 10's steps are implemented
-by `holosmith upgrade <binary>` and not by a separate script, HS-078 *is* that command, so the smoke test has to be
-something HS-078 can run in-process and branch on. A `scripts/smoke.sh` was refused because a script is not the
+by `holosmith upgrade <binary>` and not by a separate script, *is* that command, so the smoke test has to be
+something can run in-process and branch on. A `scripts/smoke.sh` was refused because a script is not the
 product and would be a second entry point to the pipeline; a `case_smoke`-only design was refused because a gate case
 cannot be a promotion's go/no-go — it runs on a machine that has the tree.
 
@@ -24,9 +24,9 @@ The codes are three, because two of the things that can happen are not verdicts 
 
 | Code | Meaning | Who reads it |
 | --- | --- | --- |
-| 0 | the candidate passed: a session ran a recorded turn and was deleted | HS-078 promotes |
-| 1 | a measurement failed — including the smoke **image build** | HS-078 refuses the promotion |
-| 2 | the test could not run here: no daemon, no `git`, a `--binary` that is missing, not executable or built for another CPU | HS-078 reports "this machine cannot judge it" |
+| 0 | the candidate passed: a session ran a recorded turn and was deleted | promotes |
+| 1 | a measurement failed — including the smoke **image build** | refuses the promotion |
+| 2 | the test could not run here: no daemon, no `git`, a `--binary` that is missing, not executable or built for another CPU | reports "this machine cannot judge it" |
 
 2 is decided **before** anything is attempted, and 1 is every failure after that. The image build is a 1 rather than a
 2 deliberately: the recipe is this build's own, so a daemon that cannot build it has failed the measurement, and
@@ -47,10 +47,10 @@ The three properties this buys, in order of how much they cost if lost:
 
 - **The candidate is what is tested.** The image is built from the *bytes `--binary` names* — the same bytes this run
   read, hashed and ELF-checked (`builder::artifact_problem` against `builder::default_target()`, refused as a 2) — so
-  HS-078 cannot promote a binary the smoke run never ran.
+   cannot promote a binary the smoke run never ran.
 - **The launch path stays measured.** `agent::version_of` runs `docker run --entrypoint pi <image> --version` and
   `version_check` compares it with `pins/pi.txt`; the wrapper answers the pin, so the check runs through the real path
-  instead of being skipped for a smoke run. Skipping it would have been the story's own version of PER-108's P1 — a
+  instead of being skipped for a smoke run. Skipping it would have been the story's own version of the P1 — a
   claim nothing reads.
 - **A symlink would not do.** An argv[0] of `pi` reaches *this* binary's clap parser with `--mode`, which is not a
   subcommand it has; the wrapper is what turns pi's arguments into `container fake-pi`'s.
@@ -58,7 +58,7 @@ The three properties this buys, in order of how much they cost if lost:
 A third Dockerfile is a decision rather than a variant: the agent image is what a session runs in production (pinned
 pi, git, the toolchains), and this one carries no `apt-get` at all. Node stays because the base has it and because the
 boot's network self-test probes `agent_image` as `node -e` — in a smoke run that image is this one. The two recipes
-naming one digest is asserted by a test, because "two pinned files drift" is the defect HS-048's P1 and ADR-0080's
+naming one digest is asserted by a test, because "two pinned files drift" is the defect the P1 and ADR-0080's
 `COPY --from` both were.
 
 The image is tagged `holosmith-smoke:<version>` and labelled `org.holosmith.smoke-recipe-sha256` = the SHA-256 of
@@ -68,11 +68,11 @@ does not.
 
 ## D3 — the recording is a committed file with a header, and the header is checked
 
-`crates/holosmith/fixtures/smoke-turn.jsonl` is one header line and then the **verbatim** 69 records of HS-032's
+`crates/holosmith/fixtures/smoke-turn.jsonl` is one header line and then the **verbatim** 69 records of that story's
 `tests/fixtures/pi-turn-tool.jsonl`: deltas, one tool round trip, non-zero usage, closing `agent_settled`.
 
 ```json
-{"type":"fixture","version":1,"schema":7,"recorded":"HS-032","turn":"tool"}
+{"type":"fixture","version":1,"schema":7,"recorded":"","turn":"tool"}
 ```
 
 - **It is embedded, not read.** The container runs the *candidate*, and the candidate is what must hold the recording —
@@ -82,14 +82,14 @@ does not.
   make it a property of the source code next to it.
 - **Its claims are read.** A test compares `schema` with `schema::SCHEMA_VERSION` and fails naming both numbers and the
   two honest fixes (re-record, or say why the mapping is unaffected); a second test asserts the body is byte-identical
-  to HS-032's file, so a hand edit cannot pass as a recording. A copy of a recording is only honest while something
+  to the file, so a hand edit cannot pass as a recording. A copy of a recording is only honest while something
   keeps it equal.
 - **At run time a newer recording is refused and an older one replays** with one printed note. Not symmetry for its own
   sake: the recording lives in the binary, so a header from the future is a mis-built artifact and replaying records a
   build does not map would produce a turn with quietly missing frames, while an older header is the ordinary case one
   release after a schema bump — `rpc::Mapping` counts a record it does not know rather than dying (ADR-0040).
 
-The mapping is not changed by this story. `tests/rpc.rs` already replays these records through it; what HS-077 adds is
+The mapping is not changed by this story. `tests/rpc.rs` already replays these records through it; what adds is
 the **writer half** — a program that speaks pi's side of the protocol.
 
 ## D4 — `container fake-pi` answers **every** command, with the id it was sent
@@ -115,7 +115,7 @@ a `preview_listen` picked by a bind-and-drop (the two listeners may not be the s
 candidate), `idle_stop_min` 0 (the sweeper must not take the session mid-turn), and `max_live_sessions` 1.
 
 **The root defaults to `<data_root>/smoke`**, because the data root is the one directory the config already guarantees
-the daemon can see — it is a container mount source — and because HS-078 has to run this with no operator input. A
+the daemon can see — it is a container mount source — and because has to run this with no operator input. A
 `/tmp` root mounts as an empty root-owned directory and fails with no error anywhere (ADR-0035's measurement); `--root`
 is for anything else, and the gate and the demo pass `target/smoke-$$`.
 
@@ -131,7 +131,7 @@ The root's ending is three rules, and the middle one is why a refusal's sentence
   non-empty stranger by name. Deleting a path on a guess is not a failure a sentence can make good.
 
 **The prefix reaches five kinds of name, through one composer per kind, and every reader uses it** (config's
-`container_prefix`/`network_prefix`, HS-077's other half):
+`container_prefix`/`network_prefix`, the other half):
 
 | Name | Composed | Why the prefix is load-bearing |
 | --- | --- | --- |
@@ -152,7 +152,7 @@ are asserted — a prefix that reached only some of the five is the defect the t
 with its own sentence: a `turn.start`/`turn.end` pair (the transcript's turn is the prompt, ADR-0040), at least one
 `message.delta`, a `tool.start`/`tool.end` pair with the **same** id, and a `message.end` whose `usage` is non-zero (a
 zero report is not a report, ADR-0042). Each arm is unit-tested by removing exactly one frame, so a smashed assertion —
-the shape PER-108's review named — fails here rather than at a promotion.
+the shape the review named — fails here rather than at a promotion.
 
 The turn is waited for by `turn.end`, not by the row's `idle`: the row and the log are written by different paths
 (ADR-0019), so an `idle` row does not mean the frames are committed. The delete is waited for by `404`, and the

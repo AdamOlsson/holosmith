@@ -1,4 +1,4 @@
-//! `hosts.toml`, the seed every machine is given (HS-068, spec item 16).
+//! `hosts.toml`, the seed every machine is given (spec item 16).
 //!
 //! Item 16's risk: "each machine reads an optional `hosts.toml` at startup and merges it into its hosts table (the
 //! file wins on conflicts), so one file copied to every machine keeps the lists aligned". This is the reader. The
@@ -27,7 +27,7 @@
 //! A half-read seed would leave the table holding rows the operator never wrote in the order they happened to appear.
 //!
 //! The two checks a row still gets here are the ones that are about the *name*: its alphabet (it becomes a path
-//! segment in HS-069) and [`super::LOCAL`]'s reservation. The **host predicate and the port rule are the API's and
+//! segment) and [`super::LOCAL`]'s reservation. The **host predicate and the port rule are the API's and
 //! not this file's** (ADR-0073): `hosts.toml` is on the machine's own disk and is as trusted as `config.toml`, while
 //! `POST /api/hosts` exists for values that arrive over a network.
 

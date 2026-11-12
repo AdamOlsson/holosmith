@@ -1,4 +1,4 @@
-//! `holosmith rollback`: the command surface of [`crate::rollback`] (HS-079).
+//! `holosmith rollback`: the command surface of [`crate::rollback`].
 //!
 //! As thin as `upgrade`'s: it loads the config every command loads, resolves the install tree, refuses a rollback that
 //! needs `root` and does not have it (`deploy::privilege_problem`, the rule the two release verbs share), and hands the

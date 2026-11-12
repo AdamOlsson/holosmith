@@ -1,4 +1,4 @@
-//! The stream's truncation and `GET /api/sessions/:id/events/history` (HS-061, spec item 15).
+//! The stream's truncation and `GET /api/sessions/:id/events/history` (spec item 15).
 //!
 //! The story's five acceptance lines, one test each, over a real socket. The log is written by hand
 //! rather than by the stub's turn: the rule under test is about *messages*, and a script that emitted

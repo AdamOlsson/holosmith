@@ -1,11 +1,11 @@
 //! The per-session disk soft cap: one session that hoards disk is stopped, so a bad build cannot starve the
-//! others (HS-063, spec item 14).
+//! others (spec item 14).
 //!
 //! Item 14's second sentence is a policy, not an endpoint: "`session_disk_soft_gb` (default 10): a watchdog
 //! runs `du` on each live session's worktree every 5 minutes. Over the limit it emits an `error` event with
 //! code `disk_quota`, aborts the turn and stops the session (resumable after cleanup)." This module is the
-//! watchdog, and it is the third of the build's periodic policies — after the idle stop (HS-021) and
-//! compaction (HS-060) — with one thing the other two do not have: it has to **end a turn**, not only move a
+//! watchdog, and it is the third of the build's periodic policies — after the idle stop and
+//! compaction — with one thing the other two do not have: it has to **end a turn**, not only move a
 //! row.
 //!
 //! Six rules it keeps:
@@ -31,7 +31,7 @@
 //!   subprocess follows here (the compactor's per-session step may hold the mutex because its work is
 //!   synchronous; this one may not).
 //! - **A measurement that cannot run is not a pass.** A `du` that is missing, refuses, or prints something
-//!   that is not a `du -sk` answer stops nothing and is a `warn` line: item 14's own rule, the one HS-062's
+//!   that is not a `du -sk` answer stops nothing and is a `warn` line: item 14's own rule, the one that story's
 //!   `df` reads the same way.
 //! - **It is not a state machine.** Every state change goes through
 //!   [`Transitioner::apply`](crate::sessions::state::Transitioner::apply); a refused application means the
@@ -82,7 +82,7 @@ pub const TICK: Duration = Duration::from_secs(5 * 60);
 
 /// How long the first pass waits for the boot's own re-provisioning to settle.
 ///
-/// The startup reconcile moves every live row to `starting` and restarts its provisioning (HS-044), so a pass
+/// The startup reconcile moves every live row to `starting` and restarts its provisioning, so a pass
 /// taken the instant this task spawns would find no candidate at all — and the first pass is exactly the one
 /// that catches a session which was already over its cap when the machine restarted. So it waits until no row
 /// is `starting`, and this is the bound that stops a wedged row from holding the policy off for ever.
@@ -327,7 +327,7 @@ impl Quota {
     /// Measure one candidate's worktree off the runtime's own threads, or answer `None` — with the reason in
     /// the log — when `du` could not tell.
     ///
-    /// A failure to measure stops nothing: a check that cannot run is not a pass (spec item 14, and HS-062's
+    /// A failure to measure stops nothing: a check that cannot run is not a pass (spec item 14, and that story's
     /// four arms read the same way). The row is left exactly as it was, and the next tick asks again.
     async fn size_of(&self, session: &Session) -> Option<u64> {
         let program = self.program.clone();

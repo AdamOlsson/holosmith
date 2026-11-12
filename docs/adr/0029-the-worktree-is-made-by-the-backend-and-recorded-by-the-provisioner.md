@@ -1,6 +1,6 @@
 # The worktree is the backend's to make and the provisioner's to record
 
-HS-025 is spec item 1's list of five host commands. Four decisions follow from making them real for the
+This is spec item 1's list of five host commands. Four decisions follow from making them real for the
 first time: who runs git, who writes what it made, what a second provision does, and what a missing thing
 means during teardown.
 
@@ -8,7 +8,7 @@ means during teardown.
 
 `src/worktree.rs` holds `Worktree` (the repository, `<projects>/.worktrees/<id>` and `agent/<id>`) and the
 three operations the story asks for: `ensure`, `ahead`, `remove`. Not inside the Docker backend, because
-the worktree is not a Docker thing — it is a host git thing that HS-027 mounts, HS-033 snapshots and HS-061
+the worktree is not a Docker thing — it is a host git thing that mounts, snapshots and
 diffs, and four stories reaching into one backend's private helper would be four places the naming rule
 lives.
 
@@ -50,7 +50,7 @@ each:
 
 **The row's base commit wins over the branch's current head.** A session that has committed three times must
 keep pointing `ahead` at where it started; taking the head would silently reset the number the changes sheet
-shows (HS-061).
+shows.
 
 **And a step that adopted has nothing to undo.** A provision that creates work is undone when a later step
 fails, because a provision must not leave a partial resource behind (ADR-0015) — but a worktree the step only
@@ -61,9 +61,9 @@ two happened and the provisioner records only the steps that made something (`Pr
 **delete** is a different matter and removes an adopted worktree like any other: the session is going away,
 and its work was snapshotted first (ADR-0023).
 
-This is the one place where the plan was incomplete rather than wrong: HS-025's own acceptance says teardown
+This is the one place where the plan was incomplete rather than wrong: its own acceptance says teardown
 runs when a session is deleted, and the resume-ban consequence of undoing an adoption only becomes reachable
-at HS-027, when the step *after* the worktree can succeed. It is fixed here because the failure is silent, and
+at, when the step *after* the worktree can succeed. It is fixed here because the failure is silent, and
 `tests/worktree.rs`'s `a_later_step_failure_does_not_take_an_adopted_worktree_back` fails when the rule is
 removed.
 
@@ -77,7 +77,7 @@ so a teardown that refused over an absent directory would leave a session nobody
 the operator moved is not a reason to keep one.
 
 A *directory* that exists but is not a registered worktree is left alone: git will not remove it, and an
-orphan from a crashed run is HS-044's to prune. Every path this story drives leaves the registration clean,
+orphan from a crashed run is the to prune. Every path this story drives leaves the registration clean,
 which is what that story starts from.
 
 Two measurements made these rules concrete, and both are in the module's own doc comment: `git worktree add`
@@ -88,20 +88,20 @@ a symlink only compares equal after `canonicalize`.
 ## `ahead` is a function, not a column and not an endpoint
 
 `git rev-list --count <base_commit>..agent/<id>` is one call on the value, and its publisher is
-`GET /api/sessions/:id/changes` (spec item 12, HS-061). A column would need a migration and a write after
+`GET /api/sessions/:id/changes` (spec item 12). A column would need a migration and a write after
 every commit the agent makes, which nothing observes; computing it per row in the list endpoint would be a
 git call per row on a page with a cap of three, and a second read path over the same repository. Its readers
-today are its test and that endpoint, which is the same shape as ADR-0028's `Complaint` and HS-045's `doctor`.
+today are its test and that endpoint, which is the same shape as ADR-0028's `Complaint` and the `doctor`.
 
 ## The story's demo is only half showable, and that is recorded rather than papered over
 
-HS-025's demo is "create a session, see `.worktrees/<id>` with branch `agent/<id>`, commit in it, see `ahead`
+the demo is "create a session, see `.worktrees/<id>` with branch `agent/<id>`, commit in it, see `ahead`
 increment, delete and see it gone". Nothing can show the middle: the step after the worktree is the session's
-network, it belongs to HS-027 and it refuses, so the provisioner undoes the worktree milliseconds after making
+network, it belongs and it refuses, so the provisioner undoes the worktree milliseconds after making
 it. What the shipped artifact *can* show — and `scripts/verify.sh`'s `case_worktree` asserts — is the row's two
 columns, the refusal's own reason, the worktree and branch gone afterwards, the registration pruned, and a
 `DELETE ?force=true` that answers 202 and leaves a `404`. What it cannot show is a live worktree with commits
-on it, and `ahead` has no publisher until HS-061's `GET /changes`. `tests/worktree.rs` is where those two are
+on it, and `ahead` has no publisher until the `GET /changes`. `tests/worktree.rs` is where those two are
 proven, against a real repository: `the_worktree_step_makes_the_branch_and_names_the_commit_it_starts_from`
-and `ahead_counts_the_commits_the_branch_has_that_the_base_does_not`. A later reader should not read "HS-025
+and `ahead_counts_the_commits_the_branch_has_that_the_base_does_not`. A later reader should not read "
 Done" as "the demo was performed end to end".

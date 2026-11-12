@@ -1,4 +1,4 @@
-//! The four primitives a Web Push message needs, each pinned by its own published vector (HS-066, ADR-0071).
+//! The four primitives a Web Push message needs, each pinned by its own published vector (ADR-0071).
 //!
 //! There is no crypto dependency in this crate and no plan to add one (ADR-0001, and `check-static.sh` guards
 //! `Cargo.lock`), and `openssl enc` cannot do AEAD on this host (measured: `AEAD ciphers not supported`,

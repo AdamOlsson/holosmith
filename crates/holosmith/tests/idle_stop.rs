@@ -1,4 +1,4 @@
-//! The idle stop (HS-021): a session nobody is using stops costing money.
+//! The idle stop: a session nobody is using stops costing money.
 //!
 //! The policy is a task rather than an endpoint, so the tests call its one pass — `Sweeper::sweep` is
 //! public for exactly that reason, as `Deleter::remove` and `Ladder::end_turn` are — and assert the row,
@@ -7,7 +7,7 @@
 //! because no endpoint puts a session in `running`, `error` or `deleting` without a turn or a delete
 //! behind it.
 //!
-//! Every test ages `last_active_at` rather than waiting, which is the same lever HS-017's review made a
+//! Every test ages `last_active_at` rather than waiting, which is the same lever the review made a
 //! rule: the column is whole seconds, so "it has been quiet for an hour" has to be a fact, not a race.
 
 use std::net::SocketAddr;

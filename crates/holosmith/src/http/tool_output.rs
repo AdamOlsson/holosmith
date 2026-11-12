@@ -1,4 +1,4 @@
-//! `GET /api/sessions/:id/tool-output/:tool_id`: one tool call's full output (HS-033).
+//! `GET /api/sessions/:id/tool-output/:tool_id`: one tool call's full output.
 //!
 //! The transcript carries a preview of what a tool printed — a `cat` of a large file in an event payload would
 //! be replayed to a phone on every reconnect and folded by compaction — so the rest is a file
@@ -39,7 +39,7 @@ fn no_output() -> ApiError {
 /// Answer one tool's stored output: 200 and the text, `404 not_found` otherwise.
 pub(crate) async fn respond(state: &AppState, session_id: &str, tool_id: &str) -> Response {
     // The row first: an id the table does not hold is not a directory to look in, and a delete's leftovers
-    // (HS-043's keep-rules) must not be reachable through a session nobody can see.
+    //  must not be reachable through a session nobody can see.
     let known = {
         let database = state
             .database

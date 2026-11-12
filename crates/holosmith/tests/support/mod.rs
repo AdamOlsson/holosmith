@@ -28,7 +28,7 @@ use tokio::sync::oneshot;
 
 /// A directory that removes itself, so the tests leave nothing in `/tmp`.
 ///
-/// The one copy every socket-level and database test shares (PER-39's third copy). The label
+/// The one copy every socket-level and database test shares. The label
 /// names the test and the process id is what makes two concurrent runs safe: without it, two
 /// `cargo test` invocations — or two binaries that use the same label — would `remove_dir_all`
 /// each other's live directories and open database. Nothing asserts the prefix, and `new` clears
@@ -110,7 +110,7 @@ pub fn state() -> AppState {
 /// How long the harness's stub backend takes per provisioning step.
 ///
 /// Long enough that a test which creates a session and immediately reads its row cannot lose the
-/// race against the provisioner that HS-011 now starts in the background: a session stays
+/// race against the provisioner that now starts in the background: a session stays
 /// `starting` for a minute unless a test asks for a faster stub with [`with_stub`]. Nothing waits
 /// that minute — the provisioner is a spawned task and the test's runtime drops it at the end.
 pub const SLOW_STUB_STEP: Duration = Duration::from_secs(60);
@@ -266,7 +266,7 @@ impl Served {
 /// The body is kept **both** ways on purpose: `body` is the text most tests read (an envelope is JSON), and
 /// `bytes` is what actually arrived. An image is not text — the lossy conversion turns `\x89` into a
 /// replacement character — so a test of a binary answer must compare `bytes`, and comparing `body` there would
-/// pass over bytes the server mangled (HS-035's route is the first such answer).
+/// pass over bytes the server mangled.
 pub struct Response {
     pub status: u16,
     pub headers: Vec<(String, String)>,
@@ -517,7 +517,7 @@ impl Sse {
 pub const PATIENCE: Duration = Duration::from_secs(10);
 
 /// A git repository at `dir` with one empty commit, and nothing else: no remote, no configuration, no
-/// hooks (HS-025).
+/// hooks.
 ///
 /// The identity is passed on the commit's own command line rather than written into the repository's
 /// config, because a test must not depend on the machine's `user.email` having been set — and because a
@@ -540,7 +540,7 @@ pub fn repository(dir: &Path) {
 /// A repository in `dir` whose default branch is `branch`, with one commit.
 ///
 /// `-b` rather than [`repository`] where the branch *is* the question: `[merge] targets` names `main` and
-/// `master`, so a test about a merge (HS-043) has to say which one this repository has rather than inherit
+/// `master`, so a test about a merge has to say which one this repository has rather than inherit
 /// whatever `init.defaultBranch` the machine was installed with.
 pub fn repository_on(dir: &Path, branch: &str) {
     std::fs::create_dir_all(dir).expect("the repository directory is creatable");

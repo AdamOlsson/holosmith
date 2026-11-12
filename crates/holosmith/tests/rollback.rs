@@ -1,4 +1,4 @@
-//! `holosmith rollback`: the order, the target and the two endings (HS-079, spec item 10, ADR-0083).
+//! `holosmith rollback`: the order, the target and the two endings (spec item 10, ADR-0083).
 //!
 //! Acceptance bullet 1 is an order — "drains first, points `current` at the previous release, restarts, and verifies
 //! health" — and only one of those steps is a child (`systemctl`), so the verb is driven here through

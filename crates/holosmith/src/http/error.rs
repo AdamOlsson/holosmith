@@ -15,7 +15,7 @@ use serde::Serialize;
 /// An unknown path under `/api/`.
 pub const NOT_FOUND: &str = "not_found";
 
-/// A request's query names no place in the log it can answer from (HS-061).
+/// A request's query names no place in the log it can answer from.
 ///
 /// The first query parameter this API refuses. A delete's `?force=true` is read leniently because its
 /// absence is legal and a typo fails safe; a history page's `before` has no safe default, because
@@ -34,107 +34,107 @@ pub const BAD_CLIENT: &str = "bad_client";
 /// The tailnet user behind the request is not the configured owner (ADR-0010).
 pub const BAD_OWNER: &str = "bad_owner";
 
-/// A forwarded call named a machine this registry does not hold (HS-069, ADR-0074).
+/// A forwarded call named a machine this registry does not hold (ADR-0074).
 ///
 /// `404` because the path named nothing this machine knows, and the client's next step is to read the registry:
 /// the four "wrong name" refusals of this API are one status and four sentences.
 pub const UNKNOWN_HOST: &str = "unknown_host";
 
-/// A path a hub was asked to relay and will not (HS-069).
+/// A path a hub was asked to relay and will not.
 ///
 /// One sentence today — the host registry is each machine's own, so `/api/hosts/…` is not a path a hub relays — and
 /// the code exists so a client can tell "this proxy will not" from "that machine does not have it".
 pub const NOT_FORWARDED: &str = "not_forwarded";
 
-/// The peer did not answer a forwarded call inside the forwarding timeout (HS-069, ADR-0074).
+/// The peer did not answer a forwarded call inside the forwarding timeout (ADR-0074).
 pub const UPSTREAM_TIMEOUT: &str = "upstream_timeout";
 
-/// A forwarded call could not reach the machine it was addressed to (HS-069, ADR-0074).
+/// A forwarded call could not reach the machine it was addressed to (ADR-0074).
 pub const UPSTREAM_UNREACHABLE: &str = "upstream_unreachable";
 
-/// A create on a machine whose role runs no sessions (HS-069, spec's `Roles`).
+/// A create on a machine whose role runs no sessions (spec's `Roles`).
 pub const SESSIONS_DISABLED: &str = "sessions_disabled";
 
-/// The caller is a machine that is not a hub this one accepts forwarded calls from (HS-070, spec item 4, V11).
+/// The caller is a machine that is not a hub this one accepts forwarded calls from (spec item 4, V11).
 ///
 /// `403`: the route exists, the *machine* will not be driven by this caller, and no retry changes that — the fix is
 /// on the caller (it is not the listed hub) or on this machine's `allowed_hubs`, which no answer may describe.
 pub const PEER_NOT_ALLOWED: &str = "peer_not_allowed";
 
-/// The caller's tailnet identity could not be read, so this machine cannot tell a hub from anything else (HS-070).
+/// The caller's tailnet identity could not be read, so this machine cannot tell a hub from anything else.
 ///
 /// A second code rather than one, because the two facts need different fixes: one is "this machine is not your
 /// hub", the other is "this machine's daemon did not answer" — and `doctor`'s Tailscale finding is where the
 /// second one is diagnosed.
 pub const PEER_UNVERIFIABLE: &str = "peer_unverifiable";
 
-/// A create's body is not a JSON object with the four accepted fields (HS-008).
+/// A create's body is not a JSON object with the four accepted fields.
 pub const BAD_BODY: &str = "bad_body";
 
-/// A create's body carries a field the endpoint does not accept (HS-008).
+/// A create's body carries a field the endpoint does not accept.
 pub const UNKNOWN_FIELD: &str = "unknown_field";
 
-/// A create did not carry an `Idempotency-Key` header (HS-008).
+/// A create did not carry an `Idempotency-Key` header.
 pub const MISSING_IDEMPOTENCY_KEY: &str = "missing_idempotency_key";
 
-/// A create's `Idempotency-Key` is not one value of at most 200 characters (HS-008).
+/// A create's `Idempotency-Key` is not one value of at most 200 characters.
 pub const BAD_IDEMPOTENCY_KEY: &str = "bad_idempotency_key";
 
-/// A create's `project` is not one path segment (HS-008).
+/// A create's `project` is not one path segment.
 pub const BAD_PROJECT: &str = "bad_project";
 
-/// A create's `model` is not one model name (HS-008).
+/// A create's `model` is not one model name.
 pub const BAD_MODEL: &str = "bad_model";
 
-/// A create's `thinking` is not one thinking level (HS-008).
+/// A create's `thinking` is not one thinking level.
 pub const BAD_THINKING: &str = "bad_thinking";
 
-/// A create named a project whose `.git` is not a directory (HS-026, spec item 1).
+/// A create named a project whose `.git` is not a directory (spec item 1).
 pub const GIT_NOT_DIRECTORY: &str = "git_not_directory";
 
-/// A create named a project that has submodules (HS-026, spec item 1).
+/// A create named a project that has submodules (spec item 1).
 pub const SUBMODULES_PRESENT: &str = "submodules_present";
 
-/// A create named a project with `extensions.worktreeConfig` enabled (HS-026, spec item 1).
+/// A create named a project with `extensions.worktreeConfig` enabled (spec item 1).
 pub const WORKTREE_CONFIG_ENABLED: &str = "worktree_config_enabled";
 
 /// A create was refused because the machine already runs the maximum number of live sessions
-/// (HS-008; HS-020 refines the branch with eviction).
+///
 pub const CAP_REACHED: &str = "cap_reached";
 
-/// A create could not be completed for a reason no client can fix (HS-008).
+/// A create could not be completed for a reason no client can fix.
 pub const INTERNAL: &str = "internal";
 
-/// A prompt was refused because the session is still provisioning (HS-015).
+/// A prompt was refused because the session is still provisioning.
 pub const SESSION_STARTING: &str = "session_starting";
 
-/// A prompt was refused because a turn is already running (HS-015; spec item 12).
+/// A prompt was refused because a turn is already running.
 pub const SESSION_RUNNING: &str = "session_running";
 
-/// A request was refused because the session is stopped (HS-015; spec item 8).
+/// A request was refused because the session is stopped.
 pub const SESSION_STOPPED: &str = "session_stopped";
 
-/// A request was refused because the session is in `error` (HS-015).
+/// A request was refused because the session is in `error`.
 pub const SESSION_ERROR: &str = "session_error";
 
-/// A request was refused because the session is being deleted (HS-015).
+/// A request was refused because the session is being deleted.
 pub const SESSION_DELETING: &str = "session_deleting";
 
-/// An abort was refused because there is no turn to abort (HS-016; HS-017 names it).
+/// An abort was refused because there is no turn to abort.
 pub const SESSION_IDLE: &str = "session_idle";
 
 /// A delete was refused because the session's uncommitted work could not be snapshotted, so removing
-/// it would lose work no client asked to lose (HS-019, spec item 9).
+/// it would lose work no client asked to lose (spec item 9).
 pub const UNSAVED_WORK: &str = "unsaved_work";
 
-/// The machine is draining for a restart, so it starts no new session and no new turn (HS-051, spec item 10
+/// The machine is draining for a restart, so it starts no new session and no new turn (, spec item 10
 /// step 3).
 ///
 /// The family's first non-4xx code, and deliberately not a `409`: a state refusal says "this session cannot take
 /// that request", while this one says "this *machine* cannot take it right now, and the operator is the reason".
 pub const DRAINING: &str = "draining";
 
-/// A changes view was refused because there is no worktree to read (HS-052, spec item 12).
+/// A changes view was refused because there is no worktree to read (spec item 12).
 ///
 /// One code for four facts — the row never recorded a worktree, the directory is gone, git no longer registers
 /// it, the branch or the project's repository is gone — because the client's move is one (show the sentence)
@@ -142,46 +142,46 @@ pub const DRAINING: &str = "draining";
 /// `internal`, the project refusals' own split between a state and a machine problem.
 pub const NO_WORKTREE: &str = "no_worktree";
 
-/// A merge named a target that is not one this machine will merge into (HS-054, spec item 12's rule 6).
+/// A merge named a target that is not one this machine will merge into (spec item 12's rule 6).
 ///
 /// Two facts share it — a name the `merge.targets` config does not list, and a listed name the repository has no
 /// branch for — for the reason `cap_reached` has two sentences: the client's move is one (send a target this
 /// whole machine and project agree on) while the operator's next step is the sentence's.
 pub const BAD_TARGET: &str = "bad_target";
 
-/// A merge named a `strategy` that is not one of spec item 12's three words (HS-054).
+/// A merge named a `strategy` that is not one of spec item 12's three words.
 ///
 /// The sibling of `bad_thinking` and `bad_model`: a field whose value is not in the contract's vocabulary is a
 /// malformed request, not a state and not a machine problem.
 pub const BAD_STRATEGY: &str = "bad_strategy";
 
-/// A merge was refused because the session has uncommitted work (HS-056, spec item 12's rule 1).
+/// A merge was refused because the session has uncommitted work (spec item 12's rule 1).
 ///
 /// The spec's own word, and **not** `target_dirty`: that one is the operator's checkout, whose next step is to
 /// commit or stash there, while this is the session's own worktree, whose next step is to ask the agent to
 /// commit. Both are `409` and both say nothing was merged, which is what the client shows.
 pub const DIRTY_WORKTREE: &str = "dirty_worktree";
 
-/// A merge could not fast-forward because the target has moved (HS-054, spec item 12's rule 2).
+/// A merge could not fast-forward because the target has moved (spec item 12's rule 2).
 ///
 /// The spec's own word. One fact covers both shapes rule 2 and rule 4 describe: a target that is ahead of the
 /// branch, and a target that advanced between the merge's read and its compare-and-swap.
 pub const NOT_FAST_FORWARD: &str = "not_fast_forward";
 
-/// A merge could not fast-forward because the checkout that holds the target has local work (HS-054, rule 4).
+/// A merge could not fast-forward because the checkout that holds the target has local work (rule 4).
 ///
-/// The spec's own word. It is not the session's `dirty` (rule 1's `dirty_worktree`, HS-056): this is the
+/// The spec's own word. It is not the session's `dirty` (rule 1's `dirty_worktree`): this is the
 /// operator's own working tree in the project checkout, and the next step is to commit or stash there.
 pub const TARGET_DIRTY: &str = "target_dirty";
 
-/// A merge found the target checked out somewhere that is not the project's own checkout (HS-054).
+/// A merge found the target checked out somewhere that is not the project's own checkout.
 ///
 /// The third answer to rule 4's two-arm question. In practice it is a session's worktree, where a container is
 /// working: writing that working tree from the host would move files under a running agent, so the merge refuses
 /// and says what to change.
 pub const TARGET_CHECKED_OUT: &str = "target_checked_out";
 
-/// A merge that could not reconcile two branches (HS-055, spec item 12's rule 3).
+/// A merge that could not reconcile two branches (spec item 12's rule 3).
 ///
 /// The only code whose response carries a **second payload key**: rule 3 says the call returns "409 `conflict`
 /// with the conflicting paths", and the envelope's message is a fixed sentence (ADR-0008), so the paths travel
@@ -189,28 +189,28 @@ pub const TARGET_CHECKED_OUT: &str = "target_checked_out";
 /// same shape one route over.
 pub const CONFLICT: &str = "conflict";
 
-/// A publish was refused because this machine's `publish.remotes` names no remote (HS-057, spec item 12).
+/// A publish was refused because this machine's `publish.remotes` names no remote (spec item 12).
 ///
 /// The spec's own "empty by default, so the endpoint is disabled", answered as a `403` rather than a `404`: the
 /// route exists, and a `404` for a path in the table would be a lie about the table. The next step is the
 /// operator's — a config key and a restart — which is exactly what a `403` says and what `not_found` cannot.
 pub const PUBLISH_DISABLED: &str = "publish_disabled";
 
-/// A publish named a remote this machine does not push to (HS-057).
+/// A publish named a remote this machine does not push to.
 ///
 /// Two facts share it — a name `publish.remotes` does not list, and a listed name this project's repository has
 /// no remote for — for the reason `bad_target` has two sentences: the client's move is one (send a remote this
 /// whole machine and project agree on) while the operator's next step is the sentence's.
 pub const BAD_REMOTE: &str = "bad_remote";
 
-/// A host registration's `name` is not one a registry row may have (HS-068, spec item 4).
+/// A host registration's `name` is not one a registry row may have (spec item 4).
 ///
 /// Its own code rather than a sentence on [`BAD_HOST_URL`], because the two are two fields: a client that showed
 /// "that URL is wrong" for an uppercase name would be describing the wrong input. The name is also the one field
 /// [`LOCAL`](crate::hosts::LOCAL) reserves, so the sentence says which rule it broke.
 pub const BAD_HOST_NAME: &str = "bad_host_name";
 
-/// A host registration's `url` is not one this machine will register (HS-068, spec item 4).
+/// A host registration's `url` is not one this machine will register (spec item 4).
 ///
 /// One code for the four facts item 4 spells — the scheme is not http(s), the host is neither a MagicDNS name nor an
 /// address in 100.64.0.0/10, the port is outside the allowed range, the value is not an origin at all — for
@@ -218,7 +218,7 @@ pub const BAD_HOST_NAME: &str = "bad_host_name";
 /// while the operator's next step is the sentence's.
 pub const BAD_HOST_URL: &str = "bad_host_url";
 
-/// A host answered, and what it answered is not a Holosmith health reply (HS-068, spec item 4).
+/// A host answered, and what it answered is not a Holosmith health reply (spec item 4).
 ///
 /// Item 4's "the `/api/health` reply must carry the Holosmith name and version fields; anything else is rejected
 /// with a distinct code", which is this code and not [`BAD_BODY`]: the body was the client's, this answer was the
@@ -226,20 +226,20 @@ pub const BAD_HOST_URL: &str = "bad_host_url";
 /// machine that answered and is not one of ours, so the registration is refused rather than stored.
 pub const NOT_HOLOSMITH: &str = "not_holosmith";
 
-/// A host could not be removed because the machine it names is running sessions (HS-068, spec item 4).
+/// A host could not be removed because the machine it names is running sessions (spec item 4).
 ///
 /// The `409` item 4's last bullet asks for, and the same shape as [`CAP_REACHED`]: the request was well formed and
 /// this machine can take it, but something live is in the way, and `?force=true` is how an operator says they meant it.
 pub const HOST_BUSY: &str = "host_busy";
 
-/// A publish named a destination git would never be allowed to write (HS-057, item 12's protected names).
+/// A publish named a destination git would never be allowed to write (item 12's protected names).
 ///
 /// Item 12's own list — `main`, `master`, `release/*` — on the **destination** ref. Its own code rather than a
 /// sentence on `bad_remote`, because the request's `remote` is fine and a client that showed "unknown remote"
 /// for `branch: "main"` would be describing the wrong field.
 pub const PROTECTED_BRANCH: &str = "protected_branch";
 
-/// A publish named the branch this machine merges into (HS-057, item 12's "pushing the merged target branch is
+/// A publish named the branch this machine merges into (, item 12's "pushing the merged target branch is
 /// not supported").
 ///
 /// A second fact with its own code for the reason above: on a machine whose `[merge] targets` is `["trunk"]`, a
@@ -247,21 +247,21 @@ pub const PROTECTED_BRANCH: &str = "protected_branch";
 /// the host" is the spec's own sentence.
 pub const TARGET_NOT_PUSHABLE: &str = "target_not_pushable";
 
-/// A publish whose request did not carry `confirm: true` (HS-057, item 12's `{remote, branch?, confirm:true}`).
+/// A publish whose request did not carry `confirm: true` (item 12's `{remote, branch?, confirm:true}`).
 ///
 /// `false` is a request that asked *not* to push, so it is a refusal rather than a no-op: a `200` for a body that
 /// said no would be the one answer an operator cannot recover from. A `422` and not a `409`, because nothing
 /// about the machine or the session is in the way — the client's own form is.
 pub const CONFIRM_REQUIRED: &str = "confirm_required";
 
-/// A publish the remote refused (HS-057).
+/// A publish the remote refused.
 ///
 /// The remote's answer, not this build's opinion: a non-fast-forward, a stale lease, a server-side rule. This
 /// build never force-pushes, so the refusal names the operator's next step (fetch, integrate, publish again)
 /// and the reason git gave travels in the log.
 pub const PUSH_REJECTED: &str = "push_rejected";
 
-/// A create or a resume was refused because the data root's filesystem is below `min_free_gb` (HS-062, spec
+/// A create or a resume was refused because the data root's filesystem is below `min_free_gb` (, spec
 /// item 14).
 ///
 /// The spec names the status — "session creation and resume fail with 507 below it" — and ADR-0008 says a code
@@ -275,7 +275,7 @@ pub const PUSH_REJECTED: &str = "push_rejected";
 /// differ.
 pub const DISK_FLOOR: &str = "disk_floor";
 
-/// A `push_subscriptions` endpoint is not a URL a notification can be sent to (HS-066, spec item 11).
+/// A `push_subscriptions` endpoint is not a URL a notification can be sent to (spec item 11).
 ///
 /// One code for two facts — not `https`, and no host — because the client's move is one (register again from a
 /// browser that is allowed to push) while the operator's next step is the sentence's (ADR-0008). A third fact has
@@ -283,7 +283,7 @@ pub const DISK_FLOOR: &str = "disk_floor";
 /// [`BAD_SUBSCRIPTION_KEY`].
 pub const BAD_ENDPOINT: &str = "bad_endpoint";
 
-/// A subscription's `p256dh` or `auth` is not the key material RFC 8291 asks for (HS-066).
+/// A subscription's `p256dh` or `auth` is not the key material RFC 8291 asks for.
 ///
 /// The two keys share one code for [`BAD_TARGET`]'s reason: the client's next step is one — re-read
 /// `pushManager.getSubscription()` and send what the browser holds — while which key was wrong is the sentence's.
@@ -294,7 +294,7 @@ pub const BAD_SUBSCRIPTION_KEY: &str = "bad_subscription_key";
 pub struct ErrorBody {
     pub code: &'static str,
     /// The one human sentence. Borrowed for every code whose words are fixed — which was every code until
-    /// HS-062 — and owned only by a sentence that carries a measurement, so the envelope stays allocation-free
+    ///  — and owned only by a sentence that carries a measurement, so the envelope stays allocation-free
     /// for the refusals that are one literal (ADR-0068). The serialised bytes are the same either way.
     pub message: Cow<'static, str>,
     /// The paths a conflict could not merge, and `None` for every other error — skipped on the wire, so every
@@ -331,12 +331,12 @@ impl ApiError {
         Self::new(StatusCode::NOT_FOUND, NOT_FOUND, "no such endpoint")
     }
 
-    /// What a request naming a session the table does not hold answers (HS-019).
+    /// What a request naming a session the table does not hold answers.
     ///
     /// The same code — the spec names one `not_found` — and a sentence about the *request*: after a
     /// delete, `GET /api/sessions/{id}` is a route that exists and a row that does not, so answering
     /// "no such endpoint" described the wrong thing. ADR-0008 keeps the code stable and the sentence
-    /// free for exactly this (the same lesson HS-015's prompt learned from its own demo).
+    /// free for exactly this (the same lesson 's prompt learned from its own demo).
     pub fn unknown_session() -> Self {
         Self::new(
             StatusCode::NOT_FOUND,
@@ -345,7 +345,7 @@ impl ApiError {
         )
     }
 
-    /// What a request whose query names no place in the log answers (HS-061).
+    /// What a request whose query names no place in the log answers.
     ///
     /// The sentence is the caller's, for [`Self::not_in_state`]'s reason: a bad `before` and a bad
     /// `limit` are the same code and two different mistakes, and a caller reading one sentence about the
@@ -413,7 +413,7 @@ impl ApiError {
         )
     }
 
-    /// The same code as [`Self::bad_body`], with the sentence a steer's body deserves (HS-017).
+    /// The same code as [`Self::bad_body`], with the sentence a steer's body deserves.
     ///
     /// A steer carries one `guidance` string and nothing else, so telling the operator about a
     /// prompt's or a create's fields would describe the wrong request (ADR-0008).
@@ -481,7 +481,7 @@ impl ApiError {
         )
     }
 
-    /// What a create naming a project whose `.git` is not a directory answers (HS-026, spec item 1).
+    /// What a create naming a project whose `.git` is not a directory answers (spec item 1).
     ///
     /// A sentence each rather than one shared sentence, because the operator's next step depends on
     /// which hole was found: a checkout that is not a plain one, submodules whose hooks would live
@@ -496,7 +496,7 @@ impl ApiError {
         )
     }
 
-    /// What a create naming a project with submodules answers (HS-026, spec item 1).
+    /// What a create naming a project with submodules answers (spec item 1).
     pub fn submodules_present() -> Self {
         Self::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -506,7 +506,7 @@ impl ApiError {
         )
     }
 
-    /// What a create naming a project with `extensions.worktreeConfig` answers (HS-026, spec item 1).
+    /// What a create naming a project with `extensions.worktreeConfig` answers (spec item 1).
     pub fn worktree_config_enabled() -> Self {
         Self::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -516,7 +516,7 @@ impl ApiError {
         )
     }
 
-    /// What a delete answers when the session's work could not be snapshotted (HS-019).
+    /// What a delete answers when the session's work could not be snapshotted.
     ///
     /// The sentence names the escape hatch, because the operator's next tap is the one that has to
     /// carry `?force=true`: an envelope that said only "it did not work" would leave a mis-tap
@@ -531,7 +531,7 @@ impl ApiError {
         )
     }
 
-    /// What a request that names a session with no worktree to read answers (HS-052).
+    /// What a request that names a session with no worktree to read answers.
     ///
     /// The **message** is the caller's for [`Self::not_in_state`]'s reason: the four sentences describe four
     /// different next steps (resume the session, restore the project's checkout), and a caller reading one
@@ -541,7 +541,7 @@ impl ApiError {
         Self::new(StatusCode::CONFLICT, NO_WORKTREE, message)
     }
 
-    /// What a merge whose body is not `{target, strategy?, message?, delete_session?}` answers (HS-054).
+    /// What a merge whose body is not `{target, strategy?, message?, delete_session?}` answers.
     ///
     /// The same code as [`Self::bad_body`] with this request's own fields, for the reason
     /// [`Self::bad_prompt`] has the prompt's: a client told about a create's fields would be describing the
@@ -555,7 +555,7 @@ impl ApiError {
         )
     }
 
-    /// What a merge naming a target this machine will not merge into answers (HS-054, rule 6).
+    /// What a merge naming a target this machine will not merge into answers (rule 6).
     ///
     /// The **message** is the caller's, like [`Self::no_worktree`]'s: a name the config does not list and a
     /// listed name the repository has no branch for are one code and two next steps.
@@ -563,30 +563,30 @@ impl ApiError {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, BAD_TARGET, message)
     }
 
-    /// What a merge naming a `strategy` that is not one of the spec's three words answers (HS-054).
+    /// What a merge naming a `strategy` that is not one of the spec's three words answers.
     pub fn bad_strategy(message: &'static str) -> Self {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, BAD_STRATEGY, message)
     }
 
-    /// What a merge whose session has uncommitted work answers (HS-056, rule 1).
+    /// What a merge whose session has uncommitted work answers (rule 1).
     ///
     /// `409` and, like [`Self::target_dirty`], a sentence that says nothing was merged: the client's next step is
-    /// a prompt to the agent (HS-058's affordance), so the refusal must not read like a machine failure.
+    /// a prompt to the agent, so the refusal must not read like a machine failure.
     pub fn dirty_worktree(message: &'static str) -> Self {
         Self::new(StatusCode::CONFLICT, DIRTY_WORKTREE, message)
     }
 
-    /// What a merge that cannot fast-forward answers (HS-054, rule 2).
+    /// What a merge that cannot fast-forward answers (rule 2).
     pub fn not_fast_forward(message: &'static str) -> Self {
         Self::new(StatusCode::CONFLICT, NOT_FAST_FORWARD, message)
     }
 
-    /// What a merge whose target checkout holds local work answers (HS-054, rule 4).
+    /// What a merge whose target checkout holds local work answers (rule 4).
     pub fn target_dirty(message: &'static str) -> Self {
         Self::new(StatusCode::CONFLICT, TARGET_DIRTY, message)
     }
 
-    /// What a merge whose target is checked out outside the project's own checkout answers (HS-054).
+    /// What a merge whose target is checked out outside the project's own checkout answers.
     pub fn target_checked_out(message: &'static str) -> Self {
         Self::new(StatusCode::CONFLICT, TARGET_CHECKED_OUT, message)
     }
@@ -595,7 +595,7 @@ impl ApiError {
     ///
     /// The sentence is fixed, and it describes **this** request's next step — the spec's own "merge the target
     /// into the session's branch and fix the conflicts; then retry", which is also what the Changes sheet's
-    /// Resolve-with-agent affordance prompts (HS-058). The paths are the payload.
+    /// Resolve-with-agent affordance prompts. The paths are the payload.
     pub fn conflict(conflicts: Vec<String>) -> Self {
         Self {
             status: StatusCode::CONFLICT,
@@ -610,7 +610,7 @@ impl ApiError {
         }
     }
 
-    /// What a publish whose body is not `{remote, branch?, confirm}` answers (HS-057).
+    /// What a publish whose body is not `{remote, branch?, confirm}` answers.
     ///
     /// The same code as [`Self::bad_body`] with this request's own fields, for the reason [`Self::bad_merge_body`]
     /// has the merge's. `branch` is named as optional because a publish without one pushes `agent/<id>` under its
@@ -624,7 +624,7 @@ impl ApiError {
         )
     }
 
-    /// What a publish on a machine whose `publish.remotes` names no remote answers (HS-057, item 12).
+    /// What a publish on a machine whose `publish.remotes` names no remote answers (item 12).
     ///
     /// A `403` with a sentence naming the config key and the next step, because the operator's move is a config
     /// edit and a restart — not a different request. Answered **before** the session is read: an endpoint the
@@ -638,7 +638,7 @@ impl ApiError {
         )
     }
 
-    /// What a publish naming a remote this machine does not push to answers (HS-057).
+    /// What a publish naming a remote this machine does not push to answers.
     ///
     /// The **message** is the caller's, like [`Self::bad_target`]'s: a name the config does not list and a listed
     /// name the project's repository has no remote for are one code and two next steps.
@@ -646,7 +646,7 @@ impl ApiError {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, BAD_REMOTE, message)
     }
 
-    /// What a subscription whose endpoint is not a URL a notification can be sent to answers (HS-066).
+    /// What a subscription whose endpoint is not a URL a notification can be sent to answers.
     ///
     /// The **message** is the caller's, like [`Self::bad_target`]'s: an `http://` endpoint and an `https://` URL
     /// with no host are one code and two next steps.
@@ -654,7 +654,7 @@ impl ApiError {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, BAD_ENDPOINT, message)
     }
 
-    /// What a subscription whose `p256dh` or `auth` is not the key material RFC 8291 asks for answers (HS-066).
+    /// What a subscription whose `p256dh` or `auth` is not the key material RFC 8291 asks for answers.
     ///
     /// The message is the caller's for [`Self::bad_endpoint`]'s reason: which key is wrong, and what shape the
     /// right one has, is what the sentence is for.
@@ -666,7 +666,7 @@ impl ApiError {
         )
     }
 
-    /// What a subscribe whose body is not `{endpoint, p256dh, auth}` answers (HS-066).
+    /// What a subscribe whose body is not `{endpoint, p256dh, auth}` answers.
     ///
     /// The same code as [`Self::bad_body`] with this request's own fields, for the reason [`Self::bad_prompt`] has
     /// the prompt's: a client told about a create's fields would be describing the wrong request (ADR-0008).
@@ -678,7 +678,7 @@ impl ApiError {
         )
     }
 
-    /// What a registration whose body is not `{name, url}` answers (HS-068).
+    /// What a registration whose body is not `{name, url}` answers.
     ///
     /// The same code as [`Self::bad_body`] with this request's own fields, for the reason [`Self::bad_prompt`] has
     /// the prompt's: a client told about a create's fields would be describing the wrong request (ADR-0008).
@@ -690,7 +690,7 @@ impl ApiError {
         )
     }
 
-    /// What a forwarded call naming a machine this registry does not hold answers (HS-069).
+    /// What a forwarded call naming a machine this registry does not hold answers.
     ///
     /// The message names the registry rather than the path: the caller is a client of *this* machine, and the row it
     /// probably meant is one `GET /api/hosts` shows.
@@ -705,12 +705,12 @@ impl ApiError {
         )
     }
 
-    /// What a path a hub will not relay answers (HS-069).
+    /// What a path a hub will not relay answers.
     pub fn not_forwarded(message: impl Into<Cow<'static, str>>) -> Self {
         Self::new(StatusCode::FORBIDDEN, NOT_FORWARDED, message)
     }
 
-    /// What a forwarded call whose peer did not answer in time answers (HS-069).
+    /// What a forwarded call whose peer did not answer in time answers.
     ///
     /// `504`, and the message carries the machine and the bound: the client can neither fix nor retry it on this
     /// machine, and the sentence says which machine was asked and for how long.
@@ -718,12 +718,12 @@ impl ApiError {
         Self::new(StatusCode::GATEWAY_TIMEOUT, UPSTREAM_TIMEOUT, message)
     }
 
-    /// What a forwarded call whose peer could not be reached answers (HS-069).
+    /// What a forwarded call whose peer could not be reached answers.
     pub fn upstream_unreachable(message: impl Into<Cow<'static, str>>) -> Self {
         Self::new(StatusCode::BAD_GATEWAY, UPSTREAM_UNREACHABLE, message)
     }
 
-    /// What a create on a hub answers (HS-069, the spec's `Roles`: a hub runs no sessions).
+    /// What a create on a hub answers (the spec's `Roles`: a hub runs no sessions).
     ///
     /// `403` for `publish_disabled`'s reason: the route exists, the *machine* will not do it, and no retry on this
     /// machine changes that — the operator creates the session on a server, which this machine forwards to.
@@ -736,7 +736,7 @@ impl ApiError {
         )
     }
 
-    /// What a forwarded request whose body is too large answers (HS-069).
+    /// What a forwarded request whose body is too large answers.
     ///
     /// The create's code with **this** route's sentence, for [`Self::bad_prompt`]'s reason: a body over the bound is
     /// the same fact wherever it arrives, and a client told about the create's four fields would be describing the
@@ -750,7 +750,7 @@ impl ApiError {
         )
     }
 
-    /// What a call from a machine that is not a listed hub answers (HS-070, spec item 4, V11).
+    /// What a call from a machine that is not a listed hub answers (spec item 4, V11).
     ///
     /// The message is the trust check's own sentence: it names the peer's address and the node the tailnet named for
     /// it, and never this machine's list (`crate::trust::Refusal`).
@@ -758,12 +758,12 @@ impl ApiError {
         Self::new(StatusCode::FORBIDDEN, PEER_NOT_ALLOWED, message)
     }
 
-    /// What a call whose tailnet identity could not be read answers (HS-070).
+    /// What a call whose tailnet identity could not be read answers.
     pub fn peer_unverifiable(message: impl Into<Cow<'static, str>>) -> Self {
         Self::new(StatusCode::FORBIDDEN, PEER_UNVERIFIABLE, message)
     }
 
-    /// What a registration whose `name` is not one a registry row may have answers (HS-068).
+    /// What a registration whose `name` is not one a registry row may have answers.
     ///
     /// The **message** is the caller's, like [`Self::bad_endpoint`]'s: an uppercase name, a name too long for a path
     /// segment and `local` are one code and three sentences.
@@ -771,7 +771,7 @@ impl ApiError {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, BAD_HOST_NAME, message)
     }
 
-    /// What a registration whose `url` this machine will not register answers (HS-068).
+    /// What a registration whose `url` this machine will not register answers.
     ///
     /// The message is the caller's for [`Self::bad_host_name`]'s reason: item 4's four facts are one code and four
     /// sentences, and each names the rule it broke.
@@ -779,7 +779,7 @@ impl ApiError {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, BAD_HOST_URL, message)
     }
 
-    /// What a registration of a machine that answered something other than a health payload answers (HS-068).
+    /// What a registration of a machine that answered something other than a health payload answers.
     ///
     /// `422` rather than `503`: nothing on this machine is unavailable — the *host* is not one of ours, and the
     /// client's next step is to fix the URL rather than to retry.
@@ -787,7 +787,7 @@ impl ApiError {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, NOT_HOLOSMITH, message)
     }
 
-    /// What a removal of a host with live sessions answers unless it is forced (HS-068).
+    /// What a removal of a host with live sessions answers unless it is forced.
     ///
     /// The message carries the count, because "one session" and "three" are the same next step and different
     /// sentences an operator reads before forcing.
@@ -795,12 +795,12 @@ impl ApiError {
         Self::new(StatusCode::CONFLICT, HOST_BUSY, message)
     }
 
-    /// What a publish naming a protected destination answers (HS-057, item 12's three names).
+    /// What a publish naming a protected destination answers (item 12's three names).
     pub fn protected_branch(message: &'static str) -> Self {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, PROTECTED_BRANCH, message)
     }
 
-    /// What a publish naming this machine's merge target answers (HS-057).
+    /// What a publish naming this machine's merge target answers.
     pub fn target_not_pushable(message: &'static str) -> Self {
         Self::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -809,12 +809,12 @@ impl ApiError {
         )
     }
 
-    /// What a publish without `confirm: true` answers (HS-057).
+    /// What a publish without `confirm: true` answers.
     pub fn confirm_required(message: &'static str) -> Self {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, CONFIRM_REQUIRED, message)
     }
 
-    /// What a push the remote refused answers (HS-057).
+    /// What a push the remote refused answers.
     ///
     /// `409` rather than `422`: the request was well formed and this machine was willing; the **remote** is what
     /// said no, and the operator's next step (fetch and integrate) changes the branch rather than the body.
@@ -822,7 +822,7 @@ impl ApiError {
         Self::new(StatusCode::CONFLICT, PUSH_REJECTED, message)
     }
 
-    /// What a create or a resume answers on a data root below `min_free_gb` (HS-062, spec item 14).
+    /// What a create or a resume answers on a data root below `min_free_gb` (spec item 14).
     ///
     /// The sentence carries both numbers, which is the one place in this envelope where the message is not a
     /// literal: the boot's sentence about the same machine names the same two numbers and offers the boot's fix
@@ -853,9 +853,9 @@ impl ApiError {
         }
     }
 
-    /// What a resume at the cap answers (HS-018, spec item 8's "or returns 409").
+    /// What a resume at the cap answers (spec item 8's "or returns 409").
     ///
-    /// The create no longer uses this: since HS-020 it evicts an idle session instead, and answers
+    /// The create no longer uses this: it evicts an idle session instead, and answers
     /// [`Self::cap_without_idle`] only when there is nothing to evict (ADR-0024). Two requests, two
     /// next steps, so two sentences on one code.
     pub fn cap_reached() -> Self {
@@ -866,7 +866,7 @@ impl ApiError {
         )
     }
 
-    /// What a create at the cap answers when there is nothing to evict (HS-020).
+    /// What a create at the cap answers when there is nothing to evict.
     ///
     /// The same code and the create's own sentence: since the machine evicts an idle session instead
     /// of refusing, a caller that got the refusal is owed the reason it could not — a `running` or
@@ -894,7 +894,7 @@ impl ApiError {
         )
     }
 
-    /// What a create, a prompt or a resume answers while the machine drains for a restart (HS-051).
+    /// What a create, a prompt or a resume answers while the machine drains for a restart.
     ///
     /// `503` because the machine is temporarily unable to do what the request asks and the operator is the one
     /// who decides when it can again — not a `409`, which would say the *session* is in the wrong state, and not a
@@ -910,16 +910,16 @@ impl ApiError {
         )
     }
 
-    /// What a request is refused with when the session's state does not accept it (HS-015, D2;
-    /// HS-016).
+    /// What a request is refused with when the session's state does not accept it (, D2;
+    /// ).
     ///
     /// One code per state, the state's own machine word: the spec names `session_stopped` (item 8)
-    /// and `session_running` (item 12), HS-016 adds `session_idle` (an abort with no turn to abort)
-    /// and HS-017 names it too (a steer with no turn). The family is the rule rather than a list of the codes the spec
+    /// and `session_running` (item 12), adds `session_idle` (an abort with no turn to abort)
+    /// and names it too (a steer with no turn). The family is the rule rather than a list of the codes the spec
     /// happens to spell, so `idle` is a member like the rest and there is no umbrella code.
     ///
     /// The **message** is the caller's, because it has to describe its own request: an abort's
-    /// refusal must not read like a prompt's (HS-015's demo caught the prompt reusing the create's
+    /// refusal must not read like a prompt's (the demo caught the prompt reusing the create's
     /// sentence). Every caller passes a fixed sentence, which is why the envelope can keep its
     /// borrowed `&'static str`.
     pub fn not_in_state(status: crate::sessions::Status, message: &'static str) -> Self {
@@ -942,7 +942,7 @@ impl IntoResponse for ApiError {
     }
 }
 
-/// A machine-to-machine refusal, as the control listener's answer (HS-070).
+/// A machine-to-machine refusal, as the control listener's answer.
 ///
 /// The mapping lives here rather than in [`crate::trust`] for ADR-0008's reason: the codes are this module's, and a
 /// refusal that carried its own status and JSON would be a second envelope. The sentence is the trust check's own —
@@ -1135,7 +1135,7 @@ mod tests {
 
     #[test]
     fn every_project_refusal_is_a_422_with_its_own_code_and_its_own_sentence() {
-        // HS-026's three refusals. Three codes because the operator's next step differs per hole, and a
+        // the three refusals. Three codes because the operator's next step differs per hole, and a
         // sentence each because the page prints the sentence alone: a shared sentence would make the
         // codes indistinguishable to the human even though the machine can tell them apart.
         let mut sentences = std::collections::BTreeSet::new();

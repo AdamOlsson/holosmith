@@ -13,7 +13,7 @@ use super::{Config, LoadedConfig};
 /// Why the resolved config could not be written as TOML.
 ///
 /// The one value `Config` holds that TOML cannot spell is a path that is not UTF-8, and no
-/// config file can produce one (TOML is UTF-8). HS-003's `--data-dir` takes a `PathBuf`, so
+/// config file can produce one (TOML is UTF-8). the `--data-dir` takes a `PathBuf`, so
 /// the day it exists the answer has to be an error and not a panic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderError {

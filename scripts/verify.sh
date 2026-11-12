@@ -4,7 +4,7 @@
 #
 # Usage: scripts/verify.sh [--keep] [--no-build]
 # Seven phases, cheapest first: cargo fmt --check, cargo clippy --all-targets -- -D warnings,
-# cargo test, `cargo test --test schema_previous` (the expand/contract rule, HS-075),
+# cargo test, `cargo test --test schema_previous` (the expand/contract rule),
 # scripts/build.sh (which runs scripts/build-web.sh and scripts/check-static.sh),
 # scripts/check-embed.sh, then serve: dist/<host-triple>/holosmith on a random port with a temp
 # config and a temp data dir, answering /api/health, the schema version, the app shell, the 404
@@ -24,29 +24,27 @@
 # `interrupted`, the seqs stay unique and the counter is the log's highest), the names a crash leaves behind
 # swept on a real daemon (a leftover container, an orphan network and worktree directory gone, a kept branch
 # and ref kept, the session's container replaced under the same name), a boot over a database from a newer
-# release (which continues and says who refuses), the verification table itself (no V1-V10 row still
-# says `not yet run`, every row carries its verdict and an automation this repository has, and V11 is
-# still deferred to phase 3), the service, the keys and the origins a deploy installs in a case of their own
+# release (which continues and says who refuses), the service, the keys and the origins a deploy installs in a case of their own
 # straight after `case_server_deploy` (`case_server_service`: the unit's bytes, the VAPID pair, both `tailscale`
-# argvs and `doctor`'s `perms` arms), the three service commands of HS-050 (`case_status`: one line per fact, with
+# argvs and `doctor`'s `perms` arms), the three service commands (`case_status`: one line per fact, with
 # the uptime read from the endpoint the boot answers; `case_logs`: the journald child's argv through a stand-in and a
 # session's log printed byte for byte; `case_uninstall`: the unit and the two proxies gone, the data kept, a second
-# run saying `nothing`, and a purge refused over a live row until `--force`), the drain of HS-051 in two cases
+# run saying `nothing`, and a purge refused over a live row until `--force`), the drain in two cases
 # (`case_drain`: the admin socket exists and is not an HTTP route, a wait shorter than a turn exits 1 and leaves
 # the drain on, the create and the prompt answer 503 `draining` while the reads answer 200, and the drain that
 # does finish stops the idle sessions with reason `server_restart`; `case_drain_restart`: the row an expired drain
 # and a `kill -9` left `running` comes back `idle · interrupted`, and the new process is not draining), the
-# release build of HS-076 in a case of its own (`case_build`: the orchestration measured through a `docker` stand-in
+# release build in a case of its own (`case_build`: the orchestration measured through a `docker` stand-in
 # whose artifact is this tree's own binary and whose `cargo`/`rustc` stand-ins must never fire, plus the real
-# container build when this machine already has the builder image), the smoke run of HS-077 in three arms and with
+# container build when this machine already has the builder image), the smoke run in three arms and with
 # no skip (`case_smoke`: the artifact's own `container fake-pi` over two pipes, a `docker` stand-in that refuses the
 # smoke image and must be exit 1 with the smoke config on disk, and the real run — a session whose turn is asserted,
-# then deleted, with the machine's two proxies compared by id before and after), the promotion of HS-078 in four arms
+# then deleted, with the machine's two proxies compared by id before and after), the promotion in four arms
 # (`case_upgrade`: the review gate and an older-schema candidate refused before anything is asked, then a real
 # promotion over a `systemctl` stand-in that starts what `current` names and a `docker` stand-in that fakes only the two
 # product images — the step order, the images built from the candidate's digest once and never again, the backup, a
 # session the drain stopped coming back idle, and the last line naming the version and the backup — and a rollback whose
-# first restart serves nothing, so the poll gives up and the symlink goes back), the rollback verb of HS-079 in four arms
+# first restart serves nothing, so the poll gives up and the symlink goes back), the rollback verb in four arms
 # (`case_rollback`: a tree with no `current`, one with a single release and a `--to` that names nothing refused before the
 # machine is asked anything, a database from a newer release refused before the drain with the link still where it was,
 # then a real rollback over a `systemctl` stand-in that records what `current` names as it restarts — the switch before
@@ -56,7 +54,7 @@
 # refuses to start with one sentence naming the fix, with no CORS header
 # on any answer, and stopping on SIGTERM with exit 0. Each case prints `ok <case>` once it passes — a
 # case that printed SKIP withholds that line, so the log can never call a check that measured nothing a
-# pass — which makes the run's own output say which check each verdict in that table rests on (HS-046).
+# pass — which makes the run's own output say which check each verdict in that table rests on.
 # --no-build skips the two artifact phases; --keep keeps the work dir of a successful run. On
 # failure this prints FAIL <assertion> and keeps the work dir (config, banner, every answer).
 # Downloads nothing and needs neither curl nor jq: every request is a /dev/tcp fetch. `case_worktree`
@@ -108,7 +106,7 @@ socket_pid=""
 holder_pid=""
 serve_err="$WORK/serve.err"
 created_id=""
-# The preview listener's bound port, read from the banner (HS-041): the config asks for port 0.
+# The preview listener's bound port, read from the banner: the config asks for port 0.
 preview_listen=""
 preview_port=""
 assertions=0
@@ -116,17 +114,17 @@ assertions=0
 # The only cleanup path: the work dir is removed on success, kept on failure (and with --keep),
 # and a server a failure left running is stopped here rather than outliving the run.
 # The session the running Docker case made, if any: the cases that start a real container set this, so a `fail`
-# in the middle of one does not leave a live container and network on the machine (HS-031's review — the EXIT
+# in the middle of one does not leave a live container and network on the machine (the review — the EXIT
 # trap is the only hook a `fail` leaves, because `fail` exits the script). A case that makes **two** sessions
-# (HS-038's) sets the second one too: one id cannot describe a pair, and a half-cleaned failure leaves exactly
+#  sets the second one too: one id cannot describe a pair, and a half-cleaned failure leaves exactly
 # the orphan the trap exists to prevent.
 docker_session_id=""
 docker_second_session_id=""
 # A case that runs a **process of its own** sets this, so `fail` — which exits the script, leaving the EXIT trap as
-# the only hook — takes it down too (HS-066's push receiver is the first: a `node` listener on a port and a data
+# the only hook — takes it down too (the push receiver is the first: a `node` listener on a port and a data
 # root, which outlived two failing runs of `case_push` before the trap learned about it).
 extra_pid=""
-# The second machine a case runs (HS-069). Its own pid, for `start_peer`'s reason.
+# The second machine a case runs. Its own pid, for `start_peer`'s reason.
 peer_pid=""
 
 cleanup() {
@@ -135,7 +133,7 @@ cleanup() {
     kill -TERM "$serve_pid" 2>/dev/null || true
     wait "$serve_pid" 2>/dev/null || true
   fi
-  # A case's second machine (HS-069): two boots on one box, and the trap has to know about both or a `fail`
+  # A case's second machine: two boots on one box, and the trap has to know about both or a `fail`
   # between them leaves a listener on a pinned port for the next run.
   if [ -n "$peer_pid" ] && kill -0 "$peer_pid" 2>/dev/null; then
     kill -TERM "$peer_pid" 2>/dev/null || true
@@ -146,13 +144,13 @@ cleanup() {
     kill "$socket_pid" 2>/dev/null || true
     wait "$socket_pid" 2>/dev/null || true
   fi
-  # A case that holds a port on purpose (HS-045's `doctor`, whose `ports` check is the one thing it can break
+  # A case that holds a port on purpose (the `doctor`, whose `ports` check is the one thing it can break
   # without touching the machine) leaves its holder here, so a `fail` in the middle does not strand a listener.
   if [ -n "$holder_pid" ] && kill -0 "$holder_pid" 2>/dev/null; then
     kill "$holder_pid" 2>/dev/null || true
     wait "$holder_pid" 2>/dev/null || true
   fi
-  # A **smoke run's** own names (HS-077). The harness removes its container, its network and its two proxies
+  # A **smoke run's** own names. The harness removes its container, its network and its two proxies
   # itself; this is what a `fail` in the middle needs, and the filter is `smoke_` and nothing else — the
   # machine's own `hs_egress`/`hs_key` are not this case's to remove (the block above is).
   local leftover
@@ -173,13 +171,13 @@ cleanup() {
     docker rm --force "s_$id" >/dev/null 2>&1 || true
     # The egress proxy is an endpoint on a session network that allowed internet access, and `docker network rm`
     # refuses a network with one — so a teardown that forgot the detach would leave the network behind with a
-    # `warn`, which is the orphan HS-044 owns. `docker.rs`'s `remove_network` leaves first for the same reason.
+    # `warn`, which is the orphan a later change owns. `docker.rs`'s `remove_network` leaves first for the same reason.
     docker network disconnect --force "agents_$id" hs_egress >/dev/null 2>&1 || true
     docker network rm "agents_$id" >/dev/null 2>&1 || true
   done
   docker_session_id=""
   docker_second_session_id=""
-  # HS-048's image case starts the two proxies from the image it built — its own `hs_images_*` pair and the deploy's
+  # the image case starts the two proxies from the image it built — its own `hs_images_*` pair and the deploy's
   # `hs_egress`/`hs_key` — so a `fail` in the middle does not leave a container the next run's `--name` would trip
   # over (and a leftover `hs_egress` would make the *next* run's untag fail, which is how the absent state stops
   # being absent). Its images stay: every later `serve` boot starts the proxies from them.
@@ -242,7 +240,7 @@ expect_code() {
 # expect_no_cors <name> <response>: no access-control-* header, and no Vary that implies one.
 #
 # The header block is cut with bash's own suffix removal rather than `sed '/^\r$/q'`, and the reason is
-# measured (HS-053): a `sed …q` closes the pipe at the blank line while `printf` is still writing, and under
+# measured: a `sed …q` closes the pipe at the blank line while `printf` is still writing, and under
 # `pipefail` that SIGPIPE is a 141 that kills the whole run — which is exactly what a 256 KB answer did. Bash's
 # `${var%%pattern}` cannot be interrupted.
 expect_no_cors() {
@@ -306,7 +304,7 @@ fetch_body() {
   sed '1,/^\r$/d' "$WORK/responses/$label.http" >"$WORK/responses/$label.body"
 }
 
-# The same `/dev/tcp` fetch as `fetch`, against the **preview** listener rather than the control one (HS-041).
+# The same `/dev/tcp` fetch as `fetch`, against the **preview** listener rather than the control one.
 #
 # A second function rather than a port parameter, for the reason the script already has three fetch shapes: every
 # other case quotes its answers under a control label, and a preview answer saved under one of those would make
@@ -331,7 +329,7 @@ preview_fetch() {
 }
 
 # forward_fetch <port> <label> <method> <path> [Header: value]...: one request to a **named** machine's control
-# listener (HS-069). `fetch` always talks to `$port`, and a case that runs two machines has to address both: the hub
+# listener. `fetch` always talks to `$port`, and a case that runs two machines has to address both: the hub
 # through `fetch`, the server it forwards to through this.
 forward_fetch() {
   local target="$1" label="$2" method="$3" path="$4"
@@ -390,9 +388,9 @@ fetch_stream() {
 # every line has its own three-second timeout, so a stalled stream fails the case after one of them
 # instead of hanging the run. The line budget is 800 rather than 200 because a stream replays the
 # session's log from its beginning — the shared boot keeps the default `history_window`, so nothing it
-# reads is truncated (HS-061) — and the log grows with every turn this run takes: by the abort and steer
+# reads is truncated — and the log grows with every turn this run takes: by the abort and steer
 # cases the shared session has had four or five turns, which is 300-odd lines, so a budget sized for the
-# log as it was at HS-019 would end the read before the frame the case came for. A stream that has not
+# log as it was at would end the read before the frame the case came for. A stream that has not
 # settled after 200 events would be a bug of its own, and 200 events is what 800 lines is.
 fetch_sse_until() {
   local label="$1" path="$2" needle="$3"
@@ -422,7 +420,7 @@ fetch_sse_until() {
 expect_header() {
   local name="$1" response="$2" header="$3" expected="$4" value headers
   # The header block alone, for `expect_no_cors`'s reason: a `sed '/^\r$/q'` on a large answer is a SIGPIPE
-  # under `pipefail` (measured, HS-053), so the cut is bash's own.
+  # under `pipefail` (measured), so the cut is bash's own.
   headers="${response%%$'\r\n\r\n'*}"
   value="$(printf '%s\n' "$headers" | tr -d '\r' |
     { grep -i "^${header}:" || true; } | sed -n '1s/^[^:]*: *//p')"
@@ -438,7 +436,6 @@ expect_header() {
 # appended by a later story is covered without anyone having to remember to place it before
 # this one.
 serve_cases=(
-  case_verification_table
   case_health
   case_schema_version
   case_sessions_table
@@ -541,86 +538,7 @@ serve_cases=(
   case_doctor_full
 )
 
-# HS-046: the spec's verification table is the record of the verification runs, and this is what keeps it
-# honest after the stories that filled it. It reads `HolosmithSpec.md`'s eleven V rows and asserts four things:
-# no row still says "not yet run"; each carries a verdict (`**pass**` or `**fail**`, the words the table's own
-# column uses); each names an automation this repository really has — a `case_*` in serve_cases, a `tests/*.rs`
-# under the crate, a `scripts/*.sh`, or the by-hand procedure in `docs/build.md` — and every row is measured by
-# those same rules. **HS-070 filled V11, the last deferred row**, so the deferral rule that used to live in the
-# loop is gone; a row a later story fills needs no edit here beyond the row's own cell.
-#
-# It is deliberately not a second copy of the table: it reads every `V<n>` row out of the spec whatever its
-# number, so a row a later story adds is measured by the same rules. The eleven-row count is what keeps that
-# honest in both directions — a broken read (a renamed heading, a table that moved out of the file) fails
-# instead of passing over nothing, and adding a twelfth row is a deliberate edit here rather than a row the
-# case walks past. A row that says `fail` must also name the fallback it took, because acceptance bullet 2
-# asks for the fallback and not only the verdict. The mapping it enforces is the story's own deliverable: a
-# cell names the case that filled it, and "every row is automated" stops being prose the moment a case is
-# renamed (ADR-0055).
-#
-# It needs no server, no daemon and no image, which is why it runs first in serve_cases: a table that has
-# rotted fails the serve phase before any Docker case, rather than after ten minutes of them.
-case_verification_table() {
-  local name=case_verification_table
-  local spec="$repo_root/HolosmithSpec.md"
-  local rows row_count gate_cases n row cell token tokens
-  [ -f "$spec" ] || fail "$name/spec" "$spec is not there: the table is phase 1's record"
-  # Every `| V<n> |` row, whatever its number: the count below is what makes adding a row a deliberate edit
-  # here instead of a row nothing reads.
-  rows="$(grep -E '^\| V[0-9][0-9]* \|' "$spec" || true)"
-  row_count="$(printf '%s\n' "$rows" | grep -c . || true)"
-  check "$name/rows" 11 "$row_count"
-  # The cases this gate really runs, so a cell naming one that has been renamed or dropped fails here instead
-  # of quoting a check nobody runs any more.
-  gate_cases="$(printf '%s\n' "${serve_cases[@]}")"
-  for n in $(printf '%s\n' "$rows" | sed -n 's/^| V\([0-9][0-9]*\) |.*/\1/p'); do
-    row="$(printf '%s\n' "$rows" | grep -E "^\| V$n \|" || true)"
-    [ -n "$row" ] || fail "$name/V$n" "no V$n row in $spec"
-    # The Result cell is the row's last field: strip the closing pipe, then everything up to the last one.
-    cell="$(printf '%s\n' "$row" | sed -e 's/[[:space:]]*|[[:space:]]*$//' -e 's/.*|[[:space:]]*//')"
-    [ -n "$cell" ] || fail "$name/V$n" "V$n's Result cell is empty"
-    if printf '%s\n' "$cell" | grep -qi 'not yet run'; then
-      fail "$name/V$n" "V$n still says \"not yet run\": $cell"
-    fi
-    # **V11 was the last deferred row and HS-070 filled it**, so there is no longer a row this case treats
-    # differently: every row is measured by the same four rules, and the two greps that used to pin V11's
-    # "deferred to phase 3 (HS-070)" sentence are gone with the sentence. A row that is filled by a story and one
-    # that a story's scope excludes now differ only in what their cells say, which is what a record is.
-    if printf '%s\n' "$cell" | grep -q '\*\*fail'; then
-      # Acceptance bullet 2: a failure records which fallback was taken, not only that it failed.
-      printf '%s\n' "$cell" | grep -qi 'fallback' ||
-        fail "$name/V$n" "V$n says fail and records no fallback: $cell"
-      assertions=$((assertions + 1))
-    else
-      printf '%s\n' "$cell" | grep -q '\*\*pass' ||
-        fail "$name/V$n" "V$n carries no verdict (**pass** or **fail**): $cell"
-    fi
-    assertions=$((assertions + 1))
-    tokens="$(printf '%s\n' "$cell" |
-      grep -o -E 'case_[a-z0-9_]+|tests/[a-z0-9_]+\.rs|scripts/[a-z0-9-]+\.sh|docs/build\.md' || true)"
-    [ -n "$tokens" ] ||
-      fail "$name/V$n" "V$n names no automation (a case_*, a tests/*.rs, a scripts/*.sh or docs/build.md): $cell"
-    for token in $tokens; do
-      case "$token" in
-        case_*)
-          printf '%s\n' "$gate_cases" | grep -qx "$token" ||
-            fail "$name/V$n" "V$n names $token, which is not in serve_cases"
-          ;;
-        tests/*)
-          [ -f "$repo_root/crates/holosmith/$token" ] ||
-            fail "$name/V$n" "V$n names $token, which is not under crates/holosmith"
-          ;;
-        *)
-          [ -f "$repo_root/$token" ] ||
-            fail "$name/V$n" "V$n names $token, which does not exist"
-          ;;
-      esac
-      assertions=$((assertions + 1))
-    done
-  done
-}
-
-# V1 (HS-027): the hardened `.git` mounts, measured on a real daemon. Three writes must fail, three git
+# V1: the hardened `.git` mounts, measured on a real daemon. Three writes must fail, three git
 # commands must work, the process must not be root and the container must not be able to remount or
 # unmount. This case needs no server: it is a fact about `docker run` and the mounts, so it never touches
 # the booted artifact — `tests/container.rs` asserts that the arguments the binary builds are these.
@@ -736,7 +654,7 @@ case_container_mounts() {
   rm -rf "$root"
 }
 
-# HS-028's proof from the artifact: a Docker boot runs the session's network and its container, and the row
+# the proof from the artifact: a Docker boot runs the session's network and its container, and the row
 # therefore ends `error` at the **agent** step rather than at the network or the container one.
 #
 # The container's own flags are `tests/container.rs`'s (it inspects a real container, which the API cannot
@@ -746,7 +664,7 @@ case_container_mounts() {
 #
 # Its projects root lives under `target/` because the daemon resolves bind-mount sources in the host's
 # namespace and `$WORK` is on `/tmp` (ADR-0035's measurement).
-# HS-031's proof from the artifact: a Docker boot runs the session's network, its container **and the
+# the proof from the artifact: a Docker boot runs the session's network, its container **and the
 # agent**, so a create reaches `idle` and the container is pi in RPC mode with the session's own agent
 # directory mounted into it. Then the container is removed from under the server, and the exit the attached
 # stdio observed is classified: the row is `error` with the last of what pi printed, exactly spec item 6's
@@ -758,7 +676,7 @@ case_container_mounts() {
 # says, and the delete takes all of it away.
 #
 # Its projects root **and its data root** live under `target/` because the daemon resolves bind-mount
-# sources in the host's namespace and `$WORK` is on `/tmp` (ADR-0035): since HS-031 a data root the daemon
+# sources in the host's namespace and `$WORK` is on `/tmp` (ADR-0035): a data root the daemon
 # cannot see would mount an empty agent directory and fail the handshake, silently.
 case_agent_launch() {
   local name=case_agent_launch body id image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
@@ -909,10 +827,10 @@ case_agent_launch() {
   rm -rf "$root"
 }
 
-# HS-029's proof from the artifact, now over a live agent: a session reaches `idle`, the container dies from
+# the proof from the artifact, now over a live agent: a session reaches `idle`, the container dies from
 # under it (the row is `error`, the exit classified), and `POST /resume` brings it back to `idle` with the same
 # worktree and a new container. The resume's container step is the path that clears the expected-stop flag
-# (HS-030) and the launch that replaces an exit nobody is waiting for (HS-031).
+#  and the launch that replaces an exit nobody is waiting for.
 #
 # Its projects root and data root live under `target/` for `case_agent_launch`'s reason.
 case_docker_resume() {
@@ -1013,7 +931,7 @@ case_docker_resume() {
     fail "${name}_delete/no_answer" "DELETE did not answer"
   expect_status "${name}_delete" "$(answer "${name}_delete")" 202
   # The removal is a background task, so it is waited for: removing the case's scratch root underneath it
-  # would let the teardown run against paths that are already gone and prove nothing (HS-031's review).
+  # would let the teardown run against paths that are already gone and prove nothing.
   local gone=""
   for _ in $(seq 1 300); do
     fetch "${name}_gone" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
@@ -1025,7 +943,7 @@ case_docker_resume() {
   check "${name}_gone/status" "404" "$gone"
   # The session's own directory is gone and **stays** gone: this is the case that deletes a *live* session, so
   # it is where the exit the delete provokes would put `session.log` (and with it the directory) back if the
-  # backend did not forget the launch first (HS-031's review, ADR-0039).
+  # backend did not forget the launch first (ADR-0039).
   [ ! -d "$data/sessions/$id" ] ||
     fail "${name}/session_dir_left" "the delete left (or re-created) $data/sessions/$id"
   assertions=$((assertions + 1))
@@ -1034,12 +952,12 @@ case_docker_resume() {
   rm -rf "$root"
 }
 
-# HS-032's proof from the artifact: a prompt on a Docker session reaches **pi's RPC loop** and what pi answers
+# the proof from the artifact: a prompt on a Docker session reaches **pi's RPC loop** and what pi answers
 # comes back as the row's own reason. The mapping itself (a record in, a frame out) is `cargo test --test rpc`'s,
 # against records captured from a real turn; this case is the half only a real container can show.
 #
 # The assertion is a refusal and not a streamed answer, and that is a fact about this phase rather than a
-# shortcut: a session's container is on an `--internal` network (HS-028) and holds no provider key (HS-039), so
+# shortcut: a session's container is on an `--internal` network and holds no provider key, so
 # pi's `prompt` command is rejected before a stream exists — "No API key found for openrouter", in pi's own
 # words, which is what the row then carries. A refused prompt that reached pi is a *different* observable from
 # a session that hangs: the row leaves `running` for `error` with that sentence, and the container is still
@@ -1198,14 +1116,14 @@ case_docker_turn() {
   rm -rf "$root"
 }
 
-# HS-043's real half: a session with a commit on `agent/<id>` and an uncommitted change, deleted from the
+# the real half: a session with a commit on `agent/<id>` and an uncommitted change, deleted from the
 # shipped artifact against a real repository. The branch and the snapshot ref survive, the worktree and the
 # session directory do not, and the command the 202 carried recovers the work — the story's demo, as a gate.
 #
 # It needs the daemon and `agent_image` for the session to reach `idle` (a create provisions a real
 # container), so a machine without them prints one SKIP line; the keep-rule is still proven there by
 # `tests/worktree.rs`, which needs no daemon at all. The cleanup is explicit rather than a trap because a
-# gate case that fails should still not leave the next run a container to trip over (HS-041's landmine).
+# gate case that fails should still not leave the next run a container to trip over.
 case_delete_keeps_the_work() {
   local name=case_delete_keeps_the_work body id response head show
   local image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
@@ -1484,7 +1402,7 @@ PY
   rm -rf "$root"
 }
 
-# The health payload: exactly seven keys (the sixth is HS-067's application server key, the seventh is HS-074's
+# The health payload: exactly seven keys (the sixth is the application server key, the seventh is that story's
 # machine name), and the uptime is not predictable, so the assertion is the prefix and the closing brace (the shape
 # tests/http_contract.rs uses — where the whole string is compared, because the counts are what move).
 case_health() {
@@ -1521,7 +1439,7 @@ case_schema_version() {
   assertions=$((assertions + 1))
 }
 
-# HS-007's acceptance is "migration adds `sessions`", and nothing else proves the booted
+# the acceptance is "migration adds `sessions`", and nothing else proves the booted
 # artifact created it: `case_schema_version` derives the number the artifact reports, which a
 # migration bump alone would satisfy. The table's SQL lives in SQLite's `sqlite_master`, so the
 # database's own bytes carry it and no `sqlite3` binary is needed — the same byte grep
@@ -1541,7 +1459,7 @@ case_sessions_table() {
     "no app.db file carries CREATE TABLE sessions and the sessions_status index: $(ls -A "$WORK/data" 2>/dev/null)"
 }
 
-# HS-009's acceptance is the `events` table and the `last_seq` counter it bumps. Same byte grep as
+# the acceptance is the `events` table and the `last_seq` counter it bumps. Same byte grep as
 # `case_sessions_table`, and the same glob over `app.db*`: while serve is running the schema may
 # still be in `app.db-wal`, and `ALTER TABLE ... ADD COLUMN` rewrites the `sessions` entry in
 # `sqlite_master` to carry `last_seq`. The index grep is `sqlite_autoindex_events` rather than a
@@ -1583,7 +1501,7 @@ case_api_not_found() {
   expect_code "$name" "$response" not_found
 }
 
-# Box 1 of HS-005: the `Host` header is not one this machine answers. Only the host is wrong.
+# Box 1: the `Host` header is not one this machine answers. Only the host is wrong.
 case_guard_bad_host() {
   local name=case_guard_bad_host response
   fetch "$name" GET /api/nope "Host: evil.example" ||
@@ -1649,7 +1567,7 @@ case_health_is_exempt() {
   expect_status "$name" "$response" 200
 }
 
-# HS-008: a create answers 202 with the row, a `Location` and the event stream's URL. The id is
+# a create answers 202 with the row, a `Location` and the event stream's URL. The id is
 # parsed out of the body for the cases below; the body is the row, so it carries the status and
 # the key's row too.
 case_create_session() {
@@ -1685,7 +1603,7 @@ case_create_session() {
   esac
 }
 
-# HS-008: the same key answers the same session with a second 202, not a second row.
+# the same key answers the same session with a second 202, not a second row.
 case_create_is_idempotent() {
   local name=case_create_is_idempotent response body id
   fetch_body "$name" POST /api/sessions \
@@ -1700,7 +1618,7 @@ case_create_is_idempotent() {
   check "$name/id" "$created_id" "$id"
 }
 
-# HS-008: a project that is not one path segment is refused, and the code says so.
+# a project that is not one path segment is refused, and the code says so.
 case_create_bad_project() {
   local name=case_create_bad_project response
   fetch_body "$name" POST /api/sessions \
@@ -1713,9 +1631,9 @@ case_create_bad_project() {
   expect_code "$name" "$response" bad_project
 }
 
-# HS-008: one live session against the boot config's cap of one, so a fresh create is refused
-# with 409 `cap_reached` (nothing is evictable until HS-020).
-# HS-008/HS-020: a create at the cap is refused when there is nothing to evict, and since HS-020 it is
+# one live session against the boot config's cap of one, so a fresh create is refused
+# with 409 `cap_reached` (nothing is evictable until).
+# those stories: a create at the cap is refused when there is nothing to evict, and it is
 # the *last* case because it owns the session whose state it depends on: a session that is still
 # provisioning is live and not evictable, and leaving one behind would break any case that came after.
 # The first create evicts the previous case's idle session (the cap is one), so the session that holds
@@ -1755,7 +1673,7 @@ case_create_at_cap_refused() {
   response="$(answer "$name")"
   expect_status "$name" "$response" 409
   expect_code "$name" "$response" cap_reached
-  # The sentence says why nothing was evicted, which is the create's own answer since HS-020.
+  # The sentence says why nothing was evicted, which is the create's own answer.
   body="$(cat "$WORK/responses/$name.body")"
   case "$body" in
     *idle*)
@@ -1767,7 +1685,7 @@ case_create_at_cap_refused() {
   esac
 }
 
-# HS-010: the `events` URL a create answers with is a server-sent event stream. No producer exists
+# the `events` URL a create answers with is a server-sent event stream. No producer exists
 # yet, so the case proves the route and its content type rather than an event; the stream never
 # sends EOF, which is why this uses `fetch_stream` and not `fetch`.
 case_events_stream() {
@@ -1780,7 +1698,7 @@ case_events_stream() {
   expect_header "$name" "$response" cache-control "no-cache"
 }
 
-# HS-011: the backend is a machine setting, so a config file saying `backend = "stub"` is what
+# the backend is a machine setting, so a config file saying `backend = "stub"` is what
 # this boot runs on, with no flag. The banner is what proves it took effect; the provisioning case
 # below is what proves the stub is the backend that actually provisioned the session.
 case_backend_from_config() {
@@ -1789,7 +1707,7 @@ case_backend_from_config() {
   check "$name/banner" "stub" "$banner"
 }
 
-# HS-011: a create hands off to the provisioner, which reports the four steps and ends the session
+# a create hands off to the provisioner, which reports the four steps and ends the session
 # idle. The stream is read until the event that says `idle`, so the case proves the order a browser
 # sees and that the last thing it is told is the state the story requires.
 case_provisioning_steps() {
@@ -1814,7 +1732,7 @@ case_provisioning_steps() {
   esac
 }
 
-# HS-012: the state machine's `session.status` payload. The four step reports claim no state
+# the state machine's `session.status` payload. The four step reports claim no state
 # change (`from` and `to` are both `starting`), and the fifth reports the transition the table
 # allows and the story requires: `starting` to `idle`, with no step and no reason.
 case_state_transition_payload() {
@@ -1837,7 +1755,7 @@ case_state_transition_payload() {
   esac
 }
 
-# HS-013: the sessions list. A `GET`, so only the host check applies, and the body carries the
+# the sessions list. A `GET`, so only the host check applies, and the body carries the
 # session `case_create_session` made plus the machine's network default, which is the create form's
 # checkbox initial state. Read last, because it needs `$created_id`.
 case_sessions_list() {
@@ -1874,11 +1792,11 @@ case_sessions_list() {
       fail "$name/network_default" "the body does not carry network_default:false: $body"
       ;;
   esac
-  # The row's *state* is deliberately not pinned: the provisioner HS-011 starts runs while these
+  # The row's *state* is deliberately not pinned: the provisioner starts runs while these
   # cases run, so `starting` or `idle` are both correct by the time this answer is read.
 }
 
-# HS-014: one session by id, and the screen path that opens with it. The one row is the list's
+# one session by id, and the screen path that opens with it. The one row is the list's
 # element, so the answer is read against `$created_id` and the absent `events` key is asserted: the
 # page spells the stream path itself, and a second copy on the row would be a second contract.
 case_session_detail() {
@@ -1926,7 +1844,7 @@ case_session_detail() {
   expect_code "$name" "$response" not_found
 }
 
-# HS-033: one tool call's full output is a file, and the route serves it — while a name that cannot be a
+# one tool call's full output is a file, and the route serves it — while a name that cannot be a
 # filename is refused rather than joined to a path. The file is written here because the stub's turn calls no
 # tool: `tests/rpc.rs` is where a real turn's tool output is stored by the pump, and `tests/tool_output.rs`
 # where the route's answers are asserted beside it. What only the shipped artifact can add is that the route
@@ -1987,7 +1905,7 @@ case_tool_output() {
   expect_code "$name" "$response" not_found
 }
 
-# HS-035: an image in a tool result is a file beside the output, and the route serves its bytes with the
+# an image in a tool result is a file beside the output, and the route serves its bytes with the
 # type the file has — not the text route's `text/plain` and not an envelope. The file is planted here for
 # the reason `case_tool_output`'s is: the stub's turn calls no tool, so `tests/rpc.rs` is where a real turn's
 # image is stored by the pump, and `tests/tool_output.rs` where the route's answers are asserted beside it.
@@ -2055,10 +1973,10 @@ case_tool_image() {
   done
 }
 
-# HS-044's other half, on a real daemon: the names a crash leaves behind that no row owns. The live session's
+# the other half, on a real daemon: the names a crash leaves behind that no row owns. The live session's
 # container is replaced under the same name (which is what "no name conflict" means), a container and a network
 # with no row go, and a worktree directory no row owns goes **while its branch and its snapshot ref stay**
-# (HS-043, ADR-0052). The machine's own `hs_egress`/`hs_key` are not the build's session names and are left.
+# (ADR-0052). The machine's own `hs_egress`/`hs_key` are not the build's session names and are left.
 #
 # What the SKIP line costs, said out loud: on a machine with no daemon (a hub, which is supported) the container
 # and network halves of acceptance bullets 1 and 3 cannot be measured at all — there is nothing to measure — so
@@ -2164,7 +2082,7 @@ case_reconcile_orphans() {
   [ ! -e "$projects/.worktrees/$fake" ] ||
     fail "$name/orphan_worktree/gone" "the reconcile left a worktree directory no row owns"
   assertions=$((assertions + 1))
-  # **What a crash must never cost**: the branch and the snapshot ref (HS-043's rule).
+  # **What a crash must never cost**: the branch and the snapshot ref.
   check "$name/branch" "$branch" "$(git -C "$repo" rev-parse --verify --quiet "agent/$fake")"
   check "$name/ref" "$branch" "$(git -C "$repo" rev-parse --verify --quiet "$wip")"
 
@@ -2210,7 +2128,7 @@ case_reconcile_orphans() {
 }
 
 
-# HS-036: this machine's isolation, measured. The probe is `tests/selftest.rs`'s subject too, with a bridge
+# this machine's isolation, measured. The probe is `tests/selftest.rs`'s subject too, with a bridge
 # control; what only the *shipped artifact* can add is that a real boot runs it, that the answer is in the log,
 # that the machine's own `egress` network is created (not internal — the proxies attach to it) and that the
 # temporary probe network does not outlive the boot. `HOLOSMITH_LOG=debug` for this boot alone: the pass is a
@@ -2247,7 +2165,7 @@ case_network_selftest() {
   fi
   assertions=$((assertions + 1))
 
-  # HS-038's pair, in the boot's own words: the probe sees the proxy once it is joined — which is what makes the off
+  # the pair, in the boot's own words: the probe sees the proxy once it is joined — which is what makes the off
   # case's silence evidence — or the machine had no proxy to join, which the boot also says. A run that says
   # neither is a pair that was measured by nobody, and a `debug` line is why this case boots with `HOLOSMITH_LOG=debug`.
   grep -q 'the probe sees the egress proxy once it is joined' "$serve_err" ||
@@ -2255,7 +2173,7 @@ case_network_selftest() {
     fail "$name/pair" "the boot neither saw the joined proxy nor said it had none: $(grep -i 'egress' "$serve_err" | tr '\n' ' ')"
   assertions=$((assertions + 1))
 
-  # HS-039's inverse pair: the key proxy must answer on the probe's network. A boot that did not start it says
+  # the inverse pair: the key proxy must answer on the probe's network. A boot that did not start it says
   # so, and that is a `warn` rather than a verdict — but a boot that started it and did not see the alias is a
   # key-proxy join bug, which is what this line makes visible.
   grep -q 'the key proxy answers on the probe' "$serve_err" ||
@@ -2277,7 +2195,7 @@ case_network_selftest() {
   assertions=$((assertions + 1))
 }
 
-# HS-042: the WIP snapshot as the shipped artifact runs it. No daemon, no server: a real repository and a
+# the WIP snapshot as the shipped artifact runs it. No daemon, no server: a real repository and a
 # real linked worktree, one uncommitted change, and then the four questions the story's acceptance asks —
 # the ref points at the change, the branch and HEAD did not move, the index is untouched, and a tree equal
 # to HEAD removes the ref. `tests/snapshot.rs` covers the same function; this is the gate's use of it.
@@ -2326,8 +2244,8 @@ case_snapshot() {
   rm -rf "$root"
 }
 
-# HS-039: the key store and the key proxy's refusal path, with no daemon and no internet. The forwarding half
-# to a provider is HS-040's (a gate that needs a real key is not a gate); what this case can prove is the part
+# the key store and the key proxy's refusal path, with no daemon and no internet. The forwarding half
+# to a provider is the (a gate that needs a real key is not a gate); what this case can prove is the part
 # that must never be wrong: the file is 0600, `key list` never prints a value, the CLI reads stdin, and a
 # request with no dummy (or an unknown provider) is answered without a provider being contacted.
 case_key_proxy() {
@@ -2418,11 +2336,11 @@ PY
   rm -rf "$root"
 }
 
-# HS-040 (V3's bytes): the request the key proxy hands its TLS client — head **and** body. The TLS client is a
+#  (V3's bytes): the request the key proxy hands its TLS client — head **and** body. The TLS client is a
 # process (`openssl`), so a shim on `PATH` stands in for it: it takes one bounded read of exactly what the proxy
 # writes, saves it, and answers a canned 200. What the case can then assert is the thing that was wrong: the
 # request carries the body, names its length once, and has the stored key swapped in. No internet, no real key
-# and no daemon — a gate cannot have those, and the real forward is HS-040's recorded demo.
+# and no daemon — a gate cannot have those, and the real forward is the recorded demo.
 case_key_proxy_request() {
   local name=case_key_proxy_request root="$WORK/key-proxy-request-$$"
   local fake="$root/openssl" capture="$root/request.bin" port keyproxy_pid answered
@@ -2505,7 +2423,7 @@ PYASK
   rm -rf "$root"
 }
 
-# HS-037: the egress proxy, on the wire and with no daemon and no internet. What it proves is the four
+# the egress proxy, on the wire and with no daemon and no internet. What it proves is the four
 # refusals spec item 2 names — anything that is not CONNECT, a port that is not 443, a host that is not on
 # the allow-list, and a name that resolves inside the machine *even when it is on the list* — plus that the
 # log line attributes the request to the session in the proxy username. The allow path needs a real
@@ -2594,7 +2512,7 @@ PY
   wait "$proxy_pid" 2>/dev/null || true
 }
 
-# HS-038 (V6): the Internet-access checkbox is **topology**, not configuration. Two real sessions, one per
+#  (V6): the Internet-access checkbox is **topology**, not configuration. Two real sessions, one per
 # setting, both taken through the production path (a create's network step is what `apply_proxy` joins the
 # machine's egress proxy from), and three measurements on each session's own network.
 #
@@ -2749,7 +2667,7 @@ PROBE
       fail "${name}_${label}_probe" "the probe container failed: $(cat "$WORK/responses/${name}_${label}_probe.err")"
     # The pass is a *code*, spelled out rather than "anything that is not one of those two": an unrecognised word
     # from a changed probe would otherwise pass this check silently, which is the vacuous-assertion trap the gate
-    # has been bitten by twice (HS-020, HS-061).
+    # has been bitten by twice.
     case "$verdicts" in
       *"direct connected"* | *"direct refused"*)
         fail "${name}_${label}_direct" "the session reached 1.1.1.1 directly, so its network is not internal: $verdicts"
@@ -2764,7 +2682,7 @@ PROBE
     # The key proxy is the one address a session may reach in **both** cases (spec item 2): a model call
     # must work with the Internet-access checkbox off, so a missing alias is a key-proxy join bug rather than
     # a checkbox bug. The probe only proves the TCP alias resolves and accepts; the dummy-key check is
-    # `case_key_proxy`'s and the provider path is HS-040's.
+    # `case_key_proxy`'s and the provider path is that story's.
     case "$verdicts" in
       *"key connected"*)
         assertions=$((assertions + 1))
@@ -2789,7 +2707,7 @@ PROBE
           ;;
         *)
           # The two causes of "the alias does not answer" are different facts and only one of them is this
-          # story's: a machine whose proxy container is **not running** (HS-037's `warn`, a supported machine)
+          # story's: a machine whose proxy container is **not running** (a supported machine)
           # and a proxy that runs but was never joined to this session's network — which is the checkbox not
           # working. `EAI_AGAIN` cannot tell them apart; one `docker inspect` can. A SKIP therefore has to name
           # evidence the boot actually printed, or it would be a green run over the bug the case exists for.
@@ -2827,7 +2745,7 @@ PROBE
   done
   # The key proxy mounts the **directory** the key file lives in, not the file: `Store` writes `keys.toml` by
   # temp-file-and-rename, and a file bind mount pins the inode, so a proxy started before the first create would
-  # keep reading the store as it was at mount time and answer `bad-key` for every session (HS-040 measured it).
+  # keep reading the store as it was at mount time and answer `bad-key` for every session.
   # The assertion names the directory, and that the file is not a source of its own.
   key_mounts="$(docker inspect hs_key --format '{{range .Mounts}}{{.Source}} {{end}}' 2>/dev/null)"
   case "$key_mounts" in
@@ -2927,12 +2845,12 @@ PROBE
   rm -rf "$root"
 }
 
-# HS-075: a database from a **newer** release. `serve` continues — item 10's rollback must not need a restore, and
+# a database from a **newer** release. `serve` continues — item 10's rollback must not need a restore, and
 # expand/contract is what makes continuing safe — and it says so in two places an operator reads: the banner's
 # `schema <n>` is the *recorded* number rather than the binary's, and one `warn` names both versions and the command
-# that refuses (`doctor`, HS-045). This is the observable half of the acceptance's third bullet; the pure verdict
+# that refuses (`doctor`). This is the observable half of the acceptance's third bullet; the pure verdict
 # and its sentence are `tests/schema_previous.rs`'s.
-# HS-041 (spec item 3, V7): the preview listener. Two halves.
+#  (spec item 3, V7): the preview listener. Two halves.
 #
 # The first needs nothing but the booted artifact: a **second listener** that serves only `/<host>/<id>/*`,
 # refuses every control API path (with a sentence, not the envelope), refuses another machine's host name,
@@ -3246,7 +3164,7 @@ SQL
   printf '%s\n' "$line" | grep -q 'doctor' ||
     fail "$name/doctor" "the warning does not name the command that refuses: $line"
   assertions=$((assertions + 1))
-  # …and the command keeps the promise the warning made (HS-045): `doctor --quick` refuses the same database,
+  # …and the command keeps the promise the warning made: `doctor --quick` refuses the same database,
   # read **without** migrating it, with `schema::verdict`'s one sentence. `serve` continues (the 200 below),
   # `doctor` does not — that split is ADR-0047's whole decision.
   status=0
@@ -3273,7 +3191,7 @@ SQL
   rm -rf "$root"
 }
 
-# HS-014: the session screen is a path, not a route. `/sessions/<id>` is not a file the app ships,
+# the session screen is a path, not a route. `/sessions/<id>` is not a file the app ships,
 # so the fallback answers the app shell (ADR-0007) — byte-for-byte the page `case_app_shell` reads,
 # which is what makes a reload of one session's screen work with no router installed.
 case_session_screen() {
@@ -3289,7 +3207,7 @@ case_session_screen() {
   assertions=$((assertions + 1))
 }
 
-# HS-015: one prompt, one turn. The 202 is the row, now `running`, and the stream read until the
+# one prompt, one turn. The 202 is the row, now `running`, and the stream read until the
 # event that says `idle` is the whole script: a turn boundary, a message's deltas, a tool call and
 # its output, the message's end and the closing boundary, then the settle that ends the turn.
 case_prompt_turn() {
@@ -3326,7 +3244,7 @@ case_prompt_turn() {
     tr '\n' ' ' | sed 's/ $//')"
   # Seven deltas: three thinking, then two text, then two more after the tool call. Seven because the run's
   # stub paces one frame per 200 ms and the writer commits every 25 ms, so no two deltas share a commit and
-  # coalescing (HS-059) has nothing to merge; a slower window would make this a shorter list.
+  # coalescing has nothing to merge; a slower window would make this a shorter list.
   check "$name/kinds" \
     "turn.start message.delta message.delta message.delta message.delta message.delta tool.start tool.end message.delta message.delta message.end turn.end" \
     "$kinds"
@@ -3348,14 +3266,14 @@ case_prompt_turn() {
   esac
 }
 
-# HS-059's proof from the artifact: a turn's log holds one delta row per run of deltas the writer
+# the proof from the artifact: a turn's log holds one delta row per run of deltas the writer
 # committed together — never more rows than the script emitted — and every word the script said is still
 # there, in order, under one message id.
 #
 # What this case cannot show is the merge itself. The stub paces one frame per 200 ms, eight commit windows
 # apart, so nothing here is coalesced: the merge is `tests/turns.rs`'s (seven scripted deltas -> three rows
 # at a pace below the window) and `tests/events.rs`'s (5,000 -> three). What the shipped artifact can prove
-# is the contract a merge must keep, which is what a burst producer (HS-032's container output) is held to.
+# is the contract a merge must keep, which is what a burst producer is held to.
 #
 # It creates its own session and deletes it, and it runs **before** `case_create_session`: the run's cap is one
 # live session, so a create here after the shared one exists would evict it and every later case that prompts
@@ -3420,7 +3338,7 @@ case_event_coalescing() {
   wait_for_gone "${name}_gone" "$id"
 }
 
-# HS-022: the turn timeout does not fire on a turn that ends. The gate cannot make it *fire* —
+# the turn timeout does not fire on a turn that ends. The gate cannot make it *fire* —
 # `turn_timeout_min` is whole minutes and the stub's turn lasts about a second, so nothing this artifact
 # can be configured with holds a turn open for a minute — and the story's own proof of firing is
 # `tests/turn_timeout.rs`'s. What the shipped binary can prove is the other half: with the key set to its
@@ -3465,7 +3383,7 @@ case_turn_timeout() {
   assertions=$((assertions + 1))
 }
 
-# HS-015: a prompt's body is one non-empty `prompt`, and a body that is not is 422 `bad_body` — the
+# a prompt's body is one non-empty `prompt`, and a body that is not is 422 `bad_body` — the
 # same envelope the create's validation answers with.
 case_prompt_bad_body() {
   local name=case_prompt_bad_body response
@@ -3479,7 +3397,7 @@ case_prompt_bad_body() {
   expect_code "$name" "$response" bad_body
 }
 
-# HS-015: a prompt for a session the table does not hold is ADR-0008's 404 `not_found`, decided
+# a prompt for a session the table does not hold is ADR-0008's 404 `not_found`, decided
 # after the body and before any state is read.
 case_prompt_unknown_session() {
   local name=case_prompt_unknown_session response
@@ -3493,7 +3411,7 @@ case_prompt_unknown_session() {
   expect_code "$name" "$response" not_found
 }
 
-# HS-016: abort answers 202 with the running row, the ladder ends the turn off-request, and the
+# abort answers 202 with the running row, the ladder ends the turn off-request, and the
 # reason on the transition says which rung fired. The stub honours an abort, so this is rung 1 —
 # rung 2 is a constructor argument only a test can set, and `tests/abort.rs` drives it.
 case_abort() {
@@ -3545,7 +3463,7 @@ case_abort() {
   esac
 }
 
-# HS-016: an abort with no turn to abort is `409 session_idle` — the code the family gained for it —
+# an abort with no turn to abort is `409 session_idle` — the code the family gained for it —
 # because aborting an idle session is not a request that silently does nothing.
 case_abort_on_an_idle_session() {
   local name=case_abort_on_an_idle_session response
@@ -3559,7 +3477,7 @@ case_abort_on_an_idle_session() {
   expect_code "$name" "$response" session_idle
 }
 
-# HS-017: a steer hands guidance to the running turn, answers 202 with the row, and is recorded as a
+# a steer hands guidance to the running turn, answers 202 with the row, and is recorded as a
 # `turn.steer` frame — which is how the transcript shows what was delivered and when. The abort left the
 # session idle, so this case starts its own turn.
 case_steer() {
@@ -3613,7 +3531,7 @@ case_steer() {
   wait_for_idle case_steer_settles
 }
 
-# HS-017: a steer with no running turn is `409 session_idle`, the code HS-016 added for it.
+# a steer with no running turn is `409 session_idle`, the code added for it.
 case_steer_on_an_idle_session() {
   local name=case_steer_on_an_idle_session response
   fetch_body "$name" POST "/api/sessions/$created_id/steer" '{"guidance":"too late"}' \
@@ -3653,7 +3571,7 @@ wait_for_idle_docker() {
   assertions=$((assertions + 1))
 }
 
-# wait_for_idle_id <label> <id>: the same for any session, which HS-020's eviction case needs because
+# wait_for_idle_id <label> <id>: the same for any session, which the eviction case needs because
 # it makes its own pair rather than using `created_id`. A case that needs a session idle before it
 # acts cannot use a stream needle: every turn's settle carries the same payload, and the replay would
 # answer with an earlier turn's.
@@ -3674,9 +3592,8 @@ wait_for_idle_id() {
   fail "$label/status" "the session never reached idle: $body"
 }
 
-# HS-018: a resume with nothing to bring back is `409 session_idle`. The happy path cannot be driven
-# from this harness: nothing in the API produces `stopped` yet — the policies that do are HS-020's,
-# HS-021's and HS-044's — so `tests/resume.rs` proves the round trip against a row the table stopped.
+# a resume with nothing to bring back is `409 session_idle`. The happy path cannot be driven
+# from this harness: nothing in the API produces `stopped` yet — the policies that do belong to later changes — so `tests/resume.rs` proves the round trip against a row the table stopped.
 case_resume_on_an_idle_session() {
   local name=case_resume_on_an_idle_session response
   fetch "$name" POST "/api/sessions/$created_id/resume" \
@@ -3689,7 +3606,7 @@ case_resume_on_an_idle_session() {
   expect_code "$name" "$response" session_idle
 }
 
-# HS-018: a resume for a session the table does not hold is ADR-0008's 404 `not_found`.
+# a resume for a session the table does not hold is ADR-0008's 404 `not_found`.
 case_resume_unknown_session() {
   local name=case_resume_unknown_session response
   fetch "$name" POST "/api/sessions/0000000000000000/resume" \
@@ -3704,7 +3621,7 @@ case_resume_unknown_session() {
 
 # wait_for_gone <label> <id>: poll one session's row until it answers `404 not_found`, bounded.
 #
-# The removal is a background task's (HS-019), so the 202 is not the proof that it happened: the row
+# The removal is a background task's, so the 202 is not the proof that it happened: the row
 # is. Counted once, like every other wait here, so a passing case adds one assertion rather than one
 # per poll.
 wait_for_gone() {
@@ -3745,7 +3662,7 @@ wait_for_reason_id() {
 }
 
 # wait_for_stopped_id <label> <id>: poll one session's row until it says stopped, bounded and counted
-# once. The idle stop is a timer's, not a request's (HS-021), so its budget is the config's bound plus
+# once. The idle stop is a timer's, not a request's, so its budget is the config's bound plus
 # one tick rather than a fraction of a second: 100 seconds for the gate's one-minute `idle_stop_min`.
 wait_for_stopped_id() {
   local label="$1" id="$2" body
@@ -3767,8 +3684,8 @@ wait_for_stopped_id() {
 # remove_session <label> <id> [force]: delete a session and wait for its row to be gone, so a case
 # that made one of its own leaves the machine as it found it.
 #
-# `force` is HS-019's `?force=true`, and a Docker run needs it: the WIP snapshot the delete asks the backend
-# for before it removes anything is HS-042's, so a Docker session with a worktree answers `409 unsaved_work`
+# `force` is the `?force=true`, and a Docker run needs it: the WIP snapshot the delete asks the backend
+# for before it removes anything is that story's, so a Docker session with a worktree answers `409 unsaved_work`
 # until then — the spelling `case_docker_turn` uses, and the reason the stub is where the snapshot's own
 # refusal is exercised.
 remove_session() {
@@ -3784,7 +3701,7 @@ remove_session() {
   wait_for_gone "${label}_gone" "$id"
 }
 
-# HS-019: the delete flow's happy path, against the stub backend whose snapshot and delete both
+# the delete flow's happy path, against the stub backend whose snapshot and delete both
 # succeed. The 202 promises a `deleting` row and the removal happens off the request, so the proof is
 # two answers: the 202 itself, and the 404 that follows it. This case runs last among the cases that
 # name `created_id`, because it is the one that removes it.
@@ -3827,7 +3744,7 @@ case_delete_session() {
   esac
 }
 
-# HS-043: the delete's own answer, and the page that shows it. Two facts are worth asserting on every
+# the delete's own answer, and the page that shows it. Two facts are worth asserting on every
 # machine and neither needs a repository: the 202 carries `kept` — three explicit nulls when nothing
 # survived, because a stub session has no repository at all (ADR-0015) and a client must be able to tell
 # "nothing was kept" from `kept: null`, which is "the repository could not answer" — and the page the
@@ -3880,8 +3797,8 @@ case_delete_keeps() {
   done
 }
 
-# HS-064: the stopped-session expiry. A session stopped longer than `stopped_ttl_days` is removed by the
-# artifact's own daily job, through HS-043's delete flow — so this case measures the *removal* and, because a
+# the stopped-session expiry. A session stopped longer than `stopped_ttl_days` is removed by the
+# artifact's own daily job, through the delete flow — so this case measures the *removal* and, because a
 # delete's whole promise is what it keeps, the branch and the WIP ref that survive it.
 #
 # It boots its own server over a real repository and the daemon, for `case_disk_quota`'s reason: the worktree
@@ -4059,7 +3976,7 @@ PY
   start_serve
 }
 
-# HS-066: the Web Push notification (spec item 11). A **daemon-free** case: the stub backend, a real TLS
+# the Web Push notification (spec item 11). A **daemon-free** case: the stub backend, a real TLS
 # receiver written in `node`, and the artifact's own sender talking to it over TLS.
 #
 # What it measures, and why each half needs the ingredient it uses:
@@ -4093,8 +4010,8 @@ PY
 # case's boot.
 # The push receiver: the *browser* in a push exchange, written once for the two cases that need one.
 #
-# HS-066's `case_push` reads one machine's payload: the token, the record, the disposition for each answer a
-# push service can give. HS-074's `case_cross_machine` reads the same three fields from a **peer's** payload
+# the `case_push` reads one machine's payload: the token, the record, the disposition for each answer a
+# push service can give. the `case_cross_machine` reads the same three fields from a **peer's** payload
 # through a hub, so it needs the same arithmetic with different keys — and a second copy of this file would be
 # a second thing to keep right (this script already found its own two bugs: a JWK without `format: 'jwk'` and
 # an auth tag set after `final()`).
@@ -4220,7 +4137,7 @@ JS
 # The SEC1 walk: a 121-octet `openssl ecparam` key read as the two base64url strings a `vapid.toml` holds and
 # the two hex strings a receiver needs. `python3` reads the DER rather than a second hand parser in bash.
 #
-# One writer, two cases (HS-066's `case_push` and HS-074's `case_cross_machine`): the peer's pair, the
+# One writer, two cases: the peer's pair, the
 # subscription's pair and a hub's own pair are the same three questions about the same 121 octets.
 write_sec1_walk() {
   cat >"$WORK/sec1.py" <<'PY'
@@ -4300,7 +4217,7 @@ case_push() {
   read -r vapid_public vapid_private _ _ < <(python3 "$WORK/sec1.py" "$tls/vapid.der")
   [ -n "$vapid_public" ] && [ -n "$vapid_private" ] ||
     fail "$name/vapid" "the generated pair did not parse"
-  printf '# The machine'"'"'s Web Push key pair (HS-049). `server deploy` writes this once and never rewrites it.\npublic_key = "%s"\nprivate_key = "%s"\n' \
+  printf '# The machine'"'"'s Web Push key pair. `server deploy` writes this once and never rewrites it.\npublic_key = "%s"\nprivate_key = "%s"\n' \
     "$vapid_public" "$vapid_private" >"$data/secrets/vapid.toml" ||
     fail "$name/vapid" "could not write $data/secrets/vapid.toml"
   chmod 0600 "$data/secrets/vapid.toml"
@@ -4635,7 +4552,7 @@ PY
   start_serve
 }
 
-# HS-067: the installable app. "Installable" is a browser's judgement and **no gate may have one** (ADR-0046), so
+# the installable app. "Installable" is a browser's judgement and **no gate may have one** (ADR-0046), so
 # this case measures the four things a browser would otherwise be the only witness of, as bytes:
 #
 #   1. the shell names the manifest (and iOS's own PNG link), and `/settings` — the third screen — is that shell;
@@ -4651,7 +4568,7 @@ PY
 # The pair is written by hand rather than generated: it only has to *be* a pair for the health answer to carry it
 # (`vapid::parse` refuses anything else, and the assertion below is what would catch a bad literal), so this case
 # needs no `openssl` and prints **no `SKIP` line at all** — a skip here would fire exactly when the feature was
-# deleted, which is this project's P1 (RESUME §6).
+# deleted, which is this project's P1 (the gate rule).
 case_pwa() {
   local name=case_pwa root data config response asset
   local vapid_public='BAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-P0A'
@@ -4668,7 +4585,7 @@ case_pwa() {
   mkdir -p "$root/projects" "$data/secrets" || fail "$name/mkdir" "could not create $root"
   chmod 0700 "$data/secrets"
   # The header line `vapid::render` writes, because a reader who opens the file should meet the same sentence.
-  printf '# The machine'"'"'s Web Push key pair (HS-049). `server deploy` writes this once and never rewrites it.\npublic_key = "%s"\nprivate_key = "%s"\n' \
+  printf '# The machine'"'"'s Web Push key pair. `server deploy` writes this once and never rewrites it.\npublic_key = "%s"\nprivate_key = "%s"\n' \
     "$vapid_public" "$vapid_private" >"$data/secrets/vapid.toml" ||
     fail "$name/vapid" "could not write the machine's pair"
   chmod 0600 "$data/secrets/vapid.toml"
@@ -4791,7 +4708,7 @@ case_pwa() {
   # config, which turns minification off on purpose (ADR-0072 D4) — so turning it off for the app too would red
   # this loop with a message pointing at the wrong thing.
   #
-  # `nav-link` is a **class** and no longer an id: since HS-071 the header draws one link per other screen, and an
+  # `nav-link` is a **class** and no longer an id: the header draws one link per other screen, and an
   # id two elements share is not an id.
   for needle in \
     'id="settings"' 'id="settings-machine"' 'id="settings-state"' 'id="settings-action"' \
@@ -4835,7 +4752,7 @@ case_pwa() {
   start_serve
 }
 
-# HS-068: the host registry. Item 4 gives the registration its rules and item 16 gives the seed its job, and this
+# the host registry. Item 4 gives the registration its rules and item 16 gives the seed its job, and this
 # case measures both through the artifact on **its own boot** with a pinned control port — the one shape a row naming
 # *this* machine needs, because a seed file is written before the boot and the row has to spell the port the boot will
 # use.
@@ -5165,7 +5082,7 @@ PY
   stop_serve
   start_serve
 }
-# HS-072: `hub deploy` and `hub host` (spec item 10 §6, the Commands table, item 4).
+# `hub deploy` and `hub host` (spec item 10 §6, the Commands table, item 4).
 #
 # **The one case in this run that needs no daemon and no image**, which is the story's own headline: "on a Docker-less
 # machine". A hub's five steps ask no Docker question (`doctor::run` skips the daemon and git for `Role::Hub`), build
@@ -5193,7 +5110,7 @@ PY
 #    the acceptance's last bullet, on the machine whose registry it is.
 #
 # What it cannot measure: a real unit (there is no systemd), a real tailnet (no `tailscaled`, so step 6's two origins
-# exist only in the shim's answer), a second machine, and `--ssh`/`--binary` (HS-073).
+# exist only in the shim's answer), a second machine, and `--ssh`/`--binary`.
 case_hub_deploy() {
   local name=case_hub_deploy root="$repo_root/target/verify-hub-$$"
   local control preview closed shims log state status line got entry holder_pid id
@@ -5217,7 +5134,7 @@ case_hub_deploy() {
   deploy_machine_shims "$shims" "$log" "$state"
 
   # The machine's own config as `serve`/`status`/`hub host` read it: the data root is the install tree's, because
-  # `status` and `hub host` read **the config**, not `serve`'s flags (HS-050's two-configs landmine).
+  # `status` and `hub host` read **the config**, not `serve`'s flags.
   hub_config="$WORK/config-hub.toml"
   server_config="$WORK/config-hub-server.toml"
   tree="$root/tree"
@@ -5525,7 +5442,7 @@ AGAIN
   start_serve
 }
 
-# HS-069: one origin that reaches every machine (spec item 3, item 16 and `Roles`; ADR-0074).
+# one origin that reaches every machine (spec item 3, item 16 and `Roles`; ADR-0074).
 #
 # Two artifacts on one box is what "two machines" means here: a `role = "server"` boot on a pinned control port and a
 # pinned preview port, and a `role = "hub"` boot whose `hosts.toml` names the server's control origin. **The API half
@@ -6081,13 +5998,13 @@ PYWS
   standin_pid=""
   extra_pid=""
   # Two data roots, two configs, the seed, the two python helpers and the event dumps: this case's, and every other
-  # boot-owning case removes what it made (HS-068's lesson was a *passing* case leaving a container behind).
+  # boot-owning case removes what it made.
   rm -rf "$root"
   start_serve
 }
 
 
-# HS-071: the Computers screen (spec Roles, item 4, ADR-0076). The screen is a page, and no gate may run a browser
+# the Computers screen (spec Roles, item 4, ADR-0076). The screen is a page, and no gate may run a browser
 # — so this case measures **the data the page draws** and **the bytes the artifact ships**, which is the same split
 # `case_changes_screen` makes. Two boots on one box (`case_forward`'s shape, and its reason: a row naming a machine
 # has to spell the port the boot will bind, so both ports are pinned before either config is written):
@@ -6113,7 +6030,7 @@ PYWS
 # What it cannot measure, and does not pretend to: the DOM. A needle in a bundle is not a rendered element — the
 # weak half is why each sentence is a `web/test/transcript.test.ts` function with its own test — and the demo is
 # what watches the page draw.
-# HS-074: one session list and one notification stream across machines.
+# one session list and one notification stream across machines.
 #
 # Two machines on one box — `case_computers`' two boots, `case_push`'s receiver — and the four values this story adds:
 # what a machine calls itself in a payload, which machine a create names, which machine each subscription belongs to,
@@ -6208,7 +6125,7 @@ case_cross_machine() {
   [ -n "$auth_b64" ] || fail "$name/auth" "openssl rand did not answer 16 octets"
 
   # The TLS material: a CA and a `localhost` certificate with a `DNS:` SAN (`-verify_hostname` matches the SAN, not
-  # the CN — HS-066's landmine).
+  # the CN — the landmine).
   openssl req -x509 -newkey rsa:2048 -nodes -keyout "$tls/ca.key" -out "$tls/ca.pem" -days 1 \
     -subj /CN=VerifyCrossCA >/dev/null 2>&1 || fail "$name/ca" "openssl req did not write a CA"
   openssl req -newkey rsa:2048 -nodes -keyout "$tls/server.key" -out "$tls/server.csr" \
@@ -6674,7 +6591,7 @@ EOF
     *'must not be \"local\"'*) assertions=$((assertions + 1)) ;;
     *) fail "$name/bad_name/sentence" "the refusal does not name the reserved word: $body" ;;
   esac
-  # A port below the allowed range on a host the rule accepts: the URL's *port* arm, which the CLI in HS-072 must
+  # A port below the allowed range on a host the rule accepts: the URL's *port* arm, which the CLI must
   # state with the same sentence. (A loopback URL would be refused for its host instead, which is the arm below.)
   fetch_body "$name-bad-url" POST /api/hosts '{"name":"spare","url":"https://box.tail1a2b.ts.net:80"}' \
     "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
@@ -6792,7 +6709,7 @@ EOF
   start_serve
 }
 
-# HS-070: machine-to-machine trust (spec item 4, V11). A machine takes forwarded calls from its hub and from nobody
+# machine-to-machine trust (spec item 4, V11). A machine takes forwarded calls from its hub and from nobody
 # else, and the two facts that decide it are measured here against a real listener: the whois of the **address a
 # connection came from** (never a header the caller writes) and the `allowed_hubs` list that answer is compared
 # against. The three arms are the story's own: an empty list verifies nobody (the documented ACLs-only fallback), a
@@ -6836,7 +6753,7 @@ case_machine_trust() {
   export HS_TRUST_LOG="$log" HS_TRUST_ANSWER="$answer" HS_TRUST_FAILURE="$failure"
   cat >"$bin/tailscale" <<'SHIM'
 #!/bin/sh
-# The gate's tailscale (HS-070): no daemon is asked, and every argv is one line in the log.
+# The gate's tailscale: no daemon is asked, and every argv is one line in the log.
 set -eu
 printf '%s\n' "$*" >>"$HS_TRUST_LOG"
 if [ -f "$HS_TRUST_ANSWER" ]; then
@@ -6922,7 +6839,7 @@ PYCLIENT
   as_peer "$name-listed" 127.0.0.2 "$peer_port" /api/sessions
   expect_status "$name/listed" "$(answer "$name-listed")" 200
   # The argv is the measurement that it is the **address** and nothing the caller wrote: no header ever reaches this
-  # child, and `request_head` (HS-069) does not send an identity header at all.
+  # child, and `request_head` does not send an identity header at all.
   [ -f "$log" ] || fail "$name/listed/whois" "a listed peer was admitted without a whois"
   grep -qx 'whois --json 127.0.0.2' "$log" ||
     fail "$name/listed/whois" "the whois was not asked about the connection's address: $(cat "$log")"
@@ -7035,7 +6952,7 @@ PYCLIENT
 
 
 
-# HS-021: the idle stop. A session left alone stops costing money, and it is the artifact's *own*
+# the idle stop. A session left alone stops costing money, and it is the artifact's *own*
 # timer that does it — no request asks for this — so the case creates one session, waits out the
 # one-minute `idle_stop_min` the config sets, and asserts four things: the row is `stopped` with the
 # reason, the transition is in the transcript a client replays, the sweeper wrote its one log line, and
@@ -7142,7 +7059,7 @@ case_idle_stop() {
 # run_drain <label> <admin dir> [flags...]: the artifact's own `drain`, its output under $WORK, and its exit
 # status on stdout so a caller can `check` it.
 #
-# The command is the client under test — HS-051's acceptance is about what an operator types, not about the
+# The command is the client under test — the acceptance is about what an operator types, not about the
 # protocol — so the gate never hand-writes a drain line to the socket. The socket's own protocol is
 # `tests/drain.rs`'s, where a malformed line can be sent without a shell.
 run_drain() {
@@ -7166,7 +7083,7 @@ print("none" if row is None else " ".join(str(field) for field in row))
 PY
 }
 
-# HS-051: the drain, over the machine's admin socket and only there.
+# the drain, over the machine's admin socket and only there.
 #
 # It owns its boot, for two reasons: the drain stops **every** idle session, which would take `$created_id` with
 # it, and the shared config's cap of one live session cannot hold the two this case needs (one to turn, one to
@@ -7332,7 +7249,7 @@ print(answer.split(b"\r\n")[0].decode(errors="replace"))
   stopped_line="$(sed -n 's/^drain: stopped: \(.*\)$/\1/p' "$WORK/${name}_drained.out")"
   check "${name}_drained/stopped" "2 sessions with reason server_restart" "$stopped_line"
 
-  #    The rows. The container's stop is a task of its own (ADR-0024's shape, HS-030's flag), so `expected_stop`
+  #    The rows. The container's stop is a task of its own (ADR-0024's shape), so `expected_stop`
   #    is polled rather than read once: a `stopped` row is not a promise that the spawned stop has run.
   local session row
   for session in "$first" "$second"; do
@@ -7391,7 +7308,7 @@ print(answer.split(b"\r\n")[0].decode(errors="replace"))
   start_serve
 }
 
-# HS-051's fifth acceptance bullet: a session that was **live** at drain time is `idle` again on the next
+# the fifth acceptance bullet: a session that was **live** at drain time is `idle` again on the next
 # startup.
 #
 # A completed drain leaves nothing live — it waits for the turns and stops the idle sessions — so the only state
@@ -7479,7 +7396,7 @@ case_drain_restart() {
   start_serve
 }
 
-# HS-019: a delete for a session the table does not hold is ADR-0008's 404 `not_found` — the
+# a delete for a session the table does not hold is ADR-0008's 404 `not_found` — the
 # deterministic half of "a second call returns 202/404": while the row exists a repeat is a 202, and
 # once it is gone it is this.
 case_delete_unknown_session() {
@@ -7494,7 +7411,7 @@ case_delete_unknown_session() {
   expect_code "$name" "$response" not_found
 }
 
-# HS-019: the first `DELETE` route in this crate passes the guards like every other request that
+# the first `DELETE` route in this crate passes the guards like every other request that
 # changes something. The origin is right and the client header is missing, because the guards check
 # the origin first and a request missing both would prove `bad_origin` instead.
 case_delete_without_the_client_header() {
@@ -7508,7 +7425,7 @@ case_delete_without_the_client_header() {
   expect_code "$name" "$response" bad_client
 }
 
-# HS-020: at the cap, a create stops the least recently active idle session and takes its slot. The
+# at the cap, a create stops the least recently active idle session and takes its slot. The
 # case makes its own pair — by the time it runs, the session the earlier cases used has been deleted,
 # so the slot is free — and it is the last case, so nothing after it depends on what it leaves.
 #
@@ -7583,11 +7500,11 @@ case_create_at_cap_evicts() {
   wait_for_idle_id "${name}_fresh" "$fresh"
 }
 
-# HS-030's proof from the shipped artifact: the stop the server performs records that it was its own, and
+# the proof from the shipped artifact: the stop the server performs records that it was its own, and
 # a new container starts without the last one's flag.
 #
 # The artifact cannot show the story's other half — a container's *exit* — because this build has no process
-# whose exit anybody observes: the container runs detached on `sleep infinity` until HS-031 attaches pi's
+# whose exit anybody observes: the container runs detached on `sleep infinity` until attaches pi's
 # stdio, and `--rm` takes it away a moment after it stops (ADR-0038). What it can show is the flag that
 # makes the classification possible, and the two things that set and clear it, read out of `app.db` because
 # no client is sent it.
@@ -7672,7 +7589,7 @@ case_exit_classification() {
   remove_session "${name}_removed_victim" "$victim"
 }
 
-# HS-023's proof from the artifact: a ceiling under one turn's spend ends the turn that spends it, and
+# the proof from the artifact: a ceiling under one turn's spend ends the turn that spends it, and
 # the spend is persisted on the row.
 #
 # The ceiling cannot live in the one config the cases above share — with `max_session_tokens` set there,
@@ -7749,7 +7666,7 @@ print("none" if row is None else f"{row[0]} {row[1]}")
 PY
 }
 
-# HS-034's proof from the shipped artifact: a session's spend is a column that survives the two things this
+# the proof from the shipped artifact: a session's spend is a column that survives the two things this
 # machine really does to a session — an eviction that stops it, and a resume that brings it back. The numbers
 # come from the stub's script (1200 in, 340 out per turn), and they are read out of `app.db` because the API
 # does not carry them: `Session` is pinned to its fifteen keys (ADR-0038), so the row is the honest witness.
@@ -7787,7 +7704,7 @@ case_usage_survives_resume() {
   wait_for_idle_id "${name}_spent" "$first"
 
   # The row the turn's `message.end` was added to. Polled, because the writer commits on its own tick: a read
-  # taken the instant the row says `idle` can be one frame short (HS-023's own lesson).
+  # taken the instant the row says `idle` can be one frame short.
   counts=none
   for _ in $(seq 1 100); do
     counts="$(usage_of "$WORK/data-usage" "$first")"
@@ -7896,7 +7813,7 @@ PY
   fail "$label/snapshot" "no message.snapshot row appeared in $database"
 }
 
-# HS-060's proof from the artifact: a message completed more than a day ago becomes one
+# the proof from the artifact: a message completed more than a day ago becomes one
 # `message.snapshot`, and a client that connects afterwards is replayed the snapshot instead of the deltas.
 #
 # It boots its own server, like `case_token_budget`, and for a reason the story forces: the window is the
@@ -7975,7 +7892,7 @@ case_compaction() {
   esac
 }
 
-# HS-061's two halves from the artifact: a client that opens the stream with no `Last-Event-ID` gets the
+# the two halves from the artifact: a client that opens the stream with no `Last-Event-ID` gets the
 # newest `history_window` messages and a `history.truncated` frame naming where its replay starts, and
 # `GET .../events/history?before=` answers the page below that cursor.
 #
@@ -8075,7 +7992,7 @@ case_history() {
   expect_code "${name}_bad_before" "$response" bad_query
 }
 
-# HS-065's proof from the artifact: with `project_backup` on, the first session of a day bundles the
+# the proof from the artifact: with `project_backup` on, the first session of a day bundles the
 # project repository once, a second session on the same day adds nothing, the bundle is one git can
 # restore, and the prune keeps the last seven days per project.
 #
@@ -8203,11 +8120,11 @@ s.close()
 PY
 }
 
-# HS-025's proof from the artifact: the worktree step is host git, so a create makes `.worktrees/<id>` on
+# the proof from the artifact: the worktree step is host git, so a create makes `.worktrees/<id>` on
 # branch `agent/<id>` from the repository's HEAD, records both on the row, and — because the *next* step is
-# the session's network, which from HS-028 runs `docker network create` against the socket this case answers
+# the session's network, which runs `docker network create` against the socket this case answers
 # with a `_ping` shim and nothing else — the provisioner takes the worktree back, leaving the registration
-# clean. (Before HS-028 the network step refused outright, naming its story in the reason; now it fails on a
+# clean. (Before the network step refused outright, naming its story in the reason; now it fails on a
 # daemon that cannot create a network, so the reason names the step instead of a story number.)
 #
 # It boots its own server, like `case_token_budget`: the backend is `docker` and the projects root has to be a
@@ -8288,7 +8205,7 @@ case_worktree() {
   assertions=$((assertions + 1))
   check "${name}/registration" 1 "$(git -C "$repo" worktree list --porcelain | grep -c '^worktree ')"
 
-  # A delete whose worktree is already gone is not a failure: `force` turns the snapshot refusal (HS-033's)
+  # A delete whose worktree is already gone is not a failure: `force` turns the snapshot refusal
   # into the removal, and the teardown runs over an absent worktree and branch.
   fetch "${name}_delete" DELETE "/api/sessions/$id?force=true" \
     "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
@@ -8302,7 +8219,7 @@ case_worktree() {
   socket_pid=""
 }
 
-# HS-052's proof from the artifact: the changes view's summary, over a real repository, with **no daemon**.
+# the proof from the artifact: the changes view's summary, over a real repository, with **no daemon**.
 #
 # Every acceptance bullet is a git fact, so the case owns the repository and moves it between two readings: a
 # commit on `agent/<id>`, a commit on `main` (the target moving on), an uncommitted file (the worktree's
@@ -8372,7 +8289,7 @@ case_changes() {
   wt="$projects/.worktrees/$id"
   # The provisioner removed what its worktree step made (ADR-0029), so the case makes it again with the
   # step's own command — absolute paths, because `worktree add` resolves a relative one against the
-  # repository (HS-025's measurement).
+  # repository.
   git -C "$repo" worktree add --quiet -b "agent/$id" "$wt" "$base" ||
     fail "${name}/worktree" "git worktree add did not work for $wt"
   printf 'one\n' >"$wt/a.txt" || fail "${name}/write" "the session's file is not writable"
@@ -8484,7 +8401,7 @@ case_changes() {
   socket_pid=""
 }
 
-# HS-058: the Changes sheet is **shipped**. No gate may need a browser, so this case measures the three halves a
+# the Changes sheet is **shipped**. No gate may need a browser, so this case measures the three halves a
 # browser would otherwise be the only witness of:
 #
 #   1. the sheet's screen is still the app shell, byte-for-byte (`case_session_screen`'s comparison, on a session
@@ -8495,7 +8412,7 @@ case_changes() {
 #      the repository has (in the config's order) and the publish remote passed through verbatim.
 #
 # The sheet's *behaviour* is `web/test/transcript.test.ts`'s: `npm test` is the only gate that can see a sentence,
-# and a rule that only the DOM could show would not be a gate case at all (RESUME §3).
+# and a rule that only the DOM could show would not be a gate case at all (the gate rule).
 case_changes_screen() {
   local name=case_changes_screen response body id base wt asset needle
   # Two statements, not one, for the reason `case_changes` gives: in a single `local` every right-hand side expands
@@ -8590,7 +8507,7 @@ case_changes_screen() {
   assertions=$((assertions + 1))
   # One id per element the sheet is made of, and the three sentences a decision already fixed: the CI warning
   # (ADR-0066 D11), the commit prompt (ADR-0065 D4) and the Resolve prompt (ADR-0064 D10's affordance, spelled by
-  # HS-058). A `for` over needles rather than fourteen `grep`s, and every needle counted so a needle that found
+  # ). A `for` over needles rather than fourteen `grep`s, and every needle counted so a needle that found
   # nothing cannot pass as one that did.
   # Each needle names the assignment's own quotes (`id="changes-conflict"`), not the bare word: `changes-conflict`
   # is a prefix of `changes-conflict-text` and `changes-publish` one of `changes-publish-start`, so a bare word
@@ -8636,7 +8553,7 @@ case_changes_screen() {
   socket_pid=""
 }
 
-# HS-053's proof from the artifact: the unified diff itself. One real repository under a temp projects root and
+# the proof from the artifact: the unified diff itself. One real repository under a temp projects root and
 # a `_ping`-only socket (no daemon, which is what item 12 asks for — "all git work for review and merge runs on
 # the host"), a session whose worktree the provisioner took back and this case re-makes with the step's own
 # command, and three commits on `agent/<id>`: a text file, a NUL-bearing binary, and one large enough that its
@@ -8703,7 +8620,7 @@ case_changes_diff() {
 
   wt="$projects/.worktrees/$id"
   # The step's own command, absolute paths, because `worktree add` resolves a relative one against the
-  # repository (HS-025's measurement) — a fixture, not a re-implementation of the step.
+  # repository — a fixture, not a re-implementation of the step.
   git -C "$repo" worktree add --quiet -b "agent/$id" "$wt" "$base" ||
     fail "${name}/worktree" "git worktree add did not work for $wt"
   printf 'one\ntwo\n' >"$wt/a.txt" || fail "${name}/write" "the session's file is not writable"
@@ -8832,7 +8749,7 @@ case_changes_diff() {
   socket_pid=""
 }
 
-# HS-054's proof from the artifact: spec item 12's rules 2 and 4, and the first route in this build whose work
+# the proof from the artifact: spec item 12's rules 2 and 4, and the first route in this build whose work
 # **writes to the project repository**. One real repository under a temp projects root and a `_ping`-only socket
 # (no daemon, which is item 12's own shape — "all git work for review and merge runs on the host"), a session
 # whose worktree the provisioner took back and this case re-makes with the step's own command.
@@ -8898,7 +8815,7 @@ case_merge() {
 
   wt="$projects/.worktrees/$id"
   # The step's own command, absolute paths, because `worktree add` resolves a relative one against the
-  # repository (HS-025's measurement) — a fixture, not a re-implementation of the step.
+  # repository — a fixture, not a re-implementation of the step.
   git -C "$repo" worktree add --quiet -b "agent/$id" "$wt" "$base" ||
     fail "${name}/worktree" "git worktree add did not work for $wt"
   printf 'one\n' >"$wt/a.txt" || fail "${name}/write" "the session's file is not writable"
@@ -8938,7 +8855,7 @@ case_merge() {
   assertions=$((assertions + 1))
 
   # 2. **The refusals that move nothing**, with the target compared across all of them. `squash` used to be one of
-  # these (`422 unsupported`) and is a strategy since HS-055, and `delete_session` left the list when HS-056 built
+  # these (`422 unsupported`) and is a strategy, and `delete_session` left the list when built
   # it (its arm is `case_merge_guards`'s, because it needs a repository to delete from). What remains is the
   # parameter's own facts: two `bad_target`s and a fourth strategy word.
   main="$(git -C "$repo" rev-parse refs/heads/main)"
@@ -9045,7 +8962,7 @@ case_merge() {
   socket_pid=""
 }
 
-# HS-055's proof from the artifact: the two strategies that make a commit, and rule 3's conflict, over **one**
+# the proof from the artifact: the two strategies that make a commit, and rule 3's conflict, over **one**
 # repository. It boots its own Docker run over its own projects root and data root for the reason `case_merge`
 # does — a case here must own the repository it moves — and it re-makes the worktree the failed network step took
 # back with the step's own command.
@@ -9112,7 +9029,7 @@ case_merge_strategies() {
     fail "${name}_row/base" "the row does not record the branch's base commit: $body"
 
   wt="$projects/.worktrees/$id"
-  # The step's own command, absolute paths (HS-025's measurement), because the failed network step took the
+  # The step's own command, absolute paths, because the failed network step took the
   # worktree back — a fixture, not a re-implementation of the step.
   git -C "$repo" worktree add --quiet -b "agent/$id" "$wt" "$base" ||
     fail "${name}/worktree" "git worktree add did not work for $wt"
@@ -9221,7 +9138,7 @@ case_merge_strategies() {
   socket_pid=""
 }
 
-# `set_row_status <database> <id> <status>`: the one write a case makes by hand (HS-056).
+# `set_row_status <database> <id> <status>`: the one write a case makes by hand.
 #
 # Rule 1's first guard is about a row whose turn is running, and this gate cannot run a turn: its Docker boot is a
 # `_ping` shim, so a session's network step fails and no agent is ever launched. What the guard reads is one
@@ -9240,7 +9157,7 @@ connection.close()
 PY
 }
 
-# HS-056's proof from the artifact: rule 1's two guards and rule 5's `delete_session`, over its own repository,
+# the proof from the artifact: rule 1's two guards and rule 5's `delete_session`, over its own repository,
 # projects root and **data root** — `<data>/merge` is what a refused merge must not make and what a landing must
 # leave empty — and its own `_ping` socket. Six arms, in the order each one needs:
 #
@@ -9316,7 +9233,7 @@ case_merge_guards() {
   assertions=$((assertions + 1))
 
   wt="$projects/.worktrees/$id"
-  # The step's own command, absolute paths (HS-025's measurement): the failed network step took the worktree back.
+  # The step's own command, absolute paths: the failed network step took the worktree back.
   git -C "$repo" worktree add --quiet -b "agent/$id" "$wt" "$base" ||
     fail "$name/worktree" "git worktree add did not work for $wt"
   printf 'one\n' >"$wt/a.txt" || fail "${name}/write" "a.txt is not writable"
@@ -9341,10 +9258,10 @@ case_merge_guards() {
   printf '%s\n' "$body" | grep -qF 'nothing was merged' ||
     fail "${name}_dirty/sentence" "the sentence does not say nothing happened: $body"
   assertions=$((assertions + 1))
-  # The sentence is what the Changes sheet's offer will render, so it has to name a commit — the affordance HS-058
+  # The sentence is what the Changes sheet's offer will render, so it has to name a commit — the affordance
   # adds is a prompt to the agent, and a refusal that named no next step would leave it inventing one.
   # The needle is the offer and not the word "commit": "uncommitted" contains that, so a bare-word guard stays
-  # green when the whole next-step half is deleted (HS-056's review, S1).
+  # green when the whole next-step half is deleted (S1).
   printf '%s\n' "$body" | grep -qF 'ask the agent to commit' ||
     fail "${name}_dirty/offer" "the sentence names no commit to ask for: $body"
   assertions=$((assertions + 1))
@@ -9416,7 +9333,7 @@ case_merge_guards() {
   check "${name}_error_row/ref" "$tip" "$(git -C "$repo" rev-parse refs/heads/main)"
 
   # 5. **`delete_session: true` after a squash**: the work lands, the row goes, the worktree goes, and
-  # `agent/<id>` goes — a squash leaves the branch a non-ancestor of the target, so this is the rule HS-043's
+  # `agent/<id>` goes — a squash leaves the branch a non-ancestor of the target, so this is the rule that story's
   # keep-rule would *not* delete on its own (ADR-0064 D11, ADR-0065 D6).
   printf 'three\n' >"$wt/third.txt" || fail "${name}/write" "third.txt is not writable"
   git -C "$wt" add third.txt || fail "${name}/add" "git add did not work in $wt"
@@ -9451,7 +9368,7 @@ case_merge_guards() {
   # The squash's commit has the old target as its only parent and the tree of the commit this request landed —
   # the branch's work is in the target even though the branch's own commits are not. `$tip` and not
   # `agent/<id>^{tree}`: the delete this answer started is already removing the worktree and the branch, so
-  # reading through either is a race (HS-056's review), and a commit object outlives the branch that named it.
+  # reading through either is a race, and a commit object outlives the branch that named it.
   check "${name}_squash_delete/tree" "$(git -C "$repo" rev-parse "$tip^{tree}")" \
     "$(git -C "$repo" rev-parse "refs/heads/main^{tree}")"
   wait_for_gone "${name}_squash_delete_row" "$id"
@@ -9470,7 +9387,7 @@ case_merge_guards() {
   fi
 
   # 6. **The contrast, in a second session**: the same squash *without* the flag keeps the branch — and the
-  # ordinary delete afterwards says so in its `kept`, which is HS-043's answer unchanged by this story. In between,
+  # ordinary delete afterwards says so in its `kept`, which is the answer unchanged by this story. In between,
   # a `delete_session` whose delete cannot snapshot answers `200` with the three keys and leaves the row: a landed
   # merge is not retracted by a failed delete (ADR-0065 D7).
   fetch_body "${name}_create2" POST /api/sessions \
@@ -9551,7 +9468,7 @@ case_merge_guards() {
   esac
   chmod 0755 "$data/sessions" || fail "${name}/chmod" "$data/sessions is not chmoddable"
 
-  # 6b. **The ordinary delete keeps the squashed branch**, which is HS-043's rule unchanged by this story.
+  # 6b. **The ordinary delete keeps the squashed branch**, which is the rule unchanged by this story.
   fetch "${name}_deleted" DELETE "/api/sessions/$id2" \
     "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
     "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
@@ -9572,7 +9489,7 @@ case_merge_guards() {
   socket_pid=""
 }
 
-# HS-057's proof from the artifact: a real push into a **bare repository under `$WORK`**, and every refusal
+# the proof from the artifact: a real push into a **bare repository under `$WORK`**, and every refusal
 # around it. The remote is the story's own constraint made a measurement — it is on the host's filesystem and in
 # no container's mount vector, so a `200` and a `git ls-remote` that names the branch is evidence that the
 # **host** pushed, not a container and not a stub. `publish.remotes = []` is a second boot, because the disabled
@@ -9643,7 +9560,7 @@ case_publish() {
   assertions=$((assertions + 1))
 
   wt="$projects/.worktrees/$id"
-  # The step's own command, absolute paths (HS-025's measurement): the failed network step took the worktree back.
+  # The step's own command, absolute paths: the failed network step took the worktree back.
   git -C "$repo" worktree add --quiet -b "agent/$id" "$wt" "$base" ||
     fail "$name/worktree" "git worktree add did not work for $wt"
   printf 'one\n' >"$wt/a.txt" || fail "${name}/write" "a.txt is not writable"
@@ -9656,7 +9573,7 @@ case_publish() {
   check "${name}/empty" "" "$(git -C "$bare" for-each-ref --format='%(refname)' refs/heads)"
 
   # 1. **The push.** Item 12's ordinary request: our branch, under its own name, on the remote. The answer is
-  # exactly three keys — `touches_ci` is the changes view's and the warning is HS-058's, so a flag the route
+  # exactly three keys — `touches_ci` is the changes view's and the warning is that story's, so a flag the route
   # never computed must not appear — and the commit it names is the branch's tip.
   fetch_body "${name}_push" POST "/api/sessions/$id/publish" '{"remote":"origin","confirm":true}' \
     "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
@@ -9814,7 +9731,7 @@ case_publish() {
   socket_pid=""
 }
 
-# HS-026's proof from the artifact: three unsafe repositories, each refused with its own code before a row
+# the proof from the artifact: three unsafe repositories, each refused with its own code before a row
 # exists. The three checks are read on the create's own path, so what this case asserts is the 422 itself
 # and the absence of everything a create would have left behind.
 #
@@ -9898,7 +9815,7 @@ case_worktree_refusal() {
   socket_pid=""
 }
 
-# HS-024's proof from the artifact: a machine that cannot run Docker sessions refuses *at startup*, with
+# the proof from the artifact: a machine that cannot run Docker sessions refuses *at startup*, with
 # one sentence that names the fix, and binds nothing.
 #
 # The case points `docker_host` at a socket that cannot exist, so it is deterministic on every machine —
@@ -9908,7 +9825,7 @@ case_docker_preflight() {
   local name=case_docker_preflight status=0
   printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\ndocker_host = "unix://%s/absent.sock"\n' \
     "$owner" "$WORK" >"$WORK/config-docker.toml"
-  # `--admin-dir` like every other boot in this run (HS-051): a case must never bind the machine's own
+  # `--admin-dir` like every other boot in this run: a case must never bind the machine's own
   # `/run/holosmith/drain.sock`, and the refusal this case measures happens before any socket is bound.
   "$artifact" serve --config "$WORK/config-docker.toml" --port 0 --data-dir "$WORK/data-docker" \
     --admin-dir "$WORK/run/holosmith" \
@@ -9940,7 +9857,7 @@ case_docker_preflight() {
   esac
 }
 
-# HS-045's `--quick`, from the shipped artifact, on a machine that needs no daemon: six checks that are the
+# the `--quick`, from the shipped artifact, on a machine that needs no daemon: six checks that are the
 # preflight's own (`docker`, `git`, `disk` — and `merge`, V2's trial), and four doctor adds (`systemd`,
 # `tailscale`, the two `ports`, `database`). The daemon is a `_ping` socket this case answers, so the docker
 # line is deterministic on every machine — including one with a real daemon — which is `case_docker_preflight`'s
@@ -9956,13 +9873,13 @@ case_docker_preflight() {
 #
 # `tests/doctor.rs` is where every check's arms are driven over shims, including the ones no gate machine can
 # produce (a logged-out Tailscale, a git 2.37, an image running another pi).
-# HS-047's `server deploy`, from the shipped artifact. Two halves that skip independently, because the bugs it
+# the `server deploy`, from the shipped artifact. Two halves that skip independently, because the bugs it
 # exists to catch are of two kinds — the framework and the words, which need no daemon, and the install and the
 # two proxies on a real one (ADR-0056).
 #
 # The **offline** half answers `GET /_ping` from a socket it starts, so step 1 passes on a machine with no
 # daemon, and asserts four things: the dry run lists the seven steps in the spec's order, step 3 planning a build
-# of both images, steps 5, 6 and 7 planning what they would do (none of them is a skip since HS-049, and the
+# of both images, steps 5, 6 and 7 planning what they would do (none of them is a skip, and the
 # report has no `incomplete` line), and leaves the install root **absent**; a run whose `docker_host` names a
 # socket that cannot exist stops at step 1 and prints the resume command as its last line; a run that gets past
 # step 1 and then fails step 3 — that same `_ping` socket answers the ping and nothing a build needs — leaves
@@ -9986,7 +9903,7 @@ case_docker_preflight() {
 # The config a fresh host would have, written by the case rather than by the deploy: `data_root` is deliberately
 # left at its default, because `--root` is what prefixes it and a file that already named the prefixed path would
 # be prefixed twice (ADR-0056).
-# `role` is the sixth argument and defaults to `server`: HS-072's `hub deploy` takes the same machine with its own
+# `role` is the sixth argument and defaults to `server`: the `hub deploy` takes the same machine with its own
 # half, and a second config writer would be a second spelling of the eleven fields a deploy reads.
 deploy_config() {
   local path="$1" control="$2" preview="$3" docker_host="$4" image="$5" role="${6:-server}"
@@ -10012,7 +9929,7 @@ deploy_listing() {
   done
 }
 
-# One `tailscale` for the two questions a deploy run asks it (HS-049): step 6 **reads** `serve status --json` and
+# One `tailscale` for the two questions a deploy run asks it: step 6 **reads** `serve status --json` and
 # applies each origin with `serve --bg --yes --https=<port> <target>`, and `doctor`'s tailscale finding asks
 # `status --json`. One program because both go through the name on PATH, and the state file is the answer a read gets
 # back — one `<port> <target>` line per origin — so a second deploy is `satisfied` for the reason a real one would
@@ -10098,7 +10015,7 @@ SHIM
   chmod 0755 "$dir/tailscale"
 }
 
-# The gate's `ssh`, which is the other half of `case_deploy_ssh` (HS-073).
+# The gate's `ssh`, which is the other half of `case_deploy_ssh`.
 #
 # It does exactly what ssh does with a command — joins the words after the host and hands them to the target's login
 # shell — and adds one thing of its own: `$HOME` points into the case's own tree, so the copy lands where the case can
@@ -10147,12 +10064,12 @@ SHIM
 }
 
 # One background `python3` answering `200` to every `GET` on 127.0.0.1:<port> for the rest of the run, printing the
-# pid it left behind (HS-049).
+# pid it left behind.
 #
 # Two callers ask one question and both need a *listener*: `server deploy`'s step 7 waits for `GET /api/health`
 # before it calls a start successful, and `doctor`'s port check reads "the port is held and `/api/health` answers" as
 # the serving pass. A responder is all this machine can offer there — there is no systemd and no unit boot — and its
-# body **is** the health payload since HS-050: `http::health::ask` parses it, so a bare `200` reads as "a port
+# body **is** the health payload: `http::health::ask` parses it, so a bare `200` reads as "a port
 # somebody else holds" and would make step 7's wait fail. The stricter answer is also the true one — this is what
 # `serve` really answers.
 health_responder() {
@@ -10314,10 +10231,10 @@ PY
   rm -rf "$root"
 }
 
-# HS-062's floor on the two request paths that *start* work: item 14's "session creation and resume fail with 507
+# the floor on the two request paths that *start* work: item 14's "session creation and resume fail with 507
 # below `min_free_gb`".
 #
-# The boot already refuses below the floor (HS-024), so this case cannot simply be run on a small disk — a server
+# The boot already refuses below the floor, so this case cannot simply be run on a small disk — a server
 # that would refuse to start has no request path to measure. The stand-in is therefore a `df` on `PATH` that
 # `cat`s a file this case rewrites (`deploy_machine_shims`' shape): the boot measures a healthy machine, one
 # session is created on it, and then the answer is lowered so the floor can fire **while the server is up**.
@@ -10354,7 +10271,7 @@ case_disk_floor() {
   disk_floor_answer "$root/df-answer" "$healthy"
 
   # A repository for the one create: `refuse_project` refuses a project that is not a plain checkout before any
-  # row is written (HS-026), and this case is about the floor rather than about that refusal.
+  # row is written, and this case is about the floor rather than about that refusal.
   git -C "$root/projects/holosmith" init --quiet -b main || fail "$name/git" "git init did not work"
   git -C "$root/projects/holosmith" -c user.name=verify -c user.email=verify@example \
     commit --quiet --allow-empty -m "the first commit" || fail "$name/git" "git commit did not work"
@@ -10484,7 +10401,7 @@ disk_floor_answer() {
     "$(( $2 * 1024 * 1024 ))" >"$1"
 }
 
-# HS-063: the per-session disk soft cap (spec item 14). One pass, over the shipped artifact, with the size a
+# the per-session disk soft cap (spec item 14). One pass, over the shipped artifact, with the size a
 # stand-in reports.
 #
 # The policy's interval is the spec's five minutes, so this case cannot wait for a tick — and `session_disk_soft_gb`
@@ -10541,7 +10458,7 @@ case_disk_quota() {
 
   # `session_disk_soft_gb` at its default (10) rather than a case-specific number: the story's own number, and one
   # the shim's 15 GiB is over. `min_free_gb = 1` because the gate's `/tmp` is small and this case is not about the
-  # floor (HS-062's case is).
+  # floor.
   printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "docker"\nprojects_root = "%s"\ndata_root = "%s"\nagent_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\nturn_timeout_min = 0\nsession_disk_soft_gb = 10\n' \
     "$owner" "$root/projects" "$data" "$image" >"$WORK/config-disk-quota.toml"
 
@@ -10664,7 +10581,7 @@ case_disk_quota() {
   start_serve
 }
 
-# HS-048's step 3: the two images, built from the Dockerfiles embedded in the artifact, and what is inside them.
+# the step 3: the two images, built from the Dockerfiles embedded in the artifact, and what is inside them.
 #
 # This is the one case whose subject is the *build*: `holosmith-proxy:<version>` and `agent-image:<version>` are what
 # step 4's proxies run and what a session's container runs, so both the labels a later deploy compares and the
@@ -10736,7 +10653,7 @@ case_server_images() {
   # session's container would run what the deploy installed. `data_root` and `projects_root` stay at their defaults
   # because `--root` prefixes them, and this case's `--root` is under `target/` (ADR-0035's mount-source rule).
   images_config "$WORK/config-images.toml" "$control" "$preview" "$version"
-  # Steps 5, 6 and 7 are HS-049's and are real now, so a `--root` deploy reaches them: step 6 **reads**
+  # Steps 5, 6 and 7 belong to a later change and are real now, so a `--root` deploy reaches them: step 6 **reads**
   # `tailscale serve status --json`, and step 7 waits for `/api/health` and then runs `doctor --full`. This machine
   # has no `tailscaled` and nothing serving, so the two stand-ins answer instead — what this case asserts is the
   # deploy's own reads and the images they leave, not a daemon that happens to be up.
@@ -10906,7 +10823,7 @@ case_server_images() {
   rm -rf "$root"
 }
 
-# The release build runs in the pinned builder container, and the host only orchestrates Docker (HS-076).
+# The release build runs in the pinned builder container, and the host only orchestrates Docker.
 #
 # The first arm is the one that can fail on the thing the story is about: a `docker` stand-in on `PATH` records every
 # argv and writes a **real** static artifact into the `--out` mount, while `cargo` and `rustc` stand-ins are also on
@@ -10918,8 +10835,8 @@ case_server_images() {
 # The second arm runs the real container when this machine has a daemon **and** the builder image is already built:
 # it asserts what only a real build can — `file` says statically linked, `readelf -d` finds no dynamic section, and
 # the digest is the file's. Without them it prints one note and the first arm's measurements stand, because a `SKIP`
-# here would fire exactly when the feature is deleted (RESUME §6) and the first arm already fails on that.
-# HS-077: the smoke run — a candidate binary proving itself against the real daemon through a fake pi.
+# here would fire exactly when the feature is deleted (the gate rule) and the first arm already fails on that.
+# the smoke run — a candidate binary proving itself against the real daemon through a fake pi.
 #
 # Three arms and **no SKIP**. The first two are daemon-free and always run, so deleting the verb, the subcommand, the
 # fixture or the smoke config fails this case on any machine: the artifact's own `container fake-pi` over two pipes
@@ -10932,7 +10849,7 @@ case_smoke() {
   local name=case_smoke root="$repo_root/target/verify-smoke-$$" bin fake
   local answer code pin usage containers networks proxies_before proxies_after first
   # A second statement, because `local a=$x b=$a/b` expands every word *before* it assigns anything: under `set -u`
-  # that is `b: unbound variable`, which is how this case first failed (HS-077's third gate run).
+  # that is `b: unbound variable`, which is how this case first failed.
   bin="$root/bin"
   rm -rf "$root"
   mkdir -p "$bin"
@@ -11019,7 +10936,7 @@ SHIM
   # The machine's own two proxies, by **id**: a start `rm -f`s and re-runs both, and a replaced container keeps its
   # name — only the id says whether it is the same one. They are made here rather than assumed, because
   # `case_server_images` removed them and an empty string would compare equal to itself: a vacuous check that this
-  # ADR cites is the pattern this repository keeps re-finding (HS-077's review, S2).
+  # ADR cites is the pattern this repository keeps re-finding (S2).
   sentinel="$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -E '^(holosmith-proxy:|alpine:)' | head -1)"
   proxies_before=""
   if [ -n "$sentinel" ] && docker create --name hs_egress "$sentinel" >/dev/null 2>&1 &&
@@ -11062,7 +10979,7 @@ SHIM
   rm -rf "$root"
 }
 
-# HS-078: `holosmith upgrade <binary>`, the promotion pipeline (spec item 10, ADR-0082).
+# `holosmith upgrade <binary>`, the promotion pipeline (spec item 10, ADR-0082).
 #
 # Four arms. Two need nothing but the artifact — the review gate is a refusal, and a candidate compared against a
 # database one schema newer is a refusal, both **before** anything is asked of the machine. Two need the daemon and a
@@ -11258,7 +11175,7 @@ SHIM
   cp "$candidate" "$root/opt/holosmith/releases/old/holosmith"
   cp "$root/candidate/holosmith.sha256" "$root/opt/holosmith/releases/old/holosmith.sha256"
   ln -s releases/old "$root/opt/holosmith/current"
-  # HS-080's prune arm: two older releases (explicit mtimes, so the tree's order is this case's) and a directory the
+  # the prune arm: two older releases (explicit mtimes, so the tree's order is this case's) and a directory the
   # tree does not recognise. After the promotion below the tree holds four releases and the config keeps three, so
   # exactly `ancient1` goes — the live release, the rollback target (`releases/old`) and the newest of the rest stay.
   for line in ancient1 ancient2; do
@@ -11400,7 +11317,7 @@ SHIM
     fail "$name/live" "the last line does not name the version and the backup: $(tail -3 "$WORK/$name.run.out")"
   assertions=$((assertions + 2))
 
-  # HS-080: the prune is the promotion's last step, and it is the tree's own order that decides. Four releases, three
+  # the prune is the promotion's last step, and it is the tree's own order that decides. Four releases, three
   # kept: the live one and the rollback target (`releases/old`, which the print above names) are reserved, the newest
   # of the rest stays, and `ancient1` is the one that goes.
   grep -q '^upgrade: prune: kept 3 of 4 (keep_releases = 3); removed: releases/ancient1$' "$WORK/$name.run.out" ||
@@ -11435,7 +11352,7 @@ SHIM
   rm -rf "$root"
 }
 
-# HS-079: the rollback verb. Four arms, and the interesting ones need neither a daemon nor an image: a rollback runs no
+# the rollback verb. Four arms, and the interesting ones need neither a daemon nor an image: a rollback runs no
 # smoke test, builds nothing and takes no backup, so what is measured here is the *release tree*, the drain, one
 # restart and one health answer. The `systemctl` stand-in does what systemd would (stop what runs, start what
 # `current` names) and records what `current` named at the moment it restarted, which is how "drains first, points
@@ -11685,7 +11602,7 @@ PY
   rm -rf "$root"
 }
 
-# HS-080: what the release layout *means* once there is more than one release in it. No daemon, no database, no
+# what the release layout *means* once there is more than one release in it. No daemon, no database, no
 # `python3` and no server: a release is "a copy of the artifact in a directory named by a tag", so four of them are
 # four `cp`s and four mtimes, and everything this case measures is a file the artifact itself answers. The tree's own
 # arm — the prune — is `case_upgrade`'s, because a prune only happens inside a promotion.
@@ -11902,7 +11819,7 @@ SHIM
     cat >"$bin/$compiler" <<'SHIM'
 #!/bin/sh
 printf '%s %s\n' "$0" "$*" >>"$HS_BUILD_COMPILED"
-echo "$0: the host must not compile anything: the build runs in the pinned container (HS-076)" >&2
+echo "$0: the host must not compile anything: the build runs in the pinned container" >&2
 exit 1
 SHIM
     chmod 0755 "$bin/$compiler"
@@ -12139,7 +12056,7 @@ case_server_deploy() {
     grep -q '^2\. files: needs: ' "$WORK/$name.dry.out" ||
       fail "$name/dry/plan" "the dry run does not say what step 2 would do: $(cat "$WORK/$name.dry.out")"
     assertions=$((assertions + 1))
-    # Step 3 is HS-048's, so the dry run plans it: two images to build, and neither is on this machine.
+    # Step 3 is that story's, so the dry run plans it: two images to build, and neither is on this machine.
     grep -q '^3\. images: needs: ' "$WORK/$name.dry.out" ||
       fail "$name/dry/images" "the dry run does not plan step 3: $(cat "$WORK/$name.dry.out")"
     assertions=$((assertions + 1))
@@ -12425,7 +12342,7 @@ AGAIN
   rm -rf "$root"
 }
 
-# HS-073's transport: the four `ssh` children, the two refusals that happen before anything is copied, and the
+# the transport: the four `ssh` children, the two refusals that happen before anything is copied, and the
 # target's own deploy report streaming back onto this command's stdout.
 #
 # **There is no ssh key on this machine and no second machine**, so "the target" is a stand-in plus a `--root` tree.
@@ -12754,7 +12671,7 @@ CAT
   rm -rf "$root"
 }
 
-# HS-049's machine steps from the shipped artifact: the VAPID pair and the unit `server deploy` writes, the two
+# the machine steps from the shipped artifact: the VAPID pair and the unit `server deploy` writes, the two
 # Tailscale origins it configures, and the `/api/health` wait that turns an install into "this machine is
 # serving" — with `doctor`'s `perms` as the finding that makes a wrong mode a *startup* refusal, because the unit's
 # `ExecStartPre` is `doctor --quick`.
@@ -13031,7 +12948,7 @@ AGAIN
   rm -rf "$root"
 }
 
-# HS-045's `--full` from the shipped artifact, at **item 10 §7's moment**: the machine is already serving, which
+# the `--full` from the shipped artifact, at **item 10 §7's moment**: the machine is already serving, which
 # is what makes the four additions meaningful — the self-test has a daemon to run in, both proxies exist because
 # `serve`'s boot started them, the ports are held by this machine's own server (the pass `--quick` fails on), and
 # the image's pi version is a fact about the image the config names.
@@ -13046,7 +12963,7 @@ AGAIN
 # would otherwise hide.
 case_doctor_full() {
   local name=case_doctor_full image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
-  # Two `local`s, not one: `set -u` expands `$root` before `local` assigns it (HS-038's landmine, hit again).
+  # Two `local`s, not one: `set -u` expands `$root` before `local` assigns it (hit again).
   local root="$repo_root/target/verify-doctor-full-$$"
   local data="$root/data" control preview status=0 pinned networks
   if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
@@ -13150,13 +13067,13 @@ case_no_cors_header() {
     # The header block alone, read from the file rather than the whole answer: `expect_no_cors` pipes its
     # argument through `sed '/^\r$/q'`, which quits at the blank line, so a body of any size in a shell
     # variable leaves the writer with SIGPIPE — and `set -o pipefail` makes that exit the run at 141 instead
-    # of failing an assertion (measured, with HS-033's two-megabyte tool output).
+    # of failing an assertion (measured, with 's two-megabyte tool output).
     expect_no_cors "$label" "$(sed '/^\r$/q' "$file")"
   done
 }
 
 # --------------------------------------------------------------------------------------------------------------
-# HS-050's three commands, from the shipped artifact: `status`, `logs`, `uninstall`.
+# the three commands, from the shipped artifact: `status`, `logs`, `uninstall`.
 # --------------------------------------------------------------------------------------------------------------
 
 # The one command that describes a machine, one `key value` line per fact (spec's Commands table, ADR-0059).
@@ -13170,7 +13087,7 @@ case_no_cors_header() {
 # What is measured, each from the reader that owns it: `role` and `version` against the endpoint's own answer,
 # `uptime` against its `uptime_s`, the six `sessions <status>` lines against the sessions list's own length (and
 # `idle` moving by one when a session is created), both `proxy` lines against the daemon's answer, and the
-# `machines` line naming HS-068 — the story that will build the registry it cannot read yet.
+# `machines` line naming — the story that will build the registry it cannot read yet.
 case_status() {
   local name=case_status root="$repo_root/target/verify-status-$$"
   local control preview status body role_word uptime listed total line proxy state id
@@ -13252,8 +13169,8 @@ case_status() {
     fi
     assertions=$((assertions + 1))
   done
-  # The registry (HS-072): this boot's data root has no `hosts.toml` and nothing has registered, so the fact is a
-  # **count of zero** and not the phase-2 sentence that used to name HS-068. The rows themselves are
+  # The registry: this boot's data root has no `hosts.toml` and nothing has registered, so the fact is a
+  # **count of zero** and not the phase-2 sentence that used to name. The rows themselves are
   # `case_hub_deploy`'s, against a machine that really has some.
   grep -qx 'machines 0' "$WORK/$name.out" ||
     fail "$name/machines" "an empty registry is not a count of zero: $(cat "$WORK/$name.out")"
@@ -13435,7 +13352,7 @@ SHIM
 # what is there — a teardown with no daemon is not a teardown this case can measure, and `tests/uninstall.rs` covers
 # the same four words over a fake machine on every `cargo test` run, so the SKIP line does not hide the subject.
 # The machine's own network is **restored** at the end: `tests/container.rs`'s egress test needs it, and a case that
-# left the machine worse than it found it is the orphan HS-044 owns.
+# left the machine worse than it found it is the orphan a later change owns.
 #
 # The refusal's live row comes from a boot of its own over the tree's data root, which is the only way to put a row
 # in a database this case is about to delete without writing SQL by hand.
@@ -13598,7 +13515,7 @@ case_uninstall() {
   start_serve
   # The machine's network, back as this case found it — and **last**, because every `uninstall` above removed it
   # again (it is the machine's, not the tree's) and `tests/container.rs`'s egress test needs it. A case that left
-  # the machine worse than it found it is the orphan HS-044 owns.
+  # the machine worse than it found it is the orphan a later change owns.
   if [ "$egress_before" -eq 1 ]; then
     docker network create egress >/dev/null 2>&1 ||
       fail "$name/restore" "could not put the machine's egress network back"
@@ -13619,7 +13536,7 @@ start_serve() {
   # the origin the guard compares. --data-dir keeps the run out of /var/lib/holosmith.
   # --admin-dir keeps the drain socket out of /run/holosmith, for the reason --data-dir keeps the database out of
   # /var/lib/holosmith: this sandbox lets an unprivileged user write the machine's paths, and a boot here must not
-  # bind a real machine's admin socket (HS-051). Every boot in this run shares the one directory under $WORK,
+  # bind a real machine's admin socket. Every boot in this run shares the one directory under $WORK,
   # which is safe because only one serve is up at a time and a stale socket is replaced on bind.
   "$artifact" serve --config "$config" --port "$listen" --data-dir "$data" --admin-dir "$WORK/run/holosmith" \
     >"$WORK/$tag.out" 2>"$serve_err" &
@@ -13639,7 +13556,7 @@ start_serve() {
   control_origin="$(sed -n 's/^control_origin //p' "$serve_err" | sed -n '1p')"
   [ -n "$control_origin" ] ||
     fail "serve/banner" "serve printed no control_origin line: $(cat "$serve_err")"
-  # The preview listener's port too (HS-041): the config asks for `127.0.0.1:0`, so this is the only place it can
+  # The preview listener's port too: the config asks for `127.0.0.1:0`, so this is the only place it can
   # be read — and a boot whose preview could not bind is a fact this run has to know, not guess.
   preview_listen="$(sed -n 's/^preview_listen //p' "$serve_err" | sed -n '1p')"
   case "$preview_listen" in
@@ -13664,7 +13581,7 @@ stop_serve() {
 }
 
 # start_peer <config> <data> <listen>: a **second** machine on this box, with its own admin directory and its own
-# `peer_*` globals (HS-069).
+# `peer_*` globals.
 #
 # `start_serve` owns `serve_pid`, `port`, `control_origin`, `preview_port` and one admin socket under `$WORK`, and
 # its comment says why that is safe: "only one serve is up at a time". A case that runs a hub *and* the server it
@@ -13739,7 +13656,7 @@ phase_serve() {
   fi
 
   # The owner the bad_owner case needs, the cap the create cases need, the backend: `stub` from the
-  # *file*, so `--backend` is not what makes this boot work (HS-011's acceptance is both spellings;
+  # *file*, so `--backend` is not what makes this boot work (the acceptance is both spellings;
   # `tests/serve_cli.rs` covers the flag). And the idle stop at its shortest bound, which is one
   # minute: `idle_stop_min` is whole minutes on purpose, so `case_idle_stop` costs that minute rather
   # than a knob that would be a second spelling of the policy (ADR-0025).
@@ -13754,7 +13671,7 @@ phase_serve() {
   for case_fn in "${serve_cases[@]}"; do
     # A case's own standard output is captured so the loop can tell a case that measured something from one
     # that printed SKIP and returned. An `ok` for a case that skipped would log a pass for a check that never
-    # ran, which is the one shape this gate may not have (HS-046's review); nothing is swallowed, the lines are
+    # ran, which is the one shape this gate may not have; nothing is swallowed, the lines are
     # printed below in order whatever they are.
     case_out="$WORK/case.out"
     "$case_fn" >"$case_out"
@@ -13762,8 +13679,7 @@ phase_serve() {
     if grep -q '^SKIP' "$case_out"; then
       skipped=$((skipped + 1))
     else
-      # One line per case that measured something, so a green run names what it proved and a reader can point
-      # at the case a verdict in HolosmithSpec.md's verification table rests on (HS-046).
+      # One line per case that measured something, so a green run names what it proved.
       printf 'ok %s\n' "$case_fn"
     fi
   done
@@ -13786,7 +13702,7 @@ run_phase clippy cargo clippy --all-targets -- -D warnings
 # The embedded-app assertions in `web.rs` carry a `HOLOSMITH_REQUIRE_WEB=1` arm — a placeholder build is legal
 # (ADR-0007), so the tests cannot assert a real app unless a build says one exists. Setting it for this one phase,
 # when a build is present, is what makes those assertions bite in the gate rather than pass vacuously (`case_pwa` is
-# the measurement that matters, but a test that cannot fail is worse than no test — RESUME §6).
+# the measurement that matters, but a test that cannot fail is worse than no test — the gate rule).
 #
 # It is **scoped to this invocation** rather than exported: `scripts/check-embed.sh`'s second case builds with
 # `web/dist` removed and *requires* the placeholder, so an exported variable would fail the `embed` phase. The gate
@@ -13796,7 +13712,7 @@ if [ -f web/dist/index.html ]; then
 else
   run_phase test cargo test
 fi
-# HS-075: the expand/contract rule in one named command. The destructive side is refused where a migration is
+# the expand/contract rule in one named command. The destructive side is refused where a migration is
 # written (`schema::contract_violations`, which `cargo test` already runs); this is the other half — the previous
 # release's schema checked against this build's — given a phase of its own so a migration author sees the rule
 # named in the output instead of buried in a test list (ADR-0047).

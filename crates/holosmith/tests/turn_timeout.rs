@@ -1,4 +1,4 @@
-//! The turn timeout (HS-022): a turn that will not end is ended for it.
+//! The turn timeout: a turn that will not end is ended for it.
 //!
 //! The deadline is the turn runner's own, so these tests run the runner instead of a server: `Turn::run`
 //! is public for exactly that reason, as `Deleter::remove` and `Sweeper::sweep` are. A minute is the
@@ -79,7 +79,7 @@ async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
 /// Wait for a committed event whose payload says `reason`, and answer how many there are.
 ///
 /// The writer commits every 25 ms, so a row that already carries the outcome does not mean its event is
-/// readable yet — the lesson every story since HS-017 has had to relearn.
+/// readable yet — the lesson every story has had to relearn.
 async fn wait_for_reason(
     state: &AppState,
     id: &str,
@@ -133,7 +133,7 @@ async fn running(state: &AppState, key: &str) -> Session {
 }
 
 /// The runner a served process would build, with the deadline a test chooses and no token ceiling: this
-/// file is about the clock, and `tests/token_budget.rs` owns the budget (HS-023).
+/// file is about the clock, and `tests/token_budget.rs` owns the budget.
 fn runner(state: &AppState, stub: &StubBackend, limit: Option<Duration>) -> Turn {
     Turn::new(
         holosmith::backend::Backends::Stub(stub.clone()),

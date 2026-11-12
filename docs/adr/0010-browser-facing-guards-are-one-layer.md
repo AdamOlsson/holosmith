@@ -1,6 +1,6 @@
 # Browser-facing guards are one layer, and every refusal is a 403 envelope
 
-HS-005 is the story that pays ADR-0002's promise. Item 4 of the spec names four checks — the `Host` allow-list, the control origin on non-`GET`, the JSON content type plus `X-Holosmith-Client` on non-`GET`, and the `Tailscale-User-Login` owner when one is configured — and one prohibition: no CORS headers, ever. ADR-0007 said the guards would attach inside the one `Router::layer` that `App::new` calls, so that a route registered later cannot skip them. This records what that layer does, in what order, and where a literal reading of item 4 would have produced something the operator could not use.
+This is the story that pays ADR-0002's promise. Item 4 of the spec names four checks — the `Host` allow-list, the control origin on non-`GET`, the JSON content type plus `X-Holosmith-Client` on non-`GET`, and the `Tailscale-User-Login` owner when one is configured — and one prohibition: no CORS headers, ever. ADR-0007 said the guards would attach inside the one `Router::layer` that `App::new` calls, so that a route registered later cannot skip them. This records what that layer does, in what order, and where a literal reading of item 4 would have produced something the operator could not use.
 
 ## Measured before deciding
 
@@ -24,7 +24,7 @@ The layer is one `middleware::from_fn`, and it keeps `edge`'s job. In order: cou
 
 The owner check comes last but is **not** `GET`-exempt. Item 4's sentence — "When behind `tailscale serve`, require the `Tailscale-User-Login` header to equal the configured owner" — is about who is calling, not about what the method does, and a proxied `GET` from the wrong tailnet user must be refused exactly like a `POST`. Ordering it last makes the failure the caller sees the one about their method's preconditions first, which is the more actionable of two true statements.
 
-`is_guard_exempt` — shipped with the router in HS-003 and unchanged — is the only exemption list, and an exempt request skips **all four** checks rather than some. So `GET /api/health` answers even with a foreign `Host` and even from a tailnet peer who is not the owner. That is accepted: the payload is name, version, role and uptime, the operator's `systemd` and `curl` probes need it, and item 4's host-registration probe from a hub (HS-070) is exactly such a request. A test pins it so it stays a decision rather than becoming a discovery.
+`is_guard_exempt` — shipped with the router and unchanged — is the only exemption list, and an exempt request skips **all four** checks rather than some. So `GET /api/health` answers even with a foreign `Host` and even from a tailnet peer who is not the owner. That is accepted: the payload is name, version, role and uptime, the operator's `systemd` and `curl` probes need it, and item 4's host-registration probe from a hub is exactly such a request. A test pins it so it stays a decision rather than becoming a discovery.
 
 ## The `Host` allow-list, spelled the way a browser sends it
 
@@ -49,5 +49,5 @@ Item 4's "GET endpoints are read-only and never change state" is not a property 
 - `GET /api/health` is exempt from all four checks, including the owner check, so a tailnet peer who is not the owner can read the name, version, role and uptime. Accepted for the reasons above.
 - A handler that adds a CORS header loses it silently. That is deliberate and is the cost of making "ever" unconditional.
 - The 403 codes are `bad_host`, `bad_origin`, `bad_client` and `bad_owner`, from the one module of constants ADR-0008 created. The messages are one sentence each and no test pins their text.
-- Guard assertions live in `crates/holosmith/tests/guards.rs` and are **not** added to `scripts/check-static.sh`; HS-006's `scripts/verify.sh` is where they are lifted into the one-command check.
+- Guard assertions live in `crates/holosmith/tests/guards.rs` and are **not** added to `scripts/check-static.sh`; the `scripts/verify.sh` is where they are lifted into the one-command check.
 - The preview listener's own Origin check (item 3), the `allowed_hubs` plus whois check for machine-to-machine calls (item 4's last line), rate limiting and authentication are not part of this layer and are not implied by it.

@@ -1,6 +1,6 @@
 # The two images are built from Dockerfiles embedded in the binary
 
-HS-048 is spec §"What `server deploy` does" step 3 and the **Build and release** section's third bullet, and
+This is spec §"What `server deploy` does" step 3 and the **Build and release** section's third bullet, and
 its acceptance says five things: both Dockerfiles are embedded and `holosmith-proxy:<version>` is the static
 binary on a minimal base that serves both proxies; `agent-image:<version>` pins the pi version and its base
 image digest and carries git, the configured toolchains and the binary for the helper subcommands; builds are
@@ -23,8 +23,8 @@ binary.
 A build needs a **context**, and the payload of that context is the running binary. There are two honest
 ways to hand it over: a context directory (`target/…`) or an archive on `docker build -`'s stdin. The archive
 is the stronger one and it is what this build does. A directory is a path, and a path handed to the daemon is
-resolved in the **host's** namespace, which is the landmine that has cost this project a cycle at HS-027,
-HS-031 and HS-037: a source the daemon cannot see becomes an empty root-owned directory, silently, and the
+resolved in the **host's** namespace, which is the landmine that has cost this project a cycle at,
+ and: a source the daemon cannot see becomes an empty root-owned directory, silently, and the
 build then fails on a `COPY` inside the image rather than at the boundary where the mistake was made. A tar on
 a pipe has no path at all. Measured on Docker 29.9.2: `docker build -t x -` from a 6.5 MB archive holding
 `Dockerfile` and `holosmith` builds, and the archive is reproducible because its `uid`, `gid` and `mtime`
@@ -49,7 +49,7 @@ way out. Measured: both `proxy egress` and `proxy key` run from it with no mount
 
 The agent image is `node:24-bookworm-slim@sha256:…`, because **pi is a node CLI**: measured,
 `/usr/local/bin/pi` is a symlink into the npm global tree, and an image without node is exit 127 at launch,
-not a test failure (HS-036 learned that one). It installs `git ca-certificates openssl` and the configured
+not a test failure. It installs `git ca-certificates openssl` and the configured
 toolchains, `npm install -g "@earendil-works/pi-coding-agent@<pin>"`, copies the binary in for the helper
 subcommands (`container snapshot`, `proxy`), and keeps the base's `node` user — uid 1000, the host user's —
 because a session that wrote its worktree as root leaves files nobody on the host can commit to (ADR-0035).
@@ -229,7 +229,7 @@ test can never collide with a deploy.
 ## What this story does not do
 
 No multi-architecture build on one machine (`buildx`), no registry push (nothing in phase 2 pushes), no image
-signing, and no builder-container self-development path (HS-076). The skip rule it implements is what
-`upgrade`/`rollback` (HS-078/HS-079) consume. Steps 5–7 stay `skipped` on this machine — no systemd, no
+signing, and no builder-container self-development path. The skip rule it implements is what
+`upgrade`/`rollback` (those stories) consume. Steps 5–7 stay `skipped` on this machine — no systemd, no
 `tailscaled` — so a deploy here still ends `incomplete`, and "a fresh host ends with a working HTTPS URL" is
-HS-049's demo, not this one's.
+the demo, not this one's.

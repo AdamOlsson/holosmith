@@ -1,4 +1,4 @@
-//! The pinned builder container: the one place a release artifact is compiled (HS-076).
+//! The pinned builder container: the one place a release artifact is compiled.
 //!
 //! Spec item 10's first step is that the build never runs on the host, so that a `build.rs`, a proc macro — or the
 //! web app's own Vite config, which is JavaScript the build executes — cannot run outside a container. This module
@@ -16,7 +16,7 @@
 //!   not `target/`, not `node_modules/`, not the repository itself. The only host path it writes is the output
 //!   directory, which is a bind mount of its own.
 //! - **The container's output goes to a file, never a pipe.** A build prints thousands of lines; a pipe nobody
-//!   drains fills at 64 KiB and deadlocks (HS-048's landmine). [`crate::docker::Docker::run_captured`] is the
+//!   drains fills at 64 KiB and deadlocks. [`crate::docker::Docker::run_captured`] is the
 //!   primitive, and the failure path prints the tail of that file.
 //! - **The artifact is checked by this side.** `holosmith build` reads the ELF header of the bytes that landed:
 //!   `e_machine` for the triple that was asked for, `ET_EXEC`, and no `PT_INTERP` — the three properties
@@ -68,7 +68,7 @@ pub const BUILD_TIMEOUT: Duration = Duration::from_secs(3600);
 pub const TAIL_LINES: usize = 40;
 
 /// The artifact's name inside the output directory, and its digest's — item 10's `releases/<tag>/` holds these two
-/// and `holosmith upgrade` reads them (HS-078). The directory *layout* and the `current` symlink are HS-080's.
+/// and `holosmith upgrade` reads them. The directory *layout* and the `current` symlink are that story's.
 pub const BINARY: &str = "holosmith";
 pub const DIGEST: &str = "holosmith.sha256";
 
@@ -250,7 +250,7 @@ fn write_digest(out: &Path, built: &str) -> Result<(), String> {
 /// `readelf`, and this reads them from the bytes so the command can refuse its own output before placing it.
 ///
 /// Each sentence names the **file**, not a build: two callers ask this question — `holosmith build` about the bytes
-/// its container wrote, and `holosmith smoke` about the `--binary` a promotion is about to make live (HS-077) — and
+/// its container wrote, and `holosmith smoke` about the `--binary` a promotion is about to make live — and
 /// only one of them ran a build.
 pub fn artifact_problem(path: &Path, bytes: &[u8], target: &str) -> Option<String> {
     let wanted = Machine::parse(target.split('-').next().unwrap_or(target));

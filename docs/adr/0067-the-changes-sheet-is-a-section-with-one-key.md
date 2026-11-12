@@ -1,8 +1,8 @@
 # The Changes sheet is a section of the session screen, and its pickers read one key
 
-HS-058 is item 12's last bullet — the screen the other five routes exist for. Every route it draws was already
-built and measured (`GET …/changes` HS-052, `…/changes/diff` HS-053, `POST …/merge` HS-054–056, `POST …/publish`
-HS-057), and three earlier ADRs deliberately deferred text to this story: ADR-0065 D4's commit prompt, ADR-0064
+This is item 12's last bullet — the screen the other five routes exist for. Every route it draws was already
+built and measured (`GET …/changes`, `…/changes/diff`, `POST …/merge` –056, `POST …/publish`
+), and three earlier ADRs deliberately deferred text to this story: ADR-0065 D4's commit prompt, ADR-0064
 D10's Resolve affordance, ADR-0066 D11's CI warning. So this ADR decides only what a *screen* adds: where it
 lives, where its rules live, how a disabled button knows why, and where two lists a phone cannot otherwise learn
 from come from.
@@ -19,7 +19,7 @@ between the meta row and the transcript: a *Changes* button, and a body that is 
 attribute until it is tapped. Not an overlay or a `<dialog>`: the transcript stays where it was, a merge's notice
 cannot be dismissed by Escape, and the fold costs no new layout idiom.
 
-The section's shape is `deleteSection`'s (HS-043's affordance): a function that builds nodes, draws itself from an
+The section's shape is `deleteSection`'s: a function that builds nodes, draws itself from an
 answer, exposes `update(state)`, and owns its own requests. What it adds is `refresh()`, called from the screen's
 one `showState` — see D6.
 
@@ -34,7 +34,7 @@ which node, which event, which request — and the labels of its own buttons, wh
 split (an affordance's button text is inline there too).
 
 That split is ADR-0018's rule applied to the first story since phase 1 that adds a screen's worth of copy, and it
-has a second consequence the gate depends on: **no `case_*` may need a browser** (RESUME §3), so `npm test` is the
+has a second consequence the gate depends on: **no `case_*` may need a browser** (the gate rule), so `npm test` is the
 only gate that can see a sentence. A rule that only the DOM could show would not be measured anywhere, which is
 why the file rows, the two counts, the warning, all three disabled reasons, the pickers, the confirm step, the
 conflict line and the two prompts are functions — and why `case_changes_screen` (D10) measures only that the
@@ -85,7 +85,7 @@ agent that is already working to do what it is doing.
   config/repository mismatch the operator should see said out loud rather than silently dropped from a picker.
 
 **One key, not two**, because the sheet asks one question — *what may I do with this branch from here?* — and
-answers it from one fetch, and because RESUME §1.8's non-goal allows a single additive key. **Not
+answers it from one fetch, and because the non-goal allows a single additive key. **Not
 `GET /api/health`**, although ADR-0051's `preview_origin` is the precedent for a config value the page needs: health
 is the machine's payload (five keys, now pinned by an ADR, its own unit test and four stand-ins in tests and the
 gate's shims), and these are one session's, one repository's facts — the kind `target` already is.
@@ -162,10 +162,10 @@ answer that disabled it.
 `busy` exists because a re-render happens while a request is in flight: without it, the merge's own 202-triggered
 `showState` would re-enable the button mid-merge and a second tap would be a second merge. Merge, publish and the
 two prompts each disable their own buttons, and Merge and Publish use their own `fetch` — rule 6's 60 seconds is
-the hub's (HS-069, ADR-0065 D8, ADR-0066 D12), and a blanket timeout on the shared `post` helper would cut the
+the hub's (ADR-0065 D8, ADR-0066 D12), and a blanket timeout on the shared `post` helper would cut the
 delete's own `abort_grace` wait.
 
-The sheet does not resume a session for its prompts: the composer owns that ladder (HS-018). A prompt sent to a
+The sheet does not resume a session for its prompts: the composer owns that ladder. A prompt sent to a
 stopped session answers `409 session_stopped`, and that sentence names the step (resume it first).
 
 ## D10 — `case_changes_screen` measures the shipped artifact, and the rules are `npm test`'s

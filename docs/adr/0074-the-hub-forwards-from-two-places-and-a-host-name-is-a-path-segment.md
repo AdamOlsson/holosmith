@@ -1,6 +1,6 @@
 # The hub forwards from two places, and a host name is a path segment
 
-HS-069 is where one origin starts reaching more than one machine. Item 3 says the hub's **preview** listener forwards
+This is where one origin starts reaching more than one machine. Item 3 says the hub's **preview** listener forwards
 `/<host>/<id>/*` "to that machine's preview listener over the Tailnet, including WebSocket upgrades", and that local
 sessions use the name `local`. Item 16's second bullet says preview routing for non-hub machines "is in item 3".
 `Roles` says a hub runs "request and preview forwarding", that "API paths are unchanged on every role: a hub serves
@@ -85,7 +85,7 @@ and client header, and only then re-authored. The rewrite is not "the hub trusts
 is the author of the call it makes".
 
 **Consequence, stated rather than discovered:** a peer cannot tell a forwarded call from a call at its own origin.
-That is exactly the hole **HS-070/V11** closes (`allowed_hubs` and the whois), and the shape it has to verify is
+That is exactly the hole **/V11** closes (`allowed_hubs` and the whois), and the shape it has to verify is
 `forward::request_head`. Two facts follow from the guard's own text and are prerequisites rather than checks:
 
 - **the row's origin must be the exact `control_origin` the machine reports**, ports included, because the guard
@@ -93,12 +93,12 @@ That is exactly the hole **HS-070/V11** closes (`allowed_hubs` and the whois), a
   the gate's `case_forward` measures that (a `wrongspelling` row naming the peer's `localhost` while its origin is
   `127.0.0.1`), and it doubles as "a peer's own refusal survives the trip";
 - `tailscale-user-login` is dropped, so the peer's `owner` check is vacuous for a forwarded call (its
-  `(None, _) => true` arm). That is HS-070's to change, not this story's.
+  `(None, _) => true` arm). That is the to change, not this story's.
 
 ## D5 — a machine's preview origin is measured, never configured
 
 `hosts` gains one nullable column, `preview` (migration `0007`, `SCHEMA_VERSION` 7), filled by the probe from the
-peer's **own health answer** — the fifth key, `preview_origin`, which has ridden `/api/health` since HS-041. Two
+peer's **own health answer** — the fifth key, `preview_origin`, which has ridden `/api/health`. Two
 reasons, in order of weight:
 
 1. **the upgrade's `Origin` must be the peer's.** Its listener compares the header against the `preview_origin` in its
@@ -109,7 +109,7 @@ reasons, in order of weight:
    deploy's `tailscale serve --https=8444` is a guess about a key the peer owns.
 
 `POST /api/hosts` does not accept it (a caller-supplied origin would point a hub anywhere — ADR-0016's rule), it is
-published as `Option<String>` in `GET /api/hosts` (HS-071 will read it), and a row no probe has carried one for
+published as `Option<String>` in `GET /api/hosts`, and a row no probe has carried one for
 refuses a forwarded preview with a sentence naming the probe rather than dialling a guess. **The limitation, recorded
 rather than discovered:** the value is refreshed at the merge — boot time — only, so a hub started before its server
 keeps `preview = NULL` (and `reach = unreachable`) for the life of the process. A lazy re-probe would be a second
@@ -126,7 +126,7 @@ and ADR-0066 D12). They cover the dial, the request and the reply's **head** —
 no natural end (ADR-0018), so a bound that covered the body would truncate an event stream.
 
 The slow arm is chosen by the **method and the path**: the last segment is `merge` or `publish`, **or** the method is
-`DELETE` and the path is one session (`sessions/<id>`). The third is `docs/notes.md`'s own landmine about rule 6: a
+`DELETE` and the path is one session (`sessions/<id>`). The third is the own landmine about rule 6: a
 delete asks the peer's agent to stop and waits out its `abort_grace` — ten seconds by default — before it snapshots
 the worktree, so a blanket five seconds would answer `504` for a delete the peer is executing.
 
@@ -192,7 +192,7 @@ port would be a key per host, which is what the registry already is.
 
 **The page does not change, and that is a limitation rather than a design.** The embedded app still fetches
 `/api/sessions/<id>` and its stream, so a hub's *sessions screen* shows only the hub's own (none, on a hub-only
-machine) and opening a remote session needs HS-071's host-aware helper — `apiPath(host, rest)`, one function that
+machine) and opening a remote session needs the host-aware helper — `apiPath(host, rest)`, one function that
 returns `/api/<rest>` for `local` and `/api/hosts/<host>/<rest>` otherwise, plus the `host` each row was listed under.
 This story's demo is therefore the API (a script) and a browser opened at `/workshop/<id>/` on the hub's preview
 listener, which needs no page change at all.
@@ -219,6 +219,6 @@ talks to `$port`, and a case with two machines has two ports). The mid-stream de
 ## What this machine could not measure
 
 No `tailscaled` and no way to add a 100.64 address, so: a real MagicDNS name, a real tailnet, TLS to a peer, and the
-whois HS-070 adds. The transport's TLS arm (`s_client`) is the shape ADR-0071 and ADR-0073 already measured for their
+whois adds. The transport's TLS arm (`s_client`) is the shape ADR-0071 and ADR-0073 already measured for their
 own children, and `tests/forward.rs` drives the plain arm end to end; the gate's two machines are loopback, which is
 also why the seed is what makes them legal. The demo says the same thing in the same words.

@@ -1,4 +1,4 @@
-//! The mapping from pi's RPC records to the transcript's frames (HS-032).
+//! The mapping from pi's RPC records to the transcript's frames.
 //!
 //! Spec item 15 needs the agent's text and thinking to arrive as the operator watches, so a turn's frames
 //! cannot be a summary built at the end: every `message_update` pi emits becomes a `message.delta` on the
@@ -28,7 +28,7 @@
 //!
 //! - **pi's messages have no id, so one is minted.** A transcript block is keyed by the message id, and the
 //!   log is durable, so two turns must never mint the same one: the id carries the process's start instant
-//!   and a process-wide counter (`msg-<nanos>-<n>`), the same shape the stub's ids have (HS-011's reason: a
+//!   and a process-wide counter (`msg-<nanos>-<n>`), the same shape the stub's ids have (the reason: a
 //!   restart that started over at `msg-1` would fold a new turn into a previous turn's block).
 //! - **Unknown is counted, never fatal.** A record type or nested event type this build does not map — a
 //!   queue update, an extension error, and the provider's `toolcall_*` — answers
@@ -38,7 +38,7 @@
 //!   pi can still retry, recover from an overflow, or deliver a queued message after it; `agent_settled` is
 //!   pi saying it has no work left (`docs/json.md`).
 //!
-//! **Two records take more than a frame** (HS-035). A tool result can carry an *image*, which is stored beside
+//! **Two records take more than a frame**. A tool result can carry an *image*, which is stored beside
 //! the tool's text and named by `tool.end`'s `images` instead of being carried in a payload; and an extension
 //! can ask the client a *question*, which in RPC mode **blocks the run** until an `extension_ui_response`
 //! arrives. Neither can be a frame alone: the first is I/O, and the second is a write to pi's stdin. So both
@@ -109,13 +109,13 @@ pub enum Mapped {
         /// `agent_settled.aborted`: the run ended because something aborted it.
         aborted: bool,
     },
-    /// A tool call that finished, with the output that belongs in a file rather than in the log (HS-033).
+    /// A tool call that finished, with the output that belongs in a file rather than in the log.
     ///
     /// The mapping cannot write it — it does no I/O, which is what lets a fixture replay without a data
     /// root — so it answers the whole record and [`pump`] stores it, then asks [`ToolEnd::frame`] for the
     /// payload once it knows whether the write worked.
     Tool(ToolEnd),
-    /// A dialog an extension asked the client for, which must be answered or the run blocks (HS-035).
+    /// A dialog an extension asked the client for, which must be answered or the run blocks.
     ///
     /// Like a tool's output, the mapping cannot write it: the answer is a line on pi's stdin, and the mapping
     /// has no stdin. [`pump`] writes [`Cancel::response`] and then appends [`Cancel::frame`].
@@ -135,7 +135,7 @@ pub struct ToolEnd {
     pub name: String,
     /// Everything the tool printed: the text of its result's content blocks.
     pub output: String,
-    /// The images its result carried, in the order pi listed them (HS-035).
+    /// The images its result carried, in the order pi listed them.
     ///
     /// Stored beside the output by the pump, because the mapping does no I/O, and named by
     /// [`ToolEnd::frame`] as `images` once they are on disk.
@@ -150,7 +150,7 @@ pub struct ToolEnd {
     pub duration_ms: Option<u64>,
 }
 
-/// One dialog an extension asked for, and this build's answer: cancelled (HS-035).
+/// One dialog an extension asked for, and this build's answer: cancelled.
 ///
 /// pi's dialog methods (`select`, `confirm`, `input`, `editor`) emit an `extension_ui_request` and **block**
 /// until an `extension_ui_response` with the request's id arrives; their fire-and-forget siblings (`notify`,
@@ -331,7 +331,7 @@ impl Mapping {
             }
             Some("message_update") => self.update(record),
             Some("message_end") => self.end(record),
-            // The tool's own execution: HS-033's pair. The *provider's* `toolcall_*` above are declined and
+            // The tool's own execution: the pair. The *provider's* `toolcall_*` above are declined and
             // these two are mapped, because they carry the complete `args` and the result, and pi gives them
             // the same id — mapping both would open two blocks for one call (ADR-0041).
             Some("tool_execution_start") => self.tool_start(record),
@@ -339,10 +339,10 @@ impl Mapping {
             // frame, so it is a documented record with no frame rather than an unknown one.
             Some("tool_execution_update") => self.note_declined(),
             Some("tool_execution_end") => self.tool_end(record),
-            // A `response` is the reader's to route to the command that asked (HS-031); the mapping meets one only
+            // A `response` is the reader's to route to the command that asked; the mapping meets one only
             // when a fixture is replayed verbatim, and it is a documented record either way.
             Some("response") => self.note_declined(),
-            // An extension asking the client for something (HS-035). The dialog methods block the run until they
+            // An extension asking the client for something. The dialog methods block the run until they
             // are answered and the fire-and-forget ones never wait, so which method it is decides what happens
             // — see `ui_request`.
             Some("extension_ui_request") => self.ui_request(record),
@@ -435,7 +435,7 @@ impl Mapping {
         };
         if message.get("role").and_then(Value::as_str) != Some("assistant") {
             // The user's own prompt, pi's system message, and a tool result (whose text is `tool.end`'s, from
-            // the execution record, and whose images are HS-035's). None of them is a transcript block.
+            // the execution record, and whose images are that story's). None of them is a transcript block.
             return Mapped::Nothing;
         }
         let message_id = self.ended_id("a message ended with no message started");
@@ -511,7 +511,7 @@ impl Mapping {
         })
     }
 
-    /// One `extension_ui_request`: a dialog to cancel, or a record with no frame at all (HS-035).
+    /// One `extension_ui_request`: a dialog to cancel, or a record with no frame at all.
     ///
     /// The two categories are pi's own (`docs/rpc-extension-ui.md`), and they are the whole decision: a dialog
     /// method **blocks the run** until it is answered, so it is cancelled; a fire-and-forget method never waits
@@ -602,13 +602,13 @@ impl Mapping {
 /// `turn.end` when pi says it settled. A turn the agent never settles — its process died mid-run — writes no
 /// `turn.end`, because the turn did not end: `crate::exit` records what became of the row.
 ///
-/// **A tool's output is written here too** (HS-033): the mapping answers [`Mapped::Tool`] with everything the
+/// **A tool's output is written here too**: the mapping answers [`Mapped::Tool`] with everything the
 /// tool printed, and this stores it through [`crate::tool::Store`] before the frame is built. That is the one
 /// piece of I/O in a turn's mapping path, and it is here rather than in the mapping because a mapping that
-/// wrote files could not be replayed from a fixture. Its images are stored the same way (HS-035), and the
+/// wrote files could not be replayed from a fixture. Its images are stored the same way, and the
 /// frame names them rather than carrying them.
 ///
-/// **A dialog is answered here** (HS-035): `agent` is the process whose stdin the `extension_ui_response` goes
+/// **A dialog is answered here**: `agent` is the process whose stdin the `extension_ui_response` goes
 /// to, and the write happens **before** the `turn.error` frame is appended, because pi is blocked until the
 /// answer arrives — a frame first would be a log that says the cancel happened while the run is still
 /// waiting for it. A failed write is a `warn` and the turn carries on: the dialog's own `timeout`, when the
@@ -743,7 +743,7 @@ fn frame(kind: &'static str, payload: Value) -> Mapped {
 ///
 /// A result is `{"content": [...], "details": {...}}` (`docs/json.md`). The content blocks are what the tool
 /// printed; a block that is not text is named in brackets rather than dropped, so a result carrying an image
-/// leaves a trace in the transcript's text (`[image]`) beside the stored picture HS-035 names in `images`. The
+/// leaves a trace in the transcript's text (`[image]`) beside the stored picture names in `images`. The
 /// brackets are the *type*, which is why an image reads as `[image]` whether one was stored or not: the text
 /// is a description of the blocks, and the frames are where the detail lives. `details` and pi's own
 /// `structuredContent` are **not** kept — a `bash` tool's exit code lives there, and ADR-0041 says so, so
@@ -778,7 +778,7 @@ fn role(record: &Value) -> Option<&str> {
     record.get("message")?.get("role")?.as_str()
 }
 
-/// The image blocks of a tool's result, in order, as the store will take them (HS-035).
+/// The image blocks of a tool's result, in order, as the store will take them.
 ///
 /// pi's block is `{"type": "image", "mimeType": "image/png", "data": "<base64>"}`. The block's **index in
 /// `result.content`** is what the reference names, so two images of one result cannot be confused and a frame's
@@ -814,7 +814,7 @@ fn result_images(result: Option<&Value>) -> Vec<tool::Image> {
 
 /// An assistant message's usage as the contract's two counts, or `None` when the agent reported nothing.
 ///
-/// **A prompt's cached part is part of what it cost** (HS-034, ADR-0042). pi reports `input`, `output`,
+/// **A prompt's cached part is part of what it cost** (ADR-0042). pi reports `input`, `output`,
 /// `cacheRead`, `cacheWrite`, `reasoning` and `totalTokens`, and a conversation with a warm prompt is mostly
 /// cache reads: counting only `input` would make the budget a fraction of the bill. So
 /// `in = input + cacheRead + cacheWrite` and `out = output`. `reasoning` is **not** added: the fixtures show it
@@ -840,7 +840,7 @@ fn usage(message: &Value) -> Option<Value> {
 /// The names of the message's tool calls, in the order the provider emitted them.
 ///
 /// A *summary*: the acceptance asks `message.end` to carry one, and the arguments and the output belong to
-/// `tool.start`/`tool.end` (HS-033) rather than to the message's own record. A block with no name is skipped
+/// `tool.start`/`tool.end` rather than to the message's own record. A block with no name is skipped
 /// rather than rendered empty, the same rule the page applies to a frame it cannot draw.
 fn tool_calls(message: &Value) -> Vec<Value> {
     message

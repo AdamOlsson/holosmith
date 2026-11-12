@@ -1,7 +1,7 @@
 # One backend trait of single steps, one background provisioner, five progress events
 
-HS-008 answers a create with 202 and a `starting` row, HS-010 streams the session's events, and
-HS-009 commits them durably. None of them produced one. HS-011 is the first producer: the accepted
+ answers a create with 202 and a `starting` row, streams the session's events, and
+ commits them durably. None of them produced one. This is the first producer: the accepted
 session has to become a running one, without Docker (ADR-0001), and the operator has to be able to
 see which of the four steps is slow.
 
@@ -47,8 +47,8 @@ backend does. Two things with a similar name, and the doc comment on both says w
 
 A tenth method, `undo(session, step)`, is not in the story's list and is there deliberately. The
 failure path is "undoes completed steps", and `delete` — the one teardown the story does name — is
-the whole session's removal (HS-019), which would also throw away the worktree of a session that
-`error` can resume from (spec item 8). Per-step undo in reverse order is the shape HS-024 fills:
+the whole session's removal, which would also throw away the worktree of a session that
+`error` can resume from (spec item 8). Per-step undo in reverse order is the shape fills:
 `docker rm -f`, `docker network rm`, `git worktree remove --force`. Best effort: an undo that fails
 is logged and the rest still run, because leaving two partial resources behind is worse than one.
 
@@ -70,7 +70,7 @@ handed off, because a retry of the same `Idempotency-Key` answers an existing se
 worker on one session would emit a second set of steps and race the first.
 
 That leaves a row that was inserted and never provisioned — the process died in between. Spec item
-7.5 ("any row still in `starting` is resumed or set to `error`") is HS-044's reconcile, not this
+7.5 ("any row still in `starting` is resumed or set to `error`") is the reconcile, not this
 story's, and the row is visible and wrong in the one place a reader will look for it.
 
 ## The row moves first; the event follows
@@ -102,7 +102,7 @@ sentences an operator can read ("the stub backend was told to fail at the contai
 same sentence is stored in `sessions.status_reason`.
 
 This is not the state machine. The provisioner writes exactly two transitions, `starting → idle` and
-`starting → error`, through the repository's one status writer; HS-012 owns the table, the refusal
+`starting → error`, through the repository's one status writer; a later change owns the table, the refusal
 of an illegal move, `stopped_at`, and the payload's `from`/`to`. It also owns the event the
 provisioner emits last: when the table exists, `status` becomes `to` and `from` is added, and that
 change is one story's work in one file.
@@ -115,10 +115,10 @@ The story names `backend = "stub"` and `--backend`, so `Config` gains `backend: 
 follow: the file is the machine's setting, the flag is this run's (ADR-0006). `Runtime` stays the one
 authority at run time; the provisioner reads `AppState.backend` and never the file.
 
-`Config::default().backend` is Docker, because the stub is opt-in (ADR-0001). Until HS-024 there is
+`Config::default().backend` is Docker, because the stub is opt-in (ADR-0001). Until there is
 no Docker backend, so `DockerBackend` refuses every operation with `BackendError::Unsupported` and a
 reason naming the step. That is deliberate: a session created on the default backend ends `error`
-with "the worktree step: the docker backend does not provision yet (HS-024)" instead of sitting in
+with "the worktree step: the docker backend does not provision yet" instead of sitting in
 `starting`. The lie a unit-struct no-op would tell is worse than the refusal, and `error` is not a
 live state, so it does not hold a cap slot.
 
@@ -135,9 +135,9 @@ default.
   assertions.
 - `tests/support/mod.rs` gains the SSE reader that `tests/streams.rs` had privately, and a harness
   stub that takes a minute per step, so no test that is not about provisioning can lose the race
-  against a provisioner HS-011 starts in the background.
-- HS-008's `a_create_starts_no_provisioning` is amended rather than deleted: the create still does
+  against a provisioner starts in the background.
+- the `a_create_starts_no_provisioning` is amended rather than deleted: the create still does
   no provisioning itself, and `tests/provisioning.rs` owns the half that now happens.
-- The stub leaves `worktree` `''`, per HS-007's note; HS-021 and HS-024 are what fill it.
-- HS-012, HS-019 and HS-024 are the three stories that consume this shape. None of them has to move
+- The stub leaves `worktree` `''`, per the note; and are what fill it.
+-, and are the three stories that consume this shape. None of them has to move
   a file: the payload, the trait and the undo path are all where those stories will look.

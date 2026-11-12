@@ -1,4 +1,4 @@
-//! `GET /api/sessions` as a client meets it (HS-013, ADR-0017).
+//! `GET /api/sessions` as a client meets it (ADR-0017).
 //!
 //! Every test starts the real `App` on an ephemeral port and talks HTTP/1.1 over a socket, so the
 //! status, the headers and the bytes are the ones a browser gets. Each test owns its `TempDir` and
@@ -127,7 +127,7 @@ async fn a_created_session_is_listed_with_every_column_and_still_starting() {
     // create answered with, which is what the screen renders before any stream frame arrives.
     assert_eq!(row["status"].as_str(), Some("starting"));
     assert_eq!(body["network_default"].as_bool(), Some(false));
-    // HS-064: the machine's stopped-session window, beside the machine's other setting. The default is the
+    // the machine's stopped-session window, beside the machine's other setting. The default is the
     // spec's seven days (item 15), and it is a number rather than a sentence because the page draws the
     // countdown from it and the row's own `stopped_at`.
     assert_eq!(body["stopped_ttl_days"].as_u64(), Some(7));
@@ -154,7 +154,7 @@ async fn the_lists_network_default_is_the_configs() {
 
 #[tokio::test]
 async fn the_lists_retention_window_is_the_configs() {
-    // HS-064's number is the machine's and not the renderer's: a machine that keeps stopped sessions for a
+    // the number is the machine's and not the renderer's: a machine that keeps stopped sessions for a
     // fortnight says so, and the page's countdown follows. A second config, because a test that only ever read
     // the default could pass over a hard-coded `7`.
     let dir = TempDir::new("session-list-ttl");

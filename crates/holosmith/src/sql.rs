@@ -150,7 +150,7 @@ fn skip_block(bytes: &[u8], start: usize) -> usize {
 }
 
 /// The guard that keeps a table's SQL in the file that owns it, shared by every repository that
-/// has one (PER-41 S2).
+/// has one.
 ///
 /// Two copies of this matcher existed — one in each repository — and had already drifted. Worse,
 /// both named their scratch directory `holosmith-guard-{label}-{pid}` with the same labels, and
@@ -163,7 +163,7 @@ pub(crate) mod guard {
 
     /// Every file under `root`, relative to it with `/` separators, and its text.
     ///
-    /// The walk several source-level rules share: a table's SQL location, and HS-012's rule that
+    /// The walk several source-level rules share: a table's SQL location, and the rule that
     /// only one function writes a session's state. One copy, because the second caller would
     /// otherwise reimplement the recursion and quietly disagree about, say, `.rs` suffixes.
     pub(crate) fn sources_under(root: &Path) -> Vec<(String, String)> {

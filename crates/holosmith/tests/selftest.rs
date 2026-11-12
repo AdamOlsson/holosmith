@@ -1,4 +1,4 @@
-//! The network self-test against a real daemon (HS-036, spec item 2).
+//! The network self-test against a real daemon (spec item 2).
 //!
 //! The three *decisions* are unit tests in `selftest.rs`, driven by a fake [`Runner`], because a machine cannot
 //! be made to leak on demand. What only a daemon can answer is the other half: that the probe, with the real
@@ -117,7 +117,7 @@ fn an_internal_network_reaches_nothing_while_the_default_bridge_reaches_the_host
     );
 }
 
-/// HS-038's off case, measured the only way it can be: **the same network**, before and after something answers on
+/// the off case, measured the only way it can be: **the same network**, before and after something answers on
 /// the proxy's alias.
 ///
 /// The unit tests decide what a report means; this test is what makes the report possible at all. It is the pair
@@ -126,7 +126,7 @@ fn an_internal_network_reaches_nothing_while_the_default_bridge_reaches_the_host
 /// an explanation for the difference.
 ///
 /// The listener is a stand-in, not the machine's live `hs_egress`: joining the real proxy to a test network would
-/// hand a running session a route it did not ask for (the landmine HS-037's tests record). What is being measured
+/// hand a running session a route it did not ask for (the landmine 's tests record). What is being measured
 /// is the question the boot asks — *does something answer on `egress-proxy:3128` from an internal network* — and a
 /// container listening on 3128 under that alias answers it exactly as the proxy does.
 #[test]

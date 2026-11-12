@@ -1,4 +1,4 @@
-//! The previous release's schema, compared with this one (HS-075, spec item 10, ADR-0047).
+//! The previous release's schema, compared with this one (spec item 10, ADR-0047).
 //!
 //! Item 10's rule is "a release may add but never drop or rename anything the previous release uses". The
 //! destructive side is already refused at the point it is written (`schema::contract_violations`, ADR-0009); what
@@ -151,7 +151,7 @@ fn the_previous_releases_schema_is_still_a_subset_of_this_one() {
 #[test]
 fn a_dropped_column_a_dropped_table_and_a_rename_are_all_named() {
     // The rule labelled with each shape it must catch, so a comparison that stopped comparing cannot pass the
-    // snapshot test by being empty (the HS-061 lesson: a test's placement decides what it can prove).
+    // snapshot test by being empty (the lesson: a test's placement decides what it can prove).
     let then: BTreeMap<String, BTreeSet<String>> = [
         (
             "sessions".to_string(),
@@ -208,7 +208,7 @@ fn a_dropped_column_a_dropped_table_and_a_rename_are_all_named() {
 
 #[test]
 fn a_newer_database_is_not_this_binarys_schema_and_says_so() {
-    // The verdict `doctor` acts on (HS-045) and the sentence `apply_pending` warns with, without a database: the
+    // The verdict `doctor` acts on and the sentence `apply_pending` warns with, without a database: the
     // acceptance's third bullet, as the part of it that is this story's to build.
     assert_eq!(schema::verdict(3, 4), Verdict::Older);
     assert_eq!(schema::verdict(4, 4), Verdict::Same);

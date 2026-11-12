@@ -1,8 +1,8 @@
 # The disk floor is one measurement and two sentences, and only a container run is measured
 
-HS-062 is spec item 14's first sentence: "`min_free_gb` (default 20): session creation and resume fail with 507
-below it." Two of its three readers already existed — `serve` refuses to boot below the floor (HS-024), and
-`doctor --quick` prints the same finding because it is the same function (HS-045) — and ADR-0008 had already
+This is spec item 14's first sentence: "`min_free_gb` (default 20): session creation and resume fail with 507
+below it." Two of its three readers already existed — `serve` refuses to boot below the floor, and
+`doctor --quick` prints the same finding because it is the same function — and ADR-0008 had already
 written down that "a 507 for the free-space floor (item 14)" was coming. So this ADR decides only what a *request
 path* adds: where the check runs, what it shares, what it says, what `0` means, and who else is measured.
 
@@ -10,8 +10,8 @@ Five decisions, one of which is a change to a shared type.
 
 ## D1 — the floor is asked in the two handlers, and the create's answer is raised where its other refusals are
 
-The create already collects one `refusal: Option<ApiError>` before `slot_for` — the drain's `503` (HS-051) or
-the project's three `422`s (HS-026) — and `create_locked` raises it **after** the idempotency-key lookup and
+The create already collects one `refusal: Option<ApiError>` before `slot_for` — the drain's `503` or
+the project's three `422`s — and `create_locked` raises it **after** the idempotency-key lookup and
 **before** the cap. The floor joins that value, second: `drain` → floor → project.
 
 That placement is the whole of the create's behaviour, and every consequence is wanted:
@@ -85,7 +85,7 @@ invocation" and it is what `serve` built `Backends` from; the two agree on every
 **One consequence, stated because it is where the acceptance's third bullet stops.** `doctor` never consults the
 backend — it skips the Docker and git checks on a hub and nothing else — so on a *stub* run `doctor --quick` will
 fail its `disk` line while `POST /api/sessions` answers `202`. That is the same split as the boot: a stub `serve`
-starts on a full disk and refuses nothing, which HS-024 decided. The two readers still agree about the
+starts on a full disk and refuses nothing, which decided. The two readers still agree about the
 *measurement*; they disagree about whether it applies to this run, deliberately.
 
 This is also what keeps the test suite honest. This sandbox's `/tmp` has 3 GB free and the default floor is 20, so
@@ -136,4 +136,4 @@ unanswered by the very refusal they are reading.
   additionally runs a turn across the crossing and watches it settle.
 - A measurement that cannot be made on a request path answers `500 internal`, not `507`.
 - Item 14's remaining sentences (`session_disk_soft_gb`, the `du` watchdog, the `disk_quota` event) belong to
-  HS-063 and are unaffected by this split: the watchdog measures a *session's* usage, not the machine's floor.
+   and are unaffected by this split: the watchdog measures a *session's* usage, not the machine's floor.

@@ -1,4 +1,4 @@
-//! `holosmith drain`, the command half: the request line, the printed report and the exit code (HS-051).
+//! `holosmith drain`, the command half: the request line, the printed report and the exit code.
 //!
 //! The sequence is `tests/drain.rs`'s; this file is about the thing an operator and a promotion script see. Its
 //! subject is the **exit code**, because spec item 10 step 3 loops the drain into a restart: 0 must mean "the

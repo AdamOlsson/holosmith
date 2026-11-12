@@ -7,7 +7,7 @@ story's job was to notice that the repository already had the first and none of 
 
 ## What ADR-0009 already built, and what it cannot see
 
-`schema::contract_violations` (HS-004) refuses a `DROP TABLE`, an `ALTER TABLE … DROP COLUMN` or a `RENAME` in a
+`schema::contract_violations` refuses a `DROP TABLE`, an `ALTER TABLE … DROP COLUMN` or a `RENAME` in a
 migration whose **slug** is not `contract`/`contract_*`, matched on words so that `renamed_at` and
 `decontract_legacy` are not false positives. `cargo test` runs it over the embedded set, so the gate already
 rejects a destructive migration that nobody named as one. That is the local half: it needs one file to answer, and
@@ -34,7 +34,7 @@ The test is a **subset**, because adding is the point: a test that demanded equa
 checks. It is guarded against passing vacuously in the two ways it could: the snapshot must name this schema's
 tables (so a truncated or wrongly-sourced file fails), and the comparison is a function with its own tests over
 synthetic schemas — a drop, a rename and an addition — so a comparison that stopped comparing cannot go green
-(HS-061's lesson: a test's placement decides what it can prove).
+
 
 **Measured:** a migration named `0005_contract_drop_usage_out.sql` that runs `ALTER TABLE sessions DROP COLUMN
 usage_out` passes `contract_violations` (it is marked) and fails the subset test with
@@ -72,7 +72,7 @@ something must be told when the numbers disagree, and that is a check that runs 
 
 So `schema::verdict(recorded, binary)` is one function with three answers and one sentence each, and the callers
 that *decide* read it rather than comparing numbers themselves: `apply_pending` returns early on `Same` and warns
-and continues on `Newer`, and `doctor` (HS-045) is where the `Newer` sentence becomes a refusal. The banner prints
+and continues on `Newer`, and `doctor` is where the `Newer` sentence becomes a refusal. The banner prints
 the number the verdict is about — the **recorded** one, which is what `Database::schema_version()` already was.
 `serve`'s behaviour is unchanged; what changed is that the `warn` now carries the sentence, so the boot and the
 future refusal cannot drift apart.
@@ -87,7 +87,7 @@ future refusal cannot drift apart.
 - `scripts/schema-snapshot.sh` needs `python3` for its `sqlite3` module; the `sqlite3` CLI is not installed here and
   nothing in the gate may depend on it. It is a release-time tool, not a gate step.
 
-## Kept by ADR-0054 (HS-045)
+## Kept by ADR-0054
 
 "`doctor` refuses on a newer database" is now built: `doctor --quick`'s `database` check reads the file through
 `db::recorded_without_migrating` (SQLite's `SQLITE_OPEN_READ_ONLY`, not `Database::open`, so nothing is migrated)

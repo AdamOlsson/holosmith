@@ -1,4 +1,4 @@
-# holosmith: the pinned builder container (HS-076)
+# holosmith: the pinned builder container
 #
 # This is the image `holosmith build` runs, and the only place a release artifact is compiled. Spec item 10's first
 # step is that the build never runs on the host, so that a `build.rs`, a proc macro — or the web app's own `vite`
@@ -77,7 +77,7 @@ COPY build-entry.sh /usr/local/bin/holosmith-build
 # The recipe's own digest, passed in as a build argument and written as a label: `holosmith build` reads it back to
 # decide whether the image it finds was built from *this* Dockerfile and entry script. A version tag cannot answer
 # that — editing the recipe without bumping the version would otherwise reuse a stale image, which is the same class
-# of mistake `org.holosmith.binary-sha256` exists to prevent on the product images (HS-048).
+# of mistake `org.holosmith.binary-sha256` exists to prevent on the product images.
 ARG HOLOSMITH_BUILDER_RECIPE
 LABEL org.holosmith.builder-recipe-sha256="${HOLOSMITH_BUILDER_RECIPE}"
 

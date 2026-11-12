@@ -50,7 +50,7 @@ pub enum Cmd {
         #[command(subcommand)]
         which: ProxyAction,
     },
-    /// Whether this machine is fit to run sessions (spec item 10 §1 and §7).
+    /// Whether this machine is fit to run sessions.
     Doctor {
         /// The list `serve` refuses on, with no container: what the unit file runs as `ExecStartPre`.
         /// This is the default when neither flag is given.
@@ -60,7 +60,7 @@ pub enum Cmd {
         #[arg(long)]
         full: bool,
         /// An install tree to examine instead of the machine's own paths — `server deploy --root`'s, where the
-        /// release tree, the unit, the config and the admin socket all live under DIR (HS-080).
+        /// release tree, the unit, the config and the admin socket all live under DIR.
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
     },
@@ -69,23 +69,22 @@ pub enum Cmd {
         #[command(subcommand)]
         action: KeyAction,
     },
-    /// Compile a release artifact in the pinned builder container, so nothing is built on this host (spec item
-    /// 10's first step).
+    /// Compile a release artifact in the pinned builder container, so nothing is built on this host.
     ///
     /// The host orchestrates Docker and nothing else: no `build.rs`, no proc macro and no toolchain step runs
     /// outside the container. The artifact and its SHA-256 land in `--out`, which is where `holosmith upgrade`
-    /// reads them (HS-078); a failure prints the container's own last lines rather than a generic error.
+    /// reads them; a failure prints the container's own last lines rather than a generic error.
     Build {
         /// The triple to build (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`). Absent means the
         /// architecture this binary was built for.
         #[arg(long, value_name = "TRIPLE")]
         target: Option<String>,
         /// Where the artifact and its digest land. Absent means `releases/<tag>/` for the tag of the tree being
-        /// built (spec item 10's layout; HS-080 owns the `current` symlink).
+        /// built (the release tree's layout; the `current` symlink is managed here).
         #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,
     },
-    /// Promote a new version: the whole of spec item 10's pipeline, one printed line per step (HS-078).
+    /// Promote a new version: the whole pipeline, one printed line per step.
     ///
     /// The review gate acknowledged, the host smoke test, the two images when they changed, the drain, a database
     /// backup, the release directory, the `current` symlink, `systemctl restart` and a 20-second health poll that
@@ -108,11 +107,11 @@ pub enum Cmd {
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
     },
-    /// Go back one release: switch `current` to the release before the live one, drain, restart and verify (HS-079).
+    /// Go back one release: switch `current` to the release before the live one, drain, restart and verify.
     ///
     /// The emergency brake for a promotion that passed its health check but turned out to be wrong. It drains first,
     /// switches `current` **back one release in the tree's own order**, restarts the unit and polls `/api/health` for
-    /// a process younger than that restart. There is no review acknowledgement: item 12's review is a pre-promotion
+    /// a process younger than that restart. There is no review acknowledgement: the review is a pre-promotion
     /// gate, and a rollback is the command that undoes a promotion. The database is never restored — the migration
     /// rule (expand/contract) is what makes switching back safe.
     Rollback {
@@ -134,7 +133,7 @@ pub enum Cmd {
         #[command(subcommand)]
         action: ContainerAction,
     },
-    /// Run the smoke run against a candidate binary: spec item 10 step 2, a promotion's go/no-go (ADR-0081).
+    /// Run the smoke run against a candidate binary: a promotion's go/no-go (ADR-0081).
     ///
     /// The promotion's go/no-go: it starts the binary named by `--binary` as a `serve` with a smoke config — its own
     /// port, its own temporary roots, `smoke_` in front of every container and network it names — creates a session,
@@ -150,7 +149,7 @@ pub enum Cmd {
         root: Option<PathBuf>,
     },
     /// What this machine is and what it is doing: role, version, uptime, session counts, the proxies, and the
-    /// health of the machines registered with it (spec's Commands table).
+    /// health of the machines registered with it.
     Status,
     /// The server's log from journald, or one session's log (`-f` follows either).
     Logs {
@@ -161,7 +160,7 @@ pub enum Cmd {
         #[arg(long, value_name = "ID")]
         session: Option<String>,
     },
-    /// Remove the unit, the two proxies and the machine's networks, keeping the data (spec's Commands table).
+    /// Remove the unit, the two proxies and the machine's networks, keeping the data.
     Uninstall {
         /// Also remove the data root: the database, every session's log and `secrets/`.
         #[arg(long)]
@@ -173,7 +172,7 @@ pub enum Cmd {
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
     },
-    /// Refuse new work and wait for running turns, over the local admin socket (spec item 10 step 3).
+    /// Refuse new work and wait for running turns, over the local admin socket.
     ///
     /// One connection, one local unix socket, never the network: the machine answers this from
     /// `/run/holosmith/drain.sock` and nowhere else, and a request that reaches the control origin cannot make it
@@ -187,12 +186,12 @@ pub enum Cmd {
         #[arg(long, value_name = "PATH")]
         admin_dir: Option<PathBuf>,
     },
-    /// Install and start a server on this machine (spec item 10's seven steps).
+    /// Install and start a server on this machine.
     Server {
         #[command(subcommand)]
         action: ServerAction,
     },
-    /// Install and start a hub on this machine, and manage the machines it forwards to (spec's Commands table).
+    /// Install and start a hub on this machine, and manage the machines it forwards to.
     Hub {
         #[command(subcommand)]
         action: HubAction,
@@ -205,7 +204,7 @@ pub enum ServerAction {
     /// Run the deploy's seven steps in order, each checking the current state first. Re-running is safe.
     ///
     /// On a machine whose config says `hub` this installs the **server half** and leaves the config `both`: a role
-    /// is not a reason to refuse a deploy (the spec's Roles table, HS-072).
+    /// is not a reason to refuse a deploy.
     Deploy {
         /// Print each step's plan and change nothing. A broken machine still exits non-zero.
         #[arg(long)]
@@ -238,7 +237,7 @@ pub enum HubAction {
         dry_run: bool,
         /// Install into this directory instead of the system paths, as the invoking user (no sudo).
         ///
-        /// The spec's Commands table lists this flag for `server deploy` only. It is here with the same meaning and
+        /// The same meaning as `server deploy --root`. It is here for the same reason and
         /// for the same reason (ADR-0056): an install tree is how the whole deploy is driven by an unprivileged
         /// user, and it is how this story's own acceptance is measured.
         #[arg(long, value_name = "DIR")]
@@ -283,7 +282,7 @@ pub enum HostAction {
     },
 }
 
-/// The proxies a container runs (spec item 2's "internal subcommands").
+/// The proxies a container runs.
 #[derive(Debug, Subcommand)]
 pub enum ProxyAction {
     /// The egress proxy: the only route out of a session container.
@@ -306,12 +305,12 @@ pub enum ProxyAction {
     },
 }
 
-/// The container helpers (spec item 9's `hs-snapshot` logic).
+/// The container helpers.
 #[derive(Debug, Subcommand)]
 pub enum ContainerAction {
     /// Save the worktree's uncommitted work at `refs/holosmith/wip/<HS_SESSION_ID>`.
     Snapshot,
-    /// Be pi, for the smoke run: replay the committed turn on stdin/stdout (spec item 10 step 2).
+    /// Be pi, for the smoke run: replay the committed turn on stdin/stdout.
     ///
     /// The smoke image's `/usr/local/bin/pi` is a two-line wrapper around this, so a session's container runs this
     /// binary under pi's own name and `agent::COLUMN`'s launch line, version check and record framing are the real
@@ -330,7 +329,7 @@ pub enum ContainerAction {
     },
 }
 
-/// The three key subcommands (spec CLI phase 1).
+/// The three key subcommands.
 #[derive(Debug, Subcommand)]
 pub enum KeyAction {
     /// Read one provider's key from stdin and store it, mode 0600.

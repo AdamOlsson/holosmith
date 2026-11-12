@@ -1,4 +1,4 @@
-//! The disk floor's request-path half (HS-062, spec item 14): `507 disk_floor` for the two requests that *start*
+//! The disk floor's request-path half (spec item 14): `507 disk_floor` for the two requests that *start*
 //! work.
 //!
 //! Item 14's first sentence — "`min_free_gb` (default 20): session creation and resume fail with 507 below it" —

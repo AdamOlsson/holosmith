@@ -39,7 +39,7 @@ fn version_prints_five_key_value_lines_and_exits_zero() {
         "expected a non-empty git_tag line, got {:?}",
         lines[1]
     );
-    // The fifth fact is the **release directory the running file is in** (HS-080), and this binary is in
+    // The fifth fact is the **release directory the running file is in**, and this binary is in
     // `target/*/holosmith`, not under `releases/`: the line is always printed, and `-` is that answer.
     assert_eq!(
         lines[2], "release -",

@@ -1,6 +1,6 @@
 # The service, the keys and the origins are three more reads and applies
 
-HS-049 is spec item 10 §"What `server deploy` does" steps **2**, **5** and **6**, plus step **7**'s body, and its
+This is spec item 10 §"What `server deploy` does" steps **2**, **5** and **6**, plus step **7**'s body, and its
 acceptance is five sentences about a real host: the service user, its group and the ownership that lets `serve`
 write the tree; the VAPID keys written at first start and **never** regenerated; the unit installed, enabled and
 started; both Tailscale origins configured; and "a wrong mode fails `doctor`". The demo is the same claim from the
@@ -8,8 +8,8 @@ other side: a fresh host ends with a working HTTPS URL on two ports, and still d
 
 ## What the story closed, and what it did not
 
-Two items of step 2 were HS-047's leftovers — the service user and the VAPID pair — and steps 5, 6 and 7 were the
-three that still said `skipped` after HS-048 filled step 3. **Nothing in `server deploy` is `skipped` any more, so
+Two items of step 2 were the leftovers — the service user and the VAPID pair — and steps 5, 6 and 7 were the
+three that still said `skipped` filled step 3. **Nothing in `server deploy` is `skipped` any more, so
 the machinery that said so is deleted rather than left to rot**: the owner table (`SERVICE`, `ORIGINS`, `HEALTH`),
 `skipped()`, `Report::owners()` and the `deploy: incomplete: N of 7 steps belong to later stories` line, and step
 2's `REMAINDER` remark, which named stories for two items the step now does itself. A `skipped` sentence means
@@ -17,14 +17,14 @@ the machinery that said so is deleted rather than left to rot**: the owner table
 name an owner that does not exist.
 
 Step 7 has no other owner in the backlog, and that is worth saying plainly because it looks like a step somebody
-else might pick up: HS-050 is `status`, `logs` and `uninstall`, HS-072 is `hub deploy`, HS-078/HS-079 are
+else might pick up: This is `status`, `logs` and `uninstall`, This is `hub deploy`, those stories are
 `upgrade`/`rollback`. The `/api/health` wait and the `doctor --full` that ends it are this deploy's own two
 measurements, so leaving them skipped would have left the last step of a seven-step list with no story to fill it.
 
 ## D1 — the VAPID pair: one writer, one file, one child
 
 The spec's own step-2 sentence says "Generate the VAPID keys", so step 2 is the writer. `serve` only reads, and the
-consumer that signs with the pair is HS-066. "At first start" therefore means the first `server deploy` of this
+consumer that signs with the pair is. "At first start" therefore means the first `server deploy` of this
 installation: the second run reads the file the first one wrote.
 
 The file is `<data>/secrets/vapid.toml`, mode 0600, inside the 0700 `secrets` directory the provider keys already
@@ -54,7 +54,7 @@ run instead of being put right. And **the second run leaves the bytes identical*
 `cmp` and `tests/deploy.rs` with byte equality, the same pair of detectors `keys.toml` has.
 
 The consequence is recorded rather than left for the consumer to find: **no `sub` claim is stored here.** A JWT's
-subject is a claim, not key material, so HS-066 decides it and must read this file as it is; a shape change would
+subject is a claim, not key material, so decides it and must read this file as it is; a shape change would
 be a new file, not a rewrite of this one.
 
 ## D2 — the service user, the docker group and the chown

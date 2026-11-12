@@ -1,7 +1,7 @@
-//! Every statement that reads or writes the `sessions` table (HS-007).
+//! Every statement that reads or writes the `sessions` table.
 //!
 //! The repository borrows the open `Database`'s connection rather than owning one. The connection
-//! reaches a handler behind ADR-0012's `Arc<Mutex<Database>>` stopgap until HS-009's single writer
+//! reaches a handler behind ADR-0012's `Arc<Mutex<Database>>` stopgap until the single writer
 //! owns the write path; either way this file is the only one with a sessions statement. A test
 //! below walks `src/**` and fails if a sessions statement appears anywhere else, which is what
 //! makes "no SQL outside the repository" checkable rather than a review note.
@@ -29,21 +29,21 @@ const INSERT: &str = "INSERT INTO sessions \
      VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, NULL, ?7, ?8, ?9, ?9, NULL, 0, 0)";
 
 /// A status change: `stopped_at` moves with the status, `last_active_at` does not (it is
-/// activity, and HS-020/HS-021 own when it moves).
+/// activity, and those stories own when it moves).
 const UPDATE_STATUS: &str =
     "UPDATE sessions SET status = ?2, status_reason = ?3, stopped_at = ?4 WHERE id = ?1";
 
-/// One bit of activity: `last_active_at` moves and nothing else (HS-015's prompt and settle, and
-/// HS-017's steer).
+/// One bit of activity: `last_active_at` moves and nothing else (the prompt and settle, and
+/// the steer).
 const TOUCH: &str = "UPDATE sessions SET last_active_at = ?2 WHERE id = ?1";
 
-/// What the worktree step made (HS-025): where the session's files are, and the commit its branch starts
+/// What the worktree step made: where the session's files are, and the commit its branch starts
 /// from. Written once per provision, by the provisioner, because a backend cannot write the row
 /// (ADR-0019) and because the base commit has to stay the one the branch started at even after the
-/// branch has moved — `ahead` is measured from it (HS-061).
+/// branch has moved — `ahead` is measured from it.
 const SET_WORKTREE: &str = "UPDATE sessions SET worktree = ?2, base_commit = ?3 WHERE id = ?1";
 
-/// What one `message.end` adds to the tally (HS-023). An add rather than a set, because the counts
+/// What one `message.end` adds to the tally. An add rather than a set, because the counts
 /// accumulate over the session's life and a turn reports only its own; a column that was *set* would
 /// lose every turn but the last.
 const ADD_USAGE: &str =
@@ -53,11 +53,11 @@ const ADD_USAGE: &str =
 /// comparison against one value and no reader has to add two columns and remember to.
 const SPEND: &str = "SELECT usage_in + usage_out FROM sessions WHERE id = ?1";
 
-/// The expected-stop flag (HS-030): one bit that says "we asked this session's container to stop".
+/// The expected-stop flag: one bit that says "we asked this session's container to stop".
 /// `?2` is `true`/`false` as SQLite's `1`/`0`.
 const SET_EXPECTED_STOP: &str = "UPDATE sessions SET expected_stop = ?2 WHERE id = ?1";
 
-/// The flag's read *and* clear in one statement (HS-030): the classifier consumes it, so two
+/// The flag's read *and* clear in one statement: the classifier consumes it, so two
 /// observers cannot both be told that the exit they saw was the stop we asked for.
 ///
 /// A compare-and-swap rather than `… RETURNING expected_stop`, because SQLite's `RETURNING` on an
@@ -67,25 +67,25 @@ const SET_EXPECTED_STOP: &str = "UPDATE sessions SET expected_stop = ?2 WHERE id
 const TAKE_EXPECTED_STOP: &str =
     "UPDATE sessions SET expected_stop = 0 WHERE id = ?1 AND expected_stop = 1";
 
-/// The row's removal: what `deleting` means once the session owns nothing any more (HS-019).
+/// The row's removal: what `deleting` means once the session owns nothing any more.
 const REMOVE: &str = "DELETE FROM sessions WHERE id = ?1";
 
 /// The event counter's bump: one per event, inside the event insert's transaction, returning the
-/// value it assigned (HS-009). A column, not `MAX(seq)`, because compaction deletes rows and a
+/// value it assigned. A column, not `MAX(seq)`, because compaction deletes rows and a
 /// derived counter would rewind and reuse a seq (ADR-0013).
 const BUMP_LAST_SEQ: &str =
     "UPDATE sessions SET last_seq = last_seq + 1 WHERE id = ?1 RETURNING last_seq";
 
-/// The order `list` answers in: newest activity first, for the Sessions screen (HS-013), and the
+/// The order `list` answers in: newest activity first, for the Sessions screen, and the
 /// id after it so the order is total. The same `sessions_last_active` index also serves
-/// eviction's ascending read of the least recently active session (HS-020).
+/// eviction's ascending read of the least recently active session.
 const ORDER: &str = "ORDER BY last_active_at DESC, id ASC";
 
 /// The cap's count: the three live statuses, supplied from `Status::as_str` so the words stay in
 /// the enum, over the `sessions_status` index (ADR-0012).
 const LIVE_COUNT: &str = "SELECT count(*) FROM sessions WHERE status IN (?1, ?2, ?3)";
 
-/// Every status the table holds, with how many rows have it (HS-050's `status` command).
+/// Every status the table holds, with how many rows have it.
 ///
 /// `GROUP BY` rather than six counts, and rather than `list(None)`: a status with no rows is absent
 /// from the answer, so the caller fills it out from [`Status::ALL`] — the enum is the list of
@@ -104,14 +104,14 @@ fn oldest_idle_filter() -> String {
     format!("WHERE status = ?1 {QUIETEST_FIRST} LIMIT 1")
 }
 
-/// The idle stop's candidates (HS-021): the only status a sweep may choose from, and the bound that
+/// The idle stop's candidates: the only status a sweep may choose from, and the bound that
 /// makes "quiet for too long" one comparison rather than a filter in Rust. `last_active_at` is whole
 /// seconds, so `<` is "strictly older than the cutoff".
 fn idle_before_filter() -> String {
     format!("WHERE status = ?1 AND last_active_at < ?2 {QUIETEST_FIRST}")
 }
 
-/// The stopped-session expiry's candidates (HS-064, spec item 15): rows that have been `stopped` since before
+/// The stopped-session expiry's candidates (spec item 15): rows that have been `stopped` since before
 /// the cutoff, oldest first.
 ///
 /// The `status = 'stopped'` predicate is item 15's "sessions in `error` are never auto-deleted", and it keeps a
@@ -158,7 +158,7 @@ impl<'a> SessionRepository<'a> {
                     new.thinking,
                     new.base_commit,
                     // The table's `none` row, not a second spelling of "a create starts in
-                    // starting" (HS-012). `initial_status` panics only if the table loses its
+                    // starting". `initial_status` panics only if the table loses its
                     // create row, which its own test refuses.
                     super::state::initial_status().as_str(),
                     new.client_key,
@@ -186,7 +186,7 @@ impl<'a> SessionRepository<'a> {
         self.one("get", "WHERE id = ?1", &[&id])
     }
 
-    /// One session by the idempotency key its create carried (HS-008).
+    /// One session by the idempotency key its create carried.
     pub fn by_client_key(&self, client_key: &str) -> Result<Option<Session>, RepoError> {
         self.one("by_client_key", "WHERE client_key = ?1", &[&client_key])
     }
@@ -204,9 +204,9 @@ impl<'a> SessionRepository<'a> {
     }
 
     /// Every `idle` session whose `last_active_at` is older than `cutoff`: the idle stop's candidates
-    /// (HS-021), quietest first.
+    /// quietest first.
     ///
-    /// **All of them, not one.** `oldest_idle` (HS-020) answers the cap's question — "whose slot can I
+    /// **All of them, not one.** `oldest_idle` answers the cap's question — "whose slot can I
     /// have?" — and has no time bound; a sweep is a policy over every session that has been quiet for
     /// too long, so a tick that stopped one and waited for the next would make the stop interval a
     /// function of how many sessions sat idle.
@@ -223,7 +223,7 @@ impl<'a> SessionRepository<'a> {
     }
 
     /// Every `stopped` session whose `stopped_at` is older than `cutoff`: the stopped-session expiry's
-    /// candidates (HS-064, spec item 15), oldest first.
+    /// candidates (spec item 15), oldest first.
     ///
     /// **All of them, not one**, for [`Self::idle_before`]'s reason: the daily pass is a policy over every
     /// session that has been stopped for too long, so a pass that removed one and waited for the next day would
@@ -242,7 +242,7 @@ impl<'a> SessionRepository<'a> {
 
     /// How many sessions are live — `starting`, `idle` or `running` — the set item 8's cap
     /// counts (ADR-0012). One statement over the `sessions_status` index, not `list` with three
-    /// filters: a count is one row of one column, and the three-status set is HS-020's to change.
+    /// filters: a count is one row of one column, and the three-status set is the to change.
     pub fn live_count(&self) -> Result<u64, RepoError> {
         self.connection
             .query_row(
@@ -280,7 +280,7 @@ impl<'a> SessionRepository<'a> {
         Ok(counts)
     }
 
-    /// The least recently active `idle` session: the cap's victim (HS-020), or `None` when nothing is
+    /// The least recently active `idle` session: the cap's victim, or `None` when nothing is
     /// evictable.
     ///
     /// One statement rather than `list(Some(Status::Idle)).last()`: the answer is one row, and the
@@ -299,7 +299,7 @@ impl<'a> SessionRepository<'a> {
     /// Set the status and its reason, and move `stopped_at` with it: `now` when the new status is
     /// `stopped`, `NULL` otherwise, which is item 15's "cleared on resume".
     ///
-    /// **Not the way to change a state.** Since HS-012 the one production caller is
+    /// **Not the way to change a state.** Since the one production caller is
     /// [`super::state::Transitioner::apply`], which decides whether the move is in the table and
     /// emits the `session.status` event; this method only writes. A source-level guard in
     /// `sessions/state.rs` fails the build's tests if any other file under `src/` names it.
@@ -326,7 +326,7 @@ impl<'a> SessionRepository<'a> {
         self.one("set_status", "WHERE id = ?1", &[&id])
     }
 
-    /// Record whether the stop of this session's container was expected (HS-030, spec item 6).
+    /// Record whether the stop of this session's container was expected (spec item 6).
     ///
     /// Not a state change, so this is the repository's and not the transitioner's — the state is where
     /// the session *is*, and this is one bit about the container. The two production callers are the
@@ -346,7 +346,7 @@ impl<'a> SessionRepository<'a> {
         Ok(())
     }
 
-    /// Take the expected-stop flag: `true` when it was set, and it is cleared either way (HS-030).
+    /// Take the expected-stop flag: `true` when it was set, and it is cleared either way.
     ///
     /// One statement rather than a read and a write, because the flag answers a question about *one*
     /// exit: a caller that read `true` and then wrote `false` would leave a window in which a second
@@ -362,7 +362,7 @@ impl<'a> SessionRepository<'a> {
             .map_err(|error| RepoError::sqlite("take_expected_stop", error))
     }
 
-    /// Record that this session was active at `now` (HS-015, HS-020/HS-021's LRU order).
+    /// Record that this session was active at `now` (those stories's LRU order).
     ///
     /// Activity is not a state change, so this is the repository's and not the transitioner's: the
     /// status write deliberately leaves `last_active_at` alone, and the callers that mean "something
@@ -380,7 +380,7 @@ impl<'a> SessionRepository<'a> {
     }
 
     /// Record what the worktree step made: the session's worktree path and the commit its branch starts
-    /// from (HS-025).
+    /// from.
     ///
     /// Not a state change, so this is the repository's and not the transitioner's. The one production
     /// caller is [`crate::provisioner::Provisioner`], which writes it the moment the backend answers —
@@ -400,7 +400,7 @@ impl<'a> SessionRepository<'a> {
         Ok(())
     }
 
-    /// Add one message's token counts to the session's tally (HS-023).
+    /// Add one message's token counts to the session's tally.
     ///
     /// The one production caller is [`crate::events::EventRepository::insert_batch`], which runs this
     /// inside the transaction that assigns the seq: the event log and the row's tally therefore commit
@@ -409,7 +409,7 @@ impl<'a> SessionRepository<'a> {
     /// and the row is what a client reads the spend from.
     ///
     /// A row that has gone is not an error: the events writer drops an event whose session was removed
-    /// under it (HS-019), and this is called for an event that survived.
+    /// under it, and this is called for an event that survived.
     pub fn add_usage(&self, id: &str, input: u64, output: u64) -> Result<(), RepoError> {
         self.connection
             .execute(ADD_USAGE, params![id, input, output])
@@ -418,7 +418,7 @@ impl<'a> SessionRepository<'a> {
     }
 
     /// What the session has spent, `usage_in + usage_out`, or `None` when there is no such row
-    /// (HS-023).
+    ///
     ///
     /// One number rather than the two columns, because the token budget's question is "is the session
     /// over its ceiling" and the answer is a comparison, not two counts a caller has to add. A session
@@ -431,7 +431,7 @@ impl<'a> SessionRepository<'a> {
             .map_err(|error| RepoError::sqlite("spend", error))
     }
 
-    /// Remove this session's row and its event log, in **one** transaction (HS-019).
+    /// Remove this session's row and its event log, in **one** transaction.
     ///
     /// The log goes first and through the events repository's own statement, so no `events` SQL
     /// lives here; that statement borrows the transaction this call opened, exactly as
@@ -458,7 +458,7 @@ impl<'a> SessionRepository<'a> {
         Ok(removed > 0)
     }
 
-    /// Bump and return this session's event counter (HS-009).
+    /// Bump and return this session's event counter.
     ///
     /// The caller runs it inside the event insert's transaction, so the seq a row carries and the
     /// counter that assigned it commit together; `None` means there is no such session. It lives
@@ -467,7 +467,7 @@ impl<'a> SessionRepository<'a> {
     ///
     /// `pub(crate)` because there is exactly one caller and one writer: "exactly one thread
     /// assigns seq" would be convention if anything holding the database's lock could bump the
-    /// counter on its own and leave a permanent gap in a session's stream (PER-41 S3).
+    /// counter on its own and leave a permanent gap in a session's stream.
     pub(crate) fn bump_last_seq(&self, id: &str) -> Result<Option<i64>, RepoError> {
         self.connection
             .query_row(BUMP_LAST_SEQ, [id], |row| row.get(0))
@@ -475,7 +475,7 @@ impl<'a> SessionRepository<'a> {
             .map_err(|error| RepoError::sqlite("bump_last_seq", error))
     }
 
-    /// The counter's current value for this session, or `None` when there is no such row (HS-044).
+    /// The counter's current value for this session, or `None` when there is no such row.
     ///
     /// A **reader**, and the only one: the counter is bumped by [`Self::bump_last_seq`] inside the event
     /// insert's transaction, and what a crash must not do is reset it (ADR-0013). So the reconcile's own

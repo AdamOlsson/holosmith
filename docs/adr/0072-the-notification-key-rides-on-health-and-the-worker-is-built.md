@@ -1,6 +1,6 @@
 # The notification key rides on health, and the worker is a built file
 
-HS-067 is item 11's browser half. HS-066/ADR-0071 built the wire — the two routes, the `push_subscriptions` table,
+This is item 11's browser half. /ADR-0071 built the wire — the two routes, the `push_subscriptions` table,
 the four `kind` words, the 20-second threshold, the stream rule, and a VAPID-signed RFC 8291 message whose plaintext
 is `{host, session_id, kind}` and never content. What was missing was the app the wire talks to: no manifest, no
 icon, no service worker, no `pushManager` call, no settings screen, and — the one thing that cannot be worked around
@@ -24,7 +24,7 @@ The three arms and why this one:
 | a new `GET /api/push/key` | a route spec item 11's API table does not list, and a second request before the screen can draw |
 | served into the shell by `web/src/web.rs` | the shell is an embedded static file, so this is templating a value into it — which breaks `case_app_shell`'s byte-for-byte comparison and puts a dynamic value in a static asset |
 
-`preview_origin` is the precedent, not an analogy: HS-041 put the origin a session's preview lives on into this
+`preview_origin` is the precedent, not an analogy: put the origin a session's preview lives on into this
 payload for exactly this reason (ADR-0051), and `main.ts` already fetches health before either screen draws, so the
 key costs no request at all. ADR-0067 D4 rejected health for the *changes sheet's* two lists because those are one
 session's facts; a machine's signing key is the machine's, which is what this payload is.
@@ -56,7 +56,7 @@ rule — `/settings` returns to the list, every other path offers it.
 
 The screen's "state per machine" is one row today, because there is one control origin; the row names the origin
 and whether this browser is subscribed, and a line under it says why a second machine will be a second
-subscription (item 11's last bullet: each machine's keys are independent). HS-069/HS-074 own the cross-machine half.
+subscription (item 11's last bullet: each machine's keys are independent). those stories own the cross-machine half.
 
 ## D3 — the iOS sentence is a rule, and there are two of them
 
@@ -178,5 +178,5 @@ one thing left to a phone.
 
 Per-session subscriptions (item 11's payload carries the session, and a subscription that named one is a
 registration no browser makes); a notification's content (ADR-0071's plaintext is three keys); a caching worker
-(above); the hub forwarding a subscription or a push (HS-069, HS-074); and any change to the wire — HS-066's two
+(above); the hub forwarding a subscription or a push; and any change to the wire — the two
 routes take exactly `{endpoint, p256dh, auth}` and are unchanged.

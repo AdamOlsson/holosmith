@@ -1,4 +1,4 @@
-//! The publish over a real bare repository: the push (HS-057, spec item 12's publish paragraph), its refusals,
+//! The publish over a real bare repository: the push (spec item 12's publish paragraph), its refusals,
 //! and the credential assertion the story's last acceptance bullet asks for.
 //!
 //! Item 12's publish is a *remote's* fact, so these tests own a **bare repository** as `origin` — `git init
@@ -265,7 +265,7 @@ async fn a_publish_lands_the_branch_on_a_bare_remote_and_names_the_commit_it_rea
     assert_eq!(body["branch"], fixture.branch().as_str());
     assert_eq!(body["commit"], tip.as_str());
     assert_eq!(body.as_object().expect("an object").len(), 3);
-    // ... and it is `touches_ci`-free: the CI flag is the changes view's and the warning is HS-058's, so an
+    // and it is `touches_ci`-free: the CI flag is the changes view's and the warning is that story's, so an
     // answer carrying a flag this route never computed would be a claim about a diff it did not read.
     assert!(body.get("touches_ci").is_none(), "{}", response.body);
     // The remote's own git is the measurement: the ref exists, and it is the commit the answer named.
@@ -534,7 +534,7 @@ async fn an_empty_publish_remotes_disables_the_route_for_every_id() {
 async fn an_unlisted_remote_and_one_the_repository_lacks_are_one_code_and_two_sentences() {
     // `bad_remote`'s two facts, and the needles are each half's *own*: the config's list for the first, the
     // repository for the second. A single needle that both sentences contain would pass with either half
-    // deleted (HS-056's review, S1).
+    // deleted (S1).
     let unlisted = Fixture::new("publish-unlisted");
     unlisted.commit("a.txt", b"a\n", "the session's change");
     let served = unlisted.served().await;
@@ -697,7 +697,7 @@ async fn the_state_refusals_are_this_route_s_sentences() {
 
     // The fourth fact: the branch itself is gone while the directory and its registration are intact — what a
     // `git update-ref -d` (or a hand-run `branch -D` in another checkout) leaves behind. Without this arm the
-    // `NoBranch` sentence is a line nothing measures, which `docs/notes.md` records as the merge's own lesson.
+    // `NoBranch` sentence is a line nothing measures, which an earlier development note records as the merge's own lesson.
     let gone_branch = Fixture::new("publish-branch-gone");
     gone_branch.commit("a.txt", b"a\n", "the session's change");
     git(

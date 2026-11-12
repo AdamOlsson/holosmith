@@ -1,4 +1,4 @@
-//! `holosmith logs`: the server's log from journald, or one session's `session.log` (HS-050).
+//! `holosmith logs`: the server's log from journald, or one session's `session.log`.
 //!
 //! Thin, like the other commands: the one seam is [`crate::logs::Tools`], and the exit code is the child's own for
 //! the journald arm — journald's "no journal" answer is a fact this command has no better words for. The config is
@@ -27,7 +27,7 @@ pub struct LogsArgs {
 
 pub fn run(args: LogsArgs) -> ExitCode {
     // The journald arm comes **first and reads no config**: the unit's log is journald's, so a machine whose
-    // `config.toml` is broken can still be read — which is exactly the machine an operator runs `logs` on (HS-050's
+    // `config.toml` is broken can still be read — which is exactly the machine an operator runs `logs` on (that story's
     // review, S4). The session arm is where a data root is needed, and that is where the config is read.
     let Some(id) = args.session else {
         let tools = logs::Tools::default();

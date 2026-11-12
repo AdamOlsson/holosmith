@@ -1,25 +1,25 @@
-//! The Docker backend: the real one, from HS-025.
+//! The Docker backend: the real one,.
 //!
 //! It exists so the trait has the implementation the product actually ships with, and so `--backend
 //! docker` — which is the default (ADR-0001) — answers honestly instead of pretending a session is
-//! provisioned. **All four provisioning steps are real:** the worktree (HS-025), the session's private
-//! network (HS-028), the container (HS-028) and the agent inside it (HS-031), and since HS-032 so are the
+//! provisioned. **All four provisioning steps are real:** the worktree, the session's private
+//! network, the container and the agent inside it, and so are the
 //! turn's operations: a prompt reaches pi over its RPC mode and every record pi prints becomes a frame on the
-//! writer ([`crate::rpc`]). The WIP snapshot is real since HS-042 (ADR-0049): the delete flow's
+//! writer ([`crate::rpc`]). The WIP snapshot is real (ADR-0049): the delete flow's
 //! `SessionBackend::snapshot` call is its `409 unsaved_work` guard, and the turn runner and `Stopper` take one
 //! before the work can be lost.
 //!
 //! Whether the machine *can* run Docker sessions at all is not this file's question: [`crate::preflight`]
-//! answers it once, at startup, and `serve` refuses to bring up a Docker run that fails it (HS-024). A
+//! answers it once, at startup, and `serve` refuses to bring up a Docker run that fails it. A
 //! backend that reported its own preflight would be a second opinion about the same machine.
 //!
-//! What is left, and who owns it: the rest of pi's RPC mapping — tool calls and output files (HS-033), the
-//! usage question (HS-034) and images with extension UI requests (HS-035) — the `egress` network and the
-//! startup self-test (HS-036), and the egress and key proxies (HS-037, HS-039). HS-028 creates the minimum a
-//! container needs — an **internal** network of its own, which is the isolation — and HS-036 owns the rest of
+//! What is left, and who owns it: the rest of pi's RPC mapping — tool calls and output files, the
+//! usage question and images with extension UI requests — the `egress` network and the
+//! startup self-test, and the egress and key proxies. creates the minimum a
+//! container needs — an **internal** network of its own, which is the isolation — and a later change owns the rest of
 //! the network's story.
 //!
-//! **The container is the agent (HS-031).** `docker run` is attached (`-i`), its command is `pi --mode rpc`,
+//! **The container is the agent.** `docker run` is attached (`-i`), its command is `pi --mode rpc`,
 //! and this module holds the spawned process (`crate::agent::Agent`) in a registry with a per-session
 //! **generation**. Two things follow from that and are worth knowing before reading `delete` and
 //! `supervise`: a launch replaces the registry entry, so an exit from a container a newer launch replaced is
@@ -84,7 +84,7 @@ pub struct DockerBackend {
     /// **The map keeps one entry per session id this process has started**, and it does not shrink: an
     /// entry cannot be dropped while anyone may still be waiting on it, and a sweep that guesses when that
     /// is lets a third caller mint a fresh mutex and walk into the section the lock exists to protect (the
-    /// review of HS-029 found exactly that in the first draft's `strong_count` test). An unlocked
+    /// review found exactly that in the first draft's `strong_count` test). An unlocked
     /// `tokio::sync::Mutex` plus a 16-byte id is not worth a racy registry, and a process is restarted long
     /// before this matters.
     starts: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
@@ -103,11 +103,11 @@ pub struct DockerBackend {
     /// the server). A `tokio` mutex because the answer arrives through `spawn_blocking` and the wait is an
     /// `await`.
     version: Arc<tokio::sync::Mutex<Option<Result<String, String>>>>,
-    /// `<data>/sessions/<id>/session.log`: the session's stderr and the launch line (spec item 15, HS-030).
+    /// `<data>/sessions/<id>/session.log`: the session's stderr and the launch line (spec item 15).
     log: SessionLog,
     /// How many RPC commands this process has written, which is what makes a command's id unique.
     ///
-    /// The ready handshake is one constant id because it is one per agent (HS-031); a turn's commands are not:
+    /// The ready handshake is one constant id because it is one per agent; a turn's commands are not:
     /// a steer, a `clear_queue` and an abort can be in flight together, and pi correlates an answer by id, so
     /// two live commands sharing one would hand each other's replies to the wrong caller.
     commands: Arc<AtomicU64>,
@@ -142,7 +142,7 @@ impl DockerBackend {
     ///
     /// Public because a test that wants to ask the process something — the ready handshake is the pi step's,
     /// but "did the project's own resources load" is a question only the live agent can answer — has no
-    /// other way in. HS-032's turn methods will use it from inside this module.
+    /// other way in. the turn methods will use it from inside this module.
     pub fn agent(&self, session_id: &str) -> Option<Arc<Agent>> {
         let agents = self.agents.lock().unwrap_or_else(PoisonError::into_inner);
         agents
@@ -240,7 +240,7 @@ impl DockerBackend {
         network_name(&self.settings.network_prefix, &session.id)
     }
 
-    /// This run's egress proxy container: `hs_egress`, or `smoke_hs_egress` in a smoke run (HS-077).
+    /// This run's egress proxy container: `hs_egress`, or `smoke_hs_egress` in a smoke run.
     fn egress_name(&self) -> String {
         crate::container::proxy_name(&self.settings.container_prefix)
     }
@@ -250,7 +250,7 @@ impl DockerBackend {
         crate::key::key_proxy_name(&self.settings.container_prefix)
     }
 
-    /// Whether `project`'s repository may be mounted, and why not when it may not (HS-026).
+    /// Whether `project`'s repository may be mounted, and why not when it may not.
     ///
     /// The create asks this **before** the session row exists, so it cannot go through [`Self::worktree`]:
     /// the repository is named by the projects root and the project alone. It is a host read like every
@@ -321,18 +321,18 @@ impl DockerBackend {
     /// The session's private network: `docker network create --internal agents_<id>` (spec item 2).
     ///
     /// `--internal` is the isolation and the reason this step exists at all: the container joins *only*
-    /// this network, so it has no route to the host and none to the internet. HS-036 adds the `egress`
+    /// this network, so it has no route to the host and none to the internet. adds the `egress`
     /// network, the two proxies and the startup self-test; what is here is the minimum a container needs
     /// to be started on a network of its own rather than on the default bridge.
     ///
     /// A network of the same name that is already there is reused (the teardown failed, or the process
-    /// died, and HS-044 is what reconciles that at startup) — creating one twice is not an error worth
+    /// died, and This is what reconciles that at startup) — creating one twice is not an error worth
     /// failing a session over.
     async fn provision_network(&self, session: &Session) -> Result<Provisioned, BackendError> {
         // Serialised with a start and a delete of the same session, like the container step: this step now
         // *changes an endpoint* on the network (it joins the proxy), and a delete that landed between the join
         // and its own leave-then-`rm` would re-attach the proxy to a network the delete is removing — leaving an
-        // endpoint nobody owns and a `warn` instead of a teardown (HS-037).
+        // endpoint nobody owns and a `warn` instead of a teardown.
         let _start = self.start_lock(&session.id).await;
         let network = self.network(session);
         Self::docker(Step::Network, self.settings.docker(), move |docker| {
@@ -350,7 +350,7 @@ impl DockerBackend {
         Ok(Provisioned::Nothing)
     }
 
-    /// Join the machine's egress proxy to this session's network, or leave it off (HS-037, spec item 2).
+    /// Join the machine's egress proxy to this session's network, or leave it off (spec item 2).
     ///
     /// Item 2 makes the checkbox **topology, not configuration**: the same `HTTPS_PROXY` is in a container
     /// either way, and what changes is whether anything answers on that address. So a create whose row says
@@ -361,7 +361,7 @@ impl DockerBackend {
     /// session: item 2's off case is a supported case, a machine whose proxy image is not built yet must still
     /// run sessions, and the alternative — failing a create over a machine-wide container — would take the
     /// control UI down with the thing the operator needs it for. The refusal that *is* a refusal is
-    /// `--internal`, and HS-036 measures that with a probe rather than trusting this process.
+    /// `--internal`, and measures that with a probe rather than trusting this process.
     async fn apply_proxy(&self, session: &Session) {
         let network = self.network(session);
         let egress = self.egress_name();
@@ -398,7 +398,7 @@ impl DockerBackend {
         }
     }
 
-    /// Join the machine's key proxy to this session's network, unconditionally (HS-039, spec item 2).
+    /// Join the machine's key proxy to this session's network, unconditionally (spec item 2).
     ///
     /// The model provider is reachable with the Internet-access checkbox either way, so this is not the
     /// egress proxy's conditional join: every session network gets `hs_key` under the alias the container's
@@ -438,7 +438,7 @@ impl DockerBackend {
         }
     }
 
-    /// The container itself, running pi (spec item 6, HS-031).
+    /// The container itself, running pi (spec item 6).
     ///
     /// Four things happen here, in this order, and each one is a refusal that must come before the next:
     ///
@@ -453,7 +453,7 @@ impl DockerBackend {
     ///    exit code is what [`crate::exit`] classifies.
     async fn provision_container(&self, session: &Session) -> Result<Provisioned, BackendError> {
         // Serialised with a resume of the same session: both are "remove any leftover container, then start
-        // one", and interleaving them is a name conflict neither caller could explain (HS-029).
+        // one", and interleaving them is a name conflict neither caller could explain.
         let _start = self.start_lock(&session.id).await;
         self.start_container(session)
             .await
@@ -466,7 +466,7 @@ impl DockerBackend {
     /// Spec item 6: "Before every start, `docker rm -f s_<id>` runs and not-found is ignored." `--rm` already
     /// means a stopped container leaves no name behind, so the removal is for the case the flag cannot
     /// cover: a container the process lost track of — a crash, a `kill -9`, a session removed from the row
-    /// while its container lived (HS-044 reconciles that at startup; this makes the next start boring).
+    /// while its container lived.
     async fn start_container(&self, session: &Session) -> Result<(), BackendError> {
         let container = self.container(session);
         let home = container.home.clone();
@@ -476,7 +476,7 @@ impl DockerBackend {
                 home.display()
             ))
         })?;
-        // The key proxy's half of the agent directory (HS-039): a dummy key for this session, and the
+        // The key proxy's half of the agent directory: a dummy key for this session, and the
         // `models.json` that sends the provider call to the proxy. Both are written **before**
         // `Mounts::check`, because the pi-home is a mount source and Docker would otherwise create a missing
         // file as a directory. The real key is never written here; `Store::dummy_for` is the only value this
@@ -559,7 +559,7 @@ impl DockerBackend {
     /// `starting → idle` is the provisioner's, after this).
     ///
     /// A launch that produced no handshake is a failure rather than a pass: a session that is `idle` with no
-    /// agent would accept a prompt nobody can answer (HS-032).
+    /// agent would accept a prompt nobody can answer.
     async fn provision_agent(&self, session: &Session) -> Result<Provisioned, BackendError> {
         let some = self.agent(&session.id).ok_or_else(|| {
             BackendError::failed("the pi step: this session has no agent process".to_string())
@@ -588,7 +588,7 @@ impl DockerBackend {
         let worktree = self.worktree(session);
         // The row's base commit is the branch's starting point, and it has to win over the branch's
         // current head: a resumed session may have committed since, and `ahead` is measured from where
-        // it started (HS-061).
+        // it started.
         let base = session.base_commit.clone();
         let (worktree, ensured) = Self::blocking(Step::Worktree, move || {
             let ensured = worktree.ensure(base.as_deref())?;
@@ -611,7 +611,7 @@ impl DockerBackend {
         })
     }
 
-    /// The worktree's teardown: the directory, the branch and the registration (HS-025).
+    /// The worktree's teardown: the directory, the branch and the registration.
     ///
     /// Shared by [`SessionBackend::undo`] and [`SessionBackend::delete`], because "this step is being
     /// taken back" and "this session is going away" leave the same thing behind. The container and the
@@ -646,7 +646,7 @@ impl DockerBackend {
         // sentence, and without this the exit arrives while that process is *still* the current launch — the
         // new one registers a generation a moment later — so it is classified as an unexpected death. A resume
         // then dies with "the container exited 137", and the row stops the provisioner at the next step
-        // boundary before the new container is up. Measured on HS-032's resume-after-a-refused-prompt, which
+        // boundary before the new container is up. Measured on the resume-after-a-refused-prompt, which
         // lost that race about one run in two.
         self.supersede_agent(&session.id);
         let name = self.container(session).name;
@@ -699,10 +699,10 @@ impl DockerBackend {
     async fn remove_network(&self, session: &Session) {
         let name = self.network(session);
         // Leave first: `docker network rm` refuses a network that still has an endpoint on it, and the egress
-        // proxy is one for as long as the session allowed internet access (HS-037). A detach that fails — the
+        // proxy is one for as long as the session allowed internet access. A detach that fails — the
         // proxy is already gone, the network never had it — is the ordinary answer, not a reason to skip the
         // removal, so its result is not read.
-        // The key proxy is on every session network (HS-039), so it must leave before the network can be
+        // The key proxy is on every session network, so it must leave before the network can be
         // removed too. Not being attached is the ordinary answer for a network that never finished its step.
         let key_leaving = Self::docker(Step::Network, self.settings.docker(), {
             let name = name.clone();
@@ -789,7 +789,7 @@ impl SessionBackend for DockerBackend {
         match step {
             // `Retained::nothing()` on purpose: an undo takes back what *this provision* made (ADR-0029),
             // which is a worktree with no commits beyond its base — so the keep-rule would keep nothing
-            // either, and the rule's business is the delete's (HS-043).
+            // either, and the rule's business is the delete's.
             Step::Worktree => self.remove_worktree(session, &Retained::nothing()).await,
             // The container first when it is undone on its own (its network is not a dependency of
             // removing it, but a container holding a network up would make the network's removal fail).
@@ -853,8 +853,8 @@ impl SessionBackend for DockerBackend {
         );
         let mut mapping = Mapping::new(&session.id);
         // A tool's output is a file under the session's own directory, so a two-megabyte `cat` is not
-        // replayed to a phone on every reconnect (HS-033, ADR-0041); its images are files beside it, and the
-        // agent is what an extension's dialog is answered through (HS-035, ADR-0043).
+        // replayed to a phone on every reconnect (ADR-0041); its images are files beside it, and the
+        // agent is what an extension's dialog is answered through (ADR-0043).
         let store = Store::new(&self.settings.data_root);
         rpc::pump(&mut records, &mut mapping, events, &store, &agent).await
     }
@@ -916,8 +916,8 @@ impl SessionBackend for DockerBackend {
     /// not a failure (ADR-0023).
     ///
     /// The flag that says this stop was expected is **not** here: it is the server's row write, and
-    /// [`crate::stop::Stopper`] records it before calling this (HS-030, ADR-0038). The classification of how
-    /// the container then exited is [`crate::exit`]'s, and its observer is HS-031's attached stdio.
+    /// [`crate::stop::Stopper`] records it before calling this (ADR-0038). The classification of how
+    /// the container then exited is [`crate::exit`]'s, and its observer is the attached stdio.
     async fn stop(&self, session: &Session) -> Result<(), BackendError> {
         let name = self.container(session).name;
         // `?` on the outer `Result` is deliberate: a daemon that cannot answer is a failed stop, and the
@@ -941,7 +941,7 @@ impl SessionBackend for DockerBackend {
     /// The container and the network, nothing else: the worktree is the provisioner's step, and its `ensure`
     /// is create-or-adopt (ADR-0029), so a resumed session's commits are still on its branch. This is the
     /// story that gives `SessionBackend::resume` a body — it has been uncalled since ADR-0022 — because a
-    /// start that cannot cope with a leftover container is not a start (HS-029).
+    /// start that cannot cope with a leftover container is not a start.
     async fn resume(&self, session: &Session) -> Result<(), BackendError> {
         let _start = self.start_lock(&session.id).await;
         let network = self.network(session);
@@ -949,7 +949,7 @@ impl SessionBackend for DockerBackend {
             docker.create_internal_network(&network)
         })
         .await?;
-        // The proxy joins the re-created network too (HS-037): a resume of a session that may use the internet
+        // The proxy joins the re-created network too: a resume of a session that may use the internet
         // must not come back without it, and a resume of one that may not must not come back with it.
         self.apply_proxy(session).await;
         self.start_container(session).await
@@ -958,7 +958,7 @@ impl SessionBackend for DockerBackend {
     /// Remove everything the session owns: the container, its network, the worktree and its branch, and the
     /// session's own directory.
     ///
-    /// The session directory (`<data>/sessions/<id>`) joined this call in HS-031, which is what made it a
+    /// The session directory (`<data>/sessions/<id>`) joined this call, which is what made it a
     /// directory: it holds the agent's `pi-home` and the `session.log`. A delete takes both, because a session
     /// that is gone cannot be resumed and its log is a record of a row that no longer exists.
     ///
@@ -986,7 +986,7 @@ impl SessionBackend for DockerBackend {
         Ok(())
     }
 
-    /// What this teardown must leave in the project's repository (HS-043): the rule is
+    /// What this teardown must leave in the project's repository: the rule is
     /// [`Worktree::retained`]'s, and this is the off-worker call it needs.
     async fn retained(
         &self,
@@ -1004,7 +1004,7 @@ impl SessionBackend for DockerBackend {
         .await
     }
 
-    /// Hand the server the exit of the agent this session's container is running (HS-031).
+    /// Hand the server the exit of the agent this session's container is running.
     ///
     /// The exit is reported once, by the task [`Agent::launch`] spawned; this takes the receiver and wraps it
     /// with the one question the server cannot answer — **is that exit still about this session's
@@ -1140,7 +1140,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_pi_step_with_no_launch_behind_it_fails_the_session_instead_of_claiming_ready() {
-        // HS-031's fourth hole to close: the pi step used to refuse for every session. It is now the ready
+        // the fourth hole to close: the pi step used to refuse for every session. It is now the ready
         // handshake, and a handshake with no process would be the worst answer of all — a session marked
         // `idle` that accepts a prompt nobody can answer. So the step fails, and it says which step.
         let error = backend()
@@ -1196,7 +1196,7 @@ mod tests {
             );
     }
 
-    /// An exit belongs to the launch that is current, and to nothing older (HS-031, ADR-0039).
+    /// An exit belongs to the launch that is current, and to nothing older (ADR-0039).
     ///
     /// Three cases, and the reason the third exists: a forced stop resumes immediately, so the previous
     /// container's exit can arrive after a new one has been launched. Classifying it then would turn a stop
@@ -1275,8 +1275,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_turn_with_no_agent_names_the_fix_and_a_snapshot_with_no_worktree_says_so() {
-        // `stop` and `resume` left this list in HS-029, and the turn's four operations left it in HS-032: a
-        // prompt, a steer, a `clear_queue` and an abort are pi's RPC commands now. HS-042 made the snapshot a
+        // `stop` and `resume` left this list, and the turn's four operations left it: a
+        // prompt, a steer, a `clear_queue` and an abort are pi's RPC commands now. made the snapshot a
         // real host git operation, so what is left here is only the no-agent sentences.
         let backend = backend();
         let session = session();

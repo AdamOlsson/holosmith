@@ -1,4 +1,4 @@
-//! pi's records become the transcript's frames (HS-032).
+//! pi's records become the transcript's frames.
 //!
 //! Two things are proven here, and they are different questions. The **fixtures** are real turns: the agent
 //! image (`pi-agent:local`, whose pi is `pins/pi.txt`) was run with the operator's own provider credentials and
@@ -38,14 +38,14 @@ const TEXT: &str = include_str!("fixtures/pi-turn-text.jsonl");
 const THINKING: &str = include_str!("fixtures/pi-turn-thinking.jsonl");
 
 /// The turn that called a tool: pi's `toolcall_*` (the provider's streaming of the call) and
-/// `tool_execution_*` (the call's run and its result), which is what HS-033 maps and files.
+/// `tool_execution_*` (the call's run and its result), which is what maps and files.
 const TOOL: &str = include_str!("fixtures/pi-turn-tool.jsonl");
 
-/// The turn whose tool result carried an **image** (HS-035): `read` on a four-pixel PNG, whose
+/// The turn whose tool result carried an **image**: `read` on a four-pixel PNG, whose
 /// `tool_execution_end.result.content` holds a text block and an `image` block with the picture in base64.
 const IMAGE: &str = include_str!("fixtures/pi-turn-image.jsonl");
 
-/// The turn a project-local extension asked a question in (HS-035): one `select` dialog, which pi blocks on
+/// The turn a project-local extension asked a question in: one `select` dialog, which pi blocks on
 /// until the client answers, and one `notify` afterwards whose text records what the dialog returned.
 const EXTENSION_UI: &str = include_str!("fixtures/pi-turn-extension-ui.jsonl");
 
@@ -165,7 +165,7 @@ fn the_recorded_text_turn_becomes_the_contracts_frames_in_order() {
         end.payload["usage"],
         json!({"in": 1631, "out": 4}),
         "991 prompt tokens plus 640 the provider served from its cache: what the message cost, which \
-         is what the budget counts (HS-034, ADR-0042)"
+         is what the budget counts (ADR-0042)"
     );
     assert_eq!(end.payload["stop_reason"], "stop");
     assert_eq!(
@@ -500,7 +500,7 @@ fn fake_agent_recording_stdin(
 
 #[test]
 fn the_recorded_tool_turn_becomes_a_start_a_delta_run_an_end_and_one_tool_pair() {
-    // The third arm HS-033 adds, and the shape it must have: **one** `tool.start`/`tool.end` pair for one
+    // The third arm adds, and the shape it must have: **one** `tool.start`/`tool.end` pair for one
     // call, even though pi printed both the provider's `toolcall_*` stream and the execution's records. The
     // call's id is the same in both, so mapping both would open two blocks for one call (ADR-0041).
     let (frames, settled, skipped, unknown) = mapped(TOOL);
@@ -1002,7 +1002,7 @@ async fn the_records_end_with_the_process_and_answer_closed_from_then_on() {
 
 /// Every tool call `fixture` finishes, as the mapping hands them over — the whole record, which is what the
 /// pump stores. The frames a direct replay can build are `mapped`'s; the images are the part that only the
-/// store-less half sees, because a frame with no store names no file (HS-035).
+/// store-less half sees, because a frame with no store names no file.
 fn tool_ends(fixture: &str) -> Vec<ToolEnd> {
     let mut mapping = Mapping::new("0123456789abcdef");
     records(fixture)

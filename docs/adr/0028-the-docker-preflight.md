@@ -1,6 +1,6 @@
 # The Docker preflight is a startup refusal, and its sentences are data
 
-HS-024 is spec item 10 §1's first line: "Preflight, as `doctor --quick`: Linux with systemd, Docker
+This is spec item 10 §1's first line: "Preflight, as `doctor --quick`: Linux with systemd, Docker
 reachable, git 2.38 or newer, Tailscale logged in, free disk above `min_free_gb`, ports free." Three
 decisions follow from it — where the check runs, what it prints, and how the same sentence reaches three
 different readers.
@@ -17,8 +17,8 @@ exit code and that no `app.db` appeared.
 The one case this does *not* cover is the demo's other half — "creating a session fails with one clear
 message". A server that refuses to start has no create to answer, and a per-create check would ask the same
 question on every tap. The resolution is that both readers get the same sentence: `serve` prints it and
-refuses, `doctor` (HS-045) prints it on demand, and a session that reaches the Docker backend anyway lands
-in `error` with the backend's own sentence — the refusal shape HS-011 gave that backend, which is what a
+refuses, `doctor` prints it on demand, and a session that reaches the Docker backend anyway lands
+in `error` with the backend's own sentence — the refusal shape gave that backend, which is what a
 machine with a daemon but no Docker stories yet already sees.
 
 `stub` runs are not checked at all: the stub needs no daemon, no free space and no container, and the gate
@@ -35,7 +35,7 @@ it with `sudo systemctl start docker`, or set docker_host to the daemon you run"
 reported at once, which is ADR-0006's rule for config applied to a machine: two problems should be two
 edits and one restart, not two restarts.
 
-They are a type rather than three `eprintln!`s because three readers need the same words — `serve`, HS-045's
+They are a type rather than three `eprintln!`s because three readers need the same words — `serve`, that story's
 `doctor`, and any later check that wants to say "this is the same failure" — and because a test can assert
 the *fix* is present without pinning the prose.
 
@@ -75,14 +75,14 @@ is the line to revisit. The two socket calls are bounded: read and write timeout
 The caveat is in `docs/build.md`'s Docker section rather than in a doc nobody reads: a container's published
 port is opened by the Desktop VM's forwarder, so a port that looks "published" is reachable from the host
 and not from the phone or the hub. That is why the control listener is the host's own process and why
-`docker_host` on a dev machine is a `unix://` socket, and it is the reason the preview listener (HS-041)
+`docker_host` on a dev machine is a `unix://` socket, and it is the reason the preview listener
 belongs to the host too.
 
 ## What this story left alone
 
-**Not `doctor`.** HS-045 owns the command, its `--quick`/`--full` modes, the Tailscale question, the port
+**Not `doctor`.** A later change owns the command, its `--quick`/`--full` modes, the Tailscale question, the port
 question and the systemd question. This story owns the three checks this build can answer without them, and
-the type HS-045 will print.
+the type will print.
 
 **Not the conformance suite's body.** `tests/backend_contract.rs` holds the two promises both backends must
 keep today — `undo` is infallible for every step, and a failure names the thing it could not do — and each
@@ -104,7 +104,7 @@ would be a test of nothing.
   exist exits 1, prints the daemon sentence with its fix, and prints no banner. It is deterministic on a
   machine that *has* a daemon, which a case that waited for "no docker here" would not be.
 
-## Amended by ADR-0054 (HS-045)
+## Amended by ADR-0054
 
 The preflight grew the arm this ADR's sentence rule implied and `serve` did not need: `preflight::Finding` is a
 check, an `Outcome` (`pass`/`fail`/`unknown`) and the sentence, `Complaint` is **its failing projection** (the

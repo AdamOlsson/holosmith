@@ -1,4 +1,4 @@
-//! The push request and the TLS child that delivers it (HS-066, ADR-0071).
+//! The push request and the TLS child that delivers it (ADR-0071).
 //!
 //! Two facts live here, and both are shapes rather than policies:
 //!
@@ -384,7 +384,7 @@ mod tests {
     #[test]
     fn the_disposition_table_is_four_arms_and_one_removal() {
         // The rule production runs is `Gone` or not, so that is the rule asserted — not a helper one step away
-        // from it (the review of HS-063's neighbour made the same point about a test that agreed with its code).
+        // from it (the review of 's neighbour made the same point about a test that agreed with its code).
         for status in [200, 201, 202] {
             assert_eq!(Disposition::of(status), Disposition::Delivered, "{status}");
             assert!(

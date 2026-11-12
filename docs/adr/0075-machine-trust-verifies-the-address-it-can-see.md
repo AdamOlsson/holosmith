@@ -1,11 +1,11 @@
 # Machine trust verifies the address it can see
 
-HS-070 is V11. Item 4's last bullet is two rules, and HS-069's ADR ends by naming the second as its own hole:
+This is V11. Item 4's last bullet is two rules, and the ADR ends by naming the second as its own hole:
 
 > Machine to machine: a machine accepts forwarded calls only from peers listed in `allowed_hubs`, verified with the
 > Tailscale LocalAPI whois of the remote address. Browser-facing checks apply at the hub.
 
-`allowed_hubs` has existed since HS-002 and nothing read it, and `forward::request_head` authors a call whose `Host` and
+`allowed_hubs` has existed and nothing read it, and `forward::request_head` authors a call whose `Host` and
 `Origin` are the peer's own and which drops `tailscale-user-login` — so a peer cannot tell a forwarded call from a call
 at its own origin, and its `owner` check is vacuous for one. Two hops reach a peer, the session API and the preview, so
 the check has to exist once and be asked by both. This ADR decides nine things and records what a machine with no
@@ -46,7 +46,7 @@ against the `allowed_hubs` entries (validated already by the config as bare host
 
 | Arm | Verdict |
 | --- | --- |
-| **the node's short name** (chosen) | the list is a list of *machines*; the registry keys rows by that name, `hosts::LOCAL` reserves the one word, and HS-072's `hub host add <name>` will collect exactly this |
+| **the node's short name** (chosen) | the list is a list of *machines*; the registry keys rows by that name, `hosts::LOCAL` reserves the one word, and the `hub host add <name>` will collect exactly this |
 | `UserProfile.Login` | the login is the **owner** and is identical on every node the operator has, so comparing it would admit the stray node this story exists to refuse |
 | an address in 100.64/10 | an address changes when a machine rejoins; the config's own validator refuses one as an entry, and the *point* is not to trust an address but to ask who it is |
 
@@ -106,7 +106,7 @@ kind of claim ADR-0016 distrusts, and a peer that believed it alone would be adm
 ## D6 — the boot says it at `debug!`, and the risk is a row
 
 `tests/serve_cli.rs` pins the banner at exactly eight lines at the default filter, so a startup `warn!` about the
-empty-list fallback would fail the gate — HS-021/HS-022's landmine. The boot states the trust config at `debug!`, and
+empty-list fallback would fail the gate — those stories's landmine. The boot states the trust config at `debug!`, and
 the fallback is a row in the spec's **Known and accepted risks** table instead, where a reader looks for it.
 
 ## D7 — the gate stands a peer and a daemon in
@@ -144,7 +144,7 @@ from, and it is on the *wrong* side of the front-door rule by design. `python3` 
 
 ## D9 — V11's row and the case that pins it, in one commit
 
-`case_verification_table` used to assert two sentences about V11 ("deferred to phase 3", and the story that would fill
+`the gate` used to assert two sentences about V11 ("deferred to phase 3", and the story that would fill
 it). This story **removes that rule** and gives V11 the same four rules every other row gets, in the same commit that
 fills the cell — which is the shape that makes the row's automation a case that exists rather than a promise. The row
 now says `**pass**`, names `case_machine_trust` and `tests/trust.rs`, and points at the risk row D6 records.
@@ -173,7 +173,7 @@ Four consequences, and none of them is a bug in this story's code:
    claim than the story's, and it is the one the spec's "If it fails" column anticipated.
 4. **The follow-up is named, not implied:** a machine-identity path that survives serve is a story of its own — either
    a listener a hub reaches directly with the origin the peer reports (which needs ADR-0074's row to carry a dial
-   address distinct from the origin it claims) or a serve feature that reports the node. HS-072 writes a deployed
+   address distinct from the origin it claims) or a serve feature that reports the node. writes a deployed
    machine's config and is where the first would land.
 
 So V11's Result cell says **`pass, with the fallback applied`**: the whois check accepts a listed hub and rejects

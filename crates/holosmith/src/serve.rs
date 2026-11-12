@@ -3,7 +3,7 @@
 //! Both `SIGTERM` and `SIGINT` stop accepting, let in-flight requests finish, and exit 0. A
 //! streaming response has no natural end, so the drain has a deadline: after it, open
 //! connections are cut and the process still exits 0. This is process shutdown, not the
-//! **Drain** of item 10 (HS-051).
+//! **Drain** of item 10.
 
 use std::fmt;
 use std::future::Future;
@@ -71,7 +71,7 @@ where
     // deadline therefore lives outside it, in the second `select!` below, which needs to know
     // when the signal arrived.
     let (stop_tx, stop_rx) = oneshot::channel();
-    // Served **with connect info** since HS-070: machine-to-machine trust asks the Tailscale daemon
+    // Served **with connect info**: machine-to-machine trust asks the Tailscale daemon
     // who an address is, so the address has to reach the edge layer. `Router::into_make_service`
     // would drop it, and a router built without it is a router whose callers cannot be verified.
     let server = axum::serve(

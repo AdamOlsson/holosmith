@@ -1,7 +1,7 @@
 # The event log: one writer thread, a durable seq counter, and a broadcast after the commit
 
-HS-009 is the first story with two writers. HS-008's create writes a `sessions` row behind
-ADR-0012's `Arc<Mutex<Database>>` and its ADR said HS-009 "replaces the stopgap with the single
+This is the first story with two writers. The create writes a `sessions` row behind
+ADR-0012's `Arc<Mutex<Database>>` and its ADR said "replaces the stopgap with the single
 writer task". Reading the code rather than the sentence, that conflates two things: a *lock* that
 makes writes serial, and a *task* that owns the event pipeline. Item 5 and V9 need the second. They
 do not need a database actor that funnels every read and write through one task, and building one
@@ -39,7 +39,7 @@ rather than re-implemented.
   `events/repository.rs` is reported as a sessions statement — and a doc sentence containing
   `from sessions` is reported too. Both were observed failing before they were fixed.
 - **`broadcast::Sender::send` answers `Err` when there is no receiver.** A fresh process has no
-  subscriber until HS-010, so that error is the normal path.
+  subscriber until, so that error is the normal path.
 
 ## The mutex stays; the writer is added on top of it
 
@@ -47,7 +47,7 @@ rather than re-implemented.
 the database it already opens, starts the writer with a clone of the `Arc`, and hands the app the
 sender. The writer takes the lock only for its own transaction and releases it before broadcasting.
 
-- **HS-008 is untouched.** The create path, its 202/422/409 answers and its four `verify.sh` cases
+- **This is untouched.** The create path, its 202/422/409 answers and its four `verify.sh` cases
   are byte-for-byte the ones that shipped; nothing about the event log changes how a session row is
   written.
 - **"Single writer" is still true in the sense that matters:** exactly one thread assigns seqs and
@@ -71,7 +71,7 @@ the broadcast sender is dropped with the thread.
 `last_seq` is `sessions.last_seq`: bumped with `UPDATE … RETURNING` and read back **inside the
 same transaction** as the insert.
 
-`MAX(seq) + 1` would pass every test written today and break the first time HS-060 compacts:
+`MAX(seq) + 1` would pass every test written today and break the first time compacts:
 compaction *deletes* rows, so the highest row can vanish and the next event would reuse a seq a
 client has already seen — which the acceptance forbids in as many words ("never reused"). A column
 cannot rewind because nothing deletes it. `seq_is_not_reused_after_the_highest_row_is_deleted`
@@ -110,7 +110,7 @@ drops it, so no client sees a seq the batch did not commit and no seq is consume
 event naming a session that does not exist — there is no counter to bump, so the batch is refused
 with `RepoError::UnknownSession` rather than inventing a seq.
 
-**Superseded in part by ADR-0023.** HS-019's delete removes a session's row while its events may still
+**Superseded in part by ADR-0023.** the delete removes a session's row while its events may still
 be queued, which makes "an event for a session that has gone" an ordinary race rather than a producer
 bug — and refusing the batch for it would also discard every other session's event in the same 25 ms
 window. So `insert_batch` now drops that one event and commits the rest; `RepoError::UnknownSession`
@@ -122,12 +122,12 @@ Producers append over a bounded `mpsc(1024)`; a full queue slows the producer an
 Subscribers read a `broadcast(1024)`; `send` never waits for one, so a subscriber that never drains
 cannot delay a commit — `a_lagged_subscriber_does_not_stall_the_writer` queues more events than the
 buffer and asserts the writer committed every one of them while the subscriber was silent. That
-subscriber is then told `Lagged(n)` and carries on; HS-010 re-fetches what it missed by last-seen
+subscriber is then told `Lagged(n)` and carries on; re-fetches what it missed by last-seen
 seq, which is why this story ships no `Last-Event-ID` handling of its own.
 
 `EventWriter` keeps a clone of the broadcast sender and `subscribe()` returns a fresh `EventStream`,
-so the subscriber HS-010 needs is made from the handle `AppState` already carries. Without it the
-only stream would be the one `spawn` returned, `serve` drops that, and HS-010 would have to change
+so the subscriber needs is made from the handle `AppState` already carries. Without it the
+only stream would be the one `spawn` returned, `serve` drops that, and would have to change
 `spawn`'s signature to subscribe at all: the broadcast half was implemented and tested in-process
 but unreachable in the shipped binary.
 
@@ -136,7 +136,7 @@ client connected is the ordinary state.
 
 ## WAL and `synchronous=FULL` were already proved
 
-`Database::open` has set the four pragmas and read them back since HS-004 (ADR-0009), failing the
+`Database::open` has set the four pragmas and read them back (ADR-0009), failing the
 start when one did not take. This story re-proves the bullet on the file the writer uses rather than
 re-asserting anything in production: `the_database_runs_wal_and_full_sync` opens the database and
 reads `journal_mode` back through a second connection.
@@ -161,7 +161,7 @@ configured pragmas and reading `2` — so the assertion reflects the statement r
   applied set, `tests/session_repository.rs`' column list and `scripts/verify.sh`'s
   `case_events_table` all follow from the one migration file.
 - `sessions.last_seq` is `NOT NULL DEFAULT 0` and the last statement of the migration, so every
-  pre-HS-009 row is correct without a backfill and nothing later in the file depends on the column
+  row is correct without a backfill and nothing later in the file depends on the column
   being present.
 - `events` has no foreign key to `sessions`. A seq without a counter cannot be assigned, so an
   event for a missing session is refused at write time; the constraint would add a cascade decision
@@ -169,10 +169,10 @@ configured pragmas and reading `2` — so the assertion reflects the statement r
 - `Database::events()` and `EventRepository` mirror `Database::sessions()`: the connection never
   leaves the database, and the repository owns every statement and its own `src/**` guard.
 - The two SQL-location guards are one helper in `src/sql.rs`, parameterised by
-  `(table, statements, repository)`, so a fix to the matcher reaches both tables and HS-060's third
+  `(table, statements, repository)`, so a fix to the matcher reaches both tables and the third
   table adds only its constants. Two copies had already drifted, and both named their scratch
   directory from the same label: in one crate that is one lib-test binary and one process id, so
-  the events guard's `remove_dir_all` deleted the sessions guard's live fixture mid-run (PER-41
+  the events guard's `remove_dir_all` deleted the sessions guard's live fixture mid-run (
   S1/S2). `insert_batch` and `bump_last_seq` are `pub(crate)` for the same reason the guard exists —
   "exactly one writer assigns seq" is enforced by visibility, not by a comment.
 - The writer thread is not joined at shutdown. Its loop ends when the last handle drops, and a
@@ -180,14 +180,14 @@ configured pragmas and reading `2` — so the assertion reflects the statement r
   ever told about.
 - **One event naming a missing session refuses the whole batch.** The insert is one transaction, so
   every valid event in the same 25 ms window — from any session — is discarded *after* `append`
-  already returned `Ok`. Unreachable today because no producer emits an event; HS-011 is where
+  already returned `Ok`. Unreachable today because no producer emits an event; this is where
   per-event isolation or a pre-check has to be decided.
 - **The `kill -9` demo is manual, not an automated test in this tree.** The plan promised one that
   drives the real binary, and the deliverable does not include it: the process-level crash run is
-  HS-046's V9 check. HS-009's evidence is the in-process proofs — commit-before-broadcast on a
+  the V9 check. the evidence is the in-process proofs — commit-before-broadcast on a
   second connection, one transaction per batch, the seq counter and the rows surviving a reopen —
   plus the manual demo. A process-level `kill -9` test here would be a second harness for a check
   that story owns.
-- Not here, and not implied: the SSE stream and `Last-Event-ID` (HS-010), coalescing (HS-059),
-  snapshots and compaction (HS-060), history truncation (HS-061), any producer (HS-011), a
+- Not here, and not implied: the SSE stream and `Last-Event-ID`, coalescing,
+  snapshots and compaction, history truncation, any producer, a
   `GET …/events` route, a database actor, a new crate, or any change to the create endpoint.

@@ -11,7 +11,7 @@ One computer running the `holosmith` binary.
 _Avoid_: Node, box, instance
 
 **Machine name**:
-What a **machine** calls itself in a **Notification**'s payload (HS-074): the `machine_name` config key, `local` by
+What a **machine** calls itself in a **Notification**'s payload: the `machine_name` config key, `local` by
 default — the reserved word that means *the machine whose page this is* (see **Local**). Two consumers and one value:
 `push::Payload::host`, which is the word a phone shows (`Holosmith · workshop`) and the segment a tap's path is built
 from (`/hosts/<name>/sessions/<id>`), and `/api/health`'s seventh key, which is how a page labels its own row and how a
@@ -188,7 +188,7 @@ unpadded base64url strings, the 65-byte uncompressed P-256 point with its leadin
 32-byte private scalar (43). `server deploy` step 2 writes it **once** and never regenerates it — absent is the
 only state that generates, and a present file that is not a pair is a failed step, because regenerating would stop
 every push subscription made against the old pair — and it holds no configuration: a JWT's `sub` claim is the
-consumer's (HS-066). Its machine names are `vapid::Pair` and `vapid::VAPID_FILE`.
+consumer's. Its machine names are `vapid::Pair` and `vapid::VAPID_FILE`.
 _Avoid_: VAPID credentials, push keys (and not the **secrets file**, which is the provider-key store `key set` owns
 and no deploy generates)
 
@@ -324,7 +324,7 @@ The row's record that a stop of this session's container was the server's own: `
 _Avoid_: Planned stop, graceful stop, stop flag, stopping flag
 
 **Exit classification**:
-The decision spec item 6 makes about a container that stopped: with the **expected stop** recorded it was our stop, so the session stays `stopped`; without it, exit code `0` is the agent finishing (`stopped`, reason `pi_exit`) and anything else is a failure (`error`, reason = the last five lines of stderr, which the badge shows as its last line). It is a pure function (`exit::classify`) plus the one entry point that applies its answer (`Exits::record`), which also appends what the container printed to the **session log**. `unexpected_exit` is the failure arm's trigger, `pi_exit` the clean one's. Its observer is HS-031's attached stdio: a detached `--rm` container leaves nothing to inspect.
+The decision spec item 6 makes about a container that stopped: with the **expected stop** recorded it was our stop, so the session stays `stopped`; without it, exit code `0` is the agent finishing (`stopped`, reason `pi_exit`) and anything else is a failure (`error`, reason = the last five lines of stderr, which the badge shows as its last line). It is a pure function (`exit::classify`) plus the one entry point that applies its answer (`Exits::record`), which also appends what the container printed to the **session log**. `unexpected_exit` is the failure arm's trigger, `pi_exit` the clean one's. Its observer is the attached stdio: a detached `--rm` container leaves nothing to inspect.
 _Avoid_: Exit code, exit status, death, crash detection
 
 **Resume**:
@@ -556,7 +556,7 @@ The request header a reconnecting client sends: the last SSE `id` it received, w
 _Avoid_: Cursor, offset, resume token, since
 
 **Stream registry**:
-The per-session record of open streams that `AppState` carries: how many are open (HS-066 reads it) and one close signal each (HS-019 ends them by deleting a session).
+The per-session record of open streams that `AppState` carries: how many are open and one close signal each.
 _Avoid_: Subscriber list, presence, connection pool
 
 **Keep-alive comment**:
@@ -590,7 +590,7 @@ The token counts a message ends with: `in`, the tokens the message consumed, and
 produced. They arrive on `message.end` as `{"usage": {"in": …, "out": …}}`, and the screen shows them as
 one `in N · out N` line inside the message's block. They are added to the session's **spend** by the event
 writer, inside the transaction that assigns the event its seq, and a `message.end` that carries none is a
-message whose cost is unknown — never a free one. Drawing the totals on the session screen is HS-034's.
+message whose cost is unknown — never a free one. Drawing the totals on the session screen is that story's.
 _Avoid_: Cost, tokens, billing, price
 
 **Spend**:
@@ -722,7 +722,7 @@ was there, and the transcript draws **one link per picture** rather than the pic
 _Avoid_: Attachment, picture, screenshot, image blob
 
 **Changes view**:
-The answer to `GET /api/sessions/{id}/changes`: what a session's branch changed against its **base commit** and whether it would merge into its **target branch**. Eleven keys — `branch`, `base_commit`, `head`, `target`, `ahead`, `behind`, `dirty`, `mergeable`, `files[]` (`path`, `status`, `additions`, `deletions`), `touches_ci` — plus the additive `mergeable_reason`, and since HS-058 the additive `choices` (`targets[]` = the configured **targets** that exist as branches, in the config's order; `remotes[]` = `[publish] remotes` verbatim) that the **Changes sheet**'s two pickers read. It is a **host** read (never a container), it writes no ref and no working tree (`merge-tree --write-tree` writes an unreferenced tree object, which is its documented cost), and `dirty` uses the same definition of work as the **WIP snapshot**. Its machine names are `changes::Changes::read`, `changes::Choices` and `http::changes`; its second route is the **Unified diff**.
+The answer to `GET /api/sessions/{id}/changes`: what a session's branch changed against its **base commit** and whether it would merge into its **target branch**. Eleven keys — `branch`, `base_commit`, `head`, `target`, `ahead`, `behind`, `dirty`, `mergeable`, `files[]` (`path`, `status`, `additions`, `deletions`), `touches_ci` — plus the additive `mergeable_reason`, and the additive `choices` (`targets[]` = the configured **targets** that exist as branches, in the config's order; `remotes[]` = `[publish] remotes` verbatim) that the **Changes sheet**'s two pickers read. It is a **host** read (never a container), it writes no ref and no working tree (`merge-tree --write-tree` writes an unreferenced tree object, which is its documented cost), and `dirty` uses the same definition of work as the **WIP snapshot**. Its machine names are `changes::Changes::read`, `changes::Choices` and `http::changes`; its second route is the **Unified diff**.
 _Avoid_: Diff viewer, explorer, file tree
 
 **Changes sheet**:
@@ -738,7 +738,7 @@ Whether a session branch would merge into its target without a conflict, asked w
 _Avoid_: Conflicts, rebase, apply
 
 **Merge**:
-Landing a session branch on a **Target branch**, on the server, never in a container. `POST /api/sessions/{id}/merge` with `{target, strategy?, message?, delete_session?}`; the answer is `{merged_commit, target, strategy}` and nothing about the session row changes, because a merge is neither a transition nor an event — except that `delete_session: true` runs the **Delete flow** afterwards, and then the row is `deleting` before the answer. Item 12's rules; all six are built. **Rule 1**'s two guards are the route's and refuse a `running` turn (`409 session_running`) and the session's own uncommitted work (`409 dirty_worktree`, the definition of work the **Changes view** calls `dirty`); every other row state is merged. **Rule 5** is the Delete flow entered with the fact that this request landed the branch. **Rule 6**'s 60-second timeout belongs to the hub's forwarding client (HS-069), which this build does not have. Its machine names are `merge::merge`, `merge::Merged`, `http::merge` and `sessions::deletion`.
+Landing a session branch on a **Target branch**, on the server, never in a container. `POST /api/sessions/{id}/merge` with `{target, strategy?, message?, delete_session?}`; the answer is `{merged_commit, target, strategy}` and nothing about the session row changes, because a merge is neither a transition nor an event — except that `delete_session: true` runs the **Delete flow** afterwards, and then the row is `deleting` before the answer. Item 12's rules; all six are built. **Rule 1**'s two guards are the route's and refuse a `running` turn (`409 session_running`) and the session's own uncommitted work (`409 dirty_worktree`, the definition of work the **Changes view** calls `dirty`); every other row state is merged. **Rule 5** is the Delete flow entered with the fact that this request landed the branch. **Rule 6**'s 60-second timeout belongs to the hub's forwarding client, which this build does not have. Its machine names are `merge::merge`, `merge::Merged`, `http::merge` and `sessions::deletion`.
 _Avoid_: Apply, integrate, land
 
 **Merge strategy**:
@@ -754,7 +754,7 @@ The default **Merge strategy**, and the only one that needs no **Temporary merge
 _Avoid_: Rebase, cherry-pick, reset, squash
 
 **Conflict**:
-A landing git could not reconcile, which is rule 3's `409 conflict`: the merge is aborted — the **Temporary merge worktree**'s removal *is* the abort — nothing changes in the project repository, and the paths travel in the envelope's additive `conflicts` key (the only error response with a payload besides `code` and `message`). The paths are read from the **index** (`git ls-files --unmerged -z`), never from a diff, so a repository's `diff.external` or a textconv driver cannot answer the question. The Changes sheet's Resolve-with-agent affordance (HS-058) prompts the session to merge the target into its branch and retry.
+A landing git could not reconcile, which is rule 3's `409 conflict`: the merge is aborted — the **Temporary merge worktree**'s removal *is* the abort — nothing changes in the project repository, and the paths travel in the envelope's additive `conflicts` key (the only error response with a payload besides `code` and `message`). The paths are read from the **index** (`git ls-files --unmerged -z`), never from a diff, so a repository's `diff.external` or a textconv driver cannot answer the question. The Changes sheet's Resolve-with-agent affordance prompts the session to merge the target into its branch and retry.
 _Avoid_: Clash, unmerged state, half-merge
 
 **Publish**:
@@ -842,7 +842,7 @@ nothing on it has a route out — no internet, and no way to another network's g
 Its machine names are `container::network_name` (the `agents_` prefix, spec item 2) and
 `docker::create_internal_network`. **Measured**: an internal network still *reports* an IPAM gateway, and that
 gateway answers from inside it (ADR-0044) — so "no route out" is the property, not "no gateway"; the proxies of
-HS-037/039 are what a container's only way out runs through.
+those stories are what a container's only way out runs through.
 _Avoid_: Agent network, container network, sandbox network, bridge, net
 
 **Internet access**:
@@ -914,7 +914,7 @@ deploy's five. Its machine name is `uninstall::Report`.
 _Avoid_: Teardown, remove, destroy, deploy --reverse
 
 **Builder image**:
-The pinned container a release artifact is compiled in (HS-076): `holosmith-builder:<version>`, built locally from
+The pinned container a release artifact is compiled in: `holosmith-builder:<version>`, built locally from
 `crates/holosmith/images/builder.Dockerfile` — two bases pinned by manifest-list digest, the two musl.cc cross
 toolchains pinned by their tarballs' SHA-256, and node for the web app — and labelled with the recipe's own digest, so
 an edited recipe rebuilds instead of reusing a stale image. It is the only place a `build.rs`, a proc macro or the web
@@ -1002,7 +1002,7 @@ as it found it and says so; a failure *after* the drain leaves it draining, whic
 _Avoid_: Deploy (that installs a machine), upgrade (the command), rollout, release
 
 **Prune**:
-One promotion's last step (HS-080): `releases/` is kept at `keep_releases` directories, taking the **live** release and
+One promotion's last step: `releases/` is kept at `keep_releases` directories, taking the **live** release and
 the one behind it — the **rollback** target — first, then the newest of the rest. It runs only when the candidate is
 live, so a promotion that rolled back removes nothing, and a prune that cannot delete is a warning on stderr rather
 than a failed promotion. Only `Release::history`'s entries are candidates: a directory whose name is not one path
@@ -1012,7 +1012,7 @@ _Avoid_: Cleanup, rotation, retention (that is the backups'), garbage collection
 
 **Rollback**:
 Pointing **`current`** back one **release**, restarting and polling again — what a **promotion** does by itself when the
-candidate does not answer, and what `holosmith rollback [--to TAG]` does on demand (HS-079, ADR-0083). "One back" is the
+candidate does not answer, and what `holosmith rollback [--to TAG]` does on demand (ADR-0083). "One back" is the
 tree's own order (`Release::history`, newest first by **mtime** — a tag is `git describe`'s answer and does not sort),
 so the target is the newest release **strictly older** than the live one unless `--to` names another; it drains first
 (joining a drain already in progress, where a promotion refuses one), and the switch is followed by `systemctl restart`
@@ -1053,12 +1053,12 @@ _Avoid_: Test image, agent image (that is the product one), fake image, mock ima
 
 **Recorded turn**:
 `crates/holosmith/fixtures/smoke-turn.jsonl`: one header line (`{"type":"fixture","version":1,"schema":7,"recorded":
-"HS-032","turn":"tool"}`) and then HS-032's `pi-turn-tool.jsonl` **verbatim** — `agent_start`, deltas, one tool round
+"","turn":"tool"}`) and then the `pi-turn-tool.jsonl` **verbatim** — `agent_start`, deltas, one tool round
 trip, non-zero usage, closing `agent_settled`. Embedded in the binary (`include_str!`) because the container runs the
 candidate and has no file to read, and its header's `schema` is compared with `schema::SCHEMA_VERSION` by a test, so a
 schema change is a failure naming both numbers rather than a surprise at a promotion. At run time a newer header is
 refused and an older one replays with one printed note. It is a *recording plus a header*, not a hand-written fixture:
-a second test asserts the body is byte-identical to HS-032's file.
+a second test asserts the body is byte-identical to the file.
 _Avoid_: Fixture, test data, sample session, golden transcript
 
 **Remote deploy**:
@@ -1080,7 +1080,7 @@ whether the step is already satisfied and what is missing, the apply does the mi
 prints the read alone. Each one reports one of five words — **satisfied**, **needs** (a dry run's plan),
 **changed**, **skipped** (carrying the reason, and never a pass) and **failed** (which stops the run and makes the
 resume command the last line). `skipped` has had two reasons in its life and both are "no body to run here": a story
-that still owned the body (nothing since HS-049) and — since HS-072 — a **deploy half** with no work for the step
+that still owned the body (nothing since) and a **deploy half** with no work for the step
 (a hub's `images` and `proxies`), which is why a hub run's tally reads `5 satisfied, 0 changed, 2 skipped, 0 failed`.
 Its machine names are `deploy::DeployStep` and `DeployStep::ALL`, and `--root` is the install tree the step's paths
 are built under. It is not `Step`.
@@ -1124,16 +1124,6 @@ The local unix socket used for commands that must never be reachable over HTTP: 
 0700 directory whose own protection is the whole authorisation. Its one verb is the **drain**.
 _Avoid_: Control socket, IPC
 
-**Verification table**:
-The eleven checks V1–V11 in `HolosmithSpec.md` that phase 1 must run on a real Docker host, each with the condition
-that makes it a pass, the fallback to take if it fails, and a **result cell** (the table's own `Result` column)
-recording the verdict, the automation that produced it (a `case_*` in `scripts/verify.sh`'s `serve_cases`, a
-`tests/*.rs`, a `scripts/*.sh`, or `docs/build.md`'s by-hand procedure) and, on a failure, the fallback taken. It
-is the record: there is no second document, `case_verification_table` fails the gate when a row rots, and V11 stays
-deferred to phase 3. A result cell is not a `Finding`: a Finding is one of `doctor`'s checks, while a cell is a
-verification row's verdict *and* the automation that stands behind it.
-_Avoid_: Vertical-slice table, checklist, test matrix, verification report, phase-1 report
-
 ### Notifications
 
 **Web Push subscription**:
@@ -1163,7 +1153,7 @@ _Avoid_: Push notification (the *module* is `push`; the thing a phone shows is a
 **Application server key**:
 The Web Push pair's **public** half, base64url, 87 characters — the `k=` of every VAPID token this machine signs and
 the value a browser hands to `pushManager.subscribe`. It is public by design; the private half never leaves
-`<data>/secrets/vapid.toml`. HS-067 serves it as `GET /api/health`'s sixth key (`application_server_key`), read at
+`<data>/secrets/vapid.toml`. serves it as `GET /api/health`'s sixth key (`application_server_key`), read at
 the moment of asking, `null` on a machine with no pair; `vapid::public_key` is the reader.
 _Avoid_: VAPID public key, push key (a **Push subscription**'s `p256dh` is the browser's, not this)
 

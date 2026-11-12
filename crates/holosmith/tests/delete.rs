@@ -1,4 +1,4 @@
-//! Delete (HS-019): `DELETE /api/sessions/{id}` answers 202 with the row now `deleting`, and the
+//! Delete: `DELETE /api/sessions/{id}` answers 202 with the row now `deleting`, and the
 //! removal — the backend's resources, the session's key and its row — happens off the request's
 //! task. The snapshot is the request's, because a failed one must answer `409 unsaved_work` and must
 //! leave the row exactly as it was; `?force=true` is the caller saying the work may go anyway.
@@ -7,7 +7,7 @@
 //! stub provision, `starting` by a create — and two are driven by hand: `running` (nothing in the API
 //! stops or settles a turn the test wants held open) and `deleting` (the stub's removal is instant,
 //! so the only way to see a row that a *failed* removal left behind is to put it there). Both use the
-//! table's own function, as HS-016's forced rung and HS-018's stop do.
+//! table's own function, as the forced rung and the stop do.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -107,7 +107,7 @@ fn assert_deleting(response: &Response, id: &str) {
     assert_eq!(body["status"], "deleting", "{}", response.body);
 }
 
-/// The 202's `kept` key (HS-043): the delete's own answer about what the teardown leaves in the
+/// The 202's `kept` key: the delete's own answer about what the teardown leaves in the
 /// repository. Absent is a bug, so this panics rather than answering `None`.
 fn kept(response: &Response) -> Value {
     let body: Value = serde_json::from_str(&response.body).expect("the answer is JSON");
@@ -221,7 +221,7 @@ async fn a_delete_answers_the_deleting_row_and_then_removes_it() {
         "the snapshot must come before the removal"
     );
 
-    // And the answer carries the keep-rule's answer even when there is nothing to keep (HS-043): a stub
+    // And the answer carries the keep-rule's answer even when there is nothing to keep: a stub
     // session has no repository, so the three keys are explicit nulls rather than absent — a client should
     // not have to tell "no claim" from "nothing survived".
     assert_eq!(
@@ -234,7 +234,7 @@ async fn a_delete_answers_the_deleting_row_and_then_removes_it() {
 
 #[tokio::test]
 async fn the_delete_answer_names_the_work_it_keeps_and_the_command_that_recovers_it() {
-    // The story's fourth bullet at the wire (HS-043): the 202 names the branch and the snapshot ref the
+    // The story's fourth bullet at the wire: the 202 names the branch and the snapshot ref the
     // teardown will leave, with the session's own id in the spec's recovery command — and the names are
     // still in the repository afterwards.
     //
@@ -515,7 +515,7 @@ async fn a_delete_ends_a_running_turn_before_it_snapshots() {
         [
             Call::ClearQueue,
             Call::Abort,
-            // `Stopper` snapshots before every stop (HS-042), then the delete takes its own snapshot
+            // `Stopper` snapshots before every stop, then the delete takes its own snapshot
             // after the turn ended (the reason the two are separate calls).
             Call::Snapshot,
             Call::Stop,
@@ -527,9 +527,9 @@ async fn a_delete_ends_a_running_turn_before_it_snapshots() {
 
 #[tokio::test]
 async fn the_ladder_ends_a_turn_without_bringing_the_session_back() {
-    // `Ladder::end_turn` is the delete's half of the abort ladder (HS-019), and the difference from
+    // `Ladder::end_turn` is the delete's half of the abort ladder, and the difference from
     // `climb` is the whole point: a session that is about to be removed must not be provisioned
-    // first. HS-022 and HS-023 climb the same routine, so this is where its contract is pinned.
+    // first. and climb the same routine, so this is where its contract is pinned.
     let dir = TempDir::new("delete-end-turn");
     let stub = fast_stub();
     let state = with_stub(state_in(&dir, impatient_grace(100)), stub.clone());

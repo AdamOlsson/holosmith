@@ -1,6 +1,6 @@
 # The changes view is a host reader, and "mergeable" is three answers rather than two
 
-HS-052 is spec item 12's first bullet — `GET /api/sessions/:id/changes` returning `{branch, base_commit, head,
+This is spec item 12's first bullet — `GET /api/sessions/:id/changes` returning `{branch, base_commit, head,
 target, ahead, behind, dirty, mergeable, files[], touches_ci}` — under the item's own sentence: "all git work for
 review and merge runs on the host in the project repository; containers never merge". Almost every part is a
 neighbour of something that exists: `worktree.rs` already owns the naming rule, the branch and one of the five
@@ -34,7 +34,7 @@ the row holds (which commit this session branched from).
 construction an ancestor — the worktree step is `git worktree add -b agent/<id> <base>` — so two-dot and three-dot
 agree unless an agent rewrote history inside `/work`; and when they disagree, "these two trees" is still the honest
 answer to "what did this branch change". The JSON names the field `base_commit` rather than `merge_base` for the
-same reason. HS-053's diff and HS-054's merge inherit this basis, so it is recorded rather than left to the next
+same reason. the diff and the merge inherit this basis, so it is recorded rather than left to the next
 reader.
 
 ## D3 — `head` is the branch's tip, not the worktree's checkout
@@ -47,7 +47,7 @@ from nothing.
 
 ## D4 — `target` is the first **existing** branch of `[merge] targets`, and `null` when there is none
 
-`merge.targets` defaults to `["main", "master"]` because a machine has one of them (HS-043); the answer is the first
+`merge.targets` defaults to `["main", "master"]` because a machine has one of them; the answer is the first
 the repository actually has, in config order, which is the spec's "the UI preselects the first". When none exists,
 `target` is `null` **and so are `behind` and `mergeable`**: there is no branch to be behind and no question to ask,
 and `0`/`false` would be claims about a branch that is not there.
@@ -72,14 +72,14 @@ Two flags are not inherited defaults but the answer itself:
 `merge-tree --write-tree` answers three ways: exit 0 is a clean merge (`true`, no reason), exit 1 is a conflict
 (`false`, with the conflicted paths in the reason), and anything else — no target, a git without `--write-tree`, a
 killed child, a repository git cannot read — is a question that could **not be asked**, which is `null` with git's
-own words. Folding that third arm into `false` is precisely the P1 HS-050's review found in `Docker::running`, and
+own words. Folding that third arm into `false` is precisely the P1 the review found in `Docker::running`, and
 `doctor`'s `pass`/`fail`/`unknown` are the shape this field follows in JSON.
 
-`mergeable_reason` is an **additive key** on the spec's eleven, the precedent being HS-043's `kept` on the delete's
+`mergeable_reason` is an **additive key** on the spec's eleven, the precedent being the `kept` on the delete's
 202: a client that does not know it ignores it, and a client that does can say *why* instead of showing a bare
 cross.
 
-`Retained::merges_into` (HS-043) is deliberately **not** reused. That is a different question: "can I lose this
+`Retained::merges_into` is deliberately **not** reused. That is a different question: "can I lose this
 branch?" compares trees against existing targets, and a delete must not lose work. "Would a merge conflict?" is the
 spec's `merge-tree --write-tree`, which answers about a *hypothetical* merge of two commits. One build, two
 questions, two functions.
@@ -116,7 +116,7 @@ proves the order: every read inside it would otherwise fail with git's "not a gi
 `changes::CI_PATHS` is the set: directory prefixes (`.github/`, `.gitlab/`, `.circleci/`, `.buildkite/`,
 `.woodpecker/`, `.husky/`, `.githooks/`) and file names matched against the last segment (`.gitlab-ci.yml`,
 `.travis.yml`, `.drone.yml`, `.cirrus.yml`, `azure-pipelines.yml`, `bitbucket-pipelines.yml`, `appveyor.yml`,
-`codecov.yml`, `Jenkinsfile`). `changes::touches_ci(&[FileChange])` is the predicate. Publish (HS-058) reads both
+`codecov.yml`, `Jenkinsfile`). `changes::touches_ci(&[FileChange])` is the predicate. Publish reads both
 rather than spelling the warning a second time.
 
 The two spellings are **exclusive**, and that is a correction rather than a detail: an entry ending in `/` is
@@ -173,7 +173,7 @@ test fail.
 
 ## What this ADR does not decide
 
-The unified diff (`GET …/changes/diff`, HS-053), `POST …/merge` and its five rules (HS-054 – HS-057), `publish`
-(HS-058), the Changes sheet, any write of any kind, and any change to `worktree.rs`'s create refusals. `files[]` is
+The unified diff (`GET …/changes/diff`), `POST …/merge` and its five rules (those stories), `publish`
+the Changes sheet, any write of any kind, and any change to `worktree.rs`'s create refusals. `files[]` is
 not a diff and carries no hunks by design — the sheet asks for numbers, and the diff is its own endpoint with its
 own size limits.

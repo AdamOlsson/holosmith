@@ -20,7 +20,7 @@ export type SessionState = "starting" | "idle" | "running" | "stopped" | "error"
 // coalescing rule ("consecutive deltas of the same kind and message") is per kind.
 export type DeltaKind = "text" | "thinking";
 
-// One picture a tool's result carried, as `tool.end` names it (HS-035): the block's index in pi's result, its
+// One picture a tool's result carried, as `tool.end` names it: the block's index in pi's result, its
 // mime type, and the path that serves its bytes. The page links it rather than drawing it in — an inline image
 // on a phone is a screen decision with a size cost, and nothing owns it yet (ADR-0043).
 export type ToolImage = {
@@ -39,25 +39,25 @@ export type Frame =
       type: "tool-end";
       toolId: string;
       // The whole output's first `PREVIEW_MAX` characters: the rest is at the session's tool-output
-      // endpoint (HS-033).
+      // endpoint.
       output: string;
-      // `"ok"`/`"error"` — pi's own verdict for the tool. `null` for a row written before HS-033 added
+      // `"ok"`/`"error"` — pi's own verdict for the tool. `null` for a row written added
       // the key: the log is durable, so such a row is replayed for ever and must still draw.
       status: string | null;
       durationMs: number | null;
       // The path the full output can be fetched from, or `null` when nothing was stored.
       outputRef: string | null;
-      // The pictures the result carried (HS-035), each with the path that serves it. Empty for a frame
+      // The pictures the result carried, each with the path that serves it. Empty for a frame
       // written before the key existed, and for a call that returned none.
       images: ToolImage[];
     }
   | { type: "boundary"; boundary: "start" | "end" }
   | { type: "steer"; text: string }
-  // Something a turn could not do (HS-035): an extension asked for a dialog a session cannot answer, so it was
+  // Something a turn could not do: an extension asked for a dialog a session cannot answer, so it was
   // cancelled. Drawn like a steer — one frame, one block, no message id — because it belongs where in the turn
   // it happened and nothing continues it.
   | { type: "error"; reason: string; method: string }
-  // The machine ended this session for a policy of its own (HS-063): the per-session disk soft cap reaching
+  // The machine ended this session for a policy of its own: the per-session disk soft cap reaching
   // `session_disk_soft_gb` is the first. One frame, one block, nothing continues it — and unlike `error` above
   // it is not the agent failing at something, so `code` is the API's word (`disk_quota`) and `message` the
   // sentence the server composed from the measurement.
@@ -87,7 +87,7 @@ export type Change =
   | { op: "session-error"; code: string; message: string };
 
 // The SSE event names. Four are pinned by ADR-0018; `message.end`, `tool.start` and `tool.end` are
-// HS-015's, and the payloads are the plan's D8.
+// that story's, and the payloads are the plan's D8.
 const DELTA = "message.delta";
 const SNAPSHOT = "message.snapshot";
 const MESSAGE_END = "message.end";
@@ -95,15 +95,15 @@ const TOOL_START = "tool.start";
 const TOOL_END = "tool.end";
 const TURN_START = "turn.start";
 const TURN_END = "turn.end";
-// The operator's guidance reaching a running turn (HS-017). One frame, one block, never continued:
+// The operator's guidance reaching a running turn. One frame, one block, never continued:
 // a steer has no message id because it has nothing a second frame would update, and a reconnect
 // replays the log and rebuilds the page anyway (ADR-0021).
 const TURN_STEER = "turn.steer";
-// Something a turn could not do, said out loud (HS-035): `{reason, method}`. Its one producer is an
+// Something a turn could not do, said out loud: `{reason, method}`. Its one producer is an
 // extension's dialog, which a session has no way to answer and therefore cancels. Like a steer it has no
 // message id — one frame, one block, nothing that continues it.
 const TURN_ERROR = "turn.error";
-// A machine policy ending the session (HS-063): `{code, message, …}`. Its one producer is the per-session disk
+// A machine policy ending the session: `{code, message, …}`. Its one producer is the per-session disk
 // soft cap, whose `code` is `disk_quota`. A new kind rather than a `turn.error` because the two are different
 // failures — the agent could not do something, versus the machine deciding the session must stop — and an
 // unknown kind is dropped rather than refused (ADR-0018), so adding one costs a client nothing until it
@@ -111,7 +111,7 @@ const TURN_ERROR = "turn.error";
 const ERROR = "error";
 
 // The stream's own frame announcing that the replay it is about to send does not reach the beginning of
-// the log (HS-061). Not a transcript block: it is a cursor, and it is the only frame on this stream that
+// the log. Not a transcript block: it is a cursor, and it is the only frame on this stream that
 // is about the stream rather than about the agent.
 export const HISTORY_TRUNCATED = "history.truncated";
 
@@ -153,7 +153,7 @@ function toolId(payload: Record<string, unknown>): string | null {
   return typeof id === "string" && id !== "" ? id : null;
 }
 
-// One token count: a non-negative integer, which is what the API's own tally adds up (HS-023).
+// One token count: a non-negative integer, which is what the API's own tally adds up.
 function count(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= 0;
 }
@@ -169,7 +169,7 @@ function usage(payload: Record<string, unknown>): { input: number; output: numbe
   const input = fields["in"];
   const output = fields["out"];
   // A count is a count: a negative or fractional value is refused rather than rendered, and the writer
-  // that adds the same numbers to the session's spend refuses exactly these (`as_u64`, HS-023). One rule
+  // that adds the same numbers to the session's spend refuses exactly these (`as_u64`). One rule
   // in two languages is a second spelling, so the two are written the same way on purpose — a screen that
   // showed `in -5` would be showing a cost the budget never counted.
   if (!count(input) || !count(output)) {
@@ -187,7 +187,7 @@ function usage(payload: Record<string, unknown>): { input: number; output: numbe
 // A tool result's pictures: the entries that name a path, in the order the frame gave them.
 //
 // An entry this page cannot link is dropped rather than drawn as a dead anchor, the same rule a tool block's
-// own `output_ref` follows — and a frame with no `images` key (everything written before HS-035) is the empty
+// own `output_ref` follows — and a frame with no `images` key (everything written before) is the empty
 // list, so an old row renders exactly as it did.
 function toolImages(value: unknown): ToolImage[] {
   if (!Array.isArray(value)) {
@@ -211,7 +211,7 @@ function toolImages(value: unknown): ToolImage[] {
 }
 
 // One SSE frame as a `Frame`, or `null` for anything this screen does not render. An unknown event
-// type is not an error: HS-032, HS-033 and HS-034 add kinds (`tool.*`, usage) to the same stream,
+// type is not an error:, and add kinds (`tool.*`, usage) to the same stream,
 // and a page that refused what it did not know would need a release to render a tool call.
 export function parseFrame(eventType: string, data: string): Frame | null {
   if (eventType === TURN_START || eventType === TURN_END) {
@@ -279,7 +279,7 @@ export function parseFrame(eventType: string, data: string): Frame | null {
         arguments: text(fields["arguments"]) ?? "",
       };
     }
-    // Three optional keys HS-033 added to the payload: a frame written before them (a durable log) or by a
+    // Three optional keys added to the payload: a frame written before them (a durable log) or by a
     // producer that stored nothing has none of them, and `null` is how the model says "the log did not say".
     const duration = fields["duration_ms"];
     return {
@@ -326,19 +326,19 @@ export function parseFrame(eventType: string, data: string): Frame | null {
 // created when its id is first seen and never again, so a stream that interleaves two messages keeps
 // one block each and places later deltas in the block they name. A tool block is keyed by tool id and
 // kept in its own order: a tool call is not a message, and a `tool.end` whose start this client never
-// saw (a replay after HS-061 truncates one) creates the block first.
+// saw (a replay after truncates one) creates the block first.
 export class Transcript {
   private readonly blocks: string[] = [];
   private readonly seen = new Set<string>();
   private readonly tools: string[] = [];
   private readonly toolsSeen = new Set<string>();
   private turn = 0;
-  // What the stream has said about cost (HS-023): the turns that closed and whether any message
+  // What the stream has said about cost: the turns that closed and whether any message
   // declared what it spent. Both are facts about the log, so a replay re-establishes them.
   private settled = 0;
   private usage = false;
 
-  // How many turns closed before the first frame this transcript will see (HS-061).
+  // How many turns closed before the first frame this transcript will see.
   //
   // A turn is numbered from the `turn.start` frames a client has seen, which is true of a whole log and
   // of a windowed one only if the window says how much it skipped. A replay that starts at the 50th most
@@ -365,12 +365,12 @@ export class Transcript {
       return [{ op: "steer", text: frame.text }];
     }
     if (frame.type === "error") {
-      // The same shape, for the same reason (HS-035): one frame, one block, and nothing a later frame
+      // The same shape, for the same reason: one frame, one block, and nothing a later frame
       // updates — not even the message id a turn's other blocks are keyed by.
       return [{ op: "error", reason: frame.reason, method: frame.method }];
     }
     if (frame.type === "session-error") {
-      // A machine policy's frame (HS-063): one block, no message id, nothing that continues it — the same
+      // A machine policy's frame: one block, no message id, nothing that continues it — the same
       // shape as the two above, and drawn beside the turn it ended rather than inside a message.
       return [{ op: "session-error", code: frame.code, message: frame.message }];
     }
@@ -457,7 +457,7 @@ export class Transcript {
   }
 }
 
-// What the stream has said about what the agent spent (HS-023): how many turns have closed, and
+// What the stream has said about what the agent spent: how many turns have closed, and
 // whether any message declared what it cost.
 export type Spend = { settled: number; usage: boolean };
 
@@ -465,13 +465,13 @@ export type Spend = { settled: number; usage: boolean };
 // has nothing to say.
 //
 // The token budget counts `usage_in + usage_out`, which the writer accumulates from `message.end`
-// (HS-023); a backend that sends no `usage` leaves the budget nothing to count, and spec item 13's
+// a backend that sends no `usage` leaves the budget nothing to count, and spec item 13's
 // contingency says the operator is told so rather than shown a zero. Two facts decide it, and neither
 // is the row's total: a *settled turn* is what makes usage expected at all ("no turn has run yet" is
 // not "the backend reports nothing"), and *a usage frame* is what makes it reported. Both are read
 // from the log, which the page replays on every load, so the sentence is the same after a reload as it
 // was live — and a row whose two columns are 0 cannot say which of the two cases it is in. A replay
-// truncated to the newest messages (HS-061) carries the settled turns *inside* the window, which is
+// truncated to the newest messages carries the settled turns *inside* the window, which is
 // why `history.truncated`'s `turns_before` exists: a turn count that started at zero would say "no turn
 // has run yet" about a session that has run forty.
 export function budgetNotice(spend: Spend): string | null {
@@ -484,7 +484,7 @@ export function budgetNotice(spend: Spend): string | null {
 // Which of the composer's actions this state offers. Steer and Abort belong to a running turn
 // (spec item 8's `running` row): nowhere else has anything to steer or abort. Prompting is the
 // `idle` row's trigger, and `starting` is a provisioning step away from it. Resuming is the
-// `stopped` and `error` rows' trigger — the transition table's only two `resume` rows (HS-018).
+// `stopped` and `error` rows' trigger — the transition table's only two `resume` rows.
 export type Affordances = {
   prompt: boolean;
   steer: boolean;
@@ -504,7 +504,7 @@ export function affordances(state: SessionState): Affordances {
 // How much of a reason the badge shows, in characters.
 //
 // A reason is normally one word (`evicted`, `idle_stop`) or one short sentence, and fits. An unexpected
-// exit's is not: it is the last few lines the container printed (HS-030, spec item 6), so the badge shows
+// exit's is not: it is the last few lines the container printed (spec item 6), so the badge shows
 // the *last* of them — the error itself, not the oldest line of the tail — on one line and clipped.
 // `session.log` keeps every line; the badge has one ellipsis' worth of room.
 export const REASON_MAX = 48;
@@ -533,9 +533,9 @@ export function stateText(state: SessionState, reason: string | null): string {
 // What a stopped session's row says beyond its state, or `null` when its reason needs no sentence.
 //
 // Three reasons earn one, and they are the three the machine writes without being asked: `evicted` is a
-// create stopping the least recently active idle session to take its slot (HS-020), `idle_stop` is a
-// session left alone for longer than `idle_stop_min` (HS-021), and `disk_quota` is a session whose worktree
-// went over `session_disk_soft_gb` (HS-063, spec item 14). Spec item 9 is emphatic about the first two —
+// create stopping the least recently active idle session to take its slot, `idle_stop` is a
+// session left alone for longer than `idle_stop_min`, and `disk_quota` is a session whose worktree
+// went over `session_disk_soft_gb` (spec item 14). Spec item 9 is emphatic about the first two —
 // "history, worktree, events and images are kept. Nothing is deleted by the cap." — and the third is the
 // same promise with a different cause, which is why the three stay in one function: the operator reads
 // whether anything was lost the same way in all three, and the *fix* is what differs (make room, or sit idle
@@ -557,8 +557,8 @@ export function stoppedNotice(reason: string | null): string | null {
 
 // What the row's detail span holds: the notice when the state and its reason earn one, and a dash
 // otherwise. One function because the span is written in two places — when the row is built, and when
-// a `session.status` frame turns a live row into a stopped one, which is how an eviction (HS-020) or
-// an idle stop (HS-021) arrives — and two spellings there would show the operator different things
+// a `session.status` frame turns a live row into a stopped one, which is how an eviction or
+// an idle stop arrives — and two spellings there would show the operator different things
 // depending on whether they were watching.
 //
 export const NO_DETAIL = "—";
@@ -566,7 +566,7 @@ export const NO_DETAIL = "—";
 // A day, in the whole seconds every timestamp on this wire is in (`stopped_at`, `last_active_at`).
 export const DAY = 86_400;
 
-// What a stopped row says about how long it has left before the daily job reaches it (HS-064, spec item 15).
+// What a stopped row says about how long it has left before the daily job reaches it (spec item 15).
 //
 // `null` when there is nothing to say: a row that never stopped has no `stopped_at`, and a machine that is not
 // expiring anything has no positive window (`stopped_ttl_days` refuses `0` in the config, so this arm is a
@@ -602,14 +602,14 @@ export function stoppedDetail(
   if (state !== "stopped") {
     return NO_DETAIL;
   }
-  // Two facts, never both at once before HS-064: what the stop was (when its reason earns a sentence) and how
+  // Two facts, never both at once: what the stop was (when its reason earns a sentence) and how
   // long it has left. A row with neither keeps the dash, because an empty span is the producer's answer and not
   // this function's to invent.
   const parts = [stoppedNotice(reason), expires].filter((part): part is string => part !== null);
   return parts.length === 0 ? NO_DETAIL : parts.join(" · ");
 }
 
-// What a create's refusal says in the form's error area (HS-026).
+// What a create's refusal says in the form's error area.
 //
 // Spec item 1's three refusals are the project's, not the request's: the operator has to be told what is
 // wrong with the repository, and a `git_not_directory:` prefix in front of that sentence is a machine
@@ -626,7 +626,7 @@ export function createFailure(code: string, message: string): string {
   return PROJECT_REFUSALS.includes(code) ? message : `${code}: ${message}`;
 }
 
-// What a delete's 202 carries about the work it keeps (HS-043, spec item 9).
+// What a delete's 202 carries about the work it keeps (spec item 9).
 //
 // Three keys, and every one may be `null`. `kept` itself is `null` when the keep-rule had no answer — an
 // unreadable repository, or a row with no base commit — which is *not* the same as answering "nothing
@@ -690,13 +690,13 @@ export function networkText(network: boolean): string {
 // The preview listener serves `/<host>/<id>/…` and refuses every other host name, so a link out of the session
 // screen has to spell the segment the way the listener parses it. That is why the name and the shape are
 // rules in this file rather than two strings in `main.ts`: a link and a listener that disagree are a 404 a
-// browser shows and nothing explains (HS-041).
+// browser shows and nothing explains.
 //
-// Since HS-071 the segment is also *whose* session it is: a hub's preview listener forwards `/<peer>/<id>/…` to
+// Since the segment is also *whose* session it is: a hub's preview listener forwards `/<peer>/<id>/…` to
 // the machine that owns the session (ADR-0074), so one word is both "which machine" and "which listener".
 export const LOCAL_HOST = "local";
 
-// --- the machine a request is for (HS-071, ADR-0076) ---------------------------------------------
+// --- the machine a request is for (ADR-0076) ---------------------------------------------
 //
 // One page, every machine's data. A session lives on exactly one machine, and the hub reaches it at
 // `/api/hosts/<host>/<rest>` where the peer serves it at `/api/<rest>` (ADR-0074) — so **every** path the page
@@ -736,7 +736,7 @@ export function hostRef(host: string, ref: string): string {
 
 // Where a session's page is. `/sessions/<id>` is this machine's, and `/hosts/<host>/sessions/<id>` is another
 // machine's — the API's own prefix, one level out: the address bar names whose session the operator is looking at,
-// a reload lands on the same machine's transcript, and HS-074's host-aware notification has a path to link to.
+// a reload lands on the same machine's transcript, and the host-aware notification has a path to link to.
 export function sessionHref(host: string, id: string): string {
   return host === LOCAL_HOST
     ? `/sessions/${encodeURIComponent(id)}`
@@ -828,7 +828,7 @@ export function parseTruncated(data: string): Truncated | null {
   };
 }
 
-// One page of older history, as `GET /api/sessions/:id/events/history` answers it (HS-061).
+// One page of older history, as `GET /api/sessions/:id/events/history` answers it.
 //
 // `events` are stored rows, so each is a `type`/`payload` pair `parseFrame` already understands; the
 // three other fields are the cursor, whether another page exists, and how many turns closed before this
@@ -855,7 +855,7 @@ export function historyPath(
 // Whose session a path names, or `null` for every other path. Two shapes and nothing deeper:
 // `/sessions/<id>` is this machine's and `/hosts/<host>/sessions/<id>` is another's — the app shell is served for
 // any non-`/api/` path (ADR-0007), so the screen reads its own address rather than a router that would add a
-// dependency, and the host in it is what every request the screen makes is made against (HS-071).
+// dependency, and the host in it is what every request the screen makes is made against.
 export type SessionAddress = { host: string; id: string };
 
 export function sessionIdFromPath(pathname: string): SessionAddress | null {
@@ -877,7 +877,7 @@ export function sessionIdFromPath(pathname: string): SessionAddress | null {
   return null;
 }
 
-// --- the Changes sheet (HS-058, ADR-0067) --------------------------------------------------------
+// --- the Changes sheet (ADR-0067) --------------------------------------------------------
 //
 // Item 12's screen, and the reason every string below is a function: `npm test` is the only gate that can see a
 // sentence, so the sheet's rules live here rather than in `main.ts`'s event handlers (ADR-0018's rule, applied to
@@ -892,7 +892,7 @@ export type ChangedFile = {
   deletions: number | null;
 };
 
-// The options the two pickers offer, in the one additive key HS-058 put on the answer: the configured merge
+// The options the two pickers offer, in the one additive key put on the answer: the configured merge
 // targets **that exist**, and the configured publish remotes verbatim (ADR-0067).
 export type Choices = { targets: string[]; remotes: string[] };
 
@@ -940,7 +940,7 @@ export function statusWord(status: string): string {
 }
 
 // A file's two counts. A binary file is git's `-`/`-`, which the answer carries as `null`: the em dash says "not
-// counted" and `0` would say "no lines changed" about a file that changed entirely (HS-052's rule, rendered).
+// counted" and `0` would say "no lines changed" about a file that changed entirely (rendered).
 export function countsText(additions: number | null, deletions: number | null): string {
   const plus = additions === null ? NO_DETAIL : `+${additions}`;
   const minus = deletions === null ? NO_DETAIL : `−${deletions}`;
@@ -1105,7 +1105,7 @@ export function diffPath(host: string, id: string, path: string): string {
   return `${sessionPath(host, id)}/changes/diff?path=${encodeURIComponent(path)}`;
 }
 
-// ---- the Computers screen (HS-071, ADR-0076) ----------------------------------------------------
+// ---- the Computers screen (ADR-0076) ----------------------------------------------------
 //
 // Item 4's screen as a hub draws it: one section per machine, and every word on it a function here. The data
 // comes from three answers this build already serves and nothing new — `GET /api/hosts` (the registry's rows),
@@ -1181,7 +1181,7 @@ export function lastCheckText(at: number, now: number): string {
 }
 
 // "3 min ago", coarse on purpose. It reads a time from an answer and never from a frame: no frame carries one,
-// so the text is as fresh as the answer that drew it. Moved here from `main.ts` in HS-071 because the Computers
+// so the text is as fresh as the answer that drew it. Moved here from `main.ts` because the Computers
 // screen's last-check line is a second caller, and a sentence written twice is the pair that drifts.
 const MINUTE = 60;
 const HOUR = 60 * MINUTE;
@@ -1227,7 +1227,7 @@ export function skewNote(version: string, own: string): string | null {
 // that answered and is not a Holosmith.
 //
 // A refusal from this list is a **sentence about the value the operator typed**, and the code in front of it
-// would be a word to act on that is not one (`createFailure`'s rule for a project's refusals, HS-026). Every
+// would be a word to act on that is not one (`createFailure`'s rule for a project's refusals). Every
 // other code keeps its word, because it names something the operator cannot see in the form.
 export const HOST_REFUSALS: readonly string[] = ["bad_host_name", "bad_host_url", "not_holosmith"];
 
@@ -1235,10 +1235,10 @@ export function hostFailure(code: string, message: string): string {
   return HOST_REFUSALS.includes(code) ? message : `${code}: ${message}`;
 }
 
-// The two codes that mean **the machine did not answer** (HS-074): the hub's own `502` and `504` for a forwarded
+// The two codes that mean **the machine did not answer**: the hub's own `502` and `504` for a forwarded
 // call. They earn the peer's message alone, without the code in front, for `hostFailure`'s own reason one step out —
 // `upstream_unreachable: workshop could not be reached at http://…` reads as a word to look up about a machine that is
-// simply away (HS-071's rule on the list's groups, and this is the same rule for the two screens that did not have
+// simply away (the rule on the list's groups, and this is the same rule for the two screens that did not have
 // it: a session's page and the settings screen's rows).
 export const UPSTREAM_CODES: readonly string[] = ["upstream_unreachable", "upstream_timeout"];
 
@@ -1257,7 +1257,7 @@ export function hostLabel(host: string): string {
   return host === LOCAL_HOST ? "local · this machine" : host;
 }
 
-// What **this** machine is called on its own screens (HS-074).
+// What **this** machine is called on its own screens.
 //
 // `hostLabel` answers for a name in the URL space, where this machine's is the reserved `local`; a machine that has
 // been given a `machine_name` of its own says so instead, because that is the string its notifications carry and the
@@ -1314,7 +1314,7 @@ export function createOffered(role: string): boolean {
   return role !== "hub";
 }
 
-// Which machine a create may name (HS-074, spec item 11's "the hub is the only thing I open").
+// Which machine a create may name (spec item 11's "the hub is the only thing I open").
 //
 // A create names its machine **in the path**: the form posts to `POST /api/hosts/<host>/sessions`, which is the
 // hub's forwarding route reaching that machine's own `POST /api/sessions` — so the answer is the peer's own row, the
@@ -1354,19 +1354,19 @@ export function startLabel(host: string): string {
 export const NO_CREATE_TARGET =
   "no machine is reachable: register one on the Computers screen, or start a session on the machine itself";
 
-// What a session's page says under the sentence when the machine that owns it did not answer at all (HS-074). The
+// What a session's page says under the sentence when the machine that owns it did not answer at all. The
 // four composer actions, the delete and the Changes sheet are all requests to that a machine, so the page offers
 // none of them: this sentence is why there is nothing else on the screen.
 export const AWAY_DETAIL =
   "every action on a session is a request to the machine that owns it, so they are offered again once it answers";
 
 // What the settings screen says when the registry could not be read: this machine's own row is still true, and the
-// other machines are missing for a reason rather than absent (HS-074).
+// other machines are missing for a reason rather than absent.
 export function registryMissing(sentence: string): string {
   return `the registry could not be read, so other machines are missing: ${sentence}`;
 }
 
-// A session page whose machine went away **while the page was open** (HS-074). The read that drew the screen
+// A session page whose machine went away **while the page was open**. The read that drew the screen
 // succeeded, so there is no reply to quote; the stream's own connection failing is the observation, and a cached
 // transcript kept on screen after it is a claim this machine cannot make (ADR-0017). The transcript is left where it
 // is — it is what the machine last said — and this sentence says so above it.

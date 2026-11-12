@@ -1,4 +1,4 @@
-//! Forwarding one API call to another machine: the hub's client (HS-069, spec item 3, ADR-0074).
+//! Forwarding one API call to another machine: the hub's client (spec item 3, ADR-0074).
 //!
 //! The hub's preview listener is a byte tunnel (ADR-0051) and stays one; this module is the *other* shape, because
 //! the session API's answers have to travel through `axum` — the envelope, the four browser guards and the one
@@ -98,7 +98,7 @@ impl Forwarding {
     /// Three arms, and each is a route this build has: `merge` and `publish` (the spec's own pair), and a `DELETE`
     /// of one session, which is slow because the **peer** is slow — its delete asks the agent to stop and waits out
     /// `abort_grace` before it snapshots the worktree ([`crate::http::sessions::deletion`]). A blanket five seconds
-    /// would answer `504` for a delete the peer is executing, which is the failure `docs/notes.md` predicted when
+    /// would answer `504` for a delete the peer is executing, which is the failure an earlier development note predicted when
     /// ADR-0065 D8 left rule 6 to this story.
     pub fn timeout(&self, method: &str, rest: &str) -> Duration {
         let last = rest.rsplit('/').next().unwrap_or("");
@@ -148,7 +148,7 @@ impl Failure {
 ///
 /// `axum`'s `Path` percent-decodes every parameter before a handler sees it, which is right for a name and wrong for
 /// a path this machine writes into another machine's request line: a `%0d%0a` in `rest` would let a caller author a
-/// header on the forwarded request — the exact thing [`request_head`] exists to prevent (the review of HS-069 found
+/// header on the forwarded request — the exact thing [`request_head`] exists to prevent (the review found
 /// it). Positional, so an encoded host segment cannot shift it, and `None` for anything that is not that shape.
 pub fn raw_rest(path: &str) -> Option<&str> {
     let mut rest = path;
@@ -195,7 +195,7 @@ pub struct Request<'a> {
 /// here because the body is buffered.
 ///
 /// **Consequence, stated rather than discovered:** a peer cannot tell a forwarded call from a call at its own
-/// origin. That is exactly the hole HS-070/V11 closes (`allowed_hubs` and the whois), and the shape it has to
+/// origin. That is exactly the hole /V11 closes (`allowed_hubs` and the whois), and the shape it has to
 /// verify is this function's.
 pub fn request_head(request: &Request<'_>) -> Option<String> {
     let authority = authority(request.origin)?;

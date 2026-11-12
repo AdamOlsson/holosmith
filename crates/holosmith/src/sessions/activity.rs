@@ -1,6 +1,6 @@
 //! `last_active_at`: the one column two runners and one handler all move.
 //!
-//! Activity is not a state change — it is what HS-020's eviction order and HS-021's idle stop read —
+//! Activity is not a state change — it is what the eviction order and the idle stop read —
 //! so it is moved through the repository's `touch` and never through the transition table. Three
 //! callers do it (the turn runner at the prompt and at the settle, and the steer handler), and they
 //! share one function so the rule "log it and carry on" cannot drift between them: a row's activity is

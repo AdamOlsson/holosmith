@@ -1,9 +1,9 @@
-//! The worktree step against a real repository (HS-025, spec item 1).
+//! The worktree step against a real repository (spec item 1).
 //!
 //! No Docker and no daemon: the step is host `git`, so these tests build a repository in a `TempDir`
 //! and drive the shipped backend over it. The end-to-end case at the bottom is the same step through a
 //! create — the provisioner writes the row, the backend makes the files, and the network step's refusal
-//! (HS-027's, not this story's) is what makes the provisioner take the worktree back.
+//! (not this story's) is what makes the provisioner take the worktree back.
 //!
 //! The conventions the harness keeps: a fresh `TempDir` per test (two `Database::open`s on one path in
 //! one process is ADR-0009's trap), `wait_until` rather than `sleep` for anything a background task
@@ -67,7 +67,7 @@ fn projects(dir: &TempDir) -> (PathBuf, PathBuf) {
 /// A socket no daemon answers on.
 ///
 /// These tests are about where files go on disk, not about a machine that can run containers, and from
-/// HS-028 on the Docker backend really does create networks and containers — against a real daemon, in a
+///  on the Docker backend really does create networks and containers — against a real daemon, in a
 /// `TempDir` the daemon cannot even see. An absent socket makes the network step fail deterministically,
 /// which is what every one of them asserts (that a later step's refusal takes back what this one made).
 const NO_DAEMON: &str = "unix:///nonexistent/holosmith-test.sock";
@@ -142,7 +142,7 @@ async fn the_worktree_step_makes_the_branch_and_names_the_commit_it_starts_from(
 async fn a_second_provision_adopts_the_worktree_and_keeps_the_base_the_row_has() {
     // A resume re-provisions: the worktree, the branch and every commit on it are still there, so the
     // step must adopt rather than fail on a branch that already exists — and the base it answers must
-    // stay the one the session started from, because `ahead` is measured from there (HS-061).
+    // stay the one the session started from, because `ahead` is measured from there.
     // The label carries a space on purpose: `git worktree list --porcelain` prints the resolved path and
     // `registered()` compares it after `canonicalize`, so a projects root with a space in it is the case
     // that would break if either half were wrong.
@@ -310,7 +310,7 @@ async fn undo_removes_the_worktree_the_branch_and_the_registration() {
 
 #[tokio::test]
 async fn deleting_a_session_removes_its_worktree_too() {
-    // `delete` is "remove everything the session owns" (HS-019's flow), and from this story the worktree
+    // `delete` is "remove everything the session owns", and from this story the worktree
     // is part of that: a delete that left it behind would leave the files of a session nobody can see.
     let dir = TempDir::new("worktree-delete");
     let (root, repo) = projects(&dir);
@@ -360,7 +360,7 @@ async fn tearing_down_a_worktree_that_never_existed_is_not_a_failure() {
     );
 }
 
-// ---- what a delete keeps (HS-043, spec item 9) -------------------------------------------------
+// ---- what a delete keeps (spec item 9) -------------------------------------------------
 
 /// The two names `[merge] targets` carries by default: the branches a session's work may land in.
 fn default_targets() -> Vec<String> {
@@ -722,7 +722,7 @@ async fn a_project_that_is_not_a_repository_is_refused_with_its_path() {
     );
 }
 
-/// One create for `project`, the way the app's own client sends it (HS-026).
+/// One create for `project`, the way the app's own client sends it.
 async fn post_create_for(addr: SocketAddr, project: &str, key: &str) -> Response {
     let body =
         format!(r#"{{"project":"{project}","model":"claude-sonnet-4.5","thinking":"high"}}"#);
@@ -772,7 +772,7 @@ async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
 #[tokio::test]
 async fn a_create_records_the_worktree_and_takes_it_back_when_the_network_step_refuses() {
     // The provisioner is what writes the row, and the worktree step is the only one that has anything to
-    // write. The next step — the session's network — is real from HS-028 and has no daemon to talk to here,
+    // write. The next step — the session's network — is real and has no daemon to talk to here,
     // so it fails, and the provisioner undoes what completed (ADR-0015): the row keeps the record, the disk
     // keeps nothing.
     let dir = TempDir::new("worktree-create-flow");
@@ -940,7 +940,7 @@ async fn a_later_step_failure_does_not_take_an_adopted_worktree_back() {
     assert!(!path.exists(), "the delete left the worktree behind");
 }
 
-// ---- the project's refusals (HS-026, spec item 1) ---------------------------------------------
+// ---- the project's refusals (spec item 1) ---------------------------------------------
 //
 // The three rules that say a repository must not be mounted at all. They are read on the create's own
 // path, before any row exists, so each test here asserts two things: which code the operator gets, and

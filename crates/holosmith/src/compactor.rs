@@ -1,6 +1,6 @@
-//! Compaction: an old message's deltas become one snapshot (HS-060, spec item 15).
+//! Compaction: an old message's deltas become one snapshot (spec item 15).
 //!
-//! A streaming agent writes far more `message.delta` rows than a transcript needs, and HS-059's
+//! A streaming agent writes far more `message.delta` rows than a transcript needs, and that story's
 //! coalescing only bounds them per commit. This module is the other half of the spec's answer: once a
 //! message is a day old, nobody will watch it arrive, so its deltas are folded into one
 //! `message.snapshot` — the whole text and thinking, applied by message id, replacing rather than
@@ -204,7 +204,7 @@ impl Compactor {
 ///
 /// `running` is the state the story forbids, and `deleting` is a row on its way out whose log is about to go
 /// with it. What is left is every state in which the log is final for now — **including `starting`**, since
-/// HS-044: a row being provisioned has no turn running (a prompt needs `idle`) and no removal in flight, and
+/// a row being provisioned has no turn running (a prompt needs `idle`) and no removal in flight, and
 /// the startup reconcile makes every live row `starting` for as long as its re-provision takes. Excluding it
 /// would mean a restarted machine with a day-old log folded nothing until the next tick — the gate's own
 /// `case_compaction` caught exactly that. The safety argument is ADR-0032's either way: the pass holds the
@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn a_turn_in_flight_is_never_folded() {
-        // The states the story names, `starting` (HS-044: no turn runs there, and a restart parks every live
+        // The states the story names, `starting` (: no turn runs there, and a restart parks every live
         // row in it), and `deleting`, which is a log on its way out.
         assert!(foldable(Status::Starting));
         assert!(foldable(Status::Idle));

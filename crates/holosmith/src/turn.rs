@@ -1,5 +1,5 @@
-//! The turn runner: the background work one prompt becomes (HS-015), and the deadline that ends a turn
-//! which will not end itself (HS-022).
+//! The turn runner: the background work one prompt becomes, and the deadline that ends a turn
+//! which will not end itself.
 //!
 //! `POST /api/sessions/{id}/prompt` moves the row to `running` and answers 202; this is what
 //! happens next, off the request's task, so the answer never waits for a turn (spec item 8). It
@@ -17,13 +17,13 @@
 //! - **No lock is held across an `.await`.** A touch and every state change are their own
 //!   synchronous statements through `Arc<Mutex<Database>>` (ADR-0012/ADR-0013), so the guard cannot
 //!   outlive a statement and the event writer's commit never waits on this task.
-//! - **This is not a state machine.** HS-012 owns the table and the one function that writes a
+//! - **This is not a state machine.** This module owns the table and the one function that writes a
 //!   state; the runner asks it for `agent_settled` or `unexpected_exit` and writes nothing itself.
 //!
-//! Abort and steer are HS-016's and HS-017's: the script is cut short by the backend's own
+//! Abort and steer belong to a later change: the script is cut short by the backend's own
 //! `abort`/`stop`, and the ladder that asks for it is [`crate::ladder`].
 //!
-//! **The token budget (HS-023) is this task's second policy**, and it is here for the same reason the
+//! **The token budget is this task's second policy**, and it is here for the same reason the
 //! deadline is: a policy that must *record* a reason owns the ending, and only the runner writes the
 //! ending. `max_session_tokens` is a ceiling on what the session has spent (`usage_in + usage_out`, which
 //! the event writer accumulates from every `message.end`), so the runner polls the row while the turn
@@ -31,7 +31,7 @@
 //! climb is spawned and the turn keeps being awaited, exactly as the timeout's is — and the first policy
 //! to fire owns the reason, because a second climb would abort a turn that is already ending.
 //!
-//! **The turn timeout (HS-022) is this task's own deadline.** Spec item 13 gives a turn that never settles
+//! **The turn timeout is this task's own deadline.** Spec item 13 gives a turn that never settles
 //! a bound (`turn_timeout_min`), and the clock belongs here rather than in a sweeper because the row keeps
 //! no per-turn timestamp: `last_active_at` moves on a steer, so a column-based watcher would let a steered
 //! turn run for ever. The deadline starts when [`Turn::run`] does and dies with the task, so a turn that
@@ -67,7 +67,7 @@ pub const ABORT_COMPLETED: &str = "abort_completed";
 /// reads to tell "the agent is wedged" from "I stopped it" and "it stopped itself".
 pub const TURN_TIMEOUT: &str = "turn_timeout";
 
-/// The reason a turn that spent the session's whole budget records (HS-023, spec item 13).
+/// The reason a turn that spent the session's whole budget records (spec item 13).
 ///
 /// The sixth reason word, after `forced_abort`, `deleted`, `evicted`, `idle_stop` and `turn_timeout`,
 /// and the one a client reads to tell "it ran out of money" from "I stopped it" and "it stopped itself".
@@ -95,7 +95,7 @@ fn writer_tick() -> Duration {
 
 /// The deadline `turn_timeout_min` asks for, or `None` when the key is 0.
 ///
-/// `0` is the off switch (spec item 13's table, and the same reading HS-021's `idle_stop_min = 0` has):
+/// `0` is the off switch (spec item 13's table, and the same reading 's `idle_stop_min = 0` has):
 /// no timer is built at all, rather than a timer that never fires. A key the operator turned off should
 /// cost nothing.
 pub fn timeout(turn_timeout_min: u64) -> Option<Duration> {
@@ -129,7 +129,7 @@ pub struct Turn {
     /// `turn_timeout_min` as a duration, or `None` when the key is 0: no deadline is built at all.
     timeout: Option<Duration>,
     /// `max_session_tokens`, or `None` when the key is unset: no poll is built at all, and a session with
-    /// no ceiling costs nothing to run (HS-023).
+    /// no ceiling costs nothing to run.
     budget: Option<u64>,
 }
 
@@ -225,7 +225,7 @@ impl Turn {
     /// turn answered, and a climb dropped after rung 2 has moved the row — between the row's `stopped` and
     /// the resume that follows it — would leave the session stopped with nobody left to bring it back,
     /// which is spec item 16 §2's "and the server resumes it at once" broken outright. `Ladder::spawn` is
-    /// the abort handler's own entry point (HS-016), so a policy's ending and an operator's abort reach the
+    /// the abort handler's own entry point, so a policy's ending and an operator's abort reach the
     /// container through one routine and race the runner in exactly the way ADR-0020 recorded.
     ///
     /// The turn is still polled by [`Self::run`]'s `select!`, because rung 1 working *is*
@@ -237,7 +237,7 @@ impl Turn {
     }
 
     /// The label a turn that settled over its ceiling carries, or `None` when it settled under it
-    /// (HS-023).
+    ///
     ///
     /// **The second look narrows the window; it does not close it.** The tally is committed by the event
     /// writer on its own tick ([`writer_tick`]), so a turn that ends within a tick of its `message.end`
@@ -261,7 +261,7 @@ impl Turn {
             .then_some(BUDGET_EXCEEDED)
     }
 
-    /// The session's spend, when it has reached the ceiling this runner was built with (HS-023).
+    /// The session's spend, when it has reached the ceiling this runner was built with.
     ///
     /// `None` for every other answer, and for a row this runner cannot read: a failed read is a `warn`
     /// and not an abort. Ending a turn because a *read* failed would be the runner inventing a policy
@@ -308,13 +308,13 @@ impl Turn {
                 // `message.end` can settle between two polls, and then there is nothing left to abort —
                 // but the *session* is over its ceiling all the same, so the row is where the operator
                 // reads why, and the next turn trips on its first poll before it does any work. It is
-                // HS-022's own shape: a turn that finished after its deadline records `turn_timeout`
+                // its own shape: a turn that finished after its deadline records `turn_timeout`
                 // even though it stopped by itself. A turn that ended some *other* way keeps that
                 // ending's reason: an operator's abort is not the budget's to relabel.
-                // Every `agent_settled` leaves a WIP ref before the row moves (HS-042, spec item 9). A snapshot
+                // Every `agent_settled` leaves a WIP ref before the row moves (spec item 9). A snapshot
                 // failure is logged and does not change the turn's ending: the turn did finish, and making a
                 // failed git command turn a completed turn into an `error` row would lose the transcript it
-                // just produced. HS-043's delete is where a snapshot failure is a refusal.
+                // just produced. the delete is where a snapshot failure is a refusal.
                 self.snapshot(session).await;
                 let reason = match reason {
                     Some(reason) => Some(reason),
@@ -359,7 +359,7 @@ impl Turn {
 
     /// The abort ending: `running -> idle` on `reason`, unless the ladder got there first.
     ///
-    /// Two tasks can end one turn (HS-016, ADR-0020): the ladder's second rung exists exactly for a
+    /// Two tasks can end one turn (ADR-0020): the ladder's second rung exists exactly for a
     /// turn that did not stop, so it applies `running -> stopped` and then stops the backend, which
     /// is what finally makes this turn answer [`TurnEnd::Aborted`]. The row is therefore often no
     /// longer `running` by the time this runs, and the table refusing the row is the ordinary
@@ -387,7 +387,7 @@ impl Turn {
     }
 
     /// Record that the session was active: `last_active_at` moves at the prompt and at the settle,
-    /// which is what HS-020's LRU order and HS-021's idle stop read.
+    /// which is what the LRU order and the idle stop read.
     ///
     /// The rule that a failed touch is logged rather than fatal lives in
     /// [`crate::sessions::activity`], because the steer handler moves the same column for the same

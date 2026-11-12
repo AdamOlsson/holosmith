@@ -1,6 +1,6 @@
 # A remote deploy is four ssh children and a digest, and the same command runs there
 
-HS-073 is the spec's one sentence about `--ssh` ("the CLI copies the same binary to the target, verifies its SHA-256
+This is the spec's one sentence about `--ssh` ("the CLI copies the same binary to the target, verifies its SHA-256
 after the copy, and runs the same deploy there with sudo, streaming the output; it refuses if the target's CPU
 architecture differs, unless `--binary` supplies a matching build; the CLI itself downloads nothing from the
 internet"), and its five acceptance bullets. The story changes **how** a deploy reaches a machine and nothing about
@@ -80,7 +80,7 @@ Over ssh, `--root DIR` is the same flag with the same meaning on the other machi
   at all. No `sudo` is prefixed to the **run** child: the binary that runs is the invoking user's, and every write
   it makes escalates per child the way it already does.
 - The configuration a remote run reads is **the target's**, so `Config::load` is not called at all on this path and a
-  laptop with no `config.toml` can deploy. `--config` travels verbatim and names the target's file (HS-050's
+  laptop with no `config.toml` can deploy. `--config` travels verbatim and names the target's file (that story's
   two-configs rule, one hop out); making it absolute here would name this machine's.
 
 **"Verbatim" costs one quoting helper, and it is not optional.** ssh hands the target's login shell *one string*, so
@@ -166,12 +166,12 @@ stdio inheritance's build-up, and `tests/deploy.rs` the `sudo`-prefixed children
 
 ## D9 — what carries forward
 
-`GLOSSARY.md` gains **Remote deploy**. HS-074 owns cross-machine sessions and the notification deep link. HS-078/079
+`GLOSSARY.md` gains **Remote deploy**. A later change owns cross-machine sessions and the notification deep link. those stories
 (`upgrade`/`rollback`) take the same `--ssh`/`--binary` and must reuse this module's four children rather than write
 a second transport — an upgrade is "send the new binary and run `deploy`", which is exactly [`remote::Remote::send`]
 plus a different command line.
 
 The follow-up this story leaves: the copy is never removed from the target, so a machine deployed to many times
 accumulates nothing (the name is the digest) but keeps at least one binary in the login user's cache. A later story
-that owns a target-side layout (HS-080's release directory and `current` symlink) is where that becomes an install
+that owns a target-side layout is where that becomes an install
 rather than a copy.

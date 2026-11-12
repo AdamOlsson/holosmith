@@ -1,4 +1,4 @@
-//! Routes and the one servable app: the seam HS-005 attaches its guards to (ADR-0007).
+//! Routes and the one servable app: the seam attaches its guards to (ADR-0007).
 //!
 //! Feature code adds routes to [`Routes`]. The only value that can be served is [`App`], and
 //! `Router::layer` runs in exactly one place — [`App::new`] — because a layer applied at the
@@ -70,19 +70,19 @@ pub struct AppState {
     pub runtime: Runtime,
     pub database: Arc<Mutex<Database>>,
     pub events: EventWriter,
-    /// Which sessions have an SSE stream open: HS-019 closes them, HS-066 reads the count.
+    /// Which sessions have an SSE stream open: closes them, reads the count.
     pub streams: StreamRegistry,
     pub backend: Backends,
-    /// Whether this process is draining for a restart (HS-051). Not the database's: the state is the
+    /// Whether this process is draining for a restart. Not the database's: the state is the
     /// process's, and a row would outlive the restart the drain exists to precede and lie about it. Every
     /// clone of this state carries the same bit, which is what lets a handler read it on the request path
     /// while the socket's own task sets it.
     pub drain: Control,
-    /// One merge per project at a time (HS-054, spec item 12's rule 2). Here rather than in a handler for the
+    /// One merge per project at a time (spec item 12's rule 2). Here rather than in a handler for the
     /// reason the state's other handles are: two requests must share the lock, so it must be the state's, and a
     /// clone of the state clones the `Arc` rather than the map.
     pub merges: Merges,
-    /// The timeouts a forwarded call gets (HS-069): five seconds by default, sixty for the three slow arms.
+    /// The timeouts a forwarded call gets: five seconds by default, sixty for the three slow arms.
     ///
     /// The state's rather than a constant read at the call site for the reason [`Merges`] is: one value per process
     /// that a handler reads, and the one seam a test can shorten so a `504` is measured in milliseconds instead of
@@ -90,7 +90,7 @@ pub struct AppState {
     pub forwarding: crate::forward::Forwarding,
     /// The external programs this *request path* runs, as opposed to the ones a startup check runs.
     ///
-    /// Only `df` today, for HS-062's floor: a create and a resume measure the data root's free space before
+    /// Only `df` today, for the floor: a create and a resume measure the data root's free space before
     /// they start anything, with the same reader the boot and `doctor` use ([`crate::disk`]). The field is the
     /// state's for the reason [`Tools`](crate::preflight::Tools) is a parameter at all — this crate denies
     /// `unsafe`, so a test cannot `set_var` a `PATH`, and a shim it wrote is the only way to put a machine's
@@ -111,11 +111,11 @@ impl AppState {
         )
     }
 
-    /// A turn runner wired to this state's backend, database and event writer (HS-015).
+    /// A turn runner wired to this state's backend, database and event writer.
     ///
     /// Here for the same reason as [`Self::provisioner`]: the prompt handler clones the three
-    /// handles a background turn needs in one place. Since HS-022 it also carries the two durations a
-    /// turn's ending needs — the ladder's `abort_grace` and `turn_timeout_min` — and since HS-023 the
+    /// handles a background turn needs in one place. Since it also carries the two durations a
+    /// turn's ending needs — the ladder's `abort_grace` and `turn_timeout_min` — and the
     /// ceiling, so a runner cannot be built with a bound, or with a budget, the config did not ask for.
     pub fn turner(&self) -> Turn {
         Turn::new(
@@ -128,7 +128,7 @@ impl AppState {
         )
     }
 
-    /// The one state function (HS-012), wired to this state's database and event writer.
+    /// The one state function, wired to this state's database and event writer.
     ///
     /// Here for the same reason as [`Self::provisioner`]: a story that changes a session's state
     /// reaches it through the state it already has, so the two handles cannot be wired wrong or
@@ -138,7 +138,7 @@ impl AppState {
     }
 
     /// An abort ladder wired to this state's backend, database, event writer and `abort_grace`
-    /// (HS-016).
+    ///
     ///
     /// Here for the same reason as [`Self::turner`]: the abort handler clones the handles a
     /// background ladder needs in one place, and the grace period is the config's rather than a
@@ -153,7 +153,7 @@ impl AppState {
     }
 
     /// The delete flow's removal task, wired to this state's backend, database and stream registry
-    /// (HS-019).
+    ///
     ///
     /// Here for the same reason as the three above: the delete handler clones the three handles a
     /// background removal needs in one place. The registry is the state's own, so a session's open
@@ -168,7 +168,7 @@ impl AppState {
     }
 
     /// The one way a session's container is stopped, wired to this state's backend and database
-    /// (HS-030).
+    ///
     ///
     /// Its three users — the sweeper, the create's eviction and the abort ladder — all need the same two
     /// handles, and spec item 6's flag has to be written before the call in all three (ADR-0038). A
@@ -177,12 +177,12 @@ impl AppState {
         Stopper::new(self.backend.clone(), Arc::clone(&self.database))
     }
 
-    /// The idle stop's sweeper, wired to this state's backend, database and event writer (HS-021).
+    /// The idle stop's sweeper, wired to this state's backend, database and event writer.
     ///
     /// `None` when `idle_stop_min` is 0, which is the key's off switch: an operator who wants no idle
     /// stop should not have to pay for a task that sweeps and finds nothing. The decision lives here
     /// rather than in `serve` so there is one place that reads the key, and it is the same shape as
-    /// HS-022's turn timeout (ADR-0025).
+    /// the turn timeout (ADR-0025).
     ///
     /// Here for the same reason as the four above: the handles a background policy needs are cloned in
     /// one place.
@@ -201,7 +201,7 @@ impl AppState {
         ))
     }
 
-    /// The compaction task, wired to this state's database (HS-060).
+    /// The compaction task, wired to this state's database.
     ///
     /// Always present, unlike [`Self::sweeper`]: the window is the spec's 24 hours rather than a config
     /// key, so there is no key that could turn it off (ADR-0032). It needs neither the backend nor the event
@@ -214,7 +214,7 @@ impl AppState {
     }
 
     /// The per-session disk soft cap's watchdog, wired to this state's ladder, stopper, rows, writer, the
-    /// `du` this run measures with and the cap itself (HS-063, spec item 14).
+    /// `du` this run measures with and the cap itself (spec item 14).
     ///
     /// `None` when `session_disk_soft_gb` is 0, which is the key's off switch: an operator who wants no cap
     /// should not pay for a task that measures nothing (the sweeper's rule, ADR-0025). The decision lives here
@@ -238,7 +238,7 @@ impl AppState {
         ))
     }
 
-    /// The stopped-session expiry's daily job, wired to this state (HS-064, spec item 15).
+    /// The stopped-session expiry's daily job, wired to this state (spec item 15).
     ///
     /// **Always present, unlike [`Self::sweeper`] and [`Self::quota`]** — there is no off switch, and the absence
     /// is a decision rather than an omission: `stopped_ttl_days` already refuses `0` (`config/mod.rs`), and a `0`
@@ -256,7 +256,7 @@ impl AppState {
         crate::expiry::Expiry::new(self.clone(), self.config.stopped_ttl_days)
     }
 
-    /// The Web Push notification task, wired to this state (HS-066, spec item 11).
+    /// The Web Push notification task, wired to this state (spec item 11).
     ///
     /// **Always present, unlike [`Self::sweeper`] and [`Self::quota`]**: item 11 names no config key that could turn
     /// it off (ADR-0071's D10), so a `None` arm would be a second spelling of an answer the spec already gives. It
@@ -274,7 +274,7 @@ impl AppState {
     }
 
     /// The startup reconcile, wired to this state's rows, backend, writer, config and this run's backend
-    /// (HS-044).
+    ///
     ///
     /// Here for the same reason as the six above, and with one extra job: the *runtime* backend decides
     /// whether the name half runs at all (containers and networks exist only in a Docker run), so the two
@@ -289,7 +289,7 @@ impl AppState {
         )
     }
 
-    /// The drain's sequence, wired to this state's flag, rows, stopper and event writer (HS-051).
+    /// The drain's sequence, wired to this state's flag, rows, stopper and event writer.
     ///
     /// Here for the same reason as the seven above, and with one extra job: the flag is *this* state's, so a
     /// drain built anywhere else would set a bit no handler reads. `None` of the four handles could be wired
@@ -496,7 +496,7 @@ impl App {
     }
 
     /// This app's request counter, so a test can prove the layer ran on a given path. Hidden
-    /// from the docs on purpose: observation is not part of the seam HS-005 extends.
+    /// from the docs on purpose: observation is not part of the seam extends.
     #[doc(hidden)]
     pub fn counter(&self) -> RequestCounter {
         self.requests.clone()
@@ -565,12 +565,12 @@ pub fn router(state: AppState) -> Routes {
             async move { health::respond(&Health::of(&state.config, &state.runtime)) }
         })
         // Read-only, so the guards apply as they do to every other `GET`, the manifest records
-        // `ReadOnly`, and nothing new is needed for HS-013's list (ADR-0017).
+        // `ReadOnly`, and nothing new is needed for the list (ADR-0017).
         .get("/api/sessions", move || {
             let state = Arc::clone(&list_state);
             async move { sessions::list(&state).await }
         })
-        // One row, for the session screen's first answer (HS-014). Read-only like the list, and
+        // One row, for the session screen's first answer. Read-only like the list, and
         // `not_found` for an id the table does not hold.
         //
         // The path is taken as a `Result`, for the same reason the create takes its body as one:
@@ -598,7 +598,7 @@ pub fn router(state: AppState) -> Routes {
         // Read-only, so the guards apply as they do to every other `GET` and the manifest says
         // which kind it is (D7). `{id}` is axum 0.8's capture syntax; the spec writes `:id`.
         //
-        // The path is a `Result` here too: HS-014's route answers the envelope for a segment that
+        // The path is a `Result` here too: the route answers the envelope for a segment that
         // is not UTF-8, and a second route on the same prefix that answered `text/plain` would be
         // one rule with two spellings.
         .get(
@@ -609,7 +609,7 @@ pub fn router(state: AppState) -> Routes {
                 async move { streams::respond(&state, &id, &headers).await }
             },
         )
-        // One older page of the same log (HS-061). Read-only like its neighbours, so the manifest records
+        // One older page of the same log. Read-only like its neighbours, so the manifest records
         // it `ReadOnly` and the guards apply with nothing new. The query is taken as `RawQuery`, whose
         // rejection is `Infallible`: `before` is required and `limit` is clamped, and both are the
         // handler's to read and to refuse with `bad_query`.
@@ -625,7 +625,7 @@ pub fn router(state: AppState) -> Routes {
                 async move { history::respond(&state, &id, query).await }
             },
         )
-        // One tool call's full output, as a file (HS-033). Read-only like its neighbours, so the manifest
+        // One tool call's full output, as a file. Read-only like its neighbours, so the manifest
         // records `ReadOnly` and every guard applies with nothing new. Both path segments are taken as
         // `Result`s: a `%FF` segment is not UTF-8, and an id that is not a name is a file that cannot exist —
         // the handler answers `not_found` for each, which is one answer to one question (a traversal is
@@ -638,7 +638,7 @@ pub fn router(state: AppState) -> Routes {
                 async move { tool_output::respond(&state, &id, &tool_id).await }
             },
         )
-        // One image a tool returned, as a file beside that output (HS-035). Read-only on the same terms as the
+        // One image a tool returned, as a file beside that output. Read-only on the same terms as the
         // route above, and the same three `Result`s: the index is a number the handler parses, so a segment that
         // is not one is `not_found` rather than a second kind of error.
         .get(
@@ -650,7 +650,7 @@ pub fn router(state: AppState) -> Routes {
                 async move { tool_image::respond(&state, &id, &tool_id, &index).await }
             },
         )
-        // The changes view's summary (HS-052): what a session changed and whether it can merge. Read-only on the
+        // The changes view's summary: what a session changed and whether it can merge. Read-only on the
         // same terms as its neighbours — the manifest records it `ReadOnly` and every guard applies — and it is
         // the one session route whose work is host git in the project repository rather than the database or the
         // backend. The path is a `Result` for the same reason as its siblings: a `%FF` segment is a session the
@@ -663,7 +663,7 @@ pub fn router(state: AppState) -> Routes {
                 async move { changes::respond(&state, &id).await }
             },
         )
-        // The unified diff (HS-053): spec item 12's second bullet, `…/changes`'s read with a `path` to narrow it.
+        // The unified diff: spec item 12's second bullet, `…/changes`'s read with a `path` to narrow it.
         // Read-only on the same terms as its neighbours — a `GET`, so the manifest records `ReadOnly` and every
         // guard applies — and host git in the project repository like the summary beside it. The query is taken
         // as `RawQuery`, whose rejection is `Infallible`: `path` is optional (no `path` is the whole branch) and
@@ -677,7 +677,7 @@ pub fn router(state: AppState) -> Routes {
                 async move { changes::respond_diff(&state, &id, query).await }
             },
         )
-        // The merge (HS-054): spec item 12's rules 2 and 4, and the first route in this build whose work writes
+        // The merge: spec item 12's rules 2 and 4, and the first route in this build whose work writes
         // to the project repository. Mutating, so every guard applies and the manifest records it; `routes.post`
         // is what makes a `ReadOnly` kind unexpressible. Host git like the changes view beside it — no container
         // is asked anything — and the one route here that takes a lock the state owns, because two merges into
@@ -690,7 +690,7 @@ pub fn router(state: AppState) -> Routes {
                 async move { merge::respond(&state, &id, body).await }
             },
         )
-        // The publish (HS-057): item 12's last route, and the first in this build whose work reaches **out** of
+        // The publish: item 12's last route, and the first in this build whose work reaches **out** of
         // the machine. Mutating, so every guard applies and a `ReadOnly` kind is unexpressible; host git like the
         // merge beside it — the push is the server user's own git, and no container is asked anything — and the
         // path and the body are `Result`s for the reason the prompt's are. The manifest's kind is what keeps a
@@ -703,7 +703,7 @@ pub fn router(state: AppState) -> Routes {
                 async move { publish::respond(&state, &id, body).await }
             },
         )
-        // The prompt: a mutating route, so every guard applies and the manifest records it (HS-015).
+        // The prompt: a mutating route, so every guard applies and the manifest records it.
         // The path is a `Result` for the same reason as the routes above — a `%FF` segment is a
         // session the table does not hold — and the body is one, so a rejection axum would answer
         // `text/plain` becomes ADR-0008's `bad_body`.
@@ -715,7 +715,7 @@ pub fn router(state: AppState) -> Routes {
                 async move { sessions::prompt(&state, &id, body).await }
             },
         )
-        // The abort: a mutating route on the same terms as the prompt (HS-016). No body extractor:
+        // The abort: a mutating route on the same terms as the prompt. No body extractor:
         // there is nothing to parse, so there is no rejection to map.
         .post(
             "/api/sessions/{id}/abort",
@@ -726,7 +726,7 @@ pub fn router(state: AppState) -> Routes {
             },
         )
         // The steer: a mutating route with a body, so it takes both extractors as `Result`s for the
-        // reason the prompt does (HS-017).
+        // reason the prompt does.
         .post(
             "/api/sessions/{id}/steer",
             move |id: Result<Path<String>, PathRejection>, body: Result<Bytes, BytesRejection>| {
@@ -735,7 +735,7 @@ pub fn router(state: AppState) -> Routes {
                 async move { sessions::steer(&state, &id, body).await }
             },
         )
-        // The resume: a mutating route with no body (HS-018). The path is a `Result` for the same
+        // The resume: a mutating route with no body. The path is a `Result` for the same
         // reason as its siblings — a `%FF` segment is a session the table does not hold.
         .post(
             "/api/sessions/{id}/resume",
@@ -745,7 +745,7 @@ pub fn router(state: AppState) -> Routes {
                 async move { sessions::resume(&state, &id).await }
             },
         )
-        // The delete (HS-019): the one route in this table whose method is not `GET` or `POST`, and
+        // The delete: the one route in this table whose method is not `GET` or `POST`, and
         // `Routes::delete` already records it `Mutating`, so the guards apply as they do to a
         // prompt. The query is taken as `RawQuery`, whose rejection is `Infallible`: `?force=true`
         // is the only thing a delete's query can say, and it is the handler's to read.
@@ -758,7 +758,7 @@ pub fn router(state: AppState) -> Routes {
             },
         )
         // The **first routes in this build whose subject is a browser's subscription rather than a session**
-        // (HS-066, spec item 11). Both are mutating, so every guard applies and the manifest records the kind; the
+        // (spec item 11). Both are mutating, so every guard applies and the manifest records the kind; the
         // subscription is the machine's and not a session's, which is why neither path carries an id. The body and
         // the query are taken the way their neighbours do: `Result<Bytes, BytesRejection>` so a rejection axum
         // would answer in plain text becomes ADR-0008's envelope, and `RawQuery`, whose rejection is `Infallible`,
@@ -775,13 +775,13 @@ pub fn router(state: AppState) -> Routes {
             let state = Arc::clone(&unsubscribe_state);
             async move { push::unsubscribe(&state, query).await }
         })
-        // The **host registry** (HS-068, spec items 4 and 16): three routes whose subject is a machine rather than a
+        // The **host registry** (spec items 4 and 16): three routes whose subject is a machine rather than a
         // session, one per sentence of item 4. The list is `ReadOnly` — it reads the table and never probes — while
         // the other two are `Mutating`, so every browser-facing guard applies to them; the probe runs off this thread
         // inside the handler, which is why registering still answers in the shape of every other request.
         //
         // The `DELETE` takes its name as a path segment, unlike the push unsubscribe's query: a name is one path
-        // segment by construction (`hosts::name_problem` enforces the alphabet), and HS-069 forwards with it in
+        // segment by construction (`hosts::name_problem` enforces the alphabet), and forwards with it in
         // exactly that position.
         .get("/api/hosts", move || {
             let state = Arc::clone(&hosts_state);
@@ -800,7 +800,7 @@ pub fn router(state: AppState) -> Routes {
             },
         );
 
-    // The **forwarding route** (HS-069, spec item 3, ADR-0074): one peer's API, under this machine's host prefix.
+    // The **forwarding route** (spec item 3, ADR-0074): one peer's API, under this machine's host prefix.
     // Five registrations of one path rather than one `any` route, because `Routes` records a method and a kind per
     // entry (ADR-0010) and a forwarded `GET` cannot change state *at this machine* — so the manifest can say which
     // methods read and which mutate without inventing a method it does not have. The method that travels is the
@@ -849,7 +849,7 @@ async fn edge(
             Some(error) => error.into_response(),
             // The fifth check, and the fifth is not a header's: who is calling. Asked **after** the four because a
             // browser's mistake is the cheaper answer to give, and only where they apply because a peer's health
-            // probe has to keep working (HS-070).
+            // probe has to keep working.
             None => match admit(
                 guards.trust(),
                 request
@@ -877,7 +877,7 @@ async fn edge(
 }
 
 /// Machine-to-machine trust: does the address this call came from belong to a hub this machine takes calls from
-/// (HS-070, spec item 4, V11)?
+/// (spec item 4, V11)?
 ///
 /// `None` is "yes, or nothing to ask" — an empty `allowed_hubs` verifies nobody (the ACLs-only fallback), and a
 /// front door, a listed node and a machine with no list all come back `None` here. The whois is a child, so it runs
@@ -918,7 +918,7 @@ async fn admit(trust: &crate::trust::Trust, peer: Option<std::net::IpAddr>) -> O
 
 /// The only request no guard applies to: the health endpoint, on `GET` or `HEAD`.
 ///
-/// HS-005 reads this predicate instead of inventing its own list. `HEAD` is included because
+///  reads this predicate instead of inventing its own list. `HEAD` is included because
 /// axum answers it from the `GET` route, so exempting one and not the other would break the
 /// header probe the operator and `systemd` use.
 pub fn is_guard_exempt(method: &Method, path: &str) -> bool {

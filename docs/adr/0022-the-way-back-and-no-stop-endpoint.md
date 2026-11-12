@@ -1,6 +1,6 @@
 # The way back, and why there is no stop endpoint
 
-HS-018 is the story that makes `stopped` survivable: a session whose container is gone keeps its id, its
+This is the story that makes `stopped` survivable: a session whose container is gone keeps its id, its
 events and its worktree, and `POST /api/sessions/{id}/resume` brings it back. Three things had to be
 decided, and the first is a decision *not* to build something, which is the one most likely to be
 re-litigated later.
@@ -12,17 +12,17 @@ lists no stop. The transition table reaches `stopped` from `idle` by `evict`, `i
 and from a killed `running` turn by `abort_ladder` — three *policies* and one *escalation*, none of them
 an operator action.
 
-So HS-018 builds the way back and no way in. Adding `POST /api/sessions/{id}/stop` would have been a
-second vocabulary for a decision the later stories own (HS-020's eviction, HS-021's idle stop, HS-044's
+So builds the way back and no way in. Adding `POST /api/sessions/{id}/stop` would have been a
+second vocabulary for a decision the later stories own (the eviction, the idle stop, that story's
 drain), and it would have made "stop" look like something an operator is expected to do. The
-consequence is worth stating plainly: **until HS-020 or HS-021 lands, no client can put a session into
+consequence is worth stating plainly: **until or lands, no client can put a session into
 `stopped`.** That is why this story's own tests and demo drive the one state function to stop a
-session, exactly as HS-016's forced rung is driven, and why `scripts/verify.sh` proves the two refusals
+session, exactly as the forced rung is driven, and why `scripts/verify.sh` proves the two refusals
 and leaves the round trip to `tests/resume.rs`.
 
 `SessionBackend::resume` is still uncalled, for a related reason: a session comes back by being
 provisioned (`stopped → starting` is the table's `resume` row, then the four steps), and whether a
-resumed session re-runs every step or only the container's is HS-024's question about a real container.
+resumed session re-runs every step or only the container's is the question about a real container.
 Calling `resume` here would have guessed the answer. ADR-0020 deferred it; this ADR keeps the deferral
 and says who lifts it.
 
@@ -33,16 +33,16 @@ the last slot. A resume cannot: it is `live_count` and then a transition, two st
 The order that matters is not atomicity but **which side of the transition the refusal falls on**:
 
 - Refusing *after* the transition leaves a session `starting` with nothing provisioning it — a state
-  with no way out until HS-021's idle stop, and precisely the kind of stranded row this phase has been
+  with no way out until the idle stop, and precisely the kind of stranded row this phase has been
   closing.
 - Refusing *before* it touches nothing, and the client sees the code it can act on.
 
 So the count is read first and `409 cap_reached` is answered before `apply`. The window between the two
-statements can let two resumes overrun the cap by one; HS-020's eviction makes that uninteresting, and
+statements can let two resumes overrun the cap by one; the eviction makes that uninteresting, and
 a stranded `starting` row is worse than a fourth live session for a moment.
 
 The story's bullet allows either branch — "evicts the least recently active idle session first, **or**
-returns 409" — and eviction is HS-020's, so this story takes the 409. What the operator sees is the
+returns 409" — and eviction is that story's, so this story takes the 409. What the operator sees is the
 create's own `cap_reached`, so a client has one code to learn for "this machine is full".
 
 ## The page resumes once and retries once
@@ -73,15 +73,15 @@ and an abort is not one of them. Four details are deliberate:
 **Spec item 8's `error` row is conditional** — `| error | resume (clone present) | starting |` — and the
 condition is not implemented here: the table's row is unconditional and the handler checks only the
 status. Whether a session that died before its worktree was cloned can be resumed at all is a question
-about what a stopped session still owns, which is HS-024's (the first story with a real container and a
+about what a stopped session still owns, which is the (the first story with a real container and a
 real worktree). This story accepts an `error` resume and lets the provisioner say what is missing.
 
 **A resumed session re-runs all four provisioning steps, including `worktree`, and the provisioner's
 failure path undoes what completed.** For a session whose worktree the stop deliberately preserved
 ("history, worktree, events and images are kept", spec item 9), a later step failing could therefore
 remove the very thing the stop kept. Unreachable today — the Docker backend refuses every step, so the
-undo is a no-op recording — but it is a real risk the moment HS-024 fills the trait in, and it belongs
-in HS-024's brief rather than in this story's code.
+undo is a no-op recording — but it is a real risk the moment fills the trait in, and it belongs
+in the brief rather than in this story's code.
 
 ## Consequences
 
@@ -94,11 +94,11 @@ in HS-024's brief rather than in this story's code.
 - `web/test/transcript.test.ts` grows the affordance matrix: `resume` on `stopped` and `error` only.
 - `scripts/verify.sh` grows two cases — the two refusals — for 32 cases, and says in its own comment why
   the happy path is not among them.
-- The **`stopped` producer remains open** and is the most visible gap in the phase: until HS-020 or
-  HS-021 lands, `stopped` can be reached only through the state function. The next story, HS-019
-  (delete), produces none either; **HS-020's eviction is the first producer**, HS-021's idle stop the
+- The **`stopped` producer remains open** and is the most visible gap in the phase: until or
+   lands, `stopped` can be reached only through the state function. The next story,
+  (delete), produces none either; **the eviction is the first producer**, the idle stop the
   second, and the demo's "stopped *with a reason*" half is theirs (this story's tests supply the reason
   themselves, and the resume clears it, which is what they assert).
-- Retention (`stopped_ttl_days`, HS-064) and the UI's "days remaining" line have the column they need:
+- Retention (`stopped_ttl_days`) and the UI's "days remaining" line have the column they need:
   `stopped_at` moves with the state and is cleared by the resume, which was ADR-0016's choice and is
   proved here.

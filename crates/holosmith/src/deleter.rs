@@ -1,4 +1,4 @@
-//! The delete flow's background half: what happens after the row is `deleting` (HS-019).
+//! The delete flow's background half: what happens after the row is `deleting`.
 //!
 //! `DELETE /api/sessions/{id}` does everything a client must be able to *see* the result of —
 //! ending a running turn, taking the WIP snapshot, applying the transition — and then hands the
@@ -12,7 +12,7 @@
 //!    working the moment the operator asked [(`revoke_key`)](revoke_key).
 //! 2. **Remove what the backend owns** — [`SessionBackend::delete`], which is the container, the
 //!    worktree, the session directory and the network in one call, and which is handed the keep-rule's
-//!    answer so the branch and the snapshot ref it names survive (HS-043). A backend that *cannot* delete
+//!    answer so the branch and the snapshot ref it names survive. A backend that *cannot* delete
 //!    has created nothing to remove, so the flow carries on; any other failure means resources may
 //!    still be there, so the row stays `deleting` and a repeat request retries this task.
 //! 3. **Remove the row and its event log**, in one transaction: the row is what names the
@@ -55,7 +55,7 @@ pub struct Deleter {
     database: Arc<Mutex<Database>>,
     streams: StreamRegistry,
     /// `<data>/secrets/keys.toml`: the session's dummy key is removed here before the backend tears anything
-    /// down (HS-039). A key that spends money must stop working the moment the operator asked.
+    /// down. A key that spends money must stop working the moment the operator asked.
     secrets: PathBuf,
 }
 
@@ -76,7 +76,7 @@ impl Deleter {
 
     /// Hand `session` to a background task and return immediately.
     ///
-    /// `retained` is the answer the 202 carried (HS-043), for the reason [`Deleter::remove`] gives.
+    /// `retained` is the answer the 202 carried, for the reason [`Deleter::remove`] gives.
     pub fn spawn(self, session: Session, retained: Retained) -> JoinHandle<()> {
         tokio::spawn(async move { self.remove(&session, &retained).await })
     }
@@ -87,7 +87,7 @@ impl Deleter {
     /// racing a spawned task.
     ///
     /// `retained` is the keep-rule's answer, computed by the request that told the operator what survives
-    /// (HS-043). It is handed rather than recomputed for one reason: the answer and the removal must be the
+    /// It is handed rather than recomputed for one reason: the answer and the removal must be the
     /// same decision, and a commit that landed between them would make a recomputation disagree with what
     /// the operator was just told.
     ///
@@ -97,7 +97,7 @@ impl Deleter {
     pub async fn remove(&self, session: &Session, retained: &Retained) {
         revoke_key(session, &self.secrets);
         // No expected-stop flag here, deliberately: the *backend* is what makes a delete's exit quiet, by
-        // forgetting the launch before it removes the container (HS-031, ADR-0039). The flag would say
+        // forgetting the launch before it removes the container (ADR-0039). The flag would say
         // "the server asked for this stop", which the row is about to stop existing for.
         match self.backend.delete(session, retained).await {
             Ok(()) => {}
@@ -165,7 +165,7 @@ impl Deleter {
 /// Revoke the dummy API key this session spends with (spec item 9, item 14's risk table: "key
 /// revoked on delete").
 ///
-/// **A named no-op, deliberately.** No session has a key yet: HS-039 issues one per session and
+/// **A named no-op, deliberately.** No session has a key yet: issues one per session and
 /// wires the revocation here. The call site is the story's, because "revoked on delete" is a promise
 /// that has to have somewhere to land — a later story that found no hook would have to invent the
 /// ordering as well as the mechanism.

@@ -1,6 +1,6 @@
 # Compaction is a per-session pass inside the database lock
 
-HS-060 is spec item 15's second sentence: for messages completed more than 24 hours ago, a compaction job
+This is spec item 15's second sentence: for messages completed more than 24 hours ago, a compaction job
 replaces their delta rows with one `message.snapshot` taking the highest seq of the removed rows. The frame,
 the renderer and the seq counter already existed — ADR-0018 pinned the snapshot's payload and the page
 already replaces on one, and ADR-0031's neighbour rule says the counter is `sessions.last_seq` precisely
@@ -63,7 +63,7 @@ Bounding the number of messages is not the same as bounding the *work*, and the 
 the mutex is the one the writer and every handler need. So the delta read is bounded too, by the seq of the
 newest candidate's `message.end`: a message's deltas all precede its own end, so that seq is the furthest row
 any fold can reach, and without it a pass would read and parse every delta the session had ever held — on
-HS-061's 200k-event session, hundreds of milliseconds every minute. The bound is on the *scan*, not on the
+the 200k-event session, hundreds of milliseconds every minute. The bound is on the *scan*, not on the
 deletes: a delta inside the region that belongs to a message this pass is not folding is filtered out by
 message id, and the deletes are exactly the rows the fold read.
 

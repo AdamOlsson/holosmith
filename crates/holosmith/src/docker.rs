@@ -1,4 +1,4 @@
-//! The `docker` CLI as a program: one place that runs it, one place that reads what it said (HS-028).
+//! The `docker` CLI as a program: one place that runs it, one place that reads what it said.
 //!
 //! The backend does not speak the Docker HTTP API. Item 10 §1's `doctor` and the deploy steps are shell
 //! commands against the same daemon, the mount and network flags are easier to get right as arguments than
@@ -24,7 +24,7 @@ pub const STOP_SECONDS: &str = "10";
 ///
 /// Not internal, and not per session: the egress proxy is attached here *and* to each session network, so that
 /// a container's only route out is through something this build controls. It is created at startup on a Docker
-/// run (HS-036) so the proxies that arrive next have one place to attach to, and its absence is a `warn` rather
+/// run so the proxies that arrive next have one place to attach to, and its absence is a `warn` rather
 /// than a refusal — a session's own network step already fails with a message about itself.
 pub const EGRESS_NETWORK: &str = "egress";
 
@@ -54,7 +54,7 @@ impl Docker {
     /// One `docker` invocation as a value another module can spawn, with `-H` and the arguments set.
     ///
     /// For the one call in this build that is not "run it and read the answer": the agent's launch is
-    /// attached, so its stdio belongs to the caller for as long as the container lives (HS-031). Everything
+    /// attached, so its stdio belongs to the caller for as long as the container lives. Everything
     /// else here stays synchronous and hands back a string; this hands back the program — which is why there
     /// is no `run_container` beside `stop_container` any more.
     pub fn command_line(&self, arguments: &[String]) -> Command {
@@ -126,7 +126,7 @@ impl Docker {
 
     /// The gateway address a network reports, when it has one.
     ///
-    /// Only the network self-test asks (HS-036), and only to learn *which* address the host is reachable on
+    /// Only the network self-test asks, and only to learn *which* address the host is reachable on
     /// from a normal network. `None` for a network that does not exist, has no IPAM config (a driver that does
     /// not do IPAM) or reports Docker's `<no value>` for a missing field — three ways of saying "there is no
     /// address here to probe", and none of them is an error.
@@ -197,7 +197,7 @@ impl Docker {
 
     /// Run a **detached** container under a bound, answering its container id.
     ///
-    /// The egress proxy's start (HS-037) is the caller: `--detach` means the CLI returns as soon as the daemon has
+    /// The egress proxy's start is the caller: `--detach` means the CLI returns as soon as the daemon has
     /// created the container, and `--restart unless-stopped` means its lifetime is the daemon's, not this
     /// process's. It is **bounded** because it runs on the startup path — where a `docker run` can also have to
     /// pull the image first — and `Ok(None)` is "the start did not finish", not a verdict about the machine.
@@ -231,7 +231,7 @@ impl Docker {
     }
 
     /// Run `docker <arguments>` under a bound and answer the self-test's report: the probe's exit code and what it
-    /// printed (HS-036).
+    /// printed.
     ///
     /// The probe reports by **exit code**, so this is the one caller that reads the code rather than the text.
     /// `Ok(None)` is the bound expiring and the child being killed — "the probe did not finish", which is not a
@@ -269,7 +269,7 @@ impl Docker {
     }
 
     /// Remove a network under a bound, answering whether it happened — the startup reconcile's spelling of
-    /// [`Docker::remove_network`] (HS-044), for [`Docker::remove_container_bounded`]'s reason: it runs before
+    /// [`Docker::remove_network`], for [`Docker::remove_container_bounded`]'s reason: it runs before
     /// the listener has an answer for anybody, so a wedged daemon may cost the bound and not the boot.
     pub fn remove_network_bounded(&self, name: &str, bound: std::time::Duration) -> bool {
         self.removed_bounded(&["network", "rm", name], bound)
@@ -282,7 +282,7 @@ impl Docker {
             .is_ok_and(|output| output.is_some_and(|output| output.status.success()))
     }
 
-    /// Every container the daemon knows, by name, as the startup reconcile reads them (HS-044, spec item 6).
+    /// Every container the daemon knows, by name, as the startup reconcile reads them (spec item 6).
     ///
     /// The filter is the spec's own (`docker ps -a --filter name=s_`), and it is **not** the rule that decides
     /// what is the build's: Docker's name filter is a substring match, so `name=s_` also answers a container
@@ -300,7 +300,7 @@ impl Docker {
         )
     }
 
-    /// Every network the daemon knows, by name, for the same reason as [`Docker::container_names`] (HS-044).
+    /// Every network the daemon knows, by name, for the same reason as [`Docker::container_names`].
     pub fn network_names(
         &self,
         filter: &str,
@@ -350,7 +350,7 @@ impl Docker {
     /// The egress proxy is what a session's container can reach, and it reaches it by the **alias** rather
     /// than by the container's name: `docker network connect --alias` is what puts `egress-proxy` in the
     /// session network's DNS, and the proxy is joined to a network of its own as well, so the alias is the only
-    /// spelling that means the same thing from both sides (HS-037, spec item 2).
+    /// spelling that means the same thing from both sides (spec item 2).
     ///
     /// **A disconnect first**, so this is idempotent without reading Docker's English: a second `connect`
     /// answers `endpoint with name … already exists in network`, and a resume runs this again over a network
@@ -369,7 +369,7 @@ impl Docker {
     /// Detach `container` from `network`, answering `false` when it was not attached.
     ///
     /// Load-bearing rather than tidy: `docker network rm` refuses a network with an active endpoint, and a
-    /// session's network has one for as long as the egress proxy is joined to it (HS-037). ADR-0023's rule is
+    /// session's network has one for as long as the egress proxy is joined to it. ADR-0023's rule is
     /// that a delete leaves no `deleting` row, so the teardown leaves the network before it removes it.
     pub fn leave_network(&self, network: &str, container: &str) -> bool {
         self.succeeds(&["network", "disconnect", "--force", network, container])
@@ -382,7 +382,7 @@ impl Docker {
     }
 
     /// Remove a container by force, answering `false` when it was not there (spec item 6's "ignore
-    /// not-found", which HS-029 uses before every start and the teardown uses after a failure).
+    /// not-found", which uses before every start and the teardown uses after a failure).
     pub fn remove_container(&self, name: &str) -> bool {
         self.succeeds(&["rm", "--force", name])
     }
@@ -397,7 +397,7 @@ impl Docker {
     /// without parsing Docker's English.
     ///
     /// The flag that says this stop was expected is written by the caller — `stop::Stopper`, before this
-    /// call (HS-030) — because it is a row's column and a backend may not write one; the ten seconds are the
+    /// call — because it is a row's column and a backend may not write one; the ten seconds are the
     /// spec's.
     pub fn stop_container(&self, name: &str) -> Result<bool, DockerError> {
         if !self.container_exists(name) {
@@ -419,7 +419,7 @@ impl Docker {
         self.succeeds(&["container", "inspect", name])
     }
 
-    /// Whether an image is there, which is a question whose "no" is an ordinary answer (HS-048).
+    /// Whether an image is there, which is a question whose "no" is an ordinary answer.
     ///
     /// Asked before a label read and by the proxies' start: an absent image is "not built yet", and only a
     /// daemon that cannot answer at all is an error. `container_exists`'s shape, one object over.
@@ -430,13 +430,13 @@ impl Docker {
     /// One `docker image inspect --format` field, as Go's template syntax spells it.
     ///
     /// `inspect` rather than `container inspect`, because the subject is an image: the labels a build wrote are
-    /// `Config.Labels`, and reading them is how a deploy decides an image is current (HS-048).
+    /// `Config.Labels`, and reading them is how a deploy decides an image is current.
     pub fn image_inspect(&self, image: &str, format: &str) -> Result<String, DockerError> {
         self.run(&["image", "inspect", "--format", format, image])
             .map(|text| text.trim().to_string())
     }
 
-    /// Run one `docker build` with `archive` on its stdin under a bound, answering its combined output (HS-048).
+    /// Run one `docker build` with `archive` on its stdin under a bound, answering its combined output.
     pub(crate) fn build_bounded(
         &self,
         arguments: &[String],
@@ -447,7 +447,7 @@ impl Docker {
     }
 
     /// Run one `docker` child under a bound with its **output captured in a file** and, when it needs one, its input
-    /// written to a pipe from a thread of its own (HS-048; generalised in HS-076 for `docker run`).
+    /// written to a pipe from a thread of its own.
     ///
     /// Three things make a build — an image build or a release build — unlike every other call here, and each is why
     /// this is not `run`:

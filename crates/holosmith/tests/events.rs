@@ -1,4 +1,4 @@
-//! The event log and its single writer (HS-009, ADR-0013).
+//! The event log and its single writer (ADR-0013).
 //!
 //! Every test drives the shipped path: a real `Database` on a temporary file, the writer thread
 //! `events::spawn` starts, and — where the rule is about visibility — a *second* connection
@@ -174,7 +174,7 @@ fn the_events_table_has_every_column_and_the_composite_key() {
     );
 
     // The read order is SQLite's own index for the composite primary key, so no second, named
-    // index over the same columns exists (PER-41 S4). The name is read from `index_list` rather
+    // index over the same columns exists. The name is read from `index_list` rather
     // than written here: SQLite numbers its autoindexes (`sqlite_autoindex_events_1`), and the
     // assertion should name the index it actually built.
     let primary_key_index = connection
@@ -354,7 +354,7 @@ async fn seq_is_not_reused_after_the_highest_row_is_deleted() {
     }
     writer.take(3).await;
 
-    // What HS-060's compaction does: the rows go, the counter does not. `MAX(seq) + 1` would
+    // What the compaction does: the rows go, the counter does not. `MAX(seq) + 1` would
     // answer 1 here and reuse three seqs the client has already seen.
     let connection = reader(&dir);
     connection
@@ -425,7 +425,7 @@ async fn a_subscriber_sees_the_row_before_the_event() {
 async fn the_writer_handle_can_make_a_subscriber() {
     // `spawn`'s stream is the only one besides this, and `serve` drops it. Without a way to
     // subscribe through the handle, the broadcast half would be unreachable from the
-    // `EventWriter` an `AppState` carries, which is what HS-010 lands on (PER-41 P1).
+    // `EventWriter` an `AppState` carries, which is what lands on.
     let dir = TempDir::new("events-subscribe");
     let mut writer = writer(&dir, INTERVAL);
     let mut subscriber = writer.handle.subscribe();
@@ -473,7 +473,7 @@ async fn a_lagged_subscriber_does_not_stall_the_writer() {
     // sending before draining: 1100 non-blocking sends take far less than this.
     std::thread::sleep(Duration::from_millis(250));
 
-    // The subscriber is told it fell behind rather than being silently wrong (HS-010 re-fetches
+    // The subscriber is told it fell behind rather than being silently wrong (re-fetches
     // those events by last-seen seq).
     match writer.stream.recv().await {
         Err(RecvError::Lagged(missed)) => assert!(
@@ -583,7 +583,7 @@ async fn the_durability_rule_holds_across_a_reopen() {
     );
 }
 
-// ---- coalescing (HS-059, spec item 15) ---------------------------------------------------------
+// ---- coalescing (spec item 15) ---------------------------------------------------------
 //
 // Two claims, and the second is the one that makes the first safe: a burst becomes far fewer rows, and
 // nothing the transcript shows is lost or reordered while it does.

@@ -1,4 +1,4 @@
-//! `holosmith build`: compile a release artifact in the pinned builder container (HS-076).
+//! `holosmith build`: compile a release artifact in the pinned builder container.
 //!
 //! A **host** verb, and a thin one: it reads the config the way every command does (so `--config` means one thing
 //! and `docker_host` is honoured), resolves what it was asked for, and hands [`crate::builder`] three questions —

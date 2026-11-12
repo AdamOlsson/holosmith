@@ -1,35 +1,35 @@
 # The container story fills the network step, runs detached, and bounds the container with three keys
 
-HS-028 is spec item 6's run line — `docker run -i --rm --init --name s_<id> --network agents_<id>` — plus
+This is spec item 6's run line — `docker run -i --rm --init --name s_<id> --network agents_<id>` — plus
 "CPU, memory and PID limits come from config with documented defaults" and the negative list: no Docker
 socket, no host network, no `--privileged`, no added capabilities. Four things had to be decided for it
 that the spec does not decide.
 
-## The network step is this story's, and HS-036 owns the rest of the network
+## The network step is this story's, and a later change owns the rest of the network
 
 Spec item 6's run line names `--network agents_<id>`, so the container cannot be started without its
 network. The step order agrees: the provisioner runs `worktree → network → container → pi`, so a container
-step that came first would have nothing to join. HS-028 therefore creates the network with
+step that came first would have nothing to join. therefore creates the network with
 `docker network create --internal agents_<id>` and removes it on teardown.
 
 `--internal` is the whole isolation: a network without it has a gateway to the host and a route out, so it
-is not a flag a caller can pass. What HS-028 does **not** do is the rest of item 2: the `egress` network, the
+is not a flag a caller can pass. What does **not** do is the rest of item 2: the `egress` network, the
 two proxy containers, the startup self-test that refuses to start sessions when a probe can reach the
 internet or the host, the network-off probe, and the startup removal of orphaned `agents_*` networks. All of
-that is HS-036's, which extends this step rather than replacing it.
+that is that story's, which extends this step rather than replacing it.
 
-## The container runs detached until HS-031
+## The container runs detached until
 
 Spec item 6 spells `docker run -i`: pi speaks RPC over the container's stdin and writes its frames to
-stdout, so the shipped launch is an attached process whose stdio the server holds. That is HS-031's
+stdout, so the shipped launch is an attached process whose stdio the server holds. That is that story's
 change, and it is a large one — a `tokio` child process, two pumps, a reaping loop and a classification of
-how it ended (HS-030). Pretending to do it here would mean an attached process nobody reads from, which is
+how it ended. Pretending to do it here would mean an attached process nobody reads from, which is
 a container that fills its stdout pipe and blocks.
 
 So this story runs `--detach` and the container's command is [`container::IDLE_COMMAND`], `sleep infinity`.
 It is a placeholder and the module says so: the container exists, is mounted, is hardened and is limited,
 and nothing inside it is working yet — which is exactly what this build can truthfully claim. The demo is
-therefore half artifact and half test (the precedent is HS-025/ADR-0029): the artifact shows a create
+therefore half artifact and half test (the precedent is /ADR-0029): the artifact shows a create
 reaching the *agent* step, and `tests/container.rs` inspects the real container's flags.
 
 Detached plus `--rm` means a container whose command exits is removed immediately, which is why the
@@ -54,7 +54,7 @@ worth naming:
   endpoint is written and the preflight reads the same value; an inherited variable would be a second
   opinion about the same machine. A `docker` that answers is also a fact an operator can reproduce by hand,
   which is what makes a failure diagnosable from the row's `status_reason`.
-- **`Mounts::check` runs before `docker run`**, because HS-027 measured that `-v` creates a missing source as
+- **`Mounts::check` runs before `docker run`**, because measured that `-v` creates a missing source as
   an empty root-owned directory instead of failing (ADR-0035). The container step is the first caller that
   could be bitten by it, so it is the first caller that asks.
 

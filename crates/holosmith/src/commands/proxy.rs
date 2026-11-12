@@ -1,4 +1,4 @@
-//! `holosmith proxy egress`: the egress proxy, as a mode of this binary (HS-037, spec item 2).
+//! `holosmith proxy egress`: the egress proxy, as a mode of this binary (spec item 2).
 //!
 //! The proxy is not a second program. The spec's "Internal subcommands, used inside containers" lists
 //! `holosmith proxy egress`, and one binary means the proxy container runs the same artifact the server does —
@@ -8,7 +8,7 @@
 //! The allow-list comes from `--allow`, one domain per flag, and from the config file's `[egress] allow` when
 //! the flag is absent. The container the server starts passes the flags, because a container has no config
 //! file; a host-side run reads the operator's own list, which is what makes the demo and a `doctor` check
-//! (HS-045) one command rather than two spellings of the same policy.
+//!  one command rather than two spellings of the same policy.
 //!
 //! Nothing here binds a privileged port by design: the container's listen address is `0.0.0.0:3128` because
 //! that is what [`crate::egress::DEFAULT_LISTEN`] says and what `HTTPS_PROXY` names, and a host-side run is
@@ -37,7 +37,7 @@ pub struct ProxyArgs {
     pub config: Option<PathBuf>,
 }
 
-/// `holosmith proxy key`: the key proxy, as a mode of this binary (HS-039).
+/// `holosmith proxy key`: the key proxy, as a mode of this binary.
 #[derive(Debug, Clone)]
 pub struct KeyProxyArgs {
     pub listen: Option<String>,

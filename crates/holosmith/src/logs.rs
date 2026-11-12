@@ -1,4 +1,4 @@
-//! `holosmith logs`: the server's log, or one session's (HS-050, spec's Commands table).
+//! `holosmith logs`: the server's log, or one session's (spec's Commands table).
 //!
 //! Two sources, and they are read in two different ways on purpose:
 //!

@@ -1,5 +1,5 @@
 //! `holosmith server deploy` and `holosmith hub deploy`: install one half of a machine, in the spec's seven steps
-//! (HS-047, HS-072).
+//!
 //!
 //! The command is one idempotent pass over item 10 §"What `server deploy` does": each step **reads the machine's
 //! current state** and then applies only what the read found missing, so a second run changes nothing and reports
@@ -10,7 +10,7 @@
 //! [`Word`] is the read's answer, one of five. The two that carry the design are:
 //!
 //! - **`skipped` is never `satisfied`.** A step that prints "already satisfied" over a check that read nothing is a
-//!   lie of exactly the kind this list exists to prevent, which is why the word is in [`Word`] at all. Since HS-072
+//!   lie of exactly the kind this list exists to prevent, which is why the word is in [`Word`] at all. Since
 //!   its producer is a **role**: a [`Kind::Hub`] run builds no images and starts no proxies, and says so on both
 //!   lines rather than reporting a pass over work it never did.
 //! - **The first `failed` step stops the run.** Later steps are not evaluated at all: a machine whose preflight
@@ -20,7 +20,7 @@
 //!
 //! Four things are deliberately narrow:
 //!
-//! - **This is the local deploy.** `--ssh`, `--binary` and the remote copy are phase 3 (HS-073); nothing here
+//! - **This is the local deploy.** `--ssh`, `--binary` and the remote copy are phase 3; nothing here
 //!   reads a remote.
 //! - **A run installs one half of a machine.** [`Kind`] says which, the union of that half with the role the
 //!   config already carries is what step 2 writes, and the two halves together are `both` (the spec's Roles
@@ -63,9 +63,9 @@ use crate::preflight::{self, Check, Outcome};
 use crate::proxies;
 use crate::vapid;
 
-/// The admin socket's directory (spec item 10 step 2's "admin socket directory", path fixed by HS-051).
+/// The admin socket's directory (spec item 10 step 2's "admin socket directory", path fixed by).
 ///
-/// Public because it is a path `doctor`'s `perms` finding has to know (and HS-051's socket will be created in it), and
+/// Public because it is a path `doctor`'s `perms` finding has to know (and 's socket will be created in it), and
 /// a second spelling of `/run/holosmith` is a second thing to change.
 ///
 /// **`uninstall` does not remove it**, and that is a decision rather than an oversight: the directory holds the admin
@@ -103,7 +103,7 @@ pub const HEALTH_POLL: Duration = Duration::from_millis(250);
 ///
 /// The two commands that print a **resume** line need it — `server deploy` and `uninstall` — and a resume that named
 /// a relative path would mean a different tree from another directory. One function, because the second copy was
-/// byte for byte the first (HS-050's review, T9): a helper whose whole job is "the same path" should not exist twice.
+/// byte for byte the first (T9): a helper whose whole job is "the same path" should not exist twice.
 pub fn absolute(path: &Path) -> PathBuf {
     std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
@@ -121,7 +121,7 @@ const HELD_PORT: &str =
 /// make the repair unreachable and leave the operator to run one `chmod` the deploy knows how to run.
 const WRONG_MODE: &str = "; a wrong mode or owner in the install tree is what step 2 repairs, so it is a remark here and not a failure";
 
-/// The remark a broken `current` earns instead of failing the deploy — step 1's **third** divergence (HS-080).
+/// The remark a broken `current` earns instead of failing the deploy — step 1's **third** divergence.
 ///
 /// `doctor --quick` fails it on purpose: the unit runs `doctor --quick` as `ExecStartPre`, and a `current` the unit
 /// executes through that resolves to nothing is a boot that cannot happen. But a deploy is one of the two commands
@@ -297,7 +297,7 @@ pub enum Word {
     Needs,
     /// The apply ran and did them.
     Changed,
-    /// This run's role has no work for this step, and the line carries the reason. Since HS-072 its producer is a
+    /// This run's role has no work for this step, and the line carries the reason. Since its producer is a
     /// [`Kind::Hub`] install — a hub builds no images and starts no proxies — and the word is never a pass: the tally
     /// counts it apart, and a reader is told what was left out rather than told it is already right.
     Skipped,
@@ -372,7 +372,7 @@ impl Report {
     /// The whole report as the operator reads it: the header, where it installed, one line per step and the tally.
     ///
     /// The tally's four counts are always printed — `skipped` included, as zero on a run that skipped nothing —
-    /// because a gate greps the line's shape and a reader diffs two runs by it (ADR-0056). Since HS-049 there is no
+    /// because a gate greps the line's shape and a reader diffs two runs by it (ADR-0056). Since there is no
     /// list of who owns what remains, because nothing remains: the `deploy: incomplete:` line is gone, not hidden.
     pub fn render(&self) -> String {
         let count = |word: Word| self.lines.iter().filter(|line| line.word == word).count();
@@ -588,7 +588,7 @@ pub fn run(
     run_as(config, target, tools, machine, dry_run, Kind::Server)
 }
 
-/// The same run, for either half of a machine (HS-072).
+/// The same run, for either half of a machine.
 ///
 /// Two configs come out of the one the caller handed over, and the split is [`Kind`]'s whole substance:
 ///
@@ -618,7 +618,7 @@ pub fn run_as(
     };
     // The two machine-wide paths of the install tree are the *target's*, not the machine's: `doctor`'s `perms`
     // finding compares the tree this run writes, so a `--root` deploy must not read `/etc/holosmith` or
-    // `/run/holosmith` (HS-049's review, SPEC-1). Everything else about the tools — the programs, the systemd
+    // `/run/holosmith` (SPEC-1). Everything else about the tools — the programs, the systemd
     // directory, the tailscale binary — is a fact about the host and stays as it is.
     let mut doctor_tools = tools.doctor.clone();
     doctor_tools.config_path = target.etc_config();
@@ -679,7 +679,7 @@ pub fn run_as(
 /// `ExecStartPre`, but the deploy *repairs* one, so refusing here would make step 2's chmod and chown actions
 /// unreachable (ADR-0058). `release` is the third for that same reason, one step later: a `current` that does not
 /// resolve is a boot that cannot happen, and step 5 writes the unit for the binary this run is running whenever
-/// `Release::live` names nothing — refusing at step 1 would make the repair unreachable too (HS-080, ADR-0084).
+/// `Release::live` names nothing — refusing at step 1 would make the repair unreachable too (ADR-0084).
 fn preflight(config: &Config, tools: &doctor::Tools, machine: &dyn Machine) -> Line {
     let report = doctor::run(config, Depth::Quick, tools, machine);
     let mut findings = report.findings;
@@ -788,7 +788,7 @@ fn disk_of_the_nearest_ancestor(
 /// provider key and is **never** written over — created when absent and mode-repaired with `chmod`, never with
 /// `install`, which truncates, and its bytes are not even read; and `vapid.toml` is generated once by `openssl`
 /// when it is absent and read-only afterwards, because regenerating it would silence every existing push
-/// subscription (HS-049).
+/// subscription.
 ///
 /// The user and the ownership are not items: they are machine facts rather than install-tree paths, and under
 /// `--root` neither is read at all — the tree belongs to the invoking user, and the line says so instead.
@@ -1223,7 +1223,7 @@ fn read(item: &Item) -> Result<Option<Action>, String> {
                     mode,
                     bytes: bytes.clone(),
                 },
-                // Absent is the one state that earns a generated pair (HS-049).
+                // Absent is the one state that earns a generated pair.
                 ItemKind::Vapid => Action::Vapid { path: path.clone() },
             }));
         }
@@ -1280,7 +1280,7 @@ fn read(item: &Item) -> Result<Option<Action>, String> {
                 ));
             }
             // The read never generates: absent is the only state that earns a key, which is what makes a second
-            // deploy leave the pair — and every push subscription made with it — alone (HS-049).
+            // deploy leave the pair — and every push subscription made with it — alone.
             match vapid::is_pair(path) {
                 Ok(true) => wrong_mode.then(|| Action::Mode {
                     path: path.clone(),
@@ -1554,7 +1554,7 @@ fn failed(step: DeployStep, sentence: String) -> Line {
     }
 }
 
-/// Step 3: the two images, built from the Dockerfiles embedded in this binary (HS-048, ADR-0057).
+/// Step 3: the two images, built from the Dockerfiles embedded in this binary (ADR-0057).
 ///
 /// The read is each image's **labels**, compared with what this binary would build: not the tag, which any
 /// `docker tag` can move, and not a build timestamp, which says nothing about what is inside. One of those labels
@@ -1574,7 +1574,7 @@ fn images_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
     };
     // Both expectations up front, so the loop below and the `satisfied` sentence read the same two values.
     //
-    // `outstanding` is the read's one home (HS-078): a promotion asks the same question for another release's
+    // `outstanding` is the read's one home: a promotion asks the same question for another release's
     // version and digest, so the *rule* -- labels, proxy first, the read's own sentence as the reason -- must not
     // live twice.
     let release = crate::version::VersionInfo::current();
@@ -1671,7 +1671,7 @@ fn proxies_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
         .is_ok_and(|names| names.iter().any(|name| name == docker::EGRESS_NETWORK));
     let [egress, key] = proxies::running(config, machine);
     // The names this run's config composes: `hs_egress`/`hs_key` on a deployed machine, and a smoke config's own two
-    // if a deploy is ever run with one (HS-077).
+    // if a deploy is ever run with one.
     let names = proxies::names(config);
     if network && egress && key {
         return Line {
@@ -1773,7 +1773,7 @@ fn running_as_root() -> bool {
         .is_some_and(|uid| uid == "0")
 }
 
-/// Step 5: the systemd unit, rendered from this binary's own path (spec item 10 step 5, HS-049).
+/// Step 5: the systemd unit, rendered from this binary's own path (spec item 10 step 5).
 ///
 /// The bytes are the deliverable, which is why the rendering is a public function of exactly three facts — where the
 /// binary is, whether this is a privileged install, and the role the machine will hold — and the read compares the
@@ -1846,7 +1846,7 @@ fn service_line(
 ) -> Line {
     // `ExecStart` names the **release tree's** binary when one is live, and this process's own path otherwise.
     //
-    // That is the one fact a promotion changes and a deploy must not undo (HS-078): a machine whose `current`
+    // That is the one fact a promotion changes and a deploy must not undo: a machine whose `current`
     // symlink resolves is a machine that systemd should start *through* it, so a switch is what a restart picks up.
     // The unit's bytes are rendered from the same function either way, which is why this read and the promotion's
     // write agree byte for byte -- and why a second deploy on a promoted machine says `satisfied`.
@@ -1993,7 +1993,7 @@ pub fn preview_target(config: &Config) -> String {
     format!("http://127.0.0.1:{}", config.preview_listen.port())
 }
 
-/// Step 6: `tailscale serve` for the two origins (spec item 10 step 6, HS-049).
+/// Step 6: `tailscale serve` for the two origins (spec item 10 step 6).
 ///
 /// The read is Tailscale's own description of what it serves, not a file this deploy wrote: `serve status --json`
 /// answers one `Web` entry per host:port with the `Proxy` behind `/`, so "is :443 the control origin" is a field
@@ -2121,7 +2121,7 @@ fn served(json: &str) -> Result<Vec<(u16, String)>, String> {
     Ok(served)
 }
 
-/// Step 7: wait for `/api/health`, then ask `doctor --full` (spec item 10 step 7, HS-049).
+/// Step 7: wait for `/api/health`, then ask `doctor --full` (spec item 10 step 7).
 ///
 /// The read is the same two questions the apply ends on — the endpoint answers **and** no finding fails — so a
 /// `satisfied` line here is "this machine is serving, measured", not "the unit was installed". Anything short of

@@ -2,7 +2,7 @@
 
 Spec item 9's script is the whole design: seed a temporary index from `HEAD`, `git add -A` into it,
 `write-tree`, `commit-tree` with the holosmith identity, and point `refs/holosmith/wip/<id>` at the
-commit. HS-042 makes that script a module (`src/snapshot.rs`), a container mode
+commit. makes that script a module (`src/snapshot.rs`), a container mode
 (`holosmith container snapshot`) and three call sites.
 
 ## The temporary index is what keeps the promise
@@ -28,7 +28,7 @@ uncommitted work.
 ## A tree equal to HEAD deletes the ref
 
 The ref means "there is work here that the branch does not have". A commit whose tree equals `HEAD`'s
-tree would be a second name for nothing, and HS-043's keep-rule is written as "the wip ref differs from
+tree would be a second name for nothing, and the keep-rule is written as "the wip ref differs from
 the branch". So the tree comparison comes before `commit-tree`, and "equal" is an `update-ref -d`, not a
 new commit. A ref that was never there is already the right answer.
 
@@ -48,6 +48,6 @@ backend wraps it with the operation, the way every other backend failure is name
 
 ## What this story does not do
 
-The delete's keep-rules and the recovery sentence are HS-043's; this story only guarantees that the ref
+The delete's keep-rules and the recovery sentence are that story's; this story only guarantees that the ref
 exists before a delete and that a failed snapshot is visible. A stopped session's worktree is not
 removed here, and the snapshot does not fetch or push anything.

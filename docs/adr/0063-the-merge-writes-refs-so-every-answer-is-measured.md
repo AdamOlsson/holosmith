@@ -1,6 +1,6 @@
 # The merge writes refs, so it is its own module, and every answer about what happened is measured
 
-HS-054 is spec item 12's `POST /api/sessions/:id/merge` — rules 2 and 4 of the five the item states — and it is
+This is spec item 12's `POST /api/sessions/:id/merge` — rules 2 and 4 of the five the item states — and it is
 the first route in this build whose work **writes to the project repository**. Everything before it read: the
 changes view's summary and unified diff, the worktree's refusals, `doctor`'s merge trial. That is why the
 decisions below are less about new domain facts (there are only three: the target's two checks and the
@@ -11,7 +11,7 @@ the host in the project repository; containers never merge".
 
 ## D1 — A new `src/merge.rs` and `src/http/merge.rs`, importing the changes view's rules rather than copying them
 
-`changes.rs` is a **reader**: its module doc promises "no write, no fetch, no lock", and HS-053's `diff` already
+`changes.rs` is a **reader**: its module doc promises "no write, no fetch, no lock", and the `diff` already
 lives there because a patch is a read. A merge writes refs and a working tree, so putting it in that file would
 have made its promise false for every later reader of the module.
 
@@ -26,7 +26,7 @@ are the same two facts. That is answered by import rather than by cohabitation:
 So there is one spelling of each **rule** and two modules. The **sentences** are not shared, and the first draft
 of this ADR got that wrong: `http/merge.rs` writes its own four `no_worktree` messages ("…so there is no branch
 to merge") because a message must describe *its own* request — the rule `ApiError::no_worktree(message)` exists
-for, and the one that made HS-015's prompt stop reusing the create's sentence. The **code** is shared, which is
+for, and the one that made the prompt stop reusing the create's sentence. The **code** is shared, which is
 the part a client branches on. A merge's git failure is answered by `internal("merge", …)` rather than by the
 changes view's mapper, for the same reason: a failed *write* logged as "the changes view could not read the
 repository" is a sentence about the wrong operation. The alternative — a `Merge` struct hung on `Worktree` —
@@ -42,8 +42,8 @@ delegates to it, so `git worktree list --porcelain` has one parser rather than t
 key is `422 unknown_field` (the create's rule), and a body that is not an object with a string `target` is `422
 bad_body` with a merge-specific sentence (ADR-0008: a code may be shared, a sentence may not).
 
-This story builds `ff-only` only. `strategy: "merge" | "squash"` is HS-055's and `delete_session: true` is
-HS-056's, so both answer **`422 unsupported`** with a sentence each:
+This story builds `ff-only` only. `strategy: "merge" | "squash"` and `delete_session: true` belong to later
+changes, so both answer **`422 unsupported`** with a sentence each:
 
 | Request | Code | Why a refusal rather than a silent `ff-only` |
 | --- | --- | --- |
@@ -51,15 +51,15 @@ HS-056's, so both answer **`422 unsupported`** with a sentence each:
 | `delete_session: true` | `unsupported` | The request says "delete the session". An endpoint that merged and kept the row would be ignoring the most destructive thing it was told. |
 
 A `strategy` that is not one of the spec's three words at all (`"rebase"`) is `422 bad_strategy` instead — a
-malformed request, not a missing feature, and `unsupported` would promise that HS-055 adds it.
+malformed request, not a missing feature, and `unsupported` would promise that adds it.
 
-**Both rows above are history now**: HS-055 built the two strategy words and HS-056 built `delete_session`, so
+**Both rows above are history now**: built the two strategy words and built `delete_session`, so
 `unsupported` has no producer left and retired with its last field (ADR-0065 D9). The table is kept as the record
 of why the refusals were the right answer at the time rather than rewritten.
 
 **`message` is accepted, type-unchecked, and read by nothing.** A fast-forward creates no commit, so there is
 nothing for a message to name; the field is in the `FIELDS` allow-list because a client that sends the
-contract's body must not be told it sent a field this endpoint does not accept. HS-055, which makes a merge
+contract's body must not be told it sent a field this endpoint does not accept., which makes a merge
 commit, is what will read it. The asymmetry with the two fields above is deliberate: `message` changes nothing
 about what happens to the repository or the row, and those two change everything.
 
@@ -81,7 +81,7 @@ before any read inside it can become a `500`.
 Two facts share `bad_target`, on the `cap_reached` precedent: a name the config does not list, and a listed name
 the repository has no branch for — one code, two sentences, because the client's move is one and the operator's
 next step is the sentence's. The second is the ordinary case, not an error: `[merge] targets` defaults to
-`["main", "master"]` because a machine has one of them (HS-043). It is still a `422` and not a `409` because
+`["main", "master"]` because a machine has one of them. It is still a `422` and not a `409` because
 ADR-0061's rule applies one route over — "a name the repository does not have is not a target" — and the
 parameter is what named it.
 
@@ -92,14 +92,14 @@ parameter is what named it.
 
 `git merge-base --is-ancestor refs/heads/<target> refs/heads/agent/<id>`: exit 0 is "the target is behind (or
 equal to) the branch, so this is a fast-forward", exit 1 is `409 not_fast_forward`, anything else is a `500`. The
-same command HS-043's keep-rule reads, and read the same way — an exit code that *is* an answer, with the codes
+same command the keep-rule reads, and read the same way — an exit code that *is* an answer, with the codes
 named rather than inferred.
 
 The ancestry test is the primary check because it is the one that explains itself: "the target has commits the
 branch does not" is a sentence an operator can act on. It is asked about **`head`**, the commit this merge will
 write, rather than about the branch's ref read a second time — the test and the write have to be about one commit,
 or a commit landing on the branch in between would let the target advance to a commit that is no longer the
-branch's tip (reachable here, because rule 1's `session_running` guard is HS-056's and deliberately absent). The compare-and-swap
+branch's tip (reachable here, because rule 1's `session_running` guard is 's and deliberately absent). The compare-and-swap
 (`git update-ref refs/heads/<target> <new> <old>`) is what makes the unchecked-out path race-free: the third
 argument makes git refuse the write unless the ref still holds the value this module read, which is exactly the
 window a test cannot close. When it refuses, the module re-reads the ref — moved → the same
@@ -123,7 +123,7 @@ Rule 4 is written for a world with two shapes: not checked out anywhere, or chec
 
 **A prunable registration is not a checkout.** `git worktree list --porcelain` prints `prunable <reason>` for a
 worktree whose directory is gone and which `git worktree prune` has not caught up with — a state this build
-leaves behind routinely (HS-052's own landmine is one). Such a registration has no working tree to move, so
+leaves behind routinely. Such a registration has no working tree to move, so
 counting it would refuse a merge the operator can perform with advice ("check out another branch in that
 worktree") that cannot be followed. `worktree::Checkout` carries the flag and `checkout_of` filters it out; the
 startup sweep still sees every registration, because there the flag is not a reason to ignore anything.
@@ -159,7 +159,7 @@ a build that has learned to measure its reads should not infer its writes.
 
 ## D7 — The answer is exactly three keys, and the row is untouched
 
-`{merged_commit, target, strategy}`, item 12's rule 6. No additive key: HS-043's `kept` had to be *earned* by a
+`{merged_commit, target, strategy}`, item 12's rule 6. No additive key: the `kept` had to be *earned* by a
 fact no other surface could carry, and everything this story could add (whether anything moved, where the merge
 ran) is derivable from the three — `merged_commit` equal to the branch's tip means nothing moved, and
 `GET …/changes` says the rest.
@@ -192,7 +192,7 @@ mutex; a fresh mutex per call turns that test red), and the CAS is what actually
 
 ## D9 — Hooks never run, on this path too
 
-Rule 2 spells `-c core.hooksPath=/dev/null` for the temporary worktree HS-055 will build. This story applies it
+Rule 2 spells `-c core.hooksPath=/dev/null` for the temporary worktree will build. This story applies it
 to the fast-forward as well, because the sentence's reason is not about the temporary worktree: "so that your
 hooks never run agent-written code". `post-merge` is the one hook a fast-forward can run, and after an agent has
 been writing into `/work` a project's hooks are not code this build will execute on the operator's behalf.
@@ -230,11 +230,11 @@ used `update-ref` would fail step 3's "the file is on disk".
 
 ## What this ADR does not decide
 
-The `merge` and `squash` strategies and the temporary merge worktree (HS-055), rule 3's conflict arm, the
-`delete_session` half and rule 1's two guards (HS-056), publish (HS-057), the Changes sheet (HS-058), the hub's
+The `merge` and `squash` strategies and the temporary merge worktree, rule 3's conflict arm, the
+`delete_session` half and rule 1's two guards, publish, the Changes sheet, the hub's
 60-second merge timeout, and any change to `worktree.rs`'s create refusals.
 
 One fact the UI inherits from D5 and does not decide here: `409 target_checked_out` is a state the Changes sheet
-(HS-058) must render and HS-056 must not lose, because it is the only refusal whose next step is a git command in
+ must render and must not lose, because it is the only refusal whose next step is a git command in
 another directory. The two `unsupported` sentences in
-`http/merge.rs` exist only until HS-055 and HS-056 land, and go with them.
+`http/merge.rs` exist only until and land, and go with them.

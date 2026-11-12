@@ -6,7 +6,7 @@
 //! stays the one source of truth for the machine's settings.
 //!
 //! [`Backend`] is the one type both halves name: `serve` resolves `--backend` over the config
-//! file's `backend` key and then builds a `Runtime` from it (HS-011, ADR-0015), so a run's choice
+//! file's `backend` key and then builds a `Runtime` from it (ADR-0015), so a run's choice
 //! and the machine's setting are the same word rather than two.
 
 use std::time::Instant;

@@ -1,11 +1,11 @@
-//! Resume (HS-018): `POST /api/sessions/{id}/resume` answers 202 with the row now `starting`, the
+//! Resume: `POST /api/sessions/{id}/resume` answers 202 with the row now `starting`, the
 //! provisioner walks it back to `idle`, and nothing else about the session changes — the id, the events
 //! and the worktree path are what a stop leaves alone.
 //!
 //! **The stop is the table's.** Nothing in the API produces `stopped` yet: the spec makes it reachable
-//! from `idle` by `evict`, `idle_stop` and `drain` (HS-020, HS-021, HS-044) and from a killed `running`
-//! turn by `abort_ladder` (HS-016, which resumes at once), and the API table lists no stop endpoint. So
-//! a test drives the one state function, exactly as HS-016's forced rung is driven, and this story owns
+//! from `idle` by `evict`, `idle_stop` and `drain` and from a killed `running`
+//! turn by `abort_ladder` (which resumes at once), and the API table lists no stop endpoint. So
+//! a test drives the one state function, exactly as the forced rung is driven, and this story owns
 //! the way back.
 
 use std::net::SocketAddr;
@@ -376,7 +376,7 @@ async fn a_resume_at_the_cap_is_refused_and_leaves_the_session_stopped() {
 
 #[tokio::test]
 async fn prompt_steer_and_abort_on_a_stopped_session_are_session_stopped() {
-    // The refusals the page's resume-and-retry hangs off (HS-018's third bullet, spec item 8).
+    // The refusals the page's resume-and-retry hangs off (spec item 8).
     let dir = TempDir::new("resume-stopped-refusals");
     let state = with_stub(state_in(&dir, Config::default()), fast_stub());
     let served = Served::start(http::router(state.clone()), GRACE).await;

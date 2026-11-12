@@ -1,6 +1,6 @@
 # An image is a file, and a dialog is cancelled
 
-HS-035 is V8's last two cases, and they are the two records the mapping could not finish with a frame. HS-032
+This is V8's last two cases, and they are the two records the mapping could not finish with a frame.
 made `Mapping::map` one record in, at most one frame out, with no clock, no database and no agent, because that
 is what lets a committed fixture replay through the code a container drives. Both of these records need
 something that is not a frame:
@@ -20,8 +20,8 @@ gains one write, and the contract gains one kind.
 **An image is a file beside the tool's text**, under the same session directory and the same id rule:
 
 ```text
-<data>/sessions/<id>/tool/<tool_id>.txt          the tool's text (HS-033)
-<data>/sessions/<id>/tool/<tool_id>-<index>.png   one image block of its result (HS-035)
+<data>/sessions/<id>/tool/<tool_id>.txt the tool's text
+<data>/sessions/<id>/tool/<tool_id>-<index>.png one image block of its result
 ```
 
 - **`index` is the block's position in `result.content`**, not a counter of images, so a frame's entry says
@@ -37,7 +37,7 @@ gains one write, and the contract gains one kind.
   length **before the decode allocates**: the body is agent-controlled text, and counting it as whole
   four-character groups would let `IMAGE_CAP + 2` bytes through on an unpadded one, so the trailing group
   counts too. What this does **not** bound is the *record*: `agent::read_records` reads one line with no
-  length limit (HS-032's reader), so a gigabyte of base64 is a gigabyte of memory before this function is
+  length limit, so a gigabyte of base64 is a gigabyte of memory before this function is
   reached. That is recorded here rather than papered over — bounding a record is that reader's decision and
   its own story. An invalid or oversized body is a `warn` and no entry, so the frame's `images` names exactly
   the files that exist and a dead reference cannot be produced.
@@ -46,7 +46,7 @@ gains one write, and the contract gains one kind.
   earlier result would answer for a later `.gif`, and an index the later result does not carry would answer at
   all although no frame names it. So the files are decoded first and then every `<tool_id>-<digits>.<known
   extension>` that the new set does not name is removed — one sweep, whose digit requirement is what keeps it
-  from touching another tool whose id merely begins with this one. HS-033's text file keeps the same rule for
+  from touching another tool whose id merely begins with this one. the text file keeps the same rule for
   its one name.
 - **`tool.end` gains `images: [{index, mime, output_ref}]` additively, and only when one was stored.** A call
   whose result held none answers exactly ADR-0041's payload, and a row written before this key still draws.
@@ -111,7 +111,7 @@ table of kinds gains one, and ADR-0019's gains the `images` key:
   lightbox is a screen decision with a size cost on a phone and a second fetch policy, and no story owns it
   yet.
 - **A second replacing frame.** `message.snapshot` still has exactly one producer (ADR-0032).
-- **What a delete keeps.** Image files are a session's own directory, so HS-043's keep-rules own their fate.
+- **What a delete keeps.** Image files are a session's own directory, so the keep-rules own their fate.
 - **Deleting images or bounding their number.** One tool result can carry several blocks; each is stored, and
   the cap per image is the only bound. A total-per-session budget is a machine property, and would be a config
   key rather than a constant.

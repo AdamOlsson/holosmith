@@ -1,4 +1,4 @@
-# holosmith: embedded agent image (HS-048)
+# holosmith: embedded agent image
 #
 # This is the image a session's container runs: pi at the pinned version, git, the toolchains the config names
 # in `agent_toolchains`, and this binary for the helper subcommands (`container snapshot`, `proxy`).

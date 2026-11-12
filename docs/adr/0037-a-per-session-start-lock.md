@@ -1,6 +1,6 @@
 # A start is `rm -f` then `run`, serialised per session, and `resume` gets a body
 
-HS-029 is spec item 6's first three lines: "`--rm` means a stopped container never leaves its name behind.
+This is spec item 6's first three lines: "`--rm` means a stopped container never leaves its name behind.
 Before every start, run `docker rm -f s_<id>` and ignore not-found. Session data lives in host directories,
 so removing the container loses nothing." Plus one sentence that is not about Docker at all: "Two starts for
 the same session cannot race: a per-session lock serialises them."
@@ -17,7 +17,7 @@ So the spec's `rm -f` is not belt-and-braces over a flag that already works. It 
 - the window above, where the container has exited but the daemon has not removed it yet;
 - a container this process has lost track of — a `kill -9`, a crash, a session row removed while its
   container lived;
-- a container an operator started by hand under the same name. (HS-044 reconciles orphans at startup; this
+- a container an operator started by hand under the same name. (reconciles orphans at startup; this
   makes the *next start* boring regardless.)
 
 `rm -f` before `run` is one call inside the container step, so every path that starts a container — a
@@ -54,7 +54,7 @@ body, because the acceptance's third line ("a test that stops, removes and resum
   touches **no** worktree: the worktree is the provisioner's step and its `ensure` is create-or-adopt
   (ADR-0029), so a resumed session's commits are still on its branch.
 
-The expected-stop **flag** and the exit classification are deliberately not here — those are HS-030's, and
+The expected-stop **flag** and the exit classification are deliberately not here — those are that story's, and
 `stop` is the call they will annotate.
 
 ## What is asserted, and where

@@ -1,4 +1,4 @@
-//! The changes view's summary over a real repository (HS-052, spec item 12).
+//! The changes view's summary over a real repository (spec item 12).
 //!
 //! Every acceptance bullet of the story is a *git* fact, so these tests own a real repository in a
 //! `TempDir` — a first commit on `main`, one worktree, one branch `agent/<id>` — and move refs between two
@@ -147,7 +147,7 @@ impl Fixture {
         Changes::read(&self.worktree(), &self.base, targets, &[]).expect("the changes view answers")
     }
 
-    /// The same answer with the machine's publish remotes, for the tests of the sheet's second picker (HS-058).
+    /// The same answer with the machine's publish remotes, for the tests of the sheet's second picker.
     fn read_with_remotes(&self, targets: &[String], remotes: &[String]) -> Changes {
         Changes::read(&self.worktree(), &self.base, targets, remotes)
             .expect("the changes view answers")
@@ -427,7 +427,7 @@ fn a_conflict_makes_it_unmergeable_and_moves_no_working_tree() {
 
 #[test]
 fn a_repository_without_a_target_answers_unknown_rather_than_false() {
-    // The P1 lesson of HS-050's review, as a test: no target is "I could not ask", and folding it into
+    // The P1 lesson of the review, as a test: no target is "I could not ask", and folding it into
     // `false` would say "this branch cannot merge" about a question nobody asked. `behind` is null for the
     // same reason — there is no branch to be behind.
     let fixture = Fixture::new("changes-no-target");
@@ -471,7 +471,7 @@ fn the_first_existing_target_wins() {
 
 #[test]
 fn the_choices_are_the_targets_that_exist_and_the_remotes_as_configured() {
-    // The pickers' one key (HS-058, ADR-0067). Two arms, and each is measurably different from the other:
+    // The pickers' one key (ADR-0067). Two arms, and each is measurably different from the other:
     //
     // - `targets` is filtered by what the repository has, in the **config's** order, so a second existing branch
     //   appears in the position the config put it in rather than in git's;
@@ -876,7 +876,7 @@ async fn the_route_is_read_only_and_reachable_with_the_ordinary_guards() {
     served.finish().await.expect("the server stops");
 }
 
-// --- the unified diff (HS-053) -----------------------------------------------------------------------------
+// --- the unified diff -----------------------------------------------------------------------------
 
 /// The patch for one path, or `None` for the whole branch, as the handler would ask for it.
 fn patch(fixture: &Fixture, path: Option<&str>) -> holosmith::changes::Diff {

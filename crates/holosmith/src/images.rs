@@ -1,4 +1,4 @@
-//! The two images `server deploy`'s step 3 builds, from the Dockerfiles embedded here (HS-048).
+//! The two images `server deploy`'s step 3 builds, from the Dockerfiles embedded here.
 //!
 //! The Dockerfiles are `include_str!`ed rather than shipped beside the binary: a deploy runs on a machine that
 //! has the artifact and nothing else, so the recipe has to be *inside* it, and `scripts/check-static.sh` greps
@@ -35,7 +35,7 @@ pub const PROXY_DOCKERFILE: &str = include_str!("../images/proxy.Dockerfile");
 /// The agent image's Dockerfile, for the same reason.
 pub const AGENT_DOCKERFILE: &str = include_str!("../images/agent.Dockerfile");
 
-/// The **smoke** image's recipe (HS-077, spec item 10 step 2): the candidate as `pi`, on the agent image's base.
+/// The **smoke** image's recipe (spec item 10 step 2): the candidate as `pi`, on the agent image's base.
 ///
 /// A third recipe rather than a variant of the agent image, because the two answer different questions: the agent
 /// image is what a session runs in production (pi at the pinned version, git, the toolchains), and this one exists so
@@ -43,7 +43,7 @@ pub const AGENT_DOCKERFILE: &str = include_str!("../images/agent.Dockerfile");
 /// `server deploy` — it is not what a promotion ships, and the ADR says so.
 pub const SMOKE_DOCKERFILE: &str = include_str!("../images/smoke.Dockerfile");
 
-/// The smoke image's tag: `holosmith-smoke:<version>`, one spelling for `images` and `smoke` (HS-077).
+/// The smoke image's tag: `holosmith-smoke:<version>`, one spelling for `images` and `smoke`.
 pub fn smoke_image() -> String {
     format!("holosmith-smoke:{}", env!("CARGO_PKG_VERSION"))
 }
@@ -112,7 +112,7 @@ impl Kind {
         self.image_of(env!("CARGO_PKG_VERSION"))
     }
 
-    /// The same name for **another release's** version, which is the tag a promotion builds and then reads (HS-078).
+    /// The same name for **another release's** version, which is the tag a promotion builds and then reads.
     ///
     /// One format string per kind, because the tag a promotion creates and the tag the *new* binary will ask for at
     /// its next boot have to be the same string: the boot composes it from its own `CARGO_PKG_VERSION`, and a
@@ -149,7 +149,7 @@ impl Kind {
 /// What one image's labels must say, from a release's own values.
 ///
 /// Built from a [`VersionInfo`] — which is *this* process's values for the two callers that build images for the
-/// binary they are running (`server deploy`'s step 3 and `doctor`), and the **candidate's** for a promotion (HS-078)
+/// binary they are running (`server deploy`'s step 3 and `doctor`), and the **candidate's** for a promotion
 /// — from the config's `agent_toolchains`, and from a **digest of the binary bytes the build will copy**: an image
 /// is current when its labels are exactly this, which is why nothing here reads a build timestamp or an image id —
 /// a rebuild of identical inputs would change both and still be current. The binary is in the list because it is
@@ -192,7 +192,7 @@ impl Expectation {
         Self::of_release(kind, config, &VersionInfo::current(), binary)
     }
 
-    /// The expectation for **another release**: the candidate a promotion is about to make live (HS-078).
+    /// The expectation for **another release**: the candidate a promotion is about to make live.
     ///
     /// Every `env!` value [`of_digest`](Self::of_digest) reads is a fact of the *building* binary, and a promotion
     /// builds images the *candidate* will run — its version in the tag, its git tag, its pinned pi, and its digest,
@@ -310,7 +310,7 @@ fn label_word(key: &str) -> &'static str {
     }
 }
 
-/// The SHA-256 of a file, lowercase hex: what `org.holosmith.binary-sha256` carries (HS-048).
+/// The SHA-256 of a file, lowercase hex: what `org.holosmith.binary-sha256` carries.
 ///
 /// Written here rather than taken from a crate: this build's dependencies are fixed (`--locked`), the only
 /// question asked of it is "are these the same bytes", and forty lines checked against the standard's own test
@@ -350,7 +350,7 @@ pub fn own_digest() -> Result<String, String> {
 
 /// Lowercase hex, two characters per byte.
 ///
-/// `pub(crate)` since HS-073, so `remote`'s digest of the file it sends is written by the same two functions
+/// `pub(crate)`, so `remote`'s digest of the file it sends is written by the same two functions
 /// [`digest`] and [`own_digest`] use rather than by a third hex writer beside them.
 pub(crate) fn hex(bytes: &[u8]) -> String {
     let mut text = String::with_capacity(bytes.len() * 2);
@@ -367,7 +367,7 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 /// `"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"`, which is one block's worth of padding plus a
 /// tail and catches an off-by-one in the length field.
 ///
-/// **Shared with `push::crypto` since HS-066**, which builds HMAC-SHA-256 on it rather than writing the standard
+/// **Shared with `push::crypto`**, which builds HMAC-SHA-256 on it rather than writing the standard
 /// a second time: a Web Push message's key schedule is three HMACs deep (RFC 8291 §3.4), and two SHA-256s in one
 /// crate would be two things to keep right.
 pub(crate) fn sha256(data: &[u8]) -> [u8; 32] {
@@ -540,7 +540,7 @@ pub fn archive(dockerfile: &str, binary: &Path) -> Result<Vec<u8>, String> {
 
 /// The same archive from bytes the caller already holds.
 ///
-/// The smoke run's half (HS-077): it has read, hashed and ELF-checked the candidate before it builds anything, so a
+/// The smoke run's half: it has read, hashed and ELF-checked the candidate before it builds anything, so a
 /// second read could be a second file — and a promotion's image is supposed to be built from the bytes it measured.
 pub fn archive_bytes(dockerfile: &str, program: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -553,7 +553,7 @@ pub fn archive_bytes(dockerfile: &str, program: &[u8]) -> Vec<u8> {
 
 /// One ustar entry: a 512-byte header, the data, and the zero padding that rounds it to a block.
 ///
-/// `pub(crate)` since HS-076, whose builder archive is a second caller: the daemon reads a context it is handed, and
+/// `pub(crate)`, whose builder archive is a second caller: the daemon reads a context it is handed, and
 /// one ustar writer for the three images is one place the header can be wrong.
 pub(crate) fn push_entry(out: &mut Vec<u8>, name: &str, mode: u32, data: &[u8]) {
     let mut header = [0_u8; 512];

@@ -1,4 +1,4 @@
-//! `holosmith uninstall`: tear the install down and keep the data (HS-050).
+//! `holosmith uninstall`: tear the install down and keep the data.
 //!
 //! Thin, like the deploy it inverts: the config is read the way every command reads it, the target is what decides
 //! where the tree is and whether each write is `sudo`-prefixed, and everything an operator has to act on is in

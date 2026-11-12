@@ -1,4 +1,4 @@
-//! `POST /api/sessions` as a client meets it (HS-008, ADR-0012).
+//! `POST /api/sessions` as a client meets it (ADR-0012).
 //!
 //! Every test starts the real `App` on an ephemeral port and talks HTTP/1.1 over a socket, so
 //! the status, the headers and the bytes are the ones a browser gets. Each test owns its
@@ -141,7 +141,7 @@ fn live_count(state: &AppState) -> u64 {
 }
 
 /// Stop an idle session the way the product does — spec item 8's `idle` + `evict` row, through
-/// the one state function (HS-012). A create provisions in the background since HS-011, so the
+/// the one state function. A create provisions in the background, so the
 /// test waits for `idle` rather than writing a state the table does not allow.
 async fn stop_idle_session(state: &AppState, id: &str) {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -513,7 +513,7 @@ async fn a_create_answers_202_with_the_row_and_one_extra_key() {
 
 #[tokio::test]
 async fn a_create_answers_a_starting_row_without_waiting_for_provisioning() {
-    // **Amended by HS-011**, which made the create hand the new row to a background provisioner:
+    // **Amended**, which made the create hand the new row to a background provisioner:
     // the handler still does no provisioning itself and still answers before any step (spec item
     // 7), and the row it answers with is `starting` with no worktree. The harness's stub takes a
     // minute per step, so a row still `starting` after the answer is the handler not having

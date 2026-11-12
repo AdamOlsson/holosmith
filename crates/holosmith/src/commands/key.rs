@@ -1,4 +1,4 @@
-//! `holosmith key set|list|remove` (HS-039, spec CLI phase 1).
+//! `holosmith key set|list|remove` (spec CLI phase 1).
 //!
 //! `set` reads the key from **stdin only**. A key in `argv` is a key in the process list, in the shell's
 //! history and in any crash report; the spec says stdin, so there is no `--key` flag to get it wrong with.

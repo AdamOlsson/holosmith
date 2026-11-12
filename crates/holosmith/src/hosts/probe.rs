@@ -1,4 +1,4 @@
-//! The host health probe: one `GET /api/health` out of this machine (HS-068, spec item 4).
+//! The host health probe: one `GET /api/health` out of this machine (spec item 4).
 //!
 //! Item 4 gives the registration three checks and this module is two of them: "the `/api/health` reply must carry
 //! the Holosmith name and version fields", and "redirects are not followed". The third — where the URL may point —
@@ -62,7 +62,7 @@ const POLL: Duration = Duration::from_millis(20);
 /// What one probe found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// The host answered its own health payload: the row's version, the preview origin it named (HS-069), and a
+    /// The host answered its own health payload: the row's version, the preview origin it named, and a
     /// registration worth storing.
     Healthy {
         /// The `version` the host reported, as it spelled it.

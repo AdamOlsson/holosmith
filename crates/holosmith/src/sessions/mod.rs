@@ -1,5 +1,5 @@
 //! The `sessions` row: what a session is stored as, and the types the repository stores it with
-//! (HS-007).
+//!
 //!
 //! The six statuses live in an enum here rather than in a `CHECK` constraint, so a corrupt row is
 //! an error at read time naming the text that was found, and the transition rules arrive without
@@ -80,7 +80,7 @@ impl Serialize for Status {
 /// Whether `id` has the shape a session id has: sixteen lowercase hexadecimal characters (ADR-0011).
 ///
 /// One home, because more than one place asks the same question about a string that came from somewhere else —
-/// the preview listener's path (HS-041), `container snapshot`'s `HS_SESSION_ID`, and anything that must decide
+/// the preview listener's path, `container snapshot`'s `HS_SESSION_ID`, and anything that must decide
 /// "could this be a row" before it reads one. A second copy would be a second answer to "what is an id".
 pub fn is_id(id: &str) -> bool {
     id.len() == 16
@@ -113,7 +113,7 @@ pub struct Session {
     /// The spec's `network INTEGER` column, as the checkbox a client sends.
     pub network: bool,
     pub created_at: i64,
-    /// What the cap's LRU eviction orders by (spec item 7, HS-020).
+    /// What the cap's LRU eviction orders by (spec item 7).
     pub last_active_at: i64,
     /// `Some` exactly while the status is `stopped`: set when it becomes stopped, cleared when
     /// the session resumes (spec item 15).
@@ -145,7 +145,7 @@ pub enum RepoError {
     },
     /// A row's `status` is not one of the six; it carries the text that was found.
     Status(String),
-    /// A create carried an idempotency key another session already holds (HS-008).
+    /// A create carried an idempotency key another session already holds.
     DuplicateClientKey,
 }
 
@@ -153,7 +153,7 @@ impl RepoError {
     /// A SQLite failure during `operation`: the name of the public method whose statement
     /// failed.
     ///
-    /// `pub(crate)` since HS-066: `push::repository` reuses this error as its own, the way
+    /// `pub(crate)`: `push::repository` reuses this error as its own, the way
     /// `events::repository` does, so the crate keeps one repository error rather than two shapes of
     /// "a statement failed".
     pub(crate) fn sqlite(operation: &'static str, source: rusqlite::Error) -> Self {

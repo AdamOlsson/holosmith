@@ -1,4 +1,4 @@
-//! The `config` subcommands as the operator runs them (HS-002).
+//! The `config` subcommands as the operator runs them.
 //!
 //! Every test drives `CARGO_BIN_EXE_holosmith`, so the exit codes, the stdout/stderr split
 //! and the file left on disk are the real ones.

@@ -1,6 +1,6 @@
 // The app shell: two screens that share one header and one stream. `/` is the machine's health, the
 // session list and the new-session form; `/sessions/<id>` is one session with its live transcript
-// (HS-014). Every value either screen shows came from a response or from a stream frame, so a
+// Every value either screen shows came from a response or from a stream frame, so a
 // reconnect has nothing to reconcile and there is no cache to invalidate (ADR-0017). The one value
 // the list keeps that is not on screen is the pending Idempotency-Key a retry has to repeat.
 //
@@ -122,14 +122,14 @@ type Health = {
   version: string;
   role: string;
   uptime_s: number;
-  // The machine's Web Push pair's public half, base64url, or `null` when it has none (HS-067, ADR-0072 D1). The
+  // The machine's Web Push pair's public half, base64url, or `null` when it has none (ADR-0072 D1). The
   // settings screen hands it straight to `pushManager.subscribe`, which is the only use it has.
   application_server_key: string | null;
-  // What this machine calls itself in a notification's payload (HS-074): the `machine_name` config key, `local` for a
+  // What this machine calls itself in a notification's payload: the `machine_name` config key, `local` for a
   // machine that has no name of its own. The settings screen labels its own row with it and the create form's first
   // option too, so the string the tap's path is built from is one the operator can see.
   machine_name: string;
-  // The origin a session's preview is served on (HS-041): the listener's own origin, never the control one.
+  // The origin a session's preview is served on: the listener's own origin, never the control one.
   preview_origin: string;
 };
 
@@ -150,7 +150,7 @@ type Session = {
   status_reason: string | null;
   last_active_at: number;
   // When the state became `stopped`, and `null` in every other state (ADR-0016's one writer keeps the two in
-  // step). The list draws the days it has left from this and the machine's window (HS-064).
+  // step). The list draws the days it has left from this and the machine's window.
   stopped_at: number | null;
 };
 
@@ -173,14 +173,14 @@ type MessageBlock = { element: HTMLElement; nodes: BlockNodes };
 type ToolBlock = {
   element: HTMLElement;
   name: HTMLElement;
-  // What the tool was asked for, as the frame's summary (HS-033). Shown because "I want to see what the agent
+  // What the tool was asked for, as the frame's summary. Shown because "I want to see what the agent
   // ran" is the story's own sentence, and a block that named the tool and hid the command would not answer it.
   arguments_: HTMLElement;
-  // The tool's verdict and duration, and the link to its full output (HS-033).
+  // The tool's verdict and duration, and the link to its full output.
   meta: HTMLElement;
   output: HTMLElement;
   full: HTMLAnchorElement;
-  // One anchor per picture the result carried (HS-035). They are links rather than inline images: the bytes
+  // One anchor per picture the result carried. They are links rather than inline images: the bytes
   // are a file, and drawing it on a phone is a screen decision nothing owns yet (ADR-0043).
   images: HTMLElement;
 };
@@ -204,7 +204,7 @@ function newKey(): string {
 type SessionList = {
   sessions: Session[];
   network_default: boolean;
-  // The machine's stopped-session window in days (HS-064): the row carries `stopped_at`, this carries the
+  // The machine's stopped-session window in days: the row carries `stopped_at`, this carries the
   // number, and the page adds them. One clock — the browser's — draws the countdown.
   stopped_ttl_days: number;
 };
@@ -255,7 +255,7 @@ function textInput(name: string, value: string): HTMLInputElement {
   return input;
 }
 
-// One labelled control. `HTMLElement` rather than `HTMLInputElement` since HS-074: the create form's machine is a
+// One labelled control. `HTMLElement` rather than `HTMLInputElement`: the create form's machine is a
 // `<select>`, and a field helper that only took an input would have had the picker drawn outside its own label.
 function field(label: string, input: HTMLElement): HTMLLabelElement {
   const element = make("label", "field");
@@ -264,14 +264,14 @@ function field(label: string, input: HTMLElement): HTMLLabelElement {
 }
 
 // "3 min ago", coarse on purpose, is `transcript.ts`'s `relativeTime`: the Computers screen's last-check line
-// asked for it too (HS-071), and a sentence written twice is the pair that drifts.
+// asked for it too, and a sentence written twice is the pair that drifts.
 
 // One row: the project and the state with its reason, then the id, the model and the last
 // activity, then the provisioning step (while starting) or what the stop means (stopped).
 // Every node is built with `createElement` and filled with `textContent`: the payload carries
 // operator- and agent-controlled text and none of it is parsed as markup.
 //
-// `host` is the machine that owns the row (HS-071): it is the row's link's first segment, the machine every request
+// `host` is the machine that owns the row: it is the row's link's first segment, the machine every request
 // for this row is made against, and the stream's own path. A row is the *peer's* row, forwarded byte for byte
 // (ADR-0074), so the machine it lives on is the page's fact and not a column of the answer.
 function sessionRow(session: Session, ttlDays: number, host: string): HTMLLIElement {
@@ -296,7 +296,7 @@ function sessionRow(session: Session, ttlDays: number, host: string): HTMLLIElem
 
   const step = make("span", "step");
   // What a stopped row says: the sentence its reason earns (an eviction lost nothing, and the badge alone would
-  // read like a loss — HS-020) and the days it has left before the daily job reaches it (HS-064). One span,
+  // read like a loss —) and the days it has left before the daily job reaches it. One span,
   // because both are "what this row's state means", and one function, because the frame path writes it too.
   const detail = stoppedDetail(
     session.status,
@@ -311,7 +311,7 @@ function sessionRow(session: Session, ttlDays: number, host: string): HTMLLIElem
   return row;
 }
 
-// The machine's stopped-session window in days, as the list carried it (HS-064).
+// The machine's stopped-session window in days, as the list carried it.
 //
 // Read from the DOM rather than kept in a module variable, because `main.ts` keeps no state beyond the DOM (the
 // same rule that makes a row's id a `data-` attribute): the list element carries the number, and every reader —
@@ -331,8 +331,8 @@ function secondsNow(): number {
 }
 
 // One source exactly while the row is live, and none otherwise: the row that comes back to a live
-// state (HS-018's resume) opens one again. The server replays a stream's history first — the newest
-// messages, since HS-061 — so a frame applied later always overwrites an earlier one and the last
+// state opens one again. The server replays a stream's history first — the newest
+// messages, — so a frame applied later always overwrites an earlier one and the last
 // frame wins.
 function syncStream(row: HTMLLIElement, state: SessionState): void {
   const open = rowSources.get(row);
@@ -356,7 +356,7 @@ function openSource(row: HTMLLIElement): void {
     return;
   }
   // The create's answer carries `events` and a list element does not; both spell this path, so one
-  // rule opens a stream for a row however it arrived. The row's own machine is where the stream is (HS-071):
+  // rule opens a stream for a row however it arrived. The row's own machine is where the stream is:
   // a remote row's frames come through the hub's forwarding route, which relays the peer's stream event for
   // event (ADR-0074).
   const source = new EventSource(streamPath(host, id));
@@ -402,11 +402,11 @@ function applyStatus(row: HTMLLIElement, frame: StatusFrame): void {
   if (retention !== null) {
     // The frame is the only path by which a row *becomes* stopped while the operator is looking at
     // it — an eviction lands exactly this way — so the detail line is written here too, not only
-    // where the row was built (HS-020). One function, so the two paths cannot say different things.
+    // where the row was built. One function, so the two paths cannot say different things.
     //
     // A frame carries no `stopped_at`: the transition that produced it just wrote the clock, so this
     // instant *is* the row's stop as far as the page can tell, and the countdown starts from a number no
-    // fresher answer could improve on (HS-064).
+    // fresher answer could improve on.
     //
     // Two numbers that happen to be equal, named apart: the transition just wrote `stopped_at`, so the stop
     // instant is the frame's arrival, while `now` is what the countdown is measured against.
@@ -424,7 +424,7 @@ function applyStatus(row: HTMLLIElement, frame: StatusFrame): void {
 }
 
 // One machine's sessions, in the payload the sessions list answers with: a group is one machine's answer, the
-// refusal that stood in for it, or `null` while its answer is still in flight (HS-071). The `host` is the machine's
+// refusal that stood in for it, or `null` while its answer is still in flight. The `host` is the machine's
 // registry name, whose own answer carries the stopped window the rows count down against — the **peer's**
 // `stopped_ttl_days` and not this machine's, which is what makes a countdown a fact about the machine that owns the
 // row.
@@ -489,8 +489,8 @@ function fillGroup(body: HTMLElement, host: string, answer: Answer<SessionList>)
   const rows = answer.value.sessions;
   const ttlDays = answer.value.stopped_ttl_days;
   const list = make("ul", "session-list");
-  // The one place the window enters the page (HS-064): a row's own columns do not carry the machine's setting, and
-  // the frame path has no request to ask, so the element is the junction. Since HS-071 there is one such element per
+  // The one place the window enters the page: a row's own columns do not carry the machine's setting, and
+  // the frame path has no request to ask, so the element is the junction. Since there is one such element per
   // machine, and the row's `.closest()` finds its own — which is why the selector is a class and not the single
   // `#session-list` id it was.
   list.dataset.stoppedTtlDays = String(ttlDays);
@@ -505,7 +505,7 @@ function fillGroup(body: HTMLElement, host: string, answer: Answer<SessionList>)
 }
 
 function addSession(session: Session, host: string): void {
-  // A session a create just made belongs to **the machine the form named** (HS-074): the form posts to
+  // A session a create just made belongs to **the machine the form named**: the form posts to
   // `/api/hosts/<host>/sessions`, and the answer is that machine's own row, so the row is drawn in that machine's
   // group rather than in this machine's. A group that is not on screen is a row with nowhere to land, and the
   // operator's own reload is the honest answer.
@@ -521,14 +521,14 @@ function addSession(session: Session, host: string): void {
   }
   list.querySelector<HTMLElement>(".empty")?.remove();
   // Prepended because the repository lists newest activity first and a create is the newest. The window comes
-  // off the list's own dataset: a create's answer carries the row and not the machine's setting (HS-064).
+  // off the list's own dataset: a create's answer carries the row and not the machine's setting.
   list.prepend(sessionRow(session, stoppedTtlDays(list), host));
 }
 
 // The new-session form. `networkDefault` is the machine setting the list carried: the checkbox
 // starts where the config says and the operator may still change it for this session.
 //
-// Since HS-074 the form also says **which machine** the session runs on, and it says so in the request rather than
+// Since the form also says **which machine** the session runs on, and it says so in the request rather than
 // in the body: the post goes to `POST /api/hosts/<host>/sessions`, so a hub forwards it to the machine the operator
 // picked and a machine that runs no sessions still answers `403 sessions_disabled` for its own path. `targets` is
 // `createTargets`' answer — this machine first when it can create, then every reachable peer.
@@ -562,7 +562,7 @@ function createSection(networkDefault: boolean, targets: string[], ownName: stri
   }
   // Before the click, not only after it: the button names the machine the picker holds, so the one thing about this
   // form that can point at the wrong computer is on the button (item 11's "the UI shows which machine it will run
-  // on"). A create's answer then puts the row in that machine's own group with its own `hostLabel` badge (HS-071).
+  // on"). A create's answer then puts the row in that machine's own group with its own `hostLabel` badge.
   const refreshLabel = (): void => {
     button.textContent = startLabel(machine.value);
   };
@@ -571,12 +571,12 @@ function createSection(networkDefault: boolean, targets: string[], ownName: stri
 
   // The key of the submission in flight or last refused. A retry has to repeat the same request,
   // so a refusal keeps the key; a 202 means the next press is a new intent, so it is dropped
-  // (HS-008's rule, ADR-0017).
+  // (ADR-0017).
   let pendingKey: string | null = null;
 
   const fail = (code: string, message: string): void => {
     // A project's refusal is a sentence about the repository and the operator reads it as one: the code
-    // in front of it would be a word to act on and this is not one (HS-026, `createFailure`).
+    // in front of it would be a word to act on and this is not one (`createFailure`).
     error.textContent = createFailure(code, message);
     error.hidden = false;
   };
@@ -661,7 +661,7 @@ function noCreateSection(): HTMLElement {
 // The header every screen shares: the machine's own facts, and the links between the screens. Which links exist is
 // `push.ts`'s `navLinks` rule — one per screen other than this one — so a fourth screen is a row in `SCREENS` and
 // not a branch here, and `case_pwa` sees the class in the served bundle. The links carry a **class** and no id
-// since HS-071: three screens mean two links on every page, and an id two elements share is not an id.
+// three screens mean two links on every page, and an id two elements share is not an id.
 function header(health: Health, navs: NavLink[]): HTMLElement {
   const element = make("header", "machine");
   const nav_ = make("nav", "machine-nav");
@@ -679,7 +679,7 @@ function header(health: Health, navs: NavLink[]): HTMLElement {
   return element;
 }
 
-// ---- the Computers screen (HS-071, ADR-0076) -------------------------------------------------
+// ---- the Computers screen (ADR-0076) -------------------------------------------------
 
 // One registry row as `GET /api/hosts` answers it: the struct's field order, with `preview`, `version` and
 // `last_error` nullable because a machine that never answered has none of them.
@@ -804,7 +804,7 @@ function machineCard(
           return;
         }
         const envelope = (await response.json()) as ErrorEnvelope;
-        // The API's own sentence, verbatim: it is the one HS-072's CLI will show too (ADR-0076 D6).
+        // The API's own sentence, verbatim: it is the one the CLI will show too (ADR-0076 D6).
         notice.textContent = hostFailure(envelope.code, envelope.message);
         notice.hidden = false;
         if (hostForceOffered(envelope.code)) {
@@ -934,7 +934,7 @@ function computersSection(health: Health, rows: HostRow[]): HTMLElement {
   form.append(field("name", name), field("url", url), submit);
   form.addEventListener("submit", (event) => {
     // A form with no action is a GET of this path with the fields in the query string: a reload that throws away
-    // the screen (HS-014's review). The submit is swallowed whether or not there is anything to send.
+    // the screen. The submit is swallowed whether or not there is anything to send.
     event.preventDefault();
     if (submit.disabled) {
       return;
@@ -969,7 +969,7 @@ function computersSection(health: Health, rows: HostRow[]): HTMLElement {
   return section;
 }
 
-// ---- the session screen (HS-014) ----------------------------------------------------------
+// ---- the session screen ----------------------------------------------------------
 
 // One kind's node inside one message: a delta appends a text node to it, a snapshot replaces its
 // children. `BlockNodes` holds the pair, keyed by `DeltaKind`; `article[data-message]` is the block
@@ -999,7 +999,7 @@ function toolBlock(id: string): ToolBlock {
   // The arguments summary, set by `tool.start` and never replaced: the frame is the whole of what the log
   // kept, so there is nothing a later frame could add.
   const arguments_ = kindNode("tool-arguments");
-  // What the tool said about itself and how long it took (HS-033). Both start empty and are filled by the
+  // What the tool said about itself and how long it took. Both start empty and are filled by the
   // `tool.end` frame; a frame written before those keys existed leaves them empty, so a replayed old row
   // draws exactly what it always did.
   const meta = make("div", "tool-meta");
@@ -1038,7 +1038,7 @@ function replaceKind(node: HTMLElement, value: string): void {
 // One change from the transcript model, applied to the DOM. Blocks are found in the map the stream
 // fills, never by querying the document, so no frame costs a walk over the transcript. The container is
 // a `ParentNode` rather than an element because a page of older history is folded into a detached
-// fragment and inserted in one go (HS-061).
+// fragment and inserted in one go.
 function applyChange(
   change: Change,
   container: ParentNode,
@@ -1048,7 +1048,7 @@ function applyChange(
 ): void {
   if (change.op === "boundary") {
     // A turn's number comes from the `turn.start` events seen so far. A `turn.end` with no start
-    // before it — reachable once HS-061 truncates a replay to recent messages — says "a turn settled"
+    // before it — reachable once truncates a replay to recent messages — says "a turn settled"
     // rather than "turn 0 settled".
     let label = `turn ${change.turn} settled`;
     if (change.boundary === "start") {
@@ -1080,7 +1080,7 @@ function applyChange(
     container.append(block);
     return;
   }
-  // Something the turn could not do (HS-035): an extension asked a question a session cannot answer, so it was
+  // Something the turn could not do: an extension asked a question a session cannot answer, so it was
   // cancelled and the transcript says which dialog and why. One block per frame like a steer — no id, nothing
   // a later frame updates — and every node is `createElement` + `textContent`, because the reason is text the
   // agent's own extension caused.
@@ -1094,7 +1094,7 @@ function applyChange(
     container.append(block);
     return;
   }
-  // A machine policy ended the session (HS-063): the per-session disk soft cap is the first, and the block says
+  // A machine policy ended the session: the per-session disk soft cap is the first, and the block says
   // what the server measured. One block per frame, no id, nothing a later frame updates — and the code is kept
   // as a data attribute rather than shown, because `disk_quota` is a word for a client and the sentence is for
   // the operator (the same split the create form's refusal makes).
@@ -1137,7 +1137,7 @@ function applyChange(
     if (change.outputRef !== null) {
       // The peer computed this path for itself (`/api/sessions/<id>/tool-output/<tool>`), so it is re-rooted at the
       // machine that wrote it: a forwarded frame is the peer's bytes and the hub's own route for that path is a 404
-      // (HS-071, ADR-0076 D2).
+      // (ADR-0076 D2).
       block.full.setAttribute("href", hostRef(host, change.outputRef));
       block.full.hidden = false;
     }
@@ -1174,13 +1174,13 @@ function applyChange(
 
 // The composer: one box of guidance and the three things that can be done with it. Prompting is the
 // `idle` row's trigger and steering and aborting are a running turn's, so the buttons exist in one
-// state each (`affordances`). All three post for real: the prompt (HS-015), the abort (HS-016) and the
-// steer (HS-017), which is the one whose frame the page also draws into the transcript.
+// state each (`affordances`). All three post for real: the prompt, the abort and the
+// steer, which is the one whose frame the page also draws into the transcript.
 type Composer = { element: HTMLElement; update: (state: SessionState) => void };
 
 // `showState` patches the screen's badge from a row the prompt's answer carried, so a 202 says
 // `running` before the stream has said anything.
-// `host` is the machine the session lives on: every request below is made against it (HS-071), so one closure
+// `host` is the machine the session lives on: every request below is made against it, so one closure
 // carries it rather than each of the six `fetch` calls spelling the prefix.
 function composerSection(
   host: string,
@@ -1215,7 +1215,7 @@ function composerSection(
   };
 
   // The two states the transition table has a `resume` row for, so the two refusals a resume can fix
-  // (HS-018). Everything else is the operator's to act on.
+  // Everything else is the operator's to act on.
   const RESUMABLE = new Set(["session_stopped", "session_error"]);
 
   // Wait until the row says `idle`, which is what a retried prompt or steer needs after a resume's
@@ -1243,7 +1243,7 @@ function composerSection(
   type PostResult = { envelope: ErrorEnvelope | null; row: Session | null };
 
   // `action` is the route's own word (`prompt`, `abort`, `steer`, `resume`): `sessionActionPath` is the one spelling of
-  // a session's action on the machine that owns it (HS-071).
+  // a session's action on the machine that owns it.
   const post = async (
     action: string,
     body?: string,
@@ -1257,7 +1257,7 @@ function composerSection(
     });
     if (response.ok) {
       // Every one of these answers the row it acted on, so the badge can follow the 202 rather than
-      // waiting for the stream to catch up (HS-015's rule, kept for all four).
+      // waiting for the stream to catch up (kept for all four).
       return { envelope: null, row: (await response.json()) as Session };
     }
     const envelope = (await response.json()) as ErrorEnvelope;
@@ -1280,7 +1280,7 @@ function composerSection(
     return post(action, body, mayResume, true);
   };
 
-  // Steering is a real request (HS-017): the 202 means the running turn took the guidance, and the
+  // Steering is a real request: the 202 means the running turn took the guidance, and the
   // frame it answers with puts the steer's own block in the transcript. The one refusal worth a
   // sentence is `session_idle`: a turn that ended while the operator was typing means the guidance is
   // a prompt, and the Prompt button is already on screen for exactly that state.
@@ -1313,7 +1313,7 @@ function composerSection(
   steer.addEventListener("click", () => {
     void steerTurn();
   });
-  // Aborting is a real request (HS-016): the 202 says the ladder accepted it and the turn ends
+  // Aborting is a real request: the 202 says the ladder accepted it and the turn ends
   // off-request, so the badge and the buttons follow the stream rather than this answer. No body is
   // sent — there is nothing to say — but the content type goes with it, because the guards read it
   // on every request that changes something (ADR-0010).
@@ -1341,7 +1341,7 @@ function composerSection(
     void abortTurn();
   });
 
-  // Resuming is the one action that brings a session back (HS-018): the 202 promises `starting`, the
+  // Resuming is the one action that brings a session back: the 202 promises `starting`, the
   // provisioner walks it back to `idle`, and the badge follows the stream. `mayResume` is false here
   // because this *is* the resume — a refused one has nothing left to retry.
   const resumeSession = async (): Promise<void> => {
@@ -1378,7 +1378,7 @@ function composerSection(
     prompt.disabled = true;
     try {
       // The prompt, through the shared POST: a `session_stopped` refusal resumes and retries it once
-      // (HS-018). The 202 carries the row, now `running`, so the badge and the buttons follow it and
+      // The 202 carries the row, now `running`, so the badge and the buttons follow it and
       // the box is emptied, so the next prompt starts from nothing.
       const sent = guidance.value;
       const { envelope, row } = await post("prompt", JSON.stringify({ prompt: sent }));
@@ -1446,7 +1446,7 @@ function composerSection(
 // last seq it saw (ADR-0014), so a reconnect resumes after what is already on screen and the page
 // needs no cursor of its own.
 //
-// The one cursor it does keep is the truncation frame's (HS-061): a stream opened with no resume point
+// The one cursor it does keep is the truncation frame's: a stream opened with no resume point
 // carries only the newest `history_window` messages, so the frame names where its replay started and
 // the "Load earlier" button walks down from there one page per click. Paging is a button and not
 // infinite scroll because the story says so, and because one click is one request.
@@ -1458,11 +1458,11 @@ type StreamTarget = {
   placeholder: HTMLElement;
   earlier: HTMLButtonElement;
   // The one way a `session.status` frame patches the screen: the badge, the preview link, the composer's
-  // actions and the delete affordance (HS-043 put a fourth reader on it, and a fifth copy of "where a state
-  // is written" is what HS-020's blocker was).
+  // actions and the delete affordance (put a fourth reader on it, and a fifth copy of "where a state
+  // is written" is what the blocker was).
   showState: (state: SessionState, reason: string | null) => void;
   showSpend: (spend: Spend) => void;
-  // The line that says the machine stopped answering under an open page (HS-074), hidden until it does.
+  // The line that says the machine stopped answering under an open page, hidden until it does.
   lost: HTMLElement;
 };
 
@@ -1549,7 +1549,7 @@ function openSessionStream(host: string, id: string, target: StreamTarget): void
   for (const eventType of TRANSCRIPT_EVENTS) {
     source.addEventListener(eventType, (event) => {
       // `error` is the one name the platform uses as well as the server: an `EventSource` dispatches a plain
-      // `Event` of that type when its own connection fails, and that is not a transcript frame (HS-063's kind is
+      // `Event` of that type when its own connection fails, and that is not a transcript frame (the kind is
       // a stored event, and a stored event always arrives as a `MessageEvent`). One guard here rather than a
       // special case per kind, because the next server-chosen name may collide too.
       if (!(event instanceof MessageEvent)) {
@@ -1568,7 +1568,7 @@ function openSessionStream(host: string, id: string, target: StreamTarget): void
         applyChange(change, transcript, blocks, tools, host);
       }
       // One pure rule over what the stream has said about cost, applied after every frame: the
-      // sentence is the same one the screen builds with (HS-023).
+      // sentence is the same one the screen builds with.
       showSpend(model.spend());
     });
   }
@@ -1583,7 +1583,7 @@ function openSessionStream(host: string, id: string, target: StreamTarget): void
   });
 }
 
-// The Changes sheet (HS-058, spec item 12's UI): item 12's screen, folded away behind one button.
+// The Changes sheet (spec item 12's UI): item 12's screen, folded away behind one button.
 //
 // `deleteSection` is the shape — a section that draws itself from an answer and is patched by the one state
 // callback the screen already has (ADR-0023's precedent) — with three differences the story adds: it re-reads
@@ -1908,7 +1908,7 @@ function changesSection(
     }
   };
 
-  // The merge, with its own `fetch`: rule 6's 60 seconds belongs to the hub (HS-069), and a blanket timeout on
+  // The merge, with its own `fetch`: rule 6's 60 seconds belongs to the hub, and a blanket timeout on
   // the shared helper would cut the delete's own `abort_grace` wait (ADR-0065 D8, ADR-0066 D12).
   const sendMerge = async (): Promise<void> => {
     busy = true;
@@ -1984,7 +1984,7 @@ function changesSection(
     }
   };
 
-  // The two prompts. Neither resumes the session: the composer owns that ladder (HS-018), and a prompt sent to a
+  // The two prompts. Neither resumes the session: the composer owns that ladder, and a prompt sent to a
   // stopped session answers `409 session_stopped`, which is the sentence an operator needs — resume it first.
   const sendPrompt = async (prompt: string, done: string): Promise<void> => {
     busy = true;
@@ -2068,7 +2068,7 @@ function changesSection(
   };
 }
 
-// The session screen's destructive affordance (HS-043, spec item 9).
+// The session screen's destructive affordance (spec item 9).
 //
 // ADR-0023 deferred it because a destructive request needs a confirmation step and a way past a refused
 // snapshot; the story's fourth bullet asks the UI to show the recovery command, so the screen owns both.
@@ -2186,15 +2186,15 @@ function deleteSection(
 // is drawn from the answer and then patched by `session.status`, so a reconnect has nothing to
 // reconcile; the row that is not live still opens a stream, because this is the screen the operator
 // asked for by name.
-// `host` is the machine the session lives on, from the address (HS-071): the preview link's first segment names
+// `host` is the machine the session lives on, from the address: the preview link's first segment names
 // it, every request the screen makes is made against it, and the meta line says whose session this is — the list's
 // grouping is gone on a screen that shows one row.
-// What a session's page draws when the machine that owns it did not answer (HS-074).
+// What a session's page draws when the machine that owns it did not answer.
 //
 // Not a bare notice: the operator came here from the list, so the screen keeps the way back and the name of the
 // machine whose session it is, and says the machine's own sentence — `hostFailure` drops the code of the two
 // upstream words, because "upstream_unreachable: workshop could not be reached" reads as a word to look up about a
-// machine that is simply away (HS-071's rule, on the one screen that did not have it yet).
+// machine that is simply away (on the one screen that did not have it yet).
 //
 // Nothing is invented: no cached transcript, no counts, no false `idle`. The one affordance is a reload, which is a
 // new read of the same address — the sentence the machine would answer if it came back.
@@ -2248,8 +2248,8 @@ function sessionScreen(health: Health, host: string, session: SessionDetail): vo
   head.append(make("span", "project", session.project), badge);
 
   // What the stream says about the cost of the turns, and nothing else: the totals themselves are
-  // HS-034's. The span is drawn by the same function the stream patches it with, so an operator who
-  // reloads sees what a live one saw (HS-020's rule about a sentence in two places).
+  // that story's. The span is drawn by the same function the stream patches it with, so an operator who
+  // reloads sees what a live one saw.
   const budget = make("span", "budget");
   const showSpend = (spend: Spend): void => {
     const notice = budgetNotice(spend);
@@ -2257,7 +2257,7 @@ function sessionScreen(health: Health, host: string, session: SessionDetail): vo
     budget.hidden = notice === null;
   };
 
-  // The link to what the agent built, on the preview listener's own origin (HS-041, spec item 3). It is drawn
+  // The link to what the agent built, on the preview listener's own origin (spec item 3). It is drawn
   // from the state, so a session whose container is gone does not offer a page nobody is serving — and it is
   // patched by the same callback that patches the badge, so a session that stops stops offering it.
   const preview = document.createElement("a");
@@ -2296,7 +2296,7 @@ function sessionScreen(health: Health, host: string, session: SessionDetail): vo
   transcript.append(placeholder);
 
   // "Load earlier": hidden until the stream says its replay was truncated, so a short session never
-  // shows a button that would do nothing (HS-061).
+  // shows a button that would do nothing.
   const earlier = make("button", "secondary earlier", "Load earlier");
   earlier.type = "button";
   earlier.hidden = true;
@@ -2308,8 +2308,8 @@ function sessionScreen(health: Health, host: string, session: SessionDetail): vo
   );
 
   // The one place a state change patches the screen: the badge, the preview link, the composer's actions,
-  // the delete affordance and the Changes sheet. Two writers of one state is the blocker HS-020's review
-  // found, and HS-043's affordance is the fourth reader and HS-058's sheet the fifth — so it is one function,
+  // the delete affordance and the Changes sheet. Two writers of one state is the blocker the review
+  // found, and the affordance is the fourth reader and the sheet the fifth — so it is one function,
   // and `session.status` goes through it too. The sheet is the one reader that *acts* on the transition: a turn
   // ending is what moves the branch, so it re-reads.
   function showState(state: SessionState, reason: string | null): void {
@@ -2348,13 +2348,13 @@ function sessionScreen(health: Health, host: string, session: SessionDetail): vo
   });
 }
 
-// ---- the settings screen (HS-067, HS-074; ADR-0072 D2/D6, ADR-0079) --------------------------
+// ---- the settings screen (ADR-0079) --------------------------
 
 // One machine's row: the words `push.ts` decided and the nodes they are drawn into.
 type MachineRow = {
   host: string;
   // This machine's application server key, as the last read answered it. `null` is a machine with no pair, and
-  // `undefined` is a machine that has not answered yet — two facts a sentence must not confuse (HS-074).
+  // `undefined` is a machine that has not answered yet — two facts a sentence must not confuse.
   key: string | null | undefined;
   name: HTMLElement;
   sentence: HTMLElement;
@@ -2363,12 +2363,12 @@ type MachineRow = {
   decided: PushState | null;
 };
 
-// The machine's notifications: **one row per machine** the app can subscribe on (HS-074, item 11's last bullet —
+// The machine's notifications: **one row per machine** the app can subscribe on (, item 11's last bullet —
 // "each machine has its own keys, so the web app subscribes on every machine it uses (through the hub)").
 //
 // Every word is `push.ts`'s, and every row asks that machine's own questions: its `application_server_key` through
 // the hop, and whether *this browser* holds a subscription for that key. A machine that did not answer is a
-// sentence and no control — both facts a row would show are things only that machine can answer (HS-071's rule
+// sentence and no control — both facts a row would show are things only that machine can answer (the rule
 // about `false` being a claim, in a second screen).
 //
 // The facts are read from the platform each time the screen is (re)drawn rather than kept: a permission the
@@ -2409,8 +2409,8 @@ function settingsSection(health: Health, hosts: HostRow[], origin: string): HTML
     detail.hidden = true;
     const action = make("button", "settings-action");
     action.type = "button";
-    // The first row keeps the ids this screen has carried since HS-067 (the local machine's), and a **class** is
-    // what the rest share: an id two elements carry is not an id (HS-071's `nav-link`). `case_pwa` reads these
+    // The first row keeps the ids this screen has carried (the local machine's), and a **class** is
+    // what the rest share: an id two elements carry is not an id. `case_pwa` reads these
     // four ids out of the served bundle, so the local row is where they stay.
     if (index === 0) {
       name.id = "settings-machine";
@@ -2438,7 +2438,7 @@ function settingsSection(health: Health, hosts: HostRow[], origin: string): HTML
       const decided = row.decided;
       // Which word the row's own state earns is `push.ts`'s rule, and `null` while nothing has been read: a row that
       // has not asked its machine yet shows its name and `reading…`, never `not subscribed` (the `false`-is-a-claim
-      // rule HS-071's `—` keeps, one screen over).
+      // rule the `—` keeps, one screen over).
       const state = decided === null ? null : machineSubscription(decided.action);
       row.name.textContent =
         state === null
@@ -2577,7 +2577,7 @@ function settingsSection(health: Health, hosts: HostRow[], origin: string): HTML
       return;
     }
     // That machine's own route, through the hub: `local` is this origin's own path, a peer is
-    // `/api/hosts/<name>/push/subscribe`, which is HS-069's forwarding route reaching the peer's own
+    // `/api/hosts/<name>/push/subscribe`, which is the forwarding route reaching the peer's own
     // `POST /api/push/subscribe`. The row is stored **there**, sealed to **that** machine's pair.
     const response = await fetch(subscriptionRoute(row.host), {
       method: "POST",
@@ -2593,12 +2593,12 @@ function settingsSection(health: Health, hosts: HostRow[], origin: string): HTML
     }
   }
 
-  // The one delete: **every** machine this app subscribed to (item 11's acceptance, HS-074).
+  // The one delete: **every** machine this app subscribed to (item 11's acceptance).
   //
   // One `DELETE` per machine, against each machine's own route with that machine's own endpoint — the endpoints
   // differ, because each subscribe call is the push service minting a subscription for a different application
   // server key. `404` is the answer the operator wanted (the row is already gone) and is the rule the local
-  // unsubscribe has kept since HS-067; anything else is that row's own sentence, so a machine that is away says so
+  // unsubscribe has kept; anything else is that row's own sentence, so a machine that is away says so
   // and the machines that answered are still cleared.
   async function unsubscribeEverywhere(): Promise<void> {
     notice.hidden = true;
@@ -2667,7 +2667,7 @@ function settingsSection(health: Health, hosts: HostRow[], origin: string): HTML
 // The sessions list: one group per machine, and the create form only where this machine can create.
 //
 // `own` is this machine's answer, which is also where the form's `network_default` comes from and the only place a
-// create can post to (HS-071). `groups` carries every machine's rows; `health.role` decides the affordance.
+// create can post to. `groups` carries every machine's rows; `health.role` decides the affordance.
 function render(
   health: Health,
   own: SessionList,
@@ -2721,13 +2721,13 @@ async function show(): Promise<void> {
   }
   // The path decides the screen. `/sessions/<id>` is read from the address rather than from a
   // router: the server already answers the app shell for every non-`/api/` path (ADR-0007), so a
-  // reload of one session's screen lands here with nothing installed (ADR-0017). Since HS-071 the address also
+  // reload of one session's screen lands here with nothing installed (ADR-0017). Since the address also
   // names **whose** session it is — `/hosts/<host>/sessions/<id>` — and every request below is made against it.
   const address = sessionIdFromPath(location.pathname);
   if (address !== null) {
     const session = await getJson<SessionDetail>(sessionPath(address.host, address.id));
     if (!session.ok) {
-      // A machine that is away is a **state of this session**, not a page that failed to load (HS-074, item 11's
+      // A machine that is away is a **state of this session**, not a page that failed to load (, item 11's
       // "degrades to a clear state per session rather than an empty list"): the hub's own `502 upstream_unreachable`
       // and `504 upstream_timeout` say the machine did not answer, and everything this page could offer —
       // the four composer actions, the delete, the Changes sheet — is a request to that same machine. So the screen
@@ -2743,7 +2743,7 @@ async function show(): Promise<void> {
     sessionScreen(health.value, address.host, session.value);
     return;
   }
-  // `/settings` is the third screen and the machine's own (HS-067, ADR-0072), and since HS-074 it is **one row per
+  // `/settings` is the third screen and the machine's own (ADR-0072), and it is **one row per
   // machine**: the health this function already made is this machine's row, and the registry is what names the rest,
   // exactly as the Computers screen reads it. A registry that cannot be read is not a reason to draw nothing — this
   // machine's own row is still true, and the notice says the rest are missing rather than absent.
@@ -2762,7 +2762,7 @@ async function show(): Promise<void> {
     }
     return;
   }
-  // `/computers` is the fourth (HS-071): the machines this one may send a request to, and their state. It reads the
+  // `/computers` is the fourth: the machines this one may send a request to, and their state. It reads the
   // registry and then one health and one session list per machine, so it is a screen of its own rather than a
   // section of the list — a machine with no sessions still has a state, and a hub has no sessions at all.
   if (location.pathname === COMPUTERS_PATH) {
@@ -2780,7 +2780,7 @@ async function show(): Promise<void> {
   // The list after the health: a machine whose database is not open answers 500 here, and that
   // envelope is what the operator needs to see rather than a page that half drew.
   //
-  // One request per machine (HS-071): this machine's own list, then each registry row's own — the peer's rows are the
+  // One request per machine: this machine's own list, then each registry row's own — the peer's rows are the
   // peer's, forwarded byte for byte, so the page gets a `host` for each group rather than adding one to somebody
   // else's row (ADR-0074). A machine that cannot be reached is a group with its refusal's sentence, not a group
   // that vanished (ADR-0076 D3).
@@ -2820,7 +2820,7 @@ async function show(): Promise<void> {
   }
 }
 
-// Navigating away ends the streams: the server counts them (HS-066), and a source the page forgets
+// Navigating away ends the streams: the server counts them, and a source the page forgets
 // would keep one open until the browser decides to drop it.
 window.addEventListener("beforeunload", () => {
   for (const source of openSources) {
@@ -2829,7 +2829,7 @@ window.addEventListener("beforeunload", () => {
   openSources.clear();
 });
 
-// The service worker, registered from every screen (HS-067, ADR-0072 D4). The manifest is what makes the app
+// The service worker, registered from every screen (ADR-0072 D4). The manifest is what makes the app
 // installable; the worker is what a push arrives at, and it is registered at load rather than from the settings
 // screen so that an app opened from a home-screen icon — which lands on `/` or on a session — is already reachable
 // when the notification comes. A registration that fails is not a reason to draw nothing: the settings screen reads

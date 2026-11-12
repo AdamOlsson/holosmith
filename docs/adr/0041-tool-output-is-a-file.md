@@ -1,6 +1,6 @@
 # A tool call's output is a file, and its frame says where
 
-HS-033 is the story that makes a tool call legible without making the log heavy. HS-032 turned pi's records
+This is the story that makes a tool call legible without making the log heavy. turned pi's records
 into the transcript's frames for text and thinking; the records a tool leaves behind — its arguments, its
 result, how long it took, whether it failed — were *declined*, and the story that owns them has to answer two
 questions the contract did not: what a `tool.*` frame carries, and where a result that is two megabytes long
@@ -56,7 +56,7 @@ ADR-0019's table pinned `tool.start` as `{"tool_id", "name", "arguments"}` and `
   at a file that cannot answer. Absent `isError` is `ok`: pi omits it when the tool did not run, and a frame
   that said `error` for that would report a failure nobody observed. Keeping the whole `result` (or a `details`
   blob, or an exit code as a key of its own) is a new decision with its own story: it is a second payload shape
-  for one field, and HS-035 will be the story that touches a result's non-text parts anyway.
+  for one field, and will be the story that touches a result's non-text parts anyway.
 - **`duration_ms`** is pi's `durationMs`, optional because pi measured none when the tool did not run.
 - **`output` is a preview** (`tool::PREVIEW_MAX` = 2000 characters, ellipsis-marked): the transcript's own
   rendering limit, so a 5 MB output draws as a paragraph and the log's rows stay small. This is the one
@@ -70,7 +70,7 @@ ADR-0019's table pinned `tool.start` as `{"tool_id", "name", "arguments"}` and `
 when a picture was stored — one file per image block beside this file, under `<tool_id>-<block index>.<ext>`,
 served by its own route with the type the *file* has. So a call's result is still one block, a frame whose
 result held no image answers exactly the payload above, and this story's "an image block is not retained" is
-now the opposite: HS-035 retains it, and `details`/`structuredContent` are what remain unkept.
+now the opposite: retains it, and `details`/`structuredContent` are what remain unkept.
 
 ## The file, and why the mapping is not the writer
 
@@ -87,7 +87,7 @@ the served path and a store-less replay agree.
 - **The path** is `<data>/sessions/<id>/tool/<tool_id>.txt`, beside `session.log` and `pi-home`, because it is
   one session's own file about one of its own turns.
 - **The cap is 5 MiB of output** (`tool::CAP`), a constant and not a config key, for the reason ADR-0032's
-  window and HS-021's tick are: it is a rule of the contract, not a property of a machine. It is *defensive* in
+  window and the tick are: it is a rule of the contract, not a property of a machine. It is *defensive* in
   practice: pi's own `bash` tool already truncates what it hands back (its description, in the committed
   fixture, promises the last 2000 lines or 50 KB), so the six-megabyte cases in `tests/rpc.rs` are synthetic and
   the two-megabyte one in the gate is planted. A tool from a project-local extension need not truncate, which is
@@ -119,19 +119,19 @@ the served path and a store-less replay agree.
 tool's own text and a link that opens in a browser should read as text.
 
 **The row is checked before any directory is read.** A session the table does not hold is `404 not_found` with
-`unknown_session`'s sentence, whatever is left on disk — a delete's leftovers (HS-043 owns what survives it) are
+`unknown_session`'s sentence, whatever is left on disk — a delete's leftovers are
 not reachable through a session nobody can see. An id that is not a filename and a file that is not there are
 one answer with one sentence, because to a caller they are one fact: there is nothing to fetch. The code is
 ADR-0008's `not_found` for all three; the sentences differ because the requests do.
 
 ## What this story does not decide
 
-- **Images in a tool result** are HS-035's. The text blocks of `result.content` are what the file holds; a block
+- **Images in a tool result** are that story's. The text blocks of `result.content` are what the file holds; a block
   that is not text is written as `[<type>]`, so a result carrying an image leaves a trace in the text instead of
-  being silently dropped, and HS-035 adds storage and a rendered frame on top.
-- **Deleting tool files.** A delete removes the row and its event log (HS-019); what happens to a session's
-  directory is HS-043's keep-rules.
-- **Cache counters in a tool's usage** — HS-034.
+  being silently dropped, and adds storage and a rendered frame on top.
+- **Deleting tool files.** A delete removes the row and its event log; what happens to a session's
+  directory is the keep-rules.
+- **Cache counters in a tool's usage** —.
 - **A cap or a preview length as a config key.** Both are the contract's numbers here; a machine cannot tune
   what a client can render.
 - **A UI affordance for anything but the link**: the tool block draws the name, the status word, the duration,

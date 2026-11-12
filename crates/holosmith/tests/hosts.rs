@@ -1,4 +1,4 @@
-//! The host registry as a client meets it (HS-068, spec items 4 and 16).
+//! The host registry as a client meets it (spec items 4 and 16).
 //!
 //! Four groups, one per thing the story had to get right:
 //!
@@ -123,7 +123,7 @@ fn row(response: &Response, name: &str) -> Option<serde_json::Value> {
 /// Two, not one, because that is what makes "a redirect is not followed" measurable: a probe that followed one would
 /// open a second connection to this port, and the counter is what says it did. The listener is **non-blocking with a
 /// deadline** rather than a `for stream in listener.incoming()`: a loop with no end leaves the thread parked in
-/// `accept()` for the rest of the binary, holding a port, which is exactly the hang `docs/notes.md` records from this
+/// `accept()` for the rest of the binary, holding a port, which is exactly the hang an earlier development note records from this
 /// story's own unit test.
 fn stand_in(answer: Vec<u8>) -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
     use std::sync::atomic::AtomicUsize;
@@ -216,7 +216,7 @@ async fn a_registration_is_refused_with_a_code_of_its_own_for_each_rule() {
         );
     }
 
-    // The name is its own field with its own code, including the one name HS-069 reserves.
+    // The name is its own field with its own code, including the one name reserves.
     for (name, needle) in [
         ("local", "own sessions"),
         ("Workshop", "lowercase"),

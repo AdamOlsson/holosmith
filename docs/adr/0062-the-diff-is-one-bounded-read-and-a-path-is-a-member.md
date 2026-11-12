@@ -1,9 +1,9 @@
 # The unified diff is one bounded read of the same repository, and a path is a member of a list
 
-HS-053 is spec item 12's second bullet — `GET /api/sessions/:id/changes/diff?path=` returns the unified diff,
+This is spec item 12's second bullet — `GET /api/sessions/:id/changes/diff?path=` returns the unified diff,
 capped at 256 KB, computed with `--no-ext-diff --no-textconv` — under the item's governing sentence: "all git work
 for review and merge runs on the host in the project repository; containers never merge". It is a neighbour of
-HS-052 rather than new ground: the repository, the base commit, the branch's tip and the ordered refusals are the
+ rather than new ground: the repository, the base commit, the branch's tip and the ordered refusals are the
 summary's, and `changes.rs` already held the file list this story validates a path against. What this ADR records
 is the eleven decisions a later reader could take differently — including the two that have a wrong answer which
 looks right (the marker's own length, and a path that is resolved instead of compared).
@@ -163,6 +163,6 @@ reads are never coloured, so the three flags that change an *answer* stay one li
 
 ## What this ADR does not decide
 
-`POST …/merge` and its rules (HS-054 – HS-057), `publish` (HS-058), the Changes sheet, the summary's fields, any
+`POST …/merge` and its rules (those stories), `publish`, the Changes sheet, the summary's fields, any
 write of any kind, and `worktree.rs`'s create refusals. `publish`'s warning before a remote is `touches_ci`, which
 is already public and unaffected by anything here.

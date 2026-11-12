@@ -1,4 +1,4 @@
-//! Web Push: the notification a browser's subscription earns when a turn ends (HS-066, spec item 11).
+//! Web Push: the notification a browser's subscription earns when a turn ends (spec item 11).
 //!
 //! Five rules hold the design together. Item 11 is the specification and it is quoted, not paraphrased:
 //!
@@ -479,7 +479,7 @@ struct Payload<'a> {
 struct Message {
     pair: vapid::Pair,
     sub: String,
-    /// What this machine calls itself (HS-074): the payload's `host`, and therefore the segment a tap's path is
+    /// What this machine calls itself: the payload's `host`, and therefore the segment a tap's path is
     /// built from. Read from the config at the moment a notification is built, so a reload is the only thing a
     /// changed name needs.
     host: String,

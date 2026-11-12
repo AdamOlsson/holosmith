@@ -1,4 +1,4 @@
-//! The host registry (HS-068, spec items 4 and 16).
+//! The host registry (spec items 4 and 16).
 //!
 //! A machine's list of the other machines it may send a request to: one row per host, keyed by the name the
 //! operator gives it, with the origin it answers on, whether it answered its own health check the last time
@@ -20,7 +20,7 @@
 //! same range, and one implementation for both would be one policy with two callers who disagree (ADR-0073).
 //!
 //! **A row's `url` is an origin** ([`crate::config::Origin`]) rather than a free URL: the probe asks
-//! `GET /api/health` at it and nothing else, HS-069 appends the path it forwards, and `Origin::parse` already
+//! `GET /api/health` at it and nothing else, appends the path it forwards, and `Origin::parse` already
 //! refuses a non-http(s) scheme, a path, a query and whitespace.
 
 pub mod client;
@@ -42,10 +42,10 @@ use crate::preflight::Tools;
 /// only when the port is left out — the same URL with two answers.
 pub const MIN_PORT: u16 = 1024;
 
-/// The longest name a row may have: DNS's own label limit, and one path segment when HS-069 forwards with it.
+/// The longest name a row may have: DNS's own label limit, and one path segment when forwards with it.
 pub const MAX_NAME: usize = 63;
 
-/// The one name a registry row may not take: HS-069 spells **this** machine's sessions with it.
+/// The one name a registry row may not take: spells **this** machine's sessions with it.
 ///
 /// Item 16's phase-3 neighbour, "local sessions use the host name `local`; remote ones use the registered name",
 /// makes `local` a name in the URL space that means *here*. A registered host called `local` would make every
@@ -127,7 +127,7 @@ impl<'de> serde::Deserialize<'de> for Reach {
 pub struct Host {
     pub name: String,
     pub url: Origin,
-    /// The machine's **preview** origin (HS-069, ADR-0074): where its preview listener answers, learned from its
+    /// The machine's **preview** origin (ADR-0074): where its preview listener answers, learned from its
     /// own health payload and never supplied by a caller. `None` until a probe has carried one — which refuses a
     /// forwarded preview with a sentence naming the probe rather than dialling a guess.
     pub preview: Option<Origin>,
@@ -165,7 +165,7 @@ impl Refusal {
 
 /// Why `name` is not a name a row may take, or `None` when it is.
 ///
-/// A name is one path segment in HS-069's URL space, so the alphabet is DNS's: lowercase ASCII letters, digits and
+/// A name is one path segment in the URL space, so the alphabet is DNS's: lowercase ASCII letters, digits and
 /// `-`, not starting or ending with `-`, at most [`MAX_NAME`] characters. Uppercase is refused rather than folded,
 /// because a name is compared as text in a URL and two spellings of one host is the ambiguity this rule exists to
 /// prevent.
@@ -180,7 +180,7 @@ pub fn name_problem(name: &str) -> Option<String> {
 
 /// Why `name` is not a name a machine may call **itself** in a notification's payload, or `None` when it is.
 ///
-/// The same alphabet as a registry row, because the payload's `host` is a registry name one hop later (HS-074) —
+/// The same alphabet as a registry row, because the payload's `host` is a registry name one hop later —
 /// with this machine's one exception: [`LOCAL`] is the reserved word that means *the machine whose page this is*,
 /// so it is the one name a machine may hold that no row may take. A server with no `machine_name` is `local`, and
 /// its notification opens `/sessions/<id>` on its own page.
@@ -346,7 +346,7 @@ pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-/// One row's facts, as `holosmith status` and `holosmith hub host list` both print them (HS-072).
+/// One row's facts, as `holosmith status` and `holosmith hub host list` both print them.
 ///
 /// One function, two callers, because the sentence is a rule: a row is its **reach**, the version that machine
 /// reported, the sentence it failed with if it did, and how long ago anything asked. `checked <n>s ago` is the
@@ -447,7 +447,7 @@ pub fn probe_row(config: &Config, tools: &Tools, name: &str, origin: &Origin) ->
 fn probe_one(config: &Config, tools: &Tools, origin: &Origin) -> probe::Outcome {
     if is_local(origin, &config.control_origin) {
         // The local row carries this config's own preview origin for the reason [
-        // `merge_outcome`] takes one from a peer's payload (HS-069): the shortcut answers a *round trip* without
+        // `merge_outcome`] takes one from a peer's payload: the shortcut answers a *round trip* without
         // making one, so it has to answer the same two facts. `None` here would leave this machine's own row the one
         // row on the machine whose previews cannot be forwarded.
         return probe::Outcome::Healthy {

@@ -1,4 +1,4 @@
-//! Every statement that reads or writes the `push_subscriptions` table (HS-066, spec item 11).
+//! Every statement that reads or writes the `push_subscriptions` table (spec item 11).
 //!
 //! The repository borrows the open `Database`'s connection rather than owning one, exactly as `sessions` and
 //! `events` do, and this file is the only one with a `push_subscriptions` statement. A test below walks `src/**`

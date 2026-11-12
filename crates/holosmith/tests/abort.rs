@@ -1,4 +1,4 @@
-//! Abort and its ladder (HS-016): `POST /api/sessions/{id}/abort` answers 202 with the row while the
+//! Abort and its ladder: `POST /api/sessions/{id}/abort` answers 202 with the row while the
 //! ladder ends the turn off-request. Rung 1 asks the agent to stop and the turn runner closes the
 //! session; rung 2 kills the container when the agent ignores rung 1, records why, and brings the
 //! session straight back.
@@ -6,7 +6,7 @@
 //! Every state a refusal needs is produced the way the server produces it: `idle` by letting a fast
 //! stub provision, `starting` by aborting a session the slow stub has not finished provisioning, and
 //! `running` by prompting. The only thing a test drives by hand is the ladder's *reason*, which is a
-//! parameter precisely so a later story (HS-022's timeout) can pass its own — that test is the one
+//! parameter precisely so a later story can pass its own — that test is the one
 //! place `Ladder::climb` is awaited directly.
 
 use std::net::SocketAddr;
@@ -316,7 +316,7 @@ async fn the_ladder_forces_the_stop_when_the_agent_ignores_the_abort() {
 
 #[tokio::test]
 async fn the_ladders_reason_is_the_callers_so_a_later_story_can_pass_its_own() {
-    // HS-022's turn timeout climbs the same ladder with its own reason. Awaiting `climb` directly
+    // the turn timeout climbs the same ladder with its own reason. Awaiting `climb` directly
     // is what proves the reason is a parameter and not a constant spelled inside the routine.
     let dir = TempDir::new("abort-reason");
     let stub = paced(50).ignoring_abort();
@@ -368,7 +368,7 @@ async fn an_abort_is_refused_with_the_states_own_code() {
     assert_envelope(&post_abort(served.addr, &id).await, 409, SESSION_STARTING);
     served.finish().await.expect("a clean shutdown");
 
-    // `idle`: HS-016's own code, which the family did not have before this story.
+    // `idle`: its own code, which the family did not have before this story.
     let idle = TempDir::new("abort-refused-idle");
     let idle_state = with_stub(state_in(&idle, Config::default()), fast_stub());
     let idle_served = Served::start(http::router(idle_state.clone()), GRACE).await;

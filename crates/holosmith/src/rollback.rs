@@ -1,7 +1,7 @@
-//! `holosmith rollback`: go back one release (HS-079, spec item 10's Commands table, ADR-0083).
+//! `holosmith rollback`: go back one release (spec item 10's Commands table, ADR-0083).
 //!
 //! Item 10's closing sentence is two verbs — "in v1 these steps are implemented by `holosmith upgrade <binary>` and
-//! `holosmith rollback`" — and HS-078 built the first. This is the second: the same switch-in-reverse a promotion
+//! `holosmith rollback`" — and built the first. This is the second: the same switch-in-reverse a promotion
 //! performs by itself when a candidate does not answer, reachable **on demand**, with the target chosen from the tree
 //! rather than from what a promotion happened to capture, and with the schema refusal read *before* anything is
 //! touched.

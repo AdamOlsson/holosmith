@@ -1,5 +1,5 @@
 //! The one state machine: the spec's transition table as data, and the one function every state
-//! change goes through (HS-012, ADR-0016).
+//! change goes through (ADR-0016).
 //!
 //! Three things live here, and they are all the same rule seen from three sides:
 //!
@@ -10,7 +10,7 @@
 //!   asked for — and **never** writes it — then persists the new state and emits the
 //!   `session.status` event that reports the transition.
 //! - [`SessionStatus`] is that event's payload: `from`, `to`, an optional `step` (the provisioning
-//!   progress HS-011 reports) and an optional `reason`.
+//!   progress reports) and an optional `reason`.
 //!
 //! `stopped_at` moves with the state inside the same write: set when the state becomes `stopped`,
 //! cleared when it leaves, which is item 15's "cleared on resume" and the reason this is one
@@ -72,14 +72,14 @@ pub enum Trigger {
     Delete,
     /// The process restarted and this row was live when it died.
     CrashRecovery,
-    /// The session's worktree is over `session_disk_soft_gb` (HS-063, spec item 14).
+    /// The session's worktree is over `session_disk_soft_gb` (spec item 14).
     ///
     /// An `idle` session's stop, and only that: a `running` one ends its turn through the abort ladder's own
     /// row ([`Self::AbortLadder`], with this policy's reason), because a turn is the ladder's to end and a row
     /// with no turn is the table's. The word is the reason the row records and the code the event carries —
     /// [`crate::quota::DISK_QUOTA`], and a test keeps the two spellings one.
     DiskQuota,
-    /// The daily job found this session stopped for longer than `stopped_ttl_days` (HS-064, spec item 15).
+    /// The daily job found this session stopped for longer than `stopped_ttl_days` (spec item 15).
     ///
     /// A row of its own rather than the delete's `any` row, because this caller is not a request: an operator's
     /// `DELETE` may end a running turn first and is entitled to any row, while a job that destroys a forgotten
@@ -177,14 +177,14 @@ pub struct Transition {
 /// Read it against the spec's table row by row. Two rows need saying out loud:
 ///
 /// - `running` + [`Trigger::AbortLadder`] ends in `stopped`; the spec's cell continues "then
-///   immediate resume", which is a *second* row ([`Trigger::Resume`]) that HS-022 chains after
+///   immediate resume", which is a *second* row ([`Trigger::Resume`]) that chains after
 ///   this one. One row is one state change.
 /// - `any` + [`Trigger::Delete`] reaches `deleting`; "then removed" is the row's removal, which is
-///   HS-019's flow and not a state.
+///   the flow and not a state.
 /// - Recovery's `from` is the spec's "server crash", which is not a state: the rows that were
 ///   **live** when the process died are the ones with something to recover, so the row admits
 ///   `starting`, `idle` and `running`. A `stopped` session has nothing running and a `deleted` one
-///   is gone; a row caught mid-delete is HS-044's decision, and the table refuses it until then
+///   is gone; a row caught mid-delete is the decision, and the table refuses it until then
 ///   rather than restarting a session somebody asked to delete.
 pub const TABLE: &[Transition] = &[
     Transition {
@@ -237,7 +237,7 @@ pub const TABLE: &[Transition] = &[
         trigger: Trigger::Drain,
         to: Status::Stopped,
     },
-    // Item 14's per-session soft cap (HS-063): an idle session whose worktree is over `session_disk_soft_gb`
+    // Item 14's per-session soft cap: an idle session whose worktree is over `session_disk_soft_gb`
     // is stopped and stays stopped until the operator cleans up, so this is a row of its own rather than a
     // second reason on `idle_stop` — the two answer different questions ("nobody used it" and "it is holding
     // too much disk"), and a client reads the reason. A `running` session does not take this row: its turn is
@@ -257,7 +257,7 @@ pub const TABLE: &[Transition] = &[
         trigger: Trigger::UnexpectedExit,
         to: Status::Error,
     },
-    // Item 6's clean exit (HS-030): code 0 without the expected-stop flag ends the session *stopped*,
+    // Item 6's clean exit: code 0 without the expected-stop flag ends the session *stopped*,
     // with `pi_exit` as its reason, rather than `error`. Item 8's table has no row for it — its
     // "container exits unexpectedly" cell is the one this rule replaces for a clean exit — so the row
     // is this story's amendment, recorded in ADR-0038. It is also the reason word, the way
@@ -277,7 +277,7 @@ pub const TABLE: &[Transition] = &[
         trigger: Trigger::Delete,
         to: Status::Deleting,
     },
-    // Item 15's stopped-session expiry (HS-064): the daily job's own move, and the story's amendment the way
+    // Item 15's stopped-session expiry: the daily job's own move, and the story's amendment the way
     // `pi_exit` is ADR-0038's and `disk_quota` is ADR-0069's. It admits `stopped` and nothing else, which is
     // what keeps a job from removing a session a resume brought back in the window between its read and this
     // write: the delete's own row is `any` because a request is entitled to end a turn first, and a job is
@@ -354,7 +354,7 @@ impl std::error::Error for StateError {
 /// The payload of a `session.status` event.
 ///
 /// Four keys, always present, `Option` fields explicit `null` — the shape rule the session row
-/// follows, so a client decodes one thing. `step` is set only by a provisioning report (HS-011),
+/// follows, so a client decodes one thing. `step` is set only by a provisioning report,
 /// where `from` and `to` are both `starting` because a step beginning changes no state; a real
 /// transition carries `step: null`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -429,7 +429,7 @@ impl Transitioner {
                 .map_err(StateError::Repository)?
                 .ok_or_else(|| StateError::UnknownSession(session_id.to_string()))?;
             let Some(transition) = lookup(current.status, trigger) else {
-                // `debug`, not `error`: since HS-015 a refused transition is the *expected* outcome
+                // `debug`, not `error`: a refused transition is the *expected* outcome
                 // of a legal request (a prompt that lost a race to another prompt), and the callers
                 // that treat it as impossible log it themselves.
                 tracing::debug!(
@@ -582,7 +582,7 @@ mod tests {
                 Trigger::Drain,
                 Status::Stopped,
             ),
-            // Item 14's per-session soft cap (HS-063): the story's amendment, the way `pi_exit` is
+            // Item 14's per-session soft cap: the story's amendment, the way `pi_exit` is
             // ADR-0038's. A `running` session does not take this row — its turn is the abort ladder's.
             (
                 FromStates::OneOf(&[Status::Idle]),
@@ -610,7 +610,7 @@ mod tests {
                 Status::Starting,
             ),
             (FromStates::Any, Trigger::Delete, Status::Deleting),
-            // Item 15's stopped-session expiry (HS-064): the job's narrow row, beside the request's `any` one.
+            // Item 15's stopped-session expiry: the job's narrow row, beside the request's `any` one.
             (
                 FromStates::OneOf(&[Status::Stopped]),
                 Trigger::Expire,
@@ -667,7 +667,7 @@ mod tests {
             }
         }
         // Spot checks a reader will look for: `deleting` is a sink apart from `delete`, which
-        // keeps it there. Recovery does not reach it — a row caught mid-delete is HS-044's
+        // keeps it there. Recovery does not reach it — a row caught mid-delete is that story's
         // decision, and the table refuses rather than restarting a session somebody asked to
         // delete.
         for trigger in Trigger::ALL {
@@ -777,12 +777,12 @@ mod tests {
         // crate's production code names it in exactly two places: its definition and this module.
         //
         // The walk covers `src/`, which is all the production code there is. A test outside the
-        // crate may still call it — `tests/session_repository.rs` is HS-007's proof that the
+        // crate may still call it — `tests/session_repository.rs` is the proof that the
         // repository can update a state at all — and that is the crate boundary doing its job
         // rather than an exemption here.
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         // Non-vacuous: a walk that found nothing would pass the next assertion for the wrong
-        // reason, so this one names the two files the rule is about (PER-39 S2's precedent).
+        // reason, so this one names the two files the rule is about.
         let files: Vec<String> = crate::sql::guard::sources_under(&root)
             .into_iter()
             .map(|(file, _)| file)

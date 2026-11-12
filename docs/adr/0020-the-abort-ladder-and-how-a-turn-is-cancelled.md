@@ -1,10 +1,10 @@
 # The abort ladder, how a turn is cancelled, and the second owner of a running turn
 
-HS-016 is the story that closes the worst hole in the lifecycle: a turn that will not end. Before it,
+This is the story that closes the worst hole in the lifecycle: a turn that will not end. Before it,
 `SessionBackend::abort`/`stop` were recordings, the turn runner awaited `start_turn` with nothing able
 to interrupt it, and the stub's script was unconditional — so `running` had exactly one way out and a
 hung agent had none. Five things had to be decided that the spec does not decide, and each is
-expensive to change once HS-017 (steer), HS-018 (resume), HS-022 (turn timeout) and HS-023 (token
+expensive to change once (steer), (resume), (turn timeout) and (token
 budget) have built on it.
 
 ## The backend reports how a turn ended; the runner still chooses the row
@@ -31,7 +31,7 @@ ordering if it can observe both calls separately.
 There is no cancellation token in the server, no `select!` around `start_turn`, and no per-session
 registry of turn handles in `AppState`.
 
-**Amended by ADR-0026 (HS-022).** `Turn::run` now races `start_turn` against its own deadline — that is a
+**Amended by ADR-0026.** `Turn::run` now races `start_turn` against its own deadline — that is a
 `select!` around it — but nothing is cancelled by it: the deadline's arm hands the ladder a **task of its
 own** (`Ladder::spawn`, the abort handler's entry point) and then keeps awaiting the turn, so rung 1 works
 exactly as it does for an operator's abort and the backend still decides `TurnEnd`. The rule that matters —
@@ -39,7 +39,7 @@ no server-side token, and none of the server's belief about a turn the agent is 
 untouched; what changed is only *when* the ladder is asked. A token would let the server *believe* it had stopped a turn
 the agent is still running, and the whole point of rung 2 is that the agent is not to be trusted to
 honour anything. So the interruption is the backend's own: the stub's turn loop checks a per-session
-stop flag between frames and answers `Aborted` instead of finishing its script; Docker's HS-024
+stop flag between frames and answers `Aborted` instead of finishing its script; Docker's
 implementation will answer when its agent process exits. The flag is consumed by the observation, so
 a stop cannot leak into the next turn of the same session.
 
@@ -51,15 +51,15 @@ always honours rung 1, and rung 2 is proved by `tests/abort.rs`.
 ## The ladder is one routine with a parameterised reason
 
 `crate::ladder::Ladder` is built like `Provisioner` and `Turn`: `spawn` for production, `climb` for a
-test. `climb(session, reason)` takes the reason as an argument, because HS-022's turn timeout and
-HS-023's budget climb the same two rungs and record their own word — `turn_timeout`,
+test. `climb(session, reason)` takes the reason as an argument, because the turn timeout and
+the budget climb the same two rungs and record their own word — `turn_timeout`,
 `budget_exceeded` — where the abort records `forced_abort`. A constant inside the routine would have
 made the two later stories a copy of it.
 
 **The parameter is rung 2's reason only.** Rung 1's ending is the turn runner's and is always
 `abort_completed`, because the runner is not told why its turn is being stopped — the backend answers
 `Aborted` and nothing more. That is enough for this story (an abort is what rung 1 is for) and it is
-*not* enough for HS-022 and HS-023, whose acceptance is that the caller's own word reaches the row's
+*not* enough and, whose acceptance is that the caller's own word reaches the row's
 `status_reason`. Those two stories must plumb it: the smallest shape is a reason on the turn itself
 (`Turn` holding the `&'static str` its abort ending records), set by whoever climbs the ladder. Naming
 that here is deliberate — a later story that finds the row saying `abort_completed` after a timeout has
@@ -74,15 +74,15 @@ The rungs, in the spec's order and with the reasoning that fixes each one:
 | 1c | wait until `abort_grace` has passed, reading the row | The row is the question, not a flag in the ladder: the runner writes `running → idle` when the agent stops, so "the row is no longer `running`" *is* "rung 1 worked" |
 | 2a | apply `abort_ladder` → `stopped` with the reason | The row first, because the other order leaves a row that says `idle` over a dead container — the one lie a client cannot detect |
 | 2b | `stop` the backend | Kills the hung agent, which is what finally makes the turn answer `Aborted` |
-| 2c | apply `resume` → `starting`, then the provisioner | "Then immediate resume" (item 16 §2); the four steps are the provisioner's, and that is the path HS-018's endpoint reuses |
+| 2c | apply `resume` → `starting`, then the provisioner | "Then immediate resume" (item 16 §2); the four steps are the provisioner's, and that is the path the endpoint reuses |
 
 `stopped_at` moves with the state inside the same write (ADR-0016), so a forced stop is instantly
-eligible for HS-021's idle stop and HS-064's retention without a second statement.
+eligible for the idle stop and the retention without a second statement.
 
 The ladder does **not** call `SessionBackend::resume`. Whether a resumed session runs all four
-provisioning steps or only the container's is HS-018's and HS-024's question — the trait's `resume`
-exists and has no caller until one of them says what it means. Answering it here would have been a
-guess that HS-024 then had to undo.
+provisioning steps or only the container's is a later question — the trait's `resume`
+exists and has no caller until a change says what it means. Answering it here would have been a
+guess that then had to undo.
 
 ## Two owners can end one turn, and the table decides
 
@@ -94,7 +94,7 @@ it issued make the runner's `start_turn` answer `Aborted`, at which point the ru
 That refusal is **not a bug and must not read like one**: it is the designed outcome of two owners
 racing on one row. The runner therefore treats `StateError::Illegal` for the abort ending as a `debug`
 line ("the abort ladder ended this turn instead"), and only for that ending. Everywhere else a
-refused transition stays what HS-012 made it — an error the caller has to be able to explain. This is
+refused transition stays what made it — an error the caller has to be able to explain. This is
 the same trade ADR-0019 accepted for a prompt that loses a race to another prompt: the table is the
 authority, and losing a documented race is not a failure.
 
@@ -113,10 +113,10 @@ because a prompt is *accepted* in `idle`. So the constructor became
 `not_in_state(status, message)` — total over the six states, one code each, `session_idle` included —
 and the **message** is the caller's, because a sentence has to describe its own request: an abort's
 refusal says "the session is not running, so it has no turn to abort", a prompt's says "the session is
-not idle, so it cannot be prompted". HS-017 needs `session_idle` for steer and gets it for free.
+not idle, so it cannot be prompted". needs `session_idle` for steer and gets it for free.
 
 An abort on anything but `running` is refused rather than answered `202` with no work. The spec's
-family rule and HS-017's "on `idle` it returns `409 session_idle`" make a silent 202 the odd one out,
+family rule and the "on `idle` it returns `409 session_idle`" make a silent 202 the odd one out,
 and a 202 that does nothing is indistinguishable from a ladder that failed.
 
 ## Consequences
@@ -134,6 +134,6 @@ and a 202 that does nothing is indistinguishable from a ladder that failed.
   a constructor argument only a test can set.
 - `web/src/main.ts` aborts for real now: a POST with no body and the two guard headers, a notice on
   success and the envelope's code on failure. The badge follows the stream, not the answer.
-- `SessionBackend` is now ten methods. `steer` and `resume` had no caller when this was written; HS-017
-  gave `steer` one (**see ADR-0021**) and HS-018 owns `resume`, which is why the methods were added with
+- `SessionBackend` is now ten methods. `steer` and `resume` had no caller when this was written;
+  gave `steer` one (**see ADR-0021**) and a later change owns `resume`, which is why the methods were added with
   the trait rather than with their callers.

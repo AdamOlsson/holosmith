@@ -1,4 +1,4 @@
-//! V1 — the hardened `.git` mounts, measured against a real daemon (HS-027).
+//! V1 — the hardened `.git` mounts, measured against a real daemon.
 //!
 //! `tests/container.rs` is the only *test* that runs a real container (the gate's two cases do too), and it exists because
 //! spec item 1's mounts are a claim about the kernel rather than about our code: three writes must fail,
@@ -128,8 +128,8 @@ impl Drop for Scratch {
     }
 }
 
-/// Remove a container by name, ignoring "no such container" (HS-029 does this before every start; until
-/// then a container a failed run left behind keeps the name, which is measured: HS-027's first V1 run
+/// Remove a container by name, ignoring "no such container" (does this before every start; until
+/// then a container a failed run left behind keeps the name, which is measured: the first V1 run
 /// failed its second attempt with "the container name is already in use").
 fn rm_container(name: &str) {
     let _ = Command::new("docker")
@@ -273,7 +273,7 @@ fn v1_holds_the_hardened_git_mounts_answer_the_way_spec_item_one_says() {
     let container = container(&scratch.path, ID_V1);
     let mounts = container.mounts.clone();
 
-    // The agent's directory is a mount source since HS-031, and the container step is what makes it; V1
+    // The agent's directory is a mount source, and the container step is what makes it; V1
     // never provisions, so it makes it here.
     std::fs::create_dir_all(&mounts.agent.host).expect("the agent directory is creatable");
 
@@ -287,7 +287,7 @@ fn v1_holds_the_hardened_git_mounts_answer_the_way_spec_item_one_says() {
     let config_before =
         std::fs::read_to_string(&mounts.config.host).expect("the config is readable");
 
-    // The run vector now names the session's own network (HS-028), so V1's container joins a real one:
+    // The run vector now names the session's own network, so V1's container joins a real one:
     // `--internal`, created by the same helper the backend's network step uses.
     let docker = Docker::new(None);
     docker
@@ -297,7 +297,7 @@ fn v1_holds_the_hardened_git_mounts_answer_the_way_spec_item_one_says() {
     // The self-test proves the *machine* honours it; this proves the flag is on the session's own network.
     //
     // Only the flag, because the gateway field lies about reachability: an `--internal` network still reports
-    // an IPAM gateway (measured here — `172.21.0.1`), it simply has no route to it. That is *why* HS-036 probes
+    // an IPAM gateway (measured here — `172.21.0.1`), it simply has no route to it. That is *why* probes
     // instead of reading flags, and an assertion on the gateway would be an assertion on a number Docker makes
     // up either way.
     assert_eq!(
@@ -308,7 +308,7 @@ fn v1_holds_the_hardened_git_mounts_answer_the_way_spec_item_one_says() {
         "a session network must be internal, or it has a route to the host"
     );
     rm_container(&container.name);
-    // The production vector is detached (the container step does not hold a process open until HS-031);
+    // The production vector is detached (the container step does not hold a process open until);
     // V1 needs the container's stdout, so the same vector runs attached.
     let mut arguments: Vec<String> = container
         .run_args()
@@ -403,7 +403,7 @@ fn v1_holds_the_hardened_git_mounts_answer_the_way_spec_item_one_says() {
         worktree.display()
     );
 
-    // The process is not root: the image's own user runs the agent, and HS-028's flag list says so
+    // The process is not root: the image's own user runs the agent, and the flag list says so
     // without a `--user` that would have to guess the mapping (the container module's doc). A missing `id`
     // prints `missing` and fails here, rather than being read as a uid that happens not to be zero.
     let uid = stdout
@@ -494,7 +494,7 @@ fn the_container_step_runs_a_limited_container_with_no_way_out() {
         "the container the step launched never came up"
     );
 
-    // Everything spec item 6 and HS-028's acceptance name, read out of `docker inspect` — the only place a
+    // Everything spec item 6 and the acceptance name, read out of `docker inspect` — the only place a
     // running container's real configuration is visible.
     let field = |format: &str| {
         docker
@@ -512,7 +512,7 @@ fn the_container_step_runs_a_limited_container_with_no_way_out() {
         field("{{.Config.Env}}").contains(&format!("HS_SESSION_ID={ID_RUN}")),
         "the session id is not in the container's environment"
     );
-    // HS-041: the port the preview listener forwards to, so a dev server in the container knows where to listen.
+    // the port the preview listener forwards to, so a dev server in the container knows where to listen.
     // Read off the running container rather than out of the vector, because the vector is what a test wrote and the
     // environment is what Docker gave the process.
     assert!(
@@ -605,7 +605,7 @@ fn the_container_step_runs_a_limited_container_with_no_way_out() {
 
 /// A runtime for the tests that drive the backend's `async` methods.
 ///
-/// Every test holds **one** for its whole body, and that is not tidiness: since HS-031 the container step
+/// Every test holds **one** for its whole body, and that is not tidiness: the container step
 /// spawns the agent and the tasks that read its pipes, so the container lives exactly as long as the
 /// runtime that launched it. A per-call runtime dropped the agent (and with it the container, through
 /// `--rm`) the moment the step returned — measured: `docker inspect` then said "no such object".
@@ -619,7 +619,7 @@ fn runtime() -> tokio::runtime::Runtime {
 
 /// A started session: network and container through the real backend, and the container is up.
 ///
-/// `start` waits for the container rather than returning when the step does: since HS-031 the container
+/// `start` waits for the container rather than returning when the step does: the container
 /// step *spawns* the attached `docker run` and returns, and the daemon creates the container a moment later
 /// (measured here at several seconds — far longer than the step). A test that inspected straight after the
 /// step read "no such object" and called it a bug in the backend.
@@ -692,7 +692,7 @@ fn exec(container: &str, script: &str) -> String {
 fn a_second_start_never_fails_on_a_leftover_name() {
     // Spec item 6's first line, and the reason it exists: `--rm` covers a container that *stopped*, and
     // nothing covers one this process lost track of — a `kill -9`, a crash, a row removed while its
-    // container lived (HS-044 reconciles those at startup). So a start removes any container of its name
+    // container lived. So a start removes any container of its name
     // first, and asking twice is boring.
     if !ready() {
         return;
@@ -956,7 +956,7 @@ async fn two_starts_of_one_session_do_not_race() {
         .expect("the teardown works");
 }
 
-/// HS-037: the egress proxy's place is a session network's, and a teardown has to take it off again.
+/// the egress proxy's place is a session network's, and a teardown has to take it off again.
 ///
 /// What this measures is **this build's join and leave**, not the proxy's own behaviour (`src/egress.rs`
 /// proves the rules and the bytes without a daemon, and the gate's `case_egress_proxy` proves the wire).
@@ -964,7 +964,7 @@ async fn two_starts_of_one_session_do_not_race() {
 /// The stand-in is `sleep infinity` in the same image, under the name the teardown **detaches**: the two
 /// detaches `remove_network` makes are by container name (`hs_key`, `hs_egress`), so a proxy under any other
 /// name cannot be taken off and `docker network rm` then refuses the network — which is exactly the assertion
-/// below, and a stand-in called something else made it unprovable (HS-043 measured that: the test skipped
+/// below, and a stand-in called something else made it unprovable (measured that: the test skipped
 /// whenever a proxy *was* running and failed whenever one was not, so its real path never ran). The name is
 /// only safe because of the SKIP: with a live proxy on the machine this test does not run at all — and
 /// because the stand-in holds itself away in a guard, so a failing assertion cannot leave `hs_egress` behind
@@ -1064,7 +1064,7 @@ fn the_egress_proxy_joins_a_session_network_under_its_alias_and_leaves_it() {
 /// the end panics.
 ///
 /// The stand-in wears the machine's own proxy name, so a panic that left it running would make the next run's
-/// `running(PROXY_NAME)` SKIP answer *pass* on the very test that failed: the failure mode HS-043's baseline
+/// `running(PROXY_NAME)` SKIP answer *pass* on the very test that failed: the failure mode the baseline
 /// found, reached by the other door.
 struct StandIn<'a> {
     docker: &'a Docker,

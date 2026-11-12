@@ -1,7 +1,7 @@
-//! Which sessions have an event stream open, and how to end one (HS-010, ADR-0014).
+//! Which sessions have an event stream open, and how to end one (ADR-0014).
 //!
-//! Two later stories read this: HS-019 calls [`StreamRegistry::close`] when it deletes a session,
-//! and HS-066 asks whether a session has a stream open before it pushes a notification. Neither
+//! Two later stories read this: calls [`StreamRegistry::close`] when it deletes a session,
+//! and asks whether a session has a stream open before it pushes a notification. Neither
 //! needs to know anything about SSE, so the registry holds no stream body and no connection —
 //! only a count per session and one close signal per open stream. [`StreamRegistry::count`] is
 //! the whole read surface: a "which sessions are open" list has no caller yet.
@@ -60,14 +60,14 @@ impl StreamRegistry {
         }
     }
 
-    /// How many streams are open on `session`. What HS-066 reads.
+    /// How many streams are open on `session`. What reads.
     pub fn count(&self, session: &str) -> usize {
         self.entries().get(session).map_or(0, |entry| entry.open)
     }
 
     /// End every stream open on `session` and answer how many were asked to close.
     ///
-    /// Called by the delete flow (HS-019). The count itself is released by each guard on the way
+    /// Called by the delete flow. The count itself is released by each guard on the way
     /// out, so a second call, or a call on a session with nothing open, is a no-op rather than
     /// an error.
     pub fn close(&self, session: &str) -> usize {

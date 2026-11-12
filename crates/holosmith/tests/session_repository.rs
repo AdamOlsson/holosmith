@@ -1,4 +1,4 @@
-//! The `sessions` row as the repository stores and returns it (HS-007).
+//! The `sessions` row as the repository stores and returns it.
 //!
 //! Every test drives `Database::sessions`, the path the shipped binary uses. Two of them reach
 //! the file with `rusqlite` directly, and only for what the repository deliberately cannot do:
@@ -17,7 +17,7 @@ use support::{TempDir, open};
 /// The timestamps these tests write, so the value can be asserted rather than raced.
 const NOW: i64 = 1_760_000_000;
 
-/// The create body these tests share: the four fields HS-008 will validate, plus the key.
+/// The create body these tests share: the four fields will validate, plus the key.
 fn new_session(client_key: Option<&str>) -> NewSession {
     NewSession {
         project: "holosmith".to_string(),
@@ -116,7 +116,7 @@ fn the_table_has_every_column_the_spec_names() {
     ] {
         assert_eq!(text(name), "INTEGER", "{name} is not INTEGER");
     }
-    // `worktree` is NOT NULL and holds '' until the provisioner runs (HS-007's note), rather
+    // `worktree` is NOT NULL and holds '' until the provisioner runs, rather
     // than becoming nullable; every other non-nullable column is here too, so dropping one
     // `NOT NULL` fails a test. `id` is the exception: SQLite cannot express `NOT NULL` on a
     // `TEXT PRIMARY KEY`, and that is recorded in ADR-0011 rather than defended.
@@ -142,7 +142,7 @@ fn the_table_has_every_column_the_spec_names() {
         assert!(!column(name).2, "{name} must be nullable");
     }
     // The spec's three `DEFAULT 0` columns, `network` being the one the acceptance names, plus
-    // HS-009's `last_seq`, which makes every pre-HS-009 row correct without a backfill.
+    // the `last_seq`, which makes every earlier row correct without a backfill.
     for name in ["network", "usage_in", "usage_out", "last_seq"] {
         assert_eq!(
             column(name).3.as_deref(),
@@ -345,7 +345,7 @@ fn a_session_reads_back_by_client_key() {
 #[test]
 fn many_sessions_without_a_client_key_are_not_duplicates() {
     // A create without an `Idempotency-Key` is not a duplicate, so SQLite's UNIQUE must allow
-    // many NULLs (HS-008 relies on it).
+    // many NULLs.
     let dir = TempDir::new("no-key");
     let database = open(&dir);
     let repository = database.sessions();
@@ -369,7 +369,7 @@ fn the_same_client_key_twice_is_refused() {
         .create(&new_session(Some("taken")), NOW)
         .expect_err("a duplicate client key is refused");
     // The repository maps SQLite's `UNIQUE` violation to this variant by extended code, which is
-    // what lets the handler answer the winning row instead of a 500 (HS-008, ADR-0012).
+    // what lets the handler answer the winning row instead of a 500 (ADR-0012).
     assert!(matches!(error, RepoError::DuplicateClientKey), "{error}");
     assert_eq!(
         error.to_string(),
@@ -584,7 +584,7 @@ fn set_status_sets_stopped_at_only_while_the_session_is_stopped() {
 
 #[test]
 fn expired_before_answers_only_stopped_rows_oldest_first() {
-    // HS-064's one statement: the predicate and the order are the repository's, so a policy cannot forget either.
+    // the one statement: the predicate and the order are the repository's, so a policy cannot forget either.
     // A cutoff far in the future makes the *clock* answer "yes" for every row, so what is left is the status
     // predicate and the ordering — which is what this test is about.
     let dir = TempDir::new("expired-before");
@@ -650,7 +650,7 @@ fn expired_before_answers_only_stopped_rows_oldest_first() {
 
 #[test]
 fn set_status_leaves_last_active_at_alone() {
-    // Activity is not status: HS-020 and HS-021 own when `last_active_at` moves.
+    // Activity is not status: and own when `last_active_at` moves.
     let dir = TempDir::new("last-active");
     let database = open(&dir);
     let repository = database.sessions();
@@ -680,7 +680,7 @@ fn set_status_on_an_unknown_id_returns_none() {
 
 #[test]
 fn touch_moves_last_active_at_and_nothing_else() {
-    // HS-015: the turn runner touches at the prompt and again at the settle, and neither is a
+    // the turn runner touches at the prompt and again at the settle, and neither is a
     // state change, so the status write deliberately leaves the column alone and this is the only
     // statement that moves it.
     let dir = TempDir::new("touch");
@@ -720,7 +720,7 @@ fn touch_succeeds_for_an_unknown_id() {
 
 #[test]
 fn set_worktree_records_the_path_and_the_base_and_nothing_else() {
-    // HS-025: the provisioner writes what the worktree step made. It is not a state change — the session
+    // the provisioner writes what the worktree step made. It is not a state change — the session
     // stays `starting` while the next step runs — and it must not disturb the two timestamps, because
     // `last_active_at` is activity's and the cap's eviction order reads it.
     let dir = TempDir::new("set-worktree");

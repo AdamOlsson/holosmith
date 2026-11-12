@@ -1,11 +1,11 @@
 # The release tree keeps a count, and says which release is running
 
-HS-080 closes item 10's layout paragraph — "releases live in `releases/<tag>/` with a `current` symlink that systemd
-runs" — for the state the paragraph is *about*: **two releases at once**. HS-078 built the tree and the switch, HS-079
+ closes item 10's layout paragraph — "releases live in `releases/<tag>/` with a `current` symlink that systemd
+runs" — for the state the paragraph is *about*: **two releases at once**. built the tree and the switch,
 gave it an order; what was still missing is what the layout means once there is more than one directory in it — which
 one is live, which ones are kept, and how a machine states both.
 
-Two of the acceptance's five bullets are measurements of what HS-078 landed (the directory shape, the atomic switch), so
+Two of the acceptance's five bullets are measurements of what landed (the directory shape, the atomic switch), so
 this story adds three facts and one sentence. The three facts are a count, a report from the running file, and a check.
 
 ## D1 — the prune is the promotion's last step, and a prune that cannot delete is a warning

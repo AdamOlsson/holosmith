@@ -1,4 +1,4 @@
-//! Exit classification: what "the container stopped" means for the row (HS-030, spec item 6).
+//! Exit classification: what "the container stopped" means for the row (spec item 6).
 //!
 //! Spec item 6 replaces the earlier clean-exit-means-ended rule with three answers, and the middle one
 //! is why the expected-stop flag exists:
@@ -15,19 +15,19 @@
 //! the stderr in the session's log.
 //!
 //! **Where the observation comes from, and which story owns it.** This build has no process whose exit
-//! anybody can see: the container runs detached on `sleep infinity` (ADR-0036) until HS-031 attaches pi's
+//! anybody can see: the container runs detached on `sleep infinity` (ADR-0036) until attaches pi's
 //! stdio, and `--rm` takes the container away a moment after it stops, so there is nothing left to
-//! inspect (ADR-0037). HS-031's attachment is therefore the caller of [`Exits::record`] — it has the exit
-//! code and the stderr pipe — and HS-030 owns the decision, the flag and the record. That boundary is
+//! inspect (ADR-0037). the attachment is therefore the caller of [`Exits::record`] — it has the exit
+//! code and the stderr pipe — and a later change owns the decision, the flag and the record. That boundary is
 //! recorded in ADR-0038 rather than papered over with a watcher (`docker events`, a `docker wait` race
-//! against `--rm`) that HS-031 would delete.
+//! against `--rm`) that would delete.
 //!
 //! **`session.log` is the session's stderr and the server's own launch line** — and nothing else.
 //! `<data>/sessions/<id>/session.log` is append-only and carries what the container printed on stderr (its
-//! kept tail, at most `crate::agent::STDERR_TAIL` bytes, since HS-031 drains a pipe it also bounds);
+//! kept tail, at most `crate::agent::STDERR_TAIL` bytes, drains a pipe it also bounds);
 //! the row's `status_reason` carries only the last few, because a phone shows one line. Spec item 15's
-//! "`session.log` holds stderr only" is what keeps a *tool's* output out of it (HS-033 gives each tool call
-//! its own file) and what makes the file worth reading when a session dies; HS-031 adds the launch line
+//! "`session.log` holds stderr only" is what keeps a *tool's* output out of it (gives each tool call
+//! its own file) and what makes the file worth reading when a session dies; adds the launch line
 //! there, because "which command did we run" is the first question a failed launch asks and there is no row
 //! column for it.
 
@@ -50,7 +50,7 @@ pub const PI_EXIT: &str = "pi_exit";
 ///
 /// Five, because the row is read on a phone and the row is also what a list shows: enough to identify a
 /// stack trace's tail or a provider's error, short enough to stay one paragraph. `session.log` gets all of
-/// it that was kept — since HS-031 the reader keeps a bounded tail (`agent::STDERR_TAIL`, 64 KiB) of a pipe
+/// it that was kept — the reader keeps a bounded tail (`agent::STDERR_TAIL`, 64 KiB) of a pipe
 /// it drains to the end, so a build log of megabytes cannot fill the data root.
 pub const STDERR_LINES: usize = 5;
 
@@ -113,7 +113,7 @@ fn tail(code: i32, stderr: &str) -> String {
 
 /// The two handles an exit's consequences need: the row, the event log, and where a session's files are.
 ///
-/// `Clone` because its production caller is a task that supervises a container's stdio (HS-031), and a
+/// `Clone` because its production caller is a task that supervises a container's stdio, and a
 /// supervisor is spawned rather than borrowed.
 #[derive(Debug, Clone)]
 pub struct Exits {
@@ -214,7 +214,7 @@ impl Exits {
     /// Append `stderr` to the session's log, one line per line.
     ///
     /// The directory is made on the first write, because a session that dies early may never have had one
-    /// (HS-031 seeds the agent directory when it starts a container). A failure to write is a `warn` and
+    /// A failure to write is a `warn` and
     /// nothing more: the row's reason is the durable half of this, and the log is the complete one.
     fn append_log(&self, session_id: &str, stderr: &str) {
         self.log.append(session_id, stderr);
@@ -229,9 +229,9 @@ impl Exits {
     }
 }
 
-/// The session's log file as one value: `<data>/sessions/<id>/session.log`, append-only (HS-031).
+/// The session's log file as one value: `<data>/sessions/<id>/session.log`, append-only.
 ///
-/// Lifted out of [`Exits`] when HS-031 needed to write into it from somewhere that must not write a row:
+/// Lifted out of [`Exits`] when needed to write into it from somewhere that must not write a row:
 /// a backend may not touch the database (ADR-0019), but the *file* is the agent process's own stderr and
 /// the launch line the backend is the only thing that could describe. Two callers, one writer, and the
 /// path guard in one place.

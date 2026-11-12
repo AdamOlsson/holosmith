@@ -1,6 +1,6 @@
 # Coalescing happens in the writer's batch, and the writer parses one more payload
 
-HS-059 is spec item 15's first sentence: "inside each 25 ms commit, consecutive deltas of the same kind and
+This is spec item 15's first sentence: "inside each 25 ms commit, consecutive deltas of the same kind and
 message become one row with one seq." That names both the place and the unit — the commit and its batch —
 and three consequences follow: who merges, what must match, and what happens to a payload the writer does
 not understand.
@@ -41,7 +41,7 @@ ADR-0027 recorded that the **events repository** parses exactly one kind's paylo
 so the tally could commit with the row. This is a second parse, in a different place and for a different
 reason: the writer is looking at the event as a value on its way to being a row, and "same message and kind"
 is unanswerable without reading the payload. The repository's invariant was untouched by *this* change — it
-still parsed exactly one kind, and HS-060 is what widened it (ADR-0032's second section).
+still parsed exactly one kind, and this is what widened it (ADR-0032's second section).
 
 A payload that is not the pinned shape is **never merged**: it is written exactly as the producer sent it,
 and it ends the run it sits in. "The pinned shape" is exact — the three keys and nothing else — because

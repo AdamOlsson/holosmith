@@ -1,6 +1,6 @@
 # What a delete keeps, and how it says so
 
-HS-043 is the last story of spec item 9's sentence about deletion, and item 9 says three things this
+This is the last story of spec item 9's sentence about deletion, and item 9 says three things this
 repository had no code for:
 
 > Kept in the repository: branch `agent/<id>` if it has commits beyond the base and is not merged into a
@@ -72,7 +72,7 @@ the first is the one git spells as a question. A branch that is *equal* to its t
 ancestor of it, so it is not kept — which is right, and which `ahead` has already decided by then.
 
 The rule is therefore: **keep the branch iff it has commits beyond the base and the merge question did not
-answer "yes".** Reading a merge is all this story does; writing one is HS-054's.
+answer "yes".** Reading a merge is all this story does; writing one is that story's.
 
 ## The wip ref "differs from the branch" is a tree comparison, and nothing deletes it
 
@@ -162,5 +162,5 @@ family can make and a delete cannot.
   affordance and command, and — with a daemon and `agent_image` — the real half: commit, modify, delete,
   `agent/<id>` and the ref still there, the worktree and the session directory gone, and
   `git branch rescue refs/holosmith/wip/<id>` succeeding.
-- A kept branch is now a thing a machine accumulates. Nothing expires it: HS-064 owns stopped-session
-  expiry and these names are not rows, and HS-044's reconcile starts from the branch rather than pruning it.
+- A kept branch is now a thing a machine accumulates. Nothing expires it: a later change owns stopped-session
+  expiry and these names are not rows, and the reconcile starts from the branch rather than pruning it.

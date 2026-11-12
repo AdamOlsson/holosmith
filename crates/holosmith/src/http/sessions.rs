@@ -1,14 +1,14 @@
 //! The sessions collection: `POST /api/sessions` validates the body, writes one `starting` row and
-//! answers 202 (HS-008, ADR-0012); `GET /api/sessions` answers every row in the repository's own
-//! order together with the machine's network default (HS-013, ADR-0017); `GET /api/sessions/{id}`
-//! answers one row, which is what the session screen opens with (HS-014); and
+//! answers 202 (ADR-0012); `GET /api/sessions` answers every row in the repository's own
+//! order together with the machine's network default (ADR-0017); `GET /api/sessions/{id}`
+//! answers one row, which is what the session screen opens with; and
 //! `POST /api/sessions/{id}/prompt` starts a turn and answers 202 with the now-`running` row
-//! (HS-015); `POST /api/sessions/{id}/abort` accepts an abort and answers 202 with the row while the
-//! ladder ends the turn off-request (HS-016); `POST /api/sessions/{id}/steer` hands guidance to the
-//! running turn and records it as the event the transcript reads (HS-017); and
+//! `POST /api/sessions/{id}/abort` accepts an abort and answers 202 with the row while the
+//! ladder ends the turn off-request; `POST /api/sessions/{id}/steer` hands guidance to the
+//! running turn and records it as the event the transcript reads; and
 //! `POST /api/sessions/{id}/resume` brings a stopped (or failed) session back through the provisioner
-//! (HS-018); and `DELETE /api/sessions/{id}` removes a session once its uncommitted work is safe
-//! (HS-019).
+//! and `DELETE /api/sessions/{id}` removes a session once its uncommitted work is safe
+//!
 //!
 //! The body is parsed by hand rather than through `axum::Json<T>`: that extractor rejects a bad
 //! body with its own `text/plain` answer, which would break ADR-0008's envelope on exactly the
@@ -56,7 +56,7 @@ const NOT_RUNNING_ABORT: &str = "the session is not running, so it has no turn t
 const NOT_RUNNING_STEER: &str = "the session is not running, so there is no turn to steer";
 
 /// What a resume is refused with. The transition table has exactly two `resume` rows — from `stopped`
-/// and from `error` — so those are the two states that accept one (HS-018).
+/// and from `error` — so those are the two states that accept one.
 const NOT_RESUMABLE: &str =
     "the session is neither stopped nor in error, so there is nothing to resume";
 
@@ -67,7 +67,7 @@ const NOT_RESUMABLE: &str =
 /// (ADR-0019) rather than a panic on a path a future row could open.
 const NOT_DELETABLE: &str = "the session is in a state that cannot be deleted";
 
-/// The event a steer is recorded as (HS-017, ADR-0021), under the name it has with every other kind:
+/// The event a steer is recorded as (ADR-0021), under the name it has with every other kind:
 /// `<subject>.<verb>`, like `turn.start`, and the subject is the turn, because the operator's guidance
 /// is something that happened *to a turn* rather than a message the agent produced. The payload is
 /// `{"text": "…"}` — no message id, because a steer is one frame that is never continued or replaced,
@@ -79,7 +79,7 @@ use crate::events::TURN_STEER;
 /// cannot become a payload.
 const MAX_KEY_CHARS: usize = 200;
 
-/// The reason recorded when a create stops an idle session to free its slot (HS-020, spec item 9).
+/// The reason recorded when a create stops an idle session to free its slot (spec item 9).
 ///
 /// The row is `stopped` with this word, which is what the Sessions screen turns into "nothing was
 /// deleted, resume it to continue": an eviction is the machine making room, never data loss.
@@ -96,7 +96,7 @@ struct PromptBody {
     prompt: String,
 }
 
-/// A steer's body: one `guidance` string and nothing else (HS-017). The word is the composer's own
+/// A steer's body: one `guidance` string and nothing else. The word is the composer's own
 /// field name and the glossary's **Steer**, so the page and the API say the same thing.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -104,7 +104,7 @@ struct SteerBody {
     guidance: String,
 }
 
-/// `NAME_MAX`'s 255: HS-025 builds `<projects_root>/<project>` from this value.
+/// `NAME_MAX`'s 255: builds `<projects_root>/<project>` from this value.
 const MAX_PROJECT_CHARS: usize = 255;
 
 const MAX_MODEL_CHARS: usize = 128;
@@ -158,7 +158,7 @@ fn idempotency_key(headers: &HeaderMap) -> Result<&str, ApiError> {
 }
 
 /// `project` is one path segment: non-empty, at most 255 characters, letters, digits, `.`, `_`
-/// and `-`, and not `.` or `..`. Whether a repository exists there is HS-025's check.
+/// and `-`, and not `.` or `.`. Whether a repository exists there is the check.
 fn validate_project(project: &str) -> Result<(), ApiError> {
     if project.is_empty()
         || project.chars().count() > MAX_PROJECT_CHARS
@@ -176,7 +176,7 @@ fn is_project_byte(byte: u8) -> bool {
 }
 
 /// `model` is 1–128 characters of letters, digits, `.`, `:`, `/` and `-`. No list of models is
-/// invented here: pi's real values are HS-031's.
+/// invented here: pi's real values are that story's.
 fn validate_model(model: &str) -> Result<(), ApiError> {
     if model.is_empty()
         || model.chars().count() > MAX_MODEL_CHARS
@@ -192,7 +192,7 @@ fn is_model_byte(byte: u8) -> bool {
 }
 
 /// `thinking` is 1–32 lowercase letters, digits, `_` and `-`, starting with a letter. No list of
-/// levels is invented here either (HS-031).
+/// levels is invented here either.
 fn validate_thinking(thinking: &str) -> Result<(), ApiError> {
     let starts_with_letter = thinking
         .bytes()
@@ -227,7 +227,7 @@ fn request_parts<'a>(
 }
 
 /// The row on the wire plus the one key the table does not have: where its event stream will be
-/// served (HS-010). Flattening `Session` is what keeps the body the row rather than a hand-built
+/// served. Flattening `Session` is what keeps the body the row rather than a hand-built
 /// copy of it.
 #[derive(Debug, Serialize)]
 pub struct CreatedSession {
@@ -266,19 +266,19 @@ pub async fn create(
         Err(error) => return error.into_response(),
     };
     // The project's refusals are read here, on the request path, and *answered* only where the create
-    // would write a row (HS-026): a retry of an idempotency key creates nothing and is answered from the
+    // would write a row: a retry of an idempotency key creates nothing and is answered from the
     // row it already has, and a refused create must not evict an idle session on its way to saying no.
     //
-    // The drain's refusal rides the same road and for the same two reasons (HS-051), and it is decided
+    // The drain's refusal rides the same road and for the same two reasons, and it is decided
     // *instead of* the project's read: a draining machine starts nothing whatever the project looks like, so
     // the git questions are not worth asking. `create_locked` raises it after the key's lookup, so a retry
     // still answers its own row.
     //
-    // HS-062's disk floor is the third of that family and the same kind of fact — the *machine's*, not the
+    // the disk floor is the third of that family and the same kind of fact — the *machine's*, not the
     // session's — so it is asked second, and again instead of the project's read: a full machine needs no `git`
     // process to answer itself. In the same order the resume asks it, and for the same reason.
     let refusal = if state.config.role == crate::config::Role::Hub {
-        // **A hub has no sessions** (HS-069, the spec's `Roles`: "a hub-only machine ... creates no sessions").
+        // **A hub has no sessions** (the spec's `Roles`: "a hub-only machine.. creates no sessions").
         // First of the machine's refusals, before the drain and the floor, because it is the fact that makes the
         // other two questions unnecessary: a machine that starts nothing has no disk to protect and no drain to
         // honour. The row is never written, and the client's next step is the one the sentence names.
@@ -314,7 +314,7 @@ pub async fn create(
     }
 }
 
-/// Take today's bundle of the project's repository, if this machine keeps one and has not today (HS-065).
+/// Take today's bundle of the project's repository, if this machine keeps one and has not today.
 ///
 /// Spec item 1's `project_backup` is a safety net under the shared repository: several sessions work in
 /// one checkout's branches, so an agent that damages it damages every session's base. The bundle is taken
@@ -361,7 +361,7 @@ async fn back_up(state: &AppState, project: &str) {
     }
 }
 
-/// The project's refusal rules, read before the create writes anything (HS-026).
+/// The project's refusal rules, read before the create writes anything.
 ///
 /// The read is two filesystem questions and one `git config`, and it runs on a blocking task: a create's
 /// request path must not park a runtime worker on a subprocess, which is the same rule the worktree's
@@ -412,7 +412,7 @@ enum Slot {
     Full,
 }
 
-/// Insert the session, stopping the least recently active idle one while the machine is full (HS-020).
+/// Insert the session, stopping the least recently active idle one while the machine is full.
 ///
 /// The loop is the handler's and not the insert scope's: an eviction moves a row through
 /// [`Transitioner::apply`](crate::sessions::state::Transitioner::apply), which takes the database lock
@@ -512,7 +512,7 @@ async fn evict_one(state: &AppState) -> bool {
     // effort in a task of its own, like the ladder's second rung, with the same "a container that
     // outlived its row is still deletable" reason.
     // The stopper, not the backend: spec item 6's flag is written before the stop, so the exit this
-    // produces reads as one we asked for (HS-030).
+    // produces reads as one we asked for.
     let stopping = state.stopper();
     let victim = candidate.clone();
     tokio::spawn(async move {
@@ -537,7 +537,7 @@ async fn evict_one(state: &AppState) -> bool {
 /// cannot both see a free slot (ADR-0012).
 ///
 /// `Slot::Existing` means the idempotency key already named a session; `Slot::Full` means the caller
-/// may evict one and try again. `refusal` is the project's answer, read before the lock (HS-026): it is
+/// may evict one and try again. `refusal` is the project's answer, read before the lock: it is
 /// raised between the key's lookup and the cap, because a create that cannot run must answer its own
 /// refusal rather than stop somebody else's session to make room for work that will not happen.
 fn create_locked(
@@ -552,7 +552,7 @@ fn create_locked(
         .unwrap_or_else(PoisonError::into_inner);
     let repository = database.sessions();
     // The lookup runs before the cap: a retry whose first attempt filled the last slot must get
-    // its own session, not 409 — and, since HS-020, must not evict a session on the way to finding
+    // its own session, not 409 — and, must not evict a session on the way to finding
     // out it already had one.
     if let Some(existing) = repository
         .by_client_key(key)
@@ -615,7 +615,7 @@ fn created(session: Session) -> Response {
 /// endpoint (ADR-0017). The elements are the `Session` row itself, so the list cannot drift from the
 /// create's answer.
 ///
-/// `stopped_ttl_days` is the second such setting, and it is here for exactly the same reason (HS-064, spec item
+/// `stopped_ttl_days` is the second such setting, and it is here for exactly the same reason (, spec item
 /// 15): a stopped row shows the days it has left, the *number* is the machine's rather than the row's, and the
 /// screen has no other way to learn it. It is one number and not an `expires_at` per row, because the row
 /// already carries `stopped_at`: the client adds the two and compares them with its own clock, which is the
@@ -639,7 +639,7 @@ pub async fn list(state: &AppState) -> Response {
 
 /// The one lock scope the list has: no `.await` inside it, so the guard cannot outlive a statement.
 ///
-/// No filter and no paging: the repository's state filter has no caller yet and HS-061 owns paging,
+/// No filter and no paging: the repository's state filter has no caller yet and a later change owns paging,
 /// so the answer is the order `list(None)` already returns (`last_active_at DESC, id ASC`).
 fn list_locked(state: &AppState) -> Result<SessionList, ApiError> {
     let database = state
@@ -718,7 +718,7 @@ pub async fn prompt(state: &AppState, id: &str, body: Result<Bytes, BytesRejecti
         Err(error) => return error.into_response(),
     };
     // A draining machine starts no turn whatever this session's state is, and the refusal comes before the row
-    // is read so it is one sentence rather than a state's (HS-051). `503` and not `409` is the operator's answer:
+    // is read so it is one sentence rather than a state's. `503` and not `409` is the operator's answer:
     // the page must not offer to resume-and-retry a session the drain itself just stopped.
     if state.drain.is_draining() {
         return ApiError::draining().into_response();
@@ -738,7 +738,7 @@ pub async fn prompt(state: &AppState, id: &str, body: Result<Bytes, BytesRejecti
     }
     // The row is `running` now, so the turn is started **before** anything else can fail: a refetch
     // that failed would otherwise leave a `running` row whose turn never began. The abort ladder
-    // (HS-016) can end such a row, which is why this order is defensible rather than merely fast.
+    //  can end such a row, which is why this order is defensible rather than merely fast.
     // The row the runner is handed is the one read above with the status the table has just written;
     // the refetch only improves the 202's body.
     let mut running = current;
@@ -754,7 +754,7 @@ pub async fn prompt(state: &AppState, id: &str, body: Result<Bytes, BytesRejecti
 /// Answer `POST /api/sessions/{id}/abort`: 202 and the row as it stands, or ADR-0008's envelope.
 ///
 /// Two decisions, in this order: the row (`not_found`), then the state — only a `running` session
-/// has a turn to abort, and every other state is `409 session_<state>`, `idle` included (HS-016,
+/// has a turn to abort, and every other state is `409 session_<state>`, `idle` included (,
 /// ADR-0020). Nothing is parsed: the request has no body, and a client that sends one is ignored
 /// rather than refused, because no field of it could change what an abort does.
 ///
@@ -796,7 +796,7 @@ fn parse_steer(bytes: &[u8]) -> Result<String, ApiError> {
 /// can fix neither the backend nor a turn that stopped underneath it.
 ///
 /// A steer changes no state: the transition table has no row for it, so this handler never asks for
-/// one. What it does do is move `last_active_at` — HS-015's acceptance names prompt, settle and steer
+/// one. What it does do is move `last_active_at` — the acceptance names prompt, settle and steer
 /// — and append the `turn.steer` frame the transcript renders.
 pub async fn steer(state: &AppState, id: &str, body: Result<Bytes, BytesRejection>) -> Response {
     let body = match body {
@@ -853,13 +853,13 @@ async fn record_steer(state: &AppState, id: &str, guidance: &str) {
 /// Answer `POST /api/sessions/{id}/resume`: 202 and the row, now `starting`, or ADR-0008's envelope.
 ///
 /// The decisions run in this order: the row (`not_found`), the state (the table's two `resume` rows are
-/// `stopped` and `error`; everything else is refused with its own code), the project's refusals (HS-026 —
+/// `stopped` and `error`; everything else is refused with its own code), the project's refusals (—
 /// the same three codes a create answers), the cap, then the transition.
 ///
 /// **The cap is checked before the transition**, unlike the create's lookup: a resume takes a slot, and
 /// refusing after the row moved would leave a session `starting` with nothing provisioning it. Spec
 /// item 8 allows either branch — "evicts the least recently active idle session first, **or** returns
-/// 409" — and HS-020 gave the eviction to the **create**, which is the request that asks for a new
+/// 409" — and gave the eviction to the **create**, which is the request that asks for a new
 /// slot; a resume keeps the refusal, so the two answers stay one policy each (ADR-0022, ADR-0024).
 ///
 /// The provisioner does the work, as it does for a create: `stopped -> starting` is the table's, and
@@ -868,7 +868,7 @@ async fn record_steer(state: &AppState, id: &str, guidance: &str) {
 /// worktree path are what a stop left alone (spec item 15).
 pub async fn resume(state: &AppState, id: &str) -> Response {
     // A resume provisions a container and starts a session, which is the thing a drain exists to prevent — so it
-    // is refused first, before the row is read (HS-051). The abort ladder's own way back is untouched: it resumes
+    // is refused first, before the row is read. The abort ladder's own way back is untouched: it resumes
     // through the provisioner rather than through this handler, so a turn the drain is waiting for can still be
     // ended and brought back.
     if state.drain.is_draining() {
@@ -882,14 +882,14 @@ pub async fn resume(state: &AppState, id: &str) -> Response {
     if !matches!(current.status, Status::Stopped | Status::Error) {
         return ApiError::not_in_state(current.status, NOT_RESUMABLE).into_response();
     }
-    // Spec item 14's floor, and before the project's read and the cap for the create's reasons (HS-062):
+    // Spec item 14's floor, and before the project's read and the cap for the create's reasons:
     // bringing a stopped session back is *starting* work, a full machine needs no `git` process to say so, and
     // when the cap and the floor both hold the floor is the answer — a slot is not worth freeing if there is no
     // space to write in. Nothing has moved at this point, so the row is still resumable once space is freed.
     if let Some(floor) = crate::http::disk::refusal(state).await {
         return floor.into_response();
     }
-    // The project's refusals are read for a resume too (HS-026): a session created while its project was
+    // The project's refusals are read for a resume too: a session created while its project was
     // plain would otherwise be brought back into a mount the create would have refused. Before the cap,
     // for the create's reason — a resume that cannot run must not refuse for a slot it will not take.
     if let Some(refusal) = refuse_project(state, &current.project).await {
@@ -904,7 +904,7 @@ pub async fn resume(state: &AppState, id: &str) -> Response {
         return error.into_response();
     }
     // A resume is the operator acting on the session, so the row's activity moves with it: without
-    // this, a session stopped a week ago and just resumed would sort as HS-020's least recently active
+    // this, a session stopped a week ago and just resumed would sort as the least recently active
     // idle row and be evicted first. The touch is the same one a prompt and a steer make.
     activity::touch(&state.database, id);
     // The row is `starting` now, and the provisioner is spawned before the answer is built, so no
@@ -955,7 +955,7 @@ async fn apply_trigger(
 ///
 /// Read under the same `Arc<Mutex<Database>>` the create counts under, but not in the create's one
 /// scope: a resume's count and transition are two statements, and the window between them is a window
-/// two resumes can share. That is a cap that can be overrun by one, which HS-020's eviction makes
+/// two resumes can share. That is a cap that can be overrun by one, which the eviction makes
 /// uninteresting; refusing before the transition is what keeps a row from being stranded in `starting`.
 fn live_at_cap(state: &AppState) -> Result<bool, ApiError> {
     let database = state
@@ -972,7 +972,7 @@ fn live_at_cap(state: &AppState) -> Result<bool, ApiError> {
 /// Answer `DELETE /api/sessions/{id}`: 202 and the row, now `deleting`, or ADR-0008's envelope.
 ///
 /// The query's `force` and [`deletion`], which is the flow itself: the merge's `delete_session` runs the same
-/// half with `force` false and the fact that it has just landed the branch (HS-056, spec item 12's rule 5).
+/// half with `force` false and the fact that it has just landed the branch (spec item 12's rule 5).
 pub async fn delete(state: &AppState, id: &str, query: RawQuery) -> Response {
     // Read before anything else, so a typo in the query cannot delete work it was not forced to.
     let force = force_requested(query.0.as_deref());
@@ -1004,7 +1004,7 @@ pub async fn delete(state: &AppState, id: &str, query: RawQuery) -> Response {
 /// a prompt, an abort or a resume: those are refused with `409 session_deleting`.
 ///
 /// **`landed`** is the one thing that changes the keep-rule's answer, and only for the merge's rule 5
-/// (HS-056): when it is `Some(commit)`, the request that is asking is the one that measured that commit and
+/// when it is `Some(commit)`, the request that is asking is the one that measured that commit and
 /// put it in a target, so a branch whose tip is still that commit is not kept — see [`retained_for`]. Every
 /// other caller passes `None`.
 pub(crate) async fn deletion(
@@ -1046,7 +1046,7 @@ pub(crate) async fn deletion(
 /// The delete flow's **second half**, from a row nobody's turn is running to the spawned removal: the
 /// snapshot, the keep-rule, the transition into `deleting`, and the task.
 ///
-/// One function because there are two callers and they must not be two flows (HS-064, spec item 15): the
+/// One function because there are two callers and they must not be two flows (spec item 15): the
 /// operator's request ([`deletion`]) and the stopped-session expiry's daily job ([`crate::expiry`]). Everything
 /// that makes a delete safe lives here — the snapshot before anything is removed, the keep-rules
 /// ([`retained_for`], ADR-0052/ADR-0065), the row's removal and its event log in one transaction
@@ -1084,7 +1084,7 @@ pub(crate) async fn complete_deletion(
             "deleting a session past a failed snapshot because the request forced it"
         );
     }
-    // HS-043: *after* the snapshot, because the snapshot is what writes or removes the ref this answers
+    // *after* the snapshot, because the snapshot is what writes or removes the ref this answers
     // about, and *before* the transition, so a refusal there leaves the row where the operator found it.
     let retained = retained_for(state, &current, landed).await;
     apply_trigger(state, id, trigger, NOT_DELETABLE, trigger.as_str()).await?;
@@ -1100,14 +1100,14 @@ pub(crate) async fn complete_deletion(
     Ok(DeleteAnswer::of(deleting, &retained))
 }
 
-/// The keep-rule's answer for `session`, or [`Retained::Unknown`] with the reason in the log (HS-043).
+/// The keep-rule's answer for `session`, or [`Retained::Unknown`] with the reason in the log.
 ///
 /// A keep-rule that cannot answer — a repository git cannot read, or a row with no `base_commit` — must not
 /// block a delete: the request's job is to remove a session, and the operator's next `DELETE` is the retry.
 /// It must not turn into a claim either, so the teardown keeps the branch (`Retained::Unknown`'s own rule)
 /// and the 202 carries `kept: null`.
 ///
-/// **`landed`** is the merge's own fact handed through, and the rule that uses it is `worktree.rs`'s (HS-056,
+/// **`landed`** is the merge's own fact handed through, and the rule that uses it is `worktree.rs`'s (,
 /// spec item 12's rule 5): a branch whose tip *is* the commit that request landed has nothing a target lacks, so
 /// it is not kept — and one that has moved since is the ordinary question's, because the merge never saw that
 /// commit (ADR-0065 D6). It overrides nothing here: the keep-rule lives in the module that already answers "is
@@ -1131,7 +1131,7 @@ async fn retained_for(state: &AppState, session: &Session, landed: Option<&str>)
     }
 }
 
-/// The 202's body: the row's own keys, flattened, plus what the teardown leaves behind (HS-043).
+/// The 202's body: the row's own keys, flattened, plus what the teardown leaves behind.
 ///
 /// The row is the API's body everywhere (ADR-0038), so the delete's extra answer is additive rather than
 /// a wrapper: `Session`'s fifteen columns stay exactly where they were and `kept` is one more key. That is
@@ -1183,7 +1183,7 @@ impl Kept {
 
 /// Whether the request carried `force=true`.
 ///
-/// Two routes read it: this session's `DELETE` and (since HS-068) the host registry's, whose row can also be removed
+/// Two routes read it: this session's `DELETE` and (since) the host registry's, whose row can also be removed
 /// over a refusal. One spelling of the query, because a second reader that accepted `?force=1` would make the same
 /// mistake mean two different things in one API.
 ///
@@ -1424,7 +1424,7 @@ mod tests {
         );
     }
 
-    /// HS-017: a steer's body is one non-empty `guidance`, and the sentence it is refused with is
+    /// a steer's body is one non-empty `guidance`, and the sentence it is refused with is
     /// its own — the code is shared with a prompt's `bad_body`, which is the point of ADR-0008.
     #[test]
     fn a_steer_body_is_one_non_empty_guidance_and_nothing_else() {
@@ -1456,7 +1456,7 @@ mod tests {
         }
     }
 
-    /// HS-019: a delete's only query is `force=true`, and everything else fails safe.
+    /// a delete's only query is `force=true`, and everything else fails safe.
     #[test]
     fn force_is_the_literal_force_true_and_nothing_else() {
         for query in [
@@ -1601,7 +1601,7 @@ mod tests {
 
     #[test]
     fn the_delete_answer_is_the_row_plus_what_the_teardown_keeps() {
-        // HS-043's 202: the fifteen keys a client already reads, plus one. The three shapes are all pinned
+        // the 202: the fifteen keys a client already reads, plus one. The three shapes are all pinned
         // here because the difference between them is the point — three nulls is "nothing survived", and
         // `kept: null` is "the repository could not answer", which is not the same thing to say.
         let nothing = serde_json::to_value(DeleteAnswer::of(a_row(), &Retained::nothing()))

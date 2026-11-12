@@ -1,11 +1,11 @@
 //! The stopped-session expiry: a session nobody came back to is removed, so the operator does not prune by
-//! hand (HS-064, spec item 15, decision D3).
+//! hand (spec item 15, decision D3).
 //!
 //! Item 15's retention bullet is a policy, not an endpoint: "a daily job deletes sessions that have been stopped
 //! for more than 7 days (config `stopped_ttl_days`, default 7), using the delete flow from item 9. A snapshot
 //! runs first; if it fails, the session is skipped and retried the next day. Sessions in error are never
 //! auto-deleted." This module is the job, and it is the build's **fourth** periodic policy — after the idle stop
-//! (HS-021), compaction (HS-060) and the disk soft cap (HS-063) — and the first that *destroys* something on a
+//! compaction and the disk soft cap — and the first that *destroys* something on a
 //! timer, so where it refuses is most of the work.
 //!
 //! Six rules it keeps:

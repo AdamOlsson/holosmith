@@ -1,4 +1,4 @@
-// The service worker (HS-067, ADR-0072 D4): three events, no cache.
+// The service worker (ADR-0072 D4): three events, no cache.
 //
 // It is **built**, not copied: `web/vite.sw.config.ts` compiles this file into `web/dist/sw.js` as one
 // dependency-free script, so the rules it runs are the ones `web/src/push.ts` owns and `npm test` tests — the four
@@ -102,7 +102,7 @@ scope.addEventListener("push", (event) => {
       // A lock-screen entry that opens the session, and the icon the app already ships. `badge` is the small
       // monochrome slot Android draws; the same file is the honest answer there.
       //
-      // `data` carries the host as well as the id (HS-074), and `push.ts`'s `notificationData` is what says so: a
+      // `data` carries the host as well as the id, and `push.ts`'s `notificationData` is what says so: a
       // session lives on exactly one machine, the tap's path is `/hosts/<host>/sessions/<id>` on the hub's origin, and
       // this worker has no page to ask which machine an id belongs to. Without the host every tap opened the *hub's*
       // own `/sessions/<id>`, which holds no such row — the story's one P0.

@@ -1,4 +1,4 @@
-//! The writer thread: the one place an event's seq is assigned and its row committed (HS-009).
+//! The writer thread: the one place an event's seq is assigned and its row committed.
 //!
 //! A `std::thread`, not a tokio task, because rusqlite is blocking: a 25 ms synchronous
 //! transaction on the async runtime would stall every handler sharing it. It receives over a
@@ -19,7 +19,7 @@ use crate::db::Database;
 const PRODUCER_QUEUE: usize = 1024;
 
 /// How many committed events a subscriber may fall behind before it is told it lagged. `send`
-/// never waits for a receiver, so a slow one cannot delay a commit (HS-010 re-fetches).
+/// never waits for a receiver, so a slow one cannot delay a commit.
 const SUBSCRIBER_BUFFER: usize = 1024;
 
 const THREAD_NAME: &str = "holosmith-events";
@@ -56,7 +56,7 @@ fn run(
 ) {
     while let Some(first) = incoming.blocking_recv() {
         // One pass over the batch before it becomes rows: the consecutive deltas of one message and kind
-        // are one row with one seq (HS-059, spec item 15). The batch is the unit the story names — "inside
+        // are one row with one seq (spec item 15). The batch is the unit the story names — "inside
         // each 25 ms commit" — and it is the only place the events are still values rather than rows.
         let collected = collect(first, &mut incoming, options.commit_interval);
         // The batch's length before the merge, so a failure below can say how many events were lost as well

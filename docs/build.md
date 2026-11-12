@@ -34,7 +34,7 @@ cargo test
 `scripts/check-static.sh` are the artifact gate, and `scripts/build.sh` runs
 `check-static.sh` itself, so `scripts/verify.sh` calls `build.sh` once instead of checking
 the artifact a second way. `scripts/verify.sh` also calls `scripts/check-embed.sh`, the
-HS-003 proof of the three embed cases (app present, absent, required): it runs a nested
+ proof of the three embed cases (app present, absent, required): it runs a nested
 `cargo build` and so cannot be a `cargo test`, and it is cheap enough to call from the gate.
 
 `scripts/verify.sh` is one command that runs all of it: the three commands above, the
@@ -47,10 +47,10 @@ built app's files. A green `cargo test` therefore proves the code, never that th
 built — `scripts/check-embed.sh` and `scripts/build.sh` are what prove that.
 
 The empty-root run proves there is no dynamic loader and no userspace dependency. It is
-not a container run: HS-001's "both run in an empty container" clause stays open until
-HS-046's verification run on real Docker hosts (ADR-0005).
+not a container run: the "both run in an empty container" clause stays open until
+the verification run on real Docker hosts (ADR-0005).
 
-`scripts/check-static.sh` carries the assertions HS-003 and HS-004 added, about what the
+`scripts/check-static.sh` carries the assertions and added, about what the
 artifact ships rather than about the ELF: the artifact does not contain the placeholder
 marker `build.rs` writes when `web/dist` is missing (so a build without the app cannot
 ship), the app it serves from the empty root is byte-for-byte this tree's
@@ -74,7 +74,7 @@ Seven phases, cheapest first, so a formatting slip cannot cost a two-minute musl
 | `fmt` | `cargo fmt --check` |
 | `clippy` | `cargo clippy --all-targets -- -D warnings` |
 | `test` | `cargo test` |
-| `migrations` | `cargo test --test schema_previous` (the expand/contract rule, HS-075) |
+| `migrations` | `cargo test --test schema_previous` (the expand/contract rule) |
 | `build` | `scripts/build.sh` (which runs `build-web.sh` first and `check-static.sh` last) |
 | `embed` | `scripts/check-embed.sh` |
 | `serve` | the boot below and its cases |
@@ -96,7 +96,7 @@ naming the path and `scripts/build.sh`.
 The boot is `serve --config <work>/config.toml --port 0 --data-dir <work>/data`. `--port 0`
 asks the kernel for the port and is also what makes `serve` re-derive `control_origin` from
 the bound address (ADR-0007), so the case for a request that passes the guards sends exactly
-the origin the guard compares; `control_listen`, `control_origin` and — since HS-041 — the
+the origin the guard compares; `control_listen`, `control_origin` and the
 **preview listener's** bound address are all read from the startup banner, never assumed, because
 the config asks the kernel for that port too (`preview_listen = "127.0.0.1:0"`) so that a boot of a
 case's own and this one cannot collide over `8081`. A boot whose preview could not bind is a `warn`
@@ -112,7 +112,7 @@ its own — with a ceiling under the stub's per-turn spend, a dozen assertions w
 instead of what they are named for. That
 boot's banner and log live in `serve-data-budget.out` / `.err`, which `start_serve` names after its
 data dir precisely so a case cannot read the other boot's. The backend comes from the *file* rather than from a `--backend` flag on purpose — that is half
-of HS-011's "selectable by config and by `--backend`", and `case_backend_from_config` is what proves it;
+of the "selectable by config and by `--backend`", and `case_backend_from_config` is what proves it;
 `tests/serve_cli.rs` covers the flag, the override and the default. Every request is a `/dev/tcp` fetch (`fetch` for a body-less request,
 `fetch_body` when a body is needed, `fetch_stream` for a response that never ends), so the
 harness needs neither `curl` nor `jq`. `fetch_stream` exists because `fetch` reads until EOF:
@@ -168,7 +168,7 @@ answered the row still `running`, reads the stream for the `turn.steer` frame ca
 and then polls the row until it says `idle`, which is what proves the turn continued;
 `case_steer_on_an_idle_session`, which asserts the `409 session_idle` envelope), the resume's two
 refusals (`case_resume_on_an_idle_session` and `case_resume_unknown_session`; the round trip itself is
-`tests/resume.rs`'s, because the session these two cases name is `idle` — HS-020's eviction leaves the
+`tests/resume.rs`'s, because the session these two cases name is `idle` — the eviction leaves the
 only `stopped` row of this run, and it is created last), and the delete (`case_delete_session`, which asserts the
 202 answered the row `deleting`, then polls the row until it is the `404 not_found` envelope and the
 list no longer holds it — the removal is a background task's, so the row is the proof;
@@ -254,7 +254,7 @@ with `git rev-parse` run by the case on both sides. In between it asserts the re
 across them, and it ends with `target_dirty` (an untracked file the branch adds, untouched by the refusal and
 merged once it is out of the way) and `not_fast_forward` (a commit on the target, with both refs and the checkout
 unchanged); the default `strategy` is asserted to be `ff-only` on a body that names none. (`unsupported` for
-`delete_session:true` was one of these until HS-056 built it.) No daemon is used — "all git work for review and merge runs on the host", which is the story's
+`delete_session:true` was one of these until built it.) No daemon is used — "all git work for review and merge runs on the host", which is the story's
 own sentence; see ADR-0063), the two landing strategies (`case_merge_strategies`, which boots its own Docker run
 over its own projects root **and its own data root** — `<data>/merge` is what it measures — re-makes the worktree
 with the step's own command, and walks one session's history through all three: a **`squash`** of three commits
@@ -305,7 +305,7 @@ mount source, so the daemon has to see the data root too, ADR-0039 — creates a
 (pi answered a `get_state`), and asserts the seeded `<data>/sessions/<id>/pi-home/settings.json`, the launch
 line in `session.log`, `docker inspect`'s command and environment, and that the row's `worktree` is
 recorded; then it removes the container out from under the server and asserts the row becomes `error`
-with a reason — spec item 6's third row, observed by the attached stdio HS-030 had no observer for — and
+with a reason — spec item 6's third row, observed by the attached stdio had no observer for — and
 last that a `DELETE ?force=true` takes the row, the log, the worktree and the session's own directory;
 see ADR-0039), and the resume over a live agent (`case_docker_resume`, which creates a session, waits for
 `idle`, removes its container, waits for `error`, `POST /resume`s, and asserts the row reaches `idle`
@@ -321,7 +321,7 @@ ADR-0040 records; see ADR-0040), and the key store and key proxy's refusal path 
 and no internet: it writes a key with `key set` through stdin, asserts `keys.toml` is 0600 and `key list` prints
 the provider and never the value, starts the shipped artifact as `proxy key` on a loopback port, and asserts a
 request with no dummy key is `401` and an unknown provider is `403` before any provider is contacted; the
-**real** forward is HS-040's recorded demo, because a gate that needs a real provider key is not a gate, while
+**real** forward is the recorded demo, because a gate that needs a real provider key is not a gate, while
 the **bytes** the proxy hands its TLS client are `case_key_proxy_request`'s — a stand-in `openssl` on `PATH`
 captures them, so one `Content-Length`, the body after the blank line and the swapped-in key are all gate facts;
 see ADR-0048 and ADR-0050), the
@@ -365,7 +365,7 @@ are node's `net.connect`, the same script shape the self-test's probe uses. The 
 container shows: the proxy is detached, the container is killed (the row's `unexpected_exit` lands it in `error`),
 `POST /resume` brings it back, and the network's **endpoint count** is 1 for the off session and 2 for the on one —
 detaching first is what makes that a rejoin rather than an inheritance, and a wrong flag cannot survive it; see
-ADR-0046); and — since HS-041 — the **preview listener** (`case_preview`, which is two halves. The first needs
+ADR-0046); and the **preview listener** (`case_preview`, which is two halves. The first needs
 no daemon: on its own boot it asks the preview port for `/api/health`, `/api/sessions` and `/`, which must answer
 `404` with a sentence rather than ADR-0008's envelope, for another machine's host name and for a well-formed id no
 row holds, which must answer `404`, for an upgrade carrying a foreign `Origin` and one carrying none, which must
@@ -379,17 +379,7 @@ image and prints one `SKIP` line without them — the bug it exists to catch fai
 daemon" is not that bug. It boots a `stub` backend of its own, because a create on a Docker boot refuses a project
 the machine does not hold and which boot is running when it starts is not its business).
 
-One case is about the *record* rather than the binary: `case_verification_table` reads every `V<n>` row of
-`HolosmithSpec.md`'s verification table and asserts that no V1–V10 row still says "not yet run", that each carries
-a verdict, that a `fail` row also names the fallback taken, that each names an automation this repository really
-has (a `case_*` in `serve_cases`, a `tests/*.rs`, a `scripts/*.sh`, or the by-hand section below), and that V11
-still says it is deferred to phase 3 (HS-070). It needs no server, no daemon and no image. The eleven-row count
-is what keeps the read honest in both directions: a broken read (a renamed heading, a table that moved) fails
-instead of passing over nothing, and a twelfth row is a deliberate edit here rather than a row the case walks
-past. It runs first in `serve_cases`, so a table that has rotted fails the serve phase before any Docker case
-rather than after ten minutes of them (HS-046, ADR-0055).
-
-…and — since HS-045 — **`doctor` itself**: `case_doctor_quick` runs the artifact's quick list three times over a
+…and **`doctor` itself**: `case_doctor_quick` runs the artifact's quick list three times over a
 machine it builds (a `_ping` socket it answers, two ports the kernel gives it, a data root under `target/`): once
 on a machine that passes, where it asserts the report's header, one line per check with its outcome, that the
 `systemd` and `tailscale` lines each say what they measured (both are `unknown` on a machine with no systemd and
@@ -405,7 +395,7 @@ is gone afterwards; it needs the daemon **and** the image, and prints one `SKIP`
 the bug it exists to catch (a missing `network` line fails while the machine serves). It stops the shared boot and
 leaves its own running, so it is last.
 
-…and since HS-062, **the disk floor on the request paths**: `case_disk_floor` boots its own Docker run with a
+…and, **the disk floor on the request paths**: `case_disk_floor` boots its own Docker run with a
 `df` **stand-in** on `PATH` — a `/bin/sh` script that `cat`s a two-line answer this case rewrites
 (`deploy_machine_shims`' shape), because the boot itself refuses below the floor, so a case about the request
 paths cannot start on a small disk — plants a healthy answer, creates one session (the row reaches `error`, the
@@ -418,7 +408,7 @@ stand-in fails its `disk` line with the same two numbers — the acceptance's "t
 It needs `python3` for the `_ping` socket and prints one `SKIP` line without it; `tests/disk.rs` covers both
 paths, the turn that settles mid-crossing and `min_free_gb = 0` without a socket (ADR-0068).
 
-…and since HS-063, **the per-session disk soft cap**: `case_disk_quota` boots its own Docker run with a `du`
+…and, **the per-session disk soft cap**: `case_disk_quota` boots its own Docker run with a `du`
 **stand-in** on `PATH` — a `/bin/sh` script that appends its arguments to a file this case reads and answers a
 `du -sk` line over the cap — because the size a real worktree reaches is not something a gate can build, and
 because the recorded arguments are the proof that the watchdog measured *that session's* worktree rather than
@@ -433,7 +423,7 @@ numbers (the page's payload is an escaped string, so the page itself is asserted
 prints one `SKIP` line without them; `tests/quota.rs` covers both ladder rungs, the under-the-cap case, an
 unmeasurable worktree, `session_disk_soft_gb = 0` and the measurement's arithmetic without a daemon (ADR-0069).
 
-…and since HS-064, **the stopped-session expiry**: `case_stopped_expiry` boots its own Docker run over a real
+…and, **the stopped-session expiry**: `case_stopped_expiry` boots its own Docker run over a real
 repository, because the story's claim is that the daily job runs the **delete flow** — so what survives it has to
 be a real branch and a real `refs/holosmith/wip/<id>`. It creates one session, waits for `idle`, commits once on
 `agent/<id>` and leaves one file uncommitted (so the branch is **kept work** and the snapshot has something to
@@ -450,7 +440,7 @@ without needing a browser. It needs the daemon, an `agent_image` and `python3` a
 them; `tests/expiry.rs` covers the pass, the skip-and-retry, the `error` arm, the six reasons into `stopped` and
 the refused resume without a daemon (ADR-0070).
 
-…and since HS-066, **the Web Push notification**: `case_push` is daemon-free and stands a real TLS receiver in front
+…and, **the Web Push notification**: `case_push` is daemon-free and stands a real TLS receiver in front
 of the sender. It makes a CA and a `localhost` certificate with a `DNS:` SAN, generates the machine's VAPID pair
 with the same `openssl ecparam … -outform DER` the deploy runs (converted to base64url with `python3`, written as
 `<data>/secrets/vapid.toml`), and starts a `node:https` listener on `localhost:0` that **verifies the token's ES256
@@ -468,7 +458,7 @@ its row stays). It prints one `SKIP` line and passes without `openssl`, `node` o
 why the long-turn and `error` triggers are `tests/push.rs`'s: the stub's turn is a fixed 2.4-second script with no
 failure mode over HTTP, and `LONG_TURN` is a constant twenty seconds with no key to shorten it.
 
-…and since HS-067, **the installable app**: `case_pwa` is the other case a **UI** story adds without a browser, and it
+…and, **the installable app**: `case_pwa` is the other case a **UI** story adds without a browser, and it
 measures what a browser would otherwise be the only witness of, as bytes. It boots the artifact on its own data root
 with a hand-written VAPID pair, so it needs **no `openssl`, `node` or `python3` and prints no `SKIP` line at all** — a
 skip here would fire exactly when the feature was deleted. It asserts `GET /` is this tree's `web/dist/index.html`
@@ -488,7 +478,7 @@ worker, the notification it draws, and the handler's `clients.openWindow("/sessi
 and a click on a system notification are the two things no machine here can do, and both are stated as
 not-measured (ADR-0072 D9).
 
-…and since HS-068, **the host registry**: `case_hosts` boots the artifact on its own data root with the control
+…and, **the host registry**: `case_hosts` boots the artifact on its own data root with the control
 port **pinned** — a row naming *this* machine has to spell the port the boot will use, and the seed is written before
 the boot — and stands three TLS listeners in with `python3`: one answering the health payload, one answering a `302`
 (and appending a line per request), one answering a payload with no `name`. Their certificate comes from a private CA
@@ -510,7 +500,7 @@ or `openssl`. What it cannot measure through the artifact is the API's `422 not_
 the host rule refuses loopback and no `.ts.net` name resolves on a machine with no `tailscaled` — so that arm is
 `tests/hosts.rs`'s, split into the probe against real listeners and the mapping as a function (ADR-0073 D10).
 
-…and since HS-069, **the hub's forwarding**: `case_forward` runs **two** artifacts on one box — a `role = "server"`
+…and, **the hub's forwarding**: `case_forward` runs **two** artifacts on one box — a `role = "server"`
 boot on pinned control and preview ports, and a `role = "hub"` boot whose `hosts.toml` names the server's control
 origin — which is why the harness grew `start_peer`/`stop_peer` (its own admin directory and its own `peer_*`
 globals: `start_serve` is written for one machine) and `forward_fetch <port>` (`fetch` always talks to `$port`, and
@@ -534,7 +524,7 @@ killed mid-stream: the client's socket must **end** — `read -t`'s 1 (EOF), nev
 request must be the `502` sentence. Two boots and a `kill -9` mean the trap knows a `peer_pid`; a `fail` between the
 two would otherwise leave a listener on a pinned port for the next run.
 
-…and since HS-070, **machine trust**: `case_machine_trust` boots one machine twice — an empty `allowed_hubs` and
+…and, **machine trust**: `case_machine_trust` boots one machine twice — an empty `allowed_hubs` and
 then `allowed_hubs = ["workshop"]` — and puts a `tailscale` shim first on `PATH` (the shape `deploy_machine_shims`
 already uses: paths through the environment, a plain `sh` body) that records every argv and answers
 `whois --json <ip>` from a state file. Every request comes from a client **bound to `127.0.0.2`**, which is the only
@@ -549,7 +539,7 @@ stranger in plain text while letting the listed peer through to its own `404`. I
 prints one `SKIP` line without `python3` (which binds the client), and leaves nothing behind but the shared boot
 (ADR-0075 D7).
 
-…and since HS-072, **`hub deploy` and `hub host`**: `case_hub_deploy` is **the one case in the run that needs no
+…and, **`hub deploy` and `hub host`**: `case_hub_deploy` is **the one case in the run that needs no
 daemon and no image** — a hub's five steps ask `doctor` no Docker and no git question, build nothing and start nothing
 — so its only `SKIP` line is a missing `python3` (which picks the ports a registry row has to spell and reads one row's
 field). It still needs the machine's `install`, `chmod`, `df` and `openssl`: step 2 generates the VAPID pair with
@@ -568,7 +558,7 @@ before the boot, so the case pins it, `case_hosts`' idiom); and `status`'s `mach
 `tests/deploy.rs`'s, not this case's: a tag from an earlier case is not this case's fact, and the test's `Fake` records
 every build and every daemon call so both lists can be asserted empty.
 
-…and since HS-074, **one session list and one notification stream across machines**: `case_cross_machine` is two
+…and, **one session list and one notification stream across machines**: `case_cross_machine` is two
 boots on one box — a `role = "server"` peer with `machine_name = "workshop"` and a budget of one token, and a
 `role = "hub"` whose `hosts.toml` names that peer — plus `case_push`'s `node:https` receiver standing in for the
 phone, with two endpoints and one browser key (a real phone mints a second subscription key per machine's
@@ -591,7 +581,7 @@ path rule and the row's word are `web/test/push.test.ts`'s (`notificationPath` a
 `web/test/transcript.test.ts`'s (`awaySentence`/`isAwayCode` for the two upstream codes, `ownLabel` for this
 machine's own name, `AWAY_DETAIL` and `STREAM_LOST` for the away session page and a stream lost under it).
 
-…and since HS-080, **the release layout as an operator reads it**: `case_releases` is the case that needs no daemon, no
+…and, **the release layout as an operator reads it**: `case_releases` is the case that needs no daemon, no
 `python3`, no database and no server — a release is "a copy of the artifact in a directory named by a tag", so its
 fixture is four `cp`s and four `touch -d @…`s — and it measures the acceptance bullet by bullet: `current` is a
 **relative** symlink (`readlink` is `releases/four`) with exactly one `ExecStart=` in the unit pointing through it;
@@ -607,7 +597,7 @@ happens inside a promotion: its fixture gains two seeded releases with explicit 
 asserts the printed line is the run's **last**, the one directory removed, the live release and the rollback target
 still standing, and the unrecognised directory untouched. ADR-0084.
 
-…and since HS-073, **`--ssh` deploys**: `case_deploy_ssh` measures the transport that carries a deploy to another
+…and, **`--ssh` deploys**: `case_deploy_ssh` measures the transport that carries a deploy to another
 machine, and it is built the only way this sandbox can build one — there is **no ssh key on this machine and no second
 machine**, so `ssh` is an `sh` stand-in on `PATH` that records every argv and runs the words after the host through
 `sh -c` (which is ssh's own contract, not an approximation of it) with `$HOME` pointed at a tree the case owns. The
@@ -633,7 +623,7 @@ the only form a gate can measure. What it cannot measure — a real ssh, a key, 
 machine) and the target's `sudo`-prefixed children — is `tests/remote.rs`'s (the four argvs, every refusal, the `-t`
 rule) and `tests/deploy.rs`'s (ADR-0078 D8).
 
-…and since HS-047, **`server deploy`**: `case_server_deploy` has two halves that skip independently, because the
+…and, **`server deploy`**: `case_server_deploy` has two halves that skip independently, because the
 bugs it exists to catch are of two kinds. The **offline** half needs `python3` and nothing else: a `_ping` socket
 it answers stands in for the daemon, and the case asserts that the dry run lists the seven steps in the spec's
 order with step 3 planning the two images (`needs`) and steps 5, 6 and 7 planning real work — the unit's path, both
@@ -653,7 +643,7 @@ the tree's listing and `config.toml`'s bytes are byte-identical and the shim app
 names the URL and `holosmith key set` (ADR-0056, ADR-0058). Only a failed step exits 1; the `incomplete` line it
 used to print went with the steps that were still other stories'.
 
-…and since HS-049, **`case_server_service`** owns the three machine steps from the shipped artifact, in two halves
+…and, **`case_server_service`** owns the three machine steps from the shipped artifact, in two halves
 that skip independently and print one `SKIP` line each. The **offline** half needs `python3` and nothing else: it
 builds the install tree by hand with `install -d`/`install -m` — so every mode is the case's own choice rather than
 this shell's umask — and reads `doctor --quick`'s `perms` line three times, a `pass`, a `fail` after `chmod 0755` on
@@ -673,7 +663,7 @@ serve, and `health_responder` starts the `python3` listener that holds the contr
 measure — a unit systemd loads, a daemon it can ask, a `useradd` it may run — is `tests/deploy.rs`'s and the
 by-hand section near the end of this file (ADR-0058).
 
-…and since HS-048, **`case_server_images`** is the one case whose subject is the build itself, and it runs
+…and, **`case_server_images`** is the one case whose subject is the build itself, and it runs
 **first among the cases whose boot starts the proxies** (not the first daemon case: `case_create_session`,
 `case_worktree` and the delete case precede it and need the daemon for other reasons): after this story a `serve`
 boot cannot start `hs_egress`/`hs_key` without the proxy image, so every later case that starts a server with the
@@ -694,7 +684,7 @@ build** (pi and the toolchains come from two package managers), and prints one `
 containers and scratch root — `case_server_deploy`'s online half removes the tags *it* built because that case
 asserts `changed` (ADR-0057).
 
-…and since HS-051, **the drain** is two cases, because the drain has two subjects: a machine that becomes quiet and
+…and, **the drain** is two cases, because the drain has two subjects: a machine that becomes quiet and
 one that does not. `case_drain` owns its boot (three live slots, no `idle_stop_min`, one session left `idle` and one
 prompted so there is a turn to wait for) and measures the acceptance bullet by bullet: the socket exists at
 `<admin dir>/drain.sock` as the kernel's own `-S`; `POST /api/drain` is the fallback's `404 not_found` and a raw
@@ -726,7 +716,7 @@ remember to place the new case before it.
 
 **Every later story adds at least one `case_*` function and one line in `serve_cases`.** That is what makes
 this a growing gate rather than a snapshot: a story that adds a route or a behaviour has one obvious place to
-prove the shipped binary does it, and since HS-046 every case prints one `ok <case>` line when it passes — a case
+prove the shipped binary does it, and every case prints one `ok <case>` line when it passes — a case
 that printed `SKIP` withholds it, so a skip can never read as a pass — which is what makes a green run name what
 it proved instead of only counting it. A case that needs a setting the rest of the run must not carry gets a
 boot of its own (see `case_token_budget`, `case_usage_survives_resume`,
@@ -738,7 +728,7 @@ recorded `schema_version` to 99 in between with `python3`'s `sqlite3`, and asser
 banner prints `schema 99`, that its one `warn` names both versions and the command that refuses
 (`doctor`), and that `GET /api/health` still answers `200` — the "serve continues so a rollback needs no
 restore" half of ADR-0047 — and then that `doctor --quick` **exits 1 with the same sentence**, the refusing
-half HS-045 built), and takes a place near the end of the array: nothing after it may assume the first boot's
+half built), and takes a place near the end of the array: nothing after it may assume the first boot's
 state, and a case that stops the server leaves the run with whatever boot it started (`case_doctor_full` follows
 it as the last case, booting a Docker server of its own).
 
@@ -806,7 +796,7 @@ test names a data root inside its own temporary directory, because `serve` now c
 migrates whatever root the config resolves to, and an omitted key resolves to the built-in
 default.
 
-**The event log is not append-only for ever.** Compaction (HS-060, ADR-0032) replaces the delta
+**The event log is not append-only for ever.** Compaction (ADR-0032) replaces the delta
 rows of messages completed more than 24 hours ago with one `message.snapshot` each, so an `events`
 row can disappear while `sessions.last_seq` stays where it was. Two consequences for anyone
 writing a statement against either table: a seq is **strictly increasing with gaps**, and the next
@@ -871,13 +861,13 @@ or to refresh the snapshot and say why rolling back past this release is accepta
 binary's `schema::SCHEMA_VERSION`, `serve` warns and continues: an older binary over a newer
 database is exactly the rollback expand/contract exists to make safe. `schema::verdict` holds that
 decision and the sentence, the banner prints the **recorded** number (`database <path> schema
-<n>`), and `doctor` (HS-045) is where the sentence becomes a refusal — a check that runs before a
+<n>`), and `doctor` is where the sentence becomes a refusal — a check that runs before a
 start, rather than a service that refuses to come back up.
 
 ## Prerequisites
 
 - **rustc 1.99.1** (the version in `~/.pi/toolchains`). There is no `rust-toolchain.toml`:
-  the build fetches nothing beyond its declared dependencies (HS-001).
+  the build fetches nothing beyond its declared dependencies.
 - **`x86_64-linux-musl-gcc` and `aarch64-linux-musl-gcc`** on `PATH`. SQLite is compiled
   from source (`rusqlite` with the `bundled` feature), so the C toolchain crosses too.
 - **node and npm** for the app shell: `scripts/build.sh` runs `scripts/build-web.sh`
@@ -891,7 +881,7 @@ start, rather than a service that refuses to come back up.
   `openssl s_client` to terminate the session's plaintext request and speak TLS to the provider (the artifact is
   static and has no TLS stack, ADR-0048). The image this repository tests with carries it; a missing binary is a
   502 from the proxy, not a silent fallback.
-- **`openssl` on the host** for Web Push notifications (HS-066): `push::Pusher` signs each VAPID token with
+- **`openssl` on the host** for Web Push notifications: `push::Pusher` signs each VAPID token with
   `openssl dgst -sha256 -sign`, derives each message's secret with `openssl pkeyutl -derive`, generates the
   application server's key with `openssl ecparam` and delivers with `openssl s_client` — four children per message,
   all of them the same host program `server deploy` already requires (ADR-0071). A machine without it still serves
@@ -899,15 +889,15 @@ start, rather than a service that refuses to come back up.
   something `serve` refuses to start over.
 - **`tailscale`** and **systemd** for a deployed server — and they **are** prerequisites of a deploy now: `doctor`
   reports a machine without either as `unknown` rather than failing (a LAN-only machine and a hand-run `serve` are
-  supported), and `server deploy` runs `doctor --quick` as its step 1 (HS-047), so such a machine still gets through
-  step 1. Step 5 (HS-049) writes the unit and runs `systemctl daemon-reload` and `systemctl enable --now
+  supported), and `server deploy` runs `doctor --quick` as its step 1, so such a machine still gets through
+  step 1. Step 5 writes the unit and runs `systemctl daemon-reload` and `systemctl enable --now
   holosmith.service`, so a machine without systemd fails that step with systemd's own line, and step 6 configures
   `tailscale serve` for the two origins, so a `tailscaled` that does not answer fails step 6 while `doctor`'s
   `tailscale` finding stays `unknown` on the same machine — the same host, two different questions (ADR-0054,
   ADR-0058).
 - **`install`, `chmod`, `id`, `stat`, `useradd`, `usermod` and `chown`** (coreutils, plus the account tools
   `useradd`/`usermod`), **`openssl`**, and
-  **`sudo`** on a machine whose paths are the system's, for `holosmith server deploy` (HS-047, HS-049): every file
+  **`sudo`** on a machine whose paths are the system's, for `holosmith server deploy`: every file
   action is one `install`/`chmod` child, and it is prefixed by `sudo` unless `--root` builds the tree as the
   invoking user (ADR-0056); step 2 reads `id -u`/`id -nG` and `stat -c %u` to decide whether the service user and the
   tree's ownership are already what the unit's `User=` needs, and writes them with `useradd`/`usermod`/`chown`; and
@@ -920,7 +910,7 @@ start, rather than a service that refuses to come back up.
   `preflight` already relies on for `df`.
 - **git** for `scripts/build.sh`, and for a Docker run at runtime: the worktree step runs
   `git worktree`, `git rev-list` and `git branch` against the project repository on the host
-  (HS-025). Not required by `cargo build` itself, and not required by `--backend stub`.
+  Not required by `cargo build` itself, and not required by `--backend stub`.
 - Optional: **`python3`** for the parts of the gate that read a database or speak a socket by hand:
   `case_worktree` (answers the Docker preflight from a socket saying `200 OK`, so a Docker boot can be driven
   on a machine with no daemon), `case_compaction` (ages a session's event log with stdlib `sqlite3`, because
@@ -933,8 +923,8 @@ start, rather than a service that refuses to come back up.
 - Optional: **`python3`** for `scripts/schema-snapshot.sh`, the release step that refreshes
   `docs/schema/previous.sql`: the `sqlite3` CLI is not installed and nothing in the gate may depend on it.
   That script is not part of `verify.sh` — it is run by hand when a release is cut (ADR-0047).
-- **The development sandbox binds the host's Docker socket**, because every story from HS-027 on is a fact
-  about a real `docker run` (`bwrap.sh`'s `DOCKER` binds). That is host root by another name — anything able
+- **The development sandbox binds the host's Docker socket**, because every story on is a fact
+  about a real `docker run` (the development sandbox's `DOCKER` binds). That is host root by another name — anything able
   to reach the socket can start a container with `/` mounted — so it is granted deliberately and only when
   the socket exists; a machine without a daemon gets no binds and every Docker check skips. A reviewing
   agent inside this sandbox can therefore create containers, which is the point and also the risk.
@@ -967,11 +957,11 @@ start, rather than a service that refuses to come back up.
   - No test that *replays* a fixture needs a provider key, a daemon or the network, because the records are
     already committed; only the gate's `case_docker_turn` needs the daemon and the image, and it skips without
     them like every other Docker case.
-- **A tool's output is a file under the data root** (HS-033, ADR-0041): `<data>/sessions/<id>/tool/<tool_id>.txt`,
+- **A tool's output is a file under the data root** (ADR-0041): `<data>/sessions/<id>/tool/<tool_id>.txt`,
   capped at 5 MiB of output plus one `[truncated: …]` marker line, served by
   `GET /api/sessions/{id}/tool-output/{tool_id}`. Nothing has to configure it and no test has to clean it up
   beyond the data root it already uses: the directory is a session's own, beside `session.log` and `pi-home`.
-- **An image in a tool result is a second file in the same directory** (HS-035, ADR-0043):
+- **An image in a tool result is a second file in the same directory** (ADR-0043):
   `<data>/sessions/<id>/tool/<tool_id>-<block index>.<ext>`, where the extension comes from pi's `mimeType`
   (`png`, `jpg`, `gif`, `webp`) and a type this build cannot name is kept as `.bin` and served as
   `application/octet-stream`. It is served by `GET /api/sessions/{id}/tool-image/{tool_id}/{index}`, the index
@@ -983,11 +973,11 @@ start, rather than a service that refuses to come back up.
   `case_reconcile_orphans` and for `tests/container.rs`. Both check V1 — the hardened `.git` mounts — against a real container, and both
   print one `SKIP` line and pass without a daemon, because a machine without one is a supported machine
   (a hub). The image is `$HOLOSMITH_TEST_IMAGE`, default `pi-agent:local`; it needs `sh`, `git` **and
-  `node`** — the network self-test's probe is a node script (HS-036, ADR-0044), and an image without node makes
+  `node`** — the network self-test's probe is a node script (ADR-0044), and an image without node makes
   that test `Unknown` rather than failed, so a missing node is a `warn` at every boot instead of a red test. Its
   default user must not be root. Those cases run it as the config's `agent_image`, which is why a development
   machine may point that key at an image it tagged by hand instead of at the name `server deploy` builds.
-  **The machine's two proxies no longer run that image** (HS-048, ADR-0057): they run
+  **The machine's two proxies no longer run that image** (ADR-0057): they run
   `holosmith-proxy:<version>`, which step 3 builds from the Dockerfile embedded in the binary — the artifact on
   `alpine` plus `openssl` and CA certificates, because `hs_key` spawns `openssl s_client` (ADR-0048). A `serve`
   boot on a machine that has never deployed starts no proxy: one `warn` naming `holosmith server deploy`, and a
@@ -1003,7 +993,7 @@ start, rather than a service that refuses to come back up.
 
 `backend = "docker"` is the default (ADR-0001), and `serve` will not start one on a machine
 that cannot run it: the preflight checks the daemon, git and the disk before the listener
-binds, prints one sentence per failure that names the fix, and exits 1 (HS-024, ADR-0028).
+binds, prints one sentence per failure that names the fix, and exits 1 (ADR-0028).
 `--backend stub` skips all of it — the stub needs no daemon, no container and no free space
 beyond its own database, which is what the gate uses and what a phone-only demo can use — and
 so does `role = "hub"`, which runs no sessions at all: item 10 §6's `hub deploy` says the startup
@@ -1011,7 +1001,7 @@ runs "without the Docker and git checks", and a hub without a daemon is the norm
 at startup is why `scripts/check-static.sh`'s empty-container run passes `--backend stub`: that
 run is about the artifact's own linking, and its sandbox has no `git`, no `df` and no daemon.
 
-**A session's files live at `<projects_root>/.worktrees/<id>`, on branch `agent/<id>`** (HS-025,
+**A session's files live at `<projects_root>/.worktrees/<id>`, on branch `agent/<id>`** (,
 spec item 1). The projects root is the config key `projects_root` (default `/srv/holosmith/projects`),
 and each project is a repository directly inside it: `<projects_root>/<project>` with a `.git` directory.
 The **backend** makes the worktree with `git worktree add -b agent/<id> <projects_root>/.worktrees/<id>
@@ -1021,10 +1011,10 @@ is deleted, and when a later provisioning step fails *and this provision made th
 the step only adopted (a resumed session's, with commits on it) is never taken back by a failure. **No fetch and no remote**: the session branch is created from a commit
 the project repository already has. Two consequences worth knowing before you point this at a real
 repository: a repository with **no commit** cannot be provisioned from (there is no `HEAD`), and a
-project whose `.git` is a *file* (a submodule checkout, or a worktree of a repository) is HS-026's to
+project whose `.git` is a *file* (a submodule checkout, or a worktree of a repository) is the to
 refuse — this build tries it and git says what it thinks in the session's reason.
 
-**The container's mounts are spec item 1's four** (HS-027, ADR-0035): the worktree at `/work`, the
+**The container's mounts are spec item 1's four** (ADR-0035): the worktree at `/work`, the
 repository's `.git` at its own host path (so the worktree's `.git` file, which holds an absolute
 `gitdir:`, still resolves), and `.git/hooks` and `.git/config` stacked on top of it **read-only** so that
 a hook or a `core.fsmonitor` cannot be planted. Host paths are kept identical inside the container for
@@ -1033,11 +1023,11 @@ writes and the three working git commands — passed as specified on a real daem
 fallback is not in use. The image is the config key `agent_image` (default `agent-image:<version>`, the name
 `server deploy`'s step 3 builds), and its contents are the story's other half: pi at the pinned version, git,
 the toolchains the key `agent_toolchains` names (default `["python3", "ripgrep"]`; an empty list is a machine
-whose projects need only git), and this binary for `container snapshot` and the proxies (HS-048, ADR-0057).
+whose projects need only git), and this binary for `container snapshot` and the proxies (ADR-0057).
 `--user` is deliberately not passed: the image's own user must be non-root, which the V1 checks assert
 rather than a guessed uid that would hand the agent's files to somebody the host does not own.
 
-**The isolation is measured at every boot** (HS-036, ADR-0044). A Docker run creates the machine's own
+**The isolation is measured at every boot** (ADR-0044). A Docker run creates the machine's own
 `egress` network (not internal — the proxies attach to it) and then runs one probe container from `agent_image`
 on a temporary internal network, asking it to reach `1.1.1.1:443` and the default bridge's gateway. A
 *connection that is refused* counts as reached, because a reset proves the host answered; `ENETUNREACH`, a
@@ -1048,7 +1038,7 @@ place as the preflight's complaints. `role = "hub"` and `--backend stub` run nei
 daemon at all is a supported machine: `tests/selftest.rs` and `case_network_selftest` both print one `SKIP`
 line and pass.
 
-**One container per session, limited and on a network of its own** (HS-028, ADR-0036): a
+**One container per session, limited and on a network of its own** (ADR-0036): a
 `docker run -i --rm --init --name s_<id> --network agents_<id> --cap-drop ALL --security-opt
 no-new-privileges --workdir /work --cpus … --memory …m --pids-limit …` with the five mounts and
 `-e HS_SESSION_ID=<id>`. The network is `docker network create --internal agents_<id>`; `--internal` is the
@@ -1062,7 +1052,7 @@ zero:
 | `container_memory_mb` | 4096 | `--memory <n>m` |
 | `container_pids` | 512 | `--pids-limit` |
 
-Since HS-031 the container **is the agent**: `run` is attached (`-i`, never `--detach`) and ends with
+Since the container **is the agent**: `run` is attached (`-i`, never `--detach`) and ends with
 `pi --mode rpc --no-session --approve --model <row> --thinking <row>`, with `PI_CODING_AGENT_DIR` pointing
 at `<data>/sessions/<id>/pi-home` (a fifth mount, at its own host path) and the four switches that keep pi
 off the network: `NO_PROXY=key-proxy`, `PI_OFFLINE=1`, `PI_SKIP_VERSION_CHECK=1`, `PI_TELEMETRY=0`. The
@@ -1082,15 +1072,15 @@ Three things bite here:
   spawned, not that the container is up; anything that inspects one waits for it (`tests/*`'s
   `wait_running`), and the gate's case waits for the row to say `idle`, which is after pi answered.
 - **A killed docker CLI does not stop its container.** The container outlives a crashed server, which is
-  HS-044's reconcile; the next start's `rm -f` is what makes it boring in the meantime.
+  the reconcile; the next start's `rm -f` is what makes it boring in the meantime.
 
-**Every start is `docker rm -f s_<id>` then `docker run`** (HS-029, ADR-0037), and the two are serialised
+**Every start is `docker rm -f s_<id>` then `docker run`** (ADR-0037), and the two are serialised
 per session, because two starts interleaved produce "the container name is already in use" — which is one
 start working as designed being read as the other one failing. `--rm` alone is not enough: it removes an
 exited container a moment *after* `docker stop` has answered (measured), and it does nothing about a
 container the process lost track of. `stop` is `docker stop --time 10`; the ten seconds are the spec's, and every
 stop goes through `stop::Stopper`, which first records `sessions.expected_stop` — the flag that makes a
-policy stop distinguishable from a crash (HS-030, ADR-0038).
+policy stop distinguishable from a crash (ADR-0038).
 
 Three things bite on a real machine:
 
@@ -1115,17 +1105,15 @@ Three things bite on a real machine:
   the Desktop VM forwards a `-p` port to the host, so a port a container "publishes" is
   reachable from that machine and not from your phone or the hub — and the forwarder is a
   second hop that `docker inspect` does not describe. That is why the control listener is
-  the host's own process, why the preview listener (HS-041) is on the host too, and why
+  the host's own process, why the preview listener is on the host too, and why
   `docker_host` on a development machine is a socket rather than a TCP endpoint.
 
 ## Verifying the credential path by hand (V3, V4, V5)
 
-These three checks need something no gate may require: **a real provider key**. So they are run by hand, their
-results are written into `HolosmithSpec.md`'s verification table, and the gate keeps only the half that needs
-no key (`case_key_proxy` sends a request through the proxy with a stand-in `openssl` on `PATH`, and asserts the
-bytes the proxy produces: one `Content-Length`, the body after the blank line, and the stored key swapped in).
-The table's V3, V4 and V5 cells name this section, which is what makes them a procedure rather than a claim —
-`case_verification_table` fails the gate if a cell names a file this repository does not have.
+These three checks need something no gate may require: **a real provider key**. They are run by hand, and the
+gate keeps only the half that needs no key (`case_key_proxy` sends a request through the proxy with a stand-in
+`openssl` on `PATH`, and asserts the bytes the proxy produces: one `Content-Length`, the body after the blank
+line, and the stored key swapped in). This section is the procedure.
 
 What a run needs:
 
@@ -1166,7 +1154,7 @@ Then, with `serve` running on that config:
    `models.json` key. **That is why the seeded pi-home carries no `auth.json` and the container environment no
    provider key** — the fallback in the table's last column is a rule about what the build must keep out.
 
-Two defects this procedure found, both fixed in HS-040 (ADR-0050), are worth checking first when a model call
+Two defects this procedure found, both fixed (ADR-0050), are worth checking first when a model call
 fails: a `502 the provider closed the connection before answering` means the forwarded request declared a
 `Content-Length` it did not carry, and `401 … session=- … status=bad-key` for a session that exists means the
 proxy is reading a `keys.toml` from before the create — a file mount rather than the directory.
@@ -1231,7 +1219,7 @@ machine that has the three programs this one does not (ADR-0058).
 ## Watching and tearing a host down: `status`, `logs`, `uninstall`
 
 Three commands an operator runs *after* a deploy, and the reason they exist is that none of them should need a
-systemd incantation or a hand-written `docker` call (HS-050, ADR-0059).
+systemd incantation or a hand-written `docker` call (ADR-0059).
 
 ```bash
 holosmith status                     # one `key value` line per fact
@@ -1245,7 +1233,7 @@ holosmith logs -f --session <id>     # ... and follow the file
 `status` prints `role`, `version`, `uptime`, one `sessions <status>` line per session status, one `proxy <name>` line
 per proxy, and `machines`. **`uptime` is the running server's**, read from `GET /api/health` on the config's
 `control_listen`: a machine that is not serving prints `uptime unknown: …` rather than a number from `/proc` or from
-systemd, and that is also how it says "not serving". `machines` is `unknown:` with a sentence naming HS-068 (phase 3)
+systemd, and that is also how it says "not serving". `machines` is `unknown:` with a sentence naming (phase 3)
 — there is no host registry yet, and the line says so instead of printing a zero. The exit code is 1 only when a
 fact could not be **read** (an unreadable database); a stopped server is a report, not a failure.
 
@@ -1277,13 +1265,13 @@ overrides it, because a run that removed the unit and then refused would leave t
 systemd here, so no unit is loaded and `disable --now`/`daemon-reload` are `tests/uninstall.rs`'s recorders (and a
 privileged run's unit *file* lives in `/etc/systemd/system`, which an unprivileged test cannot write); `journalctl`
 exists here but nothing runs under the unit, so the server arm is measured against a stand-in; and there is no host
-registry, which is why `status`'s `machines` line names HS-068.
+registry, which is why `status`'s `machines` line names.
 
 ## Draining a machine before a restart
 
 Spec item 10 step 3: an upgrade must not kill a turn somebody is watching. The drain is the command that makes that
 possible, and it is deliberately **not** a shutdown — it refuses new work, waits for the turns that are running,
-stops the sessions that are merely idle, and then says so while `serve` keeps answering reads (HS-051, ADR-0060).
+stops the sessions that are merely idle, and then says so while `serve` keeps answering reads (ADR-0060).
 
 ```bash
 holosmith drain                 # drain, waiting up to the default 10m
@@ -1310,7 +1298,7 @@ mid-drain.
 What keeps working while it drains: every `GET` (the UI must be able to watch the turn being protected),
 `abort`, `steer` (it refuses unless the row is `running`, so it cannot start work) and `DELETE`. What is refused,
 with ADR-0008's envelope and `503` `code: "draining"`: `POST /api/sessions`, `POST …/prompt` and `POST …/resume`.
-What ends the process is still `SIGTERM`, not the drain; the restart the drain precedes is HS-078's `upgrade`.
+What ends the process is still `SIGTERM`, not the drain; the restart the drain precedes is the `upgrade`.
 
 The socket's protection is the directory's: `/run/holosmith` is created **0700** by `server deploy`'s step 2 and
 chowned to the service user, and the socket is 0600, so being able to open it is the authorisation and no route
@@ -1330,7 +1318,7 @@ systemctl restart holosmith.service                                          # t
 
 **What this repository's environment could not measure**: there is no systemd here, so `/run/holosmith` is only the
 deployed path and every demo and gate case uses `--admin-dir` under a scratch tree; and nothing consumes the drain
-yet, because `upgrade`/`rollback` is HS-078/HS-079. The socket, the four report lines, the three refusal handlers,
+yet, because `upgrade`/`rollback` is those stories. The socket, the four report lines, the three refusal handlers,
 the rows' `server_restart`/`expected_stop` facts and the restart's `idle · interrupted` are measured — by
 `case_drain`, `case_drain_restart`, `tests/drain.rs` (the sequence, the bind rules, the request grammar and the
 refusals over the real `App`) and `tests/drain_cli.rs` (the printed lines and the exit code against a hand-written
@@ -1396,7 +1384,7 @@ real gate and it happens before this command runs.
 ## The smoke run: a candidate against the real daemon
 
 Spec item 10's second step, and the only automated evidence that a candidate binary can serve a session at all
-(ADR-0081). Run it against an artifact `holosmith build` placed — or let HS-078's `upgrade` run it for you:
+(ADR-0081). Run it against an artifact `holosmith build` placed — or let the `upgrade` run it for you:
 
 ```bash
 holosmith smoke --binary releases/<tag>/holosmith --root target/smoke
@@ -1417,7 +1405,7 @@ container, the network, its two proxies and the root. One `smoke: ` line per ste
 
 **What it measures, and what it does not.** The turn is real — a Docker container, the worktree, the network, the
 launch, the ready handshake, the event log and the delete — but its `pi` is
-`holosmith container fake-pi`, which replays `crates/holosmith/fixtures/smoke-turn.jsonl`: HS-032's recorded turn,
+`holosmith container fake-pi`, which replays `crates/holosmith/fixtures/smoke-turn.jsonl`: the recorded turn,
 committed with a header that names the schema it was recorded against. So **no provider call is made**, and the key
 proxy is started and joined and never exercised; V3's by-hand procedure above is what measures that path, because it
 needs a real key and no gate may hold one. The smoke image is not what a promotion ships either — `server deploy`'s
@@ -1488,7 +1476,7 @@ names), and the demo does the same. Two builds of one crate version also cannot 
 a release that migrated the schema cannot start the old `serve`: the unit runs `doctor --quick` first, and `doctor`
 refuses a database a newer release wrote (ADR-0047) — a recorded follow-up, not a silence.
 
-## The release tree as an operator reads it (HS-080)
+## The release tree as an operator reads it
 
 Two releases and one pointer, and three facts about them that the commands answer without a promotion:
 
@@ -1559,7 +1547,7 @@ holosmith rollback --root target/install --to v0.1.0   # the release before that
 tree's order is the order its releases were **written** onto it (`Release::history`, newest first by mtime, the tag
 breaking a tie). The default target is the newest release strictly older than the live one. `--to TAG` names any
 release the tree holds that `current` does not already name — including a *newer* one, which is how a mistaken rollback
-is undone. HS-080's pruning keeps the newest N of the same list.
+is undone. the pruning keeps the newest N of the same list.
 
 There is **no `--acknowledge-review`**: item 12's review is a pre-promotion gate, and this is the command that undoes a
 promotion. `--root` and the root-or-`--root` rule are `upgrade`'s (one function, `deploy::privilege_problem`), `--wait`
@@ -1621,7 +1609,7 @@ bwrap --dev-bind / / --unshare-net --die-with-parent \
 `scripts/check-static.sh` rejects a `source = "git+…"` entry in `Cargo.lock` for the same
 reason, so the dependency set cannot start needing the network without a gate failing.
 
-That proof covers cargo only, and it is not enough on its own since HS-003: the binary
+That proof covers cargo only, and it is not enough on its own: the binary
 embeds the web app, so a cargo-only build of a clone without `web/dist` still succeeds and
 serves a placeholder page. Run `scripts/build-web.sh` first (that is what `npm ci` reads
 `web/package-lock.json` for, the same category as `cargo fetch --locked`), and build the

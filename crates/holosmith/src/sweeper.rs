@@ -1,4 +1,4 @@
-//! The idle stop's background half: a session nobody is using stops costing money (HS-021, ADR-0025).
+//! The idle stop's background half: a session nobody is using stops costing money (ADR-0025).
 //!
 //! Spec item 13's second row is a policy, not an endpoint — `idle_stop_min` (default 30) — so
 //! nothing a client does makes it happen. This module is the thing that happens: on a fixed tick it
@@ -18,8 +18,8 @@
 //!   [`Transitioner::apply`](crate::sessions::state::Transitioner::apply). A refused application means
 //!   the session left `idle` between the read and the move — an ordinary race with a prompt — which is
 //!   an `info` line and not a bug.
-//! - **It is one policy among siblings, not the only stop.** The cap evicts (HS-020), the drain stops the
-//!   idle sessions an operator asked it to (HS-051) and the turn timeout ends a turn (HS-022); all four use the
+//! - **It is one policy among siblings, not the only stop.** The cap evicts, the drain stops the
+//!   idle sessions an operator asked it to and the turn timeout ends a turn; all four use the
 //!   table, and only the reason word differs ([`IDLE_STOP`] here, [`crate::drain::SERVER_RESTART`] there).
 //!
 //! The tick is a constant rather than a config key, for the reason the stub's pacing is a constructor
@@ -56,7 +56,7 @@ pub const TICK: Duration = Duration::from_secs(5);
 /// `Clone` for the same reason [`crate::provisioner::Provisioner`] is: `serve` builds one at startup and
 /// hands it to a task, and the fields are a [`Stopper`] (itself a backend and an `Arc`), an `Arc` and a
 /// sender. The stop goes through the stopper rather than straight to the backend because spec item 6
-/// makes "we asked for this stop" a fact the row records before the container is asked (HS-030).
+/// makes "we asked for this stop" a fact the row records before the container is asked.
 #[derive(Debug, Clone)]
 pub struct Sweeper {
     stopper: Stopper,

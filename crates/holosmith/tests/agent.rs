@@ -1,12 +1,12 @@
 //! The agent process, end to end: pi launched in a real container, the ready handshake, the agent's own
-//! directory, project trust, and the exit the server classifies (HS-031).
+//! directory, project trust, and the exit the server classifies.
 //!
 //! Everything here needs a daemon **and** an image, so every test returns early when there is neither — a
 //! machine without Docker is a supported machine (a hub), and the gate's Docker cases guard the same way.
 //! `HOLOSMITH_TEST_IMAGE` names another image; `HOLOSMITH_KEEP_SCRATCH=1` keeps the scratch root.
 //!
 //! **The scratch root is under `target/`**, because the daemon resolves a bind mount's source in the host's
-//! mount namespace and this sandbox's `/tmp` is a tmpfs it cannot see (ADR-0035). Since HS-031 that applies
+//! mount namespace and this sandbox's `/tmp` is a tmpfs it cannot see (ADR-0035). Since that applies
 //! to the **data root** as well: `<data>/sessions/<id>/pi-home` is mounted into the container, so a data root
 //! the daemon cannot see would give pi an empty directory and no error at all.
 
@@ -24,11 +24,11 @@ use holosmith::worktree::Retained;
 use serde_json::json;
 
 /// One id per test: a container is `s_<id>` and a network is `agents_<id>`, so two tests that shared one
-/// id would fight over both (HS-027 measured that).
+/// id would fight over both.
 const ID: &str = "0a1b2c3d4e5f6a7b";
 const ID_VERSION: &str = "0a1b2c3d4e5f6a7c";
 /// A third id, because a container is `s_<id>` and a network is `agents_<id>`: two tests that shared one id
-/// would fight over both (HS-027's lesson), and these two run in parallel.
+/// would fight over both, and these two run in parallel.
 const ID_COMMANDS: &str = "0a1b2c3d4e5f6a7d";
 
 /// A scratch repository, data root and worktree under the workspace's `target/`.
@@ -382,9 +382,9 @@ fn an_image_whose_pi_cannot_answer_fails_the_session_at_the_container_step() {
     });
 }
 
-/// The turn's four commands, against real pi: each one reaches the agent and gets an answer back (HS-032).
+/// The turn's four commands, against real pi: each one reaches the agent and gets an answer back.
 ///
-/// This container has no provider key (HS-039 builds the key proxy) and its network is internal (HS-028), so
+/// This container has no provider key and its network is internal, so
 /// `prompt` is *refused* by pi before a stream exists — which is the arm asserted here. What the test is
 /// about is reachability rather than the answer: a command that never got written would fail with a write
 /// error or a timeout, and a refusal is pi's own sentence arriving on the pipe. The streaming arm is

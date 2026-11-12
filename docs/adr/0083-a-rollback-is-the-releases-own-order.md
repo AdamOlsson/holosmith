@@ -1,7 +1,7 @@
 # A rollback is the release tree's own order plus the promotion's restart
 
-HS-079 closes item 10's second sentence — "in v1 these steps are implemented by `holosmith upgrade <binary>` and
-`holosmith rollback` (see Single binary and CLI), not by a separate script" — with the verb HS-078 left private
+ closes item 10's second sentence — "in v1 these steps are implemented by `holosmith upgrade <binary>` and
+`holosmith rollback` (see Single binary and CLI), not by a separate script" — with the verb left private
 (`promote::rollback`, the automatic switch-back a failed promotion performs). What the verb needed that nothing
 recorded is the one thing the acceptance says in four words: **"go back one version"**.
 
@@ -49,7 +49,7 @@ sets when `Release::write` creates the directory (and refreshes when a re-promot
 (`f2b3886-dirty`, `0.1.0-3-gabc1234`), so sorting by name puts a hash above a version tag, and "one version back"
 would mean "the build that happened to sort next".
 
-**HS-080 prunes by this list**, which is why the order lives in `release` rather than in a verb: `releases/` keeps the
+** prunes by this list**, which is why the order lives in `release` rather than in a verb: `releases/` keeps the
 newest N of `history()`, and the same function answers "which release am I running from". Recording a pointer instead
 is recorded here as the road not taken: it would make the order a file that a `cp -r` of the install tree leaves
 behind, and the month it silently disagrees with the directories is the month a rollback goes somewhere nobody chose.
@@ -160,7 +160,7 @@ A rollback drains, so the sessions it stops carry `server_restart` — the drain
 rule resumes them on the next boot, whichever release that boot is running (ADR-0082 D13). So acceptance bullet 3
 ("sessions survive the rollback in `idle` or `stopped`, never `error`") is a claim about **not adding a second path**:
 the verb writes no row, stops no container and kills no turn. The one ending where this leaves a session `stopped` is a
-boot of a release built before HS-078, which has no such rule — and `stopped` is one of the two states the bullet
+boot of a release built, which has no such rule — and `stopped` is one of the two states the bullet
 allows.
 
 No backup either: a rollback changes no database, and the promotion that preceded it took the one this state is
@@ -183,9 +183,9 @@ recoverable from (`VACUUM INTO backups/app-<ts>.db`, five kept).
 
 ## Consequences
 
-- `holosmith rollback` joins `build`, `smoke` and `upgrade` as host verbs; the Commands table's second HS-078 row is
+- `holosmith rollback` joins `build`, `smoke` and `upgrade` as host verbs; the Commands table's second row is
   implemented and phase 4 has one story left.
-- `release` owns the tree's **order** (`history`, `older_than`), and HS-080 prunes by it rather than inventing a second.
+- `release` owns the tree's **order** (`history`, `older_than`), and prunes by it rather than inventing a second.
 - `promote` owns the sequence both verbs run: `poll`, `restart_and_poll`, `refuse_older_schema`, `draining`,
   `write_unit`, and `Real`'s two policies. Three things about `upgrade`'s output changed, and none of its behaviour:
   the schema refusal's wording ("Nothing was changed — … " and its new `doctor --quick` clause, with the remedy as a

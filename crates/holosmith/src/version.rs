@@ -2,7 +2,7 @@
 //! `version`, `serve` logs `version` and `target` on its startup line, `doctor` compares
 //! `pi_version`, and `deploy --ssh` refuses on a `target` mismatch.
 //!
-//! **One shape, two directions** (HS-078): `holosmith version --json` writes it, and a promotion reads it back out of
+//! **One shape, two directions**: `holosmith version --json` writes it, and a promotion reads it back out of
 //! a *candidate* binary it has not installed yet (`holosmith upgrade` runs `<binary> version --json`), because a
 //! release's version, git tag, pin and schema are facts only that binary can answer. Deserialising the same struct
 //! rather than a second reader struct is what keeps the two ends of one line from drifting.
@@ -16,7 +16,7 @@ use crate::schema::SCHEMA_VERSION;
 pub struct VersionInfo {
     pub version: String,
     pub git_tag: String,
-    /// The release directory this file was run from (HS-080), or `None` when it is not in one.
+    /// The release directory this file was run from, or `None` when it is not in one.
     ///
     /// A **different fact** from `git_tag`: the tag is what the build was made from, and this is the
     /// `releases/<tag>/` directory the running file sits in. They agree on a machine a promotion owns, and a

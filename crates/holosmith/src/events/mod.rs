@@ -1,7 +1,7 @@
 //! The event log: one durable record per event, and the one writer that assigns its seq and
-//! commits it (HS-009, ADR-0013).
+//! commits it (ADR-0013).
 //!
-//! Nothing emits an event yet — HS-011 is the first producer. The handles exist now because the
+//! Nothing emits an event yet — This is the first producer. The handles exist now because the
 //! rules they carry are the story: a producer appends over a bounded queue and gets backpressure;
 //! a subscriber reads committed events only; and the writer assigns the seq, using the session's
 //! `last_seq` counter, so a client never sees a seq a crash could undo.
@@ -24,7 +24,7 @@ pub use writer::spawn;
 // The kinds whose payload ADR-0018 and ADR-0019 pin, and the only spelling of each.
 //
 // They live here rather than next to their producer because two modules now name one of them: the stub
-// emits every kind, and the writer reads a `message.end`'s `usage` to keep the session's tally (HS-023).
+// emits every kind, and the writer reads a `message.end`'s `usage` to keep the session's tally.
 // A kind its own producer alone names would not need a constant; these do, and a second literal is how
 // the renderer and the producer drift apart. `session.status` is not here: the transitioner is its only
 // producer and `sessions::state::SESSION_STATUS` is its name.
@@ -42,19 +42,19 @@ pub const TOOL_END: &str = "tool.end";
 /// A message finishing: `{"message_id", "usage": {"in", "out"}, "stop_reason", "tool_calls"}`. The
 /// `usage` is what the writer adds to the session's tally, and it is optional: a backend that cannot
 /// report it — **or that reports a sum of zero**, which is the same thing said twice — emits the frame
-/// without it (HS-023, ADR-0042). Its two numbers are the message's *cost*: `in` is the prompt including
+/// without it (ADR-0042). Its two numbers are the message's *cost*: `in` is the prompt including
 /// whatever the provider served from its cache, which is why pi's `cacheRead`/`cacheWrite` are folded into
 /// it (ADR-0042). `stop_reason` and `tool_calls` (the message's
-/// tool-call names, in order) are additive keys HS-032 added for pi's answers — ADR-0040, amending
+/// tool-call names, in order) are additive keys added for pi's answers — ADR-0040, amending
 /// ADR-0019's table, and nothing reads them yet: the arguments and output of a call are
-/// `tool.start`/`tool.end` (HS-033).
+/// `tool.start`/`tool.end`.
 pub const MESSAGE_END: &str = "message.end";
 /// A turn ending: `{}`.
 pub const TURN_END: &str = "turn.end";
 /// The operator's guidance reaching a running turn: `{"text"}`, and the one kind with no message id
 /// (ADR-0021).
 pub const TURN_STEER: &str = "turn.steer";
-/// Something a turn could not do, said out loud: `{"reason", "method"}` (HS-035, ADR-0043).
+/// Something a turn could not do, said out loud: `{"reason", "method"}` (ADR-0043).
 ///
 /// Its one producer today is an extension's dialog, which a session cannot answer and therefore cancels; the
 /// frame is why an extension's behaviour is explicable instead of mysterious, and it has no message id for the
@@ -62,7 +62,7 @@ pub const TURN_STEER: &str = "turn.steer";
 /// shows and `method` is pi's own name for what was asked.
 pub const TURN_ERROR: &str = "turn.error";
 
-/// A machine policy ending a session, with the code a client reads: `{"code", "message", …}` (HS-063).
+/// A machine policy ending a session, with the code a client reads: `{"code", "message", …}`.
 ///
 /// The one producer today is the per-session disk soft cap, whose frame carries `disk_quota`, the measurement
 /// and the limit it crossed (spec item 14). It is a *new* kind rather than a `turn.error` because the two say
@@ -78,7 +78,7 @@ pub struct Event {
     pub session_id: String,
     /// Strictly increasing per session and never reused (ADR-0013).
     pub seq: i64,
-    /// The `type` column: what happened. HS-011 names the kinds.
+    /// The `type` column: what happened. names the kinds.
     pub kind: String,
     /// The `payload` column: JSON held as text, so the schema need not change with an event's
     /// shape.
@@ -120,7 +120,7 @@ pub struct EventWriter {
     ///
     /// Without it the only `EventStream` would be the one `spawn` returned, and `serve` drops
     /// that: the broadcast half would be unreachable from the handle an `AppState` carries, and
-    /// HS-010 would have to change `spawn`'s signature to subscribe at all.
+    ///  would have to change `spawn`'s signature to subscribe at all.
     events: broadcast::Sender<Event>,
 }
 
@@ -140,7 +140,7 @@ impl EventWriter {
     /// A subscriber for the events this writer commits from now on.
     ///
     /// Each call is an independent stream starting at the point of the broadcast: an event
-    /// committed before the call is read back with its last-seen seq, not replayed (HS-010).
+    /// committed before the call is read back with its last-seen seq, not replayed.
     pub fn subscribe(&self) -> EventStream {
         EventStream {
             receiver: self.events.subscribe(),
@@ -157,7 +157,7 @@ impl EventStream {
     /// The next committed event.
     ///
     /// `Err(RecvError::Lagged(n))` means this subscriber fell more than the buffer behind and
-    /// missed `n` events; HS-010 re-fetches them by last-seen seq. `Err(RecvError::Closed)` means
+    /// missed `n` events; re-fetches them by last-seen seq. `Err(RecvError::Closed)` means
     /// the writer has stopped.
     pub async fn recv(&mut self) -> Result<Event, broadcast::error::RecvError> {
         self.receiver.recv().await
@@ -165,7 +165,7 @@ impl EventStream {
 }
 
 /// The pinned payload of one delta, as the writer's coalescer and the compactor's fold read it
-/// (HS-059, HS-060).
+///
 ///
 /// Field order is the contract's: serialising this spells a merged row exactly like the one a producer
 /// wrote (`{"message_id":…,"kind":…,"text":…}`, ADR-0018), so a replay cannot tell which rows were merged.
@@ -207,7 +207,7 @@ struct Open {
     deltas: usize,
 }
 
-/// Merge the consecutive deltas of one message and kind inside one commit's batch (HS-059).
+/// Merge the consecutive deltas of one message and kind inside one commit's batch.
 ///
 /// Spec item 15: "inside each 25 ms commit, consecutive deltas of the same kind and message become one row
 /// with one seq". A streaming agent emits far more deltas than the log should hold, and the transcript

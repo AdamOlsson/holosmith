@@ -1,4 +1,4 @@
--- HS-068: the host registry (schema 6). One row per machine this one knows about.
+-- the host registry (schema 6). One row per machine this one knows about.
 --
 -- Spec item 4 gives the registration its checks ("the URL must be http(s), the host a MagicDNS name or an address
 -- in 100.64.0.0/10, the port in an allowed range; redirects are not followed; and the `/api/health` reply must
@@ -6,13 +6,13 @@
 -- optional `hosts.toml` at startup and merges it into its hosts table (the file wins on conflicts)"). This is that
 -- table.
 --
--- `name` is the primary key because a name is the identity the operator picks and HS-069 forwards with
+-- `name` is the primary key because a name is the identity the operator picks and forwards with
 -- (`/<host>/<id>/*`), so a second registration of one name is that machine registered again — `POST /api/hosts` is
 -- an upsert on this key, and the merge's "the file wins" has one thing to compare. Two names may name one URL: an
 -- alias is not a conflict, and resolving it would be inventing which of the two rows the operator meant.
 --
 -- `url` is an **origin** (`https://box.tail1234.ts.net`, `http://100.100.1.2:8080`) rather than a free URL: the
--- probe asks `GET /api/health` at it and nothing else, and HS-069 appends the path it forwards. The column is TEXT
+-- probe asks `GET /api/health` at it and nothing else, and appends the path it forwards. The column is TEXT
 -- and the shape is `config::Origin`'s to refuse, as it already does for `control_origin` and `preview_origin`.
 --
 -- `reach` plus `last_error` is item 16's "a host that fails health is marked unreachable with the last error, not

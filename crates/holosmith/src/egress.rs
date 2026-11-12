@@ -1,4 +1,4 @@
-//! The egress proxy: the only route out of a session container (HS-037, spec item 2).
+//! The egress proxy: the only route out of a session container (spec item 2).
 //!
 //! Environment proxy variables are advisory, so item 2 moves enforcement to the network: a session's
 //! network is `--internal`, the proxy container is attached to the machine's `egress` network *and* to that
@@ -20,7 +20,7 @@
 //! Two things are deliberately *not* here. Bytes are counted and the host is logged per request
 //! ([`Record`]), but the content is not inspected: HTTPS is opaque to a `CONNECT` tunnel, which is why item
 //! 2 lists "every allow-listed host is an exfiltration channel" as an accepted risk. And a provider host is
-//! not on the list at all — the key proxy is what makes a model call work (HS-039), so that path never
+//! not on the list at all — the key proxy is what makes a model call work, so that path never
 //! passes through this container.
 //!
 //! The split below is the reason this module is testable without a daemon, a network or a browser: [`Rules`]
@@ -1043,7 +1043,7 @@ mod tests {
         // so no process holds port 0 — and a connect to it is refused at once. This was a bound-and-dropped ephemeral
         // port first, which is a race: another test in this binary binding that port between the drop and the
         // connect makes the connect *succeed* against a listener that never answers, and the read below waits
-        // forever. It cost HS-069's gate run fourteen minutes of a hung lib-test binary (`wchan` was
+        // forever. It cost the gate run fourteen minutes of a hung lib-test binary (`wchan` was
         // `skb_wait_for_more_packets`), so the port is deterministic now and the read is bounded.
         let dead_address = SocketAddr::from(([127, 0, 0, 1], 0));
         let tunnel = tokio::spawn(async move {
