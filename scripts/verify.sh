@@ -46,7 +46,13 @@
 # promotion over a `systemctl` stand-in that starts what `current` names and a `docker` stand-in that fakes only the two
 # product images — the step order, the images built from the candidate's digest once and never again, the backup, a
 # session the drain stopped coming back idle, and the last line naming the version and the backup — and a rollback whose
-# first restart serves nothing, so the poll gives up and the symlink goes back), and a Docker preflight that
+# first restart serves nothing, so the poll gives up and the symlink goes back), the rollback verb of HS-079 in four arms
+# (`case_rollback`: a tree with no `current`, one with a single release and a `--to` that names nothing refused before the
+# machine is asked anything, a database from a newer release refused before the drain with the link still where it was,
+# then a real rollback over a `systemctl` stand-in that records what `current` names as it restarts — the switch before
+# the restart, one restart, the session the drain stopped `idle` again, and a last arm whose restart serves nothing, so
+# the poll gives up, the sentence names the journal and the way back forward, and the link is **not** moved again; it
+# needs no Docker at all, because a rollback runs no smoke test and builds no image), and a Docker preflight that
 # refuses to start with one sentence naming the fix, with no CORS header
 # on any answer, and stopping on SIGTERM with exit 0. Each case prints `ok <case>` once it passes — a
 # case that printed SKIP withholds that line, so the log can never call a check that measured nothing a
@@ -508,6 +514,7 @@ serve_cases=(
   case_build
   case_smoke
   case_upgrade
+  case_rollback
   case_server_deploy
   case_server_service
   case_deploy_ssh
@@ -11389,6 +11396,256 @@ SHIM
     fail "$name/smoke/network" "a smoke network outlived the promotion"
   assertions=$((assertions + 2))
 
+  rm -rf "$root"
+}
+
+# HS-079: the rollback verb. Four arms, and the interesting ones need neither a daemon nor an image: a rollback runs no
+# smoke test, builds nothing and takes no backup, so what is measured here is the *release tree*, the drain, one
+# restart and one health answer. The `systemctl` stand-in does what systemd would (stop what runs, start what
+# `current` names) and records what `current` named at the moment it restarted, which is how "drains first, points
+# `current` at the previous release, restarts" becomes an order the artifact's own output and the tree prove.
+case_rollback() {
+  local name=case_rollback root="$repo_root/target/verify-rollback-$$"
+  local data="$root/data" projects="$root/projects" admin="$root/run/holosmith" config="$root/config.toml"
+  local bin="$root/bin" systemctl_log="$root/systemctl.argv" serve_log="$root/serve.log"
+  local pid_file="$root/serve.pid" restart_view="$root/restart.current"
+  local releases="$root/opt/holosmith/releases" link="$root/opt/holosmith/current"
+  local unit="$root/etc/systemd/system/holosmith.service"
+  local version tag digest status answer port line first second session schema
+  rm -rf "$root"
+  mkdir -p "$bin" "$data" "$projects" "$admin"
+
+  # The release every arm moves between: this tree's artifact, because a rollback reads its target's own
+  # `version --json` — the version the poll waits for and the schema the database is compared with.
+  digest="$(sha256sum "$artifact" | cut -d' ' -f1)"
+  version="$("$artifact" version | sed -n 's/^version //p')"
+  tag="$("$artifact" version | sed -n 's/^git_tag //p')"
+  [ -n "$version" ] && [ -n "$tag" ] || fail "$name/version" "the artifact reports no version or tag"
+  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "stub"\nrole = "server"\nprojects_root = "%s"\ndata_root = "%s"\nmin_free_gb = 0\nsession_disk_soft_gb = 0\nidle_stop_min = 0\npreview_listen = "127.0.0.1:0"\n' \
+    "$owner" "$projects" "$data" >"$config"
+
+  # `systemctl` is what systemd would be for this unit: it records its argv, records what `current` names, stops what
+  # runs and starts the binary the link names. `HS_BREAK_RESTART=1` is the last arm's injection — the service is
+  # stopped and nothing is started, so the rollback's own poll has nothing to find.
+  cat >"$bin/systemctl" <<SHIM
+#!/bin/sh
+{
+  printf 'systemctl'
+  for argument in "\$@"; do printf ' %s' "\$argument"; done
+  printf '\n'
+} >>"$systemctl_log"
+case "\$1" in
+  daemon-reload) exit 0 ;;
+  restart)
+    readlink -f "$link" >"$restart_view"
+    if [ -f "$pid_file" ]; then
+      old="\$(cat "$pid_file")"
+      kill "\$old" 2>/dev/null || true
+      for _ in \$(seq 1 100); do kill -0 "\$old" 2>/dev/null || break; sleep 0.05; done
+    fi
+    [ "\${HS_BREAK_RESTART:-0}" = 1 ] && exit 0
+    exe="\$(readlink -f "$link")/holosmith"
+    "\$exe" serve --config "$config" --admin-dir "$admin" >>"$serve_log" 2>&1 &
+    printf '%s\\n' "\$!" >"$pid_file"
+    exit 0
+    ;;
+esac
+exit 0
+SHIM
+  chmod 0755 "$bin/systemctl"
+
+  # ---- 1. the trees a rollback cannot go back in, and a `--to` that names nothing --------------------------------
+  # A machine that has never promoted: no `current` at all, so there is no release to go one back from.
+  status=0
+  answer="$(PATH="$bin:$PATH" "$artifact" --config "$config" rollback --root "$root/empty" 2>&1)" || status=$?
+  check "$name/none/exit" 1 "$status"
+  case "$answer" in
+    *"has never promoted"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/none/sentence" "the refusal does not say the machine never promoted: $answer" ;;
+  esac
+  [ ! -e "$root/empty" ] || fail "$name/none/tree" "a refused rollback wrote an install tree"
+
+  # One release, `current` on it: there is nothing behind it, and the sentence names the flag that could ask for one.
+  mkdir -p "$root/single/opt/holosmith/releases/only"
+  cp "$artifact" "$root/single/opt/holosmith/releases/only/holosmith"
+  ln -s releases/only "$root/single/opt/holosmith/current"
+  status=0
+  answer="$(PATH="$bin:$PATH" "$artifact" --config "$config" rollback --root "$root/single" 2>&1)" || status=$?
+  check "$name/only/exit" 1 "$status"
+  case "$answer" in
+    *"oldest release this tree holds"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/only/sentence" "the one-release refusal does not say it is the oldest: $answer" ;;
+  esac
+  check "$name/only/link" "releases/only" "$(readlink "$root/single/opt/holosmith/current")"
+
+  # The tree the served arms use: three releases, written in the order `one`, `two`, `three`, with `current` on the
+  # newest. The mtimes are set explicitly, because they are the tree's order — a tag is `git describe`'s answer and
+  # does not sort (`f2b3886-dirty` sorts above `v0.1.0`), so a name order would walk into a hash.
+  mkdir -p "$root/etc/systemd/system"
+  for line in one two three; do
+    mkdir -p "$releases/$line"
+    cp "$artifact" "$releases/$line/holosmith"
+    printf '%s  holosmith\n' "$digest" >"$releases/$line/holosmith.sha256"
+  done
+  touch -d @1700000001 "$releases/one"
+  touch -d @1700000002 "$releases/two"
+  touch -d @1700000003 "$releases/three"
+  ln -s releases/three "$link"
+  printf '[Unit]\nDescription=Holosmith server\n\n[Service]\nExecStart=%s/opt/holosmith/current/holosmith serve\nRestart=on-failure\n\n[Install]\nWantedBy=multi-user.target\n' \
+    "$root" >"$unit"
+  [ ! -s "$systemctl_log" ] || fail "$name/early/restart" "a refused rollback restarted the service: $(cat "$systemctl_log")"
+
+  # A tag that is not in the tree: the refusal lists the ones that are, so an operator can copy one out of it.
+  status=0
+  answer="$(PATH="$bin:$PATH" "$artifact" --config "$config" rollback --root "$root" --to nowhere 2>&1)" || status=$?
+  check "$name/to/exit" 1 "$status"
+  case "$answer" in
+    *"names no release in this tree"*"three, two, one"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/to/sentence" "the --to refusal does not list the tree in its own order: $answer" ;;
+  esac
+  check "$name/to/link" "releases/three" "$(readlink "$link")"
+
+  # ---- 2. a database from a newer release is refused before the drain, with the link where it was ----------------
+  schema="$("$artifact" version | sed -n 's/^schema_version //p')"
+  if [ -n "$schema" ] && command -v python3 >/dev/null 2>&1; then
+    python3 - "$data/app.db" "$schema" <<'PY'
+import sqlite3, sys
+path, newer = sys.argv[1], int(sys.argv[2]) + 1
+connection = sqlite3.connect(path)
+connection.execute(
+    "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL)"
+)
+for version in range(1, newer + 1):
+    connection.execute(
+        "INSERT OR REPLACE INTO schema_version (version, name, applied_at) VALUES (?, 'a release', 0)",
+        (version,),
+    )
+connection.commit()
+PY
+    status=0
+    answer="$(PATH="$bin:$PATH" "$artifact" --config "$config" rollback --root "$root" 2>&1)" || status=$?
+    check "$name/schema/exit" 1 "$status"
+    case "$answer" in
+      *"older than the database"*) assertions=$((assertions + 1)) ;;
+      *) fail "$name/schema/sentence" "the refusal does not name the schema: $answer" ;;
+    esac
+    # The acceptance's "with a clear explanation": the pre-line that would refuse it after a restart, and the rule
+    # that makes a rollback safe without a restore.
+    case "$answer" in
+      *"doctor --quick"*) assertions=$((assertions + 1)) ;;
+      *) fail "$name/schema/quick" "the refusal does not name the pre-line that would refuse it: $answer" ;;
+    esac
+    check "$name/schema/link" "releases/three" "$(readlink "$link")"
+    [ ! -s "$systemctl_log" ] || fail "$name/schema/restart" "a refused rollback restarted the service: $(cat "$systemctl_log")"
+    [ ! -s "$restart_view" ] || fail "$name/schema/view" "a refused rollback recorded a restart: $(cat "$restart_view")"
+    # The database the served arms use is this build's own: the boot below writes it.
+    rm -f "$data/app.db"
+  else
+    printf 'note %s: no python3 to make a database from a newer release, so the schema refusal was not measured\n' "$name"
+  fi
+
+  # Everything below needs a machine serving on the port the config names, so the origin is spelled to match it: a
+  # config's port does not re-derive `control_origin` (`--port 0` does).
+  port="$(free_port)"
+  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "stub"\nrole = "server"\ncontrol_listen = "127.0.0.1:%s"\ncontrol_origin = "http://127.0.0.1:%s"\nprojects_root = "%s"\nmin_free_gb = 0\nsession_disk_soft_gb = 0\nidle_stop_min = 0\npreview_listen = "127.0.0.1:0"\ndata_root = "%s"\n' \
+    "$owner" "$port" "$port" "$projects" "$data" >"$config"
+
+  # The machine, serving: the same argv the stand-in replays, so the rollback's drain socket is this run's own.
+  "$artifact" serve --config "$config" --admin-dir "$admin" >>"$serve_log" 2>&1 &
+  extra_pid=$!
+  printf '%s\n' "$extra_pid" >"$pid_file"
+  for _ in $(seq 1 200); do
+    (exec 3<>/dev/tcp/127.0.0.1/"$port") 2>/dev/null && break
+    kill -0 "$extra_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  # One idle session, which the drain stops and the boot after the restart has to bring back.
+  fetch_body "${name}_create" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1:$port" "Origin: http://127.0.0.1:$port" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-rollback-1" ||
+    fail "$name/create" "POST /api/sessions did not answer"
+  expect_status "${name}_create" "$(answer "${name}_create")" 202
+  session="$(sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p' "$WORK/responses/${name}_create.body")"
+  [ -n "$session" ] || fail "$name/create/id" "the response names no id: $(cat "$WORK/responses/${name}_create.body")"
+  for _ in $(seq 1 400); do
+    fetch "${name}_idle" GET "/api/sessions/$session" "Host: 127.0.0.1:$port" || true
+    case "$(answer "${name}_idle")" in
+      *'"status":"idle"'*) break ;;
+    esac
+    sleep 0.05
+  done
+  case "$(answer "${name}_idle")" in
+    *'"status":"idle"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/idle" "the session never reached idle: $(cat "$WORK/responses/${name}_idle.body")" ;;
+  esac
+
+  # ---- 3. the rollback: `current` moves back one release, and the machine serves it ------------------------------
+  status=0
+  PATH="$bin:$PATH" "$artifact" --config "$config" rollback --root "$root" --wait 30s \
+    >"$WORK/$name.rollback.out" 2>&1 || status=$?
+  check "$name/rollback/exit" 0 "$status"
+  if [ -f "$pid_file" ]; then extra_pid="$(cat "$pid_file")"; fi
+
+  # The steps, in the acceptance's order. Each line is printed by the step that does the work, so the order of the
+  # lines is the order of the work — and the recorded restart below backs the one part of it a line cannot.
+  first=0
+  for line in "target: " "unit: " "drain: drained" "current: " "restart: " "health: " "live: "; do
+    second="$(sed -n "/^rollback: $line/=" "$WORK/$name.rollback.out" | head -1)"
+    [ -n "$second" ] || fail "$name/order" "no 'rollback: $line' line: $(cat "$WORK/$name.rollback.out")"
+    [ "$second" -gt "$first" ] || fail "$name/order" "'rollback: $line' is out of order: $(cat "$WORK/$name.rollback.out")"
+    first="$second"
+    assertions=$((assertions + 1))
+  done
+  # The effects. One restart, and what `current` named when it ran: the switch is *before* the restart, which is what
+  # makes the newly started process the release the rollback chose.
+  check "$name/current" "releases/two" "$(readlink "$link")"
+  [ "$(grep -c '^systemctl restart holosmith.service$' "$systemctl_log")" -eq 1 ] ||
+    fail "$name/restarts" "the rollback did not restart the service exactly once: $(cat "$systemctl_log")"
+  check "$name/switch/before" "$root/opt/holosmith/releases/two" "$(cat "$restart_view" 2>/dev/null)"
+  # The drain stopped the session, and the boot the restart started brought it back — the acceptance's "sessions survive
+  # the rollback in `idle` or `stopped`, never `error`".
+  case "$(cat "$WORK/$name.rollback.out")" in
+    *"stopped: 1 session with reason server_restart"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/drain/session" "the drain did not stop the idle session: $(cat "$WORK/$name.rollback.out")" ;;
+  esac
+  for _ in $(seq 1 400); do
+    fetch "${name}_back" GET "/api/sessions/$session" "Host: 127.0.0.1:$port" || true
+    case "$(answer "${name}_back")" in
+      *'"status":"idle"'*) break ;;
+    esac
+    sleep 0.05
+  done
+  case "$(answer "${name}_back")" in
+    *'"status":"idle"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/back" "the session the drain stopped did not come back idle: $(cat "$WORK/responses/${name}_back.body")" ;;
+  esac
+  grep -q "^rollback: live: releases/two ($version, $tag), serving$" "$WORK/$name.rollback.out" ||
+    fail "$name/live" "the last line does not name the release that is serving: $(tail -3 "$WORK/$name.rollback.out")"
+  assertions=$((assertions + 1))
+
+  # ---- 4. a rollback whose own restart serves nothing says so loudly, and does not move the link again ----------
+  status=0
+  HS_BREAK_RESTART=1 PATH="$bin:$PATH" "$artifact" --config "$config" rollback --root "$root" --wait 30s \
+    >"$WORK/$name.unanswered.out" 2>&1 || status=$?
+  extra_pid=""
+  check "$name/unanswered/exit" 1 "$status"
+  case "$(cat "$WORK/$name.unanswered.out")" in
+    *"systemctl status holosmith.service"*"journalctl -u holosmith.service"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/unanswered/next" "the failure names no next step: $(tail -4 "$WORK/$name.unanswered.out")" ;;
+  esac
+  # The way back forward is the same switch, and the sentence names the release this one came from (two, which is now
+  # *newer* than the live one and is therefore legal for `--to`).
+  case "$(cat "$WORK/$name.unanswered.out")" in
+    *"--to two"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/unanswered/back" "the failure does not say how to go forward again: $(tail -4 "$WORK/$name.unanswered.out")" ;;
+  esac
+  check "$name/unanswered/current" "releases/one" "$(readlink "$link")"
+  [ "$(grep -c '^systemctl restart holosmith.service$' "$systemctl_log")" -eq 2 ] ||
+    fail "$name/unanswered/restarts" "the failed rollback did not restart the service once: $(cat "$systemctl_log")"
+
+  kill "$extra_pid" 2>/dev/null || true
+  extra_pid=""
   rm -rf "$root"
 }
 
