@@ -209,10 +209,11 @@ impl Report {
 /// Run the checks `depth` names, in the order the report prints them.
 ///
 /// The order is the operator's: the machine's init, then the three `serve` refuses on (with V2's merge trial
-/// beside git), then disk, Tailscale, the ports, the database and the installed paths' modes; `--full` appends the
-/// container questions. A **hub** is not asked the Docker or git questions at all — item 10 §6's `hub deploy` runs
-/// step 1 "without the Docker and git checks", because a hub runs no sessions — while disk, Tailscale, ports, the
-/// database and the permissions still belong to it (a hub has a data root too).
+/// beside git), then disk, Tailscale, the ports, the database, the release tree and the installed paths' modes;
+/// `--full` appends the container questions. A **hub** is not asked the Docker or git questions at all — item 10 §6's
+/// `hub deploy` runs step 1 "without the Docker and git checks", because a hub runs no sessions — while disk,
+/// Tailscale, ports, the database, the release tree and the permissions still belong to it (a hub has a data root and
+/// a release tree too).
 pub fn run(config: &Config, depth: Depth, tools: &Tools, machine: &dyn Machine) -> Report {
     let mut findings = vec![systemd(&tools.systemd)];
     let mut docker_ok = false;
@@ -544,9 +545,10 @@ fn release_tree(root: &Path, unit_path: &Path) -> Finding {
     let through = exe.as_ref() == Some(&tree.current().join(release::BINARY));
 
     // The pass every healthy machine answers: the link resolves, so say to what — the tag and the path, because the
-    // tag is what a `version` inside it prints and the path is what `systemctl status` would show.
-    if let Some(live) = tree.live() {
-        let tag = named.clone().unwrap_or_default();
+    // tag is what a `version` inside it prints and the path is what `systemctl status` would show. The tuple is why
+    // there is no `unwrap_or_default`: `live()` is `Some` only when the link named one of this tree's releases, so a
+    // resolvable tree always has a tag to name.
+    if let (Some(live), Some(tag)) = (tree.live(), named.clone()) {
         let resolved = std::fs::canonicalize(&live).unwrap_or(live);
         let sentence = match &exe {
             Some(exe) if through => format!(
@@ -571,9 +573,12 @@ fn release_tree(root: &Path, unit_path: &Path) -> Finding {
         return Finding::pass(Check::Release, sentence);
     }
 
-    // Everything below is a tree that does not resolve, so the sentence has to say which way it does not.
+    // Everything below is a tree that does not resolve, so the sentence has to say which way it does not — and
+    // whether `current` is a plain entry, because a *directory* named `current` is not replaced by `ln -sfn`.
+    let entry = std::fs::symlink_metadata(tree.current());
+    let plain = link.is_none() && entry.is_ok();
     let state = if link.is_none() {
-        match std::fs::symlink_metadata(tree.current()) {
+        match &entry {
             Ok(meta) if !meta.file_type().is_symlink() => format!(
                 "{} is a {} and not a symlink, and the layout is `releases/<tag>` with `current` a symlink",
                 tree.current().display(),
@@ -599,9 +604,15 @@ fn release_tree(root: &Path, unit_path: &Path) -> Finding {
     };
 
     if through {
-        // The remedy names a release that exists, so an operator can copy it out of the sentence. A tree with nothing
-        // to point at needs a deploy instead, which is the only command that writes the unit and the binary.
+        // The remedy names a release that exists, so an operator can copy it out of the sentence; a plain entry has to
+        // be removed first, because `ln -sfn` refuses a directory; and a tree with nothing to point at needs a deploy,
+        // which is the only command that writes the unit and the binary.
         let fix = match tree.history().first() {
+            Some(newest) if plain => format!(
+                "Replace it — `rm -rf {} && ln -sfn releases/{newest} {}`",
+                tree.current().display(),
+                tree.current().display()
+            ),
             Some(newest) => format!(
                 "Point it at a release that exists — `ln -sfn releases/{newest} {}`",
                 tree.current().display()
@@ -630,8 +641,9 @@ fn release_tree(root: &Path, unit_path: &Path) -> Finding {
         None => Finding::unknown(
             Check::Release,
             format!(
-                "{state}, and {} names no `ExecStart=` ({}): nothing here says what systemd would run, so this machine \
-                 has never been deployed — `holosmith server deploy` writes the unit and a promotion writes the tree",
+                "{state}, and {} names no `ExecStart=` ({}): there is no unit file to say what systemd would run, so \
+                 nothing here can be called live — `holosmith server deploy` writes the unit and a promotion writes \
+                 the tree",
                 unit_path.display(),
                 unit.as_ref()
                     .err()

@@ -591,6 +591,22 @@ path rule and the row's word are `web/test/push.test.ts`'s (`notificationPath` a
 `web/test/transcript.test.ts`'s (`awaySentence`/`isAwayCode` for the two upstream codes, `ownLabel` for this
 machine's own name, `AWAY_DETAIL` and `STREAM_LOST` for the away session page and a stream lost under it).
 
+…and since HS-080, **the release layout as an operator reads it**: `case_releases` is the case that needs no daemon, no
+`python3`, no database and no server — a release is "a copy of the artifact in a directory named by a tag", so its
+fixture is four `cp`s and four `touch -d @…`s — and it measures the acceptance bullet by bullet: `current` is a
+**relative** symlink (`readlink` is `releases/four`) with exactly one `ExecStart=` in the unit pointing through it;
+`version` reports the release directory the running file is in, from inside a release (`release two`), through
+`current` (`release four`, because the kernel resolves the link) and from `dist/` (`release -`), with the same fact in
+the json; and five `doctor --quick --root` runs, on a `role = "hub"` config so no daemon question is asked — a healthy
+tree (`release: pass:`, exit 0, the **resolved** path), a link naming a directory that is gone (`release: fail:`, exit
+1, and the sentence names the newest release that *does* exist — the fixture's unrecognised `releases/keepme` has a
+newer mtime, so the remedy is what proves `history()` skips it), `current` replaced by a regular file (`release:
+fail:`, "not a symlink"), a machine whose unit names a plain binary (`release: pass:`, exit 0, "does not execute"), and
+one with no unit and no tree (`release: unknown:`, exit 0). The prune itself is `case_upgrade`'s, because a prune only
+happens inside a promotion: its fixture gains two seeded releases with explicit mtimes and `keep_releases = 3`, and it
+asserts the printed line is the run's **last**, the one directory removed, the live release and the rollback target
+still standing, and the unrecognised directory untouched. ADR-0084.
+
 …and since HS-073, **`--ssh` deploys**: `case_deploy_ssh` measures the transport that carries a deploy to another
 machine, and it is built the only way this sandbox can build one — there is **no ssh key on this machine and no second
 machine**, so `ssh` is an `sh` stand-in on `PATH` that records every argv and runs the words after the host through
@@ -1513,17 +1529,19 @@ of this tree's releases`, or `names releases/<tag>` with no binary in it:
 
 ```console
 $ sudo holosmith doctor --quick | grep '^release'
-release: fail: /opt/holosmith/current names releases/v0.1.0, and /opt/holosmith/releases/v0.1.0/holosmith is not
-             there, and the unit's ExecStart (/opt/holosmith/current/holosmith) names it: systemd cannot start this
-             machine. point it at a release that exists — `ln -sfn releases/v0.1.0-3-gabc1234 /opt/holosmith/current`
+release: fail: /opt/holosmith/current names releases/v0.1.0, and /opt/holosmith/releases/v0.1.0/holosmith is not there, and the unit's ExecStart (/opt/holosmith/current/holosmith) names it: systemd cannot start this machine. Point it at a release that exists — `ln -sfn releases/v0.1.0-3-gabc1234 /opt/holosmith/current`
 ```
 
+That is one line in a terminal that does not wrap; the report writes each finding as a single line, so nothing here is
+pretty-printed. A `current` that is a plain file or a directory earns `rm -rf <root>/current && ln -sfn releases/<tag>
+<root>/current` instead, because `ln -sfn` refuses a directory.
+
 A machine that has never promoted is **not** that machine: its unit names the binary `server deploy` installed, so the
-broken link (or the absent one) is a `pass` whose sentence says the unit runs something else — and a machine with
-neither a unit nor a tree is `unknown`, because there is no fact about what is live. `server deploy`'s step 1 treats
-the failure as a remark rather than a refusal (`LINK_NOT_LIVE`), because step 5 rewrites the unit for the binary that
-run installs: a deploy is one of the two commands that **repairs** a broken tree, and refusing there would make the
-repair unreachable.
+broken link (or the absent one) is a `pass` whose sentence says the unit runs something else — and a machine whose unit
+file cannot be read is `unknown`, because there is nothing to say what systemd would run. `server deploy`'s step 1
+treats the failure as a remark rather than a refusal (`LINK_NOT_LIVE`), because step 5 rewrites the unit for the binary
+this run is running: a deploy is one of the two commands that **repairs** a broken tree, and refusing there would make
+the repair unreachable.
 
 ## The rollback: `holosmith rollback`
 

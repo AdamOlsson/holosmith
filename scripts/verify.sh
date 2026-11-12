@@ -11406,6 +11406,10 @@ SHIM
   grep -q '^upgrade: prune: kept 3 of 4 (keep_releases = 3); removed: releases/ancient1$' "$WORK/$name.run.out" ||
     fail "$name/prune/line" "the promotion did not prune: $(tail -3 "$WORK/$name.run.out")"
   assertions=$((assertions + 1))
+  # It is the *last* line, which is what "the promotion's last step" means: a prune before the health poll would print
+  # above `live:` and leave a failed promotion with a pruned tree.
+  check "$name/prune/last" "upgrade: prune: kept 3 of 4 (keep_releases = 3); removed: releases/ancient1" \
+    "$(tail -1 "$WORK/$name.run.out")"
   [ ! -e "$root/opt/holosmith/releases/ancient1" ] ||
     fail "$name/prune/removed" "the oldest release survived the prune: $(ls "$root/opt/holosmith/releases")"
   assertions=$((assertions + 1))
@@ -11686,10 +11690,15 @@ PY
 # four `cp`s and four mtimes, and everything this case measures is a file the artifact itself answers. The tree's own
 # arm — the prune — is `case_upgrade`'s, because a prune only happens inside a promotion.
 #
+# `role = "hub"` is what keeps the five `doctor` runs free of the daemon: a hub is asked no Docker, git or merge
+# question (item 10 §6), which is why this case needs no `_ping` shim and no `python3` — every other daemon-free case
+# either uses `fake_docker_ping` or is a hub for the same reason, and a case whose `exit 0` arms went red on a machine
+# with no daemon would be measuring the host instead of the tree.
+#
 # Three of the five assertions that matter are the acceptance's bullets 1, 2 and 3 read off the tree (`current` is a
 # **relative** symlink, the unit's `ExecStart` goes through it, `version` names the directory the running file is in),
 # and the fourth is bullet 5: `doctor --quick --root` in both arms of its release finding, plus the two arms where the
-# answer is "this machine does not execute through the link" and "nothing has been deployed here".
+# answer is "this machine does not execute through the link" and "there is no unit to say what it runs".
 case_releases() {
   local name=case_releases root="$repo_root/target/verify-releases-$$"
   local tree="$root/opt/holosmith" releases="$root/opt/holosmith/releases" link="$root/opt/holosmith/current"
@@ -11720,8 +11729,9 @@ case_releases() {
   printf '[Unit]\nDescription=Holosmith server\n\n[Service]\nExecStart=%s/current/holosmith serve\nRestart=on-failure\n\n[Install]\nWantedBy=multi-user.target\n' \
     "$tree" >"$unit"
   chmod 0644 "$unit"
-  # The config `--root` reads: the **installed** paths, because `--root` prefixes them (`server deploy --root`'s rule).
-  printf 'owner = "%s"\nrole = "server"\nbackend = "stub"\ncontrol_listen = "127.0.0.1:0"\npreview_listen = "127.0.0.1:0"\nmin_free_gb = 0\nsession_disk_soft_gb = 0\nidle_stop_min = 0\nkeep_releases = 2\n' \
+  # The config `--root` reads: the **installed** paths, because `--root` prefixes them (`server deploy --root`'s rule),
+  # and a hub role so the `doctor` runs ask no daemon question.
+  printf 'owner = "%s"\nrole = "hub"\nbackend = "stub"\ncontrol_listen = "127.0.0.1:0"\npreview_listen = "127.0.0.1:0"\nmin_free_gb = 0\nsession_disk_soft_gb = 0\nidle_stop_min = 0\nkeep_releases = 2\n' \
     "$owner" >"$config"
   chmod 0644 "$config"
 

@@ -125,11 +125,11 @@ const WRONG_MODE: &str = "; a wrong mode or owner in the install tree is what st
 ///
 /// `doctor --quick` fails it on purpose: the unit runs `doctor --quick` as `ExecStartPre`, and a `current` the unit
 /// executes through that resolves to nothing is a boot that cannot happen. But a deploy is one of the two commands
-/// that can **repair** it — step 5 renders the unit for the binary this run installs whenever `Release::live` names
+/// that can **repair** it — step 5 renders the unit for the binary this run is running whenever `Release::live` names
 /// nothing, so the machine boots again on a plain path — and failing at step 1 would make that repair unreachable,
 /// exactly ADR-0058's argument for `Perms` one finding over.
 const LINK_NOT_LIVE: &str = "; the unit's `ExecStart` resolves through a `current` that is not live — step 5 rewrites \
-                             the unit to the binary this run installs, which is what makes the machine boot again";
+                             the unit to the binary this run is running, which is what makes the machine boot again";
 
 /// The remark a `--root` install carries where a system one names its service user: the half of step 2 no
 /// unprivileged tree can have.
@@ -664,19 +664,22 @@ pub fn run_as(
     report
 }
 
-/// Step 1: `doctor --quick`'s list, with one finding downgraded.
+/// Step 1: `doctor --quick`'s list, with three findings downgraded.
 ///
-/// Every non-`ports` failure stops the deploy **with that finding's own sentence, verbatim**, so `serve`'s refusal,
+/// Every other failure stops the deploy **with that finding's own sentence, verbatim**, so `serve`'s refusal,
 /// `doctor`'s line and this step's failure cannot say different things about a machine (ADR-0028, ADR-0054).
 ///
-/// **`ports` and `perms` are the two divergences, and both are recorded rather than discovered.** `doctor
+/// **`ports`, `perms` and `release` are the three divergences, and all three are recorded rather than discovered.**
+/// `doctor
 /// --quick` fails a held port on purpose: its two moments are *before a start* and, through `--full`, *after one*.
 /// `deploy` is the one caller that legitimately runs on a machine that is already serving, because the spec
 /// promises that re-running is safe — so a held port becomes a remark on this line and the run continues, while
 /// `doctor`'s own exit code is unchanged. Without that, the second deploy on a working server would report a
 /// failure that is not one. `perms` is the same shape one finding later: `serve` refuses on a wrong mode through
 /// `ExecStartPre`, but the deploy *repairs* one, so refusing here would make step 2's chmod and chown actions
-/// unreachable (ADR-0058).
+/// unreachable (ADR-0058). `release` is the third for that same reason, one step later: a `current` that does not
+/// resolve is a boot that cannot happen, and step 5 writes the unit for the binary this run is running whenever
+/// `Release::live` names nothing — refusing at step 1 would make the repair unreachable too (HS-080, ADR-0084).
 fn preflight(config: &Config, tools: &doctor::Tools, machine: &dyn Machine) -> Line {
     let report = doctor::run(config, Depth::Quick, tools, machine);
     let mut findings = report.findings;

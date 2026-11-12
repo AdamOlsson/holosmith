@@ -113,9 +113,9 @@ One function, four arms, and the verdict is not "is the tree tidy" but **"can sy
 | state | outcome | sentence |
 | --- | --- | --- |
 | `current` resolves to `releases/<tag>/holosmith` | **pass** | the tag, and the **resolved** path (`std::fs::canonicalize`), plus whether the unit executes through it |
-| it does not resolve, and the unit's `ExecStart` names this tree's `current/holosmith` | **fail** | which way it does not (missing / not a symlink / names something outside `releases/<tag>` / names a tag with no binary) and the hand fix, `ln -sfn releases/<newest> <root>/current` |
-| it does not resolve, and the unit runs something else (or there is no unit file) | **pass** | the state, and that the unit's `ExecStart` names another program, so nothing here is executed |
-| no unit file **and** no release tree | **unknown** | nothing has been deployed here |
+| it does not resolve, and the unit's `ExecStart` names this tree's `current/holosmith` | **fail** | which way it does not (missing / not a symlink / names something outside `releases/<tag>` / names a tag with no binary) and the hand fix, `ln -sfn releases/<newest> <root>/current` — or `rm -rf` first when `current` is a plain entry, because `ln -sfn` refuses a directory |
+| it does not resolve, and the unit's `ExecStart` names another program | **pass** | the state, and that the unit runs something else, so nothing here is executed |
+| it does not resolve, and no `ExecStart=` can be read (no unit file, or one without the line) | **unknown** | the state, and that there is no unit file to say what systemd would run |
 
 The failure is deliberate, and the argument is the pre-line's own: `ExecStartPre=<exe> doctor --quick` runs the binary
 the unit's `ExecStart` names, so a `current` that does not resolve is a machine systemd **cannot exec at all** — the boot
@@ -127,7 +127,7 @@ every machine, which is the same argument ADR-0054 makes about `--quick` in gene
 
 **`deploy`'s step 1 exempts `Check::Release`** from refusing, beside `Ports` and `Perms`, and for their reason one
 finding over (ADR-0058): a broken `current` is a state step 5 **repairs**. `Release::live(target)` names nothing when
-the link does not resolve, so step 5 renders the unit for the binary this run installs — the machine boots again on a
+the link does not resolve, so step 5 renders the unit for the binary this run is running — the machine boots again on a
 plain path — and a refusal at step 1 would make that repair unreachable. The line gains one clause naming it
 (`LINK_NOT_LIVE`). `serve` is unaffected: it refuses on `preflight::check`'s three, never on this list.
 
@@ -148,13 +148,15 @@ finding and the deploy agree rather than adding a third rule. And no database is
 - **`case_releases`** (new; no daemon, no `python3`, no `SKIP` at all): a hand-built tree of four releases with explicit
   mtimes plus a directory the tree does not recognise and a stray file; the **relative** link; the unit's `ExecStart`
   through `current`; `version` from inside `releases/two/holosmith`, through `current/holosmith`, and from `dist/`
-  (`release two`, `release four`, `release -`) plus the json key; and four `doctor --quick` runs — the healthy tree
-  (`release: pass:`, exit 0, the resolved path), a link naming a directory that is gone (`release: fail:`, exit 1, the
-  hand fix), `current` replaced by a regular file (`release: fail:`, "not a symlink"), and a machine with no tree whose
-  unit names a plain binary (`release: pass:`, exit 0).
+  (`release two`, `release four`, `release -`) plus the json key; and five `doctor --quick` runs, on a `role = "hub"`
+  config so that no daemon question is asked — the healthy tree (`release: pass:`, exit 0, the resolved path), a link
+  naming a directory that is gone (`release: fail:`, exit 1, the hand fix), `current` replaced by a regular file
+  (`release: fail:`, "not a symlink"), a machine whose unit names a plain binary (`release: pass:`, exit 0), and a
+  machine with no unit and no tree (`release: unknown:`, exit 0).
 - **`case_upgrade`** grows the prune arm, because a prune only happens inside a promotion and that case already has the
   daemon one needs: two old releases with explicit mtimes, `keep_releases = 3`, and after the promotion the printed
-  line, the one directory removed, and the live release and the rollback target still there.
+  line — asserted to be the **last** line of the run, which is what "step 8" means — the one directory removed, the
+  live release and the rollback target still there, and the unrecognised directory untouched.
 - **`cargo test`**: `tests/release.rs` (a binary run from a release directory and through `current` reports the
   directory, one outside reports `-`), `src/release.rs`'s own tests (the reservation, the exact count, the unrecognised
   directory, the second prune, the function's floor, and `running_tag`'s arms), `tests/upgrade.rs` (a successful

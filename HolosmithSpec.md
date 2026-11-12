@@ -346,14 +346,14 @@ Running `holosmith server deploy` and `holosmith hub deploy` on the same machine
 | `holosmith hub deploy [--ssh user@host] [--binary PATH] [--root DIR] [--dry-run]` | Installs and starts a hub; `--root` builds the five steps' installed paths under `DIR`, as the invoking user |
 | `holosmith hub host add <name> <url>`, `list`, `remove <name> [--force]` | Manages the registry from the CLI, with the same checks as `POST /api/hosts`; `--force` is the API's `?force=true` for a row that names this machine while it has live sessions |
 | `holosmith key set <provider>`, `list`, `remove` | Stores provider API keys for the key proxy; the key is read from stdin, never from arguments |
-| `holosmith doctor [--quick or --full]` | Preflight checks and self-tests |
+| `holosmith doctor [--quick or --full] [--root DIR]` | Preflight checks and self-tests; `--root` examines an install tree instead of this machine's own paths |
 | `holosmith status` | Role, version, uptime, session count, proxies, last health of registered machines — the registry row's own, as old as the boot; `status` makes no live hop |
 | `holosmith logs [-f] [--session ID]` | Server log from journald, or a session's `session.log` |
 | `holosmith upgrade <binary>` and `holosmith rollback` | The promotion pipeline and rollback from item 10 |
 | `holosmith drain [--wait 10m]` | The drain from item 10 |
 | `holosmith config show`, `edit`, `validate` | Config handling; validate rejects unknown keys |
 | `holosmith uninstall [--purge]` | Removes unit, proxies and networks; `--purge` also removes data |
-| `holosmith version` | Version, git tag, pinned pi version, schema version |
+| `holosmith version` | Version, git tag, the release directory the running file is in, pinned pi version, schema version |
 
 Internal subcommands, used inside containers: `holosmith proxy egress`, `holosmith proxy key`, `holosmith container snapshot` (the `hs-snapshot` logic from item 9) and `holosmith container fake-pi` (replays the recorded session for tests).
 

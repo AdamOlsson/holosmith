@@ -401,6 +401,19 @@ fn the_release_line_reports_the_resolved_path_and_the_symlink_s_health() {
     );
     std::fs::remove_file(release.current()).expect("the file is removable");
 
+    // 3b. A *directory* named `current`: the same failure, and the remedy has to remove it first — `ln -sfn` refuses
+    // a directory, and "one actionable line per failure" means the line is the command that works.
+    std::fs::create_dir_all(release.current()).expect("a directory named current");
+    let report = doctor::run(&config, Depth::Quick, &tools, &FakeMachine::healthy());
+    let directory = finding(&report, Check::Release);
+    assert_eq!(directory.outcome, Outcome::Fail, "{}", directory.sentence);
+    assert!(
+        directory.sentence.contains("is a directory") && directory.sentence.contains("rm -rf"),
+        "the failure's remedy is not the command that replaces a directory: {}",
+        directory.sentence
+    );
+    std::fs::remove_dir_all(release.current()).expect("the directory is removable");
+
     // 4. The same broken tree on a machine whose unit names a plain binary: nothing here is executed, so the broken
     // link is a remark and not a refusal — the first deploy of every machine is exactly this state.
     std::fs::write(
