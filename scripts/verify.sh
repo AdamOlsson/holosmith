@@ -10047,6 +10047,10 @@ docker_host = "$docker_host"
 agent_image = "$image"
 min_free_gb = 1
 EOF
+  # 0644 because this is the file `server deploy` installs, and `perms` compares the config `--config` names against
+  # it. A redirect under this shell's umask is 0664, so a case that hands this file to `doctor` would be measuring the
+  # shell rather than the machine the deploy leaves.
+  chmod 0644 "$path"
 }
 
 # Every entry under a directory, sorted, each with its mode and size: what "the second run changed nothing" is
@@ -10255,6 +10259,11 @@ case_doctor_quick() {
   # and `backend = "stub"` so nothing in this case can start a container.
   printf 'owner = "%s"\nrole = "server"\nbackend = "stub"\ncontrol_listen = "127.0.0.1:%s"\npreview_listen = "127.0.0.1:%s"\ndata_root = "%s"\ndocker_host = "unix://%s/docker.sock"\nmin_free_gb = 1\n' \
     "$owner" "$control" "$preview" "$root/data" "$root" >"$WORK/config-doctor-quick.toml"
+  # `chmod` for the same reason `install -d -m 0755` made the data root: `perms` compares the config against the
+  # 0644 `server deploy` writes, and this shell's umask leaves a redirect at 0664. The fixture has to be the machine
+  # the deploy leaves. The file is the one `--config` names, so the check now really measures it — a config the deploy
+  # would have installed is the only shape this case may hand `doctor`.
+  chmod 0644 "$WORK/config-doctor-quick.toml" || fail "$name/chmod" "could not set the config to 0644"
 
   status=0
   "$artifact" doctor --quick --config "$WORK/config-doctor-quick.toml" --root "$root" \
@@ -12129,6 +12138,7 @@ docker_host = "unix:///var/run/docker.sock"
 agent_image = "agent-image:$version"
 min_free_gb = 1
 EOF
+  chmod 0644 "$path"
 }
 
 # image_proxy_ask <address> <port> <request line> [<header line>]: one request to a proxy running in a container,
@@ -13159,6 +13169,9 @@ case_doctor_full() {
   # `doctor` at this case's tree, its four install paths being the root's (ADR-0086 D1).
   printf 'owner = "%s"\nrole = "server"\nbackend = "docker"\nmax_live_sessions = 1\nprojects_root = "%s"\nagent_image = "%s"\ndata_root = "%s"\ncontrol_listen = "127.0.0.1:%s"\npreview_listen = "127.0.0.1:%s"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
     "$owner" "$root/projects" "$image" "$data" "$control" "$preview" >"$WORK/config-doctor-full.toml"
+  # 0644 for the data root's reason above: `perms` compares the config against what `server deploy` writes, and a
+  # redirect under this shell's umask is 0664. The file `--config` names is the file the check reads.
+  chmod 0644 "$WORK/config-doctor-full.toml" || fail "$name/chmod" "could not set the config to 0644"
   # Its own boot, **on the config's own ports**: `start_serve` always passes `--port 0`, which would leave the
   # config naming a port nothing listens on and `doctor`'s port check asking about the wrong address. The banner
   # is what says serve is up (the proxies and the boot's self-test run before it), and the loop gives the
