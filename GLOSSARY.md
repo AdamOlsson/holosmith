@@ -44,23 +44,33 @@ _Avoid_: Mode, type
 A machine that runs sessions. Has Docker, git and a projects root.
 _Avoid_: Worker, agent host, runner
 
+**Install**:
+The one-command first setup: `holosmith server deploy` or `holosmith hub deploy`, which writes the **config** and the
+`~/.config/systemd/user/holosmith.service` unit, makes the state at the **root**, sets `loginctl enable-linger` so the
+daemon is a boot service, and then reports what it checked — all as the operator's own account, because a **machine**
+is not a service (ADR-0088). `--dry-run` is the read alone and re-running it is the whole recovery, which is what makes
+one verb enough: there is no account to create, no ownership to hand over and no file root has to write. It is done
+when a user unit answers `/api/health`; **Uninstall** is its inverse.
+_Avoid_: Setup, provisioning, bootstrap, onboarding, install tree (that is the **root** and the **release tree**,
+neither of which is an install)
+
 **Service user**:
-The `holosmith` system user a machine runs `serve` as, and the owner of its **root**. The operator creates it once,
-with `useradd --system --create-home --home-dir <root> --shell /usr/sbin/nologin holosmith`, because creating an
-account is root's and a deploy never escalates (ADR-0086). Its home **is** the root, so `~holosmith` and the data
-root are one path and a `git` run by the service user writes its credentials inside the tree it is backing up. A
-**server** machine's only membership is the `docker` group (`usermod -aG docker holosmith`), added by the operator;
-a **hub** joins no group, because it drives no daemon. Its machine names are `deploy::SERVICE_USER`,
-`deploy::SERVICE_GROUP` and the uid every session container is started with (ADR-0087).
+Retired. `holosmith` was the system account a machine ran `serve` as and the owner of its **root** (ADR-0086), and
+ADR-0088 deleted it together with every command that made it: a **machine** is the operator's own account — one uid,
+no `useradd`, no `chown` and no `sudo -u`. A sentence that needs one is describing the **install** ADR-0088 replaced;
+until the deploy that removes the account lands, this entry is the target rather than the build.
 _Avoid_: Service account, holosmith user, deploy user, run-as user
 
 **Root**:
-The one directory a machine's Holosmith lives in: `HOLOSMITH_ROOT`, default `/var/lib/holosmith`, owned by the
-**service user** 0700. It holds four children — the config the deploy renders, the **data root**'s directory, the
-**release tree** and the `projects` the sessions are made from — so it is one path to back up and one to delete
-(ADR-0086). `--root DIR` is the same value's flag form: the tree the gate or an operator owns, not a second privilege
-mode. The unit's `ExecStart` names the config explicitly, so the daemon never resolves `~` and never decides the root
-from who ran it.
+The one directory a machine's Holosmith state lives in: `HOLOSMITH_ROOT`, default `~/.local/share/holosmith`, 0700 and
+owned by the account that runs the daemon — the operator's own, because a machine is not a service (ADR-0088). It
+holds three children — the **data root**'s directory, the **release tree** and the `projects` the sessions are made
+from — so it is one path to back up and one to delete, and the config is deliberately not one of them: it is
+`~/.config/holosmith.toml`, because that is the one file in an install a person edits, and the root is the state a
+backup carries. `--root DIR` is the same value's flag form: the tree the gate or an operator owns, not a second
+privilege mode. The unit's `ExecStart` names the config explicitly, so the daemon never resolves `~` and never decides
+the root from who ran it. The default here is ADR-0088's; this build still ships `/var/lib/holosmith` with the config
+inside it, so until the deploy that changes both lands this entry is the target rather than the build.
 _Avoid_: Install dir, home dir, prefix, install tree (when the whole root is meant — say root)
 
 **Hub**:
@@ -69,18 +79,17 @@ _Avoid_: Controller, orchestrator, gateway
 
 **Hub deploy**:
 `holosmith hub deploy`: the deploy's steps **1, 2, 5 and 6**, with 3 and 4 `skipped` — a hub builds no images and
-starts no proxies, because it runs no containers — and step 2's service user joining no group. It is one **deploy
-half** of the same six-step command, so it has `--root` and `--dry-run` with the same meanings a server's has, and
-re-running it is the whole recovery procedure. Its machine names are `deploy::{Kind::Hub, run_as, union}` and
-`commands::hub::run_deploy`.
+starts no proxies, because it runs no containers. It is one **deploy half** of the same six-step command, so it has
+`--root` and `--dry-run` with the same meanings a server's has, and re-running it is the whole recovery procedure. Its
+machine names are `deploy::{Kind::Hub, run_as, union}` and `commands::hub::run_deploy`.
 _Avoid_: Hub install, hub setup, `server deploy --hub`
 
 **Deploy half**:
-Which part of a machine one `deploy` run installs: the **server** half (all six steps, the daemon's group, both
-proxies) or the **hub** half (steps 1, 2, 5, 6 and 7, no group, no proxy). A run **unions** its half with the role the
-config already carries and writes the union into the `config.toml` step 2 installs, so `server deploy` then `hub
+Which part of a machine one `deploy` run installs: the **server** half (all six steps, both proxies) or the **hub**
+half (steps 1, 2, 5 and 6, no proxy). A run **unions** its half with the role the config already carries and writes the
+union into the `config.toml` step 2 installs, so `server deploy` then `hub
 deploy` on one machine — in either order — leaves a machine whose config says `both`; nothing is refused over a role.
-Steps 1 and 7 ask their checks about **the half this run installs** rather than the union, which is why a hub deploy
+Steps 1 and 6 ask their checks about **the half this run installs** rather than the union, which is why a hub deploy
 asks no Docker and no git question even on a `both` machine, while the unit step follows the **union** because a unit
 describes the machine that will boot. Its machine names are `deploy::{Kind, union, run_as}`.
 _Avoid_: Partial deploy, role upgrade, half-install (a **Role** is what a machine holds; a deploy half is what one run
@@ -1096,9 +1105,9 @@ prints the read alone. Each one reports one of five words — **satisfied**, **n
 resume command the last line). `skipped` has had two reasons in its life and both are "no body to run here": a story
 that still owned the body (nothing since) and a **deploy half** with no work for the step
 (a hub's `images` and `proxies`), which is why a hub run's tally reads `4 satisfied, 0 changed, 2 skipped, 0 failed`.
-A step's **apply never escalates**: what root would have done is printed as exact argv and verified by the next run
-(ADR-0086). Its machine names are `deploy::DeployStep` and `DeployStep::ALL`, and `--root` is the **root** the step's
-paths are built under. It is not `Step`.
+A step's **apply never escalates**: nothing an install writes is root's, so what a step cannot do it prints as
+exact argv and verifies on the next run (ADR-0086, ADR-0088). Its machine names are `deploy::DeployStep` and
+`DeployStep::ALL`, and `--root` is the **root** the step's paths are built under. It is not `Step`.
 _Avoid_: Install step, deploy phase, stage, deployment
 
 **Image build**:

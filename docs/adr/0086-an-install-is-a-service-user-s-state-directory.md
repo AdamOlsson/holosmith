@@ -1,5 +1,9 @@
 # An install is a service user's state directory, and the deploy never escalates
 
+**Superseded in part by ADR-0088:** D1–D4 are reversed — a machine is the operator's own account, so the state is
+`~/.local/share/holosmith`, the config is `~/.config/holosmith.toml`, and the daemon is a user unit whose sandbox
+carries fewer directives. D5 stands.
+
 An install today is the machine's own paths — `/etc/holosmith`, `/var/lib/holosmith`, `/run/holosmith`,
 `/opt/holosmith`, `/etc/systemd/system/holosmith.service` — written by `server deploy` as root, one
 `sudo`-prefixed child per file (ADR-0056), plus `useradd`, `usermod -aG docker` and three `chown`s to hand the tree
