@@ -37,7 +37,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use crate::config::Config;
-use crate::deploy::{self, Target};
+use crate::deploy::{self, Root};
 use crate::promote::{self, DrainAnswer, Steps};
 use crate::release::{self, Release};
 use crate::version::VersionInfo;
@@ -56,9 +56,9 @@ pub struct Options {
 }
 
 /// The whole rollback: what it was asked for, and the exit code its endings carry.
-pub fn run(config: &Config, target: &Target, options: &Options, steps: &dyn Steps) -> ExitCode {
+pub fn run(config: &Config, root: &Root, options: &Options, steps: &dyn Steps) -> ExitCode {
     let tools = deploy::Tools::default();
-    match execute(config, target, options, steps, &tools) {
+    match execute(config, root, options, steps, &tools) {
         Ok(()) => ExitCode::SUCCESS,
         Err(said) => {
             eprintln!("holosmith: rollback: {said}");
@@ -70,12 +70,12 @@ pub fn run(config: &Config, target: &Target, options: &Options, steps: &dyn Step
 /// [`run`] with the programs as a parameter, so a test can name its own `systemctl`.
 pub fn execute(
     config: &Config,
-    target: &Target,
+    root: &Root,
     options: &Options,
     steps: &dyn Steps,
     tools: &deploy::Tools,
 ) -> Result<(), String> {
-    let release = Release::of(target);
+    let release = Release::of(root);
     let current = live(&release)?;
     let tag = choose(&release, &current, options.to.as_deref())?;
     let binary = release.binary(&tag);
@@ -103,7 +103,7 @@ pub fn execute(
     // 3. The unit. A rollback restarts a service, so a machine without a unit is one that has not been deployed; and a
     //    unit whose `ExecStart` does not go through `current` is one the switch cannot reach (`write_unit` compares the
     //    bytes, so a promoted machine writes nothing here).
-    let unit = target.unit_path();
+    let unit = root.unit();
     if !unit.is_file() {
         return Err(format!(
             "{} is not there: a rollback restarts the unit systemd runs, so this machine has to have been deployed \
@@ -111,12 +111,12 @@ pub fn execute(
             unit.display()
         ));
     }
-    promote::write_unit(target, config, &release, "rollback")
+    promote::write_unit(root, config, &release, "rollback")
         .map_err(|said| format!("{said} — nothing was drained and nothing was switched"))?;
 
     // 4. The drain. From here on the machine is draining until it is restarted, so every refusal below says so
     //    (`promote::draining`, one clause for both verbs).
-    match steps.drain(&target.admin_dir(), options.wait) {
+    match steps.drain(&crate::config::admin_dir(&config.data_root), options.wait) {
         DrainAnswer::Drained => println!("rollback: drain: drained"),
         // A promotion refuses this (`DrainAnswer::Already`); a rollback joined the drain instead, because a machine
         // left draining is a machine this verb exists for (ADR-0083 D4).
@@ -319,12 +319,12 @@ mod tests {
     /// Each call gets its own directory: the tests in this module run in parallel threads of one process, so a name
     /// made of a constant and the pid is a scratch directory four tests share — and then one test's `world` wipes
     /// another's mid-run (measured: it reddened the gate once as "holds <dir> (no release at all)").
-    fn world(tags: &[&str]) -> (TempDir, Target, Release) {
+    fn world(tags: &[&str]) -> (TempDir, Root, Release) {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let root = TempDir::new(&format!("unit-{seq}"));
-        let target = Target::resolve(Some(root.0.clone()));
-        let release = Release::of(&target);
+        let dir = TempDir::new(&format!("unit-{seq}"));
+        let root = Root::resolve(Some(dir.0.clone()));
+        let release = Release::of(&root);
         std::fs::create_dir_all(release.releases()).expect("a release tree");
         for (at, tag) in tags.iter().enumerate() {
             let dir = release.dir_of(tag);
@@ -340,7 +340,7 @@ mod tests {
         if let Some(newest) = tags.last() {
             release.switch(newest).expect("the link is written");
         }
-        (root, target, release)
+        (dir, root, release)
     }
 
     #[test]

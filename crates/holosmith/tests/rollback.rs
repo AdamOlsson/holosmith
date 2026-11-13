@@ -18,7 +18,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use holosmith::config::Config;
-use holosmith::deploy::Target;
+use holosmith::deploy::Root;
 use holosmith::http::health::Answer;
 use holosmith::images::{self, Log};
 use holosmith::promote::{self, DrainAnswer, Steps};
@@ -30,6 +30,19 @@ use support::TempDir;
 
 /// The window every test polls with: short enough that a poll which gives up does so now.
 const WINDOW: Duration = Duration::from_millis(60);
+
+/// Hold this for the whole body of a test here: one test at a time.
+///
+/// The same trap `tests/doctor.rs` documents: `exec` of a file any process holds open for writing fails with
+/// `ETXTBSY`, and a fork anywhere in this binary inherits the descriptor three lines earlier opened. Every test here
+/// writes an executable into a release tree and then runs one through `version --json`, so serialising each whole
+/// body is the whole fix — and the failure it prevents reads as "this machine cannot run the release", which is the
+/// wrong cause for the right rejection.
+fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// The shipped artifact, or `None` on a tree that has not been built.
 fn artifact() -> Option<PathBuf> {
@@ -112,7 +125,7 @@ impl Steps for Recorder {
         self.drain.clone()
     }
 
-    fn restart(&self, _systemctl: &Path) -> Result<(), String> {
+    fn restart(&self, _tools: &holosmith::deploy::Tools) -> Result<(), String> {
         let target = std::fs::read_link(&self.link)
             .map(|target| target.display().to_string())
             .unwrap_or_else(|_| "no current".to_string());
@@ -153,7 +166,7 @@ struct World {
     /// Held for its `Drop`: the tree under it is this test's, and removing it at the end is the cleanup.
     _dir: TempDir,
     config: Config,
-    target: Target,
+    root: Root,
     info: holosmith::version::VersionInfo,
 }
 
@@ -181,8 +194,8 @@ fn world(label: &str) -> Option<World> {
     .expect("a fresh database opens");
     drop(database);
 
-    let target = Target::resolve(Some(dir.file("root")));
-    let release = Release::of(&target);
+    let root = Root::resolve(Some(dir.file("root")));
+    let release = Release::of(&root);
     let info = promote::ask_version(&artifact).expect("the artifact answers `version --json`");
     let digest = images::digest(&artifact).expect("the artifact is readable");
     // Oldest first, each written one second after the one before it, so the tree's order is the test's rather than the
@@ -203,15 +216,15 @@ fn world(label: &str) -> Option<World> {
     }
     release.switch("three").expect("the newest is live");
     // The unit a deploy writes, through `current`: `deploy::unit_text` is the one writer of these bytes.
-    let unit = target.unit_path();
+    let unit = root.unit();
     std::fs::create_dir_all(unit.parent().expect("the unit has a directory"))
         .expect("the unit's directory is creatable");
     std::fs::write(
         &unit,
         holosmith::deploy::unit_text(
             &release.current().join(holosmith::release::BINARY),
-            target.privileged(),
             config.role,
+            &root,
         ),
     )
     .expect("the unit is writable");
@@ -219,7 +232,7 @@ fn world(label: &str) -> Option<World> {
     Some(World {
         _dir: dir,
         config,
-        target,
+        root,
         info,
     })
 }
@@ -235,7 +248,7 @@ fn options(to: Option<&str>) -> Options {
 fn execute(world: &World, options: &Options, steps: &Recorder) -> Result<(), String> {
     rollback::execute(
         &world.config,
-        &world.target,
+        &world.root,
         options,
         steps,
         &holosmith::deploy::Tools::default(),
@@ -243,15 +256,12 @@ fn execute(world: &World, options: &Options, steps: &Recorder) -> Result<(), Str
 }
 
 fn link(world: &World) -> Option<PathBuf> {
-    Release::of(&world.target).link()
+    Release::of(&world.root).link()
 }
 
 /// A test's recorder, pointed at the tree it rolls back in.
 fn recorder(world: &World) -> Recorder {
-    Recorder::new(
-        &world.target.opt_dir().join(holosmith::release::CURRENT),
-        &world.info.version,
-    )
+    Recorder::new(&world.root.current(), &world.info.version)
 }
 
 /// The one `SKIP` line a tree without an artifact prints, instead of failing for the wrong reason.
@@ -272,6 +282,7 @@ macro_rules! world_or_skip {
 
 #[test]
 fn a_rollback_drains_switches_restarts_and_polls_in_that_order() {
+    let _serial = one_at_a_time();
     let world = world_or_skip!("rollback-order");
     let steps = recorder(&world);
     execute(&world, &options(None), &steps).expect("the rollback of a healthy release succeeds");
@@ -287,13 +298,13 @@ fn a_rollback_drains_switches_restarts_and_polls_in_that_order() {
     );
     assert_eq!(link(&world), Some(PathBuf::from("releases/two")));
     // The release it came from is still there: a rollback moves the link, it deletes nothing.
-    assert!(Release::of(&world.target).binary("three").is_file());
+    assert!(Release::of(&world.root).binary("three").is_file());
     // The unit already went through `current`, so nothing was rewritten: the deploy's bytes are the rollback's.
-    let unit = std::fs::read_to_string(world.target.unit_path()).expect("the unit is readable");
+    let unit = std::fs::read_to_string(world.root.unit()).expect("the unit is readable");
     assert_eq!(
         holosmith::release::unit_executable(&unit),
         Some(
-            Release::of(&world.target)
+            Release::of(&world.root)
                 .current()
                 .join(holosmith::release::BINARY)
         )
@@ -302,6 +313,7 @@ fn a_rollback_drains_switches_restarts_and_polls_in_that_order() {
 
 #[test]
 fn the_default_target_is_the_release_behind_the_live_one_and_to_names_another() {
+    let _serial = one_at_a_time();
     let world = world_or_skip!("rollback-choice");
     // The tree's own order: three is live, so two is one step back — not `one`, and not by name.
     let steps = recorder(&world);
@@ -321,10 +333,11 @@ fn the_default_target_is_the_release_behind_the_live_one_and_to_names_another() 
 
 #[test]
 fn a_tree_with_one_release_is_refused_and_asks_the_machine_nothing() {
+    let _serial = one_at_a_time();
     let world = world_or_skip!("rollback-only");
     // Remove the two releases behind the live one, so `current` names the oldest — and the only — release.
     for tag in ["one", "two"] {
-        std::fs::remove_dir_all(Release::of(&world.target).dir_of(tag))
+        std::fs::remove_dir_all(Release::of(&world.root).dir_of(tag))
             .expect("a release is removable");
     }
     let steps = recorder(&world);
@@ -341,6 +354,7 @@ fn a_tree_with_one_release_is_refused_and_asks_the_machine_nothing() {
 
 #[test]
 fn a_target_older_than_the_database_is_refused_before_the_drain() {
+    let _serial = one_at_a_time();
     let world = world_or_skip!("rollback-schema");
     // A database from a newer release: its `schema_version` table records one more than this build's.
     let path = world.config.data_root.join(holosmith::db::DATABASE_FILE);
@@ -375,6 +389,7 @@ fn a_target_older_than_the_database_is_refused_before_the_drain() {
 
 #[test]
 fn a_drain_that_expires_switches_nothing_and_says_the_machine_is_draining() {
+    let _serial = one_at_a_time();
     let world = world_or_skip!("rollback-expired");
     let mut steps = recorder(&world);
     steps.drain = DrainAnswer::Expired;
@@ -388,6 +403,7 @@ fn a_drain_that_expires_switches_nothing_and_says_the_machine_is_draining() {
 
 #[test]
 fn a_rollback_joins_a_drain_somebody_else_started() {
+    let _serial = one_at_a_time();
     let world = world_or_skip!("rollback-joining");
     // A promotion refuses this answer; a rollback must not — a machine left draining is the machine it exists for.
     let mut steps = recorder(&world);
@@ -407,6 +423,7 @@ fn a_rollback_joins_a_drain_somebody_else_started() {
 
 #[test]
 fn a_rollback_that_fails_its_own_health_check_is_loud_and_names_the_next_step() {
+    let _serial = one_at_a_time();
     let world = world_or_skip!("rollback-unanswered");
     let mut steps = recorder(&world);
     // An answer from a process older than the restart: the version is right and the uptime is not.
@@ -439,6 +456,7 @@ fn a_rollback_that_fails_its_own_health_check_is_loud_and_names_the_next_step() 
 
 #[test]
 fn a_restart_that_fails_is_named_first_and_polls_nothing() {
+    let _serial = one_at_a_time();
     let world = world_or_skip!("rollback-restart");
     let mut steps = recorder(&world);
     steps.restarted = Err("`systemctl restart holosmith.service` answered 1 (nope)".to_string());
@@ -454,21 +472,22 @@ fn a_restart_that_fails_is_named_first_and_polls_nothing() {
 
 #[test]
 fn a_unit_that_does_not_go_through_current_is_rewritten_and_a_missing_one_is_refused() {
+    let _serial = one_at_a_time();
     let world = world_or_skip!("rollback-unit");
     // A unit an operator edited by hand (or a tree copied onto a machine): it names a raw binary, so the switch would
     // not reach the restart. The rollback fixes it with the same bytes `deploy`'s step 5 renders.
     std::fs::write(
-        world.target.unit_path(),
+        world.root.unit(),
         "[Unit]\nDescription=Holosmith server\n\n[Service]\nExecStart=/usr/local/bin/holosmith serve\n",
     )
     .expect("the unit is writable");
     let steps = recorder(&world);
     execute(&world, &options(None), &steps).expect("the rollback still takes effect");
-    let unit = std::fs::read_to_string(world.target.unit_path()).expect("the unit is readable");
+    let unit = std::fs::read_to_string(world.root.unit()).expect("the unit is readable");
     assert_eq!(
         holosmith::release::unit_executable(&unit),
         Some(
-            Release::of(&world.target)
+            Release::of(&world.root)
                 .current()
                 .join(holosmith::release::BINARY)
         ),
@@ -476,7 +495,7 @@ fn a_unit_that_does_not_go_through_current_is_rewritten_and_a_missing_one_is_ref
     );
 
     // No unit at all: a machine that has not been deployed, refused before the drain.
-    std::fs::remove_file(world.target.unit_path()).expect("the unit is removable");
+    std::fs::remove_file(world.root.unit()).expect("the unit is removable");
     let steps = recorder(&world);
     let error =
         execute(&world, &options(None), &steps).expect_err("a machine with no unit is refused");
@@ -486,10 +505,11 @@ fn a_unit_that_does_not_go_through_current_is_rewritten_and_a_missing_one_is_ref
 
 #[test]
 fn the_target_directory_has_to_hold_a_binary_this_machine_can_run() {
+    let _serial = one_at_a_time();
     let world = world_or_skip!("rollback-binary");
     // A release directory whose binary is not a program: `version --json` cannot be asked, so the rollback refuses
     // `two` is the default target, and the tree counts it — which is the other half of this arm.
-    let release = Release::of(&world.target);
+    let release = Release::of(&world.root);
     assert_eq!(
         release.history(),
         vec!["three".to_string(), "two".to_string(), "one".to_string()]

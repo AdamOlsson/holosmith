@@ -247,11 +247,11 @@ pub fn run(args: ServeArgs) -> ExitCode {
     let runtime = Runtime::started(backend);
     let version = VersionInfo::current();
     let listen = loaded.config.control_listen;
-    // Read before the async body takes the rest: the admin directory is the run's (`--admin-dir`) or the
-    // machine's, and the socket's path is that one value plus `drain::SOCKET_NAME`.
+    // Read before the async body takes the rest: the admin directory is the run's (`--admin-dir`) or
+    // `<data root>/run`, which this process creates when it binds the socket.
     let admin_dir = args
         .admin_dir
-        .unwrap_or_else(|| PathBuf::from(crate::deploy::ADMIN_DIR));
+        .unwrap_or_else(|| crate::config::admin_dir(&loaded.config.data_root));
 
     let body = async move {
         // Installed before the listener binds, so a handler that cannot be installed is a
@@ -474,7 +474,7 @@ pub fn run(args: ServeArgs) -> ExitCode {
         // policies and after the reconcile, so a drain that arrives during boot sees the rows the pass left
         // rather than a half-reconciled machine. A bind that fails is one `warn` and not a refusal, for the
         // preview listener's reason: the control UI is what an operator needs when something else on the machine
-        // is wrong. The path is the run's `--admin-dir`, or the machine's `/run/holosmith` (step 2's directory).
+        // is wrong. The path is the run's `--admin-dir`, or `<data root>/run`, which this process creates.
         let drain_socket = match crate::drain::listen(&admin_dir) {
             Ok(listener) => Some(crate::drain::spawn(listener, state.drainer())),
             // Every reason is one `warn`, because every one of them means this run has no admin socket; the

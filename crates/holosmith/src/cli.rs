@@ -59,8 +59,8 @@ pub enum Cmd {
         /// Everything `--quick` has, plus the network self-test, the proxies and the agent image's pi version.
         #[arg(long)]
         full: bool,
-        /// An install tree to examine instead of the machine's own paths — `server deploy --root`'s, where the
-        /// release tree, the unit, the config and the admin socket all live under DIR.
+        /// The root to examine instead of `HOLOSMITH_ROOT`'s — the directory the config, the data root, the
+        /// release tree and the unit live under.
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
     },
@@ -100,10 +100,11 @@ pub enum Cmd {
         /// How long the drain may wait for the turns that are running (`10m`, `500ms`).
         #[arg(long, value_name = "DURATION", default_value = "10m", value_parser = parse_wait)]
         wait: std::time::Duration,
-        /// Promote into this install tree instead of the system paths, as the invoking user (no sudo).
+        /// Promote into this root instead of `HOLOSMITH_ROOT`'s.
         ///
-        /// The same meaning as `server deploy --root`: the release tree, the admin socket's directory and the unit
-        /// live under it, and a privileged install (the default) requires this command to run as root.
+        /// The same meaning as `server deploy --root`: the releases and `current` live under it. The restart is the
+        /// one command that is root's, and it goes through the machine's one sudoers line; without that line the
+        /// switch happens and this command says the restart is yours.
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
     },
@@ -121,10 +122,9 @@ pub enum Cmd {
         /// How long the drain may wait for the turns that are running (`10m`, `500ms`).
         #[arg(long, value_name = "DURATION", default_value = "10m", value_parser = parse_wait)]
         wait: std::time::Duration,
-        /// Roll back into this install tree instead of the system paths, as the invoking user (no sudo).
+        /// Roll back into this root instead of `HOLOSMITH_ROOT`'s.
         ///
-        /// The same meaning as `upgrade --root`: the release tree, the admin socket's directory and the unit live
-        /// under it, and a privileged install (the default) requires this command to run as root.
+        /// The same meaning as `upgrade --root`: the releases and `current` live under it.
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
     },
@@ -213,7 +213,7 @@ pub enum ServerAction {
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
         /// Install on another machine: copy this binary there over ssh, verify the copy, and run the same deploy
-        /// there with sudo (`user@host`).
+        /// there as the service user (`sudo -n -u holosmith`), so the target's tree is written by its owner.
         #[arg(long, value_name = "USER@HOST")]
         ssh: Option<String>,
         /// Send this file instead of the binary this command is running. It must be built for the target's
@@ -235,15 +235,15 @@ pub enum HubAction {
         /// Print each step's plan and change nothing. A broken machine still exits non-zero.
         #[arg(long)]
         dry_run: bool,
-        /// Install into this directory instead of the system paths, as the invoking user (no sudo).
+        /// Install into this root instead of `HOLOSMITH_ROOT`'s (default `/var/lib/holosmith`).
         ///
-        /// The same meaning as `server deploy --root`. It is here for the same reason and
-        /// for the same reason (ADR-0056): an install tree is how the whole deploy is driven by an unprivileged
-        /// user, and it is how this story's own acceptance is measured.
+        /// The root is one directory: the config, the data root, the release tree and the projects. The deploy
+        /// never escalates — what root owns is printed as commands for you to run — so what it needs is a root
+        /// this user can write, which is the tree a test or a by-hand install owns.
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
         /// Install on another machine: copy this binary there over ssh, verify the copy, and run the same deploy
-        /// there with sudo (`user@host`).
+        /// there as the service user (`sudo -n -u holosmith`), so the target's tree is written by its owner.
         #[arg(long, value_name = "USER@HOST")]
         ssh: Option<String>,
         /// Send this file instead of the binary this command is running. It must be built for the target's

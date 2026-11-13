@@ -1,5 +1,4 @@
-//! `holosmith server deploy` and `holosmith hub deploy`: install one half of a machine, in the spec's seven steps
-//!
+//! `holosmith server deploy` and `holosmith hub deploy`: install one half of a machine, in the spec's six steps
 //!
 //! The command is one idempotent pass over item 10 §"What `server deploy` does": each step **reads the machine's
 //! current state** and then applies only what the read found missing, so a second run changes nothing and reports
@@ -7,7 +6,9 @@
 //! the read's plan without running the apply, and "changed" has to be distinguishable from "was already right".
 //!
 //! Every step prints one line, `<n>. <step>: <word>: <sentence>`: [`DeployStep`]'s number is the spec's order and
-//! [`Word`] is the read's answer, one of five. The two that carry the design are:
+//! [`Word`] is the read's answer, one of five. A step that prints a list — a plan, or the apply that did it — puts
+//! one action per line under that line, with the count on the line itself (ADR-0085). The two words that carry the
+//! design are:
 //!
 //! - **`skipped` is never `satisfied`.** A step that prints "already satisfied" over a check that read nothing is a
 //!   lie of exactly the kind this list exists to prevent, which is why the word is in [`Word`] at all. Since
@@ -20,7 +21,7 @@
 //!
 //! Four things are deliberately narrow:
 //!
-//! - **This is the local deploy.** `--ssh`, `--binary` and the remote copy are phase 3; nothing here
+//! - **This is the local deploy.** `--ssh`, `--binary` and the remote copy live in [`crate::remote`]; nothing here
 //!   reads a remote.
 //! - **A run installs one half of a machine.** [`Kind`] says which, the union of that half with the role the
 //!   config already carries is what step 2 writes, and the two halves together are `both` (the spec's Roles
@@ -32,24 +33,24 @@
 //! - **The proxies' recipe lives in [`crate::proxies`].** A deploy and a boot must start the same two containers
 //!   the same way (ADR-0056), and this module is the caller that fails the step instead of warning.
 //!
-//! # `--root`, and what it prefixes
+//! # The root, and why nothing here escalates
 //!
-//! [`Target`] is *where* the deploy installs: the system paths, or a tree an operator names with `--root` so the
-//! whole install can be driven — and tested — by an unprivileged user. It prefixes `data_root` and
-//! `projects_root` (and therefore everything inside them), and **nothing the deploy reads about the machine**: the
-//! listen addresses, `docker_host` and [`crate::doctor::SYSTEMD_DIR`] stay as they are, because they describe
-//! the host rather than the install tree (step 4's proxies used to mount this binary; since ADR-0057 they run
-//! the image the machine built, so there is no install-tree path in their vector at all). Privilege follows the same flag — with no
-//! `--root` each write is one child prefixed by `sudo`, and with one the tree is the invoking user's — and the flag
-//! decides rather than a uid, since "may I write this tree" is a property of the tree.
+//! [`Root`] is *where* the machine lives: `HOLOSMITH_ROOT`, or [`crate::config::DEFAULT_ROOT`] — one directory,
+//! owned by the service user, holding the config, the data root, the release tree and the projects (ADR-0086).
+//! There is no second layout and therefore no prefixing: every path this module builds is `<root>/…`, whether the
+//! root is the machine's or a test's own tree.
 //!
-//! The caller passes a `Config` that [`Target::config`] has already prefixed; that is the contract, and it is why
-//! [`run`] reads `config.data_root` directly instead of asking `Target` to prefix it a second time.
+//! **This program never runs `sudo`.** Creating the account, making the root, and installing and enabling the unit
+//! are root's, so the deploy **reads** their state and **prints** the commands — as the tail remark on the step that
+//! needs them — and the next run verifies them. The only hard requirement is that this process can write the root,
+//! because the tree is written as its owner. That is what makes `sudo -u holosmith holosmith deploy` the one way to
+//! run it on a machine, and what leaves step 6 (`/api/health` plus `doctor --full`) as the thing that notices a unit
+//! which was printed and never installed.
 
 use std::fmt::{self, Write as _};
 use std::io::{ErrorKind, Write as _};
 use std::net::SocketAddr;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -63,18 +64,9 @@ use crate::preflight::{self, Check, Outcome};
 use crate::proxies;
 use crate::vapid;
 
-/// The admin socket's directory (spec item 10 step 2's "admin socket directory", path fixed by).
-///
-/// Public because it is a path `doctor`'s `perms` finding has to know (and 's socket will be created in it), and
-/// a second spelling of `/run/holosmith` is a second thing to change.
-///
-/// **`uninstall` does not remove it**, and that is a decision rather than an oversight: the directory holds the admin
-/// socket of a *running* server, and the two files `server deploy` installs outside the data root are
-/// `config.toml` and this directory — neither is data, and neither is named by the spec's teardown row. ADR-0059
-/// records the keeps list with them in it, so a later story that removes them changes one sentence in one place.
-pub const ADMIN_DIR: &str = "/run/holosmith";
-
 /// The user `serve` runs as (spec item 10 step 2's "service user", named by the unit file's `User=`).
+///
+/// Created by the operator, never by this program: `useradd` is root's (ADR-0086).
 pub const SERVICE_USER: &str = "holosmith";
 
 /// The group the service user must be in: `serve` drives the machine's daemon through its socket.
@@ -83,16 +75,10 @@ pub const SERVICE_GROUP: &str = "docker";
 /// The unit file's name, which is also the argument `systemctl` gets.
 pub const UNIT_NAME: &str = "holosmith.service";
 
-/// systemd's system-wide unit directory.
+/// Where systemd's system-wide units live: where the operator copies the rendered file.
 pub const UNIT_DIR: &str = "/etc/systemd/system";
 
-/// The HTTPS port Tailscale serves the control origin on.
-pub const CONTROL_HTTPS: u16 = 443;
-
-/// The HTTPS port Tailscale serves the preview origin on.
-pub const PREVIEW_HTTPS: u16 = 8444;
-
-/// How long step 7's apply waits for `/api/health` before it calls the unit's start a failure.
+/// How long the last step's apply waits for `/api/health` before it calls the unit's start a failure.
 pub const HEALTH_WAIT: Duration = Duration::from_secs(60);
 
 /// How often that wait asks again. A serving unit answers in milliseconds; the interval is what a wait costs the
@@ -117,8 +103,8 @@ const HELD_PORT: &str =
 ///
 /// `doctor --quick` fails it on purpose: the unit runs `doctor --quick` as `ExecStartPre`, and a secrets directory
 /// the service user cannot read is a reason for systemd not to start the service. But `deploy` is the caller that
-/// **repairs** it — step 2's `Action::Mode` and the `chown`s are exactly this finding's fix — so failing here would
-/// make the repair unreachable and leave the operator to run one `chmod` the deploy knows how to run.
+/// **repairs** it — step 2's `Action::Mode` is exactly this finding's fix — so failing here would make the repair
+/// unreachable and leave the operator to run one `chmod` the deploy knows how to run.
 const WRONG_MODE: &str = "; a wrong mode or owner in the install tree is what step 2 repairs, so it is a remark here and not a failure";
 
 /// The remark a broken `current` earns instead of failing the deploy — step 1's **third** divergence.
@@ -131,31 +117,16 @@ const WRONG_MODE: &str = "; a wrong mode or owner in the install tree is what st
 const LINK_NOT_LIVE: &str = "; the unit's `ExecStart` resolves through a `current` that is not live — step 5 rewrites \
                              the unit to the binary this run is running, which is what makes the machine boot again";
 
-/// The remark a `--root` install carries where a system one names its service user: the half of step 2 no
-/// unprivileged tree can have.
-///
-/// [`ROOT_REMARK`]:
-// (kept next to `ROOT_UNIT_REMARK` for the same reason: both say what the run did *not* do.)
-///
-/// Without it, "all 7 paths are present with their modes" reads as the whole of item 10 step 2 when the user and
-/// the ownership were read about nothing — the same "say what you did not do" shape [`Word::Skipped`] carries.
-const ROOT_REMARK: &str =
-    "; --root: no service user is created, because the tree belongs to the invoking user";
-
-/// The remark step 5's line carries under `--root`: a unit in an install tree is not one systemd can load.
-const ROOT_UNIT_REMARK: &str = "; --root: the unit is in the tree, and this run did not ask systemd to load it (a unit under --root is not one \
-     systemd can read)";
-
-/// Which deploy a run is: the server's seven steps, or the hub's five and two skips (item 10 §6).
+/// Which deploy a run is: the server's six steps, or the hub's four and two skips (item 10 §6).
 ///
 /// A deploy installs **one half of a machine**, and the two halves together are `both` — so the type carries three
 /// answers and they are deliberately not one: [`Kind::installs`] is the role this run adds, [`union`] is the role
 /// the machine ends up with, and [`Kind::group`]/[`Kind::skip`] are the two places a hub's half is not a server's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// `holosmith server deploy`: the seven steps, a service user in the daemon's group, and both proxies.
+    /// `holosmith server deploy`: the six steps, a service user in the daemon's group, and both proxies.
     Server,
-    /// `holosmith hub deploy`: steps 1, 2, 5, 6 and 7; no image, no proxy, and no daemon group.
+    /// `holosmith hub deploy`: steps 1, 2, 5 and 6; no image, no proxy, and no daemon group.
     Hub,
 }
 
@@ -223,39 +194,38 @@ pub fn union(found: Role, kind: Kind) -> Role {
     }
 }
 
-/// The spec's seven steps, in the spec's order (item 10, "What `server deploy` does").
+/// The spec's steps this command runs, in the spec's order (item 10, "What `server deploy` does").
+///
+/// Six rather than seven: the origins step is Tailscale's, not this machine's, and left the deploy with ADR-0086.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DeployStep {
     /// 1. The preflight, as `doctor --quick`.
     Preflight,
-    /// 2. The install tree: the config file, the data root, the secrets (with the provider and the VAPID keys) and
-    ///    the admin socket directory, plus the service user and the tree's ownership.
+    /// 2. The install tree under the root: the config file, the data root, the secrets (with the provider and the
+    ///    VAPID keys), and the read of the service user that will own them.
     Files,
     /// 3. The two images embedded in the binary.
     Images,
     /// 4. The `egress` network and the machine's two proxies.
     Proxies,
-    /// 5. The systemd unit.
+    /// 5. The systemd unit, rendered into the root.
     Service,
-    /// 6. `tailscale serve` for the two origins.
-    Origins,
-    /// 7. The `/api/health` wait and `doctor --full`.
+    /// 6. The `/api/health` wait and `doctor --full`.
     Health,
 }
 
 impl DeployStep {
     /// Every step, in the order the run evaluates them.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 6] = [
         Self::Preflight,
         Self::Files,
         Self::Images,
         Self::Proxies,
         Self::Service,
-        Self::Origins,
         Self::Health,
     ];
 
-    /// The spec's step number, `1..=7`, which is the report line's first field.
+    /// The spec's step number, `1..=6`, which is the report line's first field.
     pub fn number(self) -> u8 {
         match self {
             Self::Preflight => 1,
@@ -263,8 +233,7 @@ impl DeployStep {
             Self::Images => 3,
             Self::Proxies => 4,
             Self::Service => 5,
-            Self::Origins => 6,
-            Self::Health => 7,
+            Self::Health => 6,
         }
     }
 
@@ -276,7 +245,6 @@ impl DeployStep {
             Self::Images => "images",
             Self::Proxies => "proxies",
             Self::Service => "service",
-            Self::Origins => "origins",
             Self::Health => "health",
         }
     }
@@ -335,6 +303,10 @@ pub struct Line {
 impl fmt::Display for Line {
     /// `2. files: satisfied: all 6 paths are present with their modes: …` — three colon-separated fields after
     /// the number, `Finding`'s shape, so a gate greps `^2. files: satisfied: `.
+    ///
+    /// A plan's actions are **not** on this line: they follow it, one indented line each (ADR-0085), which is why
+    /// `sentence` is a `String` that may hold newlines. The step's own line is the one a gate greps, so it stays a
+    /// single line whatever the plan under it is.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -347,7 +319,7 @@ impl fmt::Display for Line {
     }
 }
 
-/// What one deploy did, as the operator reads it: a line per step evaluated, the step that stopped the run, and
+/// What one deploy did, as the operator reads it: a block per step evaluated, the step that stopped the run, and
 /// whether anything was applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
@@ -355,12 +327,12 @@ pub struct Report {
     /// The step whose line is `failed`, which is the exit code and the resume command.
     pub failed: Option<DeployStep>,
     pub dry_run: bool,
-    /// [`Target::describe`]: where this run installed, and with which privilege.
+    /// [`Root::describe`]: which tree this run installed into.
     ///
-    /// Carried rather than printed by [`Report::render`], whose shape is one line per step plus the two summary
+    /// Carried rather than printed by [`Report::render`], whose shape is a block per step plus the two summary
     /// lines: it is here because "which tree did this report describe" is a question a caller asks (and a test
-    /// asserts), and answering it from the config would mean guessing whether the paths were prefixed.
-    pub target: String,
+    /// asserts), and answering it from the config would mean guessing.
+    pub root: String,
 }
 
 impl Report {
@@ -369,21 +341,28 @@ impl Report {
         self.failed.is_some()
     }
 
-    /// The whole report as the operator reads it: the header, where it installed, one line per step and the tally.
+    /// The whole report as the operator reads it: the header, the root, one block per step and the tally.
+    ///
+    /// A block is the step's own line — `^N. step: word: ` — and, under a plan or an apply, one indented line per
+    /// action (ADR-0085). That first line is what a gate greps, so it is the only line whose shape is a contract.
     ///
     /// The tally's four counts are always printed — `skipped` included, as zero on a run that skipped nothing —
-    /// because a gate greps the line's shape and a reader diffs two runs by it (ADR-0056). Since there is no
-    /// list of who owns what remains, because nothing remains: the `deploy: incomplete:` line is gone, not hidden.
+    /// because a gate greps the line's shape and a reader diffs two runs by it (ADR-0056).
     pub fn render(&self) -> String {
         let count = |word: Word| self.lines.iter().filter(|line| line.word == word).count();
         let mut text = format!("deploy: {}\n", if self.dry_run { "dry run" } else { "run" });
-        // Which tree this report describes, on its own line: the step lines name paths, and an operator reading a
-        // `--root` run needs to see the privilege the whole run used before the paths mean anything.
-        let _ = writeln!(text, "deploy: into {}", self.target);
+        // Which tree this report describes, on its own line: the step lines name paths, and a reader needs to see
+        // which root the whole run used before the paths mean anything.
+        let _ = writeln!(text, "deploy: into {}", self.root);
         for line in &self.lines {
+            // A blank line between blocks, the header's included: a plan is a list of its own lines, and six of
+            // those stacked without a gap is the wall of text the list was meant to break up. The tally gets one
+            // too, so it reads as the summary rather than as a seventh step.
+            text.push('\n');
             // A `String` cannot fail to be written to, which is why this is not a `?`.
             let _ = writeln!(text, "{line}");
         }
+        text.push('\n');
         let _ = writeln!(
             text,
             "deploy: {} steps: {} satisfied, {} changed, {} skipped, {} failed",
@@ -397,6 +376,93 @@ impl Report {
     }
 }
 
+/// Where one machine lives: the root, and the six paths under it.
+///
+/// `HOLOSMITH_ROOT` wins over [`DEFAULT_ROOT`], and `--root` is the same value's flag form — the tree a test or an
+/// operator names. Nothing is prefixed and nothing is conditional: a root is a root, and every path here is
+/// `<root>/…` whether the root is `/var/lib/holosmith` or `target/deploy-case/tree` (ADR-0086).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Root {
+    path: PathBuf,
+}
+
+impl Root {
+    /// The root `--root` names, or `HOLOSMITH_ROOT`, or [`DEFAULT_ROOT`], made absolute so a resume command that
+    /// prints it means the same tree from another directory.
+    pub fn resolve(flag: Option<PathBuf>) -> Self {
+        let path = match flag {
+            Some(path) => path,
+            None => config::root(),
+        };
+        Self {
+            path: absolute(&path),
+        }
+    }
+
+    /// The root itself: the service user's home, and the directory every other path is under.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// `<root>/config.toml`: the file `serve` reads and the deploy renders.
+    pub fn config_file(&self) -> PathBuf {
+        config::config_path(&self.path)
+    }
+
+    /// `<root>/data`: the data root's default.
+    pub fn data_root(&self) -> PathBuf {
+        self.path.join(config::DATA_DIR)
+    }
+
+    /// `<root>/projects`: the projects root's default.
+    pub fn projects_root(&self) -> PathBuf {
+        self.path.join(config::PROJECTS_DIR)
+    }
+
+    /// `<root>/releases`: the release tree [`crate::release::Release::at`] takes.
+    pub fn releases(&self) -> PathBuf {
+        self.path.join(crate::release::RELEASES)
+    }
+
+    /// `<root>/current`: the symlink systemd executes through.
+    pub fn current(&self) -> PathBuf {
+        self.path.join(crate::release::CURRENT)
+    }
+
+    /// `<root>/holosmith.service`: the unit this run renders, for the operator to install.
+    pub fn unit(&self) -> PathBuf {
+        self.path.join(UNIT_NAME)
+    }
+
+    /// `install -m 0644 <root>/holosmith.service /etc/systemd/system/holosmith.service`: the one command that
+    /// puts the rendered unit where systemd reads it.
+    pub fn unit_install(&self) -> String {
+        format!(
+            "sudo install -m 0644 {} {}",
+            self.unit().display(),
+            Path::new(UNIT_DIR).join(UNIT_NAME).display()
+        )
+    }
+
+    /// The config this deploy installs from: a clone whose two roots are the root's, so the rendered file names the
+    /// machine it was installed on rather than the defaults it may have been read with.
+    ///
+    /// Only the two roots are moved. Everything else in a config is a fact about the host — the listen addresses, the
+    /// docker socket, an image name — and rewriting those would describe a machine that does not exist.
+    pub fn config(&self, config: &Config) -> Config {
+        Config {
+            data_root: self.data_root(),
+            projects_root: self.projects_root(),
+            ..config.clone()
+        }
+    }
+
+    /// The phrase [`Report::root`] carries: where this run installs.
+    pub fn describe(&self) -> String {
+        self.path.display().to_string()
+    }
+}
+
 /// The machine questions a deploy asks, as one parameter: the image builds' seam, the proxies' and `doctor`'s.
 ///
 /// [`crate::docker::Docker`] gets this for free through the blanket impl below, which is the point —
@@ -407,34 +473,32 @@ pub trait Machine: proxies::Containers + doctor::Machine + images::Images {}
 
 impl<T: proxies::Containers + doctor::Machine + images::Images> Machine for T {}
 
-/// The external programs and paths the deploy and its preflight run, as a seam.
+/// The external programs the deploy runs, as a seam.
 ///
 /// [`doctor::Tools`] is embedded rather than copied, for step 1's reason: the preflight is the same list `serve`
-/// refuses on, so it is the same shims. The additions are the programs the steps run — `sudo` because the system
-/// paths need it; `install` and `chmod` because every file action is one child process; `openssl` because the VAPID
-/// pair is generated by one; `id`, `useradd`, `usermod`, `stat` and `chown` because the service user and the tree's
-/// ownership are read and written by them; and `systemctl` because step 5 asks systemd two questions. They are
-/// `PathBuf`s for [`crate::preflight::Tools`]'s reason: this crate denies `unsafe` and so cannot set `PATH`, which
-/// leaves naming the program as the only way a test can point a write at a script it wrote.
+/// refuses on, so it is the same shims. The additions are the three programs the tree's own writes use — `install`
+/// and `chmod` because every file action is one child process, `openssl` because the VAPID pair is generated by one
+/// — and `id`, which is the **only** question this run asks about root's half of the machine. They are `PathBuf`s
+/// for [`crate::preflight::Tools`]'s reason: this crate denies `unsafe` and so cannot set `PATH`, which leaves
+/// naming the program as the only way a test can point a write at a script it wrote.
 ///
-/// [`Tools::health_wait`] is the one field that is not a program, and it is here for the same seam's sake: step 7's
-/// deadline is a minute on a machine and a test may not spend it, so the caller that would otherwise wait owns the
-/// bound. Step 6 runs [`doctor::Tools::tailscale`] rather than a second field — the same program, asked with
-/// `serve` instead of `status`.
+/// **This module spawns no escalation** (ADR-0086): what root would do is printed. [`Tools::sudo`] is here for the two
+/// release verbs' single restart, and [`Tools::health_wait`] is the one field that is not a program.
 #[derive(Debug, Clone)]
 pub struct Tools {
     pub doctor: doctor::Tools,
-    pub sudo: PathBuf,
     pub install: PathBuf,
     pub chmod: PathBuf,
     pub openssl: PathBuf,
+    /// `id`: the service user's uid and its groups, which is this run's whole read of root's half.
     pub id: PathBuf,
-    pub useradd: PathBuf,
-    pub usermod: PathBuf,
-    pub stat: PathBuf,
-    pub chown: PathBuf,
+    /// `sudo`: **not used by this module.** The two release verbs run `sudo -n systemctl restart <unit>` through it,
+    /// because one restart is the only escalation a machine has (ADR-0086 D4) — and the field is here rather than in
+    /// `promote`'s own tools so that a test points both programs at its recorders in one place.
+    pub sudo: PathBuf,
+    /// `systemctl`: the release verbs' restart, through [`Tools::sudo`].
     pub systemctl: PathBuf,
-    /// How long step 7's apply waits for `/api/health`; [`HEALTH_WAIT`] on a machine.
+    /// How long the last step's apply waits for `/api/health`; [`HEALTH_WAIT`] on a machine.
     pub health_wait: Duration,
 }
 
@@ -443,166 +507,46 @@ impl Default for Tools {
     fn default() -> Self {
         Self {
             doctor: doctor::Tools::default(),
-            sudo: PathBuf::from("sudo"),
             install: PathBuf::from("install"),
             chmod: PathBuf::from("chmod"),
             openssl: PathBuf::from("openssl"),
             id: PathBuf::from("id"),
-            useradd: PathBuf::from("useradd"),
-            usermod: PathBuf::from("usermod"),
-            stat: PathBuf::from("stat"),
-            chown: PathBuf::from("chown"),
+            sudo: PathBuf::from("sudo"),
             systemctl: PathBuf::from("systemctl"),
             health_wait: HEALTH_WAIT,
         }
     }
 }
 
-/// Where the deploy installs, and whether that takes privilege.
+/// Run the six steps in the spec's order and answer the report: a **server** deploy.
 ///
-/// `None` is the system's own tree (`/etc/holosmith`, `/var/lib/holosmith`, `/run/holosmith`) written through
-/// `sudo`; `Some(root)` is an install tree under `root`, written as the invoking user. **Only paths the deploy
-/// writes are prefixed** — `data_root` and `projects_root` (and everything inside them), plus the three fixed
-/// paths above — while the listen addresses, `docker_host`, [`crate::doctor::SYSTEMD_DIR`] and step 4's binary
-/// mount source are facts about the machine and stay as they are. That asymmetry is the flag's whole meaning, so
-/// it is stated here rather than left to be inferred.
-///
-/// **[`run`] is handed a `Config` this type has already prefixed** ([`Target::config`]). The doc comment on
-/// [`run`] is where that contract lives; do not prefix a second time.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Target {
-    root: Option<PathBuf>,
-}
-
-impl Target {
-    /// The target an operator's `--root` names, made absolute so the resume command it prints is absolute too.
-    ///
-    /// `std::path::absolute` rather than canonicalising: the directory may not exist yet, and a deploy's path is
-    /// a name rather than something the kernel has already resolved. A path that cannot be made absolute is kept
-    /// verbatim, because a relative install tree is still one this run can describe.
-    pub fn resolve(root: Option<PathBuf>) -> Self {
-        Self {
-            root: root.map(|root| std::path::absolute(&root).unwrap_or(root)),
-        }
-    }
-
-    /// Whether each write needs `sudo`: the system paths do, a tree the operator named does not.
-    pub fn privileged(&self) -> bool {
-        self.root.is_none()
-    }
-
-    /// `<root>/etc/holosmith/config.toml`, or [`config::DEFAULT_CONFIG_PATH`] without a root.
-    pub fn etc_config(&self) -> PathBuf {
-        self.prefixed(Path::new(config::DEFAULT_CONFIG_PATH))
-    }
-
-    /// The data root a **machine** config names, prefixed.
-    ///
-    /// [`run`] holds the already-prefixed config and reads `config.data_root` instead; this is the question as an
-    /// unprefixed config asks it.
-    pub fn data_root(&self, config: &Config) -> PathBuf {
-        self.prefixed(&config.data_root)
-    }
-
-    /// `<data root>/secrets`, the 0700 directory the key file lives in.
-    ///
-    /// It answers for an **unprefixed** config, which is what a caller outside [`run`] has; the step itself uses
-    /// `config.data_root.join(key::SECRETS_DIR)` because the config it holds is already prefixed.
-    pub fn secrets_dir(&self, config: &Config) -> PathBuf {
-        self.data_root(config).join(key::SECRETS_DIR)
-    }
-
-    /// `<root>/run/holosmith`: the admin socket's directory.
-    pub fn admin_dir(&self) -> PathBuf {
-        self.prefixed(Path::new(ADMIN_DIR))
-    }
-
-    /// `<root>/opt/holosmith`: the release tree `holosmith upgrade` promotes into (spec item 10's
-    /// `releases/<tag>/`).
-    ///
-    /// Prefixed like every installed path, and it is one the deploy itself never writes: the tree exists only once a
-    /// release has been promoted, which is why [`crate::release`] is the module that names what lives there.
-    pub fn opt_dir(&self) -> PathBuf {
-        self.prefixed(Path::new(crate::release::ROOT))
-    }
-
-    /// `<root>/etc/systemd/system/holosmith.service`: the unit file step 5 writes.
-    ///
-    /// Prefixed like every other installed path, which is exactly why a `--root` unit is one systemd can never
-    /// load — the line says so rather than pretending the machine half happened.
-    pub fn unit_path(&self) -> PathBuf {
-        self.prefixed(&Path::new(UNIT_DIR).join(UNIT_NAME))
-    }
-
-    /// The config this deploy installs from: a clone whose two roots are under `root`.
-    ///
-    /// The two roots are the only fields prefixed, and for a reason each: `data_root` is the tree step 2 creates,
-    /// and `projects_root` is what a config the deploy writes would otherwise point at a directory the target does
-    /// not have. Nothing else in the config is a path inside the install tree — `control_listen` and
-    /// `preview_listen` are addresses, `docker_host` is a socket on the machine, and `agent_image` is an image
-    /// name — so prefixing them would describe a host that does not exist.
-    pub fn config(&self, config: &Config) -> Config {
-        Config {
-            data_root: self.data_root(config),
-            projects_root: self.prefixed(&config.projects_root),
-            ..config.clone()
-        }
-    }
-
-    /// The phrase [`Report::target`] carries: where this run installs, and with which privilege.
-    pub fn describe(&self) -> String {
-        match &self.root {
-            None => "the system paths, with sudo where each write needs it".to_string(),
-            Some(root) => format!("{}, as the invoking user (no sudo)", root.display()),
-        }
-    }
-
-    /// One path moved under `root`, keeping its own directories: `/etc/holosmith` is `<root>/etc/holosmith`.
-    fn prefixed(&self, path: &Path) -> PathBuf {
-        match &self.root {
-            None => path.to_path_buf(),
-            Some(root) => root.join(path.strip_prefix("/").unwrap_or(path)),
-        }
-    }
-}
-
-/// Run the seven steps in the spec's order and answer the report: a **server** deploy.
-///
-/// `config` is the value [`Target::config`] produced — already prefixed — so `config.data_root` and
-/// `config.projects_root` are the target's own paths and this function prefix nothing.
-///
-/// `dry_run` is the only thing that separates the two paths this function has: the reads always run, because a
-/// plan that read nothing is not a plan, and an apply is only ever reached when `dry_run` is `false`. The first
-/// failing line stops the run ([`Report`]'s docs say why), and a `skipped` or `satisfied`/`changed` line
-/// continues.
-///
-/// This is [`run_as`] with [`Kind::Server`], which is what the name means: the seven steps, the daemon's group and
+/// This is [`run_as`] with [`Kind::Server`], which is what the name means: the six steps, the daemon's group and
 /// both proxies. `holosmith hub deploy` calls [`run_as`] with its own half.
 pub fn run(
     config: &Config,
-    target: &Target,
+    root: &Root,
     tools: &Tools,
     machine: &dyn Machine,
     dry_run: bool,
 ) -> Report {
-    run_as(config, target, tools, machine, dry_run, Kind::Server)
+    run_as(config, root, tools, machine, dry_run, Kind::Server)
 }
 
 /// The same run, for either half of a machine.
 ///
 /// Two configs come out of the one the caller handed over, and the split is [`Kind`]'s whole substance:
 ///
-/// - **The installed config** is the machine's own with `kind.union(found)` in its role. Step 2 renders it, so the
-///   file that boots next says `both` after a `server deploy` and a `hub deploy` — the spec's Roles table, made a
-///   property of the install tree instead of a by-hand edit.
-/// - **The checked config** carries the half this run installs, and only steps 1 and 7 see it, because they are the
+/// - **The installed config** is the machine's own with `kind.union(found)` in its role and the two roots moved
+///   under [`Root`]. Step 2 renders it, so the file that boots next says `both` after a `server deploy` and a
+///   `hub deploy` — the spec's Roles table, made a property of the install tree instead of a by-hand edit.
+/// - **The checked config** carries the half this run installs, and only steps 1 and 6 see it, because they are the
 ///   two that ask `doctor`. A `hub deploy` therefore asks no Docker and no git question even on a machine that is
 ///   now `both` — item 10 §6's "without the Docker and git checks", read literally. The cost is recorded: the
 ///   *other* half's health is that deploy's business, and `serve` on a `both` machine refuses at its own boot when
 ///   its preflight fails.
 pub fn run_as(
     config: &Config,
-    target: &Target,
+    root: &Root,
     tools: &Tools,
     machine: &dyn Machine,
     dry_run: bool,
@@ -610,32 +554,28 @@ pub fn run_as(
 ) -> Report {
     let installed = Config {
         role: union(config.role, kind),
-        ..config.clone()
+        ..root.config(config)
     };
     let checked = Config {
         role: kind.installs(),
         ..installed.clone()
     };
-    // The two machine-wide paths of the install tree are the *target's*, not the machine's: `doctor`'s `perms`
-    // finding compares the tree this run writes, so a `--root` deploy must not read `/etc/holosmith` or
-    // `/run/holosmith` (SPEC-1). Everything else about the tools — the programs, the systemd
-    // directory, the tailscale binary — is a fact about the host and stays as it is.
+    // The three install-tree paths `doctor` reads are the root's, not the machine's: a run against a test's tree
+    // must not read `/var/lib/holosmith`'s unit or release tree. Everything else about the tools — the programs,
+    // the systemd directory, the tailscale binary — is a fact about the host and stays as it is.
     let mut doctor_tools = tools.doctor.clone();
-    doctor_tools.config_path = target.etc_config();
-    doctor_tools.admin_dir = target.admin_dir();
-    // The release tree and the unit are the target's too, and for the same reason: the release finding reads a
-    // `current` and an `ExecStart=`, and a `--root` run must read its own (`/opt/holosmith` belongs to the machine).
-    doctor_tools.release_root = target.opt_dir();
-    doctor_tools.unit_path = target.unit_path();
+    doctor_tools.config_path = root.config_file();
+    doctor_tools.release_root = root.path().to_path_buf();
+    doctor_tools.unit_path = root.unit();
     let mut report = Report {
         lines: Vec::new(),
         failed: None,
         dry_run,
-        target: target.describe(),
+        root: root.describe(),
     };
     for step in DeployStep::ALL {
         // A step this half has no work for is a `skipped` line and the run continues: the remaining steps are still
-        // this run's, and a stop here would leave steps 5–7 of a hub unevaluated for no reason (ADR-0056).
+        // this run's, and a stop here would leave steps 5–6 of a hub unevaluated for no reason (ADR-0056).
         if let Some(reason) = kind.skip(step) {
             report.lines.push(Line {
                 step,
@@ -646,11 +586,10 @@ pub fn run_as(
         }
         let line = match step {
             DeployStep::Preflight => preflight(&checked, &doctor_tools, machine),
-            DeployStep::Files => files(&installed, target, tools, dry_run, kind),
+            DeployStep::Files => files(&installed, root, tools, dry_run, kind),
             DeployStep::Images => images_line(&installed, machine, dry_run),
             DeployStep::Proxies => proxies_line(&installed, machine, dry_run),
-            DeployStep::Service => service(&installed, target, tools, dry_run),
-            DeployStep::Origins => origins(&installed, tools, dry_run),
+            DeployStep::Service => service(&installed, root, tools, dry_run),
             DeployStep::Health => health(&checked, &doctor_tools, tools, machine, dry_run),
         };
         if line.word == Word::Failed {
@@ -676,17 +615,18 @@ pub fn run_as(
 /// promises that re-running is safe — so a held port becomes a remark on this line and the run continues, while
 /// `doctor`'s own exit code is unchanged. Without that, the second deploy on a working server would report a
 /// failure that is not one. `perms` is the same shape one finding later: `serve` refuses on a wrong mode through
-/// `ExecStartPre`, but the deploy *repairs* one, so refusing here would make step 2's chmod and chown actions
-/// unreachable (ADR-0058). `release` is the third for that same reason, one step later: a `current` that does not
-/// resolve is a boot that cannot happen, and step 5 writes the unit for the binary this run is running whenever
-/// `Release::live` names nothing — refusing at step 1 would make the repair unreachable too (ADR-0084).
+/// `ExecStartPre`, but the deploy *repairs* one, so refusing here would make step 2's chmod actions unreachable
+/// (ADR-0058). `release` is the third for that same reason, one step later: a `current` that does not resolve is a
+/// boot that cannot happen, and step 5 writes the unit for the binary this run is running whenever `Release::live`
+/// names nothing — refusing at step 1 would make the repair unreachable too (ADR-0084).
 fn preflight(config: &Config, tools: &doctor::Tools, machine: &dyn Machine) -> Line {
     let report = doctor::run(config, Depth::Quick, tools, machine);
     let mut findings = report.findings;
     // `preflight::disk` answers `unknown` for a data root that does not exist yet, which is exactly the **first**
     // deploy's situation — the run the floor is for. So an unknown disk finding is re-asked against the nearest
     // existing ancestor: the same check, an honest subject. The line says which path was measured, because a
-    // reader who asked about `/var/lib/holosmith` and was told `/` is a different fact from one who was not told.
+    // reader who asked about `/var/lib/holosmith/data` and was told `/` is a different fact from one who was not
+    // told.
     let mut elsewhere = None;
     if let Some(index) = findings
         .iter()
@@ -781,7 +721,56 @@ fn disk_of_the_nearest_ancestor(
         .map(|finding| (probe, finding))
 }
 
-/// Step 2: the install tree — four directories and three files, the service user, and the tree's ownership.
+/// What `id` answered about the service user, before this run wrote anything.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ServiceUser {
+    /// The uid, when the account exists.
+    uid: Option<String>,
+    /// Whether the group that owns the daemon's socket has the user.
+    grouped: bool,
+}
+
+impl ServiceUser {
+    /// The commands that would make the account what the unit's `User=` needs, in the order they must run.
+    ///
+    /// These are **printed**, never run: `useradd` and `usermod` are root's (ADR-0086). The list is empty when the
+    /// account is already what the unit names, which is what makes the step's line stop saying anything about it.
+    fn commands(&self, root: &Root, group: Option<&str>) -> Vec<String> {
+        let mut commands = Vec::new();
+        if self.uid.is_none() {
+            commands.push(match group {
+                Some(group) => format!(
+                    "sudo useradd --system --create-home --home-dir {} --shell /usr/sbin/nologin \
+                     --groups {group} {SERVICE_USER}",
+                    root.path().display()
+                ),
+                None => format!(
+                    "sudo useradd --system --create-home --home-dir {} --shell /usr/sbin/nologin {SERVICE_USER}",
+                    root.path().display()
+                ),
+            });
+        } else if let (Some(group), false) = (group, self.grouped) {
+            commands.push(format!("sudo usermod -aG {group} {SERVICE_USER}"));
+        }
+        commands
+    }
+
+    /// The clause a step's line carries about the account, or an empty string when there is nothing to say.
+    fn remark(&self, group: Option<&str>) -> String {
+        match (self.uid.is_some(), group) {
+            (true, Some(group)) if self.grouped => {
+                format!("; the service user {SERVICE_USER} is in the {group} group")
+            }
+            (true, None) => format!(
+                "; the service user {SERVICE_USER} exists, and this run joined it to no group because a hub \
+                 drives no daemon"
+            ),
+            _ => String::new(),
+        }
+    }
+}
+
+/// Step 2: the install tree — the root, four paths inside the data root, and the two files the machine owns.
 ///
 /// The three files are treated differently on purpose, and that difference is the security property of this step:
 /// `config.toml` is the deploy's own rendering and is rewritten when it differs; `keys.toml` holds every stored
@@ -790,14 +779,12 @@ fn disk_of_the_nearest_ancestor(
 /// when it is absent and read-only afterwards, because regenerating it would silence every existing push
 /// subscription.
 ///
-/// The user and the ownership are not items: they are machine facts rather than install-tree paths, and under
-/// `--root` neither is read at all — the tree belongs to the invoking user, and the line says so instead.
-///
-/// The staging directory is removed whatever happened: a failed step must leave nothing behind but the paths it
-/// managed to install.
-fn files(config: &Config, target: &Target, tools: &Tools, dry_run: bool, kind: Kind) -> Line {
+/// The account is not an item: it is a machine fact, and it is the operator's to create. Its state is read, its
+/// commands are printed as the line's remark, and the run continues — because the tree's writes are this process's
+/// and the account's absence does not change them.
+fn files(config: &Config, root: &Root, tools: &Tools, dry_run: bool, kind: Kind) -> Line {
     let staging = staging_dir();
-    let line = install(config, target, tools, dry_run, &staging, kind);
+    let line = install(config, root, tools, dry_run, &staging, kind);
     let _ = std::fs::remove_dir_all(&staging);
     line
 }
@@ -837,18 +824,6 @@ enum Action {
     /// The key pair is absent and a child generates it: `openssl` prints the SEC1 DER, and the rendered pair is
     /// installed by the same `install -m 0600` every other file action uses.
     Vapid { path: PathBuf },
-    /// `useradd --system [--groups <group>] --home-dir <home> --shell /usr/sbin/nologin <name>`: the service user
-    /// does not exist. `group` is `None` on a hub install, which joins no group (item 10 §6).
-    UserAdd {
-        name: String,
-        group: Option<String>,
-        home: PathBuf,
-    },
-    /// `usermod -aG <group> <name>`: the user exists and the group does not have it.
-    UserMod { name: String, group: String },
-    /// `chown[-R] <name>:<name> <path>`: the tree is not the service user's, so `serve` (running as it) could not
-    /// write it.
-    Chown { path: PathBuf, recursive: bool },
 }
 
 impl Action {
@@ -870,51 +845,36 @@ impl Action {
                  <staged> {}",
                 path.display()
             ),
-            Self::UserAdd { name, group, home } => format!(
-                "useradd --system {}--home-dir {} --shell /usr/sbin/nologin {name}",
-                match group {
-                    Some(group) => format!("--groups {group} "),
-                    None => String::new(),
-                },
-                home.display()
-            ),
-            Self::UserMod { name, group } => format!("usermod -aG {group} {name}"),
-            Self::Chown { path, recursive } => format!(
-                "chown {}{SERVICE_USER}:{SERVICE_USER} {}",
-                if *recursive { "-R " } else { "" },
-                path.display()
-            ),
         }
     }
 }
 
-/// The four directories and three files of item 10 step 2, in the order they must be created — a file's directory
+/// The root, the data root, the secrets and the three files, in the order they must be created — a file's directory
 /// first, because `install -m` does not make one, and the key pair after the 0700 directory it lives in.
+///
+/// The root itself is first and is the only item whose outcome can be a *failure* rather than a write: a root this
+/// process cannot write is a run that cannot do anything, and its sentence is the command that would fix it.
 ///
 /// The only `Err` is [`config::render`]'s: a path in the config that is not UTF-8, which no config file can carry
 /// and which this step will not paper over with an empty body — a `config.toml` this deploy wrote and could not
 /// render is a step that failed, not a step that changed something.
-fn items(config: &Config, target: &Target) -> Result<Vec<Item>, String> {
-    let etc_dir = target
-        .etc_config()
-        .parent()
-        .map_or_else(|| PathBuf::from("/etc"), Path::to_path_buf);
+fn items(config: &Config, root: &Root) -> Result<Vec<Item>, String> {
     let secrets = config.data_root.join(key::SECRETS_DIR);
     let rendered = config::render(config).map_err(|error| {
         format!(
             "the config that would be written to {} could not be rendered as TOML ({error}): this is the file \
              `serve` reads, so an empty one would be worse than a failure",
-            target.etc_config().display()
+            root.config_file().display()
         )
     })?;
     Ok(vec![
         Item {
-            path: etc_dir,
-            mode: 0o755,
+            path: root.path().to_path_buf(),
+            mode: 0o700,
             kind: ItemKind::Directory,
         },
         Item {
-            path: target.etc_config(),
+            path: root.config_file(),
             mode: 0o644,
             kind: ItemKind::Rendered(rendered.into_bytes()),
         },
@@ -938,271 +898,150 @@ fn items(config: &Config, target: &Target) -> Result<Vec<Item>, String> {
             mode: 0o600,
             kind: ItemKind::Vapid,
         },
-        Item {
-            path: target.admin_dir(),
-            mode: 0o700,
-            kind: ItemKind::Directory,
-        },
     ])
 }
 
-/// What `id` answered about the service user before this run wrote anything.
-struct ServiceUser {
-    /// The uid, when the user exists — the owner the install tree is compared with.
-    uid: Option<String>,
-    /// Whether the group that owns the daemon's socket has the user.
-    grouped: bool,
-}
-
-impl ServiceUser {
-    /// The action that would make the user what the unit file's `User=` needs, or `None` when it already is.
-    ///
-    /// `group` is the group this run installs the user into, and a `None` makes the group question not exist: a
-    /// `hub deploy` creates the user and joins it to nothing (item 10 §6's "without the docker group"). Nothing here
-    /// ever *removes* a membership, so a `both` machine that ran `server deploy` first keeps the docker group when a
-    /// later `hub deploy` reads it — which is why the hub's satisfied line says the user joins no group rather than
-    /// claiming it is in none.
-    fn pending(&self, home: &Path, group: Option<&str>) -> Option<Action> {
-        if self.uid.is_none() {
-            return Some(Action::UserAdd {
-                name: SERVICE_USER.to_string(),
-                group: group.map(str::to_string),
-                home: home.to_path_buf(),
-            });
-        }
-        let group = group?;
-        (!self.grouped).then(|| Action::UserMod {
-            name: SERVICE_USER.to_string(),
-            group: group.to_string(),
-        })
-    }
-}
-
-/// The apply: read the service user, then every item, then the ownership; then run the pending actions in order,
-/// answering the step's line.
+/// The apply: read the service user, then every item, then run the pending actions in order, answering the step's
+/// line.
 ///
-/// The read is complete before the first write, so a plan and a run describe the same machine (ADR-0056). The three
-/// groups have an order the apply depends on: `useradd` before `chown`, because the chown names the user; the items
-/// before the chowns, because a chown of a path this run creates needs the path to exist; and the user before the
-/// items, because the tree a system-path install writes is `sudo`'s and belongs to the service user only after the
-/// chowns at the end.
+/// The account is read **first** and its commands are the line's remark whatever happens, because they are the half
+/// of this step no unprivileged run can do and a reader has to see them beside the list (ADR-0085).
 fn install(
     config: &Config,
-    target: &Target,
+    root: &Root,
     tools: &Tools,
     dry_run: bool,
     staging: &Path,
     kind: Kind,
 ) -> Line {
-    let items = match items(config, target) {
+    let user = match read_user(tools, kind.group()) {
+        Ok(user) => user,
+        Err(sentence) => return failed(DeployStep::Files, sentence),
+    };
+    let account = user.commands(root, kind.group());
+    // The half this run cannot do is the line's remark, in both a dry run and an apply: a tree that is written but
+    // whose account is missing is a unit that boots into `ExecStartPre` failing (ADR-0086), so the words that fix it
+    // sit beside the count rather than being lost with a failure that only a broken run prints.
+    let remark = match account.is_empty() {
+        true => user.remark(kind.group()),
+        false => format!("; still root's to run: {}", account.join("; ")),
+    };
+    // The root is one of the items, and it is the only one this process may not be able to make: its parent belongs
+    // to root on a real machine. The apply below attempts it like any other write and turns its failure into the
+    // command the operator runs instead (ADR-0086).
+    let items = match items(config, root) {
         Ok(items) => items,
         Err(sentence) => return failed(DeployStep::Files, sentence),
     };
-    // 1. The service user, read only where a service user is installed: under `--root` the tree is the invoking
-    // user's and there is nobody to create.
-    let mut user = Vec::new();
-    let mut uid = None;
-    if target.privileged() {
-        let read = match read_user(tools, kind.group()) {
-            Ok(read) => read,
-            Err(sentence) => return failed(DeployStep::Files, sentence),
-        };
-        uid.clone_from(&read.uid);
-        user.extend(read.pending(&config.data_root, kind.group()));
-    }
-    // 2. The seven paths.
-    let mut pending = Vec::new();
+    let mut actions = Vec::new();
     for item in &items {
         match read(item) {
-            Ok(Some(action)) => pending.push(action),
+            Ok(Some(action)) => actions.push(action),
             Ok(None) => {}
             Err(sentence) => return failed(DeployStep::Files, sentence),
         }
     }
-    // 3. The ownership — the service user's, because `serve` writes the data root and the unit runs it as that user.
-    if target.privileged() {
-        match read_owner(config, target, tools, uid.as_deref()) {
-            Ok(chowns) => pending.extend(chowns),
-            Err(sentence) => return failed(DeployStep::Files, sentence),
-        }
-    }
-    let pending: Vec<Action> = user.into_iter().chain(pending).collect();
-    if pending.is_empty() {
+    let plan: Vec<String> = actions.iter().map(Action::describe).collect();
+    if actions.is_empty() {
         return Line {
             step: DeployStep::Files,
             word: Word::Satisfied,
             sentence: format!(
-                "all {} paths are present with their modes: {}{}",
-                items.len(),
-                present(&items),
-                match target.privileged() {
-                    true => format!(
-                        ", {}, and the VAPID keys are in {}",
-                        service_user_clause(kind),
-                        vapid::store(&config.data_root).display()
-                    ),
-                    false => ROOT_REMARK.to_string(),
-                }
+                "{} holds the config, the data root, the secrets and the keys with their modes{remark}",
+                root.describe()
             ),
         };
     }
-    let remark = if target.privileged() {
-        String::new()
-    } else {
-        ROOT_REMARK.to_string()
-    };
     if dry_run {
         return Line {
             step: DeployStep::Files,
             word: Word::Needs,
-            sentence: format!("{}{remark}", planned(&pending)),
+            sentence: counted(&plan, &remark),
         };
     }
-    for action in &pending {
-        if let Err(sentence) = apply(action, target, tools, staging) {
-            return failed(DeployStep::Files, sentence);
+    let mut command = None;
+    for action in &actions {
+        // The root itself is the one action this process may not be able to do: its parent is root's on a real
+        // machine, so the child fails there with `permission denied`. The failure is turned into the command the
+        // operator runs instead — `install -d -o holosmith` — because "carry on with a partial tree" is not an option
+        // and "the tree could not be made" is not a description anyone can act on (ADR-0086).
+        if matches!(action, Action::Directory { path, .. } if path == root.path()) {
+            command = Some(format!(
+                "sudo install -d -o {SERVICE_USER} -g {SERVICE_USER} -m 0700 {}",
+                root.path().display()
+            ));
         }
+        if let Err(sentence) = apply(action, tools, staging) {
+            return failed(
+                DeployStep::Files,
+                match command {
+                    Some(command) => format!("{sentence} — run `{command}`, then re-run"),
+                    None => sentence,
+                },
+            );
+        }
+        command = None;
     }
     Line {
         step: DeployStep::Files,
         word: Word::Changed,
-        sentence: format!("{}{remark}", planned(&pending)),
+        sentence: counted(&plan, &remark),
     }
 }
 
-/// What a `satisfied` step-2 line says about the service user, which is the one clause a hub's install cannot
-/// copy from a server's.
+/// What `id` answers about the account the unit names.
 ///
-/// The wording is deliberate: a hub's line says the user **exists, and this run joined it to no group**, not that it
-/// is in none — nothing in this build ever removes a membership, so a `both` machine that ran `server deploy` first
-/// keeps the docker group, and a line whose subject was the user would be wrong about the machine it just described.
-fn service_user_clause(kind: Kind) -> String {
-    match kind.group() {
-        Some(group) => format!("the service user {SERVICE_USER} is in the {group} group"),
-        None => format!(
-            "the service user {SERVICE_USER} exists, and this run joined it to no group because a hub drives no \
-             daemon"
-        ),
-    }
-}
-
-/// Whether `id` says the service user exists and is in the daemon's group (spec item 10 step 2).
-///
-/// Two questions, each `id`'s exit code: `id -u <user>` answers a uid when the user exists, and `id -nG <user>` the
-/// groups it is in. A spawn failure is a **failure of the read**, not "there is no user": an `id` this machine does
-/// not have cannot tell the deploy whether to create one, and a deploy that guessed would run `useradd` over a user
-/// that is already there.
+/// `id -u holosmith` is the existence question and `id -nG holosmith` the group one — two reads, because "the user
+/// exists" and "the user may talk to the daemon" are two facts with two fixes. A spawn failure is a failed step
+/// rather than "there is no user": an `id` this machine does not have cannot answer the question, and a deploy that
+/// guessed would print a `useradd` for an account that is already there.
 fn read_user(tools: &Tools, group: Option<&str>) -> Result<ServiceUser, String> {
     let uid = ask(
         &tools.id,
         &["-u", SERVICE_USER],
-        "the deploy reads whether the service user exists before it creates it",
+        "this step reads the service user before it says anything about it",
     )?;
-    let Some(uid) = uid else {
-        return Ok(ServiceUser {
-            uid: None,
-            grouped: false,
-        });
+    let grouped = match (uid.is_some(), group) {
+        (true, Some(group)) => ask(
+            &tools.id,
+            &["-nG", SERVICE_USER],
+            "this step asks whether the service user is in the daemon's group before it prints the command",
+        )?
+        .is_some_and(|groups| groups.split_whitespace().any(|found| found == group)),
+        _ => false,
     };
-    // A deploy that installs no daemon joins no group, so there is no question to ask — and answering `false` here
-    // would make `usermod` the plan of every hub install for a group the hub never uses.
-    let Some(group) = group else {
-        return Ok(ServiceUser {
-            uid: Some(uid),
-            grouped: true,
-        });
-    };
-    let groups = ask(
-        &tools.id,
-        &["-nG", SERVICE_USER],
-        "the group that owns the daemon's socket is a fact the unit's `User=` depends on",
-    )?;
-    let groups = groups.ok_or_else(|| {
-        format!(
-            "`{} -nG {SERVICE_USER}` answered non-zero for a user `id -u` found: without its groups this step \
-             cannot say whether `usermod` is needed, and it will not add a user to a group it did not read",
-            tools.id.display()
-        )
-    })?;
-    Ok(ServiceUser {
-        uid: Some(uid),
-        grouped: groups.split_whitespace().any(|seen| seen == group),
-    })
+    Ok(ServiceUser { uid, grouped })
 }
 
-/// The ownership writes the install tree needs, read from the uid `id` answered and the uids `stat` reports.
+/// The same shape for a list of sentences: the count on the step's own line, then one action per line below it —
+/// `3 actions:` and three `    - …` lines, or `1 action:` and one.
 ///
-/// The reference is the **service user's** uid, read rather than spelled: that is the identity the unit's `User=`
-/// names and the one `serve` writes the tree as. All three installed roots are compared, not only the data root,
-/// because the admin directory lives on a tmpfs and is recreated by a privileged `install` after every reboot — a
-/// read that only looked at the data root would leave a root-owned 0700 directory the service user cannot put its
-/// socket in.
+/// One helper rather than two, so a reader can rely on the leading number in every plan and on the word after it
+/// being "action"/"actions" rather than "1 things".
 ///
-/// A path `stat` cannot answer for is one this run is about to create with `sudo install`, which makes it root's
-/// until the chown at the end of the same apply; a path that exists and is already the service user's earns
-/// nothing, which is what makes the second run's step 2 `satisfied`. A run that is creating the user has no uid to
-/// compare, so its tree is the chowns' too.
-fn read_owner(
-    config: &Config,
-    target: &Target,
-    tools: &Tools,
-    uid: Option<&str>,
-) -> Result<Vec<Action>, String> {
-    let roots = [
-        (config.data_root.clone(), true),
-        (target.etc_config(), false),
-        (target.admin_dir(), false),
-    ];
-    let Some(uid) = uid else {
-        return Ok(roots
-            .into_iter()
-            .map(|(path, recursive)| Action::Chown { path, recursive })
-            .collect());
-    };
-    let mut pending = Vec::new();
-    for (path, recursive) in roots {
-        let owner = ask(
-            &tools.stat,
-            &["-c", "%u", &path.display().to_string()],
-            "the tree `serve` writes must be the service user's, and each path's owner is what says whether it is",
-        )?;
-        if owner.as_deref().map(str::trim) != Some(uid) {
-            pending.push(Action::Chown { path, recursive });
-        }
-    }
-    Ok(pending)
-}
-
-/// The item list as a `satisfied` line prints it: each path with its mode, so a reader can see *what* was checked.
-fn present(items: &[Item]) -> String {
-    items
-        .iter()
-        .map(|item| format!("{} {:04o}", item.path.display(), item.mode))
-        .collect::<Vec<String>>()
-        .join(", ")
-}
-
-/// A pending list as a line prints it: how many writes, and each one as the program it would run.
-fn planned(pending: &[Action]) -> String {
-    counted(
-        &pending
-            .iter()
-            .map(Action::describe)
-            .collect::<Vec<String>>(),
-    )
-}
-
-/// The same shape for a list of sentences: the count, then the list — `3 actions: …`, `1 action: …`.
+/// **The list is one action per line, and the count stays on the step's line** (ADR-0085). Ten actions joined with
+/// `; ` are one 700-character line on a phone, and the entry that matters most — the first `install` that has to
+/// succeed before the rest can — is the first thing the wrap loses. The count stays where it was, so the step's
+/// first line keeps its `N. files: needs: 10 actions:` shape and a gate greps it the way it always has.
 ///
-/// One helper rather than two, so a reader can rely on the leading number in both steps' lines and on the word
-/// after it being "action"/"actions" rather than "1 things".
-fn counted(items: &[String]) -> String {
-    format!(
-        "{} action{}: {}",
+/// `remark` is the clause a few steps carry about what the run does *not* do — the account's commands, the unit's
+/// install line, an `agent_image` this step does not build. It sits after the count rather than after the last
+/// action, because it is a statement about the whole step: a reader who skimmed the list would otherwise take the
+/// actions for the run's whole effect. It starts with `; `, which is why the count's own colon gives way to it.
+fn counted(items: &[String], remark: &str) -> String {
+    let count = format!(
+        "{} action{}",
         items.len(),
         if items.len() == 1 { "" } else { "s" },
-        items.join("; ")
-    )
+    );
+    let mut text = match remark.is_empty() {
+        true => format!("{count}:"),
+        false => format!("{count}{remark}"),
+    };
+    for item in items {
+        text.push_str(&format!("\n    - {item}"));
+    }
+    text
 }
 
 /// One item's state read: `None` when it is already what the deploy wants, the action that would make it so
@@ -1236,11 +1075,14 @@ fn read(item: &Item) -> Result<Option<Action>, String> {
         }
     };
     let wrong_mode = metadata.permissions().mode() & 0o777 != mode;
+    let wrong_owner = metadata.uid() != std::fs::metadata(".").map_or(0, |here| here.uid());
     Ok(match &item.kind {
-        ItemKind::Directory => (!metadata.is_dir() || wrong_mode).then(|| Action::Directory {
-            path: path.clone(),
-            mode,
-        }),
+        ItemKind::Directory => {
+            (!metadata.is_dir() || wrong_mode || wrong_owner).then(|| Action::Directory {
+                path: path.clone(),
+                mode,
+            })
+        }
         ItemKind::Kept(_) => {
             if !metadata.is_file() {
                 return Err(format!(
@@ -1300,9 +1142,9 @@ fn read(item: &Item) -> Result<Option<Action>, String> {
 
 /// Whether `program` answered exit 0, and its stdout when it did.
 ///
-/// These are the deploy's **questions** — `id`, `stat`, `systemctl is-enabled`, `tailscale serve status` — so none
-/// of them is prefixed by `sudo`: a question needs no privilege, and a spawn failure is a sentence rather than a
-/// "no" (a program this machine does not have cannot answer whether a user exists).
+/// These are the deploy's **questions** — `id -u`, `id -nG` — so none of them is prefixed by anything: a question
+/// needs no privilege, and a spawn failure is a sentence rather than a "no" (a program this machine does not have
+/// cannot answer whether a user exists).
 fn ask(program: &Path, arguments: &[&str], because: &str) -> Result<Option<String>, String> {
     let rendered = format!("{} {}", program.display(), arguments.join(" "));
     let output = Command::new(program)
@@ -1318,15 +1160,12 @@ fn ask(program: &Path, arguments: &[&str], because: &str) -> Result<Option<Strin
 
 /// One action as one child process, or — for the key pair — two.
 ///
-/// `install` for a directory or a file, `chmod` for a mode, `useradd`/`usermod`/`chown` for the user and the
-/// ownership, and for the pair a generation followed by the same `install -m 0600` a file action uses. Every one
-/// goes through [`child`], so a spawn failure and a non-zero answer are one sentence shape wherever they happen: a
-/// `sudo` that is not installed is a fact about this machine, not a panic.
-fn apply(action: &Action, target: &Target, tools: &Tools, staging: &Path) -> Result<(), String> {
+/// `install` for a directory or a file, `chmod` for a mode, and for the pair a generation followed by the same
+/// `install -m 0600` a file action uses. Every one goes through [`child`], so a spawn failure and a non-zero answer
+/// are one sentence shape wherever they happen.
+fn apply(action: &Action, tools: &Tools, staging: &Path) -> Result<(), String> {
     match action {
         Action::Directory { path, mode } => child(
-            tools,
-            target,
             &tools.install,
             vec![
                 "-d".to_string(),
@@ -1338,22 +1177,17 @@ fn apply(action: &Action, target: &Target, tools: &Tools, staging: &Path) -> Res
         .map(drop),
         Action::File { path, mode, bytes } => {
             let staged = stage(staging, path, bytes)?;
-            install_staged(tools, target, &staged, path, *mode)
+            install_staged(tools, &staged, path, *mode)
         }
         Action::Mode { path, mode } => child(
-            tools,
-            target,
             &tools.chmod,
             vec![format!("{mode:04o}"), path.display().to_string()],
         )
         .map(drop),
         Action::Vapid { path } => {
             // The generation is a **read of a program's output**, not a write: it prints the DER to stdout, and the
-            // file is written by the `install` below. So it is not `sudo`-prefixed — asking for the password twice
-            // to write one file would be the only thing escalation bought here.
-            let generated = execute(
-                &tools.sudo,
-                false,
+            // file is written by the `install` below.
+            let generated = child(
                 &tools.openssl,
                 vec![
                     "ecparam".to_string(),
@@ -1367,53 +1201,14 @@ fn apply(action: &Action, target: &Target, tools: &Tools, staging: &Path) -> Res
             )?;
             let pair = vapid::from_der(&generated.stdout)?;
             let staged = stage(staging, path, vapid::render(&pair).as_bytes())?;
-            install_staged(tools, target, &staged, path, 0o600)
-        }
-        Action::UserAdd { name, group, home } => {
-            let mut arguments = vec!["--system".to_string()];
-            if let Some(group) = group {
-                arguments.push("--groups".to_string());
-                arguments.push(group.clone());
-            }
-            arguments.extend([
-                "--home-dir".to_string(),
-                home.display().to_string(),
-                "--shell".to_string(),
-                "/usr/sbin/nologin".to_string(),
-                name.clone(),
-            ]);
-            child(tools, target, &tools.useradd, arguments).map(drop)
-        }
-        Action::UserMod { name, group } => child(
-            tools,
-            target,
-            &tools.usermod,
-            vec!["-aG".to_string(), group.clone(), name.clone()],
-        )
-        .map(drop),
-        Action::Chown { path, recursive } => {
-            let mut arguments = Vec::new();
-            if *recursive {
-                arguments.push("-R".to_string());
-            }
-            arguments.push(format!("{SERVICE_USER}:{SERVICE_USER}"));
-            arguments.push(path.display().to_string());
-            child(tools, target, &tools.chown, arguments).map(drop)
+            install_staged(tools, &staged, path, 0o600)
         }
     }
 }
 
 /// `install -m <mode> <staged> <path>`: the one write every file action ends in, staged or generated.
-fn install_staged(
-    tools: &Tools,
-    target: &Target,
-    staged: &Path,
-    path: &Path,
-    mode: u32,
-) -> Result<(), String> {
+fn install_staged(tools: &Tools, staged: &Path, path: &Path, mode: u32) -> Result<(), String> {
     child(
-        tools,
-        target,
         &tools.install,
         vec![
             "-m".to_string(),
@@ -1425,47 +1220,19 @@ fn install_staged(
     .map(drop)
 }
 
-/// One action's child, prefixed by `sudo` when the target is the system's tree.
-///
-/// The one place an action's argv and its failure sentence are spelled, so a child that cannot be spawned and one
-/// that answers non-zero read the same whichever program ran. A successful child's [`Output`] is handed back
-/// because generating the key pair is a child whose **stdout** is the answer.
-fn child(
-    tools: &Tools,
-    target: &Target,
-    program: &Path,
-    arguments: Vec<String>,
-) -> Result<Output, String> {
-    execute(&tools.sudo, target.privileged(), program, arguments)
-}
-
-/// [`child`] without a target: the caller decides whether the system's privilege is involved.
-fn execute(
-    sudo: &Path,
-    escalate: bool,
-    program: &Path,
-    arguments: Vec<String>,
-) -> Result<Output, String> {
-    let (program, arguments) = match escalate {
-        true => {
-            let mut all = vec![program.display().to_string()];
-            all.extend(arguments);
-            (sudo.to_path_buf(), all)
-        }
-        false => (program.to_path_buf(), arguments),
-    };
+/// One action's child: the one place an action's argv and its failure sentence are spelled, so a child that cannot
+/// be spawned and one that answers non-zero read the same whichever program ran. A successful child's [`Output`] is
+/// handed back because generating the key pair is a child whose **stdout** is the answer.
+fn child(program: &Path, arguments: Vec<String>) -> Result<Output, String> {
     let rendered = format!("{} {}", program.display(), arguments.join(" "));
-    // `stdin` is inherited so that `sudo` can ask for a password on the terminal it was run from: a deploy is an
-    // operator's foreground command, and the alternative is `sudo: a terminal is required to read the password` on
-    // every machine whose credential is not already cached (ADR-0056).
-    let output = Command::new(&program)
+    let output = Command::new(program)
         .args(&arguments)
-        .stdin(Stdio::inherit())
+        .stdin(Stdio::null())
         .output()
         .map_err(|error| {
             format!(
-                "`{rendered}` could not be run ({error}): the deploy reads and writes this machine one child at a \
-                 time, each prefixed by `sudo` when it changes the system's own tree"
+                "`{rendered}` could not be run ({error}): this deploy writes its own tree one child at a time, \
+                 each inside the root the run was given"
             )
         })?;
     if output.status.success() {
@@ -1508,9 +1275,9 @@ fn stage(staging: &Path, path: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
         |name| name.to_string_lossy().into_owned(),
     );
     let staged = staging.join(name);
-    // `create_new` rather than `write`: the system-path run hands this file to `sudo install`, so an entry a local
-    // user planted in the staging directory (a symlink to a root-owned path, say) must be a refusal rather than a
-    // followed link. The directory is unique per run and emptied first; this is the half that does not trust it.
+    // `create_new` rather than `write`: an entry a local user planted in the staging directory (a symlink to a path
+    // this run may not write, say) must be a refusal rather than a followed link. The directory is unique per run
+    // and emptied first; this is the half that does not trust it.
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1607,7 +1374,7 @@ fn images_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
         return Line {
             step: DeployStep::Images,
             word: Word::Needs,
-            sentence: format!("{}{remark}", counted(&reasons)),
+            sentence: counted(&reasons, &remark),
         };
     }
     let binary = match std::env::current_exe() {
@@ -1707,7 +1474,7 @@ fn proxies_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
             ));
         }
     }
-    let sentence = counted(&pending);
+    let sentence = counted(&pending, "");
     if dry_run {
         return Line {
             step: DeployStep::Proxies,
@@ -1733,68 +1500,24 @@ fn proxies_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
     }
 }
 
-/// Whether this process may write [`Target`]'s tree, and the sentence when it may not.
+/// Step 5: the systemd unit, rendered into the root for the operator to install (ADR-0086).
 ///
-/// The two **release verbs** — `holosmith upgrade` and `holosmith rollback` — write the release tree, the `current`
-/// symlink and the unit, and restart a system service. `server deploy` writes each of its own files as a
-/// `sudo`-prefixed child; a release verb doing the same would be a dozen escalations for one command, each asking for
-/// the same credential. So the rule is one check with one sentence: as root, or with `--root DIR` for a tree this user
-/// owns — and it lives here, next to [`Target::privileged`] and [`UNIT_NAME`], because it is a fact about the paths a
-/// release verb writes rather than about either verb.
+/// The bytes are the deliverable, which is why the rendering is a public function of exactly four facts — where the
+/// binary is, the role the machine will hold, the root, and whether the root is under `/home` — and the read
+/// compares the file with it byte for byte. The path is [`std::env::current_exe`] and not the literal `holosmith`:
+/// this binary does not install itself, and an `ExecStart` resolved through systemd's `PATH` would be a coin flip
+/// between the artifact the operator just built and whatever else answers to the name.
 ///
-/// A file that cannot be read answers "not root", which is the safe direction: a verb that wrongly believed it could
-/// write `/opt` would fail at the first write with a `Permission denied` instead of the sentence this returns.
-pub fn privilege_problem(target: &Target, verb: &str) -> Option<String> {
-    if !target.privileged() || running_as_root() {
-        return None;
-    }
-    Some(format!(
-        "`holosmith {verb}` writes into the release tree ({}), the `{}` symlink and the unit, and restarts {} — so it runs \
-         as root, or with `--root DIR` for an install tree this user owns: nothing was changed",
-        target.opt_dir().display(),
-        crate::release::CURRENT,
-        UNIT_NAME
-    ))
-}
-
-/// Whether this process's effective uid is 0, read from `/proc/self/status`.
-///
-/// One file rather than a child (`id -u`) and rather than a dependency: `Uid:`'s second field is the effective uid,
-/// and this build is Linux-only (both release targets are).
-fn running_as_root() -> bool {
-    std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|status| {
-            status
-                .lines()
-                .find_map(|line| line.strip_prefix("Uid:"))
-                .and_then(|fields| fields.split_whitespace().nth(1).map(str::to_string))
-        })
-        .is_some_and(|uid| uid == "0")
-}
-
-/// Step 5: the systemd unit, rendered from this binary's own path (spec item 10 step 5).
-///
-/// The bytes are the deliverable, which is why the rendering is a public function of exactly three facts — where the
-/// binary is, whether this is a privileged install, and the role the machine will hold — and the read compares the
-/// file with it byte for byte. The
-/// path is [`std::env::current_exe`] and not the literal `holosmith`: this binary does not install itself, and an
-/// `ExecStart` resolved through systemd's `PATH` would be a coin flip between the artifact the operator just built
-/// and whatever else answers to the name.
-///
-/// `User=` and `Group=` are the two lines `--root` omits rather than blanks: a unit in an install tree is not one
-/// systemd can load, so naming a service user there would describe a machine that does not exist.
+/// **The unit is written into the root, and installing it is the operator's.** `/etc/systemd/system` is root's, so
+/// this step prints the two commands that put these bytes there and start them (`Root::unit_install` and the
+/// `systemctl` pair) as the line's remark — in a dry run and in a run alike. A run that printed the command and
+/// never had it obeyed is caught one step later, by a `/api/health` that does not answer.
 ///
 /// `role` is the role the **machine** will hold (`deploy::union`'s answer), not the half this run installs, and it
 /// decides two things: `Description=`, and whether the unit requires the daemon. A `hub`-only machine has no
 /// Docker, so a unit that requires `docker.service` there is a unit systemd never starts — and a `both` machine
 /// runs sessions, so its unit keeps the requirement even when the run that wrote it was a `hub deploy`.
-pub fn unit_text(exe: &Path, privileged: bool, role: Role) -> String {
-    let identity = if privileged {
-        format!("User={SERVICE_USER}\nGroup={SERVICE_USER}\n")
-    } else {
-        String::new()
-    };
+pub fn unit_text(exe: &Path, role: Role, root: &Root) -> String {
     let daemon = if role == Role::Hub {
         ""
     } else {
@@ -1805,6 +1528,14 @@ pub fn unit_text(exe: &Path, privileged: bool, role: Role) -> String {
     } else {
         "Requires=docker.service\n"
     };
+    // `ProtectHome=yes` hides `/home`, `/root` and `/run/user` from the service, which is the cheap half of the
+    // sandbox — and it would hide the root itself if an operator put the root under `/home`. So the one directive
+    // that cannot coexist with such a root is the one that is written conditionally.
+    let home = if root.path().starts_with("/home") {
+        ""
+    } else {
+        "ProtectHome=yes\n"
+    };
     format!(
         "[Unit]\n\
          Description=Holosmith {role}\n\
@@ -1814,9 +1545,16 @@ pub fn unit_text(exe: &Path, privileged: bool, role: Role) -> String {
          \n\
          [Service]\n\
          Type=simple\n\
-         {identity}\
+         User={SERVICE_USER}\n\
+         Group={SERVICE_USER}\n\
+         UMask=0077\n\
+         NoNewPrivileges=yes\n\
+         PrivateTmp=yes\n\
+         ProtectSystem=strict\n\
+         {home}\
+         ReadWritePaths={root}\n\
          ExecStartPre={exe} doctor --quick\n\
-         ExecStart={exe} serve\n\
+         ExecStart={exe} serve --config {config}\n\
          Restart=on-failure\n\
          RestartSec=5s\n\
          KillMode=mixed\n\
@@ -1824,22 +1562,33 @@ pub fn unit_text(exe: &Path, privileged: bool, role: Role) -> String {
          \n\
          [Install]\n\
          WantedBy=multi-user.target\n",
-        exe = exe.display()
+        role = role.as_str(),
+        exe = exe.display(),
+        root = root.path().display(),
+        config = root.config_file().display(),
     )
 }
 
-/// Step 5's read and apply: the file's bytes, and on a system-path install the two `systemctl` verbs that make
-/// systemd load it.
-fn service(config: &Config, target: &Target, tools: &Tools, dry_run: bool) -> Line {
+/// What the operator must run to make the rendered unit the one systemd loads, in order.
+fn unit_commands(root: &Root) -> Vec<String> {
+    vec![
+        root.unit_install(),
+        "sudo systemctl daemon-reload".to_string(),
+        format!("sudo systemctl enable --now {UNIT_NAME}"),
+    ]
+}
+
+/// Step 5's read and apply: the file's bytes, and the commands that install them.
+fn service(config: &Config, root: &Root, tools: &Tools, dry_run: bool) -> Line {
     let staging = staging_dir();
-    let line = service_line(config, target, tools, dry_run, &staging);
+    let line = service_line(config, root, tools, dry_run, &staging);
     let _ = std::fs::remove_dir_all(&staging);
     line
 }
 
 fn service_line(
     config: &Config,
-    target: &Target,
+    root: &Root,
     tools: &Tools,
     dry_run: bool,
     staging: &Path,
@@ -1850,7 +1599,7 @@ fn service_line(
     // symlink resolves is a machine that systemd should start *through* it, so a switch is what a restart picks up.
     // The unit's bytes are rendered from the same function either way, which is why this read and the promotion's
     // write agree byte for byte -- and why a second deploy on a promoted machine says `satisfied`.
-    let exe = match crate::release::Release::of(target).live() {
+    let exe = match crate::release::Release::of(root).live() {
         Some(live) => live,
         None => match std::env::current_exe() {
             Ok(exe) => exe,
@@ -1866,262 +1615,50 @@ fn service_line(
             }
         },
     };
-    let path = target.unit_path();
-    // The role the machine holds once this run is done, not the half it installs: the unit is what boots.
-    let bytes = unit_text(&exe, target.privileged(), config.role);
-    // The unit's directory first: `install -m` does not make one, and under `--root` this step is the only thing
-    // that ever asks for `/etc/systemd/system`.
-    let directory = Item {
-        path: path
-            .parent()
-            .map_or_else(|| PathBuf::from(UNIT_DIR), Path::to_path_buf),
-        mode: 0o755,
-        kind: ItemKind::Directory,
-    };
+    let bytes = unit_text(&exe, config.role, root);
     let unit = Item {
-        path: path.clone(),
+        path: root.unit(),
         mode: 0o644,
         kind: ItemKind::Rendered(bytes.clone().into_bytes()),
     };
-    let mut files = Vec::new();
-    for item in [&directory, &unit] {
-        match read(item) {
-            Ok(Some(action)) => files.push(action),
-            Ok(None) => {}
-            Err(sentence) => return failed(DeployStep::Service, sentence),
-        }
-    }
-    // The machine half. `is-enabled` is one word and one exit code — the question "would a boot start this?" — which
-    // is why it is what `satisfied` is compared with rather than a parse of some other command's prose.
-    let enabled = if target.privileged() {
-        match ask(
-            &tools.systemctl,
-            &["is-enabled", UNIT_NAME],
-            "step 5 asks systemd whether the unit is enabled before it enables it",
-        ) {
-            Ok(answer) => answer.is_some(),
-            Err(sentence) => return failed(DeployStep::Service, sentence),
-        }
-    } else {
-        false
+    let actions: Vec<Action> = match read(&unit) {
+        Ok(Some(action)) => vec![action],
+        Ok(None) => Vec::new(),
+        Err(sentence) => return failed(DeployStep::Service, sentence),
     };
-    if files.is_empty() && enabled == target.privileged() {
-        let sentence = if target.privileged() {
-            format!(
-                "{} holds this binary's unit ({} bytes), and `systemctl is-enabled {UNIT_NAME}` answers enabled, so \
-                 systemd loads it at boot",
-                path.display(),
-                bytes.len()
-            )
-        } else {
-            format!(
-                "{} holds this binary's unit ({} bytes){ROOT_UNIT_REMARK}",
-                path.display(),
-                bytes.len()
-            )
-        };
+    let remark = format!("; still root's to run: {}", unit_commands(root).join("; "));
+    if actions.is_empty() {
         return Line {
             step: DeployStep::Service,
             word: Word::Satisfied,
-            sentence,
+            sentence: format!(
+                "{} holds this binary's unit ({} bytes){remark}",
+                root.unit().display(),
+                bytes.len()
+            ),
         };
     }
-    // The machine half is planned whenever the step applies at all — a *changed* unit has to be re-read before it can
-    // be started, so `daemon-reload` is not only for the first install.
-    let mut plan: Vec<String> = files.iter().map(Action::describe).collect();
-    if target.privileged() {
-        plan.push("systemctl daemon-reload".to_string());
-        plan.push(format!("systemctl enable --now {UNIT_NAME}"));
-    }
-    // The `--root` remark belongs on all three arms, like step 2's: a plan is where an operator learns what the run
-    // will *not* do, and a `changed` line that dropped it would be the one line saying less than the read did.
-    let remark = if target.privileged() {
-        String::new()
-    } else {
-        ROOT_UNIT_REMARK.to_string()
-    };
+    let plan: Vec<String> = actions.iter().map(Action::describe).collect();
     if dry_run {
         return Line {
             step: DeployStep::Service,
             word: Word::Needs,
-            sentence: format!("{}{remark}", counted(&plan)),
+            sentence: counted(&plan, &remark),
         };
     }
-    for action in &files {
-        if let Err(sentence) = apply(action, target, tools, staging) {
-            return failed(DeployStep::Service, sentence);
-        }
-    }
-    if target.privileged() {
-        // `daemon-reload` first: `enable --now` on a unit systemd has not re-read would start the previous
-        // rendering, which is exactly the version an upgrade is replacing.
-        if let Err(sentence) = child(
-            tools,
-            target,
-            &tools.systemctl,
-            vec!["daemon-reload".to_string()],
-        ) {
-            return failed(DeployStep::Service, sentence);
-        }
-        if let Err(sentence) = child(
-            tools,
-            target,
-            &tools.systemctl,
-            vec![
-                "enable".to_string(),
-                "--now".to_string(),
-                UNIT_NAME.to_string(),
-            ],
-        ) {
+    for action in &actions {
+        if let Err(sentence) = apply(action, tools, staging) {
             return failed(DeployStep::Service, sentence);
         }
     }
     Line {
         step: DeployStep::Service,
         word: Word::Changed,
-        sentence: format!("{}{remark}", counted(&plan)),
+        sentence: counted(&plan, &remark),
     }
 }
 
-/// The control origin's local target: what `tailscale serve` proxies :443 to.
-pub fn control_target(config: &Config) -> String {
-    format!("http://127.0.0.1:{}", config.control_listen.port())
-}
-
-/// The preview origin's local target: what `tailscale serve` proxies :8444 to.
-pub fn preview_target(config: &Config) -> String {
-    format!("http://127.0.0.1:{}", config.preview_listen.port())
-}
-
-/// Step 6: `tailscale serve` for the two origins (spec item 10 step 6).
-///
-/// The read is Tailscale's own description of what it serves, not a file this deploy wrote: `serve status --json`
-/// answers one `Web` entry per host:port with the `Proxy` behind `/`, so "is :443 the control origin" is a field
-/// comparison. That also makes a second deploy honestly `satisfied`, and it means a Tailscale that cannot be asked
-/// is a **failure** rather than a pass — the deploy cannot configure what it cannot read.
-///
-/// Neither child is `sudo`-prefixed: `tailscale serve` writes to the daemon, not to a root path. `--root` changes
-/// nothing here either, because the origins are machine facts — the same asymmetry the docker socket has.
-fn origins(config: &Config, tools: &Tools, dry_run: bool) -> Line {
-    let status = match execute(
-        &tools.sudo,
-        false,
-        &tools.doctor.tailscale,
-        vec![
-            "serve".to_string(),
-            "status".to_string(),
-            "--json".to_string(),
-        ],
-    ) {
-        Ok(output) => output,
-        Err(sentence) => {
-            return failed(
-                DeployStep::Origins,
-                format!(
-                    "{sentence}: this deploy reads what it configures, so a Tailscale that cannot be asked is a \
-                     step that cannot be answered"
-                ),
-            );
-        }
-    };
-    let served = match served(&String::from_utf8_lossy(&status.stdout)) {
-        Ok(served) => served,
-        Err(sentence) => return failed(DeployStep::Origins, sentence),
-    };
-    let wanted = [
-        (CONTROL_HTTPS, control_target(config)),
-        (PREVIEW_HTTPS, preview_target(config)),
-    ];
-    let missing: Vec<&(u16, String)> = wanted
-        .iter()
-        .filter(|(port, target)| {
-            !served
-                .iter()
-                .any(|(served_port, proxy)| served_port == port && proxy == target)
-        })
-        .collect();
-    if missing.is_empty() {
-        return Line {
-            step: DeployStep::Origins,
-            word: Word::Satisfied,
-            sentence: format!(
-                "`tailscale serve status --json` answers both origins: {} → {} and {} → {}",
-                CONTROL_HTTPS, wanted[0].1, PREVIEW_HTTPS, wanted[1].1
-            ),
-        };
-    }
-    let plan: Vec<String> = missing
-        .iter()
-        .map(|(port, target)| format!("tailscale serve --bg --yes --https={port} {target}"))
-        .collect();
-    if dry_run {
-        return Line {
-            step: DeployStep::Origins,
-            word: Word::Needs,
-            sentence: counted(&plan),
-        };
-    }
-    // One child per missing origin, in the order the origins are read: a failure names the port it was configuring
-    // and stops, so the report never claims an origin that was not asked for.
-    for (port, target) in &missing {
-        if let Err(sentence) = execute(
-            &tools.sudo,
-            false,
-            &tools.doctor.tailscale,
-            vec![
-                "serve".to_string(),
-                "--bg".to_string(),
-                "--yes".to_string(),
-                format!("--https={port}"),
-                target.clone(),
-            ],
-        ) {
-            return failed(DeployStep::Origins, sentence);
-        }
-    }
-    Line {
-        step: DeployStep::Origins,
-        word: Word::Changed,
-        sentence: counted(&plan),
-    }
-}
-
-/// The `Proxy` behind `/` for every `Web` entry of `tailscale serve status --json`, as (port, target).
-///
-/// The shape is `ipn.ServeConfig`: `Web` is keyed by `host:port` and each entry's `Handlers["/"]` carries the
-/// `Proxy` this machine already serves there. An entry without one, or a key without a port, is not an origin this
-/// step configured — skipped rather than guessed at.
-fn served(json: &str) -> Result<Vec<(u16, String)>, String> {
-    let value: serde_json::Value = serde_json::from_str(json).map_err(|error| {
-        format!(
-            "`tailscale serve status --json` printed something that is not JSON ({error}): this deploy reads what \
-             it configures, so it can only compare what it can parse"
-        )
-    })?;
-    let mut served = Vec::new();
-    let Some(web) = value.get("Web").and_then(serde_json::Value::as_object) else {
-        return Ok(served);
-    };
-    for (host_port, entry) in web {
-        let Some((_, port)) = host_port.rsplit_once(':') else {
-            continue;
-        };
-        let Ok(port) = port.parse::<u16>() else {
-            continue;
-        };
-        let proxy = entry
-            .get("Handlers")
-            .and_then(|handlers| handlers.get("/"))
-            .and_then(|root| root.get("Proxy"))
-            .and_then(serde_json::Value::as_str);
-        if let Some(proxy) = proxy {
-            served.push((port, proxy.to_string()));
-        }
-    }
-    Ok(served)
-}
-
-/// Step 7: wait for `/api/health`, then ask `doctor --full` (spec item 10 step 7).
+/// Step 6: wait for `/api/health`, then ask `doctor --full` (spec item 10 step 7).
 ///
 /// The read is the same two questions the apply ends on — the endpoint answers **and** no finding fails — so a
 /// `satisfied` line here is "this machine is serving, measured", not "the unit was installed". Anything short of
@@ -2162,7 +1699,7 @@ fn health(
         return Line {
             step: DeployStep::Health,
             word: Word::Needs,
-            sentence: counted(&plan),
+            sentence: counted(&plan, ""),
         };
     }
     if !wait_for_health(config.control_listen, tools.health_wait) {
@@ -2183,7 +1720,7 @@ fn health(
     Line {
         step: DeployStep::Health,
         word: Word::Changed,
-        sentence: counted(&plan),
+        sentence: counted(&plan, ""),
     }
 }
 

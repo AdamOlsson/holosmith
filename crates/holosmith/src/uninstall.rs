@@ -39,12 +39,12 @@
 //! explanation. The count and the `--force` that overrides it are one sentence, and `--force` requires `--purge` at
 //! the command line because a `--force` with nothing to force is a flag nobody meant.
 //!
-//! # `--root`, and privilege
+//! # The root, and the privilege
 //!
-//! [`crate::deploy::Target`] is the same value the deploy installs through: it says *where* the tree is, and it
-//! decides privilege the same way (`privileged()` — no `--root` means one `sudo`-prefixed child per write). A unit
-//! under `--root` is one systemd cannot load, so that arm asks systemd nothing and its line says so, exactly as
-//! `server deploy`'s step 5 does.
+//! [`crate::deploy::Root`] is the same value the deploy installs into: one directory, owned by the service user
+//! (ADR-0086). This program never escalates, so the half that is root's — `systemctl disable --now`, the unit in
+//! `/etc/systemd/system`, `daemon-reload` — is **printed** as the unit line's remark, and what this run does itself is
+//! what the service user can do: remove `<root>/holosmith.service` and, with `--purge`, the data root.
 
 use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -54,7 +54,7 @@ use std::time::Duration;
 use crate::config::Config;
 use crate::container::{network_listing_prefix, network_name};
 use crate::db;
-use crate::deploy::{Target, UNIT_NAME};
+use crate::deploy::{Root, UNIT_DIR, UNIT_NAME};
 use crate::docker::{self, Docker};
 use crate::sessions::Status;
 
@@ -147,8 +147,8 @@ impl fmt::Display for Line {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
     pub lines: Vec<Line>,
-    /// [`Target::describe`]: which tree this run tore down, and with which privilege.
-    pub target: String,
+    /// [`Root::describe`]: which tree this run tore down.
+    pub root: String,
 }
 
 impl Report {
@@ -159,7 +159,7 @@ impl Report {
 
     /// The whole report as the operator reads it: the header line, then one line per thing.
     pub fn render(&self) -> String {
-        let mut text = format!("uninstall: from {}\n", self.target);
+        let mut text = format!("uninstall: from {}\n", self.root);
         for line in &self.lines {
             // A `String` cannot fail to be written to, which is why this is not a `?`.
             let _ = writeln!(text, "{line}");
@@ -208,14 +208,13 @@ impl Machines for Docker {
 }
 
 /// The programs a teardown runs, as a seam — the same shape and the same reason as [`crate::deploy::Tools`].
+///
+/// One program, because one thing is left for this run to remove itself: `rm`. Everything else a teardown touches is
+/// Docker's (no privilege) or root's (printed, not run).
 #[derive(Debug, Clone)]
 pub struct Tools {
-    /// The privilege prefix for each write on a system-path install.
-    pub sudo: PathBuf,
     /// `rm`: how a file and a directory tree go.
     pub rm: PathBuf,
-    /// `systemctl`: the two verbs that make systemd forget the unit.
-    pub systemctl: PathBuf,
     /// How long each daemon question and removal may take; [`BOUND`] on a machine.
     pub bound: Duration,
 }
@@ -223,9 +222,7 @@ pub struct Tools {
 impl Default for Tools {
     fn default() -> Self {
         Self {
-            sudo: PathBuf::from("sudo"),
             rm: PathBuf::from("rm"),
-            systemctl: PathBuf::from("systemctl"),
             bound: BOUND,
         }
     }
@@ -241,8 +238,8 @@ pub struct Args {
 
 /// Tear the install down and answer the report.
 ///
-/// `config` is the value [`Target::config`] produced — already prefixed — which is [`crate::deploy::run`]'s
-/// contract and this function's too: `config.data_root` is the target's own path.
+/// `config` is the value [`Root::config`] produced, so `config.data_root` is the root's own path — [`crate::deploy::run`]'s
+/// contract and this function's too.
 ///
 /// **`Err` is a refusal, not a failure**: `--purge` over live sessions, or a database the refusal could not be
 /// counted in, stops the command before any child runs and is printed as one sentence — the shape the deploy's own
@@ -255,14 +252,14 @@ pub struct Args {
 /// this run could no longer promise anything about. Re-running is the recovery, because every step reads first.
 pub fn run(
     config: &Config,
-    target: &Target,
+    root: &Root,
     tools: &Tools,
     machine: &dyn Machines,
     args: &Args,
 ) -> Result<Report, String> {
     let mut report = Report {
         lines: Vec::new(),
-        target: target.describe(),
+        root: root.describe(),
     };
     if args.purge && !args.force {
         // Nothing is removed before this answer, which is the whole point of asking first: a refused purge must
@@ -282,10 +279,10 @@ pub fn run(
         }
     }
     for line in [
-        unit(target, tools),
+        unit(root, tools),
         proxies(config, machine),
         network(machine, tools),
-        data(config, target, tools, machine, args),
+        data(config, tools, machine, args),
     ] {
         let failed = line.word == Word::Failed;
         report.lines.push(line);
@@ -330,147 +327,40 @@ fn live_sessions(config: &Config) -> Result<u64, String> {
 
 /// Step 1: the unit.
 ///
-/// `systemctl`'s answers are **remarks**, not failures: an unloaded unit is `disable --now`'s non-zero answer, a
-/// machine whose systemd is not running answers the same way, and neither is a reason to stop a teardown whose
-/// deliverable is the file. The `rm -f` is the deliverable, so *its* failure is the step's.
-fn unit(target: &Target, tools: &Tools) -> Line {
-    let path = target.unit_path();
+/// The deliverable this run can reach is `<root>/holosmith.service`, the file the deploy rendered; the unit systemd
+/// actually loads is `/etc/systemd/system/holosmith.service`, which is root's to disable and delete. So the step
+/// removes the rendered file, and its sentence carries the three commands that finish the job — one clause, the
+/// same `; still root's to run: …` shape the deploy's step 5 prints (ADR-0086). A machine that never ran them is not
+/// this step's failure: the file it owns is gone, and the operator is told what is left.
+fn unit(root: &Root, tools: &Tools) -> Line {
+    let path = root.unit();
     let present = path.is_file();
-    // A unit systemd already knows about is this machine's to remove even when its file has gone: `systemctl enable`
-    // can link one from `/run/systemd/system`, and a file removed by hand leaves the unit loaded. So on a privileged
-    // run the file's absence is *confirmed* by asking systemd rather than believed — one child on a machine with
-    // nothing installed, and the only question this step asks before it acts.
-    let asked =
-        (!present && target.privileged()).then(|| systemctl(tools, &["is-enabled", UNIT_NAME]));
-    let known = asked
-        .as_ref()
-        .is_some_and(|answer| answer.answered() && answer.remark().is_none());
-    if !present && !known {
-        // Three sentences, because there are three facts: systemd said no, systemd could not be asked, or this is a
-        // `--root` tree where no question was asked at all.
-        let why = match (&asked, target.privileged()) {
-            (Some(Answer::No(line)), _) => format!(
-                "`systemctl is-enabled {UNIT_NAME}` answers that systemd knows of none ({line})"
-            ),
-            (Some(Answer::Unasked(line)), _) => format!(
-                "systemd could not be asked whether it knows one ({line}), so whether it is loaded was not measured"
-            ),
-            _ => "--root: this run did not ask systemd, because a unit in a tree is not one it can read".to_string(),
-        };
+    let remark = format!(
+        "; still root's to run: sudo systemctl disable --now {UNIT_NAME}; sudo rm -f {}; sudo systemctl \
+         daemon-reload",
+        Path::new(UNIT_DIR).join(UNIT_NAME).display()
+    );
+    if !present {
         return Line {
             what: What::Unit,
             word: Word::Nothing,
             sentence: format!(
-                "no unit at {}, and {why}: nothing has installed one, or this run already removed it",
+                "there was no file at {}, so nothing has installed one here or this run already removed it{remark}",
                 path.display()
             ),
         };
     }
-    let mut remarks = Vec::new();
-    if target.privileged() {
-        // Stop it before its file goes: a unit whose `ExecStart` is still running would keep the proxies alive and
-        // the port held, and nothing would be able to address it afterwards.
-        let answer = systemctl(tools, &["disable", "--now", UNIT_NAME]);
-        if let Some(line) = answer.remark() {
-            remarks.push(match answer {
-                Answer::Unasked(_) => format!(
-                    "`systemctl disable --now {UNIT_NAME}` could not be run ({line}), so the unit was not stopped \
-                     through systemd"
-                ),
-                _ => format!(
-                    "`systemctl disable --now {UNIT_NAME}` answered non-zero, which is what a unit systemd has not \
-                     loaded looks like ({line})"
-                ),
-            });
-        }
-    }
-    if present && let Err(sentence) = remove(path.as_path(), false, target, tools) {
+    if let Err(sentence) = remove(path.as_path(), false, tools) {
         return Line {
             what: What::Unit,
             word: Word::Failed,
             sentence,
         };
     }
-    if target.privileged() {
-        let answer = systemctl(tools, &["daemon-reload"]);
-        if let Some(line) = answer.remark() {
-            remarks.push(match answer {
-                Answer::Unasked(_) => {
-                    format!("`systemctl daemon-reload` could not be run ({line})")
-                }
-                _ => format!("`systemctl daemon-reload` answered non-zero ({line})"),
-            });
-        }
-    }
-    let mut sentence = match (present, target.privileged()) {
-        (true, true) => format!(
-            "{} is gone, and systemd was asked to disable and forget {UNIT_NAME}",
-            path.display()
-        ),
-        // systemd knew a unit whose file had already gone: the disable is still the fact that matters.
-        (false, _) => format!(
-            "there was no file at {}, and systemd was asked to disable and forget {UNIT_NAME}",
-            path.display()
-        ),
-        (true, false) => format!(
-            "{} is gone: --root: the unit is in the tree, and this run did not ask systemd about it (a unit under \
-             --root is not one systemd can read)",
-            path.display()
-        ),
-    };
-    for remark in remarks {
-        sentence.push_str(&format!("; {remark}"));
-    }
     Line {
         what: What::Unit,
         word: Word::Removed,
-        sentence,
-    }
-}
-
-/// What one `systemctl` child answered, in the three shapes that matter to a teardown.
-///
-/// **"No" and "nothing answered" are different facts**, and the whole of this type is that distinction: a
-/// `disable --now` that exits non-zero over a unit systemd has not loaded is a *remark* (the file's removal is the
-/// deliverable), and a `systemctl` that could not be run at all — a machine with no systemd, or none on `PATH` — is
-/// not systemd saying "no such unit". Collapsing the two made the `nothing` line assert something no program had
-/// said (T4), which is the one thing these reports refuse to do.
-enum Answer {
-    /// Exit zero.
-    Yes,
-    /// It ran and refused, and this is its own first line.
-    No(String),
-    /// It could not be run: not a verdict about the unit.
-    Unasked(String),
-}
-
-impl Answer {
-    /// The remark a failed child earned, or nothing when it succeeded.
-    fn remark(&self) -> Option<&str> {
-        match self {
-            Self::Yes => None,
-            Self::No(line) | Self::Unasked(line) => Some(line),
-        }
-    }
-
-    /// Whether this is systemd *answering* — either word — rather than the program being absent.
-    fn answered(&self) -> bool {
-        !matches!(self, Self::Unasked(_))
-    }
-}
-
-fn systemctl(tools: &Tools, arguments: &[&str]) -> Answer {
-    match Command::new(&tools.systemctl).args(arguments).output() {
-        Ok(output) if output.status.success() => Answer::Yes,
-        Ok(output) => Answer::No(
-            first_line(&String::from_utf8_lossy(&output.stderr))
-                .or_else(|| first_line(&String::from_utf8_lossy(&output.stdout)))
-                .unwrap_or_else(|| format!("exit {:?}", output.status.code())),
-        ),
-        Err(error) => Answer::Unasked(format!(
-            "`{}` could not be run: {error}",
-            tools.systemctl.display()
-        )),
+        sentence: format!("{} is gone{remark}", path.display()),
     }
 }
 
@@ -482,25 +372,21 @@ fn first_line(text: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Remove a file or a directory tree with `rm`: one child per write, `sudo`-prefixed on a system-path install —
-/// `server deploy`'s rule for installing, the other way round.
-fn remove(path: &Path, recursive: bool, target: &Target, tools: &Tools) -> Result<(), String> {
+/// Remove a file or a directory tree with `rm`: one child per write, as the owner of the root — which is what makes
+/// `--purge` an unprivileged command (ADR-0086).
+fn remove(path: &Path, recursive: bool, tools: &Tools) -> Result<(), String> {
     let mut arguments: Vec<String> = vec![if recursive { "-rf" } else { "-f" }.to_string()];
     arguments.push(path.display().to_string());
-    let mut command = if target.privileged() {
-        let mut command = Command::new(&tools.sudo);
-        command.arg(&tools.rm);
-        command
-    } else {
-        Command::new(&tools.rm)
-    };
-    let output = command.args(&arguments).output().map_err(|error| {
-        format!(
-            "`{} {}` could not be run ({error})",
-            tools.rm.display(),
-            arguments.join(" ")
-        )
-    })?;
+    let output = Command::new(&tools.rm)
+        .args(&arguments)
+        .output()
+        .map_err(|error| {
+            format!(
+                "`{} {}` could not be run ({error})",
+                tools.rm.display(),
+                arguments.join(" ")
+            )
+        })?;
     if output.status.success() {
         return Ok(());
     }
@@ -606,13 +492,7 @@ fn network(machine: &dyn Machines, tools: &Tools) -> Line {
 /// The purge reads the rows **before** it deletes them, because the rows are what name `s_<id>` and `agents_<id>`;
 /// a name it cannot derive is not removed, and a daemon that refuses is counted in the sentence rather than failing
 /// the run: the data root is the deliverable, and a leftover container is not a reason to keep a database.
-fn data(
-    config: &Config,
-    target: &Target,
-    tools: &Tools,
-    machine: &dyn Machines,
-    args: &Args,
-) -> Line {
+fn data(config: &Config, tools: &Tools, machine: &dyn Machines, args: &Args) -> Line {
     let root = &config.data_root;
     if !args.purge {
         return Line {
@@ -652,7 +532,7 @@ fn data(
             ),
         };
     }
-    if let Err(sentence) = remove(root, true, target, tools) {
+    if let Err(sentence) = remove(root, true, tools) {
         // The sweep ran **before** this, so a failure here cannot claim nothing was removed: the containers and
         // networks are gone, and a line that said otherwise would be the report contradicting itself one line later.
         return Line {

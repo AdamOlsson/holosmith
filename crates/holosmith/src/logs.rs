@@ -235,7 +235,7 @@ mod tests {
     #[test]
     fn an_id_that_is_not_a_session_id_is_refused_before_it_becomes_a_path() {
         let mut out = Vec::new();
-        let sentence = session("../../etc/passwd", false, &config(), &mut out)
+        let sentence = session("../../etc/passwd", false, &config("traversal"), &mut out)
             .expect_err("a traversal is not an id");
         assert!(sentence.contains("not a session id"), "{sentence}");
         assert!(out.is_empty());
@@ -243,7 +243,7 @@ mod tests {
 
     #[test]
     fn an_id_with_no_log_names_the_path_it_looked_at() {
-        let config = config();
+        let config = config("no-log");
         let mut out = Vec::new();
         let sentence = session("0123456789abcdef", false, &config, &mut out)
             .expect_err("no log was written for this session");
@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn a_session_log_is_printed_as_written() {
-        let config = config();
+        let config = config("printed-as-written");
         let log = SessionLog::new(config.data_root.clone());
         log.append("0123456789abcdef", "launch: pi --mode rpc");
         log.append("0123456789abcdef", "exit 0");
@@ -265,8 +265,12 @@ mod tests {
         );
     }
 
-    fn config() -> Config {
-        let root = std::env::temp_dir().join(format!("holosmith-logs-root-{}", std::process::id()));
+    /// One data root per test, named for it: these tests run in parallel in one process, and a root shared by
+    /// the binary (a pid alone) let one test's `remove_dir_all` delete the log another had just appended to —
+    /// which failed as a lost first line, not as a failure to make a directory.
+    fn config(name: &str) -> Config {
+        let root =
+            std::env::temp_dir().join(format!("holosmith-logs-root-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         Config {
             data_root: root,

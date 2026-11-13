@@ -51,6 +51,12 @@ and the requirement is *checked* instead: the gate reads `id -u` in the containe
 An image whose default user is root is a broken image, and (the real pi launch) is where the image's
 contents are the subject.
 
+**Superseded in part by ADR-0087:** the install now runs `serve` as a *system* user (ADR-0086), whose uid is not the
+image's `node` 1000, so "the image's own user" would be a container that cannot write the worktree it is mounted on.
+The container is now started with `--user <the data root's owner>`, read from the tree rather than guessed, and the
+non-root requirement is asserted exactly as this section says. The *property* this decision protects — "a worktree the
+host can commit to" — is unchanged; only the assumption that the two uid numbers coincide is gone.
+
 ## A mount whose source is missing is refused before `docker run`
 
 `docker run -v /nope:/work` does not fail: it creates `/nope` as an empty root-owned directory and mounts

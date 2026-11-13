@@ -85,34 +85,33 @@ impl std::fmt::Display for Depth {
 ///
 /// The last two are the install tree's two machine-wide paths, and they are a seam for a different reason: the
 /// tree `perms` reads is the tree the *caller* installed. `server deploy --root DIR` writes `<DIR>/etc/…` and
-/// `<DIR>/run/…`, so a check that spelled the system paths itself would compare the host's real install against a
-/// target's data root and hand the operator a `chown` on a file the run never wrote (SPEC-1).
+/// `<DIR>/…` under the root, so a check that spelled the paths itself would compare the host's real install against
+/// a run's own tree and hand the operator a `chmod` on a file the run never wrote.
 #[derive(Debug, Clone)]
 pub struct Tools {
     pub preflight: preflight::Tools,
     pub tailscale: PathBuf,
     pub systemd: PathBuf,
-    /// The config file the install wrote: [`crate::config::DEFAULT_CONFIG_PATH`] on a machine.
+    /// The config file the install wrote: `<root>/config.toml`.
     pub config_path: PathBuf,
-    /// The admin socket's directory: [`crate::deploy::ADMIN_DIR`] on a machine.
-    pub admin_dir: PathBuf,
-    /// The release tree [`crate::release::ROOT`] on a machine, for the release finding.
+    /// The root the release tree hangs off — `<root>/releases` and `<root>/current` are below it — because
+    /// [`crate::release::Release::at`] takes that root and not the `releases` directory.
     pub release_root: PathBuf,
-    /// The unit file [`crate::deploy::UNIT_DIR`]/[`crate::deploy::UNIT_NAME`] on a machine: where the release
-    /// finding reads the `ExecStart=` that says what systemd runs.
+    /// The unit file `<root>/holosmith.service`, rendered by step 5: where the release finding reads the
+    /// `ExecStart=` that says what systemd runs.
     pub unit_path: PathBuf,
 }
 
 impl Default for Tools {
     fn default() -> Self {
+        let root = crate::deploy::Root::resolve(None);
         Self {
             preflight: preflight::Tools::default(),
             tailscale: PathBuf::from("tailscale"),
             systemd: PathBuf::from(SYSTEMD_DIR),
-            config_path: PathBuf::from(crate::config::DEFAULT_CONFIG_PATH),
-            admin_dir: PathBuf::from(crate::deploy::ADMIN_DIR),
-            release_root: PathBuf::from(crate::release::ROOT),
-            unit_path: PathBuf::from(crate::deploy::UNIT_DIR).join(crate::deploy::UNIT_NAME),
+            config_path: root.config_file(),
+            release_root: root.path().to_path_buf(),
+            unit_path: root.unit(),
         }
     }
 }
@@ -700,7 +699,6 @@ fn perms(config: &Config, tools: &Tools) -> Finding {
         (secrets.clone(), 0o700),
         (secrets.join(crate::key::KEYS_FILE), 0o600),
         (crate::vapid::store(data), 0o600),
-        (tools.admin_dir.clone(), 0o700),
         (tools.config_path.clone(), 0o644),
     ];
     let mut offenders = Vec::new();

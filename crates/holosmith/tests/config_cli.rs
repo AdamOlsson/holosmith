@@ -9,6 +9,17 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+/// The config path a root names, composed the way the binary composes it: `HOLOSMITH_ROOT`, else the default root.
+fn default_config_path() -> String {
+    let root = std::env::var_os("HOLOSMITH_ROOT").map_or_else(
+        || PathBuf::from(holosmith::config::DEFAULT_ROOT),
+        PathBuf::from,
+    );
+    root.join(holosmith::config::CONFIG_FILE)
+        .display()
+        .to_string()
+}
+
 /// A directory that removes itself, so the tests leave nothing in `/tmp`.
 struct TempDir {
     path: PathBuf,
@@ -174,21 +185,27 @@ fn validate_reports_a_path_it_cannot_read() {
 
 #[test]
 fn validate_uses_the_default_path_when_none_is_given() {
-    if Path::new(holosmith::config::DEFAULT_CONFIG_PATH).exists() {
-        eprintln!(
-            "SKIP: this machine has {}",
-            holosmith::config::DEFAULT_CONFIG_PATH
-        );
-        return;
+    let default = default_config_path();
+    // `exists()` is not the question this test asks. It answers `false` for a path under a directory the user may
+    // not read — which is what a root the service user owns is, 0700 and `holosmith` (ADR-0086 D1) — so the guard
+    // would not fire on the one machine where the run below cannot work. `metadata` separates "this machine has no
+    // config" from "this machine's config is not mine to read", and only the first is a case this test can drive.
+    match std::fs::metadata(&default) {
+        Ok(_) => {
+            eprintln!("SKIP: this machine has {default}");
+            return;
+        }
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            eprintln!("SKIP: {default} cannot be examined from this user ({error})");
+            return;
+        }
+        Err(_) => {}
     }
     let output = holosmith(&["config", "validate"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
     assert_eq!(
         stdout_of(&output),
-        format!(
-            "config valid: {} (no file, defaults)\n",
-            holosmith::config::DEFAULT_CONFIG_PATH
-        )
+        format!("config valid: {default} (no file, defaults)\n")
     );
 }
 

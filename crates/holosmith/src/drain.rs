@@ -26,7 +26,7 @@
 //! Item 10 step 3 says "over a local unix socket" and the API table says "not reachable over HTTP". That is
 //! one decision with one consequence: no route, no guard, no CORS layer, no `App` — so a phone that can reach
 //! the control origin still cannot drain the machine, and the only caller is a process that can open a file in
-//! `/run/holosmith`. The directory is step 2's, created 0700 and chowned to the service user, which
+//! `<data root>/run`. The directory belongs to the service user — `serve` creates it 0700 when it binds — which
 //! is why the socket needs no authentication of its own: being able to open it *is* the authorisation.
 //!
 //! # Why the wait is a poll over the rows
@@ -532,11 +532,10 @@ fn describe(wait: Duration) -> String {
 ///
 /// Three facts, each a measurement this project has paid for:
 ///
-/// - **The directory is step 2's, and a `serve` that is not the machine's has to make its own.** On a deployed
-///   host `/run/holosmith` exists, 0700, chowned to the service user — a tmpfs entry a reboot empties,
-///   which is why the deploy re-creates it. A hand-run `serve` (`--admin-dir`, a dev instance, a gate case) may
-///   be the first thing on a tree that has never been deployed, so it is created here, 0700, and only when it
-///   is absent: an operator's own mode is theirs (the data root's rule).
+/// - **The directory is this process's to make.** It is `<data root>/run` (ADR-0086), created here 0700 when it is
+///   absent, and only then: an operator's own mode is theirs (the data root's rule). Because it lives on the root's
+///   filesystem rather than on a tmpfs, a reboot no longer empties it — and the stale-socket rule below is what
+///   handles the file a killed server leaves.
 /// - **A socket left behind by a killed process must not wedge the next boot.** `UnixListener::bind` fails with
 ///   `AddrInUse` for a file, live or dead, so the path is probed first: a connection that is *refused* is a dead
 ///   server's socket and is unlinked; one that succeeds means another server owns this machine's admin socket,

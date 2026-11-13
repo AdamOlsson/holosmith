@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crate::config::{Config, LoadError};
-use crate::deploy::Target;
+use crate::deploy::Root;
 use crate::docker::Docker;
 use crate::doctor::{self, Depth};
 
@@ -39,15 +39,15 @@ pub fn run(args: DoctorArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let target = Target::resolve(args.root);
-    let config = target.config(&loaded.config);
-    // The four machine-wide paths are the *target's*, which is the one thing `--root` changes: on the system paths
-    // the rest of `Tools::default` is what a machine has, and under a tree these are the files the deploy wrote.
+    let root = Root::resolve(args.root);
+    let config = root.config(&loaded.config);
+    // The install tree's three paths are the root's, which is the one thing `--root` changes: on a machine the rest
+    // of `Tools::default` is what it has, and under a tree these are the files the deploy wrote. `release_root` is
+    // the **root**, not `<root>/releases`: `Release::at` takes what `releases/` and `current` hang off (ADR-0086 D1).
     let tools = doctor::Tools {
-        config_path: target.etc_config(),
-        admin_dir: target.admin_dir(),
-        release_root: target.opt_dir(),
-        unit_path: target.unit_path(),
+        config_path: root.config_file(),
+        release_root: root.path().to_path_buf(),
+        unit_path: root.unit(),
         ..doctor::Tools::default()
     };
     // The daemon is only asked about by `--full`, and constructing the handle is what names the socket: a machine

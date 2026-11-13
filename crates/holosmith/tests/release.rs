@@ -161,7 +161,8 @@ fn the_unit_names_the_path_through_current_and_a_promotion_can_read_it_back() {
     let release = tree(&dir);
     release.switch("v1").expect("the release is live");
     let exe = release.live().expect("the tree is live");
-    let unit = holosmith::deploy::unit_text(&exe, false, holosmith::config::Role::Server);
+    let root = holosmith::deploy::Root::resolve(Some(dir.path().to_path_buf()));
+    let unit = holosmith::deploy::unit_text(&exe, holosmith::config::Role::Server, &root);
     assert!(
         unit.contains(&format!("ExecStart={} serve", exe.display())),
         "{unit}"

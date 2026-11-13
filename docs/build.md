@@ -56,8 +56,9 @@ marker `build.rs` writes when `web/dist` is missing (so a build without the app 
 ship), the app it serves from the empty root is byte-for-byte this tree's
 `web/dist/index.html`, the migration SQL is compiled in (a byte grep of the artifact for
 `CREATE TABLE schema_version`, which survives `strip` and LTO), and under the `--data-dir`
-it was given it writes `app.db` and its WAL sidecars — and nothing else, before or after the
-stop. The marker is read out of
+it was given it writes `app.db`, its WAL sidecars and the admin socket's directory
+`run/drain.sock` (ADR-0086 D3) — and nothing else, before or after the stop, with each entry's type letter
+checked so a directory standing where a file belongs cannot pass. The marker is read out of
 `crates/holosmith/build_support/web_embed.rs` rather than restated here or in the script.
 
 ## One-command verification
@@ -540,14 +541,15 @@ prints one `SKIP` line without `python3` (which binds the client), and leaves no
 (ADR-0075 D7).
 
 …and, **`hub deploy` and `hub host`**: `case_hub_deploy` is **the one case in the run that needs no
-daemon and no image** — a hub's five steps ask `doctor` no Docker and no git question, build nothing and start nothing
+daemon and no image** — a hub's four steps ask `doctor` no Docker and no git question, build nothing and start nothing
 — so its only `SKIP` line is a missing `python3` (which picks the ports a registry row has to spell and reads one row's
 field). It still needs the machine's `install`, `chmod`, `df` and `openssl`: step 2 generates the VAPID pair with
-`openssl ecparam`, and step 7's `doctor --full` has an `openssl` finding that a hub is **not** exempt from, because a
-hub runs `s_client` for every `https` registry row. It measures the dry run's seven lines in the spec's order with four `needs` and two `skipped`
-(each naming what a hub has no work for) and the tally counting them apart, and an install root that does not appear;
-a real `--root` run whose steps 2–6 apply with their modes, whose `config.toml` reads `role = "hub"`, whose unit
-carries **no** `docker.service`, and whose second run is five `satisfied` and two `skipped`; the **union** — the same
+`openssl ecparam`, and step 6's `doctor --full` has an `openssl` finding that a hub is **not** exempt from, because a
+hub runs `s_client` for every `https` registry row. It measures the dry run's six lines in order with three `needs` and
+two `skipped` (each naming what a hub has no work for) and the tally counting them apart, and an install root that does
+not appear; a real `--root` run whose steps 2, 5 and 6 apply with their modes, whose `config.toml` reads
+`role = "hub"`, whose unit carries **no** `docker.service`, and whose second run is four `satisfied` and two
+`skipped`; the **union** — the same
 command on a `server` config leaves `role = "both"`, a unit that keeps the daemon, the `deploy: role: both` line, and
 a stub boot of that tree answering `"role":"both"` with `/api/hosts` and `/api/sessions` unchanged; `hub host
 add`/`list`/`remove` against that machine's own listener, with both registration sentences printed verbatim and no
@@ -602,14 +604,14 @@ machine, and it is built the only way this sandbox can build one — there is **
 machine**, so `ssh` is an `sh` stand-in on `PATH` that records every argv and runs the words after the host through
 `sh -c` (which is ssh's own contract, not an approximation of it) with `$HOME` pointed at a tree the case owns. The
 copy, the check and the deploy are then all real: the shipped artifact's bytes, the machine's own `sha256sum`, and the
-artifact's own seven steps in a `--root` tree. It needs `python3` (two ports, a `_ping` socket and one
+artifact's own six steps in a `--root` tree. It needs `python3` (two ports, a `_ping` socket and one
 `/api/health` responder), the artifact, and the machine's `install`/`chmod`/`df`/`openssl`; it needs **no daemon and
 no image**, because the server arm is a dry run over a `_ping` socket and a hub builds and starts nothing. It measures
 the story's demo in one arm — `server deploy --ssh me@box --dry-run` prints this side's three measured lines and then
-the **target's** seven, in the spec's order, streamed through the fourth child's inherited stdout, with the copy on
+the **target's** six, in the order this release runs them, streamed through the fourth child's inherited stdout, with the copy on
 disk carrying the artifact's bytes, mode 0755 and a name derived from the digest in the first line and in the
-shim's log; a real hub install over the same transport (steps 2, 5, 6 and 7 applied, 3 and 4 `skipped` — the `Kind`
-travelled) and a second run whose tally is `5 satisfied, 0 changed, 2 skipped, 0 failed` and whose copy overwrote the
+shim's log; a real hub install over the same transport (steps 2, 5 and 6 applied, 3 and 4 `skipped` — the `Kind`
+travelled) and a second run whose tally is `4 satisfied, 0 changed, 2 skipped, 0 failed` and whose copy overwrote the
 same digest-named file rather than adding a second; the architecture refusal with **one** child in the log, no copy
 on the target and a resume line naming `--binary`, and the same target accepting `--binary` when it matches (the two
 musl artifacts `scripts/build.sh` leaves behind are the two builds it can be given, and the arm prints one `SKIP` line
@@ -619,29 +621,29 @@ under `--no-build` if the other one is absent); a `cat` stand-in that appends on
 *target* refuses (a config path that exists here and not there), which is what measures that a child's non-zero status
 becomes this command's exit code, that the target's sentence is on stderr and the local resume line is the last line on
 stdout; and a `curl`/`wget` recorder that must never fire, which is the spec's "the CLI itself downloads nothing" in
-the only form a gate can measure. What it cannot measure — a real ssh, a key, a second machine, a real `sudo` (there is none on this
-machine) and the target's `sudo`-prefixed children — is `tests/remote.rs`'s (the four argvs, every refusal, the `-t`
-rule) and `tests/deploy.rs`'s (ADR-0078 D8).
+the only form a gate can measure. What it cannot measure — a real ssh, a key and a second machine — is
+`tests/remote.rs`'s (the four argvs, every refusal, the `-t` rule) and `tests/deploy.rs`'s (ADR-0078 D8).
 
 …and, **`server deploy`**: `case_server_deploy` has two halves that skip independently, because the
 bugs it exists to catch are of two kinds. The **offline** half needs `python3` and nothing else: a `_ping` socket
-it answers stands in for the daemon, and the case asserts that the dry run lists the seven steps in the spec's
-order with step 3 planning the two images (`needs`) and steps 5, 6 and 7 planning real work — the unit's path, both
-`--https` targets and the `/api/health` wait — that **no** step is `skipped` and that the report has no `deploy:
-incomplete` line (ADR-0058), that an install root under `target/` does **not appear** afterwards, that a run whose
+it answers stands in for the daemon, and the case asserts that the dry run lists the six steps in order with step 3
+planning the two images (`needs`) and steps 5 and 6 planning real work — the unit's path with the three commands that
+are root's, and the `/api/health` wait — that **no** step is `skipped` and that the report has no `deploy: incomplete`
+line (ADR-0058), that a root under `target/` holds nothing afterwards, that a run whose
 `docker_host` names a socket that cannot exist stops at step 1 with the resume command as its last line, and that a
 run which gets past step 1 and then fails step 3 (that same socket answers `_ping` and nothing a build's label read
 needs) leaves step 2's files on disk, prints the resume command with the resolved `--root`/`--config`, and
 evaluates no later step at all. The **online** half needs the daemon and an `agent_image` that exists: it removes
 any `hs_egress`/`hs_key` an earlier case left behind — those are the machine's names, and a leftover would make its
 own first run read `satisfied` — removes both image tags step 3 builds (so its `changed` is a real build,
-layer-cached), then runs a real deploy into a root under `target/` with the `tailscale` stand-in on `PATH` and a
-`python3` responder holding the control port, asserting step 2's four paths with their modes (0755, 0644, 0700,
-0600, 0700) and the VAPID pair, step 3 `changed`, step 4 `changed` with both containers running, step 5 `changed`,
-step 6 `changed` and step 7 `satisfied`, and then the same command again, where **all seven** steps say `satisfied`,
-the tree's listing and `config.toml`'s bytes are byte-identical and the shim applied no second origin, and the tail
-names the URL and `holosmith key set` (ADR-0056, ADR-0058). Only a failed step exits 1; the `incomplete` line it
-used to print went with the steps that were still other stories'.
+layer-cached), then runs a real deploy into a root under `target/` — which the run itself creates 0700 as the
+invoking user, because the parent is `target/` rather than root's — with the `tailscale` stand-in on `PATH` and a
+`python3` responder holding the control port, asserting step 2's paths with their modes (0700, 0644, 0755, 0700, 0600,
+0600) and the VAPID pair, step 3 `changed`, step 4 `changed` with both containers running, step 5 `changed` with the
+unit's bytes naming the root's config, step 6 `satisfied`, and the `tailscale` stand-in's log **empty** — the deploy
+configures no origin any more (ADR-0086) — and then the same command again, where **all six** steps say `satisfied`
+and the tree's listing and `config.toml`'s bytes are byte-identical, and the tail names the URL and `holosmith key
+set` (ADR-0056, ADR-0086). Only a failed step exits 1.
 
 …and, **`case_server_service`** owns the three machine steps from the shipped artifact, in two halves
 that skip independently and print one `SKIP` line each. The **offline** half needs `python3` and nothing else: it
@@ -887,17 +889,14 @@ start, rather than a service that refuses to come back up.
   all of them the same host program `server deploy` already requires (ADR-0071). A machine without it still serves
   and still streams every turn: a notification is a channel `doctor --full` reports (`Check::Openssl`) rather than
   something `serve` refuses to start over.
-- **`tailscale`** and **systemd** for a deployed server — and they **are** prerequisites of a deploy now: `doctor`
-  reports a machine without either as `unknown` rather than failing (a LAN-only machine and a hand-run `serve` are
-  supported), and `server deploy` runs `doctor --quick` as its step 1, so such a machine still gets through
-  step 1. Step 5 writes the unit and runs `systemctl daemon-reload` and `systemctl enable --now
-  holosmith.service`, so a machine without systemd fails that step with systemd's own line, and step 6 configures
-  `tailscale serve` for the two origins, so a `tailscaled` that does not answer fails step 6 while `doctor`'s
-  `tailscale` finding stays `unknown` on the same machine — the same host, two different questions (ADR-0054,
-  ADR-0058).
-- **`install`, `chmod`, `id`, `stat`, `useradd`, `usermod` and `chown`** (coreutils, plus the account tools
-  `useradd`/`usermod`), **`openssl`**, and
-  **`sudo`** on a machine whose paths are the system's, for `holosmith server deploy`: every file
+- **`tailscale`** and **systemd** for a deployed server, as `doctor` questions rather than as things a deploy runs:
+  a machine without either is `unknown` in the report (a LAN-only machine and a hand-run `serve` are supported), and
+  `server deploy` runs `doctor --quick` as its step 1, so such a machine still gets through it. Since ADR-0086 the
+  deploy **installs no unit and asks systemd nothing**: step 5 renders the unit into the root and prints the three
+  commands that install and start it, and a machine where they were never run is caught by step 6's `/api/health`
+  (ADR-0054, ADR-0086).
+- **`install`, `chmod`, `id`** (coreutils), **`openssl`**, and
+  **`sudo` is the operator's**, for `holosmith server deploy`: every file
   action is one `install`/`chmod` child, and it is prefixed by `sudo` unless `--root` builds the tree as the
   invoking user (ADR-0056); step 2 reads `id -u`/`id -nG` and `stat -c %u` to decide whether the service user and the
   tree's ownership are already what the unit's `User=` needs, and writes them with `useradd`/`usermod`/`chown`; and
@@ -1002,7 +1001,7 @@ at startup is why `scripts/check-static.sh`'s empty-container run passes `--back
 run is about the artifact's own linking, and its sandbox has no `git`, no `df` and no daemon.
 
 **A session's files live at `<projects_root>/.worktrees/<id>`, on branch `agent/<id>`** (,
-spec item 1). The projects root is the config key `projects_root` (default `/srv/holosmith/projects`),
+spec item 1). The projects root is the config key `projects_root` (default `/var/lib/holosmith/projects`),
 and each project is a repository directly inside it: `<projects_root>/<project>` with a `.git` directory.
 The **backend** makes the worktree with `git worktree add -b agent/<id> <projects_root>/.worktrees/<id>
 HEAD` and the **provisioner** writes the path and that commit to the session's row; the teardown —
@@ -1161,34 +1160,35 @@ proxy is reading a `keys.toml` from before the create — a file mount rather th
 
 ## Deploying a real host by hand
 
-`server deploy` is the supported path, and on a real host it is a handful of commands for an operator who has the
-artifact and `sudo`. **Copy the artifact to a stable path first**, because step 5's unit names the path of the
-binary that wrote it (`std::env::current_exe()`, ADR-0058) — a deploy run out of `target/debug` writes a unit
-pointing at `target/debug`, which `cargo clean` removes and which systemd could not read anyway.
+`server deploy` is the supported path, and on a real host it is one account, one directory and a deploy run as that
+account (ADR-0086). **Copy the artifact to a stable path first**, because step 5's unit names the path of the binary
+that wrote it (`std::env::current_exe()`) — a deploy run out of `target/debug` writes a unit pointing at
+`target/debug`, which `cargo clean` removes.
 
 ```bash
 scripts/build.sh
-sudo install -m 0755 dist/x86_64-unknown-linux-musl/holosmith /usr/local/bin/holosmith
-/usr/local/bin/holosmith server deploy --dry-run    # the plan, and it creates nothing
-/usr/local/bin/holosmith server deploy             # each write asks `sudo` for what it needs
+sudo useradd --system --create-home --home-dir /var/lib/holosmith --shell /usr/sbin/nologin holosmith
+sudo usermod -aG docker holosmith
+sudo install -d -o holosmith -g holosmith -m 0700 /var/lib/holosmith
+sudo install -m 0755 dist/x86_64-unknown-linux-musl/holosmith /var/lib/holosmith/holosmith
+sudo -u holosmith /var/lib/holosmith/holosmith server deploy --dry-run   # the plan, and it creates nothing
+sudo -u holosmith /var/lib/holosmith/holosmith server deploy            # six steps, no `sudo` of its own
 ```
 
-Run it as yourself and let the `sudo` children ask: that is the shape ADR-0056 records, and the child inherits the
-deploy's stdin so a password prompt lands on your terminal. `--root` is for a tree you own and is what the gate
-uses; on a real host the deploy takes the system paths. The config it writes is `/etc/holosmith/config.toml`
-rendered from the defaults, so edit it **before** the first deploy if `projects_root`, the listen addresses or
-`docker_host` are not what this machine wants, and then run the deploy: step 2 rewrites that file when its
-rendering differs, and never touches `secrets/keys.toml` or `secrets/vapid.toml`.
+The deploy runs **as the service user** and never escalates: the half that is root's is printed as exact commands
+(step 2's `useradd`/`usermod`, step 5's `install -m 0644` + `systemctl daemon-reload` + `systemctl enable --now`),
+you run them, and the next run verifies them. The config it writes is `/var/lib/holosmith/config.toml` rendered from
+the defaults, so edit it **before** the first deploy if `projects_root`, the listen addresses or `docker_host` are not
+what this machine wants; step 2 rewrites that file when its rendering differs, and never touches
+`data/secrets/keys.toml` or `data/secrets/vapid.toml`.
 
-What each step does here: **2** creates the `holosmith` system user in the `docker` group, the data directory,
-`config.toml`, the 0700 secrets directory with its 0600 `keys.toml` and the VAPID pair in `vapid.toml`, and the
-admin socket directory, then `chown`s the tree to the service user, because `serve` runs as that user; **3** builds
+What each step does here: **2** writes `config.toml`, the `data/` directory, the 0700 `secrets/` with its 0600
+`keys.toml` and the VAPID pair, and **reads** the service user whose commands it prints; **3** builds
 `holosmith-proxy` and `agent-image` from the Dockerfiles embedded in the artifact, and a first build pulls pi and
 the toolchains over the network; **4** creates the `egress` network and starts `hs_egress`/`hs_key` with
-`--restart unless-stopped`; **5** installs the unit, runs `systemctl daemon-reload` and then `systemctl enable
---now holosmith.service`; **6** asks `tailscale serve` for the control origin on 443 and the preview origin on 8444;
-and **7** waits for `/api/health` and then runs `doctor --full`, so the run ends with the URL and the next steps
-(`holosmith key set <provider>`, and registering the machine in a hub).
+`--restart unless-stopped`; **5** renders `/var/lib/holosmith/holosmith.service` and prints the three commands that
+install and start it; **6** waits for `/api/health` and then runs `doctor --full`, so the run ends with the URL and
+the next steps (`holosmith key set <provider>`, and registering the machine in a hub).
 
 Those are the two origins the story's demo names — the control origin on 443 and the preview origin on 8444, on
 this machine's tailnet name — plus the one thing a deploy cannot do, which is survive a reboot. So reboot once and
@@ -1200,7 +1200,7 @@ systemctl status holosmith.service             # active (running), and enabled
 systemctl is-enabled holosmith.service         # what step 5's read compares with
 sudo tailscale serve status                    # both origins, with their targets
 curl -fsS https://<machine>.<tailnet>.ts.net/api/health
-sudo holosmith doctor --full                   # as root, because `perms` reads the 0700 secrets directory
+sudo -u holosmith holosmith doctor --full      # `perms` reads the secrets inside the 0700 root
 ```
 
 `doctor --full` is the same list the unit's `ExecStartPre` runs, plus the checks that only mean something on a
@@ -1276,11 +1276,11 @@ stops the sessions that are merely idle, and then says so while `serve` keeps an
 ```bash
 holosmith drain                 # drain, waiting up to the default 10m
 holosmith drain --wait 1m       # a shorter wait
-holosmith drain --admin-dir /tmp/hs/run/holosmith   # a run that is not the machine's
+holosmith drain --admin-dir /tmp/hs/run                   # a run that is not the machine's
 ```
 
-One request line goes to a **unix socket** — `/run/holosmith/drain.sock` on a deployed host, `<admin dir>/drain.sock`
-otherwise — and the answer is printed as it arrives:
+One request line goes to a **unix socket** — `/var/lib/holosmith/data/run/drain.sock` on a deployed machine,
+`<admin dir>/drain.sock` otherwise — and the answer is printed as it arrives:
 
 ```text
 drain: state: draining
@@ -1300,9 +1300,9 @@ What keeps working while it drains: every `GET` (the UI must be able to watch th
 with ADR-0008's envelope and `503` `code: "draining"`: `POST /api/sessions`, `POST …/prompt` and `POST …/resume`.
 What ends the process is still `SIGTERM`, not the drain; the restart the drain precedes is the `upgrade`.
 
-The socket's protection is the directory's: `/run/holosmith` is created **0700** by `server deploy`'s step 2 and
-chowned to the service user, and the socket is 0600, so being able to open it is the authorisation and no route
-exists for anything else. A `serve` that finds a **dead** socket (a killed process's) unlinks it and binds — a
+The socket's protection is the directory's: `<data root>/run` is created **0700** by `serve` itself when it binds —
+inside the 0700 root the service user owns (ADR-0086) — and the socket is 0600, so being able to open it is the
+authorisation and no route exists for anything else. A `serve` that finds a **dead** socket (a killed process's) unlinks it and binds — a
 `kill -9` must not wedge the next boot — while a **live** one is another server's and this run warns and serves
 without an admin socket rather than stealing its clients.
 
@@ -1316,8 +1316,8 @@ journalctl -u holosmith.service | grep 'holosmith::drain'                     # 
 systemctl restart holosmith.service                                          # the operator's move, not the drain's
 ```
 
-**What this repository's environment could not measure**: there is no systemd here, so `/run/holosmith` is only the
-deployed path and every demo and gate case uses `--admin-dir` under a scratch tree; and nothing consumes the drain
+**What this repository's environment could not measure**: there is no systemd here, so the deployed socket path is
+only a path and every demo and gate case uses `--admin-dir` under a scratch tree; and nothing consumes the drain
 yet, because `upgrade`/`rollback` is those stories. The socket, the four report lines, the three refusal handlers,
 the rows' `server_restart`/`expected_stop` facts and the restart's `idle · interrupted` are measured — by
 `case_drain`, `case_drain_restart`, `tests/drain.rs` (the sequence, the bind rules, the request grammar and the
@@ -1426,15 +1426,16 @@ not answer — and, only once the candidate **is** live, one **prune** of the re
 directories (ADR-0084).
 
 ```bash
-sudo holosmith upgrade releases/<tag>/holosmith --acknowledge-review   # a machine's own tree, as root
-holosmith upgrade releases/<tag>/holosmith --acknowledge-review --root target/install   # an install tree
+sudo -u holosmith holosmith upgrade releases/<tag>/holosmith --acknowledge-review   # the machine's own root
+sudo -u holosmith holosmith upgrade releases/<tag>/holosmith --acknowledge-review --root target/install   # a tree
 ```
 
 `--acknowledge-review` is not a formality: item 12's diff review is the real gate, and a promotion without the word is
-refused before anything is asked of the machine. `--root DIR` is `server deploy --root`'s tree (the release tree at
-`<root>/opt/holosmith`, the admin socket at `<root>/run/holosmith`, the unit at `<root>/etc/systemd/system/`), and a
-**privileged** promotion has to run as root — it writes `/opt`, `/etc/systemd/system` and restarts a service. `--wait`
-is the drain's (`10m`), `--config` is every command's.
+refused before anything is asked of the machine. `--root DIR` is `server deploy --root`'s root — one directory holding
+`releases/`, `current`, `config.toml` and the data root — and a promotion runs **as the service user**, because the
+tree is that user's. The one command it cannot run itself is `systemctl restart`, which goes through the machine's
+single sudoers line (ADR-0086 D4); a machine without that line still switches the release and says the restart is
+yours. `--wait` is the drain's (`10m`), `--config` is every command's.
 
 One `upgrade: ` line per step, in this order, and the exit code is 0 only for a candidate that is live:
 
@@ -1445,9 +1446,9 @@ upgrade: smoke: …                        (the smoke run's own lines, then pass
 upgrade: images: no image needed building | built 2 images: holosmith-proxy:…, agent-image:…
 upgrade: drain: … drained
 upgrade: backup: <data>/backups/app-<ts>.db (5 kept)
-upgrade: release: <install>/opt/holosmith/releases/<tag>/holosmith (sha256 …)
+upgrade: release: <root>/releases/<tag>/holosmith (sha256 …)
 upgrade: current: -> releases/<tag> (was releases/<previous>)
-upgrade: restart: systemctl restart holosmith.service
+upgrade: restart: sudo -n systemctl restart holosmith.service
 upgrade: health: 0.1.0 answered 0.4s after the restart
 upgrade: live: 0.1.0 (<tag>), backup <path>
 upgrade: prune: kept 2 of 4 (keep_releases = 2); removed: releases/old, releases/older
@@ -1481,10 +1482,14 @@ refuses a database a newer release wrote (ADR-0047) — a recorded follow-up, no
 Two releases and one pointer, and three facts about them that the commands answer without a promotion:
 
 ```text
-<install>/opt/holosmith/
+<root>/
+  config.toml                         the machine's config
+  data/                               the data root: app.db, secrets/, sessions/, backups/
   releases/<tag>/holosmith            one release's binary (and its .sha256)
   releases/<older>/holosmith          the rollback target, and whatever else is kept
   current -> releases/<tag>           a **relative** symlink, replaced by `rename`
+  projects/<name>/.worktrees/<id>     the repositories sessions are made from
+  holosmith.service                   the unit the deploy rendered, for `install -m 0644`
 ```
 
 **Which one is live.** `holosmith version` reports `release <tag>` — the directory the **running file** is in, which
@@ -1494,7 +1499,7 @@ test binary the line reads `release -`, and `version --json` carries the same fa
 machine:
 
 ```console
-$ /opt/holosmith/current/holosmith version
+$ /var/lib/holosmith/current/holosmith version
 version 0.1.0
 git_tag v0.1.0-3-gabc1234
 release v0.1.0-3-gabc1234
@@ -1511,13 +1516,13 @@ a hand-seeded directory that *is* one is pruned like any other.
 
 **Whether the unit can start.** `holosmith doctor --quick` reports one `release:` line, in both its arms: `pass` with
 the tag and the **resolved** path (`current -> releases/<tag>, and the unit's ExecStart runs
-/opt/holosmith/releases/<tag>/holosmith`), or `fail` with the state and the hand fix when the unit's `ExecStart`
+<root>/releases/<tag>/holosmith`), or `fail` with the state and the hand fix when the unit's `ExecStart`
 resolves through a `current` that does not — `does not exist`, `is not a symlink`, `names something which is not one
 of this tree's releases`, or `names releases/<tag>` with no binary in it:
 
 ```console
 $ sudo holosmith doctor --quick | grep '^release'
-release: fail: /opt/holosmith/current names releases/v0.1.0, and /opt/holosmith/releases/v0.1.0/holosmith is not there, and the unit's ExecStart (/opt/holosmith/current/holosmith) names it: systemd cannot start this machine. Point it at a release that exists — `ln -sfn releases/v0.1.0-3-gabc1234 /opt/holosmith/current`
+release: fail: /var/lib/holosmith/current names releases/v0.1.0, and /var/lib/holosmith/releases/v0.1.0/holosmith is not there, and the unit's ExecStart (/var/lib/holosmith/current/holosmith) names it: systemd cannot start this machine. Point it at a release that exists — `ln -sfn releases/v0.1.0-3-gabc1234 /var/lib/holosmith/current`
 ```
 
 That is one line in a terminal that does not wrap; the report writes each finding as a single line, so nothing here is

@@ -8,14 +8,12 @@
 //! is the step's deliverable), and a real SQLite database with a real row (the refusal is a `live_count` over the
 //! table, and a fake count would be a test of the fake).
 //!
-//! **Handed in**: `systemctl` and `sudo` are scripts this test wrote ([`uninstall::Tools`]), the daemon is a
-//! [`Fake`] ([`uninstall::Machines`]), and `--root` is what keeps every path inside the temp directory.
+//! **Handed in**: the daemon is a [`Fake`] ([`uninstall::Machines`]) and `--root` is what keeps every path inside the
+//! temp directory.
 //!
-//! What this file cannot reach is the **system path's unit file**, and it says so rather than pretending: a
-//! privileged run whose `/etc/systemd/system/holosmith.service` is absent has nothing to remove, so the system-path
-//! arms here are the ones that ask `systemctl` (a unit systemd knows) and prefix a write with `sudo`. The gate's
-//! `case_uninstall` drives the `--root` arm against the shipped artifact, and the by-hand procedure in
-//! `docs/build.md` is what proves the privileged one on a machine that has a unit installed.
+//! The teardown never escalates (ADR-0086), so this file has no `sudo` and no `systemctl`: the unit it removes is the
+//! **rendered** one at `<root>/holosmith.service`, and the three commands that clear the installed unit out of
+//! `/etc/systemd/system` are words on the line rather than children of the run.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -23,7 +21,7 @@ use std::sync::Mutex;
 use holosmith::config::{Config, Role};
 use holosmith::container;
 use holosmith::db;
-use holosmith::deploy::Target;
+use holosmith::deploy::Root;
 use holosmith::sessions::NewSession;
 use holosmith::uninstall::{self, Args, Machines, Word};
 
@@ -55,39 +53,12 @@ fn shim(dir: &TempDir, name: &str, body: &str) -> PathBuf {
     path
 }
 
-/// A `sudo` that records its argv and runs nothing — `tests/deploy.rs`'s, for its own reason: the argv here names
-/// `/etc/systemd/system`, and a shim that forwarded to the real `sudo` would remove a unit from the machine running
-/// the tests.
-fn sudo_recorder(dir: &TempDir, log: &Path) -> PathBuf {
-    shim(
-        dir,
-        "sudo",
-        &format!("printf 'sudo %s\\n' \"$*\" >> '{}'", log.display()),
-    )
-}
-
 /// A `rm` that records its argv and removes nothing.
 fn rm_recorder(dir: &TempDir, log: &Path) -> PathBuf {
     shim(
         dir,
         "rm",
         &format!("printf 'rm %s\\n' \"$*\" >> '{}'", log.display()),
-    )
-}
-
-/// A `systemctl` that records its argv, answering `is-enabled` with `enabled`.
-///
-/// The exit code is the read: `enabled` is the whole knob, and it is the question a privileged run asks when no unit
-/// file is there.
-fn systemctl_shim(dir: &TempDir, log: &Path, enabled: bool) -> PathBuf {
-    let code = if enabled { 0 } else { 1 };
-    shim(
-        dir,
-        "systemctl",
-        &format!(
-            "printf 'systemctl %s\\n' \"$*\" >> '{}'\n[ \"$1\" = is-enabled ] && exit {code}\nexit 0",
-            log.display()
-        ),
     )
 }
 
@@ -215,18 +186,17 @@ fn config() -> Config {
     }
 }
 
-/// The `--root` target under `dir`, and the config the steps see (`Target::config`'s contract).
-fn root_target(dir: &TempDir) -> (Target, Config) {
-    let target = Target::resolve(Some(dir.file("install")));
-    let deployed = target.config(&config());
-    (target, deployed)
+/// The root under `dir`, and the config the steps see (`Root::config`'s contract).
+fn root_target(dir: &TempDir) -> (Root, Config) {
+    let root = Root::resolve(Some(dir.file("install")));
+    let deployed = root.config(&config());
+    (root, deployed)
 }
 
-/// The tree a `server deploy --root` leaves: the unit, the data root with its 0700 secrets and the two files.
-fn installed_tree(target: &Target, deployed: &Config) {
-    let unit = target.unit_path();
-    std::fs::create_dir_all(unit.parent().expect("the unit has a directory"))
-        .expect("the unit's directory is creatable");
+/// The tree a `server deploy` leaves: the rendered unit, the data root with its 0700 secrets and the two files.
+fn installed_tree(root: &Root, deployed: &Config) {
+    let unit = root.unit();
+    std::fs::create_dir_all(root.path()).expect("the root is creatable");
     std::fs::write(&unit, "[Service]\nExecStart=/usr/bin/holosmith serve\n")
         .expect("the unit is writable");
     let secrets = deployed.data_root.join("secrets");
@@ -284,17 +254,15 @@ fn words(report: &uninstall::Report) -> Vec<(&'static str, Word)> {
 fn a_root_install_loses_the_unit_and_keeps_the_data() {
     let _guard = one_at_a_time();
     let dir = TempDir::new("uninstall-root");
-    let (target, deployed) = root_target(&dir);
-    installed_tree(&target, &deployed);
+    let (root, deployed) = root_target(&dir);
+    installed_tree(&root, &deployed);
     let machine = Fake::default();
     let (sudo_log, systemctl_log) = (dir.file("sudo.log"), dir.file("systemctl.log"));
     let tools = uninstall::Tools {
-        sudo: sudo_recorder(&dir, &sudo_log),
         rm: PathBuf::from("rm"),
-        systemctl: systemctl_shim(&dir, &systemctl_log, false),
         ..uninstall::Tools::default()
     };
-    let report = uninstall::run(&deployed, &target, &tools, &machine, &Args::default())
+    let report = uninstall::run(&deployed, &root, &tools, &machine, &Args::default())
         .expect("nothing refuses this run");
     assert_eq!(
         words(&report),
@@ -307,7 +275,7 @@ fn a_root_install_loses_the_unit_and_keeps_the_data() {
         "{}",
         report.render()
     );
-    assert!(!target.unit_path().exists(), "the unit file is gone");
+    assert!(!root.unit().exists(), "the unit file is gone");
     assert!(
         deployed
             .data_root
@@ -338,19 +306,17 @@ fn a_root_install_loses_the_unit_and_keeps_the_data() {
 fn the_second_run_says_nothing_and_keeps_succeeding() {
     let _guard = one_at_a_time();
     let dir = TempDir::new("uninstall-again");
-    let (target, deployed) = root_target(&dir);
-    installed_tree(&target, &deployed);
+    let (root, deployed) = root_target(&dir);
+    installed_tree(&root, &deployed);
     let machine = Fake::default();
     let tools = uninstall::Tools {
-        sudo: sudo_recorder(&dir, &dir.file("sudo.log")),
         rm: PathBuf::from("rm"),
-        systemctl: systemctl_shim(&dir, &dir.file("systemctl.log"), false),
         ..uninstall::Tools::default()
     };
-    let first = uninstall::run(&deployed, &target, &tools, &machine, &Args::default())
+    let first = uninstall::run(&deployed, &root, &tools, &machine, &Args::default())
         .expect("nothing refuses this run");
     assert_eq!(first.lines[0].word, Word::Removed);
-    let second = uninstall::run(&deployed, &target, &tools, &machine, &Args::default())
+    let second = uninstall::run(&deployed, &root, &tools, &machine, &Args::default())
         .expect("nothing refuses the second run either");
     assert_eq!(
         words(&second),
@@ -370,18 +336,16 @@ fn the_second_run_says_nothing_and_keeps_succeeding() {
 fn the_proxies_and_the_egress_network_go_containers_first() {
     let _guard = one_at_a_time();
     let dir = TempDir::new("uninstall-proxies");
-    let (target, deployed) = root_target(&dir);
+    let (root, deployed) = root_target(&dir);
     let machine = Fake::with(
         &[container::PROXY_NAME, holosmith::key::KEY_PROXY_NAME],
         &[holosmith::docker::EGRESS_NETWORK, "agents_0123456789abcdef"],
     );
     let tools = uninstall::Tools {
-        sudo: sudo_recorder(&dir, &dir.file("sudo.log")),
         rm: PathBuf::from("rm"),
-        systemctl: systemctl_shim(&dir, &dir.file("systemctl.log"), false),
         ..uninstall::Tools::default()
     };
-    let report = uninstall::run(&deployed, &target, &tools, &machine, &Args::default())
+    let report = uninstall::run(&deployed, &root, &tools, &machine, &Args::default())
         .expect("nothing refuses this run");
     assert_eq!(
         words(&report),
@@ -420,20 +384,18 @@ fn the_proxies_and_the_egress_network_go_containers_first() {
 fn a_refused_removal_is_a_failed_step_and_stops_the_run() {
     let _guard = one_at_a_time();
     let dir = TempDir::new("uninstall-refused");
-    let (target, deployed) = root_target(&dir);
-    installed_tree(&target, &deployed);
+    let (root, deployed) = root_target(&dir);
+    installed_tree(&root, &deployed);
     let machine = Fake {
         containers: Mutex::new(vec![container::PROXY_NAME.to_string()]),
         refuse_removal: true,
         ..Fake::default()
     };
     let tools = uninstall::Tools {
-        sudo: sudo_recorder(&dir, &dir.file("sudo.log")),
         rm: PathBuf::from("rm"),
-        systemctl: systemctl_shim(&dir, &dir.file("systemctl.log"), false),
         ..uninstall::Tools::default()
     };
-    let report = uninstall::run(&deployed, &target, &tools, &machine, &Args::default())
+    let report = uninstall::run(&deployed, &root, &tools, &machine, &Args::default())
         .expect("nothing refuses this run");
     assert_eq!(
         words(&report),
@@ -452,20 +414,18 @@ fn a_refused_removal_is_a_failed_step_and_stops_the_run() {
 fn a_purge_refuses_over_a_live_session_and_removes_nothing() {
     let _guard = one_at_a_time();
     let dir = TempDir::new("uninstall-refusal");
-    let (target, deployed) = root_target(&dir);
-    installed_tree(&target, &deployed);
+    let (root, deployed) = root_target(&dir);
+    installed_tree(&root, &deployed);
     // `starting` is live: the three statuses the cap counts and `live_count` answers with.
     let id = seed_row(&deployed, "starting");
     let machine = Fake::default();
     let tools = uninstall::Tools {
-        sudo: sudo_recorder(&dir, &dir.file("sudo.log")),
         rm: PathBuf::from("rm"),
-        systemctl: systemctl_shim(&dir, &dir.file("systemctl.log"), false),
         ..uninstall::Tools::default()
     };
     let sentence = uninstall::run(
         &deployed,
-        &target,
+        &root,
         &tools,
         &machine,
         &Args {
@@ -483,10 +443,9 @@ fn a_purge_refuses_over_a_live_session_and_removes_nothing() {
         sentence.contains("--force"),
         "the refusal names the override: {sentence}"
     );
-    // Nothing ran: the unit is still there, the tree is still there, and systemd was not asked.
-    assert!(target.unit_path().exists(), "the refusal removed the unit");
+    // Nothing ran: the rendered unit is still there and the tree is still there.
+    assert!(root.unit().exists(), "the refusal removed the unit");
     assert!(deployed.data_root.exists(), "the refusal removed the data");
-    assert!(!dir.file("systemctl.log").exists());
     // The row is still in the table, which is what the re-read proves: the refusal happened before anything.
     let reader = db::Reader::open(&deployed.data_root.join(db::DATABASE_FILE))
         .expect("the database reads")
@@ -504,22 +463,20 @@ fn a_purge_refuses_over_a_live_session_and_removes_nothing() {
 fn a_forced_purge_removes_the_data_and_the_rows_own_names() {
     let _guard = one_at_a_time();
     let dir = TempDir::new("uninstall-forced");
-    let (target, deployed) = root_target(&dir);
-    installed_tree(&target, &deployed);
+    let (root, deployed) = root_target(&dir);
+    installed_tree(&root, &deployed);
     let id = seed_row(&deployed, "starting");
     let machine = Fake::with(
         &[&format!("s_{id}")],
         &[&format!("agents_{id}"), "agents_0123456789abcdef"],
     );
     let tools = uninstall::Tools {
-        sudo: sudo_recorder(&dir, &dir.file("sudo.log")),
         rm: PathBuf::from("rm"),
-        systemctl: systemctl_shim(&dir, &dir.file("systemctl.log"), false),
         ..uninstall::Tools::default()
     };
     let report = uninstall::run(
         &deployed,
-        &target,
+        &root,
         &tools,
         &machine,
         &Args {
@@ -551,122 +508,67 @@ fn a_forced_purge_removes_the_data_and_the_rows_own_names() {
 }
 
 #[test]
-fn a_system_path_run_with_no_unit_file_asks_systemd_and_writes_nothing() {
+fn a_purge_is_one_plain_rm_and_the_unit_line_names_the_three_root_commands() {
     let _guard = one_at_a_time();
-    let dir = TempDir::new("uninstall-system");
-    // No `--root`: the system paths, and `privileged()`. The config's data root is this test's temp directory, so
-    // nothing the run says names the machine's real one — and every write is a recorder.
-    let target = Target::resolve(None);
-    let deployed = Config {
-        data_root: dir.file("data"),
-        ..config()
-    };
+    let dir = TempDir::new("uninstall-plain-purge");
+    let (root, deployed) = root_target(&dir);
+    installed_tree(&root, &deployed);
     let machine = Fake::default();
-    let (sudo_log, rm_log, systemctl_log) = (
-        dir.file("sudo.log"),
-        dir.file("rm.log"),
-        dir.file("systemctl.log"),
-    );
+    let rm_log = dir.file("rm.log");
     let tools = uninstall::Tools {
-        sudo: sudo_recorder(&dir, &sudo_log),
         rm: rm_recorder(&dir, &rm_log),
-        // systemd knows a unit whose file is not there: a linked unit, or one left loaded after a hand removal.
-        systemctl: systemctl_shim(&dir, &systemctl_log, true),
-        ..uninstall::Tools::default()
-    };
-    let report = uninstall::run(&deployed, &target, &tools, &machine, &Args::default())
-        .expect("nothing refuses this run");
-    assert_eq!(
-        words(&report)[0],
-        ("unit", Word::Removed),
-        "{}",
-        report.render()
-    );
-    let asked = std::fs::read_to_string(&systemctl_log).expect("systemctl was asked");
-    for argv in [
-        "systemctl is-enabled holosmith.service",
-        "systemctl disable --now holosmith.service",
-        "systemctl daemon-reload",
-    ] {
-        assert!(asked.contains(argv), "no `{argv}`: {asked}");
-    }
-    // The unit's *file* was not there, so no write was needed and none ran: the systemd verbs are what this arm is
-    // about, and a `rm` over a path that does not exist would be a child the read had already answered.
-    assert!(
-        !rm_log.exists() && !sudo_log.exists(),
-        "a run with no file to remove wrote something: {} {}",
-        std::fs::read_to_string(&rm_log).unwrap_or_default(),
-        std::fs::read_to_string(&sudo_log).unwrap_or_default()
-    );
-}
-
-#[test]
-fn a_purge_is_one_sudo_prefixed_child_on_a_system_path_install() {
-    let _guard = one_at_a_time();
-    let dir = TempDir::new("uninstall-sudo");
-    let target = Target::resolve(None);
-    // The data root is a temp directory, so the recorder's `rm` names something this machine does not have — which
-    // is the point: `tests/deploy.rs`'s `sudo` recorder exists because a system-path run names real paths.
-    let deployed = Config {
-        data_root: dir.file("data"),
-        ..config()
-    };
-    std::fs::create_dir_all(&deployed.data_root).expect("the data root is creatable");
-    let (sudo_log, rm_log) = (dir.file("sudo.log"), dir.file("rm.log"));
-    let tools = uninstall::Tools {
-        sudo: sudo_recorder(&dir, &sudo_log),
-        rm: rm_recorder(&dir, &rm_log),
-        systemctl: systemctl_shim(&dir, &dir.file("systemctl.log"), false),
         ..uninstall::Tools::default()
     };
     let report = uninstall::run(
         &deployed,
-        &target,
+        &root,
         &tools,
-        &Fake::default(),
+        &machine,
         &Args {
             purge: true,
-            force: false,
+            force: true,
         },
     )
-    .expect("no session is live, so nothing refuses this purge");
+    .expect("nothing refuses this run");
+    // The tree the run owns goes in one `rm -rf`, as its owner: the service user owns the root, and nothing here
+    // needs a privilege (ADR-0086).
     assert_eq!(
-        words(&report).last(),
-        Some(&("data", Word::Removed)),
-        "{}",
-        report.render()
+        std::fs::read_to_string(&rm_log).expect("the rm recorder was called"),
+        format!(
+            "rm -f {}\nrm -rf {}\n",
+            root.unit().display(),
+            deployed.data_root.display()
+        ),
+        "the unit goes first, then the data root, in one plain `rm` each"
     );
-    let sudo = std::fs::read_to_string(&sudo_log).expect("sudo was used");
-    assert!(
-        sudo.starts_with("sudo ")
-            && sudo.contains(&format!(" -rf {}", deployed.data_root.display())),
-        "the purge is one sudo-prefixed `rm -rf`: {sudo}"
-    );
-    assert!(
-        !rm_log.exists(),
-        "the tree's `rm` ran without sudo: {}",
-        std::fs::read_to_string(&rm_log).unwrap_or_default()
-    );
+    // The half that is root's is words on the unit line, not a child.
+    let unit_line = &report.lines[0];
+    assert_eq!(unit_line.word, Word::Removed, "{}", report.render());
+    for command in [
+        "sudo systemctl disable --now holosmith.service",
+        "sudo rm -f /etc/systemd/system/holosmith.service",
+        "sudo systemctl daemon-reload",
+    ] {
+        assert!(
+            unit_line.sentence.contains(command),
+            "the unit line does not name `{command}`: {}",
+            unit_line.sentence
+        );
+    }
 }
 
 #[test]
 fn a_machine_with_nothing_installed_is_nothing_rather_than_a_failure() {
     let _guard = one_at_a_time();
     let dir = TempDir::new("uninstall-empty");
-    let target = Target::resolve(None);
-    let deployed = Config {
-        data_root: dir.file("data"),
-        ..config()
-    };
+    let (root, deployed) = root_target(&dir);
+    std::fs::create_dir_all(root.path()).expect("the root is creatable");
     let machine = Fake::default();
     let tools = uninstall::Tools {
-        sudo: sudo_recorder(&dir, &dir.file("sudo.log")),
         rm: rm_recorder(&dir, &dir.file("rm.log")),
-        // systemd answers that it knows no such unit, which is what a machine that has never deployed looks like.
-        systemctl: systemctl_shim(&dir, &dir.file("systemctl.log"), false),
         ..uninstall::Tools::default()
     };
-    let report = uninstall::run(&deployed, &target, &tools, &machine, &Args::default())
+    let report = uninstall::run(&deployed, &root, &tools, &machine, &Args::default())
         .expect("nothing refuses this run");
     assert_eq!(
         words(&report),
@@ -680,39 +582,26 @@ fn a_machine_with_nothing_installed_is_nothing_rather_than_a_failure() {
         report.render()
     );
     assert!(!report.failed());
-    assert!(!dir.file("sudo.log").exists(), "nothing was removed");
-    // The one child this run paid: the question that tells "no unit" from "a unit systemd knows".
-    assert_eq!(
-        std::fs::read_to_string(dir.file("systemctl.log")).unwrap_or_default(),
-        "systemctl is-enabled holosmith.service\n"
-    );
+    assert!(!dir.file("rm.log").exists(), "nothing was removed");
 }
 
 #[test]
 fn the_report_prints_its_target_and_one_line_per_thing() {
     let _guard = one_at_a_time();
     let dir = TempDir::new("uninstall-render");
-    let (target, deployed) = root_target(&dir);
+    let (root, deployed) = root_target(&dir);
     let tools = uninstall::Tools {
-        sudo: sudo_recorder(&dir, &dir.file("sudo.log")),
         rm: PathBuf::from("rm"),
-        systemctl: systemctl_shim(&dir, &dir.file("systemctl.log"), false),
         ..uninstall::Tools::default()
     };
-    let report = uninstall::run(
-        &deployed,
-        &target,
-        &tools,
-        &Fake::default(),
-        &Args::default(),
-    )
-    .expect("nothing refuses this run");
+    let report = uninstall::run(&deployed, &root, &tools, &Fake::default(), &Args::default())
+        .expect("nothing refuses this run");
     let text = report.render();
     let mut lines = text.lines();
     let header = lines.next().expect("a header line");
     assert_eq!(
         header,
-        format!("uninstall: from {}", target.describe()),
+        format!("uninstall: from {}", root.describe()),
         "the header names the tree and the privilege: {text}"
     );
     let rest: Vec<&str> = lines.collect();
@@ -730,18 +619,23 @@ fn the_report_prints_its_target_and_one_line_per_thing() {
 }
 
 #[test]
-fn a_root_target_prefixes_the_system_paths_and_a_plain_one_does_not() {
+fn the_root_names_the_tree_and_the_data_root() {
     let dir = TempDir::new("uninstall-paths");
-    let (target, deployed) = root_target(&dir);
+    let (root, deployed) = root_target(&dir);
     assert_eq!(
-        target.unit_path(),
-        dir.file("install/etc/systemd/system/holosmith.service")
+        root.unit(),
+        dir.file("install/holosmith.service"),
+        "the unit the deploy renders is at the root's top level"
     );
-    assert_eq!(deployed.data_root, dir.file("install/var/lib/holosmith"));
-    let plain = Target::resolve(None);
+    assert_eq!(deployed.data_root, dir.file("install/data"));
+    assert_eq!(deployed.projects_root, dir.file("install/projects"));
+    let machine_wide = Root::resolve(None);
     assert_eq!(
-        plain.unit_path(),
-        Path::new("/etc/systemd/system/holosmith.service")
+        machine_wide.unit(),
+        Path::new("/var/lib/holosmith/holosmith.service")
     );
-    assert_eq!(plain.data_root(&config()), Path::new("/var/lib/holosmith"));
+    assert_eq!(
+        machine_wide.config(&config()).data_root,
+        Path::new("/var/lib/holosmith/data")
+    );
 }

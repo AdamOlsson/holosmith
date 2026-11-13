@@ -37,6 +37,8 @@ Issue tracking is remote only. Do not add `HS-*`/`PER-*` citations to code, comm
 | `web/` | Vite + TypeScript PWA; built into `web/dist` and embedded in the binary |
 | `scripts/` | Build, static-artifact checks, embed checks and the end-to-end gate |
 | `docs/build.md` | How to build, test, verify, deploy and measure the credential path by hand |
+| `docs/quickstart.md` | One machine, phone as the browser: config, deploy, first session |
+| `docs/config.md` | Every config key: type, default, rule, and what reads it |
 | `docs/adr/` | Architecture decisions, one decision per file |
 | `docs/schema/previous.sql` | The previous release's schema; `tests/schema_previous.rs` compares it |
 | `pins/pi.txt` | The single pinned pi version |

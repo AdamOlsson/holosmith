@@ -370,12 +370,14 @@ fn docker(docker_host: Option<&str>) -> Finding {
 /// **`permission denied` does not have the stopped daemon's fix.** A socket this user may not open is a
 /// group the operator is not in — the socket is answering, it just will not talk — so that sentence names
 /// `usermod`, not `systemctl`. Every other reason is the daemon not being there or not being healthy, and
-/// `systemctl start` is the fix for those.
+/// `systemctl start` is the fix for those. The account is the **service user's**, not the reader's: since ADR-0086
+/// the daemon talks to the socket as `holosmith`, and adding the operator would fix nothing.
 fn socket_sentence(host: &str, path: &str, reason: &Unreachable) -> String {
     if reason.kind == ErrorKind::PermissionDenied {
         return format!(
-            "the docker socket {path} refused this user ({}): add yourself to the docker group with \
-             `sudo usermod -aG docker $USER` and log back in, or set docker_host to a socket you can open",
+            "the docker socket {path} refused this user ({}): add the service user to the docker group with \
+             `sudo usermod -aG docker holosmith` and restart the service, or set docker_host to a socket it can \
+             open (a rootless daemon's is `unix:///run/user/<uid>/docker.sock`)",
             reason.message
         );
     }

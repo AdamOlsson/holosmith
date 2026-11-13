@@ -59,6 +59,14 @@ be a new file, not a rewrite of this one.
 
 ## D2 — the service user, the docker group and the chown
 
+**Superseded in part by ADR-0086:** the user, the group and the ownership are still this section's three facts, but the
+*deploy* no longer performs any of them. It reads them (`id -u`, `id -nG`, the owner of each root) and prints the
+commands that would fix them; the operator types `useradd`, `usermod -aG docker` and the one `install -d`. The chown
+half also loses its reason: the tree belongs to the service user from the start because the operator created it that
+way, and `RuntimeDirectory=`/`StateDirectory=` are what keep it correct across reboots instead of a re-run `chown`.
+The `--groups docker` on a *hub* install is gone with it — a hub joins no group and the operator's `usermod` is the
+only membership there is.
+
 The unit runs `serve` as `User=holosmith`, and `serve` drives the machine's daemon through its socket, so the user
 has to exist and has to be in the `docker` group. Step 2 reads `id -u holosmith` (exit 0 means the user exists)
 and, when it does, `id -nG holosmith` for the group. The apply is `useradd --system --groups docker --home-dir

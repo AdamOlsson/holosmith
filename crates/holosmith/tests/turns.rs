@@ -230,7 +230,9 @@ async fn a_snapshot_that_fails_does_not_turn_a_finished_turn_into_an_error() {
 #[tokio::test]
 async fn the_stream_carries_the_scripts_six_kinds_in_order_and_the_turn_settles() {
     let dir = TempDir::new("turns-stream");
-    let state = with_stub(state_in(&dir, Config::default()), paced(30));
+    // A hundred milliseconds a frame, which is four times the writer's 25 ms commit: the pace below is what makes
+    // the seven scripted deltas seven rows, so it has to be a multiple of the batch and not a hair above it.
+    let state = with_stub(state_in(&dir, Config::default()), paced(100));
     let served = Served::start(http::router(state.clone()), GRACE).await;
     let id = created_id(&post_create(served.addr, "turns-stream").await);
     wait_idle(&state, &id).await;
@@ -310,10 +312,11 @@ async fn the_stream_carries_the_scripts_six_kinds_in_order_and_the_turn_settles(
     let deltas: Vec<usize> = (0..turn.len())
         .filter(|index| turn[*index].kind.as_deref() == Some("message.delta"))
         .collect();
-    // Seven, because this test paces one frame per 30 ms and the writer commits every 25 ms: the stub's
-    // scripted deltas each land in their own batch, which is exactly the case coalescing leaves alone. A pace
-    // below the window would make this a smaller number, and the assertion would have to say what it
-    // meant instead.
+    // Seven, because this test paces one frame per 100 ms and the writer commits every 25 ms: the stub's
+    // scripted deltas each land in their own batch, which is exactly the case coalescing leaves alone. The pace is
+    // a multiple of that window rather than a hair above it — at 30 ms the margin was 5 ms, and a scheduling delay
+    // under load merged two deltas into one row, so a run asserted 6 where the script wrote 7. A pace below the
+    // window would make this a smaller number still, and the assertion would have to say what it meant instead.
     assert_eq!(deltas.len(), 7, "three thinking, two text, two text again");
     let first = message_id(start + deltas[0]);
     assert!(

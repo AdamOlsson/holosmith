@@ -14,7 +14,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use crate::config::{Config, LoadError};
-use crate::deploy::Target;
+use crate::deploy::Root;
 use crate::promote::Real;
 use crate::rollback::{self, Options};
 
@@ -43,16 +43,12 @@ pub fn run(args: RollbackArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let target = Target::resolve(args.root.clone());
-    if let Some(said) = crate::deploy::privilege_problem(&target, "rollback") {
-        eprintln!("holosmith: rollback: {said}");
-        return ExitCode::FAILURE;
-    }
+    let root = Root::resolve(args.root.clone());
     let options = Options {
         to: args.to,
         wait: args.wait,
         window: crate::promote::WINDOW,
     };
     let steps = Real::joining(&config);
-    rollback::run(&config, &target, &options, &steps)
+    rollback::run(&config, &root, &options, &steps)
 }

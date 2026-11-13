@@ -399,7 +399,7 @@ impl ContainerSettings {
     /// The settings for a machine whose two roots are `projects_root` and `data_root`, everything else
     /// default.
     ///
-    /// Both roots are arguments rather than defaults: the config's default data root is `/var/lib/holosmith`,
+    /// Both roots are arguments rather than defaults: the config's default data root is `<root>/data`,
     /// and a test that built a machine from the defaults would create a directory a real deployment owns.
     /// The numbers come from [`Config::default`] rather than from a second copy, so a test that builds a
     /// machine this way is testing the same limits a served one would use.
@@ -440,6 +440,16 @@ impl ContainerSettings {
     }
 }
 
+/// One path's owner, as `(uid, gid)`, or `None` when it cannot be read.
+///
+/// One function for the two containers that name an identity — a session's and [`KeyProxy`], which reads it from the
+/// key store's file — because "who owns the thing the container must write" is one question (ADR-0087).
+pub(crate) fn owner_of(path: &Path) -> Option<(u32, u32)> {
+    let metadata = std::fs::metadata(path).ok()?;
+    use std::os::unix::fs::MetadataExt as _;
+    Some((metadata.uid(), metadata.gid()))
+}
+
 /// One session's container: the image it runs, the name it takes, and how it is mounted.
 ///
 ///  added the lifecycle flags (`--rm`, `-i`, `--init`), the network and the limits; turns the
@@ -467,6 +477,14 @@ pub struct SessionContainer {
     /// The port the preview listener forwards to inside this container, carried as
     /// [`PREVIEW_PORT_ENV`].
     pub preview_port: u16,
+    /// The uid and gid the container runs as: **the data root's owner**, read from the tree rather than assumed.
+    ///
+    /// ADR-0087. The image's own user is its base's `node` (uid 1000) and the machine's service user is a system
+    /// account, so the two numbers do not meet — and a container that is not the worktree's owner cannot write a
+    /// file in it. The identity that must match is the one that owns the tree, and the directory every session
+    /// writes under is the data root, so its metadata is the read. `None` when it cannot be read (a test's fake
+    /// settings, a tree not made yet), which leaves the image's own user: the same fallback the key proxy has.
+    pub user: Option<(u32, u32)>,
 }
 
 impl SessionContainer {
@@ -490,6 +508,7 @@ impl SessionContainer {
             mounts: Mounts::of(&worktree, home),
             limits: settings.limits,
             preview_port: settings.preview_port,
+            user: owner_of(&settings.data_root),
         }
     }
 
@@ -500,10 +519,12 @@ impl SessionContainer {
     /// this process's stdin and stdout, which is pi's RPC channel, and its exit code, which is what
     /// [`crate::exit`] classifies (ADR-0036's "until ").
     ///
-    /// `--user` is deliberately absent. The image's own default user is what runs the agent, and the
-    /// deploy step is what guarantees that user is the one that owns the host's files. Naming a
-    /// uid here would be a second, guessed answer to a question the image already answers — so the
-    /// question is *asserted* instead: `id -u` in the container is not `0` (the gate's case checks it).
+    /// `--user` is the **data root's owner** when that can be read, and the image's own user otherwise.
+    ///
+    /// ADR-0087 replaces ADR-0035's "the image's user is the host's user": that held only while every uid on the
+    /// machine was 1000, and the install now runs `serve` as a system account. The property that matters is
+    /// unchanged — a worktree the host can commit to — and it is a measurement of the tree rather than a guess about
+    /// the base image. The non-root requirement is still asserted separately: `id -u` in the container is not `0`.
     pub fn run_args(&self) -> Vec<String> {
         let mut arguments = vec![
             "run".to_string(),
@@ -542,6 +563,12 @@ impl SessionContainer {
             "--pids-limit".to_string(),
             self.limits.pids.to_string(),
         ];
+        // The identity, when the tree named one: the container is the owner of the data root, which is the user
+        // `serve` runs as — so a file the agent writes is a file the host can commit (ADR-0087).
+        if let Some((uid, gid)) = self.user {
+            arguments.push("--user".to_string());
+            arguments.push(format!("{uid}:{gid}"));
+        }
         // pi's environment (spec item 2): its own directory, and the four switches that keep it from
         // refreshing anything, checking for a release, sending telemetry, or sending a provider call
         // through the egress proxy that is not there yet.
@@ -1051,10 +1078,47 @@ mod tests {
                 .unwrap_or_else(|| panic!("{flag} is missing from {arguments:?}"));
             assert_eq!(arguments[at + 1], value, "{flag}");
         }
-        assert!(
-            !arguments.iter().any(|argument| argument == "--user"),
-            "the image's own user runs the agent; naming a uid here would be a guessed second answer"
+        // The identity is the data root's owner when the tree can be read (ADR-0087), and the image's own user
+        // otherwise. This fixture's data root may or may not exist on the machine running the tests, so the
+        // assertion is the read's shape rather than a constant: a named uid is the owner, and nothing is named when
+        // nothing could be read. The test below is the arm that proves the read itself.
+        match container.user {
+            Some((uid, gid)) => assert!(
+                arguments
+                    .windows(2)
+                    .any(|pair| pair[0] == "--user" && pair[1] == format!("{uid}:{gid}")),
+                "the container read an owner and did not name it: {arguments:?}"
+            ),
+            None => assert!(
+                !arguments.iter().any(|argument| argument == "--user"),
+                "a container with no tree to read named a uid: {arguments:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn the_session_container_runs_as_the_data_roots_owner() {
+        // ADR-0087: the uid is read from the tree that must be writable, not assumed from the image's base.
+        let dir =
+            std::env::temp_dir().join(format!("holosmith-session-owner-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the data root is creatable");
+        let mut settings = ContainerSettings::at("/projects", &dir);
+        settings.image = "agent-image:0.1.0".to_string();
+        let container = SessionContainer::of(&settings, &session("holosmith", "0123456789abcdef"));
+        let owner = owner_of(&dir).expect("the data root this test just made has an owner");
+        assert_eq!(container.user, Some(owner));
+        let arguments = container.run_args();
+        let at = arguments
+            .iter()
+            .position(|argument| argument == "--user")
+            .unwrap_or_else(|| panic!("the container names no user: {arguments:?}"));
+        assert_eq!(
+            arguments[at + 1],
+            format!("{}:{}", owner.0, owner.1),
+            "the container does not run as the data root's owner"
         );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The container is attached and runs pi: no `--detach`, one `-i`, and the agent's command.

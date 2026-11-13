@@ -46,7 +46,7 @@ use crate::backup;
 use crate::builder;
 use crate::config::Config;
 use crate::db;
-use crate::deploy::{self, Target};
+use crate::deploy::{self, Root};
 use crate::drain;
 use crate::http::health;
 use crate::images;
@@ -118,8 +118,8 @@ pub trait Steps {
     /// Ask the machine to drain, over its admin socket.
     fn drain(&self, admin_dir: &Path, wait: Duration) -> DrainAnswer;
 
-    /// `systemctl restart <unit>`, whose exit status is the answer.
-    fn restart(&self, systemctl: &Path) -> Result<(), String>;
+    /// `sudo -n systemctl restart <unit>`, whose exit status is the answer.
+    fn restart(&self, tools: &deploy::Tools) -> Result<(), String>;
 
     /// `GET /api/health` once, on the control listener.
     fn health(&self, listen: SocketAddr) -> Result<health::Answer, String>;
@@ -220,32 +220,44 @@ impl Steps for Real {
         }
     }
 
-    fn restart(&self, systemctl: &Path) -> Result<(), String> {
-        let output = std::process::Command::new(systemctl)
+    fn restart(&self, tools: &deploy::Tools) -> Result<(), String> {
+        // One escalation, and it is `sudoers`-scoped: `holosmith ALL=(root) NOPASSWD: /usr/bin/systemctl restart
+        // holosmith.service` (ADR-0086 D4). `-n` makes a missing rule a refusal in one line rather than a password
+        // prompt on a service's stdin, and the sentence names the rule to add.
+        let output = std::process::Command::new(&tools.sudo)
+            .arg("-n")
+            .arg(&tools.systemctl)
             .args(["restart", deploy::UNIT_NAME])
-            .stdin(std::process::Stdio::inherit())
+            .stdin(std::process::Stdio::null())
             .output()
             .map_err(|error| {
                 format!(
-                    "`{} restart {}` could not be run ({error}): a promotion restarts the unit systemd runs, and a \
-                     machine without that program is one where `--root` is the tree to promote into",
-                    systemctl.display(),
+                    "`{} -n {} restart {}` could not be run ({error}): a promotion restarts the unit systemd runs",
+                    tools.sudo.display(),
+                    tools.systemctl.display(),
                     deploy::UNIT_NAME
                 )
             })?;
         if output.status.success() {
             return Ok(());
         }
+        let said = String::from_utf8_lossy(&output.stderr);
+        let line = said
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("no output")
+            .trim();
         Err(format!(
-            "`{} restart {}` answered {} ({})",
-            systemctl.display(),
+            "`{} -n {} restart {}` answered {} ({line}): this machine needs the one line ADR-0086 records — \
+             `{} ALL=(root) NOPASSWD: /usr/bin/systemctl restart {}` in `/etc/sudoers.d/{}` — and until it has it a \
+             release cannot confirm itself live",
+            tools.sudo.display(),
+            tools.systemctl.display(),
             deploy::UNIT_NAME,
             output.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&output.stderr)
-                .lines()
-                .find(|line| !line.trim().is_empty())
-                .unwrap_or("no output")
-                .trim()
+            deploy::SERVICE_USER,
+            deploy::UNIT_NAME,
+            deploy::SERVICE_USER,
         ))
     }
 
@@ -255,9 +267,9 @@ impl Steps for Real {
 }
 
 /// The whole promotion: what it was asked for, and the exit code its endings carry.
-pub fn run(config: &Config, target: &Target, options: &Options, steps: &dyn Steps) -> ExitCode {
+pub fn run(config: &Config, root: &Root, options: &Options, steps: &dyn Steps) -> ExitCode {
     let tools = deploy::Tools::default();
-    match execute(config, target, options, steps, &tools) {
+    match execute(config, root, options, steps, &tools) {
         Ok(()) => ExitCode::SUCCESS,
         Err(said) => {
             eprintln!("holosmith: upgrade: {said}");
@@ -269,7 +281,7 @@ pub fn run(config: &Config, target: &Target, options: &Options, steps: &dyn Step
 /// [`run`] with the programs as a parameter, so a test can name its own `systemctl`.
 pub fn execute(
     config: &Config,
-    target: &Target,
+    root: &Root,
     options: &Options,
     steps: &dyn Steps,
     tools: &deploy::Tools,
@@ -354,7 +366,7 @@ pub fn execute(
     }
 
     // 4. The drain.
-    match steps.drain(&target.admin_dir(), options.wait) {
+    match steps.drain(&crate::config::admin_dir(&config.data_root), options.wait) {
         DrainAnswer::Drained => println!("upgrade: drain: drained"),
         DrainAnswer::Already => {
             return Err(format!(
@@ -392,10 +404,10 @@ pub fn execute(
 
     // 6. The release, the unit and the switch. Each of these can refuse on a tree an operator has to look at, so
     //    each refusal carries the state the drain left the machine in.
-    let release = Release::of(target);
-    let previous = previous_release(&release, target).map_err(draining)?;
+    let release = Release::of(root);
+    let previous = previous_release(&release, root).map_err(draining)?;
     write_release(&release, &candidate).map_err(draining)?;
-    write_unit(target, config, &release, "upgrade").map_err(draining)?;
+    write_unit(root, config, &release, "upgrade").map_err(draining)?;
     release.switch(&candidate.info.git_tag).map_err(draining)?;
     println!(
         "upgrade: current: -> releases/{} (was {})",
@@ -411,7 +423,7 @@ pub fn execute(
     serve_with(
         &candidate.info,
         config,
-        target,
+        root,
         steps,
         tools,
         options.window,
@@ -613,7 +625,7 @@ struct Previous {
 /// A machine that has never promoted has no `current`, and the previous release is the one systemd is running: this
 /// reads the unit's `ExecStart=`, copies that binary into `releases/<its tag>/` and points `current` at it **before**
 /// the candidate's release is written — so the rollback target exists before the switch that may need it.
-fn previous_release(release: &Release, target: &Target) -> Result<Previous, String> {
+fn previous_release(release: &Release, root: &Root) -> Result<Previous, String> {
     if let Some(link) = release.link() {
         let tag = release.tag_of(&link).ok_or_else(|| {
             format!(
@@ -638,7 +650,7 @@ fn previous_release(release: &Release, target: &Target) -> Result<Previous, Stri
         });
     }
     // No `current`: the unit's `ExecStart` is what is live.
-    let unit_path = target.unit_path();
+    let unit_path = root.unit();
     let text = std::fs::read_to_string(&unit_path).map_err(|error| {
         format!(
             "{} could not be read ({error}): a promotion switches the `current` symlink the unit runs and restarts \
@@ -713,14 +725,14 @@ fn write_release(release: &Release, candidate: &Candidate) -> Result<(), String>
 /// changes. A unit that already names `current/holosmith` is left byte-identical, so a second promotion writes
 /// nothing and a later `server deploy` finds the file it would have written.
 pub(crate) fn write_unit(
-    target: &Target,
+    root: &Root,
     config: &Config,
     release: &Release,
     prefix: &str,
 ) -> Result<(), String> {
-    let path = target.unit_path();
+    let path = root.unit();
     let exe = release.current().join(release::BINARY);
-    let bytes = deploy::unit_text(&exe, target.privileged(), config.role);
+    let bytes = deploy::unit_text(&exe, config.role, root);
     if std::fs::read(&path).is_ok_and(|existing| existing == bytes.as_bytes()) {
         return Ok(());
     }
@@ -756,7 +768,7 @@ pub(crate) fn write_unit(
 fn serve_with(
     candidate: &VersionInfo,
     config: &Config,
-    target: &Target,
+    root: &Root,
     steps: &dyn Steps,
     tools: &deploy::Tools,
     window: Duration,
@@ -788,13 +800,13 @@ fn serve_with(
         // Step 8, and the only place a prune runs: the candidate is live, so the tree may shed what it no longer
         // needs. A promotion that failed before here, or whose candidate never answered, removes nothing — that tree
         // is what an operator reads while diagnosing it, and the rollback target is in it.
-        prune(&Release::of(target), config.keep_releases);
+        prune(&Release::of(root), config.keep_releases);
         return Ok(());
     }
     // The rollback: the same switch in reverse, the same restart, and the same poll -- and **no database restore**,
     // because expand/contract is what makes switching back safe (ADR-0047). A restore would delete the work of every
     // session since the backup.
-    rollback(config, target, steps, tools, window, backup, previous)
+    rollback(config, root, steps, tools, window, backup, previous)
 }
 
 /// Step 8: keep the newest `keep_releases`, and never the live release or the one behind it.
@@ -828,14 +840,14 @@ fn prune(release: &Release, keep: u32) {
 /// Put the previous link target back, restart, and say what is live now -- the promotion's failure ending.
 fn rollback(
     config: &Config,
-    target: &Target,
+    root: &Root,
     steps: &dyn Steps,
     tools: &deploy::Tools,
     window: Duration,
     backup: &Path,
     previous: &Previous,
 ) -> Result<(), String> {
-    let release = Release::of(target);
+    let release = Release::of(root);
     release.restore(&previous.link).map_err(|error| {
         format!(
             "the candidate did not become live and `current` could not be put back to {}: {error}. This machine is \
@@ -935,9 +947,10 @@ pub(crate) fn restart_and_poll(
     prefix: &str,
 ) -> Attempt {
     let started = Instant::now();
-    let restarted = steps.restart(&tools.systemctl);
+    let restarted = steps.restart(tools);
     println!(
-        "{prefix}: restart: {} restart {}",
+        "{prefix}: restart: {} -n {} restart {}",
+        tools.sudo.display(),
         tools.systemctl.display(),
         deploy::UNIT_NAME
     );

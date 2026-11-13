@@ -98,6 +98,11 @@ fn batch() -> Vec<String> {
 #[derive(Debug, Clone)]
 pub struct Tools {
     pub ssh: PathBuf,
+    /// `sudo`: the remote run becomes the **service user**, because the tree is that user's (ADR-0086). `-n` makes a
+    /// missing rule a refusal in one line rather than a password prompt on a pipe that has nobody to answer it; the
+    /// machine's rule is `holosmith ALL=(root) NOPASSWD: …` for the restart and an ordinary `sudo -u holosmith` for
+    /// the deploy itself.
+    pub sudo: PathBuf,
     pub uname: PathBuf,
     pub sha256sum: PathBuf,
     /// Whether to ask ssh for a pseudo-terminal: true exactly when stdin and stdout are both terminals.
@@ -108,6 +113,7 @@ impl Default for Tools {
     fn default() -> Self {
         Self {
             ssh: PathBuf::from("ssh"),
+            sudo: PathBuf::from("sudo"),
             uname: PathBuf::from("uname"),
             sha256sum: PathBuf::from("sha256sum"),
             interactive: std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
@@ -255,6 +261,16 @@ impl Remote {
             arguments.push("-t".to_string());
         }
         arguments.push(self.host.clone());
+        // The deploy is the service user's: the tree it writes is that user's root, so the remote run is one
+        // `sudo -n -u holosmith` rather than the ssh login itself (ADR-0086).
+        for part in [
+            tools.sudo.display().to_string(),
+            "-n".to_string(),
+            "-u".to_string(),
+            crate::deploy::SERVICE_USER.to_string(),
+        ] {
+            arguments.push(part);
+        }
         arguments.push(sent.token.clone());
         arguments.extend(plan.arguments());
         let rendered = format!("{} {}", tools.ssh.display(), arguments.join(" "));

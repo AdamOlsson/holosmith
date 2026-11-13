@@ -45,29 +45,38 @@ A machine that runs sessions. Has Docker, git and a projects root.
 _Avoid_: Worker, agent host, runner
 
 **Service user**:
-The `holosmith` system user a deployed machine runs `serve` as: `useradd --system --groups docker --home-dir <data
-root> --shell /usr/sbin/nologin holosmith` on a privileged **server** install, and the owner of the install tree after
-step 2's `chown`. A **hub** deploy creates the same user and joins it to **no group** — a hub drives no daemon — and
-nothing in the build ever removes a membership, so a `both` machine that ran `server deploy` first keeps the docker
-group and a later hub install says the user *exists and joins no group* rather than claiming it is in none. Under
-`--root` there is none: the tree belongs to the invoking user, and the step's line says so. Its machine names are
-`deploy::SERVICE_USER` and `deploy::SERVICE_GROUP`.
-_Avoid_: Service account, holosmith user, deploy user (and a `--root` install has no service user at all)
+The `holosmith` system user a machine runs `serve` as, and the owner of its **root**. The operator creates it once,
+with `useradd --system --create-home --home-dir <root> --shell /usr/sbin/nologin holosmith`, because creating an
+account is root's and a deploy never escalates (ADR-0086). Its home **is** the root, so `~holosmith` and the data
+root are one path and a `git` run by the service user writes its credentials inside the tree it is backing up. A
+**server** machine's only membership is the `docker` group (`usermod -aG docker holosmith`), added by the operator;
+a **hub** joins no group, because it drives no daemon. Its machine names are `deploy::SERVICE_USER`,
+`deploy::SERVICE_GROUP` and the uid every session container is started with (ADR-0087).
+_Avoid_: Service account, holosmith user, deploy user, run-as user
+
+**Root**:
+The one directory a machine's Holosmith lives in: `HOLOSMITH_ROOT`, default `/var/lib/holosmith`, owned by the
+**service user** 0700. It holds four children — the config the deploy renders, the **data root**'s directory, the
+**release tree** and the `projects` the sessions are made from — so it is one path to back up and one to delete
+(ADR-0086). `--root DIR` is the same value's flag form: the tree the gate or an operator owns, not a second privilege
+mode. The unit's `ExecStart` names the config explicitly, so the daemon never resolves `~` and never decides the root
+from who ran it.
+_Avoid_: Install dir, home dir, prefix, install tree (when the whole root is meant — say root)
 
 **Hub**:
 The single entry point you open in a browser. Forwards requests and previews to servers. Runs no sessions.
 _Avoid_: Controller, orchestrator, gateway
 
 **Hub deploy**:
-`holosmith hub deploy`: the deploy's steps **1, 2, 5, 6 and 7**, with 3 and 4 `skipped` — a hub builds no images and
+`holosmith hub deploy`: the deploy's steps **1, 2, 5 and 6**, with 3 and 4 `skipped` — a hub builds no images and
 starts no proxies, because it runs no containers — and step 2's service user joining no group. It is one **deploy
-half** of the same seven-step command, so it has `--root` and `--dry-run` with the same meanings a server's has, and
+half** of the same six-step command, so it has `--root` and `--dry-run` with the same meanings a server's has, and
 re-running it is the whole recovery procedure. Its machine names are `deploy::{Kind::Hub, run_as, union}` and
 `commands::hub::run_deploy`.
 _Avoid_: Hub install, hub setup, `server deploy --hub`
 
 **Deploy half**:
-Which part of a machine one `deploy` run installs: the **server** half (all seven steps, the daemon's group, both
+Which part of a machine one `deploy` run installs: the **server** half (all six steps, the daemon's group, both
 proxies) or the **hub** half (steps 1, 2, 5, 6 and 7, no group, no proxy). A run **unions** its half with the role the
 config already carries and writes the union into the `config.toml` step 2 installs, so `server deploy` then `hub
 deploy` on one machine — in either order — leaves a machine whose config says `both`; nothing is refused over a role.
@@ -168,7 +177,10 @@ Where the running config came from: the config file, or the built-in defaults wh
 _Avoid_: Config origin, mode, fallback
 
 **Data root**:
-The directory holding everything the binary writes: the database, session directories, backups and the secrets file. Its machine name is `data_root`.
+The directory holding everything the binary writes: the database, session directories, backups and the secrets file —
+`<root>/data` by default. Its machine name is `data_root`. It is deliberately not the whole **root**: `config`
+refuses a `projects_root` at or inside it, so the repositories and the release tree sit beside it, and "delete the
+data" never deletes a repository.
 _Avoid_: Data dir, state dir, home
 
 **Projects root**:
@@ -976,19 +988,21 @@ build answers without sharing its `git_tag`.
 _Avoid_: Version (that is the crate's semver, not a release), build, deploy
 
 **Release tree**:
-`<install>/opt/holosmith`, holding `releases/<tag>/` and the **`current`** symlink; `--root` prefixes it, so an install
-tree carries its own. `holosmith upgrade` creates it and switches it; `holosmith rollback` switches it back one release,
-and its **order** — the order the releases were written onto the machine, newest first — is `Release::history`, which is
-also the order a **prune** keeps. A **promotion** prunes it to `keep_releases` when the candidate is live,
-`holosmith version` reports the release directory the running file is in, and `doctor` reports the resolved path and
-whether the link is intact. Its machine names are `release::Release`, `release::ROOT` and `release::running_tag`.
-_Avoid_: Releases directory, install tree (that is the whole `--root`), versions
+`<root>/releases`, holding `releases/<tag>/` and the **`current`** symlink at `<root>/current`. It is inside the root
+rather than a `/opt` of its own (ADR-0086), which is why `upgrade` and `rollback` write plain files as the service
+user and need no privilege for the tree. `holosmith upgrade` creates it and switches it; `holosmith rollback` switches
+it back one release, and its **order** — the order the releases were written onto the machine, newest first — is
+`Release::history`, which is also the order a **prune** keeps. A **promotion** prunes it to `keep_releases` when the
+candidate is live, `holosmith version` reports the release directory the running file is in, and `doctor` reports the
+resolved path and whether the link is intact. Its machine names are `release::Release`, `release::ROOT` and
+`release::running_tag`.
+_Avoid_: Releases directory, install tree, versions
 
 **`current`**:
-The symlink systemd executes through: `<install>/opt/holosmith/current`, pointing at `releases/<tag>` **relatively**, so
-the tree can be moved. A switch creates a staged symlink and `rename`s it onto `current`, which replaces the old target
+The symlink systemd executes through: `<root>/current`, pointing at `releases/<tag>` **relatively**, so the tree can be
+moved. A switch creates a staged symlink and `rename`s it onto `current`, which replaces the old target
 in one step; a rollback writes back the target it read, verbatim. The unit's `ExecStart` names
-`<install>/opt/holosmith/current/holosmith`, so a restart picks a switch up — and `server deploy`'s step 5 renders that
+`<root>/current/holosmith`, so a restart picks a switch up — and `server deploy`'s step 5 renders that
 path once a release tree resolves, so a deploy after a promotion does not undo it.
 _Avoid_: Pointer, live link, symlink target
 
@@ -1064,7 +1078,7 @@ _Avoid_: Fixture, test data, sample session, golden transcript
 **Remote deploy**:
 A deploy that runs on **another machine**: `holosmith server deploy --ssh user@host` (or `hub deploy`) sends the
 binary this command is running — or the file `--binary` names — to the target over ssh, verifies the copy's SHA-256
-on that side, and runs the same command there, so the seven steps, the `kind` and the flags are the target's own and
+on that side, and runs the same command there, so the six steps, the `kind` and the flags are the target's own and
 nothing about *what* is installed is decided here. The copy lands at
 `$HOME/.cache/holosmith/deploy-<first 12 hex of the digest>`; the architecture is compared **before** it is sent (the
 file's ELF header against the target's `uname -m`), and a run that fails before the fourth child has executed
@@ -1073,17 +1087,18 @@ run. Its machine names are `remote::Remote`, `remote::Plan`, `Binary`, `Sent`, `
 _Avoid_: Remote install, push, upload, scp
 
 **Deploy step**:
-One of the seven parts of a `deploy` run — `holosmith server deploy` or `holosmith hub deploy` — in the spec's
+One of the six parts of a `deploy` run — `holosmith server deploy` or `holosmith hub deploy` — in the spec's
 order: `preflight`, `files`, `images`,
-`proxies`, `service`, `origins`, `health`. A deploy step is a **state read** and an **apply**: the read says
+`proxies`, `service`, `health`. A deploy step is a **state read** and an **apply**: the read says
 whether the step is already satisfied and what is missing, the apply does the missing part, and `--dry-run`
 prints the read alone. Each one reports one of five words — **satisfied**, **needs** (a dry run's plan),
 **changed**, **skipped** (carrying the reason, and never a pass) and **failed** (which stops the run and makes the
 resume command the last line). `skipped` has had two reasons in its life and both are "no body to run here": a story
 that still owned the body (nothing since) and a **deploy half** with no work for the step
-(a hub's `images` and `proxies`), which is why a hub run's tally reads `5 satisfied, 0 changed, 2 skipped, 0 failed`.
-Its machine names are `deploy::DeployStep` and `DeployStep::ALL`, and `--root` is the install tree the step's paths
-are built under. It is not `Step`.
+(a hub's `images` and `proxies`), which is why a hub run's tally reads `4 satisfied, 0 changed, 2 skipped, 0 failed`.
+A step's **apply never escalates**: what root would have done is printed as exact argv and verified by the next run
+(ADR-0086). Its machine names are `deploy::DeployStep` and `DeployStep::ALL`, and `--root` is the **root** the step's
+paths are built under. It is not `Step`.
 _Avoid_: Install step, deploy phase, stage, deployment
 
 **Image build**:

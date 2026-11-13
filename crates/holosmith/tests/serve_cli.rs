@@ -552,7 +552,7 @@ fn a_data_dir_the_file_must_not_name_is_refused_from_the_cli_too() {
         "--config",
         config.to_str().expect("UTF-8"),
         "--data-dir",
-        "/srv/holosmith/projects",
+        "/var/lib/holosmith/projects",
         "--port",
         "0",
     ]);

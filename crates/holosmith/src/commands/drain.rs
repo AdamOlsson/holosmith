@@ -21,10 +21,11 @@
 //!
 //! # What this command does not read
 //!
-//! No config file: the path is the admin directory ([`crate::deploy::ADMIN_DIR`], or `--admin-dir`), which is a
-//! fixed path of the machine rather than a setting, and the wait is the flag's. A `--config` given to it is
-//! therefore accepted and unused — the honest thing to do with a flag that names a file this command has no
-//! question for, rather than refusing a command line that also serves `serve`.
+//! No config file: the path is the admin socket's directory — `<data root>/run`, which `serve` creates when it
+//! binds — or `--admin-dir`. The default is composed from the root rather than read from a config, because a drain
+//! that had to parse the machine's file could not tell an operator their socket path when the file is the thing that
+//! is broken. A `--config` given to it is therefore accepted and unused — the honest thing to do with a flag that
+//! names a file this command has no question for, rather than refusing a command line that also serves `serve`.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -32,7 +33,6 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use crate::deploy::ADMIN_DIR;
 use crate::drain::{self, Ending};
 
 /// How long the client waits for the server's **first** answer before it calls the socket dead.
@@ -53,7 +53,9 @@ pub struct DrainArgs {
 }
 
 pub fn run(args: DrainArgs) -> ExitCode {
-    let admin_dir = args.admin_dir.unwrap_or_else(|| PathBuf::from(ADMIN_DIR));
+    let admin_dir = args.admin_dir.unwrap_or_else(|| {
+        crate::config::admin_dir(&crate::config::root().join(crate::config::DATA_DIR))
+    });
     let path = drain::socket_path(&admin_dir);
     match ask(&path, args.wait) {
         Ok(ending) => {

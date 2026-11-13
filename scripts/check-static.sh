@@ -152,16 +152,32 @@ check_serve_in_empty_root() {
   grep -qx "database /data/app.db schema $schema_version" "$dir/serve.err" ||
     fail "$label in an empty root: serve did not report the database it opened: $(cat "$dir/serve.err")"
 
-  # While the process runs the database is in WAL, and nothing else is written under the data
-  # root. The -wal is the proof the schema was written through the WAL, not around it.
-  local running wanted
-  running="$(find "$dir/data" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
-  for wanted in app.db app.db-wal; do
+  # The set under the data root, before and after the stop: the database, its WAL sidecars and the admin
+  # socket's directory — `<data root>/run`, 0700, made by `serve` when it binds (ADR-0086 D3: it sits on the
+  # root's filesystem and outlives the process, and a socket a stop leaves behind is removed at the next bind,
+  # `drain::listen`). The -wal is the proof the schema was written through the WAL, not around it.
+  #
+  # One list for both listings, and each entry carries its type letter, so a directory standing where a file
+  # belongs (or the reverse) cannot pass. Before this, the running arm filtered to `-type f` and the stopped arm
+  # did not, which is how `run/` slipped past one and failed the other.
+  local -a allowed=('app.db f' 'app.db-wal f' 'app.db-shm f' 'run d' 'run/drain.sock s')
+  printf '%s\n' "${allowed[@]}" > "$dir/allowed"
+  # The socket is bound before the control listener answers (it is bound beside the policies, ahead of the
+  # listeners), so the wait above has already covered it; the bound is here so a slow bind is a wait and not a
+  # failure that names the wrong cause.
+  local wanted running
+  for i in $(seq 1 200); do
+    [ -S "$dir/data/run/drain.sock" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  running="$(find "$dir/data" -mindepth 1 -maxdepth 2 -printf '%P %y\n' | sort)"
+  for wanted in 'app.db f' 'app.db-wal f' 'run d' 'run/drain.sock s'; do
     printf '%s\n' "$running" | grep -qx "$wanted" ||
       fail "$label in an empty root: '$wanted' is missing while serving: $running"
   done
   local unexpected
-  unexpected="$(printf '%s\n' "$running" | grep -vx -e app.db -e app.db-wal -e app.db-shm || true)"
+  unexpected="$(printf '%s\n' "$running" | grep -vxF -f "$dir/allowed" || true)"
   [ -z "$unexpected" ] ||
     fail "$label in an empty root: serve wrote $unexpected under the data dir"
 
@@ -193,14 +209,14 @@ check_serve_in_empty_root() {
   cmp -s "$dir/served.html" web/dist/index.html ||
     fail "$label in an empty root: / is not web/dist/index.html"
 
-  # After the stop the data root holds the database and, because the sandbox reports the
-  # signal's own status instead of a clean exit, at most its two WAL sidecars — never anything
-  # else, and app.db is still the schema.
+  # After the stop the data root holds the database, at most its two WAL sidecars — because the sandbox reports
+  # the signal's own status instead of a clean exit — and the admin directory with the socket it bound. app.db is
+  # still the schema, and nothing outside the list above was written.
   local left
-  left="$(printf '%s\n' "$(find "$dir/data" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)")"
-  printf '%s\n' "$left" | grep -qx app.db ||
+  left="$(find "$dir/data" -mindepth 1 -maxdepth 2 -printf '%P %y\n' | sort)"
+  printf '%s\n' "$left" | grep -qx 'app.db f' ||
     fail "$label in an empty root: app.db is gone after the stop: $left"
-  unexpected="$(printf '%s\n' "$left" | grep -vx -e app.db -e app.db-wal -e app.db-shm || true)"
+  unexpected="$(printf '%s\n' "$left" | grep -vxF -f "$dir/allowed" || true)"
   [ -z "$unexpected" ] ||
     fail "$label in an empty root: after the stop the data dir holds $unexpected"
   printf 'ok %s: serves the app from an empty root\n' "$label"

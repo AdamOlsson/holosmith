@@ -19,7 +19,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use holosmith::config::Config;
-use holosmith::deploy::Target;
+use holosmith::deploy::Root;
 use holosmith::http::health::Answer;
 use holosmith::images::{self, Expectation, Kind, Log};
 use holosmith::promote::{self, DrainAnswer, Options, Steps};
@@ -90,7 +90,7 @@ impl Steps for Recorder {
         self.drain.clone()
     }
 
-    fn restart(&self, _systemctl: &Path) -> Result<(), String> {
+    fn restart(&self, _tools: &holosmith::deploy::Tools) -> Result<(), String> {
         self.record("restart");
         Ok(())
     }
@@ -153,7 +153,7 @@ fn artifact() -> Option<PathBuf> {
 struct World {
     dir: TempDir,
     config: Config,
-    target: Target,
+    root: Root,
     candidate: PathBuf,
     info: VersionInfo,
 }
@@ -189,8 +189,8 @@ fn world(label: &str) -> Option<World> {
     drop(database);
 
     let root = dir.file("root");
-    let target = Target::resolve(Some(root));
-    let release = Release::of(&target);
+    let root = Root::resolve(Some(root));
+    let release = Release::of(&root);
     std::fs::create_dir_all(release.releases()).expect("the releases directory is creatable");
     let old = b"#!/bin/sh\nexit 0\n";
     let old_digest = {
@@ -208,7 +208,7 @@ fn world(label: &str) -> Option<World> {
     Some(World {
         dir,
         config,
-        target,
+        root,
         candidate,
         info,
     })
@@ -227,7 +227,7 @@ fn options(world: &World, acknowledge_review: bool) -> Options {
 fn execute(world: &World, options: &Options, steps: &Recorder) -> Result<(), String> {
     promote::execute(
         &world.config,
-        &world.target,
+        &world.root,
         options,
         steps,
         &holosmith::deploy::Tools::default(),
@@ -297,7 +297,7 @@ fn a_promotion_asks_the_machine_in_the_specs_order() {
     );
 
     // The candidate's release directory, and `current` pointing at it.
-    let release = Release::of(&world.target);
+    let release = Release::of(&world.root);
     assert_eq!(
         release.link(),
         Some(Path::new(holosmith::release::RELEASES).join(&world.info.git_tag)),
@@ -308,13 +308,13 @@ fn a_promotion_asks_the_machine_in_the_specs_order() {
         "the candidate's release directory holds no binary"
     );
     // The unit runs through `current`, which is what makes the restart start the candidate.
-    let unit = std::fs::read_to_string(world.target.unit_path()).expect("the unit is readable");
-    let live = format!(
-        "{}/{}/{}",
-        world.target.opt_dir().display(),
-        holosmith::release::CURRENT,
-        holosmith::release::BINARY
-    );
+    let unit = std::fs::read_to_string(world.root.unit()).expect("the unit is readable");
+    let live = world
+        .root
+        .current()
+        .join(holosmith::release::BINARY)
+        .display()
+        .to_string();
     assert!(
         unit.contains(&format!("ExecStart={live} serve")),
         "the unit does not run through `current`:\n{unit}"
@@ -326,7 +326,7 @@ fn a_promotion_asks_the_machine_in_the_specs_order() {
 /// `File::open(dir).set_modified` is how a directory's own mtime is set (no `touch` child, no `filetime` crate), and
 /// it has to be opened **after** the release's files are written, because writing into a directory refreshes it.
 fn seed(world: &World, tag: &str, seconds: u64) {
-    let release = Release::of(&world.target);
+    let release = Release::of(&world.root);
     let bytes = b"#!/bin/sh\nexit 0\n";
     let path = world.dir.file(&format!("seed-{tag}"));
     std::fs::write(&path, bytes).expect("the fixture binary is writable");
@@ -354,7 +354,7 @@ fn a_promotion_that_succeeds_prunes_the_tree_and_keeps_the_rollback_target() {
     seed(&world, "ancient2", 1_100_000_000);
     seed(&world, "ancient3", 1_200_000_000);
     world.config.keep_releases = 4;
-    let release = Release::of(&world.target);
+    let release = Release::of(&world.root);
     assert_eq!(
         release.history(),
         vec![
@@ -412,7 +412,7 @@ fn a_promotion_whose_candidate_never_answers_prunes_nothing() {
     seed(&world, "ancient1", 1_000_000_000);
     seed(&world, "ancient2", 1_100_000_000);
     world.config.keep_releases = 2;
-    let release = Release::of(&world.target);
+    let release = Release::of(&world.root);
 
     let mut steps = Recorder::new(&world.info.version);
     // An answer from a process older than the restart: the version is right and the uptime is not, so the candidate
@@ -453,7 +453,7 @@ fn a_promotion_that_skipped_the_review_is_refused_before_anything_is_asked() {
         "a refused promotion wrote a backup"
     );
     assert_eq!(
-        Release::of(&world.target).link(),
+        Release::of(&world.root).link(),
         Some(Path::new("releases/old").to_path_buf()),
         "a refused promotion switched `current`"
     );
@@ -477,7 +477,7 @@ fn a_failed_smoke_run_stops_the_promotion_before_the_drain() {
     );
     assert!(backups(&world).is_empty());
     assert_eq!(
-        Release::of(&world.target).link(),
+        Release::of(&world.root).link(),
         Some(Path::new("releases/old").to_path_buf())
     );
 
@@ -526,7 +526,7 @@ fn an_expired_or_already_running_drain_is_refused_before_the_backup() {
             backups(&world)
         );
         assert_eq!(
-            Release::of(&world.target).link(),
+            Release::of(&world.root).link(),
             Some(Path::new("releases/old").to_path_buf()),
             "a refused drain switched `current`"
         );
@@ -557,7 +557,7 @@ fn a_backup_that_cannot_be_written_leaves_the_previous_release_live() {
         "a refusal after the drain does not say the machine is draining: {error}"
     );
     assert_eq!(
-        Release::of(&world.target).link(),
+        Release::of(&world.root).link(),
         Some(Path::new("releases/old").to_path_buf()),
         "a promotion that could not back up switched `current`"
     );
@@ -586,7 +586,7 @@ fn a_candidate_that_never_answers_is_switched_back_and_says_which_ending_it_was(
         "{error}"
     );
     assert_eq!(
-        Release::of(&world.target).link(),
+        Release::of(&world.root).link(),
         Some(Path::new("releases/old").to_path_buf()),
         "the rollback did not put `current` back"
     );
@@ -601,7 +601,7 @@ fn a_candidate_that_never_answers_is_switched_back_and_says_which_ending_it_was(
     );
     // The candidate's release directory survives the rollback (it is the next attempt's), and the backup is kept.
     assert!(
-        Release::of(&world.target)
+        Release::of(&world.root)
             .binary(&world.info.git_tag)
             .is_file()
     );

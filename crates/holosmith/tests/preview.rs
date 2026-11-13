@@ -357,12 +357,11 @@ async fn a_session_with_no_container_is_a_502_that_names_the_reason() {
 #[tokio::test]
 async fn a_dev_server_that_answers_nothing_is_a_502() {
     let dir = TempDir::new("preview-unreachable");
-    // A port the kernel gives out and nothing listens on: the connect is refused.
-    let dead = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("a loopback port is bindable");
-    let address = dead.local_addr().expect("a bound address");
-    drop(dead);
+    // A loopback address nothing listens on, and one no other arm here can take: every other test in this binary
+    // binds `127.0.0.1:0`, and a port handed back by `drop` was free for exactly as long as it took this test to
+    // connect — a neighbour's ephemeral bind then answered 404 where the refusal was expected, which is what made
+    // this arm flaky. Port 1 (tcpmux) is below the ephemeral range, needs privilege to bind and is no dev server.
+    let address: SocketAddr = "127.0.0.1:1".parse().expect("a loopback address");
     let (listening, id) = Listening::start(&dir, Ok(address)).await;
     let response = get(listening.address, &format!("/local/{id}/"), &[]).await;
     assert_eq!(response.status, 502);

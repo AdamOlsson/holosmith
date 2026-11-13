@@ -19,7 +19,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use crate::config::{Config, LoadError};
-use crate::deploy::Target;
+use crate::deploy::Root;
 use crate::promote::{self, Options, Real};
 
 /// What the command line asked for.
@@ -49,11 +49,7 @@ pub fn run(args: UpgradeArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let target = Target::resolve(args.root.clone());
-    if let Some(said) = crate::deploy::privilege_problem(&target, "upgrade") {
-        eprintln!("holosmith: upgrade: {said}");
-        return ExitCode::FAILURE;
-    }
+    let root = Root::resolve(args.root.clone());
     let options = Options {
         candidate: args.binary,
         acknowledge_review: args.acknowledge_review,
@@ -61,5 +57,5 @@ pub fn run(args: UpgradeArgs) -> ExitCode {
         window: crate::promote::WINDOW,
     };
     let steps = Real::new(&config);
-    promote::run(&config, &target, &options, &steps)
+    promote::run(&config, &root, &options, &steps)
 }

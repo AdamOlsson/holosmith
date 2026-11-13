@@ -26,6 +26,12 @@ the number is the spec's order and the word is the check's outcome. The words ar
 | `skipped` | another story owns this step's body, **and the line names it** |
 | `failed` | the read or the apply failed; the run stops here |
 
+**Amended by ADR-0085:** the step's line is unchanged and is still the only line whose shape is a contract, but a
+step that prints a **list** — a plan, or the apply that did it — puts one action per line *under* that line, with the
+count staying on it (`2. files: needs: 10 actions:` and ten `    - …` lines below). A ten-action step joined with `; `
+was one wrapped paragraph on a phone, and the entry that matters most was the first thing the wrap lost. Steps are
+separated by one blank line, and the tally has a block of its own.
+
 **A `skipped` step is never `satisfied`.** Four of the seven steps have no body in this release — step 3's
 image builds are that story's, and steps 5, 6 and 7 are the — and the wrong answer is a step that prints
 "already satisfied" over a check that read nothing, which is the P1 shape ADR-0055 names. So a skipped step
@@ -95,6 +101,13 @@ it is chowned. The distinction the sentence was drawing survives: nothing here a
 the child **inherits the deploy's stdin** so `sudo` can ask for a password on the operator's terminal: without
 that, `sudo: a terminal is required to read the password` would be every machine whose credential is not
 already cached, which is most of them on a first deploy.
+
+**Superseded in part by ADR-0086:** there is one install and it is not a privileged one. The root is a service user's
+state directory (`HOLOSMITH_ROOT`, default `/var/lib/holosmith`), the unit is a system unit with `User=` and
+`StateDirectory=`, and the deploy **never escalates**: it prints the four commands that are root's and verifies them on
+the next run. So `--root` is the same root's flag form rather than a second privilege mode, `Tools::sudo`, the
+`sudo`-prefixed children and the stdin inheritance above are deleted, and the `useradd`/`chown` actions are the
+operator's to type. The step/read/apply shape and the five words are this ADR's and unchanged.
 
 Every file action is one program: `install -d -m` for a directory, `install -m` for a file that is absent or
 whose bytes differ, and `chmod` to repair a mode. **`keys.toml` is never installed over an existing file** —

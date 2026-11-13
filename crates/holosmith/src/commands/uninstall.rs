@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crate::config::{Config, LoadError};
-use crate::deploy::Target;
+use crate::deploy::Root;
 use crate::docker::Docker;
 use crate::uninstall::{self, Args};
 
@@ -42,17 +42,17 @@ pub fn run(args: UninstallArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let target = Target::resolve(args.root.clone());
-    // The one config the steps see: the two roots moved under `--root`, and every machine fact untouched — the same
+    let root = Root::resolve(args.root.clone());
+    // The one config the steps see: the two roots moved under the root, and every machine fact untouched — the same
     // contract `server deploy` hands its steps (see `deploy::run`).
-    let deployed = target.config(&loaded.config);
+    let deployed = root.config(&loaded.config);
     let tools = uninstall::Tools::default();
     let machine = Docker::new(deployed.docker_host.clone());
     let wanted = Args {
         purge: args.purge,
         force: args.force,
     };
-    let report = match uninstall::run(&deployed, &target, &tools, &machine, &wanted) {
+    let report = match uninstall::run(&deployed, &root, &tools, &machine, &wanted) {
         Ok(report) => report,
         Err(sentence) => {
             eprintln!("holosmith: uninstall: {sentence}");

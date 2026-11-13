@@ -27,8 +27,51 @@ use problem::{Position, Problem};
 
 use crate::runtime::Backend;
 
-/// The one path the spec names for the machine's config file.
-pub const DEFAULT_CONFIG_PATH: &str = "/etc/holosmith/config.toml";
+/// The one directory a machine's Holosmith lives in, when `HOLOSMITH_ROOT` does not name another.
+///
+/// It is the **service user's home** as well as the state directory, so `~holosmith` and the root are one path
+/// and a `git` run by the service user writes its credentials inside the tree a backup copies (ADR-0086).
+pub const DEFAULT_ROOT: &str = "/var/lib/holosmith";
+
+/// The variable that names the root, which every verb and the unit agree on.
+pub const ROOT_ENV: &str = "HOLOSMITH_ROOT";
+
+/// The config file's name inside the root.
+pub const CONFIG_FILE: &str = "config.toml";
+
+/// The **data root**'s name inside the root: the database, the sessions, the secrets and the backups.
+pub const DATA_DIR: &str = "data";
+
+/// The projects root's name inside the root: the repositories sessions are created against.
+pub const PROJECTS_DIR: &str = "projects";
+
+/// The admin socket's directory, inside the data root.
+///
+/// `serve` creates it when it binds ([`crate::drain::listen`]), so the deploy does not manage it — which is what
+/// removes the `/run` re-entry (and its `chown`) from the install (ADR-0086).
+pub const RUN_DIR: &str = "run";
+
+/// The root this process should use: `HOLOSMITH_ROOT`, or [`DEFAULT_ROOT`].
+///
+/// Resolved from the environment rather than from the config, because it is what decides *which* config file is
+/// read. A relative value is made absolute against the working directory, so every path a report prints is one an
+/// operator can paste.
+pub fn root() -> PathBuf {
+    std::env::var_os(ROOT_ENV).map_or_else(
+        || PathBuf::from(DEFAULT_ROOT),
+        |root| crate::deploy::absolute(&PathBuf::from(root)),
+    )
+}
+
+/// `<root>/config.toml`: the file a root's install wrote.
+pub fn config_path(root: &Path) -> PathBuf {
+    root.join(CONFIG_FILE)
+}
+
+/// `<data root>/run`: the admin socket's directory, which `serve` creates when it binds.
+pub fn admin_dir(data_root: &Path) -> PathBuf {
+    data_root.join(RUN_DIR)
+}
 
 /// Which parts of the system a machine runs (spec *Roles*).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -335,8 +378,8 @@ impl Default for Config {
             allowed_hosts: Vec::new(),
             owner: None,
             machine_name: crate::hosts::LOCAL.to_string(),
-            data_root: PathBuf::from("/var/lib/holosmith"),
-            projects_root: PathBuf::from("/srv/holosmith/projects"),
+            data_root: PathBuf::from(DEFAULT_ROOT).join(DATA_DIR),
+            projects_root: PathBuf::from(DEFAULT_ROOT).join(PROJECTS_DIR),
             agent_image: crate::images::agent_image(),
             agent_toolchains: vec!["python3".to_string(), "ripgrep".to_string()],
             container_cpus: 2,
@@ -461,7 +504,7 @@ pub struct ConfigPath {
 }
 
 impl ConfigPath {
-    /// `--config PATH`, or the one path the spec names.
+    /// `--config PATH`, or the path the root names — `HOLOSMITH_ROOT` first, [`DEFAULT_ROOT`] otherwise.
     pub fn resolve(named: Option<PathBuf>) -> Self {
         match named {
             Some(path) => Self {
@@ -469,7 +512,7 @@ impl ConfigPath {
                 origin: PathOrigin::Explicit,
             },
             None => Self {
-                path: PathBuf::from(DEFAULT_CONFIG_PATH),
+                path: config_path(&root()),
                 origin: PathOrigin::Default,
             },
         }
@@ -539,7 +582,21 @@ impl std::fmt::Display for LoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Missing(path) => write!(f, "no such file: {}", path.display()),
-            Self::Io { path, source } => write!(f, "cannot read {}: {source}", path.display()),
+            Self::Io { path, source } => {
+                write!(f, "cannot read {}: {source}", path.display())?;
+                // The root is 0700 and belongs to the service user (ADR-0086), so the common cause of a refusal is
+                // "you are not that user" — and a bare `permission denied` leaves an operator with nowhere to go.
+                if source.kind() == ErrorKind::PermissionDenied {
+                    write!(
+                        f,
+                        " — this machine's root belongs to the {} service user, so run this as it: \
+                         `sudo -u {} holosmith …`",
+                        crate::deploy::SERVICE_USER,
+                        crate::deploy::SERVICE_USER
+                    )?;
+                }
+                Ok(())
+            }
             Self::Invalid(problems) => write!(f, "{problems}"),
         }
     }
@@ -1062,8 +1119,8 @@ preview_origin = "https://preview.example:8444"
 allowed_hosts = ["control.example", "preview.example"]
 owner = "me@example.com"
 machine_name = "workshop"
-data_root = "/var/lib/holosmith"
-projects_root = "/srv/holosmith/projects"
+data_root = "/var/lib/holosmith/data"
+projects_root = "/var/lib/holosmith/projects"
 agent_image = "pi-agent:local"
 agent_toolchains = ["node", "ripgrep"]
 container_cpus = 3
@@ -1210,8 +1267,11 @@ allow = ["crates.io"]
         );
         assert_eq!(config.allowed_hosts, ["control.example", "preview.example"]);
         assert_eq!(config.owner.as_deref(), Some("me@example.com"));
-        assert_eq!(config.data_root, Path::new("/var/lib/holosmith"));
-        assert_eq!(config.projects_root, Path::new("/srv/holosmith/projects"));
+        assert_eq!(config.data_root, Path::new("/var/lib/holosmith/data"));
+        assert_eq!(
+            config.projects_root,
+            Path::new("/var/lib/holosmith/projects")
+        );
         assert_eq!(config.agent_image, "pi-agent:local");
         assert_eq!(config.agent_toolchains, ["node", "ripgrep"]);
         assert_eq!(config.container_cpus, 3);
@@ -1260,18 +1320,20 @@ allow = ["crates.io"]
             "config.toml:2:1: merge.targetz: unknown key\n1 problem in config.toml\n"
         );
         assert_eq!(
-            problems_of("[egress]\nalow = [\"x\"]\n"),
-            "config.toml:2:1: egress.alow: unknown key\n1 problem in config.toml\n"
+            problems_of("[egress]\nallowz = [\"x\"]\n"),
+            "config.toml:2:1: egress.allowz: unknown key\n1 problem in config.toml\n"
         );
     }
 
     #[test]
     fn every_problem_in_a_broken_file_is_reported_at_once_in_file_order() {
         assert_eq!(
-            problems_of("turn_timeout_mni = 45\nmax_live_sessions = 0\n\n[egress]\nalow = \"x\"\n"),
+            problems_of(
+                "turn_timeout_mni = 45\nmax_live_sessions = 0\n\n[egress]\nallowz = \"x\"\n"
+            ),
             "config.toml:1:1: turn_timeout_mni: unknown key\n\
              config.toml:2:1: max_live_sessions: must be at least 1\n\
-             config.toml:5:1: egress.alow: unknown key\n\
+             config.toml:5:1: egress.allowz: unknown key\n\
              3 problems in config.toml\n"
         );
     }
@@ -1529,7 +1591,7 @@ allow = ["crates.io"]
         // S8: `data_root` is a kind error, so the typed value keeps the built-in default and
         // the roots rule compares `projects_root` against a path the file never named.
         assert_eq!(
-            problems_of("data_root = 5\nprojects_root = \"/var/lib/holosmith\"\n"),
+            problems_of("data_root = 5\nprojects_root = \"/var/lib/holosmith/data\"\n"),
             "config.toml:1:1: data_root: expected string, found integer\n\
              config.toml:2:1: projects_root: must differ from data_root (data_root is the \
              built-in default): deleting data must never touch a repository\n\
@@ -1566,19 +1628,19 @@ allow = ["crates.io"]
     #[test]
     fn the_roots_must_not_be_equal_or_nested_in_either_direction() {
         assert_eq!(
-            problems_of("projects_root = \"/var/lib/holosmith\"\n"),
+            problems_of("projects_root = \"/var/lib/holosmith/data\"\n"),
             "config.toml:1:1: projects_root: must differ from data_root (data_root is the \
              built-in default): deleting data must never touch a repository\n\
              1 problem in config.toml\n"
         );
         assert_eq!(
-            problems_of("projects_root = \"/var/lib/holosmith/projects\"\n"),
+            problems_of("projects_root = \"/var/lib/holosmith/data/projects\"\n"),
             "config.toml:1:1: projects_root: must not be inside data_root (data_root is the \
              built-in default): deleting data must never touch a repository\n\
              1 problem in config.toml\n"
         );
         assert_eq!(
-            problems_of("data_root = \"/srv/holosmith/projects/data\"\n"),
+            problems_of("data_root = \"/var/lib/holosmith/projects/data\"\n"),
             "config.toml:1:1: data_root: must not be inside projects_root (projects_root is the \
              built-in default): deleting data must never touch a repository\n\
              1 problem in config.toml\n"
@@ -1591,8 +1653,8 @@ allow = ["crates.io"]
         // direction, and the one a lexical comparison used to miss.
         assert_eq!(
             problems_of(
-                "data_root = \"/var/lib/holosmith\"\n\
-                 projects_root = \"/srv/../var/lib/holosmith/projects\"\n"
+                "data_root = \"/var/lib/holosmith/data\"\n\
+                 projects_root = \"/srv/../var/lib/holosmith/data/projects\"\n"
             ),
             "config.toml:2:1: projects_root: must not be inside data_root: deleting data must \
              never touch a repository\n1 problem in config.toml\n"
@@ -1602,7 +1664,7 @@ allow = ["crates.io"]
             .expect("a projects root outside the data root is valid, however it is spelled");
         // Folding also makes two spellings of one directory equal.
         assert_eq!(
-            problems_of("projects_root = \"/var/lib/./holosmith\"\n"),
+            problems_of("projects_root = \"/var/lib/./holosmith/data\"\n"),
             "config.toml:1:1: projects_root: must differ from data_root (data_root is the \
              built-in default): deleting data must never touch a repository\n\
              1 problem in config.toml\n"
@@ -1780,11 +1842,11 @@ allow = ["crates.io"]
     fn secrets_live_below_the_data_root() {
         assert_eq!(
             settings().secrets_path(),
-            Path::new("/var/lib/holosmith/secrets/keys.toml")
+            Path::new("/var/lib/holosmith/data/secrets/keys.toml")
         );
         assert_eq!(
             Config::default().secrets_path(),
-            Path::new("/var/lib/holosmith/secrets/keys.toml")
+            Path::new("/var/lib/holosmith/data/secrets/keys.toml")
         );
     }
 
@@ -1804,25 +1866,39 @@ allow = ["crates.io"]
     }
 
     #[test]
-    fn the_default_path_is_the_one_the_spec_names() {
+    fn the_default_path_is_the_one_under_the_root() {
         // Pure, so it runs on the machine class deploys to, where a real config file
         // makes the loader tests below take their skip.
+        let root = std::env::var_os(ROOT_ENV).map_or_else(
+            || PathBuf::from(DEFAULT_ROOT),
+            |root| crate::deploy::absolute(&PathBuf::from(root)),
+        );
         let resolved = ConfigPath::resolve(None);
-        assert_eq!(resolved.path, PathBuf::from(DEFAULT_CONFIG_PATH));
+        assert_eq!(resolved.path, root.join(CONFIG_FILE));
         assert_eq!(resolved.origin, PathOrigin::Default);
-        assert_eq!(DEFAULT_CONFIG_PATH, "/etc/holosmith/config.toml");
+        assert_eq!(config_path(&root), root.join(CONFIG_FILE));
     }
 
     #[test]
     fn load_finds_the_default_path_and_does_not_need_a_file_there() {
-        let default = Path::new(DEFAULT_CONFIG_PATH);
-        // A machine with a real (and readable) config is the deployed case, not a failure.
-        if default.exists() {
-            eprintln!("SKIP: {DEFAULT_CONFIG_PATH} exists on this machine");
-            return;
+        let resolved = ConfigPath::resolve(None);
+        let default = resolved.path.clone();
+        // A machine with a real config is the deployed case, not a failure — and so is one whose root belongs to the
+        // service user, where `exists()` answers false because the `stat` itself is refused (ADR-0086 makes that the
+        // ordinary state of a deployed machine seen by anyone but `holosmith`).
+        match std::fs::read_to_string(&default) {
+            Ok(_) => {
+                eprintln!("SKIP: {} exists on this machine", default.display());
+                return;
+            }
+            Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+                eprintln!("SKIP: {} cannot be read on this machine", default.display());
+                return;
+            }
+            Err(_) => {}
         }
         let loaded = Config::load(None).expect("a missing default file is not an error");
-        assert_eq!(loaded.path, PathBuf::from(DEFAULT_CONFIG_PATH));
+        assert_eq!(loaded.path, default);
         assert_eq!(loaded.source, ConfigSource::Defaults);
         assert_eq!(loaded.config, Config::default());
     }
@@ -1944,7 +2020,10 @@ allow = ["crates.io"]
     fn the_data_dir_override_replaces_the_data_root() {
         let config = overridden(None, Some("/tmp/holosmith-data"));
         assert_eq!(config.data_root, Path::new("/tmp/holosmith-data"));
-        assert_eq!(config.projects_root, Path::new("/srv/holosmith/projects"));
+        assert_eq!(
+            config.projects_root,
+            Path::new("/var/lib/holosmith/projects")
+        );
     }
 
     #[test]
@@ -2034,14 +2113,14 @@ allow = ["crates.io"]
         // `/srv/holosmith/projects` is the built-in projects_root: the same path the file may
         // not name, refused from the CLI, which makes the repro for this story's second P1.
         assert_eq!(
-            overridden(None, Some("/srv/holosmith/projects")).override_problems(),
+            overridden(None, Some("/var/lib/holosmith/projects")).override_problems(),
             vec![
                 "projects_root: must differ from data_root: deleting data must never touch a \
                  repository"
             ]
         );
         assert_eq!(
-            overridden(None, Some("/srv/holosmith/projects/data")).override_problems(),
+            overridden(None, Some("/var/lib/holosmith/projects/data")).override_problems(),
             vec![
                 "data_root: must not be inside projects_root: deleting data must never touch a \
                  repository"

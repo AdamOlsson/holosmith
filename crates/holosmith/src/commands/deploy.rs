@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crate::config::{Config, LoadError, Role};
-use crate::deploy::{self, Kind, Target};
+use crate::deploy::{self, Kind, Root};
 use crate::docker::Docker;
 use crate::remote::{self, Binary, Plan, Remote};
 
@@ -62,21 +62,14 @@ pub fn run(args: DeployArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let target = Target::resolve(args.root.clone());
-    // The one config the steps see: the two roots moved under `--root`, and every machine fact untouched — which
-    // is why this is computed here and handed over rather than recomputed inside each step (see `deploy::run_as`).
+    let root = Root::resolve(args.root.clone());
+    // The one config the steps see: the two roots moved under the root, and every machine fact untouched — which is
+    // why this is computed here and handed over rather than recomputed inside each step (see `deploy::run_as`).
     // The role stays the machine's own; `run_as` puts the union in the copy it installs.
-    let deployed = target.config(&loaded.config);
+    let deployed = root.config(&loaded.config);
     let tools = deploy::Tools::default();
     let machine = Docker::new(deployed.docker_host.clone());
-    let report = deploy::run_as(
-        &deployed,
-        &target,
-        &tools,
-        &machine,
-        args.dry_run,
-        args.kind,
-    );
+    let report = deploy::run_as(&deployed, &root, &tools, &machine, args.dry_run, args.kind);
     print!("{}", report.render());
     if report.failed() {
         println!("{}", resume(&args));

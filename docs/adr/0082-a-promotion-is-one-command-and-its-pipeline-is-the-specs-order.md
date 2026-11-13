@@ -33,6 +33,13 @@ step, in the order the steps ran.
 
 ## D2 — a privileged install requires uid 0, and the review gate is a required word
 
+**Superseded in part by ADR-0086:** there is no privileged install to check for. The release tree lives under the
+service user's own root, so every write is plain `std::fs` as the owner of the tree — not as root — and `--root` is
+that root's flag form rather than an escape from a privilege check, so `privilege_problem` and `running_as_root` are
+deleted. The one escalation a promotion still needs is the unit restart, and it is a single sudoers line
+(`holosmith ALL=(root) NOPASSWD: /usr/bin/systemctl restart holosmith.service`) rather than a dozen `sudo`-prefixed
+children. A machine without that line does not fail: the switch happens and the operator is told the restart is theirs.
+
 A promotion writes the release tree, the symlink and the unit, and restarts a system service. `server deploy` writes
 each of its own files as a separate `sudo`-prefixed child; a promotion that did the same would be a dozen escalations
 for one command, each asking for the same credential. So the rule is one check with one sentence: as root, or with

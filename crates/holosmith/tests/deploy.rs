@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use holosmith::config::{Config, Role};
 use holosmith::container;
-use holosmith::deploy::{self, DeployStep, Kind, Line, Report, Target, Word};
+use holosmith::deploy::{self, DeployStep, Kind, Line, Report, Root, Word};
 use holosmith::docker;
 use holosmith::doctor;
 use holosmith::images::{self, Expectation, Kind as ImageKind};
@@ -170,28 +170,6 @@ fn real_tools(dir: &TempDir) -> deploy::Tools {
     }
 }
 
-/// A `sudo` that records and runs nothing.
-///
-/// **It must not exec anything**: the system-path run names `/etc/holosmith` and `/var/lib/holosmith`, and a shim
-/// that forwarded to the real `sudo` would install into the machine running the tests. Recording the argv and
-/// exiting 0 is the whole of what the system-path tests need to know.
-fn sudo_recorder(dir: &TempDir, log: &Path) -> PathBuf {
-    shim(
-        dir,
-        "sudo",
-        &format!("printf 'sudo %s\\n' \"$*\" >> '{}'", log.display()),
-    )
-}
-
-/// An `install` or a `chmod` that records its argv and exits 0, without touching the paths it was given.
-fn recorder(dir: &TempDir, name: &str, log: &Path) -> PathBuf {
-    shim(
-        dir,
-        name,
-        &format!("printf '{name} %s\\n' \"$*\" >> '{}'", log.display()),
-    )
-}
-
 /// An `id` answering the two questions step 2 asks — `-u` with `uid`, and `-nG` with `groups` — or exiting non-zero
 /// for both, which is [`None`]: no such user.
 fn id_shim(dir: &TempDir, uid: Option<&str>, groups: &str) -> PathBuf {
@@ -202,46 +180,6 @@ fn id_shim(dir: &TempDir, uid: Option<&str>, groups: &str) -> PathBuf {
         None => "exit 1".to_string(),
     };
     shim(dir, "id", &body)
-}
-
-/// A `stat -c %u` answering `uid`, which is what the data root's owner is compared with.
-fn stat_shim(dir: &TempDir, uid: &str) -> PathBuf {
-    shim(dir, "stat", &format!("echo {uid}"))
-}
-
-/// A `systemctl` that records its argv and answers `is-enabled` with `enabled`.
-///
-/// The exit code is the answer step 5 reads, so `enabled` is the whole knob: `true` records and exits 0, `false`
-/// records and exits 1 (`systemctl`'s own "disabled").
-fn systemctl_shim(dir: &TempDir, log: &Path, enabled: bool) -> PathBuf {
-    let code = if enabled { 0 } else { 1 };
-    shim(
-        dir,
-        "systemctl",
-        &format!(
-            "printf 'systemctl %s\\n' \"$*\" >> '{}'\n[ \"$1\" = is-enabled ] && exit {code}\nexit 0",
-            log.display()
-        ),
-    )
-}
-
-/// The deploy's tools over recording shims: `calls` gets every `install`/`chmod` argv, `sudo_calls` every argv the
-/// deploy prefixed with `sudo`.
-///
-/// `systemctl` is a shim as well, answering "disabled", so step 5 applies and no real `systemctl` is asked about a
-/// unit that is not on this machine. The questions that decide *which* children run — `id` and `stat` — are the
-/// caller's to name, because their answers are what the arms differ in; a test that names none gets the host's own
-/// programs, which is what a `--root` run's steps never ask.
-fn recording_tools(dir: &TempDir, calls: &Path, sudo_calls: &Path) -> deploy::Tools {
-    deploy::Tools {
-        doctor: doctor_tools(dir),
-        sudo: sudo_recorder(dir, sudo_calls),
-        install: recorder(dir, "install", calls),
-        chmod: recorder(dir, "chmod", calls),
-        systemctl: systemctl_shim(dir, &dir.file("systemctl.log"), false),
-        health_wait: Duration::from_millis(200),
-        ..deploy::Tools::default()
-    }
 }
 
 /// The body a stand-in for `/api/health` answers: `Health`'s six keys, because the reader parses them —
@@ -284,11 +222,16 @@ fn deployed_data_root(path: &Path) {
         .expect("the data root's mode is settable");
 }
 
-/// Everything a shim recorded, one line per call.
-fn recorded(log: &Path) -> Vec<String> {
-    std::fs::read_to_string(log)
-        .map(|text| text.lines().map(str::to_string).collect())
-        .unwrap_or_default()
+/// A root under `dir`, made the way the operator makes it: 0700, owned by the user running these tests.
+///
+/// The deploy writes the tree as its owner and does not create the root itself (ADR-0086) — creating it needs the
+/// parent, which on a machine is root's — so every test that expects a run to succeed starts here.
+fn rooted(dir: &TempDir, label: &str) -> Root {
+    let root = Root::resolve(Some(dir.file(label)));
+    std::fs::create_dir_all(root.path()).expect("the root is creatable");
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("the root's mode is settable");
+    root
 }
 
 /// A daemon that answers `GET /_ping` the way a real one does, for as long as the test's process lives.
@@ -656,32 +599,10 @@ fn entry_of(root: &Path, path: &Path) -> String {
     entry(root, path)
 }
 
-/// The number of writes a step-2 line says it made — the sentence's own count, so "one child process per action"
-/// can be checked against what the shims were actually asked to run.
-fn actions(report: &Report) -> usize {
-    let line = line(report, DeployStep::Files);
-    assert_eq!(
-        line.word,
-        Word::Changed,
-        "step 2 did not change anything: {}",
-        line.sentence
-    );
-    line.sentence
-        .split_whitespace()
-        .next()
-        .and_then(|count| count.parse().ok())
-        .unwrap_or_else(|| {
-            panic!(
-                "step 2's sentence does not count its actions: {}",
-                line.sentence
-            )
-        })
-}
-
 // ---- the words and the report -------------------------------------------------------------
 
 #[test]
-fn the_seven_steps_are_the_specs_order() {
+fn the_six_steps_are_the_specs_order() {
     let words: Vec<&str> = DeployStep::ALL.iter().map(|step| step.word()).collect();
     assert_eq!(
         words,
@@ -691,13 +612,12 @@ fn the_seven_steps_are_the_specs_order() {
             "images",
             "proxies",
             "service",
-            "origins",
             "health"
         ],
-        "the step words are not item 10's seven steps"
+        "the step words are not the order this command runs them in"
     );
     let numbers: Vec<u8> = DeployStep::ALL.iter().map(|step| step.number()).collect();
-    assert_eq!(numbers, [1, 2, 3, 4, 5, 6, 7]);
+    assert_eq!(numbers, [1, 2, 3, 4, 5, 6]);
     assert_eq!(DeployStep::Files.to_string(), "files");
     assert_eq!(DeployStep::Health.to_string(), "health");
     // The five words, in the spec's vocabulary: `skipped` is never `satisfied`, and `needs` is a dry run's.
@@ -730,9 +650,6 @@ fn the_seven_steps_are_the_specs_order() {
 
 #[test]
 fn the_report_prints_the_tally_and_no_owner_list() {
-    // A report built by hand: the shape is the acceptance's, and the claims that matter are the summary's four
-    // counts (always present, so a reader can diff two runs) and the absence of the owner list removed —
-    // every step has a body now, so a line naming who owns what remains would name a story that is done.
     let report = Report {
         lines: vec![
             Line {
@@ -743,7 +660,8 @@ fn the_report_prints_the_tally_and_no_owner_list() {
             Line {
                 step: DeployStep::Files,
                 word: Word::Changed,
-                sentence: "2 actions: install -d -m 0700 /run/holosmith".to_string(),
+                sentence: "2 actions; the service user holosmith is in the docker group"
+                    .to_string(),
             },
             Line {
                 step: DeployStep::Images,
@@ -753,9 +671,8 @@ fn the_report_prints_the_tally_and_no_owner_list() {
             Line {
                 step: DeployStep::Service,
                 word: Word::Changed,
-                sentence:
-                    "2 actions: install -m 0644 <staged> /etc/systemd/system/holosmith.service"
-                        .to_string(),
+                sentence: "1 action: install -m 0644 <staged> /var/lib/holosmith/holosmith.service"
+                    .to_string(),
             },
             Line {
                 step: DeployStep::Health,
@@ -765,27 +682,36 @@ fn the_report_prints_the_tally_and_no_owner_list() {
         ],
         failed: Some(DeployStep::Health),
         dry_run: false,
-        target: "the system paths, with sudo where each write needs it".to_string(),
+        root: "/var/lib/holosmith".to_string(),
     };
     let text = report.render();
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines[0], "deploy: run");
-    // Which tree the report describes is its own line, before the steps: a `--root` run's paths mean nothing
-    // without the privilege the whole run used.
+    // Which tree the report describes is its own line, before the steps: a run's paths mean nothing without the root
+    // they are under.
+    assert_eq!(lines[1], "deploy: into /var/lib/holosmith");
+    // A block per step, one blank line apart — the header's included — and the tally in a block of its own: the
+    // step's first line is the only line whose shape is a contract, and it is the `^N. step: word: ` it always was
+    // (ADR-0085).
     assert_eq!(
-        lines[1],
-        "deploy: into the system paths, with sudo where each write needs it"
+        lines[2..],
+        [
+            "",
+            "1. preflight: satisfied: 10 findings: 8 pass, 0 fail, 2 unknown (systemd, disk)",
+            "",
+            "2. files: changed: 2 actions; the service user holosmith is in the docker group",
+            "",
+            "3. images: changed: built 2 images: holosmith-proxy:0.1.0, agent-image:0.1.0",
+            "",
+            // The numbers are the spec's, so a report that skipped a step's block still names it by its own number.
+            "5. service: changed: 1 action: install -m 0644 <staged> \
+             /var/lib/holosmith/holosmith.service",
+            "",
+            "6. health: failed: the health endpoint never answered",
+            "",
+            "deploy: 5 steps: 1 satisfied, 3 changed, 0 skipped, 1 failed",
+        ]
     );
-    assert_eq!(
-        lines[2],
-        "1. preflight: satisfied: 10 findings: 8 pass, 0 fail, 2 unknown (systemd, disk)"
-    );
-    // The tally's four counts are the whole summary: `skipped` prints as zero and the `incomplete:` line is gone.
-    assert_eq!(
-        lines[7],
-        "deploy: 5 steps: 1 satisfied, 3 changed, 0 skipped, 1 failed"
-    );
-    assert_eq!(lines.len(), 8);
     assert!(
         !text.contains("incomplete"),
         "the report still claims a story owns a step:\n{text}"
@@ -801,14 +727,12 @@ fn the_report_prints_the_tally_and_no_owner_list() {
         }],
         failed: None,
         dry_run: true,
-        target: "the system paths".to_string(),
+        root: "/var/lib/holosmith".to_string(),
     };
     let text = dry.render();
     assert_eq!(text.lines().next(), Some("deploy: dry run"));
     assert!(!dry.failed());
 }
-
-// ---- the dry run and the install ----------------------------------------------------------
 
 #[test]
 fn a_dry_run_lists_the_steps_and_creates_nothing() {
@@ -817,12 +741,11 @@ fn a_dry_run_lists_the_steps_and_creates_nothing() {
     let socket = dir.file("docker.sock");
     fake_daemon(&socket);
     let config = config(Some(format!("unix://{}", socket.display())));
-    let root = dir.file("root");
-    let target = Target::resolve(Some(root.clone()));
-    let deployed = target.config(&config);
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
     let machine = Fake::new();
 
-    let report = deploy::run(&deployed, &target, &real_tools(&dir), &machine, true);
+    let report = deploy::run(&deployed, &root, &real_tools(&dir), &machine, true);
 
     assert!(!report.failed(), "a dry run failed:\n{}", report.render());
     assert_eq!(
@@ -832,23 +755,38 @@ fn a_dry_run_lists_the_steps_and_creates_nothing() {
             .map(|line| line.step)
             .collect::<Vec<DeployStep>>(),
         DeployStep::ALL,
-        "a dry run did not name all seven steps:\n{}",
+        "a dry run did not name all six steps:\n{}",
         report.render()
     );
-    // Step 1's plan is its read, step 3's is a build of both images, and steps 5, 6 and 7 are plans too: a dry run
-    // reads the machine for every step, so nothing is left to a later story any more.
+    // Step 1's plan is its read, step 3's is a build of both images, and steps 2, 5 and 6 are plans too: a dry run
+    // reads the machine for every step.
     assert_eq!(line(&report, DeployStep::Preflight).word, Word::Satisfied);
     assert_eq!(
         line(&report, DeployStep::Files).word,
         Word::Needs,
         "a dry run did not print a plan for step 2"
     );
+    // The plan is a count on the step's own line and then one action per line under it (ADR-0085): a four-action
+    // plan is four readable lines, not one semicolon-joined sentence that a phone wraps mid-command.
+    let sentence = line(&report, DeployStep::Files).sentence.clone();
+    let mut plan = sentence.lines();
+    let header = plan
+        .next()
+        .unwrap_or_else(|| panic!("step 2's plan is empty"));
+    let actions: Vec<&str> = plan.collect();
     assert!(
-        line(&report, DeployStep::Files)
-            .sentence
-            .contains("install -d -m 0755"),
-        "step 2's plan names no action: {}",
-        line(&report, DeployStep::Files).sentence
+        actions.len() > 1 && actions.iter().all(|action| action.starts_with("    - ")),
+        "step 2's plan is not one indented action per line: {sentence}"
+    );
+    assert!(
+        header.starts_with(&format!("{} action", actions.len())),
+        "step 2's plan counts its actions anywhere but on its own line: {sentence}"
+    );
+    assert!(
+        actions
+            .iter()
+            .any(|action| action.contains(&root.config_file().display().to_string())),
+        "step 2's plan does not name the config file: {sentence}"
     );
     assert_eq!(
         line(&report, DeployStep::Images).word,
@@ -856,34 +794,33 @@ fn a_dry_run_lists_the_steps_and_creates_nothing() {
         "a dry run did not print a plan for step 3: {}",
         line(&report, DeployStep::Images).sentence
     );
-    // Step 5's plan names the unit's path, step 6's the two origins, step 7's the wait and the second reading.
+    // Step 5's plan names the unit's path and the three commands that are root's, step 6's the wait and the second
+    // reading.
     let service = line(&report, DeployStep::Service);
     assert_eq!(service.word, Word::Needs, "{}", service.sentence);
     assert!(
         service
             .sentence
-            .contains(&target.unit_path().display().to_string()),
+            .contains(&root.unit().display().to_string()),
         "step 5's plan does not name the unit file: {}",
         service.sentence
     );
-    let origins = line(&report, DeployStep::Origins);
-    assert_eq!(origins.word, Word::Needs, "{}", origins.sentence);
-    for fact in [
-        "--https=443".to_string(),
-        "--https=8444".to_string(),
-        format!("http://127.0.0.1:{}", deployed.control_listen.port()),
+    for command in [
+        "sudo install -m 0644",
+        "sudo systemctl daemon-reload",
+        "sudo systemctl enable --now holosmith.service",
     ] {
         assert!(
-            origins.sentence.contains(&fact),
-            "step 6's plan does not name {fact}: {}",
-            origins.sentence
+            service.sentence.contains(command),
+            "step 5's plan does not name `{command}`: {}",
+            service.sentence
         );
     }
     let health = line(&report, DeployStep::Health);
     assert_eq!(health.word, Word::Needs, "{}", health.sentence);
     assert!(
         health.sentence.contains("/api/health") && health.sentence.contains("doctor --full"),
-        "step 7's plan is not the wait and the second reading: {}",
+        "step 6's plan is not the wait and the second reading: {}",
         health.sentence
     );
     for step in DeployStep::ALL {
@@ -893,7 +830,10 @@ fn a_dry_run_lists_the_steps_and_creates_nothing() {
             "{step} is still skipped, and this release has no producer for that word"
         );
     }
-    assert!(!root.exists(), "a dry run created {}", root.display());
+    // Nothing was written: the root is there (the operator made it) and nothing under it is.
+    assert!(!root.config_file().exists(), "a dry run wrote the config");
+    assert!(!root.data_root().exists(), "a dry run made the data root");
+    assert!(!root.unit().exists(), "a dry run wrote the unit");
     assert!(
         machine.calls().is_empty() && machine.builds().is_empty(),
         "a dry run started something: {:?} {:?}",
@@ -909,26 +849,24 @@ fn an_install_creates_the_install_tree_with_its_modes() {
     let socket = dir.file("docker.sock");
     fake_daemon(&socket);
     let mut config = config(Some(format!("unix://{}", socket.display())));
-    // Step 7 waits for this answer, so the control listener is a real one that gives it.
+    // Step 6 waits for this answer, so the control listener is a real one that gives it.
     config.control_listen = health_responder();
-    let root = dir.file("root");
-    let target = Target::resolve(Some(root.clone()));
-    let deployed = target.config(&config);
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
 
-    let report = deploy::run(&deployed, &target, &real_tools(&dir), &Fake::new(), false);
+    let report = deploy::run(&deployed, &root, &real_tools(&dir), &Fake::new(), false);
     assert!(!report.failed(), "the install failed:\n{}", report.render());
     assert_eq!(line(&report, DeployStep::Files).word, Word::Changed);
 
     let paths = [
-        (root.join("etc/holosmith"), 0o755),
-        (root.join("etc/holosmith/config.toml"), 0o644),
-        (root.join("var/lib/holosmith"), 0o755),
-        (root.join("var/lib/holosmith/secrets"), 0o700),
-        (root.join("var/lib/holosmith/secrets/keys.toml"), 0o600),
+        (root.path().to_path_buf(), 0o700),
+        (root.config_file(), 0o644),
+        (root.data_root(), 0o755),
+        (root.data_root().join("secrets"), 0o700),
+        (root.data_root().join("secrets/keys.toml"), 0o600),
         // The pair step 2 generates, and the unit step 5 renders: both are part of the tree an install leaves.
-        (root.join("var/lib/holosmith/secrets/vapid.toml"), 0o600),
-        (root.join("etc/systemd/system/holosmith.service"), 0o644),
-        (root.join("run/holosmith"), 0o700),
+        (root.data_root().join("secrets/vapid.toml"), 0o600),
+        (root.unit(), 0o644),
     ];
     for (path, expected) in paths {
         assert!(path.exists(), "{} was not installed", path.display());
@@ -941,23 +879,16 @@ fn an_install_creates_the_install_tree_with_its_modes() {
             expected
         );
     }
-    assert!(
-        root.join("var/lib/holosmith").is_dir(),
-        "the data root is not a directory"
-    );
 
-    // The file it wrote is the file `serve` reads: it re-parses, and its two roots are the target's.
-    let loaded = Config::load(Some(root.join("etc/holosmith/config.toml")))
+    // The file it wrote is the file `serve` reads: it re-parses, and its two roots are the root's.
+    let loaded = Config::load(Some(root.config_file()))
         .unwrap_or_else(|error| panic!("the deployed config does not load: {error}"));
     assert_eq!(
         loaded.config.data_root,
-        root.join("var/lib/holosmith"),
-        "the written config does not name the install tree's data root"
+        root.data_root(),
+        "the written config does not name the root's data root"
     );
-    assert_eq!(
-        loaded.config.projects_root,
-        root.join("srv/holosmith/projects")
-    );
+    assert_eq!(loaded.config.projects_root, root.projects_root());
     // Everything the deploy must not move is the machine's own, unchanged.
     assert_eq!(loaded.config.control_listen, deployed.control_listen);
     assert_eq!(loaded.config.docker_host, deployed.docker_host);
@@ -966,6 +897,12 @@ fn an_install_creates_the_install_tree_with_its_modes() {
         .load()
         .expect("the deployed key file parses");
     assert!(secrets.providers.is_empty() && secrets.sessions.is_empty());
+    // The unit `ExecStart` names the config explicitly, so the daemon never resolves `~` (ADR-0086 D1).
+    let unit = std::fs::read_to_string(root.unit()).expect("the unit is readable");
+    assert!(
+        unit.contains(&format!("--config {}", root.config_file().display())),
+        "the unit does not name the config: {unit}"
+    );
 }
 
 #[test]
@@ -976,18 +913,17 @@ fn a_second_run_is_satisfied_and_changes_nothing() {
     fake_daemon(&socket);
     let mut config = config(Some(format!("unix://{}", socket.display())));
     config.control_listen = health_responder();
-    let root = dir.file("root");
-    let target = Target::resolve(Some(root.clone()));
-    let deployed = target.config(&config);
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
     let tools = real_tools(&dir);
     let machine = Fake::new();
 
-    let first = deploy::run(&deployed, &target, &tools, &machine, false);
+    let first = deploy::run(&deployed, &root, &tools, &machine, false);
     assert!(!first.failed(), "the first run failed:\n{}", first.render());
-    let before = listing(&root);
+    let before = listing(root.path());
     assert!(!before.is_empty(), "the first run installed nothing");
 
-    let second = deploy::run(&deployed, &target, &tools, &machine, false);
+    let second = deploy::run(&deployed, &root, &tools, &machine, false);
     assert!(
         !second.failed(),
         "the second run failed:\n{}",
@@ -1005,11 +941,15 @@ fn a_second_run_is_satisfied_and_changes_nothing() {
     assert!(
         line(&second, DeployStep::Files)
             .sentence
-            .contains("present with their modes"),
+            .contains("holds the config"),
         "step 2 does not say what it read: {}",
         line(&second, DeployStep::Files).sentence
     );
-    assert_eq!(listing(&root), before, "the second run changed the tree");
+    assert_eq!(
+        listing(root.path()),
+        before,
+        "the second run changed the tree"
+    );
 }
 
 #[test]
@@ -1020,9 +960,8 @@ fn an_existing_key_file_is_never_rewritten() {
     fake_daemon(&socket);
     let mut config = config(Some(format!("unix://{}", socket.display())));
     config.control_listen = health_responder();
-    let root = dir.file("root");
-    let target = Target::resolve(Some(root.clone()));
-    let deployed = target.config(&config);
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
     // The tree a previous deploy left, with a real key in the store **and modes a looser umask left behind**: the
     // two things a deploy must handle differently. `install` would truncate the bytes, so a mode it does own is
     // repaired with `chmod`, which touches nothing — and the fixture starts wrong on purpose, because a mode that is
@@ -1041,7 +980,7 @@ fn an_existing_key_file_is_never_rewritten() {
 
     // Step 1 reads the same wrong modes — and only *remarks* on them, because repairing them is this step's job
     // (ADR-0058). A failure here would be the dead end the review called SPEC-2.
-    let report = deploy::run(&deployed, &target, &real_tools(&dir), &Fake::new(), false);
+    let report = deploy::run(&deployed, &root, &real_tools(&dir), &Fake::new(), false);
     assert!(!report.failed(), "the install failed:\n{}", report.render());
     assert!(
         line(&report, DeployStep::Preflight)
@@ -1083,10 +1022,10 @@ fn an_existing_key_file_is_never_rewritten() {
 
     // A mode that is wrong is repaired, and repaired with `chmod` rather than with the truncating `install`: the
     // config file's bytes are already this deploy's, so only its mode can be wrong.
-    let config_file = root.join("etc/holosmith/config.toml");
+    let config_file = root.config_file();
     std::fs::set_permissions(&config_file, std::fs::Permissions::from_mode(0o600))
         .expect("the config file's mode is settable");
-    let report = deploy::run(&deployed, &target, &real_tools(&dir), &Fake::new(), false);
+    let report = deploy::run(&deployed, &root, &real_tools(&dir), &Fake::new(), false);
     let changed = line(&report, DeployStep::Files).sentence.clone();
     assert!(
         changed.contains(&format!("chmod 0644 {}", config_file.display())),
@@ -1101,171 +1040,6 @@ fn an_existing_key_file_is_never_rewritten() {
 }
 
 #[test]
-fn the_system_paths_prefix_every_write_with_sudo_and_root_prefixes_none() {
-    let _serial = one_at_a_time();
-    let dir = TempDir::new("deploy-sudo");
-    let socket = dir.file("docker.sock");
-    fake_daemon(&socket);
-
-    // The `--root` run: the tree is the invoking user's, so nothing is prefixed by `sudo`.
-    let root = dir.file("root");
-    let mut rooted = config(Some(format!("unix://{}", socket.display())));
-    rooted.control_listen = health_responder();
-    let target = Target::resolve(Some(root));
-    let deployed = target.config(&rooted);
-    // The tree a previous deploy left: step 4 makes the key store itself, and step 7's `perms` reads the modes, so a
-    // recorder run has to start from a data root that exists with the mode the deploy writes.
-    deployed_data_root(&deployed.data_root);
-    let calls = dir.file("root-calls.log");
-    let sudo_calls = dir.file("root-sudo.log");
-    // No such user, so the two runs' step 2 is the same seven items with the same children on either path.
-    let id = id_shim(&dir, None, "");
-    let report = deploy::run(
-        &deployed,
-        &target,
-        &deploy::Tools {
-            id: id.clone(),
-            ..recording_tools(&dir, &calls, &sudo_calls)
-        },
-        &Fake::new(),
-        false,
-    );
-    assert!(
-        !report.failed(),
-        "the rooted run failed:\n{}",
-        report.render()
-    );
-    assert_eq!(
-        recorded(&sudo_calls),
-        Vec::<String>::new(),
-        "a --root run asked sudo to write the invoking user's tree"
-    );
-    let direct: Vec<String> = recorded(&calls)
-        .into_iter()
-        .filter(|call| !call.contains("/etc/systemd/system"))
-        .collect();
-    assert_eq!(
-        direct.len(),
-        actions(&report),
-        "step 2 reported {} actions and the shims ran {direct:?}",
-        actions(&report)
-    );
-    assert!(
-        direct.iter().all(|call| call.starts_with("install ")),
-        "a --root run's writes are not all `install`: {direct:?}"
-    );
-    assert_eq!(
-        report.target,
-        format!(
-            "{}, as the invoking user (no sudo)",
-            dir.file("root").display()
-        )
-    );
-
-    // The system run: same actions, each one prefixed by `sudo`. The shims run nothing, so `/etc` is untouched —
-    // and the data root is the temp directory's, rather than the machine's own `/var/lib/holosmith`, because a
-    // recorder run must not chmod a real tree.
-    let mut system = config(Some(format!("unix://{}", socket.display())));
-    system.control_listen = health_responder();
-    system.data_root = dir.file("system-data");
-    let target = Target::resolve(None);
-    let deployed = target.config(&system);
-    deployed_data_root(&deployed.data_root);
-    let calls = dir.file("system-calls.log");
-    let sudo_calls = dir.file("system-sudo.log");
-    let report = deploy::run(
-        &deployed,
-        &target,
-        &deploy::Tools {
-            id,
-            ..recording_tools(&dir, &calls, &sudo_calls)
-        },
-        &Fake::new(),
-        false,
-    );
-    assert!(
-        !report.failed(),
-        "the system run failed:\n{}",
-        report.render()
-    );
-    // Step 5 writes its own unit file through `sudo` too, and starts systemd with it: this is step 2's count, so the
-    // unit's install and the two `systemctl` verbs are not part of it.
-    let prefixed: Vec<String> = recorded(&sudo_calls)
-        .into_iter()
-        .filter(|call| !call.contains("/etc/systemd/system") && !call.contains("systemctl"))
-        .collect();
-    assert_eq!(
-        prefixed.len(),
-        actions(&report),
-        "step 2 reported {} actions and sudo was asked {} times",
-        actions(&report),
-        prefixed.len()
-    );
-    assert!(
-        prefixed.iter().all(|call| call.starts_with("sudo ")),
-        "the system paths were written without sudo: {prefixed:?}"
-    );
-    assert_eq!(
-        recorded(&calls),
-        Vec::<String>::new(),
-        "a system-path run called install or chmod without sudo"
-    );
-    assert!(
-        prefixed
-            .iter()
-            .any(|call| call.contains("/etc/holosmith/config.toml")),
-        "no write named the config path: {prefixed:?}"
-    );
-    assert_eq!(
-        report.target,
-        "the system paths, with sudo where each write needs it"
-    );
-}
-
-#[test]
-fn a_missing_sudo_is_a_sentence_not_a_panic() {
-    let _serial = one_at_a_time();
-    let dir = TempDir::new("deploy-no-sudo");
-    let socket = dir.file("docker.sock");
-    fake_daemon(&socket);
-    let mut config = config(Some(format!("unix://{}", socket.display())));
-    config.data_root = dir.file("data");
-    let target = Target::resolve(None);
-    let deployed = target.config(&config);
-    deployed_data_root(&deployed.data_root);
-    let missing = dir.file("no-sudo-here");
-    let tools = deploy::Tools {
-        doctor: doctor_tools(&dir),
-        sudo: missing.clone(),
-        install: PathBuf::from("/usr/bin/install"),
-        chmod: PathBuf::from("/usr/bin/chmod"),
-        // No such user, so the first pending action is `useradd` — the child the missing `sudo` cannot run.
-        id: id_shim(&dir, None, ""),
-        ..deploy::Tools::default()
-    };
-
-    let report = deploy::run(&deployed, &target, &tools, &Fake::new(), false);
-
-    assert_eq!(report.failed, Some(DeployStep::Files));
-    assert_eq!(line(&report, DeployStep::Files).word, Word::Failed);
-    let sentence = &line(&report, DeployStep::Files).sentence;
-    assert!(
-        sentence.contains("sudo"),
-        "the sentence does not name sudo: {sentence}"
-    );
-    assert!(
-        sentence.contains(&missing.display().to_string()),
-        "the sentence does not name the program it could not run: {sentence}"
-    );
-    assert!(
-        sentence.contains("useradd --system --groups docker"),
-        "the sentence does not name the argv it tried: {sentence}"
-    );
-}
-
-// ---- step 1's one divergence, and the failure that stops the run ---------------------------
-
-#[test]
 fn a_failing_preflight_stops_at_step_one() {
     let _serial = one_at_a_time();
     let dir = TempDir::new("deploy-broken-machine");
@@ -1273,12 +1047,11 @@ fn a_failing_preflight_stops_at_step_one() {
         "unix://{}",
         dir.file("absent.sock").display()
     )));
-    let root = dir.file("root");
-    let target = Target::resolve(Some(root.clone()));
+    let root = rooted(&dir, "root");
 
     let report = deploy::run(
-        &target.config(&config),
-        &target,
+        &root.config(&config),
+        &root,
         &real_tools(&dir),
         &Fake::new(),
         false,
@@ -1299,15 +1072,15 @@ fn a_failing_preflight_stops_at_step_one() {
         "the sentence is not the preflight's own: {sentence}"
     );
     assert!(
-        !root.exists(),
+        !root.data_root().exists(),
         "a failed preflight installed something at {}",
-        root.display()
+        root.data_root().display()
     );
 
     // A dry run reads the same machine, and a dry run that hid it would be useless: it fails too.
     let dry = deploy::run(
-        &target.config(&config),
-        &target,
+        &root.config(&config),
+        &root,
         &real_tools(&dir),
         &Fake::new(),
         true,
@@ -1328,12 +1101,11 @@ fn a_held_port_does_not_stop_the_deploy_but_another_failure_does() {
     let listen = health_responder();
     let mut config = config(Some(format!("unix://{}", socket.display())));
     config.control_listen = listen;
-    let root = dir.file("root");
-    let target = Target::resolve(Some(root.clone()));
+    let root = rooted(&dir, "root");
 
     let report = deploy::run(
-        &target.config(&config),
-        &target,
+        &root.config(&config),
+        &root,
         &real_tools(&dir),
         &Fake::new(),
         false,
@@ -1363,8 +1135,8 @@ fn a_held_port_does_not_stop_the_deploy_but_another_failure_does() {
     let mut broken = config.clone();
     broken.docker_host = Some(format!("unix://{}", dir.file("absent.sock").display()));
     let report = deploy::run(
-        &target.config(&broken),
-        &target,
+        &root.config(&broken),
+        &root,
         &real_tools(&dir),
         &Fake::new(),
         false,
@@ -1408,12 +1180,12 @@ fn step_three_plans_a_build_for_both_absent_images_and_then_builds_them() {
     fake_daemon(&socket);
     let mut config = config(Some(format!("unix://{}", socket.display())));
     config.control_listen = health_responder();
-    let target = Target::resolve(Some(dir.file("root")));
-    let deployed = target.config(&config);
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
     let tools = real_tools(&dir);
     let machine = Fake::new();
 
-    let planned = deploy::run(&deployed, &target, &tools, &machine, true);
+    let planned = deploy::run(&deployed, &root, &tools, &machine, true);
     let step = line(&planned, DeployStep::Images);
     assert_eq!(step.word, Word::Needs, "{}", step.sentence);
     for image in [images::proxy_image(), images::agent_image()] {
@@ -1430,7 +1202,7 @@ fn step_three_plans_a_build_for_both_absent_images_and_then_builds_them() {
         machine.builds()
     );
 
-    let report = deploy::run(&deployed, &target, &tools, &machine, false);
+    let report = deploy::run(&deployed, &root, &tools, &machine, false);
     assert!(!report.failed(), "the build failed:\n{}", report.render());
     let step = line(&report, DeployStep::Images);
     assert_eq!(step.word, Word::Changed, "{}", step.sentence);
@@ -1469,7 +1241,7 @@ fn step_three_plans_a_build_for_both_absent_images_and_then_builds_them() {
 
     // The build left the images the read compares with, so a second run is honestly satisfied — the whole point of
     // the labels.
-    let second = deploy::run(&deployed, &target, &tools, &machine, false);
+    let second = deploy::run(&deployed, &root, &tools, &machine, false);
     let step = line(&second, DeployStep::Images);
     assert_eq!(step.word, Word::Satisfied, "{}", step.sentence);
     assert_eq!(machine.builds().len(), 2, "the second run built again");
@@ -1483,8 +1255,8 @@ fn step_three_is_satisfied_when_both_images_carry_this_binarys_labels() {
     fake_daemon(&socket);
     let mut config = config(Some(format!("unix://{}", socket.display())));
     config.control_listen = health_responder();
-    let target = Target::resolve(Some(dir.file("root")));
-    let deployed = target.config(&config);
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
     let machine = Fake::new()
         .with_labels(
             &images::proxy_image(),
@@ -1495,7 +1267,7 @@ fn step_three_is_satisfied_when_both_images_carry_this_binarys_labels() {
             expected_labels(ImageKind::Agent, &deployed),
         );
 
-    let report = deploy::run(&deployed, &target, &real_tools(&dir), &machine, false);
+    let report = deploy::run(&deployed, &root, &real_tools(&dir), &machine, false);
 
     let step = line(&report, DeployStep::Images);
     assert_eq!(step.word, Word::Satisfied, "{}", step.sentence);
@@ -1528,8 +1300,8 @@ fn step_three_names_the_label_that_differs() {
     let socket = dir.file("docker.sock");
     fake_daemon(&socket);
     let config = config(Some(format!("unix://{}", socket.display())));
-    let target = Target::resolve(Some(dir.file("root")));
-    let deployed = target.config(&config);
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
     let mut agent = expected_labels(ImageKind::Agent, &deployed);
     agent.insert(
         images::LABEL_PI.to_string(),
@@ -1542,7 +1314,7 @@ fn step_three_names_the_label_that_differs() {
         )
         .with_labels(&images::agent_image(), agent);
 
-    let planned = deploy::run(&deployed, &target, &real_tools(&dir), &machine, true);
+    let planned = deploy::run(&deployed, &root, &real_tools(&dir), &machine, true);
     let step = line(&planned, DeployStep::Images);
     assert_eq!(step.word, Word::Needs, "{}", step.sentence);
     for fact in [
@@ -1582,8 +1354,8 @@ fn step_three_sees_a_rebuilt_artifact_through_the_digest_label() {
     let socket = dir.file("docker.sock");
     fake_daemon(&socket);
     let config = config(Some(format!("unix://{}", socket.display())));
-    let target = Target::resolve(Some(dir.file("root")));
-    let deployed = target.config(&config);
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
     let mut agent = expected_labels(ImageKind::Agent, &deployed);
     agent.insert(images::LABEL_BINARY.to_string(), "0".repeat(64));
     let machine = Fake::new()
@@ -1593,7 +1365,7 @@ fn step_three_sees_a_rebuilt_artifact_through_the_digest_label() {
         )
         .with_labels(&images::agent_image(), agent);
 
-    let planned = deploy::run(&deployed, &target, &real_tools(&dir), &machine, true);
+    let planned = deploy::run(&deployed, &root, &real_tools(&dir), &machine, true);
     let step = line(&planned, DeployStep::Images);
     assert_eq!(step.word, Word::Needs, "{}", step.sentence);
     for fact in [
@@ -1624,8 +1396,8 @@ fn step_three_refuses_a_daemon_that_builds_for_another_architecture() {
     let socket = dir.file("docker.sock");
     fake_daemon(&socket);
     let config = config(Some(format!("unix://{}", socket.display())));
-    let target = Target::resolve(Some(dir.file("root")));
-    let deployed = target.config(&config);
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
     let elsewhere = if daemon_word() == "amd64" {
         "arm64"
     } else {
@@ -1633,7 +1405,7 @@ fn step_three_refuses_a_daemon_that_builds_for_another_architecture() {
     };
     let machine = Fake::new().with_arch(elsewhere);
 
-    let report = deploy::run(&deployed, &target, &real_tools(&dir), &machine, false);
+    let report = deploy::run(&deployed, &root, &real_tools(&dir), &machine, false);
 
     assert_eq!(
         report.failed,
@@ -1666,11 +1438,11 @@ fn a_failed_build_is_step_threes_own_sentence_and_stops_the_run() {
     let socket = dir.file("docker.sock");
     fake_daemon(&socket);
     let config = config(Some(format!("unix://{}", socket.display())));
-    let target = Target::resolve(Some(dir.file("root")));
-    let deployed = target.config(&config);
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
     let machine = Fake::new().with_failing_build(COPY_FAILURE);
 
-    let report = deploy::run(&deployed, &target, &real_tools(&dir), &machine, false);
+    let report = deploy::run(&deployed, &root, &real_tools(&dir), &machine, false);
 
     assert_eq!(
         report.failed,
@@ -1711,13 +1483,12 @@ fn step_four_starts_both_proxies_and_the_second_run_reads_running() {
     fake_daemon(&socket);
     let mut config = config(Some(format!("unix://{}", socket.display())));
     config.control_listen = health_responder();
-    let root = dir.file("root");
-    let target = Target::resolve(Some(root));
-    let deployed = target.config(&config);
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
     let tools = real_tools(&dir);
     let machine = Fake::new();
 
-    let first = deploy::run(&deployed, &target, &tools, &machine, false);
+    let first = deploy::run(&deployed, &root, &tools, &machine, false);
     assert!(!first.failed(), "the first run failed:\n{}", first.render());
     let step = line(&first, DeployStep::Proxies);
     assert_eq!(step.word, Word::Changed, "{}", step.sentence);
@@ -1762,7 +1533,7 @@ fn step_four_starts_both_proxies_and_the_second_run_reads_running() {
         "the egress network was not created first: {calls:?}"
     );
 
-    let second = deploy::run(&deployed, &target, &tools, &machine, false);
+    let second = deploy::run(&deployed, &root, &tools, &machine, false);
     assert!(
         !second.failed(),
         "the second run failed:\n{}",
@@ -1829,13 +1600,12 @@ fn a_hub_deploy_runs_five_steps_and_skips_the_two_a_hub_has_no_work_for() {
     let mut config = config(Some(format!("unix://{}", socket.display())));
     config.role = Role::Hub;
     config.control_listen = health_responder();
-    let root = dir.file("root");
-    let target = Target::resolve(Some(root.clone()));
-    let deployed = target.config(&config);
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
     let tools = real_tools(&dir);
     let machine = Fake::new();
 
-    let report = deploy::run_as(&deployed, &target, &tools, &machine, false, Kind::Hub);
+    let report = deploy::run_as(&deployed, &root, &tools, &machine, false, Kind::Hub);
     assert!(!report.failed(), "the hub run failed:\n{}", report.render());
     let words: Vec<(u8, Word)> = report
         .lines
@@ -1850,8 +1620,7 @@ fn a_hub_deploy_runs_five_steps_and_skips_the_two_a_hub_has_no_work_for() {
             (3, Word::Skipped),
             (4, Word::Skipped),
             (5, Word::Changed),
-            (6, Word::Changed),
-            (7, Word::Satisfied),
+            (6, Word::Satisfied),
         ],
         "the hub's plan is not the spec's:\n{}",
         report.render()
@@ -1895,13 +1664,13 @@ fn a_hub_deploy_runs_five_steps_and_skips_the_two_a_hub_has_no_work_for() {
         machine.calls()
     );
     // The file it wrote is the machine that boots next, and a hub's unit requires no daemon.
-    let written = std::fs::read_to_string(root.join("etc/holosmith/config.toml"))
-        .expect("the config the run wrote is readable");
+    let written =
+        std::fs::read_to_string(root.config_file()).expect("the config the run wrote is readable");
     assert!(
         written.contains("role = \"hub\""),
         "step 2 did not write the role it installed:\n{written}"
     );
-    let unit = std::fs::read_to_string(target.unit_path()).expect("the unit is readable");
+    let unit = std::fs::read_to_string(root.unit()).expect("the unit is readable");
     assert!(
         !unit.contains("docker.service"),
         "a hub's unit requires a daemon this machine does not have:\n{unit}"
@@ -1912,7 +1681,7 @@ fn a_hub_deploy_runs_five_steps_and_skips_the_two_a_hub_has_no_work_for() {
     );
 
     // The second run changes nothing: the same five satisfied, the same two skipped.
-    let again = deploy::run_as(&deployed, &target, &tools, &machine, false, Kind::Hub);
+    let again = deploy::run_as(&deployed, &root, &tools, &machine, false, Kind::Hub);
     assert!(
         !again.failed(),
         "the second hub run failed:\n{}",
@@ -1922,7 +1691,6 @@ fn a_hub_deploy_runs_five_steps_and_skips_the_two_a_hub_has_no_work_for() {
         DeployStep::Preflight,
         DeployStep::Files,
         DeployStep::Service,
-        DeployStep::Origins,
         DeployStep::Health,
     ] {
         let line = line(&again, step);
@@ -1953,14 +1721,13 @@ fn a_hub_deploy_asks_no_docker_and_no_git_question() {
         dir.file("absent.sock").display()
     )));
     config.control_listen = health_responder();
-    let root = dir.file("root");
-    let target = Target::resolve(Some(root));
-    let deployed = target.config(&config);
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
     let mut tools = real_tools(&dir);
     tools.doctor.preflight.git = shim(&dir, "git", "exit 1");
     let machine = Fake::new();
 
-    let server = deploy::run_as(&deployed, &target, &tools, &machine, true, Kind::Server);
+    let server = deploy::run_as(&deployed, &root, &tools, &machine, true, Kind::Server);
     let preflight = line(&server, DeployStep::Preflight);
     assert_eq!(preflight.word, Word::Failed, "{}", preflight.sentence);
     assert!(
@@ -1969,7 +1736,7 @@ fn a_hub_deploy_asks_no_docker_and_no_git_question() {
         preflight.sentence
     );
 
-    let hub = deploy::run_as(&deployed, &target, &tools, &machine, true, Kind::Hub);
+    let hub = deploy::run_as(&deployed, &root, &tools, &machine, true, Kind::Hub);
     let preflight = line(&hub, DeployStep::Preflight);
     assert_eq!(
         preflight.word,
@@ -1998,21 +1765,20 @@ fn a_hub_deploy_on_a_server_machine_installs_the_union() {
     let mut config = config(Some(format!("unix://{}", socket.display())));
     assert_eq!(config.role, Role::Server);
     config.control_listen = health_responder();
-    let root = dir.file("root");
-    let target = Target::resolve(Some(root.clone()));
-    let deployed = target.config(&config);
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
     let tools = real_tools(&dir);
     let machine = Fake::new();
 
-    let report = deploy::run_as(&deployed, &target, &tools, &machine, false, Kind::Hub);
+    let report = deploy::run_as(&deployed, &root, &tools, &machine, false, Kind::Hub);
     assert!(!report.failed(), "the run failed:\n{}", report.render());
-    let written = std::fs::read_to_string(root.join("etc/holosmith/config.toml"))
-        .expect("the config the run wrote is readable");
+    let written =
+        std::fs::read_to_string(root.config_file()).expect("the config the run wrote is readable");
     assert!(
         written.contains("role = \"both\""),
         "a hub deploy on a server machine did not install `both`:\n{written}"
     );
-    let unit = std::fs::read_to_string(target.unit_path()).expect("the unit is readable");
+    let unit = std::fs::read_to_string(root.unit()).expect("the unit is readable");
     assert!(
         unit.contains("Requires=docker.service"),
         "a `both` machine's unit dropped the daemon it needs:\n{unit}"
@@ -2041,25 +1807,24 @@ fn a_server_deploy_on_a_hub_machine_installs_the_union() {
     let mut config = config(Some(format!("unix://{}", socket.display())));
     config.role = Role::Hub;
     config.control_listen = health_responder();
-    let root = dir.file("root");
-    let target = Target::resolve(Some(root.clone()));
-    let deployed = target.config(&config);
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
     let tools = real_tools(&dir);
     let machine = Fake::new();
 
-    let report = deploy::run_as(&deployed, &target, &tools, &machine, false, Kind::Server);
+    let report = deploy::run_as(&deployed, &root, &tools, &machine, false, Kind::Server);
     assert!(!report.failed(), "the run failed:\n{}", report.render());
     for step in [DeployStep::Images, DeployStep::Proxies] {
         let line = line(&report, step);
         assert_eq!(line.word, Word::Changed, "{}", line.sentence);
     }
-    let written = std::fs::read_to_string(root.join("etc/holosmith/config.toml"))
-        .expect("the config the run wrote is readable");
+    let written =
+        std::fs::read_to_string(root.config_file()).expect("the config the run wrote is readable");
     assert!(
         written.contains("role = \"both\""),
         "a server deploy on a hub machine did not install `both`:\n{written}"
     );
-    let unit = std::fs::read_to_string(target.unit_path()).expect("the unit is readable");
+    let unit = std::fs::read_to_string(root.unit()).expect("the unit is readable");
     assert!(
         unit.contains("Requires=docker.service"),
         "a `both` machine's unit dropped the daemon it needs:\n{unit}"
@@ -2077,9 +1842,8 @@ fn a_fresh_install_still_measures_the_disk_floor_the_data_root_will_land_on() {
     let socket = dir.file("docker.sock");
     fake_daemon(&socket);
     let config = config(Some(format!("unix://{}", socket.display())));
-    let root = dir.file("root");
-    let target = Target::resolve(Some(root));
-    let deployed = target.config(&config);
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
     assert!(
         !deployed.data_root.exists(),
         "this test means nothing unless the data root is absent, and the whole story is that a fresh host's is"
@@ -2088,7 +1852,7 @@ fn a_fresh_install_still_measures_the_disk_floor_the_data_root_will_land_on() {
     // 1 MiB free against the default `min_free_gb` of 20.
     tools.doctor.preflight.df = df_shim_with(&dir, 1024);
 
-    let report = deploy::run(&deployed, &target, &tools, &Fake::new(), false);
+    let report = deploy::run(&deployed, &root, &tools, &Fake::new(), false);
     let step = line(&report, DeployStep::Preflight);
     assert_eq!(
         report.failed,
@@ -2122,222 +1886,128 @@ fn a_fresh_install_still_measures_the_disk_floor_the_data_root_will_land_on() {
 }
 
 #[test]
-fn a_root_install_says_which_half_of_step_two_it_did_not_do() {
-    // A `--root` install creates no service user and runs no chown, because the tree is the invoking user's. A step
-    // that reports a pass must say so, or "all 7 paths are present with their modes" reads as the whole of item 10
-    // step 2 when the user and the ownership were never read.
+fn the_account_commands_are_printed_and_never_run() {
+    // Step 2 no longer creates anything that is root's: the account, and the root itself, are the operator's
+    // (ADR-0086). What this test measures is that the *words* are on the line — a run that reported a pass and said
+    // nothing about the missing account would be a machine that boots into `ExecStartPre` failing.
     let _serial = one_at_a_time();
-    let dir = TempDir::new("deploy-root-remark");
+    let dir = TempDir::new("deploy-account-remark");
     let socket = dir.file("docker.sock");
     fake_daemon(&socket);
     let mut config = config(Some(format!("unix://{}", socket.display())));
     config.control_listen = health_responder();
-    let target = Target::resolve(Some(dir.file("root")));
-    let deployed = target.config(&config);
-    let tools = real_tools(&dir);
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
+    // No such account: the host's own `id` answers non-zero, which is the machine an operator deploys onto.
+    let tools = deploy::Tools {
+        id: id_shim(&dir, None, ""),
+        ..real_tools(&dir)
+    };
     let machine = Fake::new();
 
-    let first = deploy::run(&deployed, &target, &tools, &machine, false);
-    assert_eq!(line(&first, DeployStep::Files).word, Word::Changed);
-    let second = deploy::run(&deployed, &target, &tools, &machine, false);
-    assert_eq!(line(&second, DeployStep::Files).word, Word::Satisfied);
-    let planned = deploy::run(&deployed, &target, &tools, &machine, true);
-    for report in [&first, &second] {
-        let sentence = &line(report, DeployStep::Files).sentence;
-        assert!(
-            sentence.contains("; --root: no service user is created"),
-            "step 2's line does not say what a --root install did not do: {sentence}"
-        );
-    }
-    // The dry run's plan already carries it: the plan for a `--root` run is not the plan for a system one.
-    assert!(
-        line(&planned, DeployStep::Files)
-            .sentence
-            .contains("; --root: no service user is created"),
-        "the dry run's plan does not say what step 2 leaves alone: {}",
-        line(&planned, DeployStep::Files).sentence
+    let plan = deploy::run(&deployed, &root, &tools, &machine, true);
+    let sentence = line(&plan, DeployStep::Files).sentence.clone();
+    let useradd = format!(
+        "sudo useradd --system --create-home --home-dir {} --shell /usr/sbin/nologin --groups docker holosmith",
+        root.path().display()
     );
-    // The satisfied line names the half it *did* do — the tree, the user it would have created, and the pair.
-    let satisfied = line(&second, DeployStep::Files).sentence.clone();
     assert!(
-        satisfied.contains("all 7 paths are present with their modes"),
-        "step 2's pass does not count the paths it read: {satisfied}"
+        sentence.contains(&useradd),
+        "the plan does not print the account command ({useradd}): {sentence}"
+    );
+
+    // The apply does not run it: it writes the tree it owns and keeps the command on the line.
+    let first = deploy::run(&deployed, &root, &tools, &machine, false);
+    assert_eq!(line(&first, DeployStep::Files).word, Word::Changed);
+    let applied = line(&first, DeployStep::Files).sentence.clone();
+    assert!(
+        applied.contains("sudo useradd"),
+        "the apply dropped the account command: {applied}"
+    );
+    assert!(
+        root.config_file().is_file(),
+        "the tree it does own was not written: {}",
+        first.render()
     );
 }
 
-// ---- the service user, the pair and the ownership -------------------------------
-
 #[test]
-fn the_service_user_and_its_docker_group_are_read_before_they_are_made() {
-    // `useradd` and `usermod` do not exist on every machine (this one has neither), so the three arms are read
-    // through the recorder: what the deploy *would* run is the claim, and nothing outside the temp directory is
-    // touched.
+fn the_service_user_is_read_and_its_commands_are_printed() {
+    // Three arms of one read: absent, present without the group, present with it. Every arm's answer is words on the
+    // line, because `useradd` and `usermod` are root's and this program never escalates (ADR-0086).
     let _serial = one_at_a_time();
     let dir = TempDir::new("deploy-user");
     let socket = dir.file("docker.sock");
     fake_daemon(&socket);
     let mut config = config(Some(format!("unix://{}", socket.display())));
-    // A data root inside the temp directory, so the only thing this test's arms differ in is the `id` answer.
-    config.data_root = dir.file("data");
-    let target = Target::resolve(None);
-    let deployed = target.config(&config);
-    deployed_data_root(&deployed.data_root);
-    let etc = Path::new("/etc/holosmith").exists();
+    config.control_listen = health_responder();
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
+    let machine = Fake::new();
 
-    // 1. No such user: the system user, in the daemon's group, with the data root as its home.
-    let calls = dir.file("calls.log");
-    let sudo_calls = dir.file("sudo.log");
+    // 1. No such user: `useradd`, once, with the root as the account's home and the daemon's group.
     let report = deploy::run(
         &deployed,
-        &target,
+        &root,
         &deploy::Tools {
             id: id_shim(&dir, None, ""),
-            ..recording_tools(&dir, &calls, &sudo_calls)
+            ..real_tools(&dir)
         },
-        &Fake::new(),
+        &machine,
         false,
     );
-    let created = format!(
-        "sudo useradd --system --groups docker --home-dir {} --shell /usr/sbin/nologin holosmith",
-        deployed.data_root.display()
-    );
-    assert!(
-        recorded(&sudo_calls).contains(&created),
-        "the service user was not created with the spec's argv ({created}):\n{}",
-        report.render()
-    );
-
-    // 2. The user exists and the group does not have it: one `usermod`, never a second `useradd`.
-    std::fs::remove_file(&sudo_calls).expect("the recorder log is removable");
-    let report = deploy::run(
-        &deployed,
-        &target,
-        &deploy::Tools {
-            id: id_shim(&dir, Some("4242"), "holosmith"),
-            ..recording_tools(&dir, &calls, &sudo_calls)
-        },
-        &Fake::new(),
-        false,
-    );
-    let added = recorded(&sudo_calls);
-    assert!(
-        added.contains(&"sudo usermod -aG docker holosmith".to_string()),
-        "a user outside the docker group was not added to it: {added:?}\n{}",
-        report.render()
-    );
-    assert!(
-        !added.iter().any(|call| call.contains("useradd")),
-        "a user that exists was created again: {added:?}"
-    );
-
-    // 3. The user is there and in the group: no child at all, and the line names what it read.
-    std::fs::remove_file(&sudo_calls).expect("the recorder log is removable");
-    let report = deploy::run(
-        &deployed,
-        &target,
-        &deploy::Tools {
-            id: id_shim(&dir, Some("4242"), "holosmith docker"),
-            ..recording_tools(&dir, &calls, &sudo_calls)
-        },
-        &Fake::new(),
-        false,
-    );
-    let quiet = recorded(&sudo_calls);
-    assert!(
-        !quiet.iter().any(|call| call.contains("useradd")),
-        "the deploy created a user that is there: {quiet:?}"
-    );
-    assert!(
-        !quiet.iter().any(|call| call.contains("usermod")),
-        "the deploy added a user to the group it is already in: {quiet:?}"
-    );
-    // The tree itself is installed by the recorders, which create nothing, so step 2 is still `changed` — the
-    // *user* half is what answered "nothing to do".
-    assert!(
-        !line(&report, DeployStep::Files)
-            .sentence
-            .contains("useradd")
-            && !line(&report, DeployStep::Files)
-                .sentence
-                .contains("usermod"),
-        "step 2's plan names a user write it did not need: {}",
-        line(&report, DeployStep::Files).sentence
-    );
-    assert_eq!(
-        Path::new("/etc/holosmith").exists(),
-        etc,
-        "a recording run touched the machine's own config directory"
-    );
-}
-
-#[test]
-fn the_install_tree_is_chowned_to_the_service_user_only_when_it_is_not() {
-    // The two uids decide it, and `stat` is asked about a data root that exists — inside the temp directory, on a
-    // system-path target, so `stat`'s answer is the shim's and the writes are recorded rather than run.
-    let _serial = one_at_a_time();
-    let dir = TempDir::new("deploy-chown");
-    let socket = dir.file("docker.sock");
-    fake_daemon(&socket);
-    let mut config = config(Some(format!("unix://{}", socket.display())));
-    config.data_root = dir.file("data");
-    let target = Target::resolve(None);
-    let deployed = target.config(&config);
-    deployed_data_root(&deployed.data_root);
-    let calls = dir.file("calls.log");
-    let sudo_calls = dir.file("sudo.log");
-
-    // The data root is root's and the service user is not, which is what a `sudo install` leaves behind: one
-    // recursive chown of the tree and one each for the two paths whose own directory is not in it.
-    let report = deploy::run(
-        &deployed,
-        &target,
-        &deploy::Tools {
-            id: id_shim(&dir, Some("4242"), "holosmith docker"),
-            stat: stat_shim(&dir, "0"),
-            ..recording_tools(&dir, &calls, &sudo_calls)
-        },
-        &Fake::new(),
-        false,
-    );
-    let chowns = recorded(&sudo_calls);
-    for expected in [
-        format!(
-            "sudo chown -R holosmith:holosmith {}",
-            config.data_root.display()
-        ),
-        "sudo chown holosmith:holosmith /etc/holosmith/config.toml".to_string(),
-        "sudo chown holosmith:holosmith /run/holosmith".to_string(),
+    let sentence = line(&report, DeployStep::Files).sentence.clone();
+    for fact in [
+        "sudo useradd --system --create-home".to_string(),
+        format!("--home-dir {}", root.path().display()),
+        "holosmith".to_string(),
     ] {
         assert!(
-            chowns.contains(&expected),
-            "the tree was not given to the service user ({expected}): {chowns:?}\n{}",
-            report.render()
+            sentence.contains(&fact),
+            "the absent-account arm does not print `{fact}`: {sentence}"
         );
     }
-    assert!(
-        !chowns.iter().any(|call| call.contains("useradd")),
-        "a user that exists was created again: {chowns:?}"
-    );
 
-    // The same tree, already the service user's: no chown at all.
-    std::fs::remove_file(&sudo_calls).expect("the recorder log is removable");
+    // 2. The user exists and the group does not have it: one `usermod`, never a second `useradd`.
     let report = deploy::run(
         &deployed,
-        &target,
+        &root,
         &deploy::Tools {
-            id: id_shim(&dir, Some("4242"), "holosmith docker"),
-            stat: stat_shim(&dir, "4242"),
-            ..recording_tools(&dir, &calls, &sudo_calls)
+            id: id_shim(&dir, Some("4242"), "holosmith"),
+            ..real_tools(&dir)
         },
-        &Fake::new(),
+        &machine,
         false,
     );
-    let chowns = recorded(&sudo_calls);
+    let sentence = line(&report, DeployStep::Files).sentence.clone();
     assert!(
-        // `starts_with` rather than `contains`: the temp directory's own name has "chown" in it.
-        !chowns.iter().any(|call| call.starts_with("sudo chown ")),
-        "the deploy chowned a tree that was already the service user's: {chowns:?}\n{}",
-        report.render()
+        sentence.contains("sudo usermod -aG docker holosmith"),
+        "the missing-group arm does not print the command: {sentence}"
+    );
+    assert!(
+        !sentence.contains("useradd"),
+        "a user that exists was going to be created again: {sentence}"
+    );
+
+    // 3. The user is there and in the group: the line says so and prints nothing to run.
+    let report = deploy::run(
+        &deployed,
+        &root,
+        &deploy::Tools {
+            id: id_shim(&dir, Some("4242"), "holosmith docker"),
+            ..real_tools(&dir)
+        },
+        &machine,
+        false,
+    );
+    let sentence = line(&report, DeployStep::Files).sentence.clone();
+    assert!(
+        sentence.contains("the service user holosmith is in the docker group"),
+        "the satisfied arm does not say what it read: {sentence}"
+    );
+    assert!(
+        !sentence.contains("useradd") && !sentence.contains("usermod"),
+        "a complete account still had a command printed: {sentence}"
     );
 }
 
@@ -2351,13 +2021,12 @@ fn vapid_keys_are_generated_once_and_never_rewritten() {
     fake_daemon(&socket);
     let mut config = config(Some(format!("unix://{}", socket.display())));
     config.control_listen = health_responder();
-    let root = dir.file("root");
-    let target = Target::resolve(Some(root.clone()));
-    let deployed = target.config(&config);
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
     let tools = real_tools(&dir);
     let machine = Fake::new();
 
-    let first = deploy::run(&deployed, &target, &tools, &machine, false);
+    let first = deploy::run(&deployed, &root, &tools, &machine, false);
     assert!(!first.failed(), "the first run failed:\n{}", first.render());
     let step = line(&first, DeployStep::Files);
     assert_eq!(step.word, Word::Changed, "{}", step.sentence);
@@ -2382,7 +2051,7 @@ fn vapid_keys_are_generated_once_and_never_rewritten() {
     assert_eq!(scalar.len(), 32);
 
     let bytes = std::fs::read(&path).expect("the pair is readable");
-    let second = deploy::run(&deployed, &target, &tools, &machine, false);
+    let second = deploy::run(&deployed, &root, &tools, &machine, false);
     assert!(
         !second.failed(),
         "the second run failed:\n{}",
@@ -2408,9 +2077,8 @@ fn a_vapid_file_that_is_not_a_pair_fails_the_step_and_is_not_regenerated() {
     let socket = dir.file("docker.sock");
     fake_daemon(&socket);
     let config = config(Some(format!("unix://{}", socket.display())));
-    let root = dir.file("root");
-    let target = Target::resolve(Some(root));
-    let deployed = target.config(&config);
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
     deployed_data_root(&deployed.data_root);
     let path = holosmith::vapid::store(&deployed.data_root);
     let secrets = path.parent().expect("the pair lives in a directory");
@@ -2422,7 +2090,7 @@ fn a_vapid_file_that_is_not_a_pair_fails_the_step_and_is_not_regenerated() {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
         .expect("the pair's mode is settable");
 
-    let report = deploy::run(&deployed, &target, &real_tools(&dir), &Fake::new(), false);
+    let report = deploy::run(&deployed, &root, &real_tools(&dir), &Fake::new(), false);
 
     assert_eq!(report.failed, Some(DeployStep::Files));
     let step = line(&report, DeployStep::Files);
@@ -2454,11 +2122,10 @@ fn the_unit_is_the_bytes_this_binary_renders_and_the_machine_reads_enabled() {
     fake_daemon(&socket);
 
     // A `--root` install: the file is real, the machine half is not attempted, and the line says so.
-    let mut rooted = config(Some(format!("unix://{}", socket.display())));
-    rooted.control_listen = health_responder();
-    let root = dir.file("root");
-    let target = Target::resolve(Some(root.clone()));
-    let deployed = target.config(&rooted);
+    let mut machine_config = config(Some(format!("unix://{}", socket.display())));
+    machine_config.control_listen = health_responder();
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&machine_config);
     let tools = real_tools(&dir);
     let exe = std::env::current_exe().expect("this test's own path is readable");
     // The spec's block, byte for byte: a rendering that matches itself would prove nothing about the file an
@@ -2466,20 +2133,25 @@ fn the_unit_is_the_bytes_this_binary_renders_and_the_machine_reads_enabled() {
     let expected = format!(
         "[Unit]\nDescription=Holosmith server\nAfter=network-online.target docker.service\n\
          Wants=network-online.target\nRequires=docker.service\n\n[Service]\nType=simple\n\
-         ExecStartPre={exe} doctor --quick\nExecStart={exe} serve\nRestart=on-failure\n\
-         RestartSec=5s\nKillMode=mixed\nTimeoutStopSec=30s\n\n[Install]\nWantedBy=multi-user.target\n",
-        exe = exe.display()
+         User=holosmith\nGroup=holosmith\nUMask=0077\nNoNewPrivileges=yes\nPrivateTmp=yes\n\
+         ProtectSystem=strict\nProtectHome=yes\nReadWritePaths={root}\n\
+         ExecStartPre={exe} doctor --quick\nExecStart={exe} serve --config {config}\n\
+         Restart=on-failure\nRestartSec=5s\nKillMode=mixed\nTimeoutStopSec=30s\n\n\
+         [Install]\nWantedBy=multi-user.target\n",
+        exe = exe.display(),
+        root = root.path().display(),
+        config = root.config_file().display(),
     );
     assert_eq!(
-        deploy::unit_text(&exe, false, Role::Server),
+        deploy::unit_text(&exe, Role::Server, &root),
         expected,
-        "the rendering is not the spec's unit"
+        "the rendering is not the unit this root describes"
     );
 
-    let first = deploy::run(&deployed, &target, &tools, &Fake::new(), false);
+    let first = deploy::run(&deployed, &root, &tools, &Fake::new(), false);
     let step = line(&first, DeployStep::Service);
     assert_eq!(step.word, Word::Changed, "{}", step.sentence);
-    let unit = target.unit_path();
+    let unit = root.unit();
     assert_eq!(
         std::fs::read_to_string(&unit).expect("the unit is readable"),
         expected,
@@ -2501,176 +2173,40 @@ fn the_unit_is_the_bytes_this_binary_renders_and_the_machine_reads_enabled() {
         expected.contains(&format!("ExecStartPre={} doctor --quick", exe.display())),
         "`ExecStartPre` is not the argv shape the spec asks for:\n{expected}"
     );
-    assert!(
-        !expected.contains("User=") && !expected.contains("Group="),
-        "a --root unit names a service user it does not have:\n{expected}"
-    );
-    let second = deploy::run(&deployed, &target, &tools, &Fake::new(), false);
+    for directive in [
+        "User=holosmith",
+        "Group=holosmith",
+        "NoNewPrivileges=yes",
+        "ProtectSystem=strict",
+        &format!("ReadWritePaths={}", root.path().display()),
+    ] {
+        assert!(
+            expected.contains(directive),
+            "the unit has no `{directive}`:\n{expected}"
+        );
+    }
+    let second = deploy::run(&deployed, &root, &tools, &Fake::new(), false);
     let step = line(&second, DeployStep::Service);
     assert_eq!(step.word, Word::Satisfied, "{}", step.sentence);
     assert!(
-        step.sentence.contains("--root: the unit is in the tree"),
-        "the pass does not say the machine half was not read: {}",
+        step.sentence
+            .contains("still root's to run: sudo install -m 0644"),
+        "the pass does not say what is left for root: {}",
         step.sentence
     );
 
-    // A system-path install: the file is written and the two verbs run, `daemon-reload` first, because `enable
-    // --now` on a unit systemd has not re-read would start the previous rendering.
-    let mut system = config(Some(format!("unix://{}", socket.display())));
-    system.data_root = dir.file("system-data");
-    let target = Target::resolve(None);
-    let deployed = target.config(&system);
-    deployed_data_root(&deployed.data_root);
-    let calls = dir.file("calls.log");
-    let sudo_calls = dir.file("sudo.log");
-    let systemctl_log = dir.file("systemctl.log");
-    // Built by hand rather than from [`recording_tools`], whose own `systemctl` shim would be written over this
-    // one: the answer is the whole subject of the arm.
-    let recorded_tools = |enabled: bool| deploy::Tools {
-        doctor: doctor_tools(&dir),
-        sudo: sudo_recorder(&dir, &sudo_calls),
-        install: recorder(&dir, "install", &calls),
-        chmod: recorder(&dir, "chmod", &calls),
-        systemctl: systemctl_shim(&dir, &systemctl_log, enabled),
-        id: id_shim(&dir, None, ""),
-        health_wait: Duration::from_millis(200),
-        ..deploy::Tools::default()
-    };
-
-    let report = deploy::run(
-        &deployed,
-        &target,
-        &recorded_tools(false),
-        &Fake::new(),
-        false,
-    );
-    let step = line(&report, DeployStep::Service);
-    assert_eq!(step.word, Word::Changed, "{}", step.sentence);
+    // The same bytes on a machine root: the unit is still written into the root, and the commands that make it
+    // systemd's are still words. `Tools` has no `systemctl` field at all (ADR-0086), which is the compile-time half
+    // of "this step runs no child of root's".
+    let again = deploy::run(&deployed, &root, &tools, &Fake::new(), true);
+    let plan = line(&again, DeployStep::Service).sentence.clone();
     assert!(
-        step.sentence.contains("daemon-reload") && step.sentence.contains("enable --now"),
-        "the plan does not name the two verbs: {}",
-        step.sentence
-    );
-    let writes = recorded(&sudo_calls);
-    let reload = writes
-        .iter()
-        .position(|call| call.ends_with("systemctl daemon-reload"))
-        .unwrap_or_else(|| panic!("`daemon-reload` was never run: {writes:?}"));
-    let enable = writes
-        .iter()
-        .position(|call| call.ends_with("systemctl enable --now holosmith.service"))
-        .unwrap_or_else(|| panic!("`enable --now` was never run: {writes:?}"));
-    assert!(
-        reload < enable,
-        "`enable --now` ran before `daemon-reload`: {writes:?}"
-    );
-    assert!(
-        recorded(&systemctl_log).contains(&"systemctl is-enabled holosmith.service".to_string()),
-        "the read never asked systemd whether the unit is enabled: {:?}",
-        recorded(&systemctl_log)
-    );
-
-    // `is-enabled` is read on every run and is the half of `satisfied` the machine answers: with the shim answering
-    // 0 the read says so. The other half — the file's bytes — cannot be satisfied here, because the `install` a
-    // system-path run uses is a recorder and the unit it would write is `/etc/systemd/system/holosmith.service` on
-    // this machine; the `--root` arm above is what proves the file half.
-    std::fs::remove_file(&sudo_calls).expect("the recorder log is removable");
-    let report = deploy::run(
-        &deployed,
-        &target,
-        &recorded_tools(true),
-        &Fake::new(),
-        false,
-    );
-    assert_eq!(
-        recorded(&systemctl_log)
-            .iter()
-            .filter(|call| call.ends_with("is-enabled holosmith.service"))
-            .count(),
-        2,
-        "the second run did not read whether the unit is enabled: {:?}",
-        recorded(&systemctl_log)
-    );
-    let step = line(&report, DeployStep::Service);
-    assert_eq!(
-        step.word,
-        Word::Changed,
-        "the recorder wrote no unit file, so the step had bytes to install: {}",
-        step.sentence
+        plan.contains("sudo install -m 0644")
+            && plan.contains("sudo systemctl daemon-reload")
+            && plan.contains("sudo systemctl enable --now holosmith.service"),
+        "the plan does not name the three commands that install and start the unit: {plan}"
     );
 }
-
-#[test]
-fn both_origins_are_asked_for_and_the_second_run_reads_status() {
-    let _serial = one_at_a_time();
-    let dir = TempDir::new("deploy-origins");
-    let socket = dir.file("docker.sock");
-    fake_daemon(&socket);
-    let mut config = config(Some(format!("unix://{}", socket.display())));
-    config.control_listen = health_responder();
-    let target = Target::resolve(Some(dir.file("root")));
-    let deployed = target.config(&config);
-    let tools = real_tools(&dir);
-    let machine = Fake::new();
-    let log = dir.file("tailscale.log");
-
-    let first = deploy::run(&deployed, &target, &tools, &machine, false);
-    let step = line(&first, DeployStep::Origins);
-    assert_eq!(step.word, Word::Changed, "{}", step.sentence);
-    let served = recorded(&log);
-    for expected in [
-        format!(
-            "serve --bg --yes --https=443 http://127.0.0.1:{}",
-            deployed.control_listen.port()
-        ),
-        format!(
-            "serve --bg --yes --https=8444 http://127.0.0.1:{}",
-            deployed.preview_listen.port()
-        ),
-    ] {
-        assert!(
-            served.contains(&expected),
-            "the origin was not asked for ({expected}): {served:?}\n{}",
-            first.render()
-        );
-        assert!(
-            step.sentence.contains(&expected),
-            "step 6's line does not name what it applied: {}",
-            step.sentence
-        );
-    }
-
-    let second = deploy::run(&deployed, &target, &tools, &machine, false);
-    let step = line(&second, DeployStep::Origins);
-    assert_eq!(
-        step.word,
-        Word::Satisfied,
-        "the second run did not read the status it applied: {}",
-        step.sentence
-    );
-    for fact in [
-        deploy::control_target(&deployed),
-        deploy::preview_target(&deployed),
-        "443".to_string(),
-        "8444".to_string(),
-    ] {
-        assert!(
-            step.sentence.contains(&fact),
-            "the pass does not name {fact}: {}",
-            step.sentence
-        );
-    }
-    assert_eq!(
-        recorded(&log).len(),
-        served.len(),
-        "the second run asked for an origin that was already served: {:?}",
-        recorded(&log)
-    );
-}
-
-/// A self-test failure's sentence, used verbatim: step 7's failure must be `doctor`'s own words.
-const BROKEN_NETWORK: &str = "a probe container on the temporary internal network reached the internet: the egress allow-list is not what \
-     this machine runs";
 
 #[test]
 fn step_seven_waits_for_health_and_reports_doctors_sentence() {
@@ -2682,9 +2218,9 @@ fn step_seven_waits_for_health_and_reports_doctors_sentence() {
     fake_daemon(&socket);
     let mut serving = config(Some(format!("unix://{}", socket.display())));
     serving.control_listen = health_responder();
-    let target = Target::resolve(Some(dir.file("root")));
-    let deployed = target.config(&serving);
-    let report = deploy::run(&deployed, &target, &real_tools(&dir), &Fake::new(), false);
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&serving);
+    let report = deploy::run(&deployed, &root, &real_tools(&dir), &Fake::new(), false);
     assert!(
         !report.failed(),
         "a serving machine failed the deploy:\n{}",
@@ -2710,10 +2246,11 @@ fn step_seven_waits_for_health_and_reports_doctors_sentence() {
     fake_daemon(&socket);
     let mut broken = config(Some(format!("unix://{}", socket.display())));
     broken.control_listen = health_responder();
-    let target = Target::resolve(Some(dir.file("root")));
-    let deployed = target.config(&broken);
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&broken);
+    const BROKEN_NETWORK: &str = "the probe reached the host";
     let machine = Fake::new().with_selftest(selftest::Outcome::Failed(BROKEN_NETWORK.to_string()));
-    let report = deploy::run(&deployed, &target, &real_tools(&dir), &machine, false);
+    let report = deploy::run(&deployed, &root, &real_tools(&dir), &machine, false);
 
     assert_eq!(report.failed, Some(DeployStep::Health));
     let step = line(&report, DeployStep::Health);
@@ -2724,7 +2261,7 @@ fn step_seven_waits_for_health_and_reports_doctors_sentence() {
     );
     assert_eq!(
         report.lines.len(),
-        7,
+        6,
         "the run did not stop at the step that failed:\n{}",
         report.render()
     );
@@ -2785,11 +2322,10 @@ fn a_release_tree_makes_the_unit_run_through_current() {
     let mut config = config(Some(format!("unix://{}", socket.display())));
     config.role = Role::Hub;
     config.control_listen = health_responder();
-    let root = dir.file("root");
-    let target = Target::resolve(Some(root.clone()));
+    let root = rooted(&dir, "root");
 
     // A release tree with one live release, before the deploy runs: this is what a promotion leaves behind.
-    let release = holosmith::release::Release::of(&target);
+    let release = holosmith::release::Release::of(&root);
     std::fs::create_dir_all(release.releases()).expect("the releases directory is creatable");
     let bytes = b"#!/bin/sh\nexit 0\n";
     let artifact = dir.file("v0.1.0-holosmith");
@@ -2800,10 +2336,10 @@ fn a_release_tree_makes_the_unit_run_through_current() {
         .expect("a release is writable");
     release.switch("v0.1.0").expect("the release is live");
 
-    let deployed = target.config(&config);
+    let deployed = root.config(&config);
     let tools = real_tools(&dir);
     let machine = Fake::new();
-    let report = deploy::run_as(&deployed, &target, &tools, &machine, false, Kind::Hub);
+    let report = deploy::run_as(&deployed, &root, &tools, &machine, false, Kind::Hub);
     assert!(!report.failed(), "the hub run failed:\n{}", report.render());
     assert_eq!(
         line(&report, DeployStep::Service).word,
@@ -2811,10 +2347,10 @@ fn a_release_tree_makes_the_unit_run_through_current() {
         "{}",
         line(&report, DeployStep::Service).sentence
     );
-    let unit = std::fs::read_to_string(target.unit_path()).expect("the unit is readable");
-    let live = format!("{}/opt/holosmith/current/holosmith", root.display());
+    let unit = std::fs::read_to_string(root.unit()).expect("the unit is readable");
+    let live = format!("{}/holosmith", root.current().display());
     assert!(
-        unit.contains(&format!("ExecStart={live} serve")),
+        unit.contains(&format!("ExecStart={live} serve --config")),
         "the unit does not run through `current`:\n{unit}"
     );
     assert!(
@@ -2823,7 +2359,7 @@ fn a_release_tree_makes_the_unit_run_through_current() {
     );
 
     // The second run reads the same bytes, so nothing changed and nothing was undone.
-    let again = deploy::run_as(&deployed, &target, &tools, &machine, false, Kind::Hub);
+    let again = deploy::run_as(&deployed, &root, &tools, &machine, false, Kind::Hub);
     assert!(
         !again.failed(),
         "the second hub run failed:\n{}",
@@ -2840,7 +2376,7 @@ fn a_release_tree_makes_the_unit_run_through_current() {
     // answers `None`), and the unit must fall back to the binary this run is — a unit pointing through a `current`
     // that cannot start would be an install that never boots again.
     std::fs::remove_file(release.binary("v0.1.0")).expect("the release binary is removable");
-    let broken = deploy::run_as(&deployed, &target, &tools, &machine, false, Kind::Hub);
+    let broken = deploy::run_as(&deployed, &root, &tools, &machine, false, Kind::Hub);
     assert!(
         !broken.failed(),
         "the run over a broken release tree failed:\n{}",
@@ -2867,7 +2403,7 @@ fn a_release_tree_makes_the_unit_run_through_current() {
         "{}",
         line(&broken, DeployStep::Service).sentence
     );
-    let unit = std::fs::read_to_string(target.unit_path()).expect("the unit is readable");
+    let unit = std::fs::read_to_string(root.unit()).expect("the unit is readable");
     assert!(
         !unit.contains("current/holosmith"),
         "the unit points through a `current` with no binary behind it:\n{unit}"

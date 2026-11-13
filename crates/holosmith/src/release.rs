@@ -3,10 +3,8 @@
 //! Item 10's first paragraph is the whole of this module: "releases live in `releases/<tag>/` with a `current`
 //! symlink that systemd runs". Three facts follow, and each is a decision this file owns:
 //!
-//! * **Where.** [`ROOT`] is `/opt/holosmith` — the FHS's home for an add-on application, a sibling of the
-//!   `/etc/holosmith`, `/var/lib/holosmith` and `/run/holosmith` the deploy already writes — and
-//!   [`crate::deploy::Target`] prefixes it, so an install tree (`--root`) carries its own release tree and an
-//!   unprivileged run can drive the whole thing.
+//! * **Where.** The release tree is `<root>/releases`, inside the one directory a machine has (ADR-0086): the
+//!   service user owns it, so `upgrade` and `rollback` write plain files and need no privilege for the tree.
 //! * **What a release is.** Two files, `holosmith` and `holosmith.sha256`, which are exactly the two
 //!   `holosmith build --out` writes ([`crate::builder::BINARY`] and [`crate::builder::DIGEST`]). The directory's
 //!   name is the tag the binary itself reports (`version`'s `git_tag`), so a release directory cannot be named
@@ -38,12 +36,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::deploy::Target;
+use crate::deploy::Root;
 
-/// The release tree's home, prefixed by [`crate::deploy::Target`] for an install tree.
-pub const ROOT: &str = "/opt/holosmith";
-
-/// The directory the releases live in, under [`ROOT`].
+/// The directory the releases live in, under the root: `<root>/releases`.
 pub const RELEASES: &str = "releases";
 
 /// The symlink systemd executes through.
@@ -81,16 +76,14 @@ pub enum Written {
 /// One machine's release tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Release {
-    /// `<install>/opt/holosmith`.
+    /// `<root>/releases`.
     root: PathBuf,
 }
 
 impl Release {
-    /// The tree of the install [`Target`] names.
-    pub fn of(target: &Target) -> Self {
-        Self {
-            root: target.opt_dir(),
-        }
+    /// The tree of the [`Root`] a run was given: the root itself, with `releases/` and `current` under it.
+    pub fn of(root: &Root) -> Self {
+        Self::at(root.path())
     }
 
     /// The tree at an explicit path, which is what the tests drive.
@@ -98,17 +91,17 @@ impl Release {
         Self { root: root.into() }
     }
 
-    /// `<install>/opt/holosmith`.
+    /// `<root>/releases`.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// `<install>/opt/holosmith/releases`.
+    /// `<root>/releases`.
     pub fn releases(&self) -> PathBuf {
         self.root.join(RELEASES)
     }
 
-    /// The symlink's own path: `<install>/opt/holosmith/current`.
+    /// The symlink's own path: `<root>/current`.
     pub fn current(&self) -> PathBuf {
         self.root.join(CURRENT)
     }
@@ -264,7 +257,7 @@ impl Release {
         Ok(Pruned { kept, removed })
     }
 
-    /// The binary systemd executes: `<install>/opt/holosmith/current/holosmith`, when the tree is live.
+    /// The binary systemd executes: `<root>/current/holosmith`, when the tree is live.
     ///
     /// The **path through the link**, not the directory it resolves to, because that is the whole point of the
     /// layout: systemd re-resolves `current` at every (re)start, so a switch is what a restart picks up. `None` is
@@ -514,19 +507,19 @@ mod tests {
     fn the_exec_start_is_read_and_the_pre_line_is_not() {
         let unit = crate::deploy::unit_text(
             Path::new("/usr/local/bin/holosmith"),
-            true,
             crate::config::Role::Server,
+            &crate::deploy::Root::resolve(Some(PathBuf::from("/var/lib/holosmith"))),
         );
         assert_eq!(
             unit_executable(&unit),
             Some(PathBuf::from("/usr/local/bin/holosmith")),
             "the unit `unit_text` writes must be the unit this reader reads"
         );
-        // A `--root` unit has no `User=` lines and the same ExecStart.
+        // The same rendering for a tree under its own root: the same ExecStart, that root's paths.
         let rooted = crate::deploy::unit_text(
             Path::new("/tree/bin/holosmith"),
-            false,
             crate::config::Role::Server,
+            &crate::deploy::Root::resolve(Some(PathBuf::from("/tree"))),
         );
         assert_eq!(
             unit_executable(&rooted),
