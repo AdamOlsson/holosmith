@@ -188,7 +188,7 @@ fn config() -> Config {
 
 /// The root under `dir`, and the config the steps see (`Root::config`'s contract).
 fn root_target(dir: &TempDir) -> (Root, Config) {
-    let root = Root::resolve(Some(dir.file("install")));
+    let root = Root::resolve(Some(dir.file("install")), Some(dir.file("holosmith.toml")));
     let deployed = root.config(&config());
     (root, deployed)
 }
@@ -629,13 +629,12 @@ fn the_root_names_the_tree_and_the_data_root() {
     );
     assert_eq!(deployed.data_root, dir.file("install/data"));
     assert_eq!(deployed.projects_root, dir.file("install/projects"));
-    let machine_wide = Root::resolve(None);
-    assert_eq!(
-        machine_wide.unit(),
-        Path::new("/var/lib/holosmith/holosmith.service")
-    );
-    assert_eq!(
-        machine_wide.config(&config()).data_root,
-        Path::new("/var/lib/holosmith/data")
-    );
+    // The machine's own paths are the account's: the state under `~/.local/share` and the config under
+    // `~/.config`, both derived from the password entry rather than from an argument.
+    let machine_wide = Root::resolve(None, None);
+    let state = holosmith::config::default_root();
+    assert_eq!(machine_wide.path(), state);
+    assert_eq!(machine_wide.unit(), state.join("holosmith.service"));
+    assert_eq!(machine_wide.config_file(), holosmith::config::config_path());
+    assert_eq!(machine_wide.config(&config()).data_root, state.join("data"));
 }

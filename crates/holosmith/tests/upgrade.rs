@@ -189,7 +189,7 @@ fn world(label: &str) -> Option<World> {
     drop(database);
 
     let root = dir.file("root");
-    let root = Root::resolve(Some(root));
+    let root = Root::resolve(Some(root), Some(dir.file("holosmith.toml")));
     let release = Release::of(&root);
     std::fs::create_dir_all(release.releases()).expect("the releases directory is creatable");
     let old = b"#!/bin/sh\nexit 0\n";

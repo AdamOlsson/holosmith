@@ -43,7 +43,7 @@ pub fn run(args: RollbackArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let root = Root::resolve(args.root.clone());
+    let root = Root::resolve(args.root.clone(), args.config.clone());
     let options = Options {
         to: args.to,
         wait: args.wait,

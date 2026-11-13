@@ -9,7 +9,7 @@ use crate::runtime::Backend;
 #[derive(Debug, Parser)]
 #[command(name = "holosmith", version, about = "Run Holosmith")]
 pub struct Cli {
-    /// Path to the config file (default: /etc/holosmith/config.toml).
+    /// Path to the config file (default: ~/.config/holosmith.toml, in the home of the account this runs as).
     #[arg(long, global = true, value_name = "PATH")]
     pub config: Option<PathBuf>,
 
@@ -59,8 +59,8 @@ pub enum Cmd {
         /// Everything `--quick` has, plus the network self-test, the proxies and the agent image's pi version.
         #[arg(long)]
         full: bool,
-        /// The root to examine instead of `HOLOSMITH_ROOT`'s — the directory the config, the data root, the
-        /// release tree and the unit live under.
+        /// The root to examine instead of `HOLOSMITH_ROOT`'s — the directory the data root, the release tree and
+        /// the unit live under. The config is `--config`'s, because it is not part of the root.
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
     },
@@ -209,7 +209,10 @@ pub enum ServerAction {
         /// Print each step's plan and change nothing. A broken machine still exits non-zero.
         #[arg(long)]
         dry_run: bool,
-        /// Install into this directory instead of the system paths, as the invoking user (no sudo).
+        /// Install into this directory instead of `HOLOSMITH_ROOT`'s (default `~/.local/share/holosmith`).
+        ///
+        /// The root is one directory: the data root, the release tree and the projects. It moves the state and
+        /// only the state — the config is `--config`'s, `~/.config/holosmith.toml` by default.
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
         /// Install on another machine: copy this binary there over ssh, verify the copy, and run the same deploy
@@ -235,11 +238,12 @@ pub enum HubAction {
         /// Print each step's plan and change nothing. A broken machine still exits non-zero.
         #[arg(long)]
         dry_run: bool,
-        /// Install into this root instead of `HOLOSMITH_ROOT`'s (default `/var/lib/holosmith`).
+        /// Install into this root instead of `HOLOSMITH_ROOT`'s (default `~/.local/share/holosmith`).
         ///
-        /// The root is one directory: the config, the data root, the release tree and the projects. The deploy
-        /// never escalates — what root owns is printed as commands for you to run — so what it needs is a root
-        /// this user can write, which is the tree a test or a by-hand install owns.
+        /// The root is one directory: the data root, the release tree and the projects. It moves the state and
+        /// only the state — the config is `--config`'s, `~/.config/holosmith.toml` by default. The deploy never
+        /// escalates, so what it needs is a root this user can write, which is the tree a test or a by-hand
+        /// install owns.
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
         /// Install on another machine: copy this binary there over ssh, verify the copy, and run the same deploy

@@ -8,8 +8,8 @@ preview_upstream_port = 3000
 allowed_hosts = []
 # owner unset
 machine_name = "local"
-data_root = "/var/lib/holosmith/data"
-projects_root = "/var/lib/holosmith/projects"
+data_root = "<root>/data"
+projects_root = "<root>/projects"
 agent_image = "agent-image:0.1.0"
 agent_toolchains = ["python3", "ripgrep"]
 container_cpus = 2

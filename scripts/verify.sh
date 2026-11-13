@@ -5151,8 +5151,9 @@ PY
 # 1. `hub deploy --dry-run`: the six lines in the spec's order with the spec's numbers, three `needs` and two
 #    `skipped` (each naming what a hub has no work for), the tally counting the skips apart, and an install root that
 #    does not appear.
-# 2. the `--root` run of the hub half: steps 2–6 apply, 7 finds the machine serving, `config.toml` says
-#    `role = "hub"`, the unit requires no daemon — and the second run is five `satisfied` and two `skipped`.
+# 2. the `--root` run of the hub half: steps 2–6 apply, 7 finds the machine serving, the config `--config` names
+#    says `role = "hub"` and is written outside the root, the unit requires no daemon — and the second run is five
+#    `satisfied` and two `skipped`.
 # 3. the union: the same command on a **server** config leaves `role = "both"` and a unit that does require the
 #    daemon, which is acceptance bullet 4's first half. The second half — "the API is unchanged" — is the stub boot
 #    of that tree answering `/api/health` as `both` with `/api/hosts` and `/api/sessions` still there.
@@ -5277,16 +5278,28 @@ APPLIED
       fail "$name/run/$n" "step $n is not a skip: $(cat "$WORK/$name.run.out")"
     assertions=$((assertions + 1))
   done
-  for path in "config.toml 644" "data 755" \
+  # The config is the account's own file, so it is where `--config` named it and **not** inside the root the
+  # deploy wrote: `--root` moves the state and only the state.
+  check "$name/run/mode/config" 644 "$(stat -c '%a' "$hub_config" 2>/dev/null || echo absent)"
+  [ ! -e "$hub_tree/config.toml" ] ||
+    fail "$name/run/config/inside" "step 2 wrote a config inside the root, which is state"
+  assertions=$((assertions + 1))
+  for path in "data 755" \
     "data/secrets 700" "data/secrets/keys.toml 600" \
     "data/secrets/vapid.toml 600" ; do
     entry="${path% *}" want="${path##* }"
     check "$name/run/mode/$entry" "$want" "$(stat -c '%a' "$hub_tree/$entry" 2>/dev/null || echo absent)"
   done
-  # The file it wrote is the machine that boots next, and a hub's unit requires no daemon: a `hub deploy` exists for
-  # the machine that has none, and a unit that named `docker.service` there would never start.
-  grep -qx 'role = "hub"' "$hub_tree/config.toml" ||
-    fail "$name/run/config/role" "step 2 did not write the role it installed: $(cat "$hub_tree/config.toml")"
+  # The file it wrote is the machine that boots next. The role line alone is not the measurement: the case wrote
+  # `hub` into the input and step 2 installs into that same `--config` path, so a step that wrote no config at all
+  # would still pass it. `data_root` is the deploy's own — nothing else in this case puts `$hub_tree/data` in that
+  # file. And a hub's unit requires no daemon: a `hub deploy` exists for the machine that has none, and a unit that
+  # named `docker.service` there would never start.
+  grep -qx 'role = "hub"' "$hub_config" ||
+    fail "$name/run/config/role" "step 2 did not write the role it installed: $(cat "$hub_config")"
+  assertions=$((assertions + 1))
+  grep -q "^data_root = \"$hub_tree/data\"$" "$hub_config" ||
+    fail "$name/run/config/data_root" "step 2 did not write the data root it installed: $(cat "$hub_config")"
   assertions=$((assertions + 1))
   if grep -q 'docker.service' "$hub_tree/holosmith.service"; then
     fail "$name/run/unit" "a hub's unit requires a daemon this machine does not have: $(cat "$hub_tree/holosmith.service")"
@@ -5296,7 +5309,7 @@ APPLIED
     fail "$name/run/unit/description" "the unit does not describe the machine it boots: $(cat "$hub_tree/holosmith.service")"
   assertions=$((assertions + 1))
   status=0
-  "$artifact" config validate --config "$hub_tree/config.toml" >/dev/null 2>&1 || status=$?
+  "$artifact" config validate --config "$hub_config" >/dev/null 2>&1 || status=$?
   check "$name/run/config/valid" 0 "$status"
   # The second run: re-running is the whole recovery procedure, so a run that reaches the end has to be idempotent.
   status=0
@@ -5318,12 +5331,15 @@ AGAIN
   assertions=$((assertions + 1))
 
   # ---- 3. the union: a server machine deployed as a hub is `both` ----------------------------------
+  # The run installs the file it read, so a copy of the `server` file is kept for the dry run below: the words that
+  # arm asserts are about a config that still says `server`.
+  cp "$server_config" "$WORK/$name.union-source.toml"
   status=0
   PATH="$shims:$PATH" "$artifact" hub deploy --root "$tree" \
     --config "$server_config" >"$WORK/$name.union.out" 2>&1 || status=$?
   check "$name/union/exit" 0 "$status"
-  grep -qx 'role = "both"' "$tree/config.toml" ||
-    fail "$name/union/role" "a hub deploy on a server machine did not install both: $(cat "$tree/config.toml")"
+  grep -qx 'role = "both"' "$server_config" ||
+    fail "$name/union/role" "a hub deploy on a server machine did not install both: $(cat "$server_config")"
   assertions=$((assertions + 1))
   grep -q '^deploy: role: both (.*server.*hub deploy.*)' "$WORK/$name.union.out" ||
     fail "$name/union/line" "the run did not say it reached both: $(cat "$WORK/$name.union.out")"
@@ -5333,7 +5349,7 @@ AGAIN
   # lie (ADR-0056's five words, and ADR-0077 D4's wording).
   status=0
   PATH="$shims:$PATH" "$artifact" hub deploy --dry-run --root "$root/dry-union" \
-    --config "$server_config" >"$WORK/$name.uniondry.out" 2>&1 || status=$?
+    --config "$WORK/$name.union-source.toml" >"$WORK/$name.uniondry.out" 2>&1 || status=$?
   check "$name/uniondry/exit" 0 "$status"
   grep -qx 'deploy: dry run' "$WORK/$name.uniondry.out" ||
     fail "$name/uniondry/header" "the run does not call itself a dry run: $(cat "$WORK/$name.uniondry.out")"
@@ -5356,7 +5372,7 @@ AGAIN
   # ---- 4. the machine booted for real: its API, and `hub host` against its own listener -------------
   # `backend = "stub"` in the config the deploy wrote, so `disk::guarded` is false and this boot runs no preflight
   # and starts no proxy: the only machine in this case that starts anything, and it starts nothing Docker.
-  start_serve "$tree/config.toml" "$tree/data" "$control"
+  start_serve "$server_config" "$tree/data" "$control"
   fetch "${name}_health" GET /api/health "Host: 127.0.0.1" || fail "${name}_health/no_answer" "GET /api/health did not answer"
   case "$(answer "${name}_health")" in
     *'"role":"both"'*) assertions=$((assertions + 1)) ;;
@@ -5376,7 +5392,7 @@ AGAIN
   # `add`: the row is stored and printed as the same `machine <name>` line `status` prints. `attic` is a MagicDNS
   # name that resolves nowhere, which is item 16's "marked unreachable with the last error, not removed".
   status=0
-  "$artifact" hub host add attic https://attic.tail1234.ts.net --config "$tree/config.toml" \
+  "$artifact" hub host add attic https://attic.tail1234.ts.net --config "$server_config" \
     >"$WORK/$name.add.out" 2>&1 || status=$?
   check "$name/add/exit" 0 "$status"
   grep -q '^machine attic unreachable, last error: .*attic\.tail1234\.ts\.net' "$WORK/$name.add.out" ||
@@ -5385,7 +5401,7 @@ AGAIN
   # The two registration refusals, with the API's sentence and **no code in front** (ADR-0076 D6): the code names a
   # value the operator just typed, so the sentence is the answer.
   status=0
-  "$artifact" hub host add local https://box.tail1234.ts.net --config "$tree/config.toml" \
+  "$artifact" hub host add local https://box.tail1234.ts.net --config "$server_config" \
     >"$WORK/$name.badname.out" 2>&1 || status=$?
   check "$name/badname/exit" 1 "$status"
   # The reserved name's own sentence, and the API's: a CLI that spelled its own would be the fork ADR-0076 D6
@@ -5395,7 +5411,7 @@ AGAIN
     fail "$name/badname/sentence" "the CLI did not print the API's own sentence: $(cat "$WORK/$name.badname.out")"
   assertions=$((assertions + 1))
   status=0
-  "$artifact" hub host add workshop ftp://box.tail1234.ts.net --config "$tree/config.toml" \
+  "$artifact" hub host add workshop ftp://box.tail1234.ts.net --config "$server_config" \
     >"$WORK/$name.badurl.out" 2>&1 || status=$?
   check "$name/badurl/exit" 1 "$status"
   got="$(cat "$WORK/$name.badurl.out")"
@@ -5409,7 +5425,7 @@ AGAIN
   assertions=$((assertions + 1))
   # `list` answers the table, in the route's own order, through the same client as the other two.
   status=0
-  "$artifact" hub host list --config "$tree/config.toml" >"$WORK/$name.list.out" 2>&1 || status=$?
+  "$artifact" hub host list --config "$server_config" >"$WORK/$name.list.out" 2>&1 || status=$?
   check "$name/list/exit" 0 "$status"
   grep -qx 'machines 2' "$WORK/$name.list.out" ||
     fail "$name/list/count" "list does not count the two rows: $(cat "$WORK/$name.list.out")"
@@ -5422,7 +5438,7 @@ AGAIN
 
   # ---- 5. `status` reads the same table, and the busy row answers with the API's sentence ------------
   status=0
-  "$artifact" status --config "$tree/config.toml" >"$WORK/$name.status.out" 2>&1 || status=$?
+  "$artifact" status --config "$server_config" >"$WORK/$name.status.out" 2>&1 || status=$?
   check "$name/status/exit" 0 "$status"
   grep -qx 'machines 2' "$WORK/$name.status.out" ||
     fail "$name/status/count" "status does not report the registry: $(cat "$WORK/$name.status.out")"
@@ -5437,7 +5453,7 @@ AGAIN
 
   # A remote row goes without a force; the row that names this machine is refused while this machine has a session.
   status=0
-  "$artifact" hub host remove attic --config "$tree/config.toml" \
+  "$artifact" hub host remove attic --config "$server_config" \
     >"$WORK/$name.remove.out" 2>&1 || status=$?
   check "$name/remove/exit" 0 "$status"
   grep -qx 'removed attic' "$WORK/$name.remove.out" ||
@@ -5452,7 +5468,7 @@ AGAIN
   id="$(sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p' "$WORK/responses/${name}_created.body")"
   [ -n "$id" ] || fail "$name/created/id" "the create names no session id: $(cat "$WORK/responses/${name}_created.body")"
   status=0
-  "$artifact" hub host remove thisbox --config "$tree/config.toml" \
+  "$artifact" hub host remove thisbox --config "$server_config" \
     >"$WORK/$name.busy.out" 2>&1 || status=$?
   check "$name/busy/exit" 1 "$status"
   grep -q '^holosmith: hub host: host_busy: "thisbox" is this machine, and it has 1 live session' "$WORK/$name.busy.out" ||
@@ -5462,7 +5478,7 @@ AGAIN
     fail "$name/busy/flag" "the refusal does not name the override it means: $(cat "$WORK/$name.busy.out")"
   assertions=$((assertions + 1))
   status=0
-  "$artifact" hub host remove thisbox --force --config "$tree/config.toml" \
+  "$artifact" hub host remove thisbox --force --config "$server_config" \
     >"$WORK/$name.forced.out" 2>&1 || status=$?
   check "$name/forced/exit" 0 "$status"
   grep -qx 'removed thisbox' "$WORK/$name.forced.out" ||
@@ -5472,7 +5488,7 @@ AGAIN
   fetch "${name}_session" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
     fail "${name}_session/no_answer" "GET /api/sessions/$id did not answer"
   expect_status "${name}_session" "$(answer "${name}_session")" 200
-  "$artifact" status --config "$tree/config.toml" >"$WORK/$name.status2.out" 2>&1 ||
+  "$artifact" status --config "$server_config" >"$WORK/$name.status2.out" 2>&1 ||
     fail "$name/status2" "status failed after the removals: $(cat "$WORK/$name.status2.out")"
   grep -qx 'machines 0' "$WORK/$name.status2.out" ||
     fail "$name/status2/empty" "an emptied registry is not a count of zero: $(cat "$WORK/$name.status2.out")"
@@ -10004,7 +10020,7 @@ case_docker_preflight() {
 # which this case does not build — step 3 builds `agent-image:<version>`, and the line says the config's
 # `agent_image` names something else): a real install into a root under `target/` — step 2's paths with their
 # modes, step 3's two images, step 4's two containers, step 5's unit and step 6's health — and then the same command
-# again, where all six steps say `satisfied`, the tree's listing and `config.toml`'s bytes are identical and
+# again, where all six steps say `satisfied`, the tree's listing and the installed config's bytes are identical and
 # `keys.toml` was not rewritten. That is the acceptance's "the second run changes nothing", as a comparison rather
 # than an absence of output. Step 6's answer is `health_responder`'s: this machine has neither a `tailscaled`
 # nor a unit boot, and a case that assumed one would be a gate that only passes on a machine that already serves.
@@ -10918,7 +10934,7 @@ case_server_images() {
   # Tailscale that cannot be asked is `unknown` here, which is not a failure, and the deploy above is where the
   # origins were measured.
   status=0
-  "$artifact" doctor --full --config "$root/install/config.toml" --root "$root/install" \
+  "$artifact" doctor --full --config "$WORK/config-images.toml" --root "$root/install" \
     >"$WORK/$name.doctor.out" 2>&1 || status=$?
   [ "$status" -eq 0 ] ||
     fail "$name/doctor/exit" "doctor --full exited $status: $(tail -20 "$WORK/$name.doctor.out")"
@@ -11034,16 +11050,16 @@ SHIM
     *"the stand-in daemon refused the smoke image"*) assertions=$((assertions + 1)) ;;
     *) fail "$name/build_sentence" "the refusal did not carry the daemon's own words: $answer" ;;
   esac
-  [ -f "$root/config/config.toml" ] ||
+  [ -f "$root/config/holosmith.toml" ] ||
     fail "$name/config" "no smoke config was written before the build: $answer"
-  grep -qx 'container_prefix = "smoke_"' "$root/config/config.toml" ||
-    fail "$name/container_prefix" "the smoke config does not prefix containers: $(cat "$root/config/config.toml")"
-  grep -qx 'network_prefix = "smoke_"' "$root/config/config.toml" ||
-    fail "$name/network_prefix" "the smoke config does not prefix networks: $(cat "$root/config/config.toml")"
-  grep -qx 'control_listen = "127.0.0.1:0"' "$root/config/config.toml" ||
-    fail "$name/port" "the smoke config does not ask for a port of its own: $(cat "$root/config/config.toml")"
-  grep -q "^data_root = \"$root/config/data\"$" "$root/config/config.toml" ||
-    fail "$name/data_root" "the smoke config's data root is not the run's own: $(cat "$root/config/config.toml")"
+  grep -qx 'container_prefix = "smoke_"' "$root/config/holosmith.toml" ||
+    fail "$name/container_prefix" "the smoke config does not prefix containers: $(cat "$root/config/holosmith.toml")"
+  grep -qx 'network_prefix = "smoke_"' "$root/config/holosmith.toml" ||
+    fail "$name/network_prefix" "the smoke config does not prefix networks: $(cat "$root/config/holosmith.toml")"
+  grep -qx 'control_listen = "127.0.0.1:0"' "$root/config/holosmith.toml" ||
+    fail "$name/port" "the smoke config does not ask for a port of its own: $(cat "$root/config/holosmith.toml")"
+  grep -q "^data_root = \"$root/config/data\"$" "$root/config/holosmith.toml" ||
+    fail "$name/data_root" "the smoke config's data root is not the run's own: $(cat "$root/config/holosmith.toml")"
   assertions=$((assertions + 4))
 
   # Arm 3: the real thing.
@@ -11782,8 +11798,8 @@ case_releases() {
   printf '[Unit]\nDescription=Holosmith server\n\n[Service]\nExecStart=%s/current/holosmith serve\nRestart=on-failure\n\n[Install]\nWantedBy=multi-user.target\n' \
     "$tree" >"$unit"
   chmod 0644 "$unit"
-  # The config `--root` reads: the **installed** paths, because `--root` prefixes them (`server deploy --root`'s rule),
-  # and a hub role so the `doctor` runs ask no daemon question.
+  # The config `--config` names, with no paths of its own: `--root` is what puts the **installed** ones in it, so
+  # this file describes the tree the case built — and a hub role so the `doctor` runs ask no daemon question.
   printf 'owner = "%s"\nrole = "hub"\nbackend = "stub"\ncontrol_listen = "127.0.0.1:0"\npreview_listen = "127.0.0.1:0"\nmin_free_gb = 0\nsession_disk_soft_gb = 0\nidle_stop_min = 0\nkeep_releases = 2\n' \
     "$owner" >"$config"
   chmod 0644 "$config"
@@ -12310,8 +12326,10 @@ case_server_deploy() {
       fail "$name/partial/stop" "a run that failed at step 3 evaluated step 4: $(cat "$WORK/$name.partial.out")"
     fi
     assertions=$((assertions + 1))
-    [ -f "$root/partial/config.toml" ] ||
-      fail "$name/partial/left" "the failed run left no config.toml, so the machine is not describable"
+    # The file step 2 installed is the one `--config` named, and it already describes this tree: a run that stopped
+    # at step 3 leaves a machine an operator can read rather than one with nothing to say what it was.
+    grep -q "^data_root = \"$root/partial/data\"$" "$WORK/config-deploy-offline.toml" ||
+      fail "$name/partial/left" "the failed run left no config naming its tree, so the machine is not describable"
     assertions=$((assertions + 1))
     [ -d "$root/partial/data/secrets" ] ||
       fail "$name/partial/left/secrets" "the failed run left no secrets directory"
@@ -12397,9 +12415,10 @@ case_server_deploy() {
   grep -q '^deploy: 6 steps: ' "$WORK/$name.online.out" ||
     fail "$name/online/summary" "no tally line: $(cat "$WORK/$name.online.out")"
   assertions=$((assertions + 1))
-  # The unit's bytes are the deliverable: `ExecStart` names this binary and the root's config, and no child was run
+  # The unit's bytes are the deliverable: `ExecStart` names this binary and the config the run installed, and no
+  # child was run
   # (ADR-0086 — `Tools` has no `systemctl` field at all, so this is a file's content and a log's silence).
-  grep -q "^ExecStart=.* serve --config $root/install/config.toml$" "$root/install/holosmith.service" ||
+  grep -q "^ExecStart=.* serve --config $WORK/config-deploy-online.toml$" "$root/install/holosmith.service" ||
     fail "$name/online/unit" "the unit does not run this binary against the root's config: $(cat "$root/install/holosmith.service")"
   assertions=$((assertions + 1))
   grep -q '^User=holosmith$' "$root/install/holosmith.service" ||
@@ -12409,17 +12428,17 @@ case_server_deploy() {
     fail "$name/online/origins" "the deploy configured Tailscale origins, which left the deploy (ADR-0086): $(cat "$log")"
   fi
   assertions=$((assertions + 1))
-  check "$name/online/config/mode" 644 "$(stat -c '%a' "$root/install/config.toml")"
+  check "$name/online/config/mode" 644 "$(stat -c '%a' "$WORK/config-deploy-online.toml")"
   check "$name/online/data/mode" 755 "$(stat -c '%a' "$root/install/data")"
   check "$name/online/secrets/mode" 700 "$(stat -c '%a' "$root/install/data/secrets")"
   check "$name/online/keys/mode" 600 "$(stat -c '%a' "$root/install/data/secrets/keys.toml")"
   check "$name/online/root/mode" 700 "$(stat -c '%a' "$root/install")"
   # The file it wrote is the machine it measured: the prefixed data root, and a file that re-reads clean.
-  grep -q "^data_root = \"$root/install/data\"$" "$root/install/config.toml" ||
-    fail "$name/online/config/data_root" "the written config does not name the prefixed data root: $(cat "$root/install/config.toml")"
+  grep -q "^data_root = \"$root/install/data\"$" "$WORK/config-deploy-online.toml" ||
+    fail "$name/online/config/data_root" "the written config does not name the prefixed data root: $(cat "$WORK/config-deploy-online.toml")"
   assertions=$((assertions + 1))
   status=0
-  "$artifact" config validate --config "$root/install/config.toml" >/dev/null 2>&1 || status=$?
+  "$artifact" config validate --config "$WORK/config-deploy-online.toml" >/dev/null 2>&1 || status=$?
   check "$name/online/config/valid" 0 "$status"
   docker ps --format '{{.Names}}' | grep -qx hs_egress ||
     fail "$name/online/egress" "hs_egress is not running"
@@ -12438,7 +12457,7 @@ case_server_deploy() {
   # The second run: the acceptance's "changes nothing", as a comparison of the tree, the config's bytes and the
   # two files the deploy must never rewrite (the provider keys and the VAPID pair).
   deploy_listing "$root/install" >"$WORK/$name.tree1"
-  cp "$root/install/config.toml" "$WORK/$name.config1"
+  cp "$WORK/config-deploy-online.toml" "$WORK/$name.config1"
   cp "$root/install/data/secrets/keys.toml" "$WORK/$name.keys1"
   status=0
   PATH="$shims:$PATH" "$artifact" server deploy --root "$root/install" \
@@ -12460,7 +12479,7 @@ AGAIN
   cmp -s "$WORK/$name.tree1" "$WORK/$name.tree2" ||
     fail "$name/again/tree" "the second run changed the tree: $(diff "$WORK/$name.tree1" "$WORK/$name.tree2" 2>&1 | head -5)"
   assertions=$((assertions + 1))
-  cmp -s "$WORK/$name.config1" "$root/install/config.toml" ||
+  cmp -s "$WORK/$name.config1" "$WORK/config-deploy-online.toml" ||
     fail "$name/again/config" "the second run rewrote config.toml"
   assertions=$((assertions + 1))
   cmp -s "$WORK/$name.keys1" "$root/install/data/secrets/keys.toml" ||
@@ -12653,8 +12672,8 @@ case_deploy_ssh() {
   assertions=$((assertions + 1))
   # Exactly one URL line: the target's. This side prints no `deploy: url:` of its own, because it measured none.
   check "$name/run/url/once" 1 "$(grep -c '^deploy: url: ' "$WORK/$name.run.out")"
-  grep -qx "role = \"hub\"" "$root/hub/config.toml" ||
-    fail "$name/run/config/role" "the target's config is not the half that was installed: $(cat "$root/hub/config.toml")"
+  grep -qx "role = \"hub\"" "$WORK/config-deploy-ssh-hub.toml" ||
+    fail "$name/run/config/role" "the target's config is not the half that was installed: $(cat "$WORK/config-deploy-ssh-hub.toml")"
   assertions=$((assertions + 1))
   [ -f "$root/hub/holosmith.service" ] ||
     fail "$name/run/unit" "the target wrote no unit"
@@ -13044,8 +13063,9 @@ case_server_service() {
     assertions=$((assertions + 1))
   fi
   # The program is the one that wrote the unit (`ExecStart` names it because a `PATH` lookup is not the binary that
-  # ran), and the config is the root's — so the two are asserted by shape, the way `case_server_deploy` does.
-  grep -q "^ExecStart=.* serve --config $root/install/config.toml$" "$unit" ||
+  # ran), and the config is the file `--config` named — so the two are asserted by shape, the way `case_server_deploy`
+  # does.
+  grep -q "^ExecStart=.* serve --config $WORK/config-service-online.toml$" "$unit" ||
     fail "$name/unit/exec" "the unit does not run this binary against the root's config: $(cat "$unit")"
   assertions=$((assertions + 1))
 

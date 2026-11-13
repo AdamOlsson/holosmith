@@ -21,8 +21,8 @@ use support::TempDir;
 /// The config every serving test reads, unless it needs another one.
 ///
 /// It names a data root inside the directory: without one, `serve` would create and migrate the
-/// default `/var/lib/holosmith`, so the tests would write machine state and fail wherever that
-/// path is not writable (ADR-0009). It names the **stub** backend for the same reason: a Docker run
+/// account's own `~/.local/share/holosmith/data`, so the tests would write the machine's state
+/// (ADR-0009). It names the **stub** backend for the same reason: a Docker run
 /// runs the preflight first and refuses on a machine without a daemon, and these tests are
 /// about the banner, the signals, the data root and the health payload, not about which backend a
 /// machine would pick — `the_default_backend_is_docker_and_the_log_line_says_so` is the one that asks
@@ -547,12 +547,15 @@ fn a_data_dir_the_file_must_not_name_is_refused_from_the_cli_too() {
     // `serve --data-dir` must refuse it in the same words and never bind.
     let dir = TempDir::new("data-dir-overlap");
     let config = config(&dir);
+    // The file's projects root is the built-in default, so it is the account's — the `--data-dir` that collides
+    // with it has to be spelled from the same value rather than from a literal no longer in the tree.
+    let projects = holosmith::config::Config::default().projects_root;
     let output = holosmith(&[
         "serve",
         "--config",
         config.to_str().expect("UTF-8"),
         "--data-dir",
-        "/var/lib/holosmith/projects",
+        projects.to_str().expect("UTF-8"),
         "--port",
         "0",
     ]);

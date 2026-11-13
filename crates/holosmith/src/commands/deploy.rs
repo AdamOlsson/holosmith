@@ -7,7 +7,7 @@
 //! One function serves both commands, and [`crate::deploy::Kind`] is the whole difference: which half this run
 //! installs, which steps it has no work for, and which group the service user joins. **Nothing is refused over a
 //! role any more** — `server deploy` on a hub and `hub deploy` on a server are both ordinary runs, and the union
-//! each one writes into `config.toml` is what makes the second one land (`deploy::union`).
+//! each one writes into the config is what makes the second one land (`deploy::union`).
 //!
 //! Three things belong to the command rather than to the steps:
 //!
@@ -62,7 +62,7 @@ pub fn run(args: DeployArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let root = Root::resolve(args.root.clone());
+    let root = Root::resolve(args.root.clone(), args.config.clone());
     // The one config the steps see: the two roots moved under the root, and every machine fact untouched — which is
     // why this is computed here and handed over rather than recomputed inside each step (see `deploy::run_as`).
     // The role stays the machine's own; `run_as` puts the union in the copy it installs.

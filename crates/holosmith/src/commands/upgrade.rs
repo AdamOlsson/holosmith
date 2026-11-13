@@ -49,7 +49,7 @@ pub fn run(args: UpgradeArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let root = Root::resolve(args.root.clone());
+    let root = Root::resolve(args.root.clone(), args.config.clone());
     let options = Options {
         candidate: args.binary,
         acknowledge_review: args.acknowledge_review,

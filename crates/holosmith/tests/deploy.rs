@@ -227,7 +227,7 @@ fn deployed_data_root(path: &Path) {
 /// The deploy writes the tree as its owner and does not create the root itself (ADR-0086) — creating it needs the
 /// parent, which on a machine is root's — so every test that expects a run to succeed starts here.
 fn rooted(dir: &TempDir, label: &str) -> Root {
-    let root = Root::resolve(Some(dir.file(label)));
+    let root = Root::resolve(Some(dir.file(label)), Some(dir.file("holosmith.toml")));
     std::fs::create_dir_all(root.path()).expect("the root is creatable");
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
         .expect("the root's mode is settable");
@@ -843,6 +843,69 @@ fn a_dry_run_lists_the_steps_and_creates_nothing() {
 }
 
 #[test]
+fn the_config_is_outside_the_root_and_its_directory_is_made_when_absent() {
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("deploy-config-outside");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let mut config = config(Some(format!("unix://{}", socket.display())));
+    config.control_listen = health_responder();
+    // A fresh account: `~/.config` itself does not exist, so the config file's directory is this run's to make
+    // and it is the one directory step 2 writes that is not under the root.
+    let config_file = dir.file("config/holosmith.toml");
+    let root = Root::resolve(Some(dir.file("root")), Some(config_file.clone()));
+    std::fs::create_dir_all(root.path()).expect("the root is creatable");
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("the root's mode is settable");
+    let deployed = root.config(&config);
+
+    let report = deploy::run(&deployed, &root, &real_tools(&dir), &Fake::new(), false);
+    assert!(!report.failed(), "the install failed:\n{}", report.render());
+    assert!(
+        config_file.is_file(),
+        "the config was not written where --config named it"
+    );
+    assert_eq!(mode(&config_file), 0o644);
+    let directory = root
+        .config_dir()
+        .expect("an absolute config path has a directory");
+    assert_eq!(
+        mode(&directory),
+        0o755,
+        "the config's directory was not made 0755"
+    );
+    assert!(
+        !root.path().join(holosmith::config::CONFIG_FILE).exists()
+            && !root.path().join("config.toml").exists(),
+        "the config landed inside the root"
+    );
+    // The unit names the config the run wrote, which is what makes the daemon read the operator's own file
+    // rather than resolve a home of its own.
+    let unit = std::fs::read_to_string(root.unit()).expect("the unit is readable");
+    assert!(
+        unit.contains(&format!("--config {}", config_file.display())),
+        "the unit does not name the config: {unit}"
+    );
+
+    // A directory that is already there is the operator's: 0700 is an ordinary mode for `~/.config`, so a second
+    // run must neither re-mode it nor report it as work.
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+        .expect("the directory's mode is settable");
+    let report = deploy::run(&deployed, &root, &real_tools(&dir), &Fake::new(), true);
+    assert_eq!(
+        line(&report, DeployStep::Files).word,
+        Word::Satisfied,
+        "a run over a complete tree is not satisfied: {}",
+        line(&report, DeployStep::Files).sentence
+    );
+    assert_eq!(
+        mode(&directory),
+        0o700,
+        "the run re-moded a directory that was already there"
+    );
+}
+
+#[test]
 fn an_install_creates_the_install_tree_with_its_modes() {
     let _serial = one_at_a_time();
     let dir = TempDir::new("deploy-install");
@@ -938,12 +1001,10 @@ fn a_second_run_is_satisfied_and_changes_nothing() {
             line(&second, step).sentence
         );
     }
+    let files = &line(&second, DeployStep::Files).sentence;
     assert!(
-        line(&second, DeployStep::Files)
-            .sentence
-            .contains("holds the config"),
-        "step 2 does not say what it read: {}",
-        line(&second, DeployStep::Files).sentence
+        files.contains("holds the data root") && files.contains("the config is"),
+        "step 2 does not say what it read: {files}"
     );
     assert_eq!(
         listing(root.path()),

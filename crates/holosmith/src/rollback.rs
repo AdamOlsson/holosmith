@@ -323,7 +323,7 @@ mod tests {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = TempDir::new(&format!("unit-{seq}"));
-        let root = Root::resolve(Some(dir.0.clone()));
+        let root = Root::resolve(Some(dir.0.clone()), Some(dir.0.join("holosmith.toml")));
         let release = Release::of(&root);
         std::fs::create_dir_all(release.releases()).expect("a release tree");
         for (at, tag) in tags.iter().enumerate() {

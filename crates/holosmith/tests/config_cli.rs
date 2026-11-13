@@ -9,15 +9,23 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-/// The config path a root names, composed the way the binary composes it: `HOLOSMITH_ROOT`, else the default root.
+/// The config path the binary resolves when nothing names one: the account's own `~/.config/holosmith.toml`.
+///
+/// It is the library's own resolution, so the comparison below is "the binary and the library agree" rather than
+/// "the test spelled the passwd parse again" — and `HOLOSMITH_ROOT` deliberately plays no part, because it moves
+/// the state and only the state.
 fn default_config_path() -> String {
-    let root = std::env::var_os("HOLOSMITH_ROOT").map_or_else(
-        || PathBuf::from(holosmith::config::DEFAULT_ROOT),
-        PathBuf::from,
-    );
-    root.join(holosmith::config::CONFIG_FILE)
-        .display()
-        .to_string()
+    holosmith::config::config_path().display().to_string()
+}
+
+/// The golden file with the two paths the account decides filled in.
+///
+/// Every other byte is the independent copy of the key set; `data_root` and `projects_root` are the two values
+/// that depend on the home, so the test supplies them from the same place the binary derives them. The golden
+/// spells them as `<root>/data` and `<root>/projects`.
+fn golden() -> String {
+    let root = holosmith::config::default_root();
+    include_str!("golden/config-default.toml").replace("<root>", &root.display().to_string())
 }
 
 /// A directory that removes itself, so the tests leave nothing in `/tmp`.
@@ -210,6 +218,39 @@ fn validate_uses_the_default_path_when_none_is_given() {
 }
 
 #[test]
+fn a_decoy_home_does_not_move_the_default_path() {
+    // `HOME` is not a fact about the account: `sudo` sets it from its own policy and a shell can export it, so a
+    // binary that read it would resolve a different config depending on who typed the command. The default path
+    // is the password entry's home, and this run's `HOME` points somewhere else entirely.
+    let default = default_config_path();
+    match std::fs::metadata(&default) {
+        Ok(_) => {
+            eprintln!("SKIP: this machine has {default}");
+            return;
+        }
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            eprintln!("SKIP: {default} cannot be examined from this user ({error})");
+            return;
+        }
+        Err(_) => {}
+    }
+    let directory = TempDir::new("decoy-home");
+    fs::create_dir_all(directory.file("decoy")).expect("the decoy home is creatable");
+    let output = holosmith_with_env(&["config", "show"], &[("HOME", &directory.file("decoy"))]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
+    let shown = stdout_of(&output);
+    assert_eq!(
+        shown.lines().next(),
+        Some(format!("# config_path: {default}").as_str()),
+        "the default path followed $HOME instead of the passwd entry: {shown}"
+    );
+    assert!(
+        !shown.contains(&directory.path().display().to_string()),
+        "the decoy home reached the output: {shown}"
+    );
+}
+
+#[test]
 fn show_prints_every_resolved_default() {
     let directory = TempDir::new("show-defaults");
     let config = directory.write("config.toml", "");
@@ -234,7 +275,7 @@ fn show_prints_every_resolved_default() {
     // The golden is the independent copy of the key set, compared byte for byte: a key the
     // walk or the renderer drops fails here, so a second hand-kept list of key names on top
     // of it could only ever say "you forgot to edit me too".
-    assert_eq!(body, include_str!("golden/config-default.toml"));
+    assert_eq!(body, golden());
 }
 
 #[test]
@@ -248,10 +289,7 @@ fn show_accepts_the_global_flag_before_the_subcommand() {
         "show",
     ]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
-    assert_eq!(
-        body_of(&stdout_of(&output)),
-        include_str!("golden/config-default.toml")
-    );
+    assert_eq!(body_of(&stdout_of(&output)), golden());
 }
 
 #[test]

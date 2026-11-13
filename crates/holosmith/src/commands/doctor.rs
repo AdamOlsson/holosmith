@@ -28,7 +28,7 @@ pub struct DoctorArgs {
 }
 
 pub fn run(args: DoctorArgs) -> ExitCode {
-    let loaded = match Config::load(args.config) {
+    let loaded = match Config::load(args.config.clone()) {
         Ok(loaded) => loaded,
         Err(LoadError::Invalid(problems)) => {
             eprint!("{problems}");
@@ -39,11 +39,12 @@ pub fn run(args: DoctorArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let root = Root::resolve(args.root);
+    let root = Root::resolve(args.root, args.config.clone());
     let config = root.config(&loaded.config);
-    // The install tree's three paths are the root's, which is the one thing `--root` changes: on a machine the rest
-    // of `Tools::default` is what it has, and under a tree these are the files the deploy wrote. `release_root` is
-    // the **root**, not `<root>/releases`: `Release::at` takes what `releases/` and `current` hang off (ADR-0086 D1).
+    // The install tree's three paths are the root's and the config's, which is the one thing `--root` and
+    // `--config` change: on a machine the rest of `Tools::default` is what it has, and under a tree these are the
+    // files the deploy wrote. `release_root` is the **root**, not `<root>/releases`: `Release::at` takes what
+    // `releases/` and `current` hang off.
     let tools = doctor::Tools {
         config_path: root.config_file(),
         release_root: root.path().to_path_buf(),

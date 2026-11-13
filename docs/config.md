@@ -1,9 +1,18 @@
 # Configuring Holosmith
 
-One TOML file per machine, `<root>/config.toml`, read by every verb (`serve`, `doctor`, `deploy`, `status`,
-`build`, `hub host`, …). The root is `HOLOSMITH_ROOT`, default `/var/lib/holosmith` — one directory holding this
-file, the data root, the release tree and the projects (ADR-0086). `--config PATH` names another file; a named file
-that does not exist is an error, while a missing default path means the built-in defaults.
+One TOML file per machine, `~/.config/holosmith.toml`, read by every verb (`serve`, `doctor`, `deploy`, `status`,
+`build`, `hub host`, …). `~` is the home **of the account the command runs as**, read from the password database
+rather than from `HOME`: `sudo holosmith …` reads root's own file, because that is the account it is. Your state is
+the root — `HOLOSMITH_ROOT`, default `~/.local/share/holosmith` — one directory holding the data root, the release
+tree and the projects; the config deliberately sits outside it, because it is the one file a person edits and the
+root is the state a backup carries. `--config PATH` names another file, and `--root DIR` moves the state and only
+the state; a file you named that does not exist is an error, while a missing default path means the built-in
+defaults.
+
+A uid with no password entry — a container started with `--user <uid>`, say — has no home to derive either path
+from, so the defaults become `/.config/holosmith.toml` and `/.local/share/holosmith`. Nothing unprivileged can
+write those, which is the point: name the paths with `--config`, `--root` or `HOLOSMITH_ROOT` instead of getting a
+tree somewhere you did not choose.
 
 ```bash
 holosmith config show       # the resolved config, defaults and all, as valid TOML
@@ -57,8 +66,8 @@ calls from another machine only if that peer's **tailnet node name** is in `allo
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `data_root` | path | `"/var/lib/holosmith/data"` | The data root: `app.db` and its WAL, session directories, `secrets/`. Absolute, and must not be equal to or inside `projects_root`. |
-| `projects_root` | path | `"/var/lib/holosmith/projects"` | The projects root. Each project is a **repository directory directly inside it** (`<projects_root>/<project>` with a `.git` directory), and session worktrees are made under `<projects_root>/.worktrees/<id>`. Absolute, and must not be equal to, inside, or a parent of `data_root` — deleting data must never touch a repository. |
+| `data_root` | path | `"~/.local/share/holosmith/data"` | The data root: `app.db` and its WAL, session directories, `secrets/`. Absolute, and must not be equal to or inside `projects_root`. |
+| `projects_root` | path | `"~/.local/share/holosmith/projects"` | The projects root. Each project is a **repository directory directly inside it** (`<projects_root>/<project>` with a `.git` directory), and session worktrees are made under `<projects_root>/.worktrees/<id>`. Absolute, and must not be equal to, inside, or a parent of `data_root` — deleting data must never touch a repository. |
 | `docker_host` | string | unset | The daemon `docker -H` talks to: `unix://…`, `tcp://…` or `ssh://…`. Unset means the client's own default (`DOCKER_HOST`, else `unix:///var/run/docker.sock`). An `ssh://` daemon is a complaint in the preflight rather than a pass, because the checks that need a container cannot run. |
 
 `<data_root>/secrets/keys.toml` (mode 0600) is **not** a config key: `holosmith key set <provider>` owns it, and
@@ -159,8 +168,8 @@ control_origin = "https://holosmith.example.net"
 preview_origin = "https://preview.example.net"
 allowed_hosts = ["holosmith.example.net", "preview.example.net"]
 owner = "adamolsson"
-data_root = "/var/lib/holosmith/data"
-projects_root = "/var/lib/holosmith/projects"
+data_root = "/home/you/.local/share/holosmith/data"
+projects_root = "/home/you/.local/share/holosmith/projects"
 min_free_gb = 10
 session_disk_soft_gb = 5
 

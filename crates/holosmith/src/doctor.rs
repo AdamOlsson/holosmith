@@ -83,16 +83,16 @@ impl std::fmt::Display for Depth {
 /// is a program, and systemd is a directory — and both are a `PathBuf` for `preflight::Tools`'s reason: a test
 /// points them at what it wrote, because this crate denies `unsafe` and so cannot set `PATH`.
 ///
-/// The last two are the install tree's two machine-wide paths, and they are a seam for a different reason: the
-/// tree `perms` reads is the tree the *caller* installed. `server deploy --root DIR` writes `<DIR>/etc/…` and
-/// `<DIR>/…` under the root, so a check that spelled the paths itself would compare the host's real install against
-/// a run's own tree and hand the operator a `chmod` on a file the run never wrote.
+/// The last three are the install's own paths, and they are a seam for a different reason: the tree `perms` reads is
+/// the tree the *caller* installed. `server deploy --root DIR` writes under `DIR` and `--config PATH` writes the
+/// config at that path, so a check that spelled the paths itself would compare the host's real install against a
+/// run's own tree and hand the operator a `chmod` on a file the run never wrote.
 #[derive(Debug, Clone)]
 pub struct Tools {
     pub preflight: preflight::Tools,
     pub tailscale: PathBuf,
     pub systemd: PathBuf,
-    /// The config file the install wrote: `<root>/config.toml`.
+    /// The config file the install wrote: `--config`'s path, or `<home>/.config/holosmith.toml`.
     pub config_path: PathBuf,
     /// The root the release tree hangs off — `<root>/releases` and `<root>/current` are below it — because
     /// [`crate::release::Release::at`] takes that root and not the `releases` directory.
@@ -104,7 +104,7 @@ pub struct Tools {
 
 impl Default for Tools {
     fn default() -> Self {
-        let root = crate::deploy::Root::resolve(None);
+        let root = crate::deploy::Root::resolve(None, None);
         Self {
             preflight: preflight::Tools::default(),
             tailscale: PathBuf::from("tailscale"),

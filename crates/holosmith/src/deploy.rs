@@ -33,12 +33,13 @@
 //! - **The proxies' recipe lives in [`crate::proxies`].** A deploy and a boot must start the same two containers
 //!   the same way (ADR-0056), and this module is the caller that fails the step instead of warning.
 //!
-//! # The root, and why nothing here escalates
+//! # The root and the config, and why nothing here escalates
 //!
-//! [`Root`] is *where* the machine lives: `HOLOSMITH_ROOT`, or [`crate::config::DEFAULT_ROOT`] — one directory,
-//! owned by the service user, holding the config, the data root, the release tree and the projects (ADR-0086).
-//! There is no second layout and therefore no prefixing: every path this module builds is `<root>/…`, whether the
-//! root is the machine's or a test's own tree.
+//! [`Root`] is *where* the machine lives: `HOLOSMITH_ROOT`, `--root`, or [`crate::config::default_root`] — one
+//! directory holding the data root, the release tree and the projects — and *which file* describes it,
+//! `--config` or `~/.config/holosmith.toml` (ADR-0088). There is no second layout and therefore no prefixing:
+//! every state path this module builds is `<root>/…`, whether the root is the machine's or a test's own tree,
+//! and the config is the one path that is not under it.
 //!
 //! **This program never runs `sudo`.** Creating the account, making the root, and installing and enabling the unit
 //! are root's, so the deploy **reads** their state and **prints** the commands — as the tail remark on the step that
@@ -184,8 +185,8 @@ impl fmt::Display for Kind {
 /// The role a machine holds after a deploy of `kind` has run on it: the spec's Roles table as one function.
 ///
 /// `server` then `hub` is `both`, and so is the other order; a machine that is already `both` stays `both`. The
-/// union is written into the `config.toml` step 2 installs, which is why the second deploy does not have to be told
-/// what the first one did.
+/// union is written into the config step 2 installs, which is why the second deploy does not have to be told what
+/// the first one did.
 pub fn union(found: Role, kind: Kind) -> Role {
     match (found, kind.installs()) {
         (Role::Both, _) => Role::Both,
@@ -376,37 +377,49 @@ impl Report {
     }
 }
 
-/// Where one machine lives: the root, and the six paths under it.
+/// Where one machine lives: the config file, the root, and the paths under it.
 ///
-/// `HOLOSMITH_ROOT` wins over [`DEFAULT_ROOT`], and `--root` is the same value's flag form — the tree a test or an
-/// operator names. Nothing is prefixed and nothing is conditional: a root is a root, and every path here is
-/// `<root>/…` whether the root is `/var/lib/holosmith` or `target/deploy-case/tree` (ADR-0086).
+/// The root is `--root`'s or `HOLOSMITH_ROOT`'s, else the account's own state directory
+/// ([`config::default_root`]); nothing is prefixed and nothing is conditional, so every state path here is
+/// `<root>/…` whether the root is `~/.local/share/holosmith` or `target/deploy-case/tree`.
+///
+/// The config file is deliberately **not** one of them (ADR-0088): it is the one file in an install a person
+/// edits, so it lives at `--config`'s or [`config::config_path`]'s `~/.config/holosmith.toml`, and `--root`
+/// moves the state and only the state. The pair is one value because a deploy writes both and a unit names
+/// both, so a step that took them separately would be one caller away from mixing them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Root {
     path: PathBuf,
+    config: PathBuf,
 }
 
 impl Root {
-    /// The root `--root` names, or `HOLOSMITH_ROOT`, or [`DEFAULT_ROOT`], made absolute so a resume command that
-    /// prints it means the same tree from another directory.
-    pub fn resolve(flag: Option<PathBuf>) -> Self {
-        let path = match flag {
-            Some(path) => path,
-            None => config::root(),
-        };
+    /// The root `--root` names, `HOLOSMITH_ROOT`, or the account's state directory; and the config file
+    /// `--config` names or the account's own. Both are made absolute, so a resume command that prints them means
+    /// the same paths from another directory.
+    pub fn resolve(root: Option<PathBuf>, config: Option<PathBuf>) -> Self {
         Self {
-            path: absolute(&path),
+            path: absolute(&root.unwrap_or_else(config::root)),
+            config: config.map_or_else(config::config_path, |config| absolute(&config)),
         }
     }
 
-    /// The root itself: the service user's home, and the directory every other path is under.
+    /// The root itself: the directory the data root, the release tree and the projects are under, owned by the
+    /// account that runs the daemon.
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    /// `<root>/config.toml`: the file `serve` reads and the deploy renders.
+    /// The config file this run installs and the unit's `ExecStart` names: `--config`'s path, or
+    /// `~/.config/holosmith.toml`.
     pub fn config_file(&self) -> PathBuf {
-        config::config_path(&self.path)
+        self.config.clone()
+    }
+
+    /// `/home/you/.config`: the directory the config file lives in, which a deploy makes when the account has
+    /// none — the one directory a run creates that is not under the root.
+    pub fn config_dir(&self) -> Option<PathBuf> {
+        self.config.parent().map(Path::to_path_buf)
     }
 
     /// `<root>/data`: the data root's default.
@@ -773,7 +786,7 @@ impl ServiceUser {
 /// Step 2: the install tree — the root, four paths inside the data root, and the two files the machine owns.
 ///
 /// The three files are treated differently on purpose, and that difference is the security property of this step:
-/// `config.toml` is the deploy's own rendering and is rewritten when it differs; `keys.toml` holds every stored
+/// the config is the deploy's own rendering and is rewritten when it differs; `keys.toml` holds every stored
 /// provider key and is **never** written over — created when absent and mode-repaired with `chmod`, never with
 /// `install`, which truncates, and its bytes are not even read; and `vapid.toml` is generated once by `openssl`
 /// when it is absent and read-only afterwards, because regenerating it would silence every existing push
@@ -849,15 +862,29 @@ impl Action {
     }
 }
 
-/// The root, the data root, the secrets and the three files, in the order they must be created — a file's directory
-/// first, because `install -m` does not make one, and the key pair after the 0700 directory it lives in.
+/// The root, the config's directory when the account has none, the data root, the secrets and the three files, in
+/// the order they must be created — a file's directory first, because `install -m` does not make one, and the key
+/// pair after the 0700 directory it lives in.
 ///
 /// The root itself is first and is the only item whose outcome can be a *failure* rather than a write: a root this
 /// process cannot write is a run that cannot do anything, and its sentence is the command that would fix it.
 ///
+/// The config's directory is the one item that is **not** under the root, and it is an item only while it is
+/// absent: `~/.config` is the operator's own directory, already there on any machine that has a session, and its
+/// mode (0700 and 0755 are both ordinary) is not this run's to change. A fresh account gets it made; an existing
+/// one is never re-moded.
+///
+/// That item is skipped when the directory is the root or under it, which is what a config *inside* the state tree
+/// asks for — `--root R --config R/holosmith.toml`, this repository's previous spelling. The root is already the
+/// list's first item at 0700, so a second entry for one path would be two contradictory modes: applied in order it
+/// would leave the state root at 0755 and put it back on the next run, and a root is 0700 because the keys and the
+/// sessions are under it. A directory *below* the root is the operator's to make — a state tree's layout is theirs,
+/// and this step makes `data` and the secrets under it — so a config named there fails on that install rather than
+/// acquiring a directory in the tree beside it.
+///
 /// The only `Err` is [`config::render`]'s: a path in the config that is not UTF-8, which no config file can carry
-/// and which this step will not paper over with an empty body — a `config.toml` this deploy wrote and could not
-/// render is a step that failed, not a step that changed something.
+/// and which this step will not paper over with an empty body — a config this deploy wrote and could not render is a
+/// step that failed, not a step that changed something.
 fn items(config: &Config, root: &Root) -> Result<Vec<Item>, String> {
     let secrets = config.data_root.join(key::SECRETS_DIR);
     let rendered = config::render(config).map_err(|error| {
@@ -867,12 +894,22 @@ fn items(config: &Config, root: &Root) -> Result<Vec<Item>, String> {
             root.config_file().display()
         )
     })?;
-    Ok(vec![
-        Item {
-            path: root.path().to_path_buf(),
-            mode: 0o700,
+    let mut items = vec![Item {
+        path: root.path().to_path_buf(),
+        mode: 0o700,
+        kind: ItemKind::Directory,
+    }];
+    if let Some(directory) = root.config_dir()
+        && !directory.starts_with(root.path())
+        && !directory.is_dir()
+    {
+        items.push(Item {
+            path: directory,
+            mode: 0o755,
             kind: ItemKind::Directory,
-        },
+        });
+    }
+    items.extend([
         Item {
             path: root.config_file(),
             mode: 0o644,
@@ -898,7 +935,8 @@ fn items(config: &Config, root: &Root) -> Result<Vec<Item>, String> {
             mode: 0o600,
             kind: ItemKind::Vapid,
         },
-    ])
+    ]);
+    Ok(items)
 }
 
 /// The apply: read the service user, then every item, then run the pending actions in order, answering the step's
@@ -947,8 +985,9 @@ fn install(
             step: DeployStep::Files,
             word: Word::Satisfied,
             sentence: format!(
-                "{} holds the config, the data root, the secrets and the keys with their modes{remark}",
-                root.describe()
+                "{} holds the data root, the secrets and the keys with their modes, and the config is {}{remark}",
+                root.describe(),
+                root.config_file().display()
             ),
         };
     }
@@ -1529,9 +1568,11 @@ pub fn unit_text(exe: &Path, role: Role, root: &Root) -> String {
         "Requires=docker.service\n"
     };
     // `ProtectHome=yes` hides `/home`, `/root` and `/run/user` from the service, which is the cheap half of the
-    // sandbox — and it would hide the root itself if an operator put the root under `/home`. So the one directive
-    // that cannot coexist with such a root is the one that is written conditionally.
-    let home = if root.path().starts_with("/home") {
+    // sandbox — and it would hide the root or the config if either is under `/home`, which is where both live on
+    // the install this build is moving to. So the one directive that cannot coexist with such a path is written
+    // only when neither of them is under `/home`.
+    let under_home = |path: &Path| path.starts_with("/home");
+    let home = if under_home(root.path()) || under_home(&root.config_file()) {
         ""
     } else {
         "ProtectHome=yes\n"
@@ -1742,5 +1783,50 @@ pub fn wait_for_health(listen: SocketAddr, bound: Duration) -> bool {
         }
         // The last sleep is short: a wait that has 40 ms left should ask again in 40, not in a poll interval.
         std::thread::sleep(HEALTH_POLL.min(bound - elapsed));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One machine's list of items, for a deploy whose `--config` is `spelling` — the config file inside the root
+    /// it names. [`items`] reads no file and writes none, so no path here has to exist.
+    fn items_for(spelling: &Path) -> Vec<Item> {
+        let root = Root::resolve(
+            Some(spelling.to_path_buf()),
+            Some(spelling.join(config::CONFIG_FILE)),
+        );
+        let config = Config {
+            data_root: root.data_root(),
+            ..Config::default()
+        };
+        items(&config, &root).expect("the config renders, so every item is known")
+    }
+
+    #[test]
+    fn a_config_inside_the_root_is_one_item_and_that_item_is_the_roots_0700() {
+        // The previous layout's own spelling, `--root R --config R/holosmith.toml`, on a machine where `R` is not
+        // there yet: the config's directory **is** the root, so an entry for it beside the root's own would be two
+        // modes for one path — applied in order, a state tree at 0755 that the next run puts back to 0700.
+        let scratch =
+            std::env::temp_dir().join(format!("holosmith-deploy-items-{}", std::process::id()));
+        let spelling = scratch.join("root");
+        assert!(
+            !spelling.exists(),
+            "{} is not a tree this test made",
+            spelling.display()
+        );
+
+        let items = items_for(&spelling);
+        let listed: Vec<&Item> = items.iter().filter(|item| item.path == spelling).collect();
+        assert_eq!(
+            listed.len(),
+            1,
+            "the root is {} items: {:?}",
+            listed.len(),
+            listed.iter().map(|item| item.mode).collect::<Vec<u32>>()
+        );
+        assert_eq!(listed[0].mode, 0o700, "the root is not the 0700 item");
     }
 }

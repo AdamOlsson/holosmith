@@ -42,7 +42,7 @@ pub fn run(args: UninstallArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let root = Root::resolve(args.root.clone());
+    let root = Root::resolve(args.root.clone(), args.config.clone());
     // The one config the steps see: the two roots moved under the root, and every machine fact untouched — the same
     // contract `server deploy` hands its steps (see `deploy::run`).
     let deployed = root.config(&loaded.config);

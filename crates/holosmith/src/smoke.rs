@@ -80,7 +80,8 @@ pub const PROMPT: &str = "holosmith smoke: replay the recorded turn";
 ///
 /// `--root` is a directory the harness may **remove** (it is scratch, and a second run must not inherit a first
 /// one's database). Deleting an operator-supplied path on a guess is not acceptable, so the guess is this line: a
-/// directory is the smoke run's only when its `config.toml` begins with it. Anything else is refused by name.
+/// directory is the smoke run's only when the config in it ([`crate::config::CONFIG_FILE`]) begins with it.
+/// Anything else is refused by name.
 pub const CONFIG_MARKER: &str =
     "# holosmith smoke: written by `holosmith smoke`; removed when the run passes";
 
@@ -385,7 +386,7 @@ fn execute(config: &Config, binary: &Path, root: &Path) -> Result<(), Ending> {
     let root = prepare_root(root).map_err(Ending::CannotRun)?;
     let image = image();
     let preview = free_port().map_err(Ending::CannotRun)?;
-    let config_path = root.join("config.toml");
+    let config_path = root.join(crate::config::CONFIG_FILE);
     std::fs::write(&config_path, config_text(&image, &root, preview)).map_err(|error| {
         Ending::CannotRun(format!(
             "the smoke config {} could not be written ({error})",
@@ -522,7 +523,7 @@ fn prepare_root(root: &Path) -> Result<PathBuf, String> {
 
 /// Whether `root` is a root a previous smoke run wrote, by the marker line of its config.
 fn is_smoke_root(root: &Path) -> bool {
-    std::fs::read_to_string(root.join("config.toml"))
+    std::fs::read_to_string(root.join(crate::config::CONFIG_FILE))
         .is_ok_and(|text| text.lines().next() == Some(CONFIG_MARKER))
 }
 
@@ -1380,7 +1381,7 @@ mod tests {
         let ours = base.join("ours");
         std::fs::create_dir_all(&ours).expect("a scratch directory");
         std::fs::write(
-            ours.join("config.toml"),
+            ours.join(crate::config::CONFIG_FILE),
             format!("{CONFIG_MARKER}\nrole = \"server\"\n"),
         )
         .expect("a smoke config");
@@ -1392,7 +1393,7 @@ mod tests {
             "a previous run's database survived into the next one"
         );
         assert!(
-            !root.join("config.toml").exists(),
+            !root.join(crate::config::CONFIG_FILE).exists(),
             "the old config survived"
         );
         assert!(

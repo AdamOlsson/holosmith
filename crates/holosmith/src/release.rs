@@ -508,7 +508,10 @@ mod tests {
         let unit = crate::deploy::unit_text(
             Path::new("/usr/local/bin/holosmith"),
             crate::config::Role::Server,
-            &crate::deploy::Root::resolve(Some(PathBuf::from("/var/lib/holosmith"))),
+            &crate::deploy::Root::resolve(
+                Some(PathBuf::from("/var/lib/holosmith")),
+                Some(PathBuf::from("/etc/holosmith/holosmith.toml")),
+            ),
         );
         assert_eq!(
             unit_executable(&unit),
@@ -519,7 +522,10 @@ mod tests {
         let rooted = crate::deploy::unit_text(
             Path::new("/tree/bin/holosmith"),
             crate::config::Role::Server,
-            &crate::deploy::Root::resolve(Some(PathBuf::from("/tree"))),
+            &crate::deploy::Root::resolve(
+                Some(PathBuf::from("/tree")),
+                Some(PathBuf::from("/etc/holosmith/holosmith.toml")),
+            ),
         );
         assert_eq!(
             unit_executable(&rooted),

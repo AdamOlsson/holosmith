@@ -194,7 +194,7 @@ fn world(label: &str) -> Option<World> {
     .expect("a fresh database opens");
     drop(database);
 
-    let root = Root::resolve(Some(dir.file("root")));
+    let root = Root::resolve(Some(dir.file("root")), Some(dir.file("holosmith.toml")));
     let release = Release::of(&root);
     let info = promote::ask_version(&artifact).expect("the artifact answers `version --json`");
     let digest = images::digest(&artifact).expect("the artifact is readable");

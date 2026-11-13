@@ -69,8 +69,9 @@ from — so it is one path to back up and one to delete, and the config is delib
 `~/.config/holosmith.toml`, because that is the one file in an install a person edits, and the root is the state a
 backup carries. `--root DIR` is the same value's flag form: the tree the gate or an operator owns, not a second
 privilege mode. The unit's `ExecStart` names the config explicitly, so the daemon never resolves `~` and never decides
-the root from who ran it. The default here is ADR-0088's; this build still ships `/var/lib/holosmith` with the config
-inside it, so until the deploy that changes both lands this entry is the target rather than the build.
+the root from who ran it. These two paths are the build's: the root's default and the config's place are ADR-0088's,
+and the deploy still installs the unit as a system unit and creates the `holosmith` account, which is the deploy that
+has not moved yet.
 _Avoid_: Install dir, home dir, prefix, install tree (when the whole root is meant — say root)
 
 **Hub**:

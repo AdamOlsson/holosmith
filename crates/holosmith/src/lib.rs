@@ -26,6 +26,7 @@ pub mod fake_pi;
 pub mod forward;
 pub mod hosts;
 pub mod http;
+pub mod identity;
 pub mod images;
 pub mod key;
 pub mod keyproxy;

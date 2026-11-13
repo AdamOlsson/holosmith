@@ -129,12 +129,17 @@ mod tests {
         render(config).expect("a config read from a file renders")
     }
 
+    /// The golden file with the two paths the account decides filled in: `<root>` is the state directory the
+    /// defaults derive from, and every other byte is the independent copy of the key set.
+    fn golden() -> String {
+        let root = crate::config::default_root();
+        include_str!("../../tests/golden/config-default.toml")
+            .replace("<root>", &root.display().to_string())
+    }
+
     #[test]
     fn the_defaults_render_byte_identically_to_the_golden_file() {
-        assert_eq!(
-            rendered(&Config::default()),
-            include_str!("../../tests/golden/config-default.toml")
-        );
+        assert_eq!(rendered(&Config::default()), golden());
     }
 
     #[test]

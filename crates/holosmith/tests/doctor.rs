@@ -345,7 +345,10 @@ fn a_clean_machine_passes_quick_with_its_whole_list_in_order() {
 /// It is the field itself: `release_root` is what `releases/` and `current` hang off, so the root a unit's
 /// `ExecStart` spells is exactly that path, and the unit text below and `Release::at` agree on one spelling.
 fn root_of(tools: &doctor::Tools) -> holosmith::deploy::Root {
-    holosmith::deploy::Root::resolve(Some(tools.release_root.clone()))
+    holosmith::deploy::Root::resolve(
+        Some(tools.release_root.clone()),
+        Some(tools.config_path.clone()),
+    )
 }
 
 #[test]
