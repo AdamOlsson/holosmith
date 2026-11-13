@@ -8,7 +8,8 @@
 # scripts/build.sh (which runs scripts/build-web.sh and scripts/check-static.sh),
 # scripts/check-embed.sh, then serve: dist/<host-triple>/holosmith on a random port with a temp
 # config and a temp data dir, answering /api/health, the schema version, the app shell, the 404
-# envelope, every browser-facing guard refusal (ADR-0010), the create endpoint's 202/422/409
+# envelope, every browser-facing guard refusal and the loopback spelling of the control origin
+# (ADR-0010), the create endpoint's 202/422/409
 # answers, the sessions list, one session by id, the session screen's path, the session's event
 # stream, a prompt's turn, a turn's deltas coalesced into no more rows than the script's frames, a
 # timeout that does not fire on a short turn, an abort down to
@@ -124,6 +125,11 @@ docker_second_session_id=""
 # the only hook — takes it down too (the push receiver is the first: a `node` listener on a port and a data
 # root, which outlived two failing runs of `case_push` before the trap learned about it).
 extra_pid=""
+# The relay `case_forward` stands in front of its peer, for the row that must name the peer's host on another port.
+# It has a slot of its own rather than `extra_pid`, which that case has already spent on the silent stand-in: a `fail`
+# anywhere between the relay's first bind and the case's own teardown leaves a python listener on a pinned port, which
+# is the orphan the two lines above exist to prevent.
+relay_pid=""
 # The second machine a case runs. Its own pid, for `start_peer`'s reason.
 peer_pid=""
 
@@ -166,6 +172,13 @@ cleanup() {
     wait "$extra_pid" 2>/dev/null || true
   fi
   extra_pid=""
+  # `case_forward`'s relay, on the same rule: the case kills it gracefully at its end, and this is what a `fail`
+  # before that point needs.
+  if [ -n "$relay_pid" ] && kill -0 "$relay_pid" 2>/dev/null; then
+    kill "$relay_pid" 2>/dev/null || true
+    wait "$relay_pid" 2>/dev/null || true
+  fi
+  relay_pid=""
   local id
   for id in ${docker_session_id:-} ${docker_second_session_id:-}; do
     docker rm --force "s_$id" >/dev/null 2>&1 || true
@@ -460,6 +473,7 @@ serve_cases=(
   case_guard_bad_client
   case_guard_bad_owner
   case_guard_passes
+  case_guard_loopback_origin
   case_health_is_exempt
   case_event_coalescing
   case_create_session
@@ -1569,6 +1583,32 @@ case_guard_passes() {
   response="$(answer "$name")"
   expect_status "$name" "$response" 404
   expect_code "$name" "$response" not_found
+}
+
+# The same request from a page opened on the **other** loopback name: `localhost` and `127.0.0.1` are
+# one listener, so the guard accepts either spelling of the configured origin. The shared boot's
+# `--port 0` re-derives `control_origin` from the bound address with the host the file names, which is
+# the default `localhost` — the precondition is asserted first, so the case cannot pass vacuously
+# against a boot that named the IP itself. A real domain gains no alias, so a foreign origin is still
+# `bad_origin` against the same boot.
+case_guard_loopback_origin() {
+  local name=case_guard_loopback_origin foreign="case_guard_loopback_origin_foreign" response
+  check "$name/boot" "http://localhost:$port" "$control_origin"
+  fetch "$name" POST /api/nope "Host: 127.0.0.1" "Content-Length: 0" \
+    "Origin: http://127.0.0.1:$port" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "$name/no_answer" "POST /api/nope did not answer"
+  response="$(answer "$name")"
+  expect_status "$name" "$response" 404
+  expect_code "$name" "$response" not_found
+
+  fetch "$foreign" POST /api/nope "Host: 127.0.0.1" "Content-Length: 0" \
+    "Origin: http://evil.example:$port" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" ||
+    fail "$foreign/no_answer" "POST /api/nope did not answer"
+  response="$(answer "$foreign")"
+  expect_status "$foreign" "$response" 403
+  expect_code "$foreign" "$response" bad_origin
 }
 
 # `is_guard_exempt` is the one exemption list, so the health probe answers a foreign `Host`.
@@ -5474,8 +5514,10 @@ AGAIN
 # 3. the event stream: the hub's frames decoded and compared with the peer's own, `... | cmp`, plus a
 #    `Last-Event-ID` round trip that starts at the next seq;
 # 4. six answers in five codes: `local`'s `308`, an unknown name, the registry not relayed, a peer that is
-#    gone (`502`), a peer that accepts and never answers (`504`), and a peer whose row is a different spelling of the
-#    right origin (the peer's own `403 bad_origin`, relayed — the forwarded refusal surviving the trip);
+#    gone (`502`), a peer that accepts and never answers (`504`), and a peer whose row names its host on another
+#    port (the peer's own `403 bad_origin`, relayed — the forwarded refusal surviving the trip). The row's origin
+#    has to be one the peer's guard **accepts**, which is its control origin or a loopback alias of it: another
+#    loopback spelling now reaches the handler, so only a port difference is still refused;
 # 5. a hub-only machine serving its reads and refusing the create (`403 sessions_disabled`, no row);
 # 6. the preview hop: a container's dev server through the hub's listener, and a hand-written `101` through it;
 # 7. a peer killed mid-stream: the client's socket **ends** (EOF, not a timeout) and the next request is the `502`.
@@ -5485,7 +5527,7 @@ case_forward() {
   local hub_config="$hub_root/config.toml" peer_config="$peer_root/config.toml"
   local hub_data="$hub_root/data" peer_data="$peer_root/data"
   local seed="$hub_root/hosts.toml" standin_pid="" response body id id2 label
-  local hub_control hub_preview peer_control peer_preview silent_port gone_port image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
+  local hub_control hub_preview peer_control peer_preview relay_port silent_port gone_port image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
   local rc=0 line fd upstream_port events
 
   # The guards first, before `stop_serve`: a case that skipped after stopping the run's server would leave
@@ -5497,9 +5539,11 @@ case_forward() {
   elif ! docker image inspect "$image" >/dev/null 2>&1; then
     preview_arms=0
   fi
-  # `python3` is needed by three arms — the silent peer, the two decoded streams and the WebSocket handshake — and by
-  # nothing else, so it is a flag rather than an early return: the create, the replay, the byte-for-byte row, four of
-  # the refusals and the whole of the mid-stream death have no business skipping because one tool is missing.
+  # `python3` decides three arms — the silent peer, the two decoded streams and the WebSocket handshake — so it is a
+  # flag rather than an early return: the create, the replay, the byte-for-byte row, four of the refusals and the whole
+  # of the mid-stream death have no business skipping because one tool is missing. What is not conditional is
+  # `free_port` and the relay in front of the peer: both are python3 this case cannot run without, so a machine with
+  # none fails at its first port rather than skipping anything here.
   local have_python3=1
   command -v python3 >/dev/null 2>&1 || have_python3=0
 
@@ -5514,6 +5558,10 @@ case_forward() {
   peer_control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
   peer_preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
   silent_port="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  # The port a relay in front of the peer listens on: the row that must be refused names the peer's host on this
+  # port rather than its own, because a loopback host spelling is an alias the peer's guard accepts — so the port is
+  # the one thing left to differ.
+  relay_port="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
   # A port nothing will listen on: bound and released, so the kernel refuses the connection.
   gone_port="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
 
@@ -5568,17 +5616,64 @@ PY
       fail "$name/silent" "the silent peer did not bind $silent_port: $(cat "$root/silent.err")"
   fi
 
-  # The hub's registry: the peer under its registered name, the same peer under a **different spelling** of the same
-  # origin (a forwarded mutating call to that row must come back as the peer's own `403 bad_origin`), the silent
-  # peer, and a machine that is not there. The hub probes every row at boot.
+  # A **relay** in front of the peer: a plain TCP pump on a second port, so a row can name the peer's host on an
+  # origin the peer's guard refuses. A loopback host spelling is no longer one of those — `localhost` and `127.0.0.1`
+  # are aliases of one origin — so the port is what differs, and the forwarded call still reaches the peer.
+  cat >"$root/relay.py" <<'PY'
+import socket, sys, threading
+
+relay_port, upstream_port = int(sys.argv[1]), int(sys.argv[2])
+
+
+def pump(source, target):
+    try:
+        while True:
+            data = source.recv(65536)
+            if not data:
+                break
+            target.sendall(data)
+    except OSError:
+        pass
+    finally:
+        try:
+            target.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+
+
+server = socket.socket()
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("127.0.0.1", relay_port))
+server.listen(8)
+print("PORT %d" % server.getsockname()[1], flush=True)
+while True:
+    client, _ = server.accept()
+    upstream = socket.create_connection(("127.0.0.1", upstream_port))
+    threading.Thread(target=pump, args=(client, upstream), daemon=True).start()
+    threading.Thread(target=pump, args=(upstream, client), daemon=True).start()
+PY
+  python3 "$root/relay.py" "$relay_port" "$peer_control" >"$root/relay.out" 2>"$root/relay.err" &
+  relay_pid=$!
+  for _ in $(seq 1 200); do
+    grep -q '^PORT ' "$root/relay.out" 2>/dev/null && break
+    kill -0 "$relay_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  [ "$(sed -n 's/^PORT \([0-9]*\)$/\1/p' "$root/relay.out")" = "$relay_port" ] ||
+    fail "$name/relay" "the relay did not bind $relay_port: $(cat "$root/relay.err")"
+
+  # The hub's registry: the peer under its registered name, the same peer **behind the relay** on another port (a
+  # forwarded mutating call to that row must come back as the peer's own `403 bad_origin`: a port is not one of the
+  # row's origin's loopback spellings), the silent peer, and a machine that is not there. The hub probes every row
+  # at boot, and the relay passes a probe straight through to the peer, so the relay's row is a reachable one.
   cat >"$seed" <<EOF
 [[hosts]]
 name = "workshop"
 url = "http://127.0.0.1:$peer_control"
 
 [[hosts]]
-name = "wrongspelling"
-url = "http://localhost:$peer_control"
+name = "wrongport"
+url = "http://127.0.0.1:$relay_port"
 
 [[hosts]]
 name = "silent"
@@ -5804,12 +5899,13 @@ PY
     expect_code "$name/timeout" "$(answer "$label")" upstream_timeout
   fi
 
-  # A row naming the peer by **another spelling** of the same origin: the probe reaches it, and every mutating call
-  # comes back as the peer's own `403 bad_origin`, because its guard compares the header as text against its
-  # `control_origin` while `hosts::is_local` folds ports. That is the rule ADR-0074 records ("register a machine by
-  # the exact origin it reports"), and the forwarded refusal arriving intact is the measurement.
+  # A row naming the peer's host on **another port**, through the relay: the probe reaches the peer, and every
+  # mutating call comes back as the peer's own `403 bad_origin`, because its guard compares the header against its
+  # `control_origin` — and a loopback alias of that origin is another host spelling, never another port. That is the
+  # rule ADR-0074 records ("register a machine by an origin its guard accepts"), and the forwarded refusal arriving
+  # intact is the measurement.
   label="$name-wrong-origin"
-  fetch_body "$label" POST "/api/hosts/wrongspelling/sessions/$id/abort" '' \
+  fetch_body "$label" POST "/api/hosts/wrongport/sessions/$id/abort" '' \
     "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
     "X-Holosmith-Client: 1" || fail "$label" "did not answer"
   expect_status "$name/wrong_origin" "$(answer "$label")" 403
@@ -6008,6 +6104,11 @@ PYWS
     wait "$standin_pid" 2>/dev/null || true
   fi
   standin_pid=""
+  if [ -n "$relay_pid" ]; then
+    kill "$relay_pid" 2>/dev/null || true
+    wait "$relay_pid" 2>/dev/null || true
+  fi
+  relay_pid=""
   extra_pid=""
   # Two data roots, two configs, the seed, the two python helpers and the event dumps: this case's, and every other
   # boot-owning case removes what it made.

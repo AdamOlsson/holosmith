@@ -73,8 +73,9 @@ structural.**
 
 ## D4 — the hub authors the request it forwards
 
-`Host` and `Origin` become the **peer's** own origin (its guard compares `Origin` as text against its `control_origin`
-and `Host` against its `allowed_hosts`), `X-Holosmith-Client: 1` says this machine is a Holosmith, and three headers
+`Host` and `Origin` become the **peer's** own origin (its guard compares `Origin` against the one origin it accepts
+— the `control_origin` it reports and, when that names a loopback host, that host's two sibling spellings (ADR-0010)
+— and `Host` against its `allowed_hosts`), `X-Holosmith-Client: 1` says this machine is a Holosmith, and three headers
 are the caller's and travel **verbatim**: `Content-Type` (what the body is), `Idempotency-Key` (which retry this is —
 a create replayed through a hub must answer the peer's *row*, not a second session) and `Last-Event-ID` (where a
 stream resumes). Hop-by-hop headers, the caller's `Host`/`Origin`, `Expect` and `tailscale-user-login` do not travel;
@@ -88,10 +89,12 @@ is the author of the call it makes".
 That is exactly the hole **/V11** closes (`allowed_hubs` and the whois), and the shape it has to verify is
 `forward::request_head`. Two facts follow from the guard's own text and are prerequisites rather than checks:
 
-- **the row's origin must be the exact `control_origin` the machine reports**, ports included, because the guard
-  compares the header as text while `hosts::is_local` folds ports. Another spelling is `403 bad_origin` at the peer —
-  the gate's `case_forward` measures that (a `wrongspelling` row naming the peer's `localhost` while its origin is
-  `127.0.0.1`), and it doubles as "a peer's own refusal survives the trip";
+- **the row's origin must be one its guard accepts** — the `control_origin` the machine reports, or a loopback alias
+  of it — because that set is what the guard compares the header against and `hosts::is_local` folds the same set, so
+  "the guard accepts it" and "it is this machine" are one answer. A host that is no loopback alias of its control
+  origin, a different port, or a different scheme is `403 bad_origin` at the peer — the gate's `case_forward` measures
+  that (a `wrongport` row naming the peer's host on another port, in front of which the case stands a relay), and it
+  doubles as "a peer's own refusal survives the trip";
 - `tailscale-user-login` is dropped, so the peer's `owner` check is vacuous for a forwarded call (its
   `(None, _) => true` arm). That is the to change, not this story's.
 

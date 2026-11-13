@@ -186,8 +186,8 @@ pub struct Request<'a> {
 /// The request head this machine sends a peer.
 ///
 /// **The hub authors the call.** `Host` and `Origin` are the **peer's** own origin — its guard compares `Origin`
-/// as text against its `control_origin`, and it answers `Host` against its `allowed_hosts` — and
-/// `X-Holosmith-Client: 1` is this machine saying it is one. Three headers are the caller's and are copied
+/// as text against its `control_origin` or a loopback alias of it, and it answers `Host` against its `allowed_hosts`
+/// — and `X-Holosmith-Client: 1` is this machine saying it is one. Three headers are the caller's and are copied
 /// verbatim: `Content-Type` (what the body is), `Idempotency-Key` (which retry this is: a create replayed through
 /// the hub must answer the peer's *row*, not a second session) and `Last-Event-ID` (where a stream resumes).
 /// Everything else is dropped: hop-by-hop headers are the hop's, `Expect` would make the peer answer `100

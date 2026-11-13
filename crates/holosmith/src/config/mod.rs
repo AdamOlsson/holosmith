@@ -115,6 +115,16 @@ impl std::fmt::Display for Role {
     }
 }
 
+/// The names a machine's own loopback listener answers on, in the spelling an origin writes them.
+///
+/// Three spellings of one listener, which is why the control origin check accepts all of them: an
+/// operator who bookmarks `http://127.0.0.1:8080` is on the page a config naming
+/// `http://localhost:8080` describes, and the difference is a name rather than an origin. It is
+/// deliberately not `http::guard::IMPLICIT_HOSTS`, which holds the first two and not `[::1]`: an
+/// `Origin` of `http://[::1]:8080` is accepted here, while `Host: [::1]` stays a `bad_host` until
+/// the machine lists it in `allowed_hosts`, because the two checks answer two questions.
+const LOOPBACK_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "[::1]"];
+
 /// An origin for the `Origin` and `Host` checks: scheme and authority, nothing else.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -175,6 +185,38 @@ impl Origin {
             Some(digits) => digits.parse().ok(),
             None => default_port(parts.scheme),
         }
+    }
+
+    /// The other loopback spellings of this origin: the same scheme and port under each name in
+    /// `LOOPBACK_HOSTS` but its own. Empty for every other host.
+    ///
+    /// A browser sends the origin it read, so a page opened at `http://127.0.0.1:8080` sends an
+    /// `Origin` no config spelling `http://localhost:8080` matches as text. Only a loopback host
+    /// has that second spelling: a real domain is one name, and inventing another would widen the
+    /// check to an origin the operator never configured.
+    ///
+    /// The port is rendered through [`Self::with_port`] rather than copied from the text, so a
+    /// config that spells the scheme's own port (`http://localhost:80`, which [`Self::parse`]
+    /// allows) yields the aliases a browser actually sends instead of two origins nobody can be at.
+    /// An origin whose port is not a number gains no alias: there is no port to fold.
+    pub fn loopback_aliases(&self) -> Vec<Self> {
+        let Some(parts) = self.parts() else {
+            return Vec::new();
+        };
+        if !LOOPBACK_HOSTS
+            .iter()
+            .any(|name| parts.host.eq_ignore_ascii_case(name))
+        {
+            return Vec::new();
+        }
+        let Some(port) = self.port() else {
+            return Vec::new();
+        };
+        LOOPBACK_HOSTS
+            .iter()
+            .filter(|name| !parts.host.eq_ignore_ascii_case(name))
+            .map(|name| Self(format!("{}://{name}", parts.scheme)).with_port(port))
+            .collect()
     }
 
     /// The authority without its port — the host alone, an IPv6 literal still bracketed.
@@ -2013,6 +2055,63 @@ allow = ["crates.io"]
         assert_eq!(
             Origin("http://[::1".to_string()).with_port(8080).as_str(),
             "http://[::1"
+        );
+    }
+
+    #[test]
+    fn a_loopback_origin_has_the_other_loopback_spellings_of_itself() {
+        // Same scheme and port, another of the three names the machine answers on: what a page
+        // opened by IP sends to a config that says `localhost`.
+        let cases = [
+            (
+                "http://localhost:8080",
+                vec!["http://127.0.0.1:8080", "http://[::1]:8080"],
+            ),
+            (
+                "http://127.0.0.1:8080",
+                vec!["http://localhost:8080", "http://[::1]:8080"],
+            ),
+            (
+                "https://[::1]:8443",
+                vec!["https://localhost:8443", "https://127.0.0.1:8443"],
+            ),
+            // A scheme's own port is never written, exactly as `with_port` never writes it — whether the config
+            // left it out or spelled it.
+            ("http://localhost", vec!["http://127.0.0.1", "http://[::1]"]),
+            (
+                "http://localhost:80",
+                vec!["http://127.0.0.1", "http://[::1]"],
+            ),
+        ];
+        for (text, expected) in cases {
+            let origin = Origin::parse(text).expect("a valid origin");
+            let aliases: Vec<String> = origin
+                .loopback_aliases()
+                .iter()
+                .map(|alias| alias.as_str().to_string())
+                .collect();
+            assert_eq!(aliases, expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn only_a_loopback_origin_has_aliases() {
+        // A named origin is one name: a second spelling would be an origin nobody configured, and
+        // the tailnet name a deployed machine serves is exactly the case that must not widen.
+        for text in [
+            "https://control.example:8443",
+            "https://box.tail1234.ts.net",
+            "http://localhost.example:8080",
+            "http://[2001:db8::1]:8080",
+        ] {
+            let origin = Origin::parse(text).expect("a valid origin");
+            assert!(origin.loopback_aliases().is_empty(), "{text}");
+        }
+        // An origin with no readable host has nothing to swap, so it has no alias either.
+        assert!(
+            Origin("http://[::1".to_string())
+                .loopback_aliases()
+                .is_empty()
         );
     }
 

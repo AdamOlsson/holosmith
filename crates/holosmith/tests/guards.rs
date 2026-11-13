@@ -280,6 +280,79 @@ async fn the_configured_control_origin_passes() {
 }
 
 #[tokio::test]
+async fn a_loopback_origin_is_accepted_in_either_spelling() {
+    // A bookmark by IP and a page loaded from `localhost` are one listener, so the guard accepts
+    // whichever of the two the config does not spell — and either way round.
+    let cases = [
+        ("http://localhost:8080", "http://127.0.0.1:8080"),
+        ("http://127.0.0.1:8080", "http://localhost:8080"),
+    ];
+    for (configured, sent) in cases {
+        let served = Served::start_with(
+            http::router(state()),
+            guards_for(&[], None, configured),
+            GRACE,
+        )
+        .await;
+        let response = post(
+            served.addr,
+            "/api/nope",
+            &[
+                ("Origin", sent),
+                ("Content-Type", "application/json"),
+                ("X-Holosmith-Client", "1"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            response.status, 404,
+            "{sent} against a {configured} control origin: {}",
+            response.body
+        );
+        assert_eq!(body_code(&response), NOT_FOUND);
+        served.finish().await.expect("a clean shutdown");
+    }
+}
+
+#[tokio::test]
+async fn a_spelling_the_alias_rule_does_not_cover_is_bad_origin() {
+    // The alias rule is a loopback rule: a real domain is one origin, so its refusal is the one the refusing case
+    // above asserts. The two other axes are the ones the gate leans on — the peer must refuse another loopback
+    // *port*, and another scheme on the same loopback host — so they are pinned here rather than only in the gate's
+    // relay arm.
+    let cases = [
+        ("https://control.example:8443", "https://127.0.0.1:8443"),
+        (ORIGIN, "http://127.0.0.1:8081"),
+        (ORIGIN, "https://127.0.0.1:8080"),
+    ];
+    for (configured, sent) in cases {
+        let served = Served::start_with(
+            http::router(state()),
+            guards_for(&[], None, configured),
+            GRACE,
+        )
+        .await;
+        let response = post(
+            served.addr,
+            "/api/nope",
+            &[
+                ("Origin", sent),
+                ("Content-Type", "application/json"),
+                ("X-Holosmith-Client", "1"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            response.status, 403,
+            "{sent} against a {configured} control origin: {}",
+            response.body
+        );
+        assert_eq!(body_code(&response), BAD_ORIGIN);
+        served.finish().await.expect("a clean shutdown");
+    }
+}
+
+#[tokio::test]
 async fn a_get_needs_no_origin() {
     let served = Served::start(http::router(state()), GRACE).await;
     let response = send(served.addr, "GET", "/api/nope", &[("Host", LOOPBACK)]).await;

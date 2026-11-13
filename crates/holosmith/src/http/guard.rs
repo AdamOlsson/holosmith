@@ -3,9 +3,9 @@
 //! [`Guards`] is built once from the config and read on every request that is not exempt, in
 //! the order `bad_host` → `bad_origin` → `bad_client` → `bad_owner`. It parses nothing on the
 //! request path: the allow-list is already folded to lowercase with the two implicit loopback
-//! names in it, and the control origin is already folded. Whether a request is exempt is
-//! [`crate::http::is_guard_exempt`]'s decision, not this module's, so the exemption list exists
-//! in exactly one place.
+//! names in it, and the accepted origins are already folded, aliases included. Whether a request
+//! is exempt is [`crate::http::is_guard_exempt`]'s decision, not this module's, so the exemption
+//! list exists in exactly one place.
 
 use axum::extract::Request;
 use axum::http::{HeaderMap, HeaderValue, Method, header, header::AsHeaderName};
@@ -22,7 +22,10 @@ const LOGIN_HEADER: &str = "tailscale-user-login";
 
 /// The names a machine answers on even with an empty `allowed_hosts`, because the default build
 /// must serve its own app shell out of the box. `[::1]` is deliberately not one of them: it is
-/// a different address family, and a machine that wants it lists it.
+/// a different address family, and a machine that wants it lists it. The origin check's alias set
+/// is a different list (`config::LOOPBACK_HOSTS`, three names), and it is deliberately not this
+/// one: an `Origin` of `http://[::1]:8080` is accepted while `Host: [::1]` still needs
+/// `allowed_hosts`, because a host name and an origin are two questions.
 const IMPLICIT_HOSTS: [&str; 2] = ["localhost", "127.0.0.1"];
 
 /// The value `X-Holosmith-Client` must carry, exactly.
@@ -39,8 +42,9 @@ const CORS_PREFIX: &str = "access-control-";
 pub struct Guards {
     /// Lowercase, with [`IMPLICIT_HOSTS`] added: the `Host` values this machine answers.
     hosts: Vec<String>,
-    /// Lowercase: the origin a request that changes something must carry.
-    control_origin: String,
+    /// Lowercase: the origins a request that changes something may carry. The configured control
+    /// origin first, then the other loopback spellings of it when it names a loopback host.
+    origins: Vec<String>,
     /// The tailnet login the requests must come from, when one is configured.
     owner: Option<String>,
     /// The machine-to-machine check: not a header's, and asked after these four.
@@ -67,9 +71,16 @@ impl Guards {
                 hosts.push(implicit.to_string());
             }
         }
+        let mut origins = vec![config.control_origin.as_str().to_ascii_lowercase()];
+        for alias in config.control_origin.loopback_aliases() {
+            let alias = alias.as_str().to_ascii_lowercase();
+            if !origins.contains(&alias) {
+                origins.push(alias);
+            }
+        }
         Self {
             hosts,
-            control_origin: config.control_origin.as_str().to_ascii_lowercase(),
+            origins,
             owner: config.owner.clone(),
             trust: crate::trust::Trust::of(config, tools),
         }
@@ -95,7 +106,12 @@ impl Guards {
         if request.method() != Method::GET {
             let origin = single(headers, header::ORIGIN)
                 .and_then(|value| value.to_str().ok())
-                .is_some_and(|origin| origin.trim().eq_ignore_ascii_case(&self.control_origin));
+                .is_some_and(|origin| {
+                    let origin = origin.trim();
+                    self.origins
+                        .iter()
+                        .any(|accepted| origin.eq_ignore_ascii_case(accepted))
+                });
             if !origin {
                 return Some(ApiError::bad_origin());
             }
@@ -188,6 +204,7 @@ fn media_type(value: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Origin;
 
     fn value(text: &str) -> HeaderValue {
         HeaderValue::from_str(text).expect("a test header value is valid")
@@ -261,10 +278,31 @@ mod tests {
     }
 
     #[test]
-    fn the_default_config_guards_two_loopback_hosts_and_no_owner() {
+    fn the_default_config_guards_two_loopback_hosts_and_three_loopback_origins() {
         let guards = Guards::from_config(&Config::default());
         assert_eq!(guards.hosts, vec!["localhost", "127.0.0.1"]);
-        assert_eq!(guards.control_origin, "http://localhost:8080");
+        assert_eq!(
+            guards.origins,
+            vec![
+                "http://localhost:8080",
+                "http://127.0.0.1:8080",
+                "http://[::1]:8080"
+            ]
+        );
         assert_eq!(guards.owner, None);
+    }
+
+    #[test]
+    fn a_named_control_origin_is_the_only_accepted_origin() {
+        // The alias rule is a loopback rule, so a domain's guards hold exactly the one origin.
+        let config = Config {
+            control_origin: Origin::parse("https://control.example:8443")
+                .expect("a test origin is a valid origin"),
+            ..Config::default()
+        };
+        assert_eq!(
+            Guards::from_config(&config).origins,
+            vec!["https://control.example:8443"]
+        );
     }
 }

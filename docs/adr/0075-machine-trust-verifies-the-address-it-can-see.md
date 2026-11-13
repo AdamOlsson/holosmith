@@ -155,8 +155,9 @@ Deploy step 6 publishes the control origin with `tailscale serve --https=443 htt
 (`deploy::control_target`) and the preview origin the same way on 8444. `tailscaled` terminates the tailnet connection
 and dials the local target, so **the listener sees `127.0.0.1` for every caller**: a browser, the CLI, a host probe —
 and the hub's forwarded call, which is the one D3 exists to govern. A hub dials the peer's registry row, and ADR-0074
-D4 requires that row to be the peer's exact `control_origin`, which on a deployed machine is the serve origin — so a
-forwarded call reaches the peer through serve and arrives as a front-door caller.
+D4 requires that row to be an origin the peer's guard accepts — its `control_origin` or a loopback alias of it —
+which on a deployed machine is the serve origin, so a forwarded call reaches the peer through serve and arrives as a
+front-door caller.
 
 Four consequences, and none of them is a bug in this story's code:
 

@@ -331,11 +331,17 @@ pub fn port_problem(origin: &Origin) -> Option<String> {
 /// Spec item 4 gives a delete one refusal, "removing a host is refused while it has live sessions", and this is the
 /// only row whose sessions this machine can count: the one whose origin is its own `control_origin`. Compared with
 /// each origin's own port folded through [`Origin::with_port`], so `https://box.tail.ts.net` and
-/// `https://box.tail.ts.net:443` are one answer — which is exactly what the `/api/health` round trip would say.
+/// `https://box.tail.ts.net:443` are one answer — which is exactly what the `/api/health` round trip would say — and
+/// with the loopback aliases the guard accepts folded in too, so "the guard accepts that row's requests" and "it is
+/// this machine" are one answer rather than two. Without the second fold a row named `http://127.0.0.1:P` on a
+/// machine whose control origin is `http://localhost:P` is forwarded to, answers, and still counts no live sessions
+/// for the delete and makes a round trip to itself in the probe.
 pub fn is_local(url: &Origin, control_origin: &Origin) -> bool {
     match (url.port(), control_origin.port()) {
         (Some(url_port), Some(our_port)) => {
-            url.with_port(url_port) == control_origin.with_port(our_port)
+            let row = url.with_port(url_port);
+            let ours = control_origin.with_port(our_port);
+            row == ours || ours.loopback_aliases().contains(&row)
         }
         _ => false,
     }
@@ -678,6 +684,33 @@ mod tests {
         assert!(!is_local(
             &Origin::parse("https://attic.tail1234.ts.net").expect("an origin"),
             &control()
+        ));
+    }
+
+    #[test]
+    fn a_loopback_alias_of_the_control_origin_names_this_machine_too() {
+        // The guard accepts either spelling of one listener (ADR-0010), so a row naming this machine by the other
+        // one is this machine's row: the delete counts its live sessions, and the probe takes the local shortcut
+        // instead of a round trip to itself. The default control origin is the `localhost` spelling, which is the
+        // case a bookmark by IP produces.
+        let localhost = Origin::parse("http://localhost:8080").expect("an origin");
+        let by_ip = Origin::parse("http://127.0.0.1:8080").expect("an origin");
+        assert!(is_local(&by_ip, &localhost));
+        assert!(is_local(&localhost, &by_ip));
+        assert!(is_local(
+            &Origin::parse("http://[::1]:8080").expect("an origin"),
+            &localhost
+        ));
+        // A port is not one of the aliases: another port is another origin, which is the row `case_forward` hands the
+        // peer's guard and expects `403 bad_origin` for.
+        assert!(!is_local(
+            &Origin::parse("http://localhost:8081").expect("an origin"),
+            &by_ip
+        ));
+        // And a name that is no loopback spelling of the control origin is a different machine.
+        assert!(!is_local(
+            &Origin::parse("https://attic.tail1234.ts.net").expect("an origin"),
+            &localhost
         ));
     }
 

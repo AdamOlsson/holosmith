@@ -13,10 +13,10 @@
 //!
 //! It still sends the origin's own **host** in `Host` and its exact text in `Origin`, which is what the served
 //! request looks like after `tailscale serve` has proxied it: the guard compares `Origin` as text against
-//! `control_origin` (ADR-0074's landmine), and `Host` is the allow-list's question. A caller on this machine arrives
-//! from `127.0.0.1`, which is ADR-0075's **front door** and asks no whois. The other two guards' headers —
-//! `Content-Type: application/json` even with no body, and `X-Holosmith-Client: 1` — are sent on every non-`GET`,
-//! because they are what `bad_client` reads.
+//! `control_origin` or a loopback alias of it (ADR-0074's landmine), and `Host` is the allow-list's question. A
+//! caller on this machine arrives from `127.0.0.1`, which is ADR-0075's **front door** and asks no whois. The other
+//! two guards' headers — `Content-Type: application/json` even with no body, and `X-Holosmith-Client: 1` — are sent
+//! on every non-`GET`, because they are what `bad_client` reads.
 //!
 //! # What a refusal is
 //!
