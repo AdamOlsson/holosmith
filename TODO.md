@@ -11,7 +11,7 @@
 
 ### Less searching for tools
 
-- [ ] **Define the agents you actually use** in `~/.pi/agent/agents/` (or project `.pi/agents/`): `hs-implementor` (worker, writer, with a quick-gate instruction baked in), `hs-reviewer` (reviewer + `write` limited to a review file path), `hs-fixer`. Pin `model: opencode-go/deepseek-v4.1-flash` and `thinking` in frontmatter so the `:medium` suffix isn't needed on every call. Document the model string format in AGENTS.md once. **Half done, and not the half the checkbox claims:** model and thinking are pinned in `.pi/settings.json` under `subagents.agentOverrides` (`worker`, `reviewer`), but no `hs-*` file exists — `~/.pi/agent/agents/` holds only `code-reviewer.md`. A `timeoutMs` per agent *does* need a real agent file, since `agentOverrides` has no such field.
+- [x] **Define the agents you actually use** in `~/.pi/agent/agents/` (or project `.pi/agents/`): `hs-implementor` (worker, writer, with a quick-gate instruction baked in), `hs-reviewer` (reviewer + `write` limited to a review file path), `hs-fixer`. Pin `model: opencode-go/deepseek-v4.1-flash` and `thinking` in frontmatter so the `:medium` suffix isn't needed on every call. Document the model string format in AGENTS.md once. **Half done, and not the half the checkbox claims:** model and thinking are pinned in `.pi/settings.json` under `subagents.agentOverrides` (`worker`, `reviewer`), but no `hs-*` file exists — `~/.pi/agent/agents/` holds only `code-reviewer.md`. A `timeoutMs` per agent *does* need a real agent file, since `agentOverrides` has no such field.
 
 ### Fewer misunderstandings
 
