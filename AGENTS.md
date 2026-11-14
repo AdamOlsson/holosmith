@@ -98,6 +98,16 @@ And never `pgrep -f` a pattern that also appears in the command line you are run
 own shell, and `verify.sh` boots processes named for the binary anyway, so the name proves nothing
 either way.
 
+A worker's full gate is **one run, at the end of its turn**. A second run answers a question the first is
+still answering, and holding one `bash` call open for the whole fifteen minutes is the mistake this rule
+exists to prevent: the call outlives the worker, and the run ends with nothing said. If the work is cut
+short, report the changed files, the gate state you last saw and what remains, rather than begin again.
+
+Run deadlines are not repository config: `timeoutMs` and `checkpointBeforeDeadlineMs` live only in
+`~/.pi/agent/extensions/subagent/config.json` — the tracked copy is `.pi/subagents-config.json`, copied
+there by hand — and they are **user-scoped**, so they apply to every project on the machine and to the
+end-of-turn drain of a `pi -p` run. A new value takes effect in a new Pi session.
+
 One thing this gate teaches the hard way: `doctor`'s `perms` check reads the file `--config` names and
 compares it against the 0644 `server deploy` writes, so a fixture that writes a config with a redirect
 under the shell's umask (0664) fails a case that has nothing to do with modes — write fixture configs

@@ -1,0 +1,4 @@
+{
+  "timeoutMs": 3600000,
+  "checkpointBeforeDeadlineMs": 600000
+}
