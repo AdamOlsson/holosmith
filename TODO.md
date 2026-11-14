@@ -21,6 +21,6 @@
 ### Harness and settings
 
 - [ ] **Raise or tune the "needs attention" threshold** for known-long commands (`cargo test`, `verify.sh`), or have those run via a wrapper that streams to a log; the 240s notice cost a diagnosis detour. A `toolTimeoutMs` is fine here since cargo test legitimately runs minutes.
-- [ ] **Child hygiene:** leaked processes (`holosmith serve` from 4h earlier, many `push-receiver.mjs`) accumulate from failed gate runs. Add a `scripts/gate-cleanup.sh` (kill by pidfile or `target/verify-*` pattern) and call it at the start of `verify.sh` or in the parent's pipeline.
+- [x] **Child hygiene:** leaked processes (`holosmith serve` from 4h earlier, many `push-receiver.mjs`) accumulate from failed gate runs. `scripts/gate-cleanup.sh` cleans a dead run's marked children and removes `target/verify-*-<pid>` with a dead pid; `verify.sh` calls it (with `--claim`) before its first phase. ADR-0089; the contract is `case_gate_cleanup`.
 - [ ] **Sequence verify.sh before the review.** The review ran on code never gate-tested at full depth. Order: implement → quick gate → full `verify.sh` → review → fix → re-run only affected cases. Then the 0664 fixture issue would have surfaced before review rather than after merge-prep. Consider `verify.sh --case NAME` support so reruns after fixes cost seconds not 15 minutes.
 

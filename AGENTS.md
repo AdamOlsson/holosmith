@@ -90,13 +90,46 @@ musl targets, the cross gccs and node/npm on `PATH`. `verify.sh` needs the musl 
 phase fails with a missing `x86_64-unknown-linux-musl`, which reads like a code error and is not.
 
 Run it detached with the output going to `target/verify.log`, and poll that file for the sentinel; do
-not block on the command's own stdout. Every other scratch path `verify.sh` makes is per-pid
-(`target/verify-logs-$$`), so this one fixed name is deliberate — the poller has to find the log, and
-nothing in the gate cleans `target/` or sets `CARGO_TARGET_DIR` out from under it.
+not block on the command's own stdout. That one fixed name is deliberate — the poller has to find the
+log — and the honesty about the rest of `target/` is worth stating: `$WORK` is a `mktemp -d` and is the
+only place a failed run's evidence lives, while every scratch tree a *case* makes is
+`target/verify-<case>-$$` and carries the run's pid. So a run that is killed leaves its scratch behind
+under a pid that is gone, and `target/verify.log` from it stays where a poller would read it: check the
+file's mtime against the run you started before trusting a sentinel.
 
 And never `pgrep -f` a pattern that also appears in the command line you are running: the match is your
 own shell, and `verify.sh` boots processes named for the binary anyway, so the name proves nothing
 either way.
+
+## Child hygiene: a killed run's children are the next run's problem
+
+`cleanup` is an `EXIT` trap, and SIGKILL runs no trap. A run that is killed — a worker's turn ending, a
+tool timeout, `kill -9` — leaves its children reparented to `systemd --user`: a `holosmith serve` that
+holds a port, node push receivers, python stand-ins. They do not exit on their own, and the gate never
+notices, so they accumulate across runs.
+
+`verify.sh` therefore sweeps *before* its first phase and claims a record for itself (ADR-0089):
+
+- `--claim` writes `target/verify-run-<pid>/owner` (`<pid> <starttime>`) and the run exports the
+  directory as `HOLOSMITH_GATE_RUN`, so **every child a case spawns carries the marker with no spawn site
+  opting in** — which is what makes the next case someone adds leak-proof too.
+- The record is **not** removed when the run ends, not even a green one: the trap cannot know it left no
+  survivor (one `extra_pid` slot is shared by several cases, and a case can forget its own child). The
+  next run reports it, kills what still carries it, and removes it. That is one directory and one line of
+  log per run, and it is what turns "every case behaves" into "the gate converges anyway".
+- The sweep kills only processes carrying a **dead** run's marker (element equality on the NUL-separated
+  `environ`, so `verify-run-12` never matches `verify-run-123`), and removes `target/verify-*-<pid>` whose
+  trailing pid is gone. It never touches a container, a network, a session row, or anything outside a
+  worktree's `target/`.
+- A pid is evidence in one direction only: a live pid spares both a stale record and a stale directory,
+  even when that pid belongs to something else. That is deliberate; the header of
+  `scripts/gate-cleanup.sh` says why, and says not to "fix" it.
+- A leak from before the marker is cleared once with
+  `scripts/gate-cleanup.sh --legacy --dry-run` (read the listing), then `--legacy --yes`. It prints what
+  it will kill first, refuses without a terminal or `--yes`, and only touches argv shapes this gate makes.
+
+A cleanup problem warns and never fails the gate: a leftover listener on a pinned port already fails in
+the case that wanted it.
 
 A worker's full gate is **one run, at the end of its turn**. A second run answers a question the first is
 still answering, and holding one `bash` call open for the whole fifteen minutes is the mistake this rule

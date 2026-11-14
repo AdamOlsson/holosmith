@@ -3,9 +3,18 @@
 # ships serves (ADR-0003).
 #
 # Usage: scripts/verify.sh [--keep] [--no-build]
-# Eight phases, cheapest first: cargo fmt --check, cargo clippy --all-targets -- -D warnings,
+#
+# Before the first phase it cleans up what killed runs left behind (`scripts/gate-cleanup.sh`, ADR-0089), and claims
+# the record that names this run: a run that is killed does not run its trap, so its descendants — a `serve`, a
+# node push receiver, a python stand-in — are reparented to `systemd --user` and outlive it until the next run's
+# cleanup. The pass kills only what carries a *dead* run's marker and removes `target/verify-*-<pid>` whose pid is
+# gone; it warns and never fails this gate.
+#
+# Nine phases, cheapest first: cargo fmt --check, cargo clippy --all-targets -- -D warnings,
 # cargo test, `cargo test --test schema_previous` (the expand/contract rule), `case_gate_quick` (the worker
-# gate's own contract — its names, its refusals, its footer, and one real run of it),
+# gate's own contract — its names, its refusals, its footer, and one real run of it), `case_gate_cleanup` (the
+# cleanup script's own contract — the marker it kills by, the prefix it does not, the lock, and the refusals that keep a
+# heuristic from being a licence to kill),
 # scripts/build.sh (which runs scripts/build-web.sh and scripts/check-static.sh),
 # scripts/check-embed.sh, then serve: dist/<host-triple>/holosmith on a random port with a temp
 # config and a temp data dir, answering /api/health, the schema version, the app shell, the 404
@@ -102,6 +111,42 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
+
+# ---- child hygiene, before anything of this run exists -------------------------------------------------
+# One call does both halves, in this order: clean up what a *killed* run left (its trap never ran, so its children are
+# reparented to `systemd --user` and outlive it), then claim the record that names this run. `--claim` holds the
+# repository's lock across both, writes `target/verify-run-<pid>/owner`, and prints that directory on stdout while
+# every report line goes to stderr — which is what lets this capture work at all.
+#
+# Two details here are load-bearing:
+#
+# `--owner "$$"` is not decoration. Inside `$( )`, the script's `$PPID` is the command substitution's own shell, which
+# is gone the moment the substitution ends; a record naming it would read as a *dead* run to the very next cleanup,
+# and that cleanup would then kill this run's children. The pid that names the run is this script's own.
+#
+# The status and the path are separate facts. `--claim` exits 1 when the cleanup it ran first could not remove a
+# directory or a process survived, and it still writes and prints the record, so the capture takes the `||` form —
+# an assignment whose failure is handled, the one shape `set -e` does not abort on — and keeps the path whatever the
+# status says. A cleanup that reports a survivor deserves a loud line; it does not deserve this run's marker.
+#
+# None of this fails the gate: a machine-hygiene problem is not a broken tree, and a leftover listener on a pinned port
+# already fails in the case that wanted it (ADR-0089).
+run_root=""
+claim_rc=0
+cleanup_err="$repo_root/target/gate-cleanup.err"
+# Only so the redirect below has somewhere to land; the script creates it too.
+mkdir -p "$repo_root/target"
+run_root="$(scripts/gate-cleanup.sh --claim --owner "$$" 2>"$cleanup_err")" || claim_rc=$?
+# The cleanup's own lines, ahead of the first phase: that is where a reader of the log looks first, and a clean pass
+# prints nothing at all.
+[ ! -s "$cleanup_err" ] || cat "$cleanup_err" >&2
+if [ -n "$run_root" ]; then
+  export HOLOSMITH_GATE_RUN="$run_root"
+  [ "$claim_rc" -eq 0 ] ||
+    printf 'warn gate-cleanup: the cleanup exited %d (above); the record was still claimed\n' "$claim_rc" >&2
+else
+  printf 'warn gate-cleanup: no run record was claimed; a killed run of this one will not be cleaned up\n' >&2
+fi
 
 # The owner the bad_owner case needs. Every other setting is the default: --port and --data-dir
 # override the two that would otherwise point at this machine.
@@ -211,6 +256,12 @@ cleanup() {
     return 0
   fi
   rm -rf "$WORK"
+  # The run record is **not** removed here, and that is the point of it. It is the only address a survivor has, and
+  # this trap cannot know it has no survivors: the `extra_pid` slot is one variable cases share, a case can forget its
+  # own receiver, and a run stopped by a signal can exit 0 (`$?` in an EXIT trap is whatever the last command left)
+  # while a `cargo test` of the phase it was in is still alive. So the record is left standing and the next cleanup
+  # reads it, finds the pid dead, kills whatever still carries it, and removes it (ADR-0089). One directory and one
+  # line of log per run is the cheap half of that trade.
   return 0
 }
 trap cleanup EXIT
@@ -6516,7 +6567,14 @@ PY
     fail "$name/delete-hub" "DELETE on the hub did not answer"
   expect_status "$name-delete-hub" "$(answer "$name-delete-hub")" 204
 
-  # The two machines are this case's, and the shared boot goes back for the cases after it.
+  # The two machines are this case's, and the shared boot goes back for the cases after it. So is the receiver: it
+  # has a slot of its own for the teardown even though `extra_pid` was set at its spawn, because *that* slot is one
+  # variable several cases reuse — `case_push` clears it when it is done, and a later case's `extra_pid` is not this
+  # case's node listener. A receiver left here outlives the run on the *green* path and is what the gate found on this
+  # machine five times over (ADR-0089).
+  kill "$receiver_pid" 2>/dev/null || true
+  wait "$receiver_pid" 2>/dev/null || true
+  extra_pid=""
   stop_peer
   rm -rf "$root"
   stop_serve
@@ -13971,6 +14029,363 @@ SHIM
   assertions=$((assertions + 1))
 }
 
+# The gate's own hygiene (`scripts/gate-cleanup.sh`): the record a run claims, the pass that kills only what a
+# *dead* run's marker names, the directory rule that is retroactive, the lock, and the refusals that keep a
+# heuristic from being a licence to kill. Every arm runs through `--worktree`, so nothing here can read or touch
+# this run's own `target/`; `GATE_CLEANUP_GRACE=1` keeps a sweep from costing a gate.
+#
+# The fakes are what make this measurable without a real leak: `HOLOSMITH_GATE_RUN=<record>` is set on the child
+# explicitly, because a child of *this* case inherits verify.sh's own **live** marker and would (correctly) be
+# spared — which is the trap this comment exists to keep the next author out of. Every fake's stdio is redirected
+# into the scratch tree, because a background process holding this script's stdout open would hold the whole gate.
+#
+# What it cannot measure, and does not pretend to: the pid-reuse interleaving the lock exists for (a pid cannot be
+# forced to wrap, so the lock arm proves the mutex and ADR-0089 carries the reasoning), and TERM-then-KILL of a
+# descendant that scrubbed its environment (invisible by construction — the header says so). The script's
+# no-/proc sentence is not measurable either, because a gate that needs /proc to run at all refuses that host
+# long before this case.
+case_gate_cleanup() {
+  local name=case_gate_cleanup root="$repo_root/target/verify-gate-cleanup-$$"
+  local script="$repo_root/scripts/gate-cleanup.sh"
+  local out="$root/out" err="$root/err" empty="$root/empty" absent="$root/absent"
+  local dead live live_start mark weird weird_start holder faker rc=0 pid n
+  local legacy_a legacy_b legacy_c legacy_op legacy_out legacy_ng mktemp_b mktemp_c mktemp_out withheld=0
+  local before=$assertions
+  local -a fakes=()
+
+  # has <file> <snippet> <assertion>: the snippet is in the file, and it is one assertion.
+  has() {
+    grep -qF -- "$2" "$1" || fail "$3" "'$2' is not in: $(head -c 500 "$1")"
+    assertions=$((assertions + 1))
+  }
+  # run_in <root> [args...]: one invocation, exit status in rc, report in $out and $err.
+  run_in() {
+    local where="$1"
+    shift
+    rc=0
+    GATE_CLEANUP_GRACE=1 "$script" --worktree "$where" "$@" >"$out" 2>"$err" || rc=$?
+  }
+  # The conditions below are waited for, never slept past: a fixed sleep is a guess about how fast this machine is,
+  # and a guess that is too short makes a green arm flaky while one that is too long costs every run. Each poll is
+  # 50 ms and gives up after ~5 s, so a fact that never arrives fails here with its own name instead of somewhere
+  # downstream.
+  marked() { # <pid> <record>: the child carries exactly this marker
+    local entry
+    [ -r "/proc/$1/environ" ] || return 1
+    while IFS= read -r -d '' entry; do
+      [ "$entry" = "HOLOSMITH_GATE_RUN=$2" ] && return 0
+    done <"/proc/$1/environ" 2>/dev/null || true
+    return 1
+  }
+  argv_has() { # <pid> <argument>: the child's argv holds this whole argument
+    local arg
+    [ -r "/proc/$1/cmdline" ] || return 1
+    while IFS= read -r -d '' arg; do
+      [ "$arg" = "$2" ] && return 0
+    done <"/proc/$1/cmdline" 2>/dev/null || true
+    return 1
+  }
+  alive() { [ -d "/proc/$1" ]; }
+  gone() { [ ! -d "/proc/$1" ]; }
+  wait_for() { # <condition> [args...]: poll it, 50 ms a step, ~5 s of patience
+    local condition="$1" n=0
+    shift
+    while [ "$n" -lt 100 ]; do
+      "$condition" "$@" && return 0
+      sleep 0.05
+      n=$((n + 1))
+    done
+    return 1
+  }
+
+  # A pid that cannot exist: one past `pid_max`, which is what makes "dead" a fact rather than a guess.
+  dead="$(cat /proc/sys/kernel/pid_max 2>/dev/null || echo 65536)"
+  case "$dead" in
+    ''|*[!0-9]*) dead=65536 ;;
+  esac
+  dead=$((dead + 1))
+
+  # `/proc` is the one thing every arm below reads, and this gate does not run on a host without it (the musl
+  # artifact, `/dev/tcp` and this cleanup all assume it). So it is an assertion, not a skip: a skip here would leave
+  # `ok cleanup` printed by `run_phase` for a case that measured nothing.
+  check "${name}/proc" yes "$([ -r /proc/self/stat ] && echo yes || echo no)"
+
+  # The scratch tree first, because every arm below writes its output into it — including arm 0, whose only subject is
+  # the record `verify.sh` claimed.
+  rm -rf "$root"
+  mkdir -p "$root/target" "$empty"
+
+  # 0. The wiring, before the script: `verify.sh` claims with `--owner "$$"`, so the record that names this run carries
+  # **this** process and its starttime. The bug this arm exists for is the one that shipped once and was caught by hand:
+  # inside `$( )`, `$PPID` is the substitution's own shell, so a record naming it reads as a dead run to the next
+  # cleanup, and that cleanup then kills a live run's children. Both halves are asserted — the path and the owner file.
+  check "${name}/wiring/path" "$repo_root/target/verify-run-$$" "${HOLOSMITH_GATE_RUN:-}"
+  check "${name}/wiring/owner" "$$ $(awk '{ sub(/^.*\) /, ""); print $20 }' "/proc/$$/stat")" \
+    "$(cat "${HOLOSMITH_GATE_RUN:-/nonexistent}/owner" 2>/dev/null)"
+  # …and the record is live as far as the script is concerned, which is the reading that matters.
+  run_in "$repo_root" --dry-run
+  has "$err" "live run verify-run-$$" "${name}/wiring/live"
+
+  # 1. Nothing to clean says nothing: a directory with no `target/` and one with an empty one are both exits 0 with
+  # no output, which is what makes a clean run's log start at `== fmt ==`.
+  run_in "$empty"
+  check "${name}/empty/exit" 0 "$rc"
+  check "${name}/empty/silent" "" "$(cat "$out" "$err")"
+
+  # 2. The claim: the path on stdout, the caller it names in the owner file, and that owner read back as live.
+  live=$BASHPID
+  run_in "$root" --claim --owner "$live"
+  check "${name}/claim/exit" 0 "$rc"
+  check "${name}/claim/path" "$root/target/verify-run-$live" "$(cat "$out")"
+  live_start="$(sed -n 's/^[0-9][0-9]* //p' "$root/target/verify-run-$live/owner" 2>/dev/null)"
+  [ -n "$live_start" ] || fail "${name}/claim/owner" "the owner file names no starttime: $(cat "$root/target/verify-run-$live/owner" 2>/dev/null)"
+  assertions=$((assertions + 1))
+
+  # 3. A dead run and a live one, side by side, with a marked child each and a third child whose marker is the dead
+  # record's name plus a digit — the prefix that must never match.
+  mark="$root/target/verify-run-$dead"
+  mkdir -p "$mark" "$root/target/verify-cross-$dead" "$root/target/verify-live-$live"
+  printf '%s 1\n' "$dead" >"$mark/owner"
+  HOLOSMITH_GATE_RUN="$mark" sleep 120 >"$root/marked.out" 2>&1 &
+  fakes+=("$!")
+  HOLOSMITH_GATE_RUN="${mark}123" sleep 120 >"$root/prefix.out" 2>&1 &
+  fakes+=("$!")
+  wait_for marked "${fakes[0]}" "$mark" || fail "${name}/marked/start" "the marked child never carried its marker"
+  wait_for marked "${fakes[1]}" "${mark}123" || fail "${name}/prefix/start" "the prefix child never carried its marker"
+
+  # 4. `--dry-run` reports both and changes neither: a listing that acted would be the one thing a dry run may not do.
+  run_in "$root" --dry-run
+  check "${name}/dry/exit" 0 "$rc"
+  has "$err" "dead run verify-run-$dead" "${name}/dry/dead_line"
+  has "$err" "live run verify-run-$live" "${name}/dry/live_line"
+  has "$err" "would kill" "${name}/dry/kill_line"
+  has "$err" "would remove $root/target/verify-cross-$dead" "${name}/dry/dir_line"
+  check "${name}/dry/nothing_killed" yes "$(kill -0 "${fakes[0]}" 2>/dev/null && echo yes || echo no)"
+  check "${name}/dry/nothing_removed" yes "$([ -d "$root/target/verify-cross-$dead" ] && echo yes || echo no)"
+
+  # 5. The real cleanup: the dead run's marked child goes, the prefix child stays, the dead run's scratch goes, and the
+  # live run's is untouched. This is the whole design in one arm.
+  run_in "$root"
+  check "${name}/cleanup/exit" 0 "$rc"
+  wait_for gone "${fakes[0]}" || fail "${name}/cleanup/marked_dead" "the marked child is still alive after the cleanup"
+  check "${name}/cleanup/marked_dead" no "$(kill -0 "${fakes[0]}" 2>/dev/null && echo yes || echo no)"
+  check "${name}/cleanup/prefix_alive" yes "$(kill -0 "${fakes[1]}" 2>/dev/null && echo yes || echo no)"
+  check "${name}/cleanup/dead_dir_gone" no "$([ -d "$root/target/verify-cross-$dead" ] && echo yes || echo no)"
+  check "${name}/cleanup/record_gone" no "$([ -d "$mark" ] && echo yes || echo no)"
+  check "${name}/cleanup/live_dir_kept" yes "$([ -d "$root/target/verify-live-$live" ] && echo yes || echo no)"
+  # The prefix child is not even reported as a mention: `verify-run-12` is not a prefix of `verify-run-123`.
+  case "$(cat "$out" "$err")" in
+    *"verify-run-${dead}123"*) fail "${name}/cleanup/prefix_mention" "a name one digit longer was treated as the record" ;;
+    *) assertions=$((assertions + 1)) ;;
+  esac
+
+  # 6. The second pass is silent and removes nothing, which is what makes this safe to call at every boot.
+  run_in "$root" --quiet
+  check "${name}/again/exit" 0 "$rc"
+  check "${name}/again/silent" "" "$(cat "$out" "$err")"
+
+  # 7. The lock. A holder takes it, announces itself, holds it past a whole `--claim`, and the claim must return only
+  # after the release — the mutex that makes a reused pid's identical record path unreachable by a concurrent pass.
+  rm -f "$root/held" "$root/released"
+  (flock 8 && : >"$root/held" && sleep 0.6 && : >"$root/released") 8>>"$root/target/gate-cleanup.lock" &
+  holder=$!
+  for _ in $(seq 1 100); do
+    [ -e "$root/held" ] && break
+    sleep 0.05
+  done
+  [ -e "$root/held" ] || fail "${name}/lock/held" "the holder never took the lock"
+  run_in "$root" --claim --owner "$live"
+  check "${name}/lock/claim_exit" 0 "$rc"
+  check "${name}/lock/waited" yes "$([ -e "$root/released" ] && echo yes || echo no)"
+  wait "$holder" 2>/dev/null || true
+
+  # 8. Legacy shapes: three the gate can leave, and three near-misses that must survive even with `--yes`. One set of
+  # six processes and four passes says what six separate arms would, and the near-misses are the point — a heuristic
+  # that cannot tell a gate's `serve` from an operator's is the one failure this flag may not have.
+  #
+  #   (a) an argv naming a dead run's `target/verify-<name>-<pid>`   — only this gate makes those
+  #   (b) a `holosmith serve` booted from a `mktemp` config, cwd a worktree of this repository
+  #   (c) a push receiver under /tmp, cwd a worktree of this repository
+  # and against them: an operator's own serve (a real config path), a serve whose cwd is outside every worktree, and
+  # a program the gate never starts carrying a matching path.
+  #
+  # The fakes are copies of `/bin/sh` named for the program they imitate, because the shape is about argv[0]'s
+  # basename — and a `-c` loop with a 0.1 s sleep in it, so killing one leaves at most a 100 ms `sleep` behind.
+  mkdir -p "$root/bin"
+  cp /bin/sh "$root/bin/holosmith"
+  cp /bin/sh "$root/bin/node"
+  mktemp_b="/tmp/tmp.gate-cleanup-$dead-b"
+  mktemp_c="/tmp/tmp.gate-cleanup-$dead-c"
+  mktemp_out="/tmp/tmp.gate-cleanup-$dead-outside"
+  (cd "$root" && exec "$root/bin/holosmith" -c 'while :; do sleep 0.1; done' serve \
+    --config "$mktemp_b/config.toml" --data-dir "$mktemp_b/data") >"$root/legacy-b.out" 2>&1 &
+  legacy_b=$!
+  (cd "$root" && exec "$root/bin/node" -c 'while :; do sleep 0.1; done' "$mktemp_c/push-receiver.mjs") \
+    >"$root/legacy-c.out" 2>&1 &
+  legacy_c=$!
+  (cd "$root" && exec "$root/bin/holosmith" -c 'while :; do sleep 0.1; done' serve \
+    --config "$root/holosmith.toml" --data-dir "$root/data") >"$root/legacy-operator.out" 2>&1 &
+  legacy_op=$!
+  (cd /tmp && exec "$root/bin/holosmith" -c 'while :; do sleep 0.1; done' serve \
+    --config "$mktemp_out/config.toml") >"$root/legacy-outside.out" 2>&1 &
+  legacy_out=$!
+  bash -c 'while :; do sleep 1; done' bash "$root/target/verify-cross-$dead/x" >"$root/legacy.out" 2>&1 &
+  legacy_a=$!
+  bash -c 'exec -a "$1" sleep 120' bash "$root/target/verify-cross-$dead/not-a-gate-program" \
+    >"$root/notgate.out" 2>&1 &
+  legacy_ng=$!
+  # living <pids...>: one word per pid, so one assertion covers the whole set's fate.
+  living() {
+    local report="" p
+    for p in "$@"; do
+      if kill -0 "$p" 2>/dev/null; then report="$report yes"; else report="$report no"; fi
+    done
+    printf '%s' "${report# }"
+  }
+  wait_for argv_has "$legacy_a" "$root/target/verify-cross-$dead/x" || fail "${name}/legacy/a/start" "shape (a) never started"
+  wait_for argv_has "$legacy_b" "$mktemp_b/config.toml" || fail "${name}/legacy/b/start" "shape (b) never started"
+  wait_for argv_has "$legacy_c" "$mktemp_c/push-receiver.mjs" || fail "${name}/legacy/c/start" "shape (c) never started"
+  wait_for argv_has "$legacy_op" "$root/holosmith.toml" || fail "${name}/legacy/operator/start" "the operator fake never started"
+  wait_for argv_has "$legacy_out" "$mktemp_out/config.toml" || fail "${name}/legacy/outside/start" "the outside-cwd fake never started"
+  wait_for argv_has "$legacy_ng" "$root/target/verify-cross-$dead/not-a-gate-program" ||
+    fail "${name}/legacy/notgate/start" "the not-a-gate-program fake never started"
+  # (b)'s cwd is the resolved root, which is the fact the shape rests on: assert it rather than assume it.
+  check "${name}/legacy/b/cwd" "$root" "$(readlink -f "/proc/$legacy_b/cwd" 2>/dev/null)"
+
+  # 8a. Off: the routine pass is marker-only, so every one of the six survives it.
+  run_in "$root"
+  check "${name}/legacy/off" "yes yes yes yes yes yes" \
+    "$(living "$legacy_a" "$legacy_b" "$legacy_c" "$legacy_op" "$legacy_out" "$legacy_ng")"
+
+  # 8b. `--dry-run`: the three shapes are listed with what identifies them (pid, cwd, argv), the three near-misses are
+  # not mentioned at all, and nothing is signalled.
+  run_in "$root" --legacy --dry-run
+  check "${name}/legacy/dry_exit" 0 "$rc"
+  has "$err" "legacy (a)" "${name}/legacy/a/listed"
+  has "$err" "pid $legacy_b cwd $root: $root/bin/holosmith" "${name}/legacy/b/listed"
+  has "$err" "legacy (c)" "${name}/legacy/c/listed"
+  has "$err" "WARNING: this is the shape most likely to be your own demo server" "${name}/legacy/b/warning"
+  case "$(cat "$out" "$err")" in
+    *": $legacy_op ("*) fail "${name}/legacy/operator/listed" "an operator's serve was listed" ;;
+    *) assertions=$((assertions + 1)) ;;
+  esac
+  case "$(cat "$out" "$err")" in
+    *": $legacy_out ("*) fail "${name}/legacy/outside/listed" "a serve outside every worktree was listed" ;;
+    *) assertions=$((assertions + 1)) ;;
+  esac
+  case "$(cat "$out" "$err")" in
+    *": $legacy_ng ("*) fail "${name}/legacy/notgate/listed" "a program the gate does not start was listed" ;;
+    *) assertions=$((assertions + 1)) ;;
+  esac
+  check "${name}/legacy/dry_alive" "yes yes yes yes yes yes" \
+    "$(living "$legacy_a" "$legacy_b" "$legacy_c" "$legacy_op" "$legacy_out" "$legacy_ng")"
+
+  # 8c. No terminal and no --yes: refused, non-zero, and not one process signalled.
+  rc=0
+  GATE_CLEANUP_GRACE=1 "$script" --worktree "$root" --legacy </dev/null >"$out" 2>"$err" || rc=$?
+  check "${name}/legacy/no_tty_exit" 2 "$rc"
+  has "$err" "--yes" "${name}/legacy/no_tty_sentence"
+  check "${name}/legacy/no_tty_alive" "yes yes yes yes yes yes" \
+    "$(living "$legacy_a" "$legacy_b" "$legacy_c" "$legacy_op" "$legacy_out" "$legacy_ng")"
+
+  # 8d. With it: the three shapes go, and the three near-misses stay — the assertion that makes the allow-list and the
+  # cwd rule mean something.
+  run_in "$root" --legacy --yes
+  check "${name}/legacy/confirmed_exit" 0 "$rc"
+  wait_for gone "$legacy_a" || fail "${name}/legacy/a/killed" "shape (a) survived --legacy --yes"
+  wait_for gone "$legacy_b" || fail "${name}/legacy/b/killed" "shape (b) survived --legacy --yes"
+  wait_for gone "$legacy_c" || fail "${name}/legacy/c/killed" "shape (c) survived --legacy --yes"
+  check "${name}/legacy/shapes_killed" "no no no" "$(living "$legacy_a" "$legacy_b" "$legacy_c")"
+  check "${name}/legacy/near_misses_kept" "yes yes yes" \
+    "$(living "$legacy_op" "$legacy_out" "$legacy_ng")"
+  for pid in "$legacy_op" "$legacy_out" "$legacy_ng"; do
+    kill "$pid" 2>/dev/null || true
+  done
+
+  # 11. A worktree named by a symlink is swept at its resolved path — the one thing `realpath` is there for.
+  ln -sfn "$root" "$root/link"
+  mkdir -p "$root/target/verify-cross-$dead"
+  run_in "$root/link"
+  check "${name}/symlink/exit" 0 "$rc"
+  check "${name}/symlink/resolved" no "$([ -d "$root/target/verify-cross-$dead" ] && echo yes || echo no)"
+
+  # 12. Field 22 through a comm full of spaces and parentheses: the same record is live at the real starttime and
+  # stale one jiffy later, which is the reading, not the arithmetic, being asserted.
+  cp /bin/sleep "$root/a) b (c"
+  "$root/a) b (c" 300 >"$root/weird.out" 2>&1 &
+  weird=$!
+  wait_for alive "$weird" || fail "${name}/comm/start" "the weird-comm fake never started"
+  weird_start="$(awk '{ sub(/^.*\) /, ""); print $20 }' "/proc/$weird/stat" 2>/dev/null)"
+  [ -n "$weird_start" ] || fail "${name}/comm" "could not read field 22 of a comm with parentheses"
+  mkdir -p "$root/target/verify-run-$weird"
+  printf '%s %s\n' "$weird" "$weird_start" >"$root/target/verify-run-$weird/owner"
+  run_in "$root" --dry-run
+  has "$err" "live run verify-run-$weird" "${name}/comm/live"
+  printf '%s %s\n' "$weird" "$((weird_start + 1))" >"$root/target/verify-run-$weird/owner"
+  run_in "$root" --dry-run
+  has "$err" "dead run verify-run-$weird" "${name}/comm/stale"
+  kill "$weird" 2>/dev/null || true
+  rm -rf "$root/target/verify-run-$weird"
+
+  # 13. A dead record is removed whether or not anything still carries it: a record names a run, and one left behind
+  # with no children would otherwise cost one directory per run forever. Three of them here, next to the live run's,
+  # which is the only one that may survive — and `--quiet` because the removal of a record is not news.
+  for n in 1 2 3; do
+    mkdir -p "$root/target/verify-run-$((dead + n))"
+    printf '%s 1\n' "$((dead + n))" >"$root/target/verify-run-$((dead + n))/owner"
+  done
+  run_in "$root" --quiet
+  check "${name}/records/exit" 0 "$rc"
+  check "${name}/records/left" "$live" \
+    "$(ls -d "$root"/target/verify-run-* 2>/dev/null | sed 's|.*/verify-run-||' | tr '\n' ' ' | sed 's/ $//')"
+
+  # 14. A directory that cannot be removed is exit 1 with its path — the only failure this script may report that is
+  # not a survivor. As root, 0500 denies nothing, so the arm says it did not run instead of passing vacuously.
+  if [ "$(id -u)" -eq 0 ]; then
+    # The two assertions this arm makes are not measurable as root, so they are counted as withheld below: a note
+    # alone would let a root run read as fully green.
+    printf 'note %s/removal: running as root, 0500 on a directory does not deny a delete\n' "$name"
+    withheld=$((withheld + 2))
+  else
+    mkdir -p "$root/target/verify-cross-$dead/child"
+    chmod 500 "$root/target/verify-cross-$dead"
+    run_in "$root"
+    check "${name}/removal/exit" 1 "$rc"
+    has "$err" "could not remove $root/target/verify-cross-$dead" "${name}/removal/sentence"
+    chmod 700 "$root/target/verify-cross-$dead"
+    rm -rf "$root/target/verify-cross-$dead"
+  fi
+
+  # 15. A directory kept because its trailing pid is alive reads as information, not as a failure, and never touches
+  # the exit code. The pid here is this very shell — which is the point: pid-only evidence cannot tell a live run from
+  # a reused number, so the conservative reading is the one that ships, and it has to look harmless in the output.
+  mkdir -p "$root/target/verify-reuse-$$"
+  run_in "$root"
+  check "${name}/reuse/exit" 0 "$rc"
+  has "$err" "kept verify-reuse-$$: pid $$ is alive" "${name}/reuse/line"
+  check "${name}/reuse/not_removed" yes "$([ -d "$root/target/verify-reuse-$$" ] && echo yes || echo no)"
+  rm -rf "$root/target/verify-reuse-$$"
+
+  # 16. Misuse is exit 2, never a pass: an unknown flag, and a root that does not resolve.
+  run_in "$root" --nonsense
+  check "${name}/misuse/flag" 2 "$rc"
+  rc=0
+  "$script" --worktree "$absent" >"$out" 2>"$err" || rc=$?
+  check "${name}/misuse/absent" 2 "$rc"
+
+  for pid in ${fakes[@]+"${fakes[@]}"}; do
+    kill "$pid" 2>/dev/null || true
+  done
+  rm -rf "$root"
+  # The last line is this case's own verdict, and it counts what it did not measure: `run_phase` prints `ok cleanup`
+  # for an exit 0, so a root run that measured two assertions fewer must not look like the same green as a full one.
+  if [ "$withheld" -gt 0 ]; then
+    printf 'ok %s: %d assertions run, %d withheld: euid 0\n' "$name" "$((assertions - before))" "$withheld"
+  else
+    printf 'ok %s: %d assertions run, nothing withheld\n' "$name" "$((assertions - before))"
+  fi
+}
+
 phase_serve() {
   printf '== serve ==\n'
   case "$(uname -m)" in
@@ -14062,6 +14477,9 @@ run_phase migrations cargo test --test schema_previous
 # cargo, not the artifact, and it is cheap enough (one named binary) that a broken script fails the run in
 # seconds rather than after the musl build.
 run_phase quick case_gate_quick
+# The cleanup script's own contract, next to the worker gate's: it is a script the gate calls before its first phase, so a
+# broken one fails here in seconds rather than as a mystery on the next run's boot.
+run_phase cleanup case_gate_cleanup
 if [ "$build" -eq 1 ]; then
   # scripts/build.sh runs scripts/build-web.sh first and scripts/check-static.sh last, so this
   # calls it once rather than running npm twice.

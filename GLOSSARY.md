@@ -1132,6 +1132,20 @@ which is a supported machine rather than a mismatch. Its machine names are `imag
 `LABEL_GIT_TAG`, `LABEL_PI`, `LABEL_BINARY` and `LABEL_TOOLCHAINS`.
 _Avoid_: Tag, annotation, metadata, image version
 
+**Run record**:
+`target/verify-run-<pid>/owner` — two numbers, a pid and that pid's starttime — written by `--claim` before a gate
+run starts anything, so a run that is killed leaves a name behind instead of a tree with no owner. A record is
+**live** when that pid is alive *and* its starttime still matches (a reused pid is a different process), and **stale**
+otherwise; only a stale record's marked children may be killed (ADR-0089).
+_Avoid_: pidfile (it lists pids and nothing about them), lockfile
+
+**Gate marker**:
+`HOLOSMITH_GATE_RUN`, the run record's directory, exported by `verify.sh` so every process a case spawns inherits it.
+It is what makes a child findable by the next run without any spawn site remembering to register a pid, and it is
+matched as a whole `NAME=value` element of the NUL-separated `environ`, so `verify-run-12` never matches
+`verify-run-123`.
+_Avoid_: tag, label, session id
+
 **Doctor**:
 The preflight and self-test command that decides whether a machine may run sessions: `doctor --quick` is the
 list `serve` refuses on and the unit file's `ExecStartPre`, and `doctor --full` adds the network self-test,
