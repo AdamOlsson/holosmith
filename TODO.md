@@ -11,7 +11,7 @@
 
 ### Less searching for tools
 
-- [ ] **Define the agents you actually use** in `~/.pi/agent/agents/` (or project `.pi/agents/`): `hs-implementor` (worker, writer, with a quick-gate instruction baked in), `hs-reviewer` (reviewer + `write` limited to a review file path), `hs-fixer`. Pin `model: opencode-go/deepseek-v4.1-flash` and `thinking` in frontmatter so the `:medium` suffix isn't needed on every call. Document the model string format in AGENTS.md once.
+- [x] **Define the agents you actually use** in `~/.pi/agent/agents/` (or project `.pi/agents/`): `hs-implementor` (worker, writer, with a quick-gate instruction baked in), `hs-reviewer` (reviewer + `write` limited to a review file path), `hs-fixer`. Pin `model: opencode-go/deepseek-v4.1-flash` and `thinking` in frontmatter so the `:medium` suffix isn't needed on every call. Document the model string format in AGENTS.md once.
 
 ### Fewer misunderstandings
 
