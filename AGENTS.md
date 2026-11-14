@@ -46,39 +46,52 @@ Issue tracking is remote only. Do not add `HS-*`/`PER-*` citations to code, comm
 
 ## Build and gates
 
-The workspace is Rust 2024, `rust-version = "1.99"`, one binary crate. `unsafe_code` is denied and `unwrap_used` is warned; CI treats warnings as errors.
+The workspace is Rust 2024, `rust-version = "1.99"`, one binary crate. `unsafe_code` is denied and
+`unwrap_used` is warned; CI treats warnings as errors.
+
+One command proves the tree:
+
+```bash
+. ~/.pi/toolchains/env.sh && scripts/verify.sh
+```
+
+It takes about fifteen minutes on this host, and green is its last line: `verify: <n> assertions, ok`.
+A `FAIL case_x/assertion` line above it names the case and the assertion; a case that cannot measure
+its fact prints `SKIP` with the reason instead of passing quietly. The count moves as cases are added,
+so read the shape of that line, not its number. It wants a working Docker daemon for the container
+cases.
+
+The same gate is three commands of its own, cheapest first, when one of them is all you need:
 
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
-scripts/verify.sh            # the full gate: fmt, clippy, tests, migrations, build, embed, booted artifact
 ```
 
-`scripts/verify.sh` is one command for all of it: the three gates above, the artifact build and its
-checks, and the boot of the shipped binary. Follow `docs/build.md` for the environment and the artifact
-build; do not invent a second build path.
+`scripts/verify.sh` runs those three, then `scripts/build.sh` (which builds the web app and checks what
+the artifact ships), `scripts/check-embed.sh`, and a boot of `dist/<host-triple>/holosmith` — the
+artifact the `build` phase just produced, never `target/debug`. Do not invent a second build path: the
+phases are the build.
 
-`scripts/verify.sh` needs the musl cross toolchains on `PATH` **before** it runs, and the default
-`~/.cargo`/`~/.rustup` toolchain does not have them — its `build` phase fails with a missing
-`x86_64-unknown-linux-musl`, which reads like a code error and is not. Source the machine-local env first:
+The `.` line is part of the command, not a convenience: `~/.pi/toolchains/env.sh` puts rustc 1.99, both
+musl targets, the cross gccs and node/npm on `PATH`. `verify.sh` needs the musl cross toolchains there
+**before** it runs, and the default `~/.cargo`/`~/.rustup` toolchain does not have them — its `build`
+phase fails with a missing `x86_64-unknown-linux-musl`, which reads like a code error and is not.
 
-```bash
-. ~/.pi/toolchains/env.sh     # rustc 1.99 + both musl targets + the cross gccs + node/npm
-scripts/verify.sh
-```
+Run it detached with the output going to `target/verify.log`, and poll that file for the sentinel; do
+not block on the command's own stdout. Every other scratch path `verify.sh` makes is per-pid
+(`target/verify-logs-$$`), so this one fixed name is deliberate — the poller has to find the log, and
+nothing in the gate cleans `target/` or sets `CARGO_TARGET_DIR` out from under it.
 
-That is a full run of all seven phases, about fifteen minutes on this host, and it ends with one line to
-check for: `verify: <n> assertions, ok` — 2207 at the time of writing. The count moves as cases are
-added; `ok` on that last line is what green looks like, and any `FAIL case_x/assertion` line above it
-names the case and the assertion. It also wants a working Docker daemon for the container cases; a case
-that cannot measure its fact prints `SKIP` with the reason instead of passing quietly.
+And never `pgrep -f` a pattern that also appears in the command line you are running: the match is your
+own shell, and `verify.sh` boots processes named for the binary anyway, so the name proves nothing
+either way.
 
-Two things this gate teaches the hard way. `doctor`'s `perms` check reads the file `--config` names and
+One thing this gate teaches the hard way: `doctor`'s `perms` check reads the file `--config` names and
 compares it against the 0644 `server deploy` writes, so a fixture that writes a config with a redirect
 under the shell's umask (0664) fails a case that has nothing to do with modes — write fixture configs
-with `chmod 0644`, as `deploy_config` does. And the `serve` phase boots `dist/<host-triple>/holosmith`,
-the artifact the `build` phase just produced, never `target/debug`.
+with `chmod 0644`, as `deploy_config` does.
 
 The web app has its own gate:
 
