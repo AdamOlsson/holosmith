@@ -41,12 +41,13 @@
 //! every state path this module builds is `<root>/…`, whether the root is the machine's or a test's own tree,
 //! and the config is the one path that is not under it.
 //!
-//! **This program never runs `sudo`.** Creating the account, making the root, and installing and enabling the unit
-//! are root's, so the deploy **reads** their state and **prints** the commands — as the tail remark on the step that
-//! needs them — and the next run verifies them. The only hard requirement is that this process can write the root,
-//! because the tree is written as its owner. That is what makes `sudo -u holosmith holosmith deploy` the one way to
-//! run it on a machine, and what leaves step 6 (`/api/health` plus `doctor --full`) as the thing that notices a unit
-//! which was printed and never installed.
+//! **This program never runs `sudo`.** Creating the account and making the root are root's, so the deploy **reads**
+//! their state and **prints** the commands — as the tail remark on the step that needs them — and the next run
+//! verifies them. The unit is not on that list: it is the operator's own file, written into the directory their user
+//! manager reads (ADR-0088), and the two `systemctl --user` commands that enable it are printed beside it. The only
+//! hard requirement is that this process can write the root, because the tree is written as its owner. That is what
+//! makes `sudo -u holosmith holosmith deploy` the one way to run it on a machine, and what leaves step 6
+//! (`/api/health` plus `doctor --full`) as the thing that notices a unit which was enabled and never started.
 
 use std::fmt::{self, Write as _};
 use std::io::{ErrorKind, Write as _};
@@ -65,9 +66,12 @@ use crate::preflight::{self, Check, Outcome};
 use crate::proxies;
 use crate::vapid;
 
-/// The user `serve` runs as (spec item 10 step 2's "service user", named by the unit file's `User=`).
+/// The account step 2 reads: the spec's item 10 step 2 "service user", by name.
 ///
-/// Created by the operator, never by this program: `useradd` is root's (ADR-0086).
+/// The unit does not render it: a user unit runs as its owner, so there is no `User=` (ADR-0088). Step 2's account
+/// half still does — it reads the account with `id -u` and prints `useradd`/`usermod` for it — and that half is the
+/// move still outstanding. Until it happens this name is also what the uninstall's reminder, the promotion's refusal
+/// sentence and the remote note spell.
 pub const SERVICE_USER: &str = "holosmith";
 
 /// The group the service user must be in: `serve` drives the machine's daemon through its socket.
@@ -76,7 +80,17 @@ pub const SERVICE_GROUP: &str = "docker";
 /// The unit file's name, which is also the argument `systemctl` gets.
 pub const UNIT_NAME: &str = "holosmith.service";
 
-/// Where systemd's system-wide units live: where the operator copies the rendered file.
+/// The **user** manager's directory, inside the config's own: `<config dir>/systemd/user`.
+///
+/// It is the user manager's because the unit is the operator's own account (ADR-0088): a system unit would need root
+/// to install, and a user unit that carries no mount or namespace directive is the one sandbox shape that does not
+/// hand the daemon a `PrivateUsers=` mapping.
+const USER_UNIT_DIR: &str = "systemd/user";
+
+/// Where systemd's system-wide units live: the directory a system unit is installed into for every account.
+///
+/// [`Root::unit`] is not there: this install's unit is the operator's own, in [`USER_UNIT_DIR`]. This constant is what
+/// `uninstall`'s reminder and `promote`'s fallback still name.
 pub const UNIT_DIR: &str = "/etc/systemd/system";
 
 /// How long the last step's apply waits for `/api/health` before it calls the unit's start a failure.
@@ -416,8 +430,8 @@ impl Root {
         self.config.clone()
     }
 
-    /// `/home/you/.config`: the directory the config file lives in, which a deploy makes when the account has
-    /// none — the one directory a run creates that is not under the root.
+    /// `/home/you/.config`: the directory the config file lives in, which a deploy makes when the account has none —
+    /// one of the two directories a run creates that are not under the root, the other being [`Self::unit`]'s.
     pub fn config_dir(&self) -> Option<PathBuf> {
         self.config.parent().map(Path::to_path_buf)
     }
@@ -442,19 +456,32 @@ impl Root {
         self.path.join(crate::release::CURRENT)
     }
 
-    /// `<root>/holosmith.service`: the unit this run renders, for the operator to install.
+    /// `<config dir>/systemd/user/holosmith.service`: the unit this run renders, in the directory systemd's **user**
+    /// manager reads.
+    ///
+    /// The directory is [`USER_UNIT_DIR`] beside [`Self::config_file`], so a machine whose config is
+    /// `~/.config/holosmith.toml` gets `~/.config/systemd/user/holosmith.service` — the path a user unit is enabled
+    /// from, derived from the account's own home rather than spelled.
+    ///
+    /// **`--config` is therefore the one flag that moves the unit besides the config**, which is deliberate: the unit
+    /// names the config's path in its `ExecStart` and is written by the run that installed that file, so the two are
+    /// one deliverable in one tree — and a test or a gate renders a unit naming its own paths without writing the
+    /// operator's real one. The consequence is worth naming: a config outside a systemd user-unit tree
+    /// (`--config /etc/holosmith.toml`) puts the unit where no user manager loads it, and nothing in step 5 notices —
+    /// the printed `systemctl --user enable --now` fails with `Unit … not found` *after* the report has said
+    /// `5. service: changed`, and step 6's health wait is what ends up reporting it.
     pub fn unit(&self) -> PathBuf {
-        self.path.join(UNIT_NAME)
+        self.unit_dir().join(UNIT_NAME)
     }
 
-    /// `install -m 0644 <root>/holosmith.service /etc/systemd/system/holosmith.service`: the one command that
-    /// puts the rendered unit where systemd reads it.
-    pub fn unit_install(&self) -> String {
-        format!(
-            "sudo install -m 0644 {} {}",
-            self.unit().display(),
-            Path::new(UNIT_DIR).join(UNIT_NAME).display()
-        )
+    /// `<config dir>/systemd/user`: the directory [`Self::unit`] is in.
+    fn unit_dir(&self) -> PathBuf {
+        // This arm is the **empty** config path's: every other path has a parent, and a bare file name
+        // (`--config holosmith.toml`) has `Some("")`, so that input keeps a relative unit path instead of reaching
+        // here. Under `/` the write fails loudly, which is the shape a path that cannot be an install should have.
+        self.config_dir()
+            .unwrap_or_else(|| PathBuf::from("/"))
+            .join(USER_UNIT_DIR)
     }
 
     /// The config this deploy installs from: a clone whose two roots are the root's, so the rendered file names the
@@ -862,25 +889,26 @@ impl Action {
     }
 }
 
-/// The root, the config's directory when the account has none, the data root, the secrets and the three files, in
-/// the order they must be created — a file's directory first, because `install -m` does not make one, and the key
-/// pair after the 0700 directory it lives in.
+/// The root, the two directories beside the config when the account has none of them, the data root, the secrets and
+/// the three files, in the order they must be created — a file's directory first, because `install -m` does not make
+/// one, and the key pair after the 0700 directory it lives in.
 ///
 /// The root itself is first and is the only item whose outcome can be a *failure* rather than a write: a root this
 /// process cannot write is a run that cannot do anything, and its sentence is the command that would fix it.
 ///
-/// The config's directory is the one item that is **not** under the root, and it is an item only while it is
-/// absent: `~/.config` is the operator's own directory, already there on any machine that has a session, and its
-/// mode (0700 and 0755 are both ordinary) is not this run's to change. A fresh account gets it made; an existing
-/// one is never re-moded.
+/// The config's directory and [`Root::unit`]'s directory are the two items that are **not** under the root, and each is
+/// an item only while it is absent: `~/.config` and `~/.config/systemd/user` are the operator's own directories,
+/// already there on a machine that has a session, and their modes (0700 and 0755 are both ordinary) are not this run's
+/// to change. A fresh account gets them made; an existing one is never re-moded — which is also what keeps a second
+/// deploy from reporting them as work.
 ///
-/// That item is skipped when the directory is the root or under it, which is what a config *inside* the state tree
-/// asks for — `--root R --config R/holosmith.toml`, this repository's previous spelling. The root is already the
-/// list's first item at 0700, so a second entry for one path would be two contradictory modes: applied in order it
-/// would leave the state root at 0755 and put it back on the next run, and a root is 0700 because the keys and the
-/// sessions are under it. A directory *below* the root is the operator's to make — a state tree's layout is theirs,
-/// and this step makes `data` and the secrets under it — so a config named there fails on that install rather than
-/// acquiring a directory in the tree beside it.
+/// The config's directory item is skipped when the directory is the root or under it, which is what a config *inside*
+/// the state tree asks for — `--root R --config R/holosmith.toml`, this repository's previous spelling. The root is
+/// already the list's first item at 0700, so a second entry for one path would be two contradictory modes: applied in
+/// order it would leave the state root at 0755 and put it back on the next run, and a root is 0700 because the keys
+/// and the sessions are under it. A directory *below* the root is the operator's to make — a state tree's layout is
+/// theirs, and this step makes `data` and the secrets under it — so a config named there fails on that install rather
+/// than acquiring a directory in the tree beside it.
 ///
 /// The only `Err` is [`config::render`]'s: a path in the config that is not UTF-8, which no config file can carry
 /// and which this step will not paper over with an empty body — a config this deploy wrote and could not render is a
@@ -905,6 +933,17 @@ fn items(config: &Config, root: &Root) -> Result<Vec<Item>, String> {
     {
         items.push(Item {
             path: directory,
+            mode: 0o755,
+            kind: ItemKind::Directory,
+        });
+    }
+    // The user manager's directory is step 5's file's parent, and `install -m` does not make one. It is emitted on the
+    // same rule as the config's directory: only while it is absent, so an existing 0700 tree of the operator's is
+    // never re-moded and never counted as work.
+    let unit_dir = root.unit_dir();
+    if !unit_dir.is_dir() {
+        items.push(Item {
+            path: unit_dir,
             mode: 0o755,
             kind: ItemKind::Directory,
         });
@@ -1539,18 +1578,31 @@ fn proxies_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
     }
 }
 
-/// Step 5: the systemd unit, rendered into the root for the operator to install (ADR-0086).
+/// Step 5: the systemd **user** unit, rendered into the directory the operator's user manager reads (ADR-0088).
 ///
-/// The bytes are the deliverable, which is why the rendering is a public function of exactly four facts — where the
-/// binary is, the role the machine will hold, the root, and whether the root is under `/home` — and the read
-/// compares the file with it byte for byte. The path is [`std::env::current_exe`] and not the literal `holosmith`:
-/// this binary does not install itself, and an `ExecStart` resolved through systemd's `PATH` would be a coin flip
-/// between the artifact the operator just built and whatever else answers to the name.
+/// The bytes are the deliverable, which is why the rendering is a public function of exactly three facts — where the
+/// binary is, the role the machine will hold, and the config's path — and the read compares the file with it byte for
+/// byte. The path is [`std::env::current_exe`] and not the literal `holosmith`: this binary does not install itself,
+/// and an `ExecStart` resolved through systemd's `PATH` would be a coin flip between the artifact the operator just
+/// built and whatever else answers to the name.
 ///
-/// **The unit is written into the root, and installing it is the operator's.** `/etc/systemd/system` is root's, so
-/// this step prints the two commands that put these bytes there and start them (`Root::unit_install` and the
-/// `systemctl` pair) as the line's remark — in a dry run and in a run alike. A run that printed the command and
-/// never had it obeyed is caught one step later, by a `/api/health` that does not answer.
+/// **The unit is written straight into [`Root::unit`], and only the enable is the operator's.** The file lands where
+/// the user manager reads it, at 0644, so the two commands left are the reload that makes systemd notice it and the
+/// enable that starts it now and at every boot — printed as the line's remark, in a dry run and in a run alike, with
+/// no `sudo` anywhere in the pair. A run whose enable was never obeyed is caught one step later, by a `/api/health`
+/// that does not answer.
+///
+/// The sandbox is the reduced set, and the reduction is measured rather than preferred: any mount or namespace
+/// directive in a **user** unit makes systemd enable `PrivateUsers=` implicitly — `PrivateTmp=`, `ProtectSystem=`,
+/// `ProtectHome=`, `ProtectKernelTunables=`, `ProtectControlGroups=`, `ProtectHostname=`, any one of them — and the
+/// mapping that implies leaves the process holding gid 65534, collapses its supplementary groups (the `docker` group
+/// included), reads every host file it does not own as `nobody:nogroup`, and makes `/etc/shadow` readable.
+/// `PrivateUsers=no` beside them does not opt out. So the directives that are left are the ones that need no
+/// namespace: they remove privilege from the process (`NoNewPrivileges`, `RestrictSUIDSGID`, `UMask=0077`), forbid it
+/// from making a namespace of its own (`RestrictNamespaces`), and bound what it may ask the kernel for
+/// (`LockPersonality`, `RestrictRealtime`, `SystemCallFilter`). What the system unit's `ProtectSystem=strict` and
+/// `ReadWritePaths=` gave — a compromised `serve` unable to write `/etc` — is gone, and that is a loss this rendering
+/// states by omission rather than by pretending the directive still works.
 ///
 /// `role` is the role the **machine** will hold (`deploy::union`'s answer), not the half this run installs, and it
 /// decides two things: `Description=`, and whether the unit requires the daemon. A `hub`-only machine has no
@@ -1567,16 +1619,6 @@ pub fn unit_text(exe: &Path, role: Role, root: &Root) -> String {
     } else {
         "Requires=docker.service\n"
     };
-    // `ProtectHome=yes` hides `/home`, `/root` and `/run/user` from the service, which is the cheap half of the
-    // sandbox — and it would hide the root or the config if either is under `/home`, which is where both live on
-    // the install this build is moving to. So the one directive that cannot coexist with such a path is written
-    // only when neither of them is under `/home`.
-    let under_home = |path: &Path| path.starts_with("/home");
-    let home = if under_home(root.path()) || under_home(&root.config_file()) {
-        ""
-    } else {
-        "ProtectHome=yes\n"
-    };
     format!(
         "[Unit]\n\
          Description=Holosmith {role}\n\
@@ -1586,14 +1628,13 @@ pub fn unit_text(exe: &Path, role: Role, root: &Root) -> String {
          \n\
          [Service]\n\
          Type=simple\n\
-         User={SERVICE_USER}\n\
-         Group={SERVICE_USER}\n\
          UMask=0077\n\
          NoNewPrivileges=yes\n\
-         PrivateTmp=yes\n\
-         ProtectSystem=strict\n\
-         {home}\
-         ReadWritePaths={root}\n\
+         LockPersonality=yes\n\
+         RestrictSUIDSGID=yes\n\
+         RestrictNamespaces=yes\n\
+         RestrictRealtime=yes\n\
+         SystemCallFilter=@system-service\n\
          ExecStartPre={exe} doctor --quick\n\
          ExecStart={exe} serve --config {config}\n\
          Restart=on-failure\n\
@@ -1602,24 +1643,25 @@ pub fn unit_text(exe: &Path, role: Role, root: &Root) -> String {
          TimeoutStopSec=30s\n\
          \n\
          [Install]\n\
-         WantedBy=multi-user.target\n",
+         WantedBy=default.target\n",
         role = role.as_str(),
         exe = exe.display(),
-        root = root.path().display(),
         config = root.config_file().display(),
     )
 }
 
-/// What the operator must run to make the rendered unit the one systemd loads, in order.
-fn unit_commands(root: &Root) -> Vec<String> {
+/// What the operator must run to make the rendered unit the one their user manager loads, in order.
+///
+/// No `sudo` and no copy: the bytes are already at [`Root::unit`], so the pair is the reload that makes the manager
+/// notice the file and the enable that starts it now, at every login, and at boot once linger is on.
+fn unit_commands() -> Vec<String> {
     vec![
-        root.unit_install(),
-        "sudo systemctl daemon-reload".to_string(),
-        format!("sudo systemctl enable --now {UNIT_NAME}"),
+        "systemctl --user daemon-reload".to_string(),
+        format!("systemctl --user enable --now {UNIT_NAME}"),
     ]
 }
 
-/// Step 5's read and apply: the file's bytes, and the commands that install them.
+/// Step 5's read and apply: the file's bytes, and the commands that enable them.
 fn service(config: &Config, root: &Root, tools: &Tools, dry_run: bool) -> Line {
     let staging = staging_dir();
     let line = service_line(config, root, tools, dry_run, &staging);
@@ -1667,7 +1709,7 @@ fn service_line(
         Ok(None) => Vec::new(),
         Err(sentence) => return failed(DeployStep::Service, sentence),
     };
-    let remark = format!("; still root's to run: {}", unit_commands(root).join("; "));
+    let remark = format!("; still yours to run: {}", unit_commands().join("; "));
     if actions.is_empty() {
         return Line {
             step: DeployStep::Service,
@@ -1747,8 +1789,8 @@ fn health(
         return failed(
             DeployStep::Health,
             format!(
-                "the control origin ({}) did not answer `/api/health` within {} s: `journalctl -u {UNIT_NAME} -n \
-                 50` names why the unit did not come up",
+                "the control origin ({}) did not answer `/api/health` within {} s: `journalctl --user -u \
+                 {UNIT_NAME} -n 50` names why the unit did not come up",
                 config.control_listen,
                 tools.health_wait.as_secs()
             ),

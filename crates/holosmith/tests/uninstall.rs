@@ -12,8 +12,9 @@
 //! temp directory.
 //!
 //! The teardown never escalates (ADR-0086), so this file has no `sudo` and no `systemctl`: the unit it removes is the
-//! **rendered** one at `<root>/holosmith.service`, and the three commands that clear the installed unit out of
-//! `/etc/systemd/system` are words on the line rather than children of the run.
+//! **written** one in the user manager's directory beside the config (`~/.config/systemd/user/holosmith.service`), and
+//! the three commands that clear an installed unit out of the system manager's are words on the line rather than
+//! children of the run.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -197,6 +198,8 @@ fn root_target(dir: &TempDir) -> (Root, Config) {
 fn installed_tree(root: &Root, deployed: &Config) {
     let unit = root.unit();
     std::fs::create_dir_all(root.path()).expect("the root is creatable");
+    std::fs::create_dir_all(unit.parent().expect("the unit has a directory"))
+        .expect("the unit's directory is creatable");
     std::fs::write(&unit, "[Service]\nExecStart=/usr/bin/holosmith serve\n")
         .expect("the unit is writable");
     let secrets = deployed.data_root.join("secrets");
@@ -624,17 +627,24 @@ fn the_root_names_the_tree_and_the_data_root() {
     let (root, deployed) = root_target(&dir);
     assert_eq!(
         root.unit(),
-        dir.file("install/holosmith.service"),
-        "the unit the deploy renders is at the root's top level"
+        dir.file("systemd/user/holosmith.service"),
+        "the unit is in the user manager's directory beside the config, which `--config` moves"
     );
     assert_eq!(deployed.data_root, dir.file("install/data"));
     assert_eq!(deployed.projects_root, dir.file("install/projects"));
-    // The machine's own paths are the account's: the state under `~/.local/share` and the config under
-    // `~/.config`, both derived from the password entry rather than from an argument.
+    // The machine's own paths are the account's: the state under `~/.local/share`, the config under `~/.config` and
+    // the unit under `~/.config/systemd/user`, all derived from the password entry rather than from an argument.
     let machine_wide = Root::resolve(None, None);
     let state = holosmith::config::default_root();
     assert_eq!(machine_wide.path(), state);
-    assert_eq!(machine_wide.unit(), state.join("holosmith.service"));
+    assert_eq!(
+        machine_wide.unit(),
+        holosmith::config::config_path()
+            .parent()
+            .expect("the config path has a directory")
+            .join("systemd/user/holosmith.service"),
+        "the unit is not the user manager's, beside the config"
+    );
     assert_eq!(machine_wide.config_file(), holosmith::config::config_path());
     assert_eq!(machine_wide.config(&config()).data_root, state.join("data"));
 }

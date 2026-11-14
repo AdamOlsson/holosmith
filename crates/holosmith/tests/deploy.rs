@@ -794,8 +794,8 @@ fn a_dry_run_lists_the_steps_and_creates_nothing() {
         "a dry run did not print a plan for step 3: {}",
         line(&report, DeployStep::Images).sentence
     );
-    // Step 5's plan names the unit's path and the three commands that are root's, step 6's the wait and the second
-    // reading.
+    // Step 5's plan names the unit's path and the two `systemctl --user` commands that enable it, step 6's the wait
+    // and the second reading.
     let service = line(&report, DeployStep::Service);
     assert_eq!(service.word, Word::Needs, "{}", service.sentence);
     assert!(
@@ -806,9 +806,9 @@ fn a_dry_run_lists_the_steps_and_creates_nothing() {
         service.sentence
     );
     for command in [
-        "sudo install -m 0644",
-        "sudo systemctl daemon-reload",
-        "sudo systemctl enable --now holosmith.service",
+        "install -m 0644",
+        "systemctl --user daemon-reload",
+        "systemctl --user enable --now holosmith.service",
     ] {
         assert!(
             service.sentence.contains(command),
@@ -816,6 +816,11 @@ fn a_dry_run_lists_the_steps_and_creates_nothing() {
             service.sentence
         );
     }
+    assert!(
+        !service.sentence.contains("sudo"),
+        "step 5's plan escalates: {}",
+        service.sentence
+    );
     let health = line(&report, DeployStep::Health);
     assert_eq!(health.word, Word::Needs, "{}", health.sentence);
     assert!(
@@ -2194,13 +2199,12 @@ fn the_unit_is_the_bytes_this_binary_renders_and_the_machine_reads_enabled() {
     let expected = format!(
         "[Unit]\nDescription=Holosmith server\nAfter=network-online.target docker.service\n\
          Wants=network-online.target\nRequires=docker.service\n\n[Service]\nType=simple\n\
-         User=holosmith\nGroup=holosmith\nUMask=0077\nNoNewPrivileges=yes\nPrivateTmp=yes\n\
-         ProtectSystem=strict\nProtectHome=yes\nReadWritePaths={root}\n\
+         UMask=0077\nNoNewPrivileges=yes\nLockPersonality=yes\nRestrictSUIDSGID=yes\n\
+         RestrictNamespaces=yes\nRestrictRealtime=yes\nSystemCallFilter=@system-service\n\
          ExecStartPre={exe} doctor --quick\nExecStart={exe} serve --config {config}\n\
          Restart=on-failure\nRestartSec=5s\nKillMode=mixed\nTimeoutStopSec=30s\n\n\
-         [Install]\nWantedBy=multi-user.target\n",
+         [Install]\nWantedBy=default.target\n",
         exe = exe.display(),
-        root = root.path().display(),
         config = root.config_file().display(),
     );
     assert_eq!(
@@ -2221,7 +2225,7 @@ fn the_unit_is_the_bytes_this_binary_renders_and_the_machine_reads_enabled() {
     assert_eq!(mode(&unit), 0o644, "the unit is not 0644");
     for line in [
         "Restart=on-failure",
-        "WantedBy=multi-user.target",
+        "WantedBy=default.target",
         " doctor --quick",
         " serve",
     ] {
@@ -2234,16 +2238,34 @@ fn the_unit_is_the_bytes_this_binary_renders_and_the_machine_reads_enabled() {
         expected.contains(&format!("ExecStartPre={} doctor --quick", exe.display())),
         "`ExecStartPre` is not the argv shape the spec asks for:\n{expected}"
     );
+    // The keep-list, in both directions: the directives the measurement found safe are there, and the five that make
+    // systemd enable `PrivateUsers=` — and hand the daemon gid 65534, no supplementary groups and a readable
+    // `/etc/shadow` — are not. `ReadWritePaths=` goes with `ProtectSystem=`, since it is that mechanism's exception.
     for directive in [
-        "User=holosmith",
-        "Group=holosmith",
         "NoNewPrivileges=yes",
-        "ProtectSystem=strict",
-        &format!("ReadWritePaths={}", root.path().display()),
+        "UMask=0077",
+        "LockPersonality=yes",
+        "RestrictSUIDSGID=yes",
+        "RestrictNamespaces=yes",
+        "RestrictRealtime=yes",
+        "SystemCallFilter=@system-service",
     ] {
         assert!(
             expected.contains(directive),
             "the unit has no `{directive}`:\n{expected}"
+        );
+    }
+    for absent in [
+        "User=",
+        "Group=",
+        "PrivateTmp=",
+        "ProtectSystem=",
+        "ProtectHome=",
+        "ReadWritePaths=",
+    ] {
+        assert!(
+            !expected.contains(absent),
+            "the unit carries `{absent}`, which a user unit cannot have:\n{expected}"
         );
     }
     let second = deploy::run(&deployed, &root, &tools, &Fake::new(), false);
@@ -2251,21 +2273,23 @@ fn the_unit_is_the_bytes_this_binary_renders_and_the_machine_reads_enabled() {
     assert_eq!(step.word, Word::Satisfied, "{}", step.sentence);
     assert!(
         step.sentence
-            .contains("still root's to run: sudo install -m 0644"),
-        "the pass does not say what is left for root: {}",
+            .contains("still yours to run: systemctl --user daemon-reload"),
+        "the pass does not say what is left to run: {}",
         step.sentence
     );
 
-    // The same bytes on a machine root: the unit is still written into the root, and the commands that make it
-    // systemd's are still words. `Tools` has no `systemctl` field at all (ADR-0086), which is the compile-time half
-    // of "this step runs no child of root's".
+    // The same bytes and the same commands for a dry run over a complete tree: the enable is still words, and no
+    // child of root's is named anywhere in the pair (ADR-0088 — the unit is the operator's own file).
     let again = deploy::run(&deployed, &root, &tools, &Fake::new(), true);
     let plan = line(&again, DeployStep::Service).sentence.clone();
     assert!(
-        plan.contains("sudo install -m 0644")
-            && plan.contains("sudo systemctl daemon-reload")
-            && plan.contains("sudo systemctl enable --now holosmith.service"),
-        "the plan does not name the three commands that install and start the unit: {plan}"
+        plan.contains("systemctl --user daemon-reload")
+            && plan.contains("systemctl --user enable --now holosmith.service"),
+        "the plan does not name the two commands that enable the unit: {plan}"
+    );
+    assert!(
+        !plan.contains("sudo"),
+        "the plan names an escalation a user unit does not need: {plan}"
     );
 }
 

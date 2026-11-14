@@ -189,9 +189,12 @@ and its ADR-0086 D4 citation go. The two hints that told an operator to escalate
 holosmith holosmith key set`", which is now the operator writing their own 0600 file, and `remote`'s note about the
 machine's sudoers rule.
 
-None of these deletions is in the tree yet: this build's deploy still creates the account, renders `User=` and
-`Group=`, prints `useradd`, `usermod` and the sudoers line, and its `promote` still escalates. The decision is recorded
-here, and what D5 lists is the shape the code moves to rather than a description of the tree as it stands.
+The move is half in the tree. Step 5 has it: the unit it renders carries no `User=` or `Group=`, the sandbox is the
+reduced set, it is enabled with `WantedBy=default.target` and the two `systemctl --user` commands, and it is written
+into the user manager's directory beside the config. Still outstanding: step 2's account and the `useradd`/`usermod` it
+prints, `promote`'s restart and the sudoers line its refusal names, `logs`'s journal spelling, `uninstall`'s words, and
+`loginctl enable-linger`. The decision is recorded here, and what D5 lists is the shape the code moves to rather than a
+description of the tree as it stands.
 
 ## Refused
 

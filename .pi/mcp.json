@@ -3,16 +3,10 @@
         "linear": {
             "url": "https://mcp.linear.app/mcp",
             "toolExposure": {
-                "list_issue*": "direct",
-                "list_project": "direct",
-                "get_project": "direct",
-                "get_workspace": "direct",
-                "save_issue*": "direct",
-                "save_comment": "direct",
                 "delete_*": "hidden",
-                "*_delete": "hidden"
+                "*_delete": "hidden",
+                "*": "direct"
             }
         }
     }
 }
-

@@ -453,6 +453,15 @@ deploy_block() {
   awk -v header="$2" '$0 ~ header { inside = 1 } inside && !/^$/ { print; next } inside { exit }' "$1" || true
 }
 
+# The unit a run with this `--config` writes: `<config dir>/systemd/user/holosmith.service`.
+#
+# The unit is the operator's own file, kept in the **user** manager's directory beside the config (ADR-0088), so it is
+# never under `--root`: a case that reads its bytes, or writes them by hand, computes the path from the config it
+# named rather than from the tree it deployed into.
+unit_for() {
+  printf '%s/systemd/user/holosmith.service' "$(dirname "$1")"
+}
+
 # Every answer a browser gets from the booted artifact: one function per case, run in this
 # order. Adding a case is one case_* function and one line in serve_cases, and every later
 # story adds at least one (docs/build.md).
@@ -5294,19 +5303,24 @@ APPLIED
   # `hub` into the input and step 2 installs into that same `--config` path, so a step that wrote no config at all
   # would still pass it. `data_root` is the deploy's own — nothing else in this case puts `$hub_tree/data` in that
   # file. And a hub's unit requires no daemon: a `hub deploy` exists for the machine that has none, and a unit that
-  # named `docker.service` there would never start.
+  # named `docker.service` there would never start. The unit itself is the user manager's, beside that config, and a
+  # grep for what it must *not* contain passes vacuously against a file that is not there — so the path is proved
+  # first.
   grep -qx 'role = "hub"' "$hub_config" ||
     fail "$name/run/config/role" "step 2 did not write the role it installed: $(cat "$hub_config")"
   assertions=$((assertions + 1))
   grep -q "^data_root = \"$hub_tree/data\"$" "$hub_config" ||
     fail "$name/run/config/data_root" "step 2 did not write the data root it installed: $(cat "$hub_config")"
   assertions=$((assertions + 1))
-  if grep -q 'docker.service' "$hub_tree/holosmith.service"; then
-    fail "$name/run/unit" "a hub's unit requires a daemon this machine does not have: $(cat "$hub_tree/holosmith.service")"
+  [ -f "$(unit_for "$hub_config")" ] ||
+    fail "$name/run/unit" "the target wrote no unit"
+  assertions=$((assertions + 1))
+  if grep -q 'docker.service' "$(unit_for "$hub_config")"; then
+    fail "$name/run/unit" "a hub's unit requires a daemon this machine does not have: $(cat "$(unit_for "$hub_config")")"
   fi
   assertions=$((assertions + 1))
-  grep -q '^Description=Holosmith hub$' "$hub_tree/holosmith.service" ||
-    fail "$name/run/unit/description" "the unit does not describe the machine it boots: $(cat "$hub_tree/holosmith.service")"
+  grep -q '^Description=Holosmith hub$' "$(unit_for "$hub_config")" ||
+    fail "$name/run/unit/description" "the unit does not describe the machine it boots: $(cat "$(unit_for "$hub_config")")"
   assertions=$((assertions + 1))
   status=0
   "$artifact" config validate --config "$hub_config" >/dev/null 2>&1 || status=$?
@@ -5362,8 +5376,8 @@ AGAIN
   assertions=$((assertions + 1))
 
   # `both` runs sessions, so its unit keeps the daemon even though the run that wrote it installed the hub's half.
-  grep -qx 'Requires=docker.service' "$tree/holosmith.service" ||
-    fail "$name/union/unit" "a both machine's unit dropped the daemon it needs: $(cat "$tree/holosmith.service")"
+  grep -qx 'Requires=docker.service' "$(unit_for "$server_config")" ||
+    fail "$name/union/unit" "a both machine's unit dropped the daemon it needs: $(cat "$(unit_for "$server_config")")"
   assertions=$((assertions + 1))
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
@@ -11143,9 +11157,13 @@ case_upgrade() {
   local bin="$root/bin" candidate="$root/candidate/holosmith" state="$root/state"
   local docker_log="$root/docker.argv" systemctl_log="$root/systemctl.argv" serve_log="$root/serve.log"
   local pid_file="$root/serve.pid" broken="$root/broken" version tag digest status answer port line schema
-  local first second session snapshots
+  local first second session snapshots unit
   rm -rf "$root"
   mkdir -p "$bin" "$data" "$projects" "$admin" "$root/candidate" "$state"
+  # The unit a deploy writes is the user manager's file beside the config (ADR-0088), so it is not in the state tree
+  # this case builds by hand and both arms that write it make its directory first.
+  unit="$(unit_for "$config")"
+  mkdir -p "$(dirname "$unit")"
 
   # The candidate is this tree's artifact with the two files `holosmith build` writes beside each other, so the
   # promotion's own ELF check, digest check and `version --json` are all measured over real bytes.
@@ -11341,8 +11359,8 @@ SUDO
   touch -d @1700000002 "$root/releases/ancient2"
   mkdir -p "$root/releases/keepme"
   printf 'not a release: no holosmith here\n' >"$root/releases/keepme/README"
-  printf '[Unit]\nDescription=Holosmith server\n\n[Service]\nExecStart=%s/current/holosmith serve\nRestart=on-failure\n\n[Install]\nWantedBy=multi-user.target\n' \
-    "$root" >"$root/holosmith.service"
+  printf '[Unit]\nDescription=Holosmith server\n\n[Service]\nExecStart=%s/current/holosmith serve\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n' \
+    "$root" >"$unit"
 
   # The machine, serving: the same argv the stand-in replays, so the promotion's drain socket is this run's own.
   "$artifact" serve --config "$config" --admin-dir "$admin" >>"$serve_log" 2>&1 &
@@ -11517,10 +11535,13 @@ case_rollback() {
   local bin="$root/bin" systemctl_log="$root/systemctl.argv" serve_log="$root/serve.log"
   local pid_file="$root/serve.pid" restart_view="$root/restart.current"
   local releases="$root/releases" link="$root/current"
-  local unit="$root/holosmith.service"
+  local unit
   local version tag digest status answer port line first second session schema
   rm -rf "$root"
   mkdir -p "$bin" "$data" "$projects" "$admin"
+  # The unit is the user manager's file beside `--config`, not a file under `--root` (ADR-0088).
+  unit="$(unit_for "$config")"
+  mkdir -p "$(dirname "$unit")"
 
   # The release every arm moves between: this tree's artifact, because a rollback reads its target's own
   # `version --json` — the version the poll waits for and the schema the database is compared with.
@@ -11780,10 +11801,13 @@ PY
 case_releases() {
   local name=case_releases root="$repo_root/target/verify-releases-$$"
   local tree="$root" releases="$root/releases" link="$root/current"
-  local unit="$root/holosmith.service" config="$root/config.toml"
+  local unit config="$root/config.toml"
   local digest status answer tag resolved line
   rm -rf "$root"
   install -d -m 0755 "$releases"
+  # The unit is the user manager's file beside `--config`, not a file under `--root` (ADR-0088).
+  unit="$(unit_for "$config")"
+  install -d -m 0755 "$(dirname "$unit")"
 
   # Four releases side by side, written by hand and given the mtimes that make the tree's order the test's. The
   # unrecognised directory is the **newest** thing in `releases/` on purpose: if `history()` counted it, the doctor's
@@ -11888,6 +11912,9 @@ case_releases() {
   esac
 
   # ---- 7. nothing deployed: no unit and no tree, which is `unknown` and not a failure -----------------------
+  # `--root` moves the tree and not the unit, which is the file beside the config (ADR-0088), so "no unit" is that
+  # file's absence rather than a root that does not have one under it.
+  rm -f "$unit"
   status=0
   "$artifact" doctor --quick --config "$config" --root "$root/empty" >"$WORK/$name.none.out" 2>&1 || status=$?
   check "$name/none/exit" 0 "$status"
@@ -12178,7 +12205,7 @@ PYASK
 case_server_deploy() {
   local name=case_server_deploy root="$repo_root/target/verify-deploy-$$"
   local image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
-  local control preview status line got entry n version
+  local control preview status line got entry n version unit
   local shims log state target count
 
   # ---- the offline half: step 1 against a `_ping` socket, and the two failures ----------------------
@@ -12223,20 +12250,27 @@ case_server_deploy() {
       fail "$name/dry/images" "the dry run does not plan step 3: $(cat "$WORK/$name.dry.out")"
     assertions=$((assertions + 1))
     # Steps 5 and 6 plan what they would do, and the sentence names the thing it would touch — the unit's path and
-    # the three commands that are root's, and the wait step 6 is. A plan's content is on the step's own line and the
-    # action lines under it (ADR-0085), so each check reads the whole block.
+    # the two `systemctl --user` commands that enable it, and the wait step 6 is. A plan's content is on the step's own
+    # line and the action lines under it (ADR-0085), so each check reads the whole block. The unit is the user
+    # manager's file beside `--config`, so the path is the config's directory and not the root's.
     line="$(deploy_block "$WORK/$name.dry.out" '^5\. service: needs: ')"
     [ -n "$line" ] || fail "$name/dry/service" "the dry run does not plan step 5: $(cat "$WORK/$name.dry.out")"
     case "$line" in
-      *"$root/install/holosmith.service"*) assertions=$((assertions + 1)) ;;
+      *"$(unit_for "$WORK/config-deploy-offline.toml")"*) assertions=$((assertions + 1)) ;;
       *) fail "$name/dry/service/unit" "step 5 does not name the unit it would write: $line" ;;
     esac
-    for command in "sudo install -m 0644" "sudo systemctl daemon-reload" "sudo systemctl enable --now holosmith.service"; do
+    for command in "systemctl --user daemon-reload" "systemctl --user enable --now holosmith.service"; do
       case "$line" in
         *"$command"*) assertions=$((assertions + 1)) ;;
         *) fail "$name/dry/service/command" "step 5 does not name '$command': $line" ;;
       esac
     done
+    # A user unit needs no escalation, and the repo's rule is that this program runs no `sudo`: the plan must not name
+    # one, either for the install or for the enable.
+    case "$line" in
+      *sudo*) fail "$name/dry/service/sudo" "step 5's plan escalates: $line" ;;
+      *) assertions=$((assertions + 1)) ;;
+    esac
     line="$(deploy_block "$WORK/$name.dry.out" '^6\. health: needs: ')"
     [ -n "$line" ] || fail "$name/dry/health" "the dry run does not plan step 6: $(cat "$WORK/$name.dry.out")"
     for target in "127.0.0.1:$control" '/api/health' 'doctor --full'; do
@@ -12415,7 +12449,7 @@ case_server_deploy() {
   grep -q '^4\. proxies: changed: ' "$WORK/$name.online.out" ||
     fail "$name/online/step4" "step 4 did not start the proxies: $(cat "$WORK/$name.online.out")"
   assertions=$((assertions + 1))
-  # The unit step, from the run that really wrote it: the file, and the commands that are root's as words.
+  # The unit step, from the run that really wrote it: the file, and the two `systemctl --user` commands as words.
   grep -q '^5\. service: changed: ' "$WORK/$name.online.out" ||
     fail "$name/online/step5" "step 5 did not write the unit: $(cat "$WORK/$name.online.out")"
   assertions=$((assertions + 1))
@@ -12425,15 +12459,24 @@ case_server_deploy() {
   grep -q '^deploy: 6 steps: ' "$WORK/$name.online.out" ||
     fail "$name/online/summary" "no tally line: $(cat "$WORK/$name.online.out")"
   assertions=$((assertions + 1))
-  # The unit's bytes are the deliverable: `ExecStart` names this binary and the config the run installed, and no
-  # child was run
-  # (ADR-0086 — `Tools` has no `systemctl` field at all, so this is a file's content and a log's silence).
-  grep -q "^ExecStart=.* serve --config $WORK/config-deploy-online.toml$" "$root/install/holosmith.service" ||
-    fail "$name/online/unit" "the unit does not run this binary against the root's config: $(cat "$root/install/holosmith.service")"
+  # The unit's bytes are the deliverable: `ExecStart` names this binary and the config the run installed, the file is
+  # in the user manager's directory beside that config (ADR-0088), and no child was run
+  # (`Tools` has no `systemctl` field at all, so this is a file's content and a log's silence).
+  unit="$(unit_for "$WORK/config-deploy-online.toml")"
+  grep -q "^ExecStart=.* serve --config $WORK/config-deploy-online.toml$" "$unit" ||
+    fail "$name/online/unit" "the unit does not run this binary against the config the run installed: $(cat "$unit")"
   assertions=$((assertions + 1))
-  grep -q '^User=holosmith$' "$root/install/holosmith.service" ||
-    fail "$name/online/unit/user" "the unit names no service user: $(cat "$root/install/holosmith.service")"
+  grep -q '^WantedBy=default.target$' "$unit" ||
+    fail "$name/online/unit/target" "the unit is not enabled by the user manager: $(cat "$unit")"
   assertions=$((assertions + 1))
+  # A user unit runs as its owner: `User=`/`Group=` would be a second account, and the mount directives that would
+  # carry `PrivateUsers=` into a user manager are gone with them (ADR-0088 D3).
+  for absent in '^User=' '^Group=' '^PrivateTmp=' '^ProtectSystem=' '^ProtectHome=' '^ReadWritePaths='; do
+    if grep -q "$absent" "$unit"; then
+      fail "$name/online/unit/absent" "the unit carries '$absent', which a user unit cannot have: $(cat "$unit")"
+    fi
+    assertions=$((assertions + 1))
+  done
   if [ -s "$log" ] && grep -q 'serve --bg' "$log"; then
     fail "$name/online/origins" "the deploy configured Tailscale origins, which left the deploy (ADR-0086): $(cat "$log")"
   fi
@@ -12685,7 +12728,7 @@ case_deploy_ssh() {
   grep -qx "role = \"hub\"" "$WORK/config-deploy-ssh-hub.toml" ||
     fail "$name/run/config/role" "the target's config is not the half that was installed: $(cat "$WORK/config-deploy-ssh-hub.toml")"
   assertions=$((assertions + 1))
-  [ -f "$root/hub/holosmith.service" ] ||
+  [ -f "$(unit_for "$WORK/config-deploy-ssh-hub.toml")" ] ||
     fail "$name/run/unit" "the target wrote no unit"
   assertions=$((assertions + 1))
   check "$name/run/children" 4 "$(grep -c '' "$sshlog")"
@@ -12837,10 +12880,10 @@ CAT
   rm -rf "$root"
 }
 
-# the machine steps from the shipped artifact: the VAPID pair and the unit `server deploy` renders, the three
-# commands that are root's (as words on the step's line), and the `/api/health` wait that turns an install into "this
-# machine is serving" — with `doctor`'s `perms` as the finding that makes a wrong mode a *startup* refusal, because the
-# unit's `ExecStartPre` is `doctor --quick`.
+# the machine steps from the shipped artifact: the VAPID pair and the unit `server deploy` renders, the two
+# `systemctl --user` commands that enable it (as words on the step's line), and the `/api/health` wait that turns an
+# install into "this machine is serving" — with `doctor`'s `perms` as the finding that makes a wrong mode a
+# *startup* refusal, because the unit's `ExecStartPre` is `doctor --quick`.
 #
 # Two halves that skip independently:
 #
@@ -12857,7 +12900,7 @@ CAT
 #
 # What neither half can measure is recorded where it belongs: nothing here asks systemd to load the unit (there is no
 # systemd on this machine), the origins are the operator's own step now, and the service user's commands and the
-# `systemctl` trio are printed rather than run — `tests/deploy.rs`'s arms are what measure the words.
+# `systemctl` pair are printed rather than run — `tests/deploy.rs`'s arms are what measure the words.
 # `docs/build.md` is the by-hand procedure for the parts only a real host can show.
 case_server_service() {
   local name=case_server_service root="$repo_root/target/verify-service-$$"
@@ -12956,7 +12999,7 @@ case_server_service() {
     line="$(deploy_block "$WORK/$name.dry.out" '^5\. service: needs: ')"
     [ -n "$line" ] || fail "$name/dry/service" "the dry run does not plan step 5: $(cat "$WORK/$name.dry.out")"
     case "$line" in
-      *"$root/install/holosmith.service"*) assertions=$((assertions + 1)) ;;
+      *"$(unit_for "$WORK/config-service-dry.toml")"*) assertions=$((assertions + 1)) ;;
       *) fail "$name/dry/service/unit" "step 5 does not name the unit it would write: $line" ;;
     esac
     line="$(deploy_block "$WORK/$name.dry.out" '^6\. health: needs: ')"
@@ -13048,35 +13091,34 @@ case_server_service() {
     fail "$name/vapid/private" "private_key is not 43 base64url characters: $(cat "$vapid")"
   assertions=$((assertions + 1))
 
-  # The unit: mode 0644 at `<root>/holosmith.service` — ADR-0086 puts the rendered unit in the root, and the
-  # operator installs it from there — carrying the lines the acceptance names, the service user the deploy makes the
-  # unit's, and the sandbox D3 promises. A gate with no root can check the bytes and not the confinement, which is
-  # what D3 says the gate is for.
-  unit="$root/install/holosmith.service"
+  # The unit: mode 0644 in the **user** manager's directory beside `--config` (ADR-0088), carrying the directives the
+  # measurement found safe in a user unit and none of the ones that make systemd enable `PrivateUsers=` — which would
+  # hand the daemon gid 65534, no supplementary groups (the `docker` group included) and a readable `/etc/shadow`. A
+  # gate with no systemd can check the bytes and not the confinement, which is what the ADR's table says the gate is
+  # for; `deploy::unit_text`'s own unit test is the arm that pins every directive and every absence.
+  unit="$(unit_for "$WORK/config-service-online.toml")"
   check "$name/unit/mode" 644 "$(stat -c '%a' "$unit")"
-  for target in 'User=holosmith' 'Group=holosmith' 'UMask=0077' 'NoNewPrivileges=yes' 'PrivateTmp=yes' \
-    'ProtectSystem=strict' "ReadWritePaths=$root/install" 'Restart=on-failure' \
-    "ExecStartPre=$artifact doctor --quick" 'WantedBy=multi-user.target'; do
+  for target in 'UMask=0077' 'NoNewPrivileges=yes' 'LockPersonality=yes' 'RestrictSUIDSGID=yes' \
+    'RestrictNamespaces=yes' 'RestrictRealtime=yes' 'SystemCallFilter=@system-service' \
+    'Restart=on-failure' "ExecStartPre=$artifact doctor --quick" 'WantedBy=default.target'; do
     grep -qxF "$target" "$unit" || fail "$name/unit/line" "the unit does not carry '$target': $(cat "$unit")"
     assertions=$((assertions + 1))
   done
-  # `ProtectHome=yes` is written **except** under a root inside `/home`, where it would hide the root itself. This
-  # tree lives under the repository, and this repository is under `/home`, so the gate is the arm that proves the
-  # conditional — and `deploy::unit_text`'s own unit test is the arm that pins the directive itself.
-  if [ "${root#/home}" = "$root" ]; then
-    grep -qxF 'ProtectHome=yes' "$unit" ||
-      fail "$name/unit/protect" "the unit hides /home from a root that is not under it: $(cat "$unit")"
+  # The other direction, which is this case's own subject: a user unit runs as its owner, so `User=`/`Group=` are not
+  # there at all, and the mount and namespace directives — with `ReadWritePaths=`, which is `ProtectSystem=`'s
+  # exception — went with them.
+  for absent in '^User=' '^Group=' '^PrivateTmp=' '^ProtectSystem=' '^ProtectHome=' '^ReadWritePaths=' \
+    '^ProtectKernelTunables=' '^ProtectControlGroups=' '^ProtectHostname=' '^PrivateUsers='; do
+    if grep -q "$absent" "$unit"; then
+      fail "$name/unit/absent" "the unit carries '$absent', which a user unit cannot have: $(cat "$unit")"
+    fi
     assertions=$((assertions + 1))
-  elif grep -q '^ProtectHome=' "$unit"; then
-    fail "$name/unit/protect" "a root under /home is hidden from itself: $(cat "$unit")"
-  else
-    assertions=$((assertions + 1))
-  fi
+  done
   # The program is the one that wrote the unit (`ExecStart` names it because a `PATH` lookup is not the binary that
   # ran), and the config is the file `--config` named — so the two are asserted by shape, the way `case_server_deploy`
   # does.
   grep -q "^ExecStart=.* serve --config $WORK/config-service-online.toml$" "$unit" ||
-    fail "$name/unit/exec" "the unit does not run this binary against the root's config: $(cat "$unit")"
+    fail "$name/unit/exec" "the unit does not run this binary against the config the run installed: $(cat "$unit")"
   assertions=$((assertions + 1))
 
   # Tailscale left the deploy (ADR-0086): the stand-in on `PATH` is what would have been called, so its log is the
@@ -13538,7 +13580,7 @@ SHIM
 case_uninstall() {
   local name=case_uninstall root="$repo_root/target/verify-uninstall-$$"
   local image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
-  local tree status line id networks egress_before control preview
+  local tree status line id networks egress_before control preview unit
   local create_body='{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}'
 
   if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
@@ -13556,10 +13598,13 @@ case_uninstall() {
   printf '%s\n' "$networks" | grep -qx 'egress' && egress_before=1
 
   # ---- 1. the tree: the unit goes, the data stays, the second run says nothing -------------------
+  # The unit is the user manager's file beside `--config` (ADR-0088), which is where the deploy wrote it and therefore
+  # where the teardown removes it: not under the state tree this case builds by hand.
   tree="$root/tree"
-  install -d -m 0755 "$tree/etc/systemd/system" "$tree/data/secrets" ||
+  unit="$(unit_for "$WORK/config-uninstall.toml")"
+  install -d -m 0755 "$(dirname "$unit")" "$tree/data/secrets" ||
     fail "$name/tree" "could not create the install tree"
-  install -m 0644 /dev/null "$tree/holosmith.service" ||
+  install -m 0644 /dev/null "$unit" ||
     fail "$name/tree/unit" "could not create the unit"
   install -m 0600 /dev/null "$tree/data/secrets/keys.toml" ||
     fail "$name/tree/keys" "could not create the key store"
@@ -13583,7 +13628,7 @@ case_uninstall() {
       fail "$name/first/network" "there was no egress network and the line claims one: $(cat "$root/first.out")"
   fi
   assertions=$((assertions + 1))
-  [ ! -e "$tree/holosmith.service" ] ||
+  [ ! -e "$unit" ] ||
     fail "$name/first/file" "the unit file is still there"
   assertions=$((assertions + 1))
   # The data root and the secrets are what "keeps data" means, and the key store is the file a careless teardown
@@ -13642,9 +13687,9 @@ case_uninstall() {
   fi
   # ---- 3. --purge: refused over a live row, and it removes nothing --------------------------------
   tree="$root/purge"
-  install -d -m 0755 "$tree/etc/systemd/system" ||
+  install -d -m 0755 "$tree" ||
     fail "$name/purge/tree" "could not create the purge tree"
-  install -m 0644 /dev/null "$tree/holosmith.service" ||
+  install -m 0644 /dev/null "$unit" ||
     fail "$name/purge/unit" "could not create the purge unit"
   if [ -n "$serve_pid" ] && kill -0 "$serve_pid" 2>/dev/null; then
     stop_serve
@@ -13674,7 +13719,7 @@ case_uninstall() {
     *) fail "$name/refused/force" "the refusal names no override: $line" ;;
   esac
   # Nothing was removed: the refusal is before the first child, which is the whole reason it is asked first.
-  [ -f "$tree/holosmith.service" ] ||
+  [ -f "$unit" ] ||
     fail "$name/refused/unit" "a refused purge removed the unit"
   assertions=$((assertions + 1))
   [ -d "$tree/data" ] || fail "$name/refused/root" "a refused purge removed the data root"
