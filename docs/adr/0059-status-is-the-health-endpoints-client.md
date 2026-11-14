@@ -191,7 +191,7 @@ command that just ran, with its own flags made absolute) because re-running is t
 
 **What this machine cannot measure**: no systemd, so no unit is loaded and `disable --now`/`daemon-reload` are
 `tests/uninstall.rs`'s recorders (and a privileged run's unit *file* is untestable here, because `/etc/systemd/system`
-is not this user's to write — the case's `--root` arm and `docs/build.md`'s by-hand procedure are the two proofs);
+is not this user's to write — the case's `--root` arm and `AGENTS.md`'s by-hand procedure are the two proofs);
 no `journalctl` for a unit, so the server arm's real journal is a stand-in's; and no host registry, so `status`'s
 machines line names instead of a health it cannot ask for. Those three are the ship note's "said plainly",
 not gaps found later.

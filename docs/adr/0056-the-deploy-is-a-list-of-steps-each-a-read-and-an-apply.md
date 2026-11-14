@@ -158,7 +158,7 @@ that records the calls, with no daemon — the `doctor::Machine` pattern.
 Steps 5 and 6 were **not measured**: this machine has no systemd (`/proc/1/comm` is `bwrap`,
 `/run/systemd/system` is absent) and no `tailscaled` answering, which is the same fact `doctor` renders as
 `unknown` (ADR-0054) and the reason they are the steps. Step 3 builds nothing, so step 4's proxies run
-whatever `agent_image` names — on this machine `pi-agent:local`, tagged by hand as `docs/build.md` says.
+whatever `agent_image` names — on this machine `pi-agent:local`, tagged by hand as `AGENTS.md` says.
 **Amended by ADR-0057:** step 3 builds both images from the Dockerfiles embedded in the binary, and the proxies
 run `holosmith-proxy:<version>` instead of whatever `agent_image` names.
 **Amended by ADR-0058:** steps 5, 6 and 7 are measured now — through the gate's `tailscale` and `/api/health`

@@ -602,7 +602,7 @@ fn take_backup(config: &Config) -> Result<PathBuf, String> {
 /// The drain is the point of no return for the machine's *state*, not for the release: a promotion that fails after
 /// it has left the process draining (new creates and prompts answer `503 draining`, reads keep answering), and the
 /// only thing that clears a drain is the restart it exists for. Naming that in each sentence is what
-/// `docs/build.md`'s "every refusal leaves the machine as it found it — except after the drain" means, and it is one
+/// `AGENTS.md`'s "every refusal leaves the machine as it found it — except after the drain" means, and it is one
 /// function so the five call sites cannot drift from it.
 pub(crate) fn draining(said: String) -> String {
     format!(

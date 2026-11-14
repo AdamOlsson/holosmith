@@ -210,7 +210,7 @@ over, and `secrets/vapid.toml` is generated once. The deploy never edits either.
 
 The order that works on a fresh machine: run `deploy --dry-run`, run the deploy, edit the config (deploy's own
 defaults are `localhost` origins and an empty allow-list), then run the deploy again. Everything else about the
-install path is in `docs/build.md`.
+install path is in `AGENTS.md`.
 
 ## Where the reasons are
 

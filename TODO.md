@@ -4,10 +4,10 @@
 ### Less repeated work
 
 - [x] **Put the gate invocation in AGENTS.md at the top of "Build and gates"** (the agent already added this at your request): `. ~/.pi/toolchains/env.sh && scripts/verify.sh`, ~15 min, success sentinel `verify: N assertions, ok`. Also state: *run it detached with a log, poll the log, don't use `pgrep -f` on a string in your own command line.*
-- **Add a `scripts/gate-quick.sh`** (fmt, clippy, `cargo test --lib`, plus the named test binaries for changed areas) and tell workers to use it; reserve full `cargo test` and `verify.sh` for the parent. Workers died re-running the 2-5 minute full suite 2-3 times.
-- **Set `timeoutMs` explicitly** for implementor/fixer runs (e.g. 3600000), and tell workers in the task: *run the full gate at most once, at the end, redirecting to a log file and grepping it.* Use `checkpointBeforeDeadlineMs` so a dying worker reports state rather than vanishing.
+- [x] **Add a `scripts/gate-quick.sh`** (fmt, clippy, `cargo test --lib`, plus the named test binaries for changed areas) and tell workers to use it; reserve full `cargo test` and `verify.sh` for the parent. Workers died re-running the 2-5 minute full suite 2-3 times.
+- [ ] **Set `timeoutMs` explicitly** for implementor/fixer runs (e.g. 3600000), and tell workers in the task: *run the full gate at most once, at the end, redirecting to a log file and grepping it.* Use `checkpointBeforeDeadlineMs` so a dying worker reports state rather than vanishing.
 - [ ] **Create a Linear id map** Make the task prompt say "fetch by title query `HS-083` within project Holosmith" so the first `get_issue HS-083` failure doesn't recur.
-- **Make a reusable "ticket pipeline" skill/prompt template** (implement → review → fix → gate → commit → Linear). This session's chain was the same shape as the prompt; encode it once, including: branch from `gitBranchName`, Linear comment checkpoints, which model/thinking flags, exclude-file list, commit message style (imperative subject, prose body).
+- [ ] **Make a reusable "ticket pipeline" skill/prompt template** (implement → review → fix → gate → commit → Linear). This session's chain was the same shape as the prompt; encode it once, including: branch from `gitBranchName`, Linear comment checkpoints, which model/thinking flags, exclude-file list, commit message style (imperative subject, prose body).
 
 ### Less searching for tools
 
@@ -16,7 +16,7 @@
 ### Fewer misunderstandings
 
 - [ ] **State acceptance gates unambiguously in the ticket template**: "gate = `. env.sh && scripts/verify.sh`" rather than "scripts/verify.sh if the environment allows". The worker's "can't run here" was a reasonable reading of that hedge.
-- [ ] **Add a rule: "an environment limitation claim must cite where you looked."** The wrong "no musl toolchain" claim came from not reading `docs/build.md`'s first code block. A line in the system addendum like "before reporting a tool as missing, grep docs/ and AGENTS.md for its setup command" would have caught it.
+- [ ] **Add a rule: "an environment limitation claim must cite where you looked."** The wrong "no musl toolchain" claim came from not reading the toolchain line in `AGENTS.md`. A line in the system addendum like "before reporting a tool as missing, grep docs/ and AGENTS.md for its setup command" would have caught it.
 
 ### Harness and settings
 

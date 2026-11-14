@@ -5,7 +5,7 @@
 #
 # Usage: scripts/check-static.sh [--target <triple>]...
 # Reads the artifact's `version` and `serve` output, so run scripts/build.sh first. Downloads
-# nothing: qemu-aarch64-static is a machine-local tool (docs/build.md) and its absence
+# nothing: qemu-aarch64-static is a machine-local tool (AGENTS.md) and its absence
 # prints one SKIP line instead of failing.
 
 set -euo pipefail
@@ -295,7 +295,7 @@ for target in "${targets[@]}"; do
       runner=("$(command -v "$emulator")")
       label="$target via $(basename "$emulator")"
     else
-      printf 'SKIP %s execution: %s not found (see docs/build.md)\n' \
+      printf 'SKIP %s execution: %s not found (see AGENTS.md)\n' \
         "$target" "${emulator:-an emulator}"
       printf '     %s: %s\n' "$bin" "$file_line"
       continue
@@ -324,7 +324,7 @@ for target in "${targets[@]}"; do
     check_serve_in_empty_root "$label" "${bwrap_args[@]}" -- "${inner[@]}"
     printf 'ok %s: runs with no loader and no userspace dependencies\n' "$target"
   else
-    printf 'SKIP %s empty-root run: bwrap not found (see docs/build.md)\n' "$target"
+    printf 'SKIP %s empty-root run: bwrap not found (see AGENTS.md)\n' "$target"
   fi
 
   printf '     %s: %s\n' "$bin" "$file_line"

@@ -11,7 +11,7 @@
 # and the header below says which release the dump came from so a later reader is never guessing.
 #
 # python3 is used for its `sqlite3` module: the `sqlite3` CLI is not installed here and nothing in the gate may
-# depend on it (docs/build.md, prerequisites). The connection is **read-only**, because this step reads a release
+# depend on it (AGENTS.md, prerequisites). The connection is **read-only**, because this step reads a release
 # and has no business changing one.
 set -euo pipefail
 
@@ -25,7 +25,7 @@ if [ -z "$database" ] || [ ! -f "$database" ]; then
   exit 2
 fi
 if ! command -v python3 >/dev/null 2>&1; then
-  printf 'schema-snapshot: python3 is needed for its sqlite3 module (docs/build.md, prerequisites)\n' >&2
+  printf 'schema-snapshot: python3 is needed for its sqlite3 module (AGENTS.md, prerequisites)\n' >&2
   exit 2
 fi
 

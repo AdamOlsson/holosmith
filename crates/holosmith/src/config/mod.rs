@@ -359,7 +359,7 @@ pub struct Config {
     pub agent_image: String,
     /// The Debian packages the agent image installs beyond git, openssl and CA certificates.
     ///
-    /// The spec's "the toolchains named in the config": `docs/build.md`'s table says a machine's image
+    /// The spec's "the toolchains named in the config": `AGENTS.md`'s prerequisites says a machine's image
     /// carries the toolchains its projects use, so they are a key rather than a constant — and the image's
     /// `org.holosmith.toolchains` label carries the list it was built with, which is what makes a changed list
     /// a rebuild rather than a re-tag. An empty list is a legitimate answer (a machine whose projects only need
@@ -368,7 +368,7 @@ pub struct Config {
     pub agent_toolchains: Vec<String>,
     /// What one session's container may use (spec item 6's resource limits): whole CPUs,
     /// mebibytes of memory, and a process count. Three integers because a config value has no decimal
-    /// and Docker's `--cpus` accepts the integer form; the defaults are `docs/build.md`'s flag list.
+    /// and Docker's `--cpus` accepts the integer form; the defaults are `docs/config.md`'s three `container_*` keys.
     pub container_cpus: u32,
     pub container_memory_mb: u64,
     pub container_pids: u64,

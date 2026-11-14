@@ -36,7 +36,6 @@ Issue tracking is remote only. Do not add `HS-*`/`PER-*` citations to code, comm
 | `crates/holosmith/fixtures/` | The recorded turn the smoke image replays |
 | `web/` | Vite + TypeScript PWA; built into `web/dist` and embedded in the binary |
 | `scripts/` | Build, static-artifact checks, embed checks and the end-to-end gate |
-| `docs/build.md` | How to build, test, verify, deploy and measure the credential path by hand |
 | `docs/quickstart.md` | One machine, phone as the browser: config, deploy, first session |
 | `docs/config.md` | Every config key: type, default, rule, and what reads it |
 | `docs/adr/` | Architecture decisions, one decision per file |
@@ -69,6 +68,17 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
+A worker runs none of that block. `scripts/gate-quick.sh <test-binary>...` runs `cargo fmt --check`,
+`cargo clippy --all-targets -- -D warnings`, `cargo test --lib`, and only the integration binaries you
+name; `--list` prints their names. Name every binary whose module you touched, and if your change names
+none, run `--lib-only` and say so in your report. The footer counts the binaries that did not run —
+`2 of 65 test binaries run` — so an under-named change is visible in the run's own last line. Relinking
+all 65 test binaries costs about a minute and running them about two and a half, which is where a
+worker's turn goes when it re-runs `cargo test` two or three times. `cargo test` and `scripts/verify.sh`
+belong to the parent: its run is the proof, and a green quick gate says on its last line that the tree
+is not proven. The two tiers are therefore recorded here and not in an ADR — ADR-0003 still reads as if
+there is one gate, which is the cost of keeping the rule where an agent will read it.
+
 `scripts/verify.sh` runs those three, then `scripts/build.sh` (which builds the web app and checks what
 the artifact ships), `scripts/check-embed.sh`, and a boot of `dist/<host-triple>/holosmith` — the
 artifact the `build` phase just produced, never `target/debug`. Do not invent a second build path: the
@@ -98,6 +108,208 @@ The web app has its own gate:
 ```bash
 cd web && npm ci && npm test && npm run build
 ```
+
+## Prerequisites, and what a `SKIP` means
+
+`cargo build` needs rustc only. Everything past a debug run wants these on `PATH`, and a step that failed for
+no visible reason is usually one of them missing:
+
+- **rustc 1.99.1** from `~/.pi/toolchains/env.sh`. There is no `rust-toolchain.toml`: the build fetches nothing
+  beyond its declared dependencies.
+- **`x86_64-linux-musl-gcc` and `aarch64-linux-musl-gcc`** for the shipped targets. SQLite is compiled from
+  source (`rusqlite`'s `bundled`), so the C toolchain crosses too.
+- **node and npm** for `scripts/build-web.sh`: Vite 7 needs node 20.19+, and `npm test` — node's own runner over
+  `web/test/`, importing TypeScript directly — needs **node 22.18 or later** (22.6–22.17 need
+  `--experimental-strip-types`). A bare `cargo build` never runs npm.
+- **git 2.38 or newer**: the merge check runs `git merge-tree --write-tree`. macOS' `/usr/bin/git` shim reports
+  2.20 until the Command Line Tools are installed; the preflight prints the version it found.
+- **`openssl`, twice, for different jobs**: in the agent image, because `holosmith proxy key` runs
+  `openssl s_client` (the artifact is static and has no TLS stack, ADR-0048) — a missing one is a 502 from the
+  proxy, never a silent fallback; and on the host, because web push signs, derives and delivers through four
+  `openssl` children per message (ADR-0071), which `doctor --full` reports as `Check::Openssl` rather than
+  something `serve` refuses to start over.
+- **`install`, `chmod`, `id`, `openssl`** and the operator's own `sudo` for `server deploy` (ADR-0056): every
+  file action is one child, and `useradd`/`usermod`/`chown`/`systemctl` are recorded argv in `tests/deploy.rs`.
+  `--root DIR` builds an unprivileged install tree, which is what every gate case uses — no test needs `sudo`.
+- **tailscale and systemd** as `doctor` questions only: a LAN-only machine and a hand-run `serve` are supported,
+  and since ADR-0086 a deploy installs no unit and asks systemd nothing.
+
+Optional, and each one is a `SKIP` with a reason rather than a failure — a machine without it is supported:
+
+- **python3**: the gate cases that read a database or speak a socket by hand (`case_worktree`,
+  `case_compaction`, `case_exit_classification`, `case_usage_survives_resume`, the history case,
+  `case_schema_newer`, `case_doctor_quick`) and `scripts/schema-snapshot.sh`, which needs stdlib `sqlite3`
+  because the CLI is not assumed to exist. `cargo test` covers the behaviour either way: **treat a `SKIP` line as
+  "not measured here", never as a defect in your change.**
+- **`$HOLOSMITH_TEST_IMAGE`** (default `pi-agent:local`): a Docker image with `sh`, `git` **and `node`** (the
+  network self-test's probe is a node script, ADR-0044) whose default user is not root, for `tests/container.rs`
+  and the two mount/reconcile cases. It is run as the config's `agent_image`, so a development machine may point
+  that key at an image it tagged by hand; the two product images are `holosmith-proxy:<version>` and
+  `agent-image:<version>` (ADR-0057).
+- **`qemu-aarch64-static`** (or `HOLOSMITH_QEMU_AARCH64`) to run the aarch64 artifact here, and **`bwrap`** for
+  the empty-root run. Both are machine-local and **no script in this repo downloads anything**.
+- **A Docker daemon.** The development sandbox binds its socket because every story is a fact about a real
+  `docker run` — that is host root by another name (anything reaching the socket can mount `/`), so it is
+  granted deliberately and only when the socket exists.
+
+## Running it by hand, and the traps in it
+
+`serve` refuses a machine that cannot run its backend: the preflight checks the daemon, git and the disk before
+the listener binds, prints one sentence per failure naming the fix, and exits 1 (ADR-0028). `--backend stub`
+skips all of it and so does `role = "hub"`, which is why every gate boot and every phone-only demo uses one of
+the two. Facts that cost an hour when you learn them the hard way:
+
+- **A mount source must be a path the daemon can see, and `-v` does not say when it is not.** Docker resolves a
+  bind source in the *host's* namespace, so a `mktemp -d` under a tmpfs `/tmp` becomes an empty root-owned
+  directory with no error anywhere: the agent gets an empty `/work` and a `.git` that is not the repository.
+  Keep scratch repositories under `target/`, as `tests/container.rs` and `case_container_mounts` do.
+- **`docker_host`**: unset means `unix:///var/run/docker.sock`; a rootless daemon lives at
+  `unix:///run/user/<uid>/docker.sock`; `tcp://` and `ssh://` are the other accepted spellings, and `ssh://` is
+  reported *not checked* rather than passed. `permission denied` on the socket means the `docker` group, and the
+  preflight's sentence names the group, not `systemctl`.
+- **Docker Desktop's published ports are the VM's**: a `-p` port is reachable from that machine and not from a
+  phone or the hub, which is why both listeners are the host's own processes.
+- **The container appears seconds after the step returns**, and a killed `docker` CLI does not stop its
+  container: anything that inspects a session waits for the row to say `idle`, and the next boot's reconcile is
+  what makes a leftover boring.
+- **A session's files**: the worktree is `<projects_root>/.worktrees/<id>` on branch `agent/<id>`, made with
+  `git worktree add` from a commit the repository already has — no fetch, no remote — so a repository with no
+  commit cannot be provisioned from. The mounts are the worktree at `/work`, the repository's `.git` at its own
+  host path, and `.git/hooks` + `.git/config` read-only over it (ADR-0035). The agent's `pi-home` and its logs
+  live under the **data root**, so a Docker session's data root has to be a path the daemon can see too.
+- **The container is the agent**, and its shape is one value (ADR-0039, `container.rs`): attached (`-i`, never
+  `--detach`), `--rm --init --cap-drop ALL --security-opt no-new-privileges`, one `--internal` network per session
+  (`agents_<id>`), the five mounts, and the four switches that keep pi off the network (`NO_PROXY=key-proxy`,
+  `PI_OFFLINE=1`, `PI_SKIP_VERSION_CHECK=1`, `PI_TELEMETRY=0`). "Ready" is a protocol fact — a `get_state` command
+  and the `response` that repeats its id, under a 30 s bound — and the pi version is asserted against `pins/pi.txt`
+  once per process. Every start is `docker rm -f` then `docker run`, serialised per session (ADR-0037).
+- **The isolation is measured at every boot** (ADR-0044): a probe from `agent_image` on a temporary internal
+  network. `Passed` is a debug line, `Unknown` (no image, no daemon, a probe that did not finish) one warn, and
+  `Failed` refuses the boot with the sentence naming what was reached. `hub` and `stub` run neither, and
+  `tests/selftest.rs` prints one `SKIP` without a daemon.
+
+## Measuring the credential path (V3–V5)
+
+Three checks no gate may run, because they need **a real provider key**. `case_key_proxy` covers the half that
+needs none (a stand-in `openssl` on `PATH`, asserting the bytes the proxy produces), and the by-hand procedure
+is below. It needs a daemon and `agent_image`, a git repository under `projects_root`, a data root under
+`target/`, and `min_free_gb` low enough for the machine.
+
+- **Never put the key on argv**: `… holosmith key set <provider>` reads it from **stdin**.
+- **V3** — create a session, let it reach `idle`, prompt it twice (one prompt that makes it call a tool, one that
+  makes it think), and read the transcript back from
+  `GET /api/sessions/<id>/events/history?before=<big>&limit=1000`: both `message.delta` kinds, one
+  `tool.start`/`tool.end` pair, `usage` on `message.end`. `docker inspect s_<id>` must show no provider key in
+  the environment, and the `pi-home` must carry the dummy.
+- **V4** — in the same container, `printf '{"type":"get_available_models","id":"m1"}\n' | docker exec -i
+  s_<id> pi --mode rpc --no-session` answers the bundled catalog with `PI_OFFLINE=1` and only the dummy key.
+- **V5** — `docker logs hs_key` names the session for a real turn (`session=<id> … status=forwarded`). Put a
+  competing value where precedence says it wins (`<data>/sessions/<id>/pi-home/auth.json`) and the proxy logs
+  `status=bad-key` with `session=-`; remove it and the turn works again. The provider's environment variable is
+  the **weakest** source and does not displace the `models.json` key — which is why the seeded `pi-home` carries
+  no `auth.json` and the container environment no provider key.
+
+Two failure signatures worth recognising first: a `502 the provider closed the connection before answering`
+means the forwarded request declared a `Content-Length` it did not carry, and `401 … session=- … status=bad-key`
+for a session that exists means the proxy is reading a `keys.toml` from before the create — a file mount rather
+than the directory.
+
+## Fixtures: re-recording one
+
+`tests/fixtures/pi-turn-*.jsonl` are five real turns replayed by `tests/rpc.rs` through the production mapping:
+one answer, one that thought first, one that called a tool, one whose tool result carried an image, and one where
+a project-local extension asked the client a question (ADR-0040, ADR-0041, ADR-0043). Replaying needs no key, no
+daemon and no network — the records are committed. **Refreshing one needs all three**, and four traps:
+
+- One prompt against a container with the operator's own provider credentials, answered with a driver that
+  **keeps pi's stdin open until `agent_settled`** — closing it is pi's orderly shutdown, so a
+  `docker run -i < prompt.txt` records the system prompt and stops. Drive from a scratch agent directory under
+  `target/`, because a mount source the daemon cannot see is an empty directory, not an error.
+- **Every fixture's last line must end with a newline**: the reader splits on LF, so a final record without one
+  waits for EOF, which a fake agent holding its stdout open never gives.
+- The tool fixture needs a prompt that makes the agent call a tool; the image fixture needs a tool result
+  carrying an `image` block, which `read` on a PNG in the container's working directory produces; the extension
+  fixture needs `.pi/extensions/<name>.ts` calling `ctx.ui.select(...)` from a `turn_start` handler **and** the
+  run launched with `--approve`, which is what makes a project's extensions load. Its `notify` after the dialog
+  is the record proving the cancel arrived.
+- Answering that dialog is `{"type": "extension_ui_response", "id": …, "cancelled": true}` — the same exchange
+  production code has.
+
+`tests/rpc.rs`'s `a_fixture_whose_records_drifted_fails_this_guard` counts the record types per fixture, so a
+silent refresh is visible where a mapping assertion cannot be.
+
+## Migrations and the schema snapshot
+
+A migration may **add**. `DROP`, `ALTER … DROP COLUMN` and `RENAME` are refused in any file whose slug is not
+`contract` or `contract_*` (`schema::contract_violations`), and `tests/schema_previous.rs` compares
+`docs/schema/previous.sql` as a subset — every table and column there must still exist. `verify.sh`'s
+`migrations` phase is that second half, named so a migration author sees the rule in the output. A new migration
+needs no `build.rs` edit: `cargo:rerun-if-changed=migrations` is already there.
+
+**Refreshing the snapshot is a release step.** Start the release you are leaving once with an empty `--data-dir`
+(that migrates it), then `scripts/schema-snapshot.sh <data root>/app.db`, and commit the result **with** the
+contract migration that needed it — the diff is the record of what that release gave up. The file carries a
+provenance line naming the release it came from.
+
+A database from a **newer** release is not a refusal to start: `serve` warns and continues, because that is the
+case expand/contract exists to make safe. `doctor --quick` is where the sentence becomes a refusal, which is why
+a rollback across a schema-migrating release cannot start its `serve`.
+
+Compaction (ADR-0032) rewrites the delta rows of messages older than 24 hours into one `message.snapshot` each,
+so a seq is **strictly increasing with gaps** and the next one is `last_seq + 1`, never `MAX(seq) + 1`.
+
+## The release path: build, smoke, upgrade, rollback
+
+A release artifact is built **in a container**, so that agent-authored build code cannot run on the host:
+`holosmith build [--target <triple>] [--out <dir>]` needs Docker and nothing else. The first run builds
+`holosmith-builder:<version>` (~6 minutes: two pinned bases, the musl.cc toolchains, the rust targets); the
+container gets the source read-only at `/src`, runs the same `scripts/build.sh`, and the artifact comes back with
+`holosmith.sha256` beside it. A directory already holding a *different* binary for the same tag is refused. **The
+container bounds what build code can reach; it does not judge what it does** — the diff review is the gate.
+
+`holosmith smoke --binary <artifact> --root <dir>` is the only automated evidence that a candidate can serve a
+session at all (ADR-0081). Its `pi` is `holosmith container fake-pi` replaying `crates/holosmith/fixtures/
+smoke-turn.jsonl`, so **no provider call is made** and the key proxy is never exercised. Exit **0** passed,
+**1** a measurement failed — including the smoke image build, so a promotion must refuse it — and **2** could not
+run here (no daemon, no `git`, a `--binary` that is missing, not executable, or for another CPU).
+`HOLOSMITH_KEEP_SCRATCH=1` keeps the root. **A story that changes the container, git or proxy paths owes this
+command a green exit**; a `--backend stub` dev run does not cover those paths. A machine with no network for the
+smoke image's base is a **red** smoke test, not a quiet `SKIP`.
+
+`holosmith upgrade <artifact> --acknowledge-review [--root DIR]` promotes: review acknowledged, smoke, the two
+product images when their labels say they changed, the drain, a database backup, the release directory, the
+`current` symlink, `systemctl restart` through the machine's single sudoers line, and a twenty-second health poll
+that puts the previous release back by itself (ADR-0082, ADR-0084). `--acknowledge-review` is not a formality: a
+promotion without it is refused before anything is asked of the machine. Every refusal leaves the machine as it
+found it and says so — **except a refusal after the drain**, which leaves the machine draining and says the
+restart is what clears it.
+
+`holosmith rollback [--root DIR] [--to TAG]` is the emergency brake: drain, switch `current` one release back,
+restart, health-poll (ADR-0083). "One back" is the order the releases were **written** onto the tree (mtime),
+not tag order; `--to` may name a newer release, which is how a mistaken rollback is undone. It has no
+`--acknowledge-review`, and every refusal happens **before** the drain so nothing moves. It does not back up,
+restore a database, or touch a row or container — the drain stops idle sessions with `server_restart` and the
+next boot resumes them.
+
+## Build settings that bite
+
+- **Never export `RUSTFLAGS`.** `.cargo/config.toml` sets the two linkers and `relocation-model=static` per
+  target, and cargo silently ignores `target.*.rustflags` when that variable is set — the build would ship a
+  static-PIE binary with no error. `scripts/check-static.sh` asserts `statically linked` and an empty
+  `readelf -d`, so the mistake fails loudly instead.
+- **The git tag** is `HOLOSMITH_GIT_TAG`, else `git describe --tags --always --dirty`, else `unknown`.
+  `scripts/build.sh` sets it; a bare `cargo build` does not, and because `build.rs`'s `rerun-if-changed` lines opt
+  out of cargo's default rerun, a new tag on an unchanged tree leaves the old value in place: only
+  `scripts/build.sh` guarantees a fresh tag.
+- **`pins/pi.txt` is the only copy of the pi version.** Do not repeat the number in code, comments, docs or
+  tests — `tests/pin_single_source.rs` fails if it appears in a second tracked file.
+- The workspace root has one member, so a command from the root needs `-p holosmith`
+  (`cargo run -p holosmith -- version`).
+- **The fetch-nothing proof**, once per target: `cargo fetch --locked`, then a `bwrap --unshare-net --offline`
+  release build; `scripts/check-static.sh` also rejects a `source = "git+…"` entry in `Cargo.lock`. It covers
+  cargo only: the binary embeds the web app, so a cargo-only build of a clone without `web/dist` still succeeds
+  and serves a placeholder — build the app first and with `HOLOSMITH_REQUIRE_WEB=1`, which `scripts/build.sh`
+  always does.
 
 ## Invariants an agent must not break
 

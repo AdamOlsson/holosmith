@@ -48,7 +48,7 @@ live in `src/doctor.rs`, because nothing on the serving path may refuse for them
 That is ADR-0044's rule ("we could not measure is not we measured a leak") applied to the rest of the machine,
 and it is what makes the command runnable on the machine this build's gate runs on: no systemd
 (`/proc/1/comm` is `bwrap`, `/run/systemd/system` does not exist) and a `tailscale` CLI whose daemon answers
-`failed to connect to local tailscaled`. `serve` by hand is a supported way to run (`docs/build.md`), so a check
+`failed to connect to local tailscaled`. `serve` by hand is a supported way to run (`AGENTS.md`), so a check
 that refused here would make `doctor` unrunnable on a perfectly good machine — and `server deploy` is
 where systemd and Tailscale become deploy prerequisites, which is where a refusal belongs.
 

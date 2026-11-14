@@ -72,7 +72,7 @@ is the line to revisit. The two socket calls are bounded: read and write timeout
 
 ## Docker Desktop, where the operator will hit it
 
-The caveat is in `docs/build.md`'s Docker section rather than in a doc nobody reads: a container's published
+The caveat is in `AGENTS.md`'s by-hand section rather than in a doc nobody reads: a container's published
 port is opened by the Desktop VM's forwarder, so a port that looks "published" is reachable from the host
 and not from the phone or the hub. That is why the control listener is the host's own process and why
 `docker_host` on a dev machine is a `unix://` socket, and it is the reason the preview listener

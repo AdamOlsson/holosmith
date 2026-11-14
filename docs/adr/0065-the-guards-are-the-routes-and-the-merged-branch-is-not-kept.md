@@ -220,7 +220,7 @@ the landmines so the next agent does not "fix" it by adding a `timeout` to the s
 `422 unsupported` existed for exactly two requests ADR-0063 could not honour — a `strategy` that made a commit,
 and `delete_session`. built the first and this story builds the second, so the code, its constructor and
 its last wire-table row go. An envelope code the server can never send is a promise it does not make, and
-`docs/build.md` and `tests/merge.rs` are edited rather than left describing a code nothing produces.
+`AGENTS.md` and `tests/merge.rs` are edited rather than left describing a code nothing produces.
 
 ## D10 — `<data>/merge/<id>` is not the delete's to clean
 

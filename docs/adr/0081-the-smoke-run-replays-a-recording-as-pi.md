@@ -31,7 +31,7 @@ The codes are three, because two of the things that can happen are not verdicts 
 2 is decided **before** anything is attempted, and 1 is every failure after that. The image build is a 1 rather than a
 2 deliberately: the recipe is this build's own, so a daemon that cannot build it has failed the measurement, and
 calling it "could not run" would let a broken recipe be reported as a missing prerequisite. The operator-facing
-consequence is in `docs/build.md`: a machine with no network for the base is a red smoke test, not a quiet skip.
+consequence is in `AGENTS.md`: a machine with no network for the base is a red smoke test, not a quiet skip.
 
 ## D2 — the container's `pi` is the candidate, behind a two-line wrapper
 

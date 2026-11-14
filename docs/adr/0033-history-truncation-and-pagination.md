@@ -108,7 +108,7 @@ What no test here can show is a phone: the story's premise is a client that woul
 measurement that matters — a 200k-event session opening quickly — is the operator's, on their device.
 
 The **"Load earlier" affordance itself** is proved by reading rather than by a test, and that is the
-repository's own division of labour: no script may require a browser (`docs/build.md`), so the button's
+repository's own division of labour: no script may require a browser (`AGENTS.md`), so the button's
 reveal, its one-page-per-click fold and its hiding when `has_more` is false live in `web/src/main.ts`
 where nothing without a DOM can reach them. Everything about them that *is* a rule — the frame's payload,
 the turn base, the page size, the path — is in `web/src/transcript.ts` and is tested with node's own

@@ -353,7 +353,7 @@ pub struct Limits {
 }
 
 impl Default for Limits {
-    /// The documented defaults (`docs/build.md`'s flag list, and the spec's *Known and accepted risks*
+    /// The documented defaults (the config's three `container_*` keys, and the spec's *Known and accepted risks*
     /// table's "resource limits").
     fn default() -> Self {
         Self {

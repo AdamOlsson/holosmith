@@ -127,7 +127,7 @@ a recorded decision, not a missed word of the acceptance.** This binary does not
 cannot promise what a bare `holosmith` resolved through systemd's `PATH` would be; a unit naming a command instead
 of a path is a coin flip between the artifact the operator just built and whatever else answers to the name. The
 acceptance's literal line is the argv *shape* — `doctor --quick` as `ExecStartPre` — which the gate greps as
-`^ExecStartPre=.* doctor --quick$`, and the literal becomes true by `docs/build.md`'s by-hand procedure, which
+`^ExecStartPre=.* doctor --quick$`, and the literal becomes true by `AGENTS.md`'s by-hand procedure, which
 copies the artifact to `/usr/local/bin/holosmith` and runs the deploy from there. Neither line carries `--config`,
 because both commands' default is `/etc/holosmith/config.toml` and that is the file step 2 wrote at the path the
 default names: a flag would be a second spelling of one default.
@@ -285,7 +285,7 @@ user and the three `chown`s are recorders too**. And no reboot, which is the one
 that the unit comes back, and that `/run/holosmith` is recreated and chowned for the user that will put its socket
 in it.
 
-The "reachable over HTTPS" half of the story's demo is therefore `docs/build.md`'s by-hand procedure on a real host,
+The "reachable over HTTPS" half of the story's demo is therefore `AGENTS.md`'s by-hand procedure on a real host,
 and both this ADR and the ship note say so. What is proven here is the plan, the bytes, the two argvs, the pair's
 identity across two runs, the finding that turns a wrong mode into a startup refusal, and the handoff from a dry run
 to a real one — which is everything about this story a machine without systemd, without a Tailscale daemon and

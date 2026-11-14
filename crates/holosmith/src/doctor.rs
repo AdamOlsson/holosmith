@@ -324,7 +324,7 @@ fn openssl(program: &Path) -> Finding {
 /// Whether this machine has systemd, where "not there" is a fact rather than a failure.
 ///
 /// `/run/systemd/system` exists exactly while systemd is the init, and its absence is the supported way to run
-/// `serve` by hand (docs/build.md says so). A `server deploy` is where systemd becomes a prerequisite,
+/// `serve` by hand (AGENTS.md says so). A `server deploy` is where systemd becomes a prerequisite,
 /// and that step is where the refusal belongs — refusing here would make `doctor` unrunnable on the machine that
 /// runs no systemd and serves perfectly well.
 fn systemd(dir: &Path) -> Finding {

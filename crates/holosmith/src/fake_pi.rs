@@ -2,7 +2,7 @@
 //!
 //! Item 10's second step must run a **successful** turn against the real daemon with no provider key on the machine,
 //! and the build has no such turn in it: a session's container is on an `--internal` network with a dummy key, so pi
-//! refuses `prompt` before a stream exists — that refusal is what `case_docker_turn` measures, and `docs/build.md`'s
+//! refuses `prompt` before a stream exists — that refusal is what `case_docker_turn` measures, and `AGENTS.md`'s
 //! V3 procedure is the by-hand run that needs a real key. What makes a *successful* turn measurable by a robot is
 //! this module: a program that speaks pi's side of the RPC protocol (`docs/rpc.md`) into the launch's two pipes and
 //! prints a turn that was recorded once, from a real one.
@@ -260,7 +260,7 @@ mod tests {
             header.schema,
             crate::schema::SCHEMA_VERSION,
             "the committed fixture says it was recorded against schema {} and this binary's schema is {}: \
-             re-record it (docs/build.md) or say in the header why the mapping is unaffected",
+             re-record it (AGENTS.md) or say in the header why the mapping is unaffected",
             header.schema,
             crate::schema::SCHEMA_VERSION
         );

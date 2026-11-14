@@ -3,8 +3,9 @@
 # ships serves (ADR-0003).
 #
 # Usage: scripts/verify.sh [--keep] [--no-build]
-# Seven phases, cheapest first: cargo fmt --check, cargo clippy --all-targets -- -D warnings,
-# cargo test, `cargo test --test schema_previous` (the expand/contract rule),
+# Eight phases, cheapest first: cargo fmt --check, cargo clippy --all-targets -- -D warnings,
+# cargo test, `cargo test --test schema_previous` (the expand/contract rule), `case_gate_quick` (the worker
+# gate's own contract — its names, its refusals, its footer, and one real run of it),
 # scripts/build.sh (which runs scripts/build-web.sh and scripts/check-static.sh),
 # scripts/check-embed.sh, then serve: dist/<host-triple>/holosmith on a random port with a temp
 # config and a temp data dir, answering /api/health, the schema version, the app shell, the 404
@@ -61,7 +62,7 @@
 # Downloads nothing and needs neither curl nor jq: every request is a /dev/tcp fetch. `case_worktree`
 # answers the Docker preflight from a python3 socket, and prints one SKIP line and passes without
 # python3 (tests/worktree.rs covers what that case asserts). Put the
-# toolchains on PATH first (docs/build.md).
+# toolchains on PATH first (AGENTS.md).
 
 set -euo pipefail
 
@@ -72,6 +73,12 @@ usage() {
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+
+# The two commands this gate must run, and the predicate that says whether a built app is there, come from one
+# file the worker gate sources too (scripts/gates.sh): a flag changed in one and not the other would make a
+# worker's green into this run's red, which is the one thing their agreement may not tolerate.
+# shellcheck source=scripts/gates.sh
+. "$repo_root/scripts/gates.sh"
 
 keep=0
 build=1
@@ -464,7 +471,7 @@ unit_for() {
 
 # Every answer a browser gets from the booted artifact: one function per case, run in this
 # order. Adding a case is one case_* function and one line in serve_cases, and every later
-# story adds at least one (docs/build.md).
+# story adds at least one (AGENTS.md).
 #
 # "No CORS header, ever" is deliberately *not* one of them: it sweeps every answer the cases
 # above saved, so it runs after the loop instead of being a member of it. That way a case
@@ -2921,7 +2928,7 @@ PROBE
 # The second is V7 itself: a real container on an `--internal` network, fetched **from the host** through the
 # shipped artifact, plus a WebSocket round trip over the same path. It needs the daemon and the agent image and
 # prints one SKIP line without them. The bug this case exists to catch — a preview listener that does not
-# proxy — fails the first half, so a SKIP for "no daemon" is not that bug (the rule in docs/build.md).
+# proxy — fails the first half, so a SKIP for "no daemon" is not that bug (the rule in AGENTS.md).
 #
 # The container is the case's own `docker run` under the name and network the convention gives a session's
 # container (`s_<id>` on `agents_<id>`), because the shared boot's backend is the *stub*: the question here is
@@ -3419,7 +3426,7 @@ case_turn_timeout() {
     expect_status "${name}_$turn" "$response" 202
 
     # The row, not a stream: every turn's settle frame carries the same payload, so a needle would be
-    # answered by the *previous* turn's replay (docs/build.md's stream rule). The row is this turn's, and
+    # answered by the *previous* turn's replay (AGENTS.md's stream rule). The row is this turn's, and
     # a fired deadline would have written `turn_timeout` into `status_reason` — which is exactly what
     # `"status_reason":null` rules out.
     wait_for_idle_id "${name}_idle_$turn" "$created_id"
@@ -4064,7 +4071,7 @@ PY
 # with no failure mode reachable over HTTP, and `long_turn` is twenty seconds of spec with no config key to
 # shorten it — those two are `tests/push.rs`'s (`three_triggers_and_the_negative_reach_the_recorder`). A real
 # push service and a real browser subscription are nobody's test environment; the receiver stands in for both,
-# and `docs/build.md` says so.
+# and `AGENTS.md` says so.
 #
 # `SSL_CERT_FILE` is exported around the boot and unset immediately after: `openssl s_client` honours it for its
 # default trust store, which is what lets a private CA be configured the way every other tool is configured —
@@ -7916,7 +7923,7 @@ PY
 # The one thing the gate cannot do through the API. An event's `created_at` is the **producer's**, and the
 # shipped stub writes `now`, so "completed more than 24 hours ago" (spec item 15) cannot be produced by a
 # request. `python3` with stdlib `sqlite3` is the tool this machine has, and it needs no dependency — the
-# case SKIPs without it rather than asserting less (docs/build.md's optional-tool rule).
+# case SKIPs without it rather than asserting less (AGENTS.md's optional-tool rule).
 age_session_events() {
   python3 - "$1" "$2" "$3" <<'PY'
 import sqlite3, sys
@@ -11940,7 +11947,7 @@ case_build() {
       host_target=aarch64-unknown-linux-musl
       other_target=x86_64-unknown-linux-musl
       ;;
-    *) fail "$name/arch" "no release target for $(uname -m): docs/build.md names the two" ;;
+    *) fail "$name/arch" "no release target for $(uname -m): AGENTS.md names the two" ;;
   esac
   rm -rf "$root"
   mkdir -p "$bin" "$out"
@@ -12901,7 +12908,7 @@ CAT
 # What neither half can measure is recorded where it belongs: nothing here asks systemd to load the unit (there is no
 # systemd on this machine), the origins are the operator's own step now, and the service user's commands and the
 # `systemctl` pair are printed rather than run — `tests/deploy.rs`'s arms are what measure the words.
-# `docs/build.md` is the by-hand procedure for the parts only a real host can show.
+# `AGENTS.md` is the by-hand procedure for the parts only a real host can show.
 case_server_service() {
   local name=case_server_service root="$repo_root/target/verify-service-$$"
   local image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
@@ -13854,12 +13861,105 @@ stop_peer() {
   peer_pid=""
 }
 
+# The worker gate's own contract (`scripts/gate-quick.sh`): the names it accepts, the invocations it refuses, the
+# toolchain it demands, and — in one real run — the footer. That footer is the whole contract with a worker: it
+# counts the test binaries that did **not** run, so an under-named change is visible in the run's own last line
+# instead of hidden behind a green. `--list` is compared against the directory rather than against a literal list,
+# so a renamed or added test binary lands here instead of drifting past.
+#
+# The middle arms are answered by a `cargo` stand-in on `PATH`: the toolchain refusal and the `--lib-only` footer
+# must not cost two more real builds inside a fifteen-minute gate, and neither arm is about what cargo does. The
+# last arm is a real run, because the script's whole claim is that it runs the gate's own commands.
+case_gate_quick() {
+  local name=case_gate_quick root="$repo_root/target/verify-gate-quick-$$"
+  local bin="$root/bin" out="$root/out" err="$root/err" rc expected total footer label file
+  rm -rf "$root"
+  mkdir -p "$bin"
+
+  # present <snippet> <file> <assertion>: the snippet is in the file, and it is one assertion.
+  present() {
+    grep -qF -- "$1" "$2" || fail "$3" "'$1' is not in: $(cat "$2")"
+    assertions=$((assertions + 1))
+  }
+
+  expected="$(cd "$repo_root/crates/holosmith/tests" && for file in *.rs; do printf '%s\n' "${file%.rs}"; done | sort)"
+  total="$(printf '%s\n' "$expected" | wc -l | tr -d ' ')"
+
+  # 1. --list is that directory, in the same words: the one place "which names exist" is answered.
+  rc=0
+  "$repo_root/scripts/gate-quick.sh" --list >"$out" 2>"$err" || rc=$?
+  check "$name/list/exit" 0 "$rc"
+  check "$name/list" "$expected" "$(cat "$out")"
+
+  # 2. No name is misuse, not a guess: exit 2, which cannot be read as a pass.
+  rc=0
+  "$repo_root/scripts/gate-quick.sh" >"$out" 2>"$err" || rc=$?
+  check "$name/noargs/exit" 2 "$rc"
+  present 'usage: scripts/gate-quick.sh' "$err" "$name/noargs/usage"
+
+  # 3. A name that is not a binary fails before cargo is asked anything, and the error carries the names.
+  rc=0
+  "$repo_root/scripts/gate-quick.sh" not_a_test_binary >"$out" 2>"$err" || rc=$?
+  check "$name/unknown/exit" 2 "$rc"
+  present '  config_cli' "$err" "$name/unknown/names"
+
+  # 4. The two exclusive modes, refused in the same breath rather than one of them silently winning.
+  rc=0
+  "$repo_root/scripts/gate-quick.sh" --lib-only config_cli >"$out" 2>"$err" || rc=$?
+  check "$name/libonly/named/exit" 2 "$rc"
+  rc=0
+  "$repo_root/scripts/gate-quick.sh" --list config_cli >"$out" 2>"$err" || rc=$?
+  check "$name/list/named/exit" 2 "$rc"
+
+  # The stand-in: a cargo that answers the version question with the wrong line and agrees with everything else.
+  cat >"$bin/cargo" <<'SHIM'
+#!/bin/sh
+case "$1" in
+  --version) printf 'cargo 1.100.0 (stand-in)\n' ;;
+esac
+exit 0
+SHIM
+  chmod +x "$bin/cargo"
+
+  # 5. The wrong toolchain is refused, with the sentence that fixes it...
+  rc=0
+  PATH="$bin:$PATH" "$repo_root/scripts/gate-quick.sh" config_cli >"$out" 2>"$err" || rc=$?
+  check "$name/toolchain/exit" 2 "$rc"
+  present '~/.pi/toolchains/env.sh' "$err" "$name/toolchain/sentence"
+
+  # ...and the override runs, says so in the footer, and counts zero binaries: `--lib-only`'s whole promise.
+  rc=0
+  PATH="$bin:$PATH" GATE_QUICK_ALLOW_TOOLCHAIN=1 "$repo_root/scripts/gate-quick.sh" --lib-only \
+    >"$out" 2>"$err" || rc=$?
+  check "$name/libonly/exit" 0 "$rc"
+  footer="$(tail -n 1 "$out")"
+  case "$footer" in
+    *"cargo 1.100.0 is not 1.99 (GATE_QUICK_ALLOW_TOOLCHAIN=1), lib (0 of $total test binaries run) - the tree is not proven; the parent runs scripts/verify.sh.") ;;
+    *) fail "$name/libonly/footer" "the last line was: $footer" ;;
+  esac
+  assertions=$((assertions + 1))
+
+  # 6. One real run: the four phases are named in the output and the footer counts one binary of `total`.
+  rc=0
+  "$repo_root/scripts/gate-quick.sh" config_cli >"$out" 2>"$err" || rc=$?
+  check "$name/real/exit" 0 "$rc"
+  for label in fmt clippy lib config_cli; do
+    present "ok $label:" "$out" "$name/real/ok/$label"
+  done
+  footer="$(tail -n 1 "$out")"
+  case "$footer" in
+    *", lib + config_cli (1 of $total test binaries run) - the tree is not proven; the parent runs scripts/verify.sh.") ;;
+    *) fail "$name/real/footer" "the last line was: $footer" ;;
+  esac
+  assertions=$((assertions + 1))
+}
+
 phase_serve() {
   printf '== serve ==\n'
   case "$(uname -m)" in
     x86_64) host_target=x86_64-unknown-linux-musl ;;
     aarch64) host_target=aarch64-unknown-linux-musl ;;
-    *) fail "serve/artifact" "no shipped artifact for $(uname -m): docs/build.md names the two" ;;
+    *) fail "serve/artifact" "no shipped artifact for $(uname -m): AGENTS.md names the two" ;;
   esac
   # The shipped musl artifact, not target/debug: it is the thing that ships, and the one
   # scripts/check-static.sh has already proved. A debug binary would embed whatever web/dist
@@ -13919,10 +14019,10 @@ phase_serve() {
 }
 
 command -v cargo >/dev/null 2>&1 ||
-  fail "cargo/path" "cargo is not on PATH: . ~/.pi/toolchains/env.sh first (docs/build.md)"
+  fail "cargo/path" "cargo is not on PATH: . ~/.pi/toolchains/env.sh first (AGENTS.md)"
 
-run_phase fmt cargo fmt --check
-run_phase clippy cargo clippy --all-targets -- -D warnings
+run_phase fmt "${GATE_FMT[@]}"
+run_phase clippy "${GATE_CLIPPY[@]}"
 # The embedded-app assertions in `web.rs` carry a `HOLOSMITH_REQUIRE_WEB=1` arm — a placeholder build is legal
 # (ADR-0007), so the tests cannot assert a real app unless a build says one exists. Setting it for this one phase,
 # when a build is present, is what makes those assertions bite in the gate rather than pass vacuously (`case_pwa` is
@@ -13931,7 +14031,7 @@ run_phase clippy cargo clippy --all-targets -- -D warnings
 # It is **scoped to this invocation** rather than exported: `scripts/check-embed.sh`'s second case builds with
 # `web/dist` removed and *requires* the placeholder, so an exported variable would fail the `embed` phase. The gate
 # found that, which is the reason this comment exists.
-if [ -f web/dist/index.html ]; then
+if gate_web_present; then
   HOLOSMITH_REQUIRE_WEB=1 run_phase test cargo test
 else
   run_phase test cargo test
@@ -13941,6 +14041,10 @@ fi
 # release's schema checked against this build's — given a phase of its own so a migration author sees the rule
 # named in the output instead of buried in a test list (ADR-0047).
 run_phase migrations cargo test --test schema_previous
+# The worker gate is asserted here, next to the other source-level phases and before the artifact ones: it runs
+# cargo, not the artifact, and it is cheap enough (one named binary) that a broken script fails the run in
+# seconds rather than after the musl build.
+run_phase quick case_gate_quick
 if [ "$build" -eq 1 ]; then
   # scripts/build.sh runs scripts/build-web.sh first and scripts/check-static.sh last, so this
   # calls it once rather than running npm twice.

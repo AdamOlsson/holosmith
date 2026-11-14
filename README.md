@@ -222,7 +222,6 @@ recorded turn; `upgrade` runs the review gate, smoke, image builds, drain, backu
 
 - `docs/quickstart.md` — one machine, the phone as the browser: config, deploy, a session, day two.
 - `docs/config.md` — every key in `<root>/config.toml`: its type, default, rule and what it decides.
-- `docs/build.md` — build, test, verify, deploy, release, and the by-hand credential checks.
 - `GLOSSARY.md` — the vocabulary: what a session, a turn, a stream, a release and a drain mean here.
 - `docs/adr/` — the decisions and why they were taken.
 - `AGENTS.md` — the repository rules for agents working on the code.

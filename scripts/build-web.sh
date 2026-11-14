@@ -32,7 +32,7 @@ esac
 for tool in node npm; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "build-web.sh: $tool not found on PATH." >&2
-    echo "  The app shell needs node and npm; see docs/build.md." >&2
+    echo "  The app shell needs node and npm; see AGENTS.md." >&2
     echo "  A binary built without it serves a placeholder page (ADR-0007)." >&2
     exit 1
   fi

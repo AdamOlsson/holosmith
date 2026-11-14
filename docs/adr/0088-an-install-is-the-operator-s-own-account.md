@@ -234,7 +234,7 @@ description of the tree as it stands.
 ## Consequences
 
 - The `holosmith` account is not part of the install this ADR describes, and only ADR-0086 carries the pointer. The
-  documents that still describe the install it replaced — `docs/build.md`, `docs/quickstart.md`, `docs/config.md`'s
+  documents that still describe the install it replaced — `docs/quickstart.md`, `docs/config.md`'s
   `<root>/config.toml` and its `/var/lib/holosmith` default, ADR-0056's privileged step list, ADR-0058's ownership
   section, ADR-0082's root check and ADR-0087's measurement of a system account — are later stories' to rewrite, and
   until they are they describe an install this one replaced.

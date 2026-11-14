@@ -2,7 +2,7 @@
 # Build the static musl artifacts and copy them to dist/<target-triple>/holosmith.
 #
 # Usage: scripts/build.sh [--target <triple>]... [--no-check]
-# Needs the cross toolchains on PATH:  . ~/.pi/toolchains/env.sh  (docs/build.md)
+# Needs the cross toolchains on PATH:  . ~/.pi/toolchains/env.sh  (AGENTS.md)
 
 set -euo pipefail
 

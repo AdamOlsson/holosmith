@@ -232,4 +232,4 @@ sudo -u holosmith holosmith server deploy   # idempotent: the second run changes
   restart. `docs/config.md` has the exact block.
 - **A second machine.** `hub deploy` on the always-on box, `hub host add <name> <url>` for this one, and
   `allowed_hubs = ["<hub node name>"]` here.
-- **Every key, rule and default.** `docs/config.md`. Build, release, upgrade: `docs/build.md`.
+- **Every key, rule and default.** `docs/config.md`. Build, release, upgrade: `AGENTS.md` and the ADRs.

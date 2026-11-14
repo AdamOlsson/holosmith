@@ -1,4 +1,4 @@
-# Builds need the cross toolchains on PATH:  . ~/.pi/toolchains/env.sh  (docs/build.md).
+# Builds need the cross toolchains on PATH:  . ~/.pi/toolchains/env.sh  (AGENTS.md).
 #
 # Never export RUSTFLAGS anywhere in this repo: it silently disables the
 # per-target rustflags below and ships static-PIE without an error (ADR-0005).
