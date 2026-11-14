@@ -1101,11 +1101,13 @@ One of the six parts of a `deploy` run — `holosmith server deploy` or `holosmi
 order: `preflight`, `files`, `images`,
 `proxies`, `service`, `health`. A deploy step is a **state read** and an **apply**: the read says
 whether the step is already satisfied and what is missing, the apply does the missing part, and `--dry-run`
-prints the read alone. Each one reports one of five words — **satisfied**, **needs** (a dry run's plan),
+prints the read alone. Each one reports one of five words — **satisfied**, **needs** (a dry run's plan, or a real
+run whose remaining work is the operator's, printed as exact argv and never run),
 **changed**, **skipped** (carrying the reason, and never a pass) and **failed** (which stops the run and makes the
 resume command the last line). `skipped` has had two reasons in its life and both are "no body to run here": a story
 that still owned the body (nothing since) and a **deploy half** with no work for the step
-(a hub's `images` and `proxies`), which is why a hub run's tally reads `4 satisfied, 0 changed, 2 skipped, 0 failed`.
+(a hub's `images` and `proxies`), which is why a hub run's tally reads
+`4 satisfied, 0 needs, 0 changed, 2 skipped, 0 failed`.
 A step's **apply never escalates**: nothing an install writes is root's, so what a step cannot do it prints as
 exact argv and verifies on the next run (ADR-0086, ADR-0088). Its machine names are `deploy::DeployStep` and
 `DeployStep::ALL`, and `--root` is the **root** the step's paths are built under. It is not `Step`.

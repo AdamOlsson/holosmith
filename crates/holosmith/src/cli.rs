@@ -216,7 +216,8 @@ pub enum ServerAction {
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
         /// Install on another machine: copy this binary there over ssh, verify the copy, and run the same deploy
-        /// there as the service user (`sudo -n -u holosmith`), so the target's tree is written by its owner.
+        /// there as the login's own account, because a machine is the account that runs it (the deploy escalates
+        /// nothing).
         #[arg(long, value_name = "USER@HOST")]
         ssh: Option<String>,
         /// Send this file instead of the binary this command is running. It must be built for the target's
@@ -247,7 +248,8 @@ pub enum HubAction {
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
         /// Install on another machine: copy this binary there over ssh, verify the copy, and run the same deploy
-        /// there as the service user (`sudo -n -u holosmith`), so the target's tree is written by its owner.
+        /// there as the login's own account, because a machine is the account that runs it (the deploy escalates
+        /// nothing).
         #[arg(long, value_name = "USER@HOST")]
         ssh: Option<String>,
         /// Send this file instead of the binary this command is running. It must be built for the target's

@@ -39,9 +39,9 @@
 //! # `-t`, and the one thing it changes
 //!
 //! The run child is given a pseudo-terminal exactly when both of this command's ends are terminals
-//! ([`Tools::interactive`]): a pty is what gives the target's `sudo` a tty to ask its password on (ADR-0056's
-//! landmine one hop out), and *not* allocating one when the output is piped keeps the deploy's lines
-//! LF-terminated and greppable.
+//! ([`Tools::interactive`]): the deploy prints its lines to a terminal rather than to a pipe, and *not* allocating
+//! one when the output is piped keeps the deploy's lines LF-terminated and greppable. Nothing on the target asks a
+//! password: the run is the ssh login's own account and escalates nothing (ADR-0088).
 
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
@@ -95,14 +95,12 @@ fn batch() -> Vec<String> {
 /// [`Tools::interactive`] is the one field that is not a program (the [`crate::deploy::Tools::health_wait`]
 /// precedent): it is read from this process's own stdio by [`Tools::default`], and a test sets it explicitly to
 /// measure both arms of the `-t` rule rather than whichever one the harness happens to be.
+///
+/// There is no `sudo`: the run on the target is the **ssh login's own**, because a machine is the account that
+/// invoked it and never a second one (ADR-0088), so the deploy arrives with no account to become.
 #[derive(Debug, Clone)]
 pub struct Tools {
     pub ssh: PathBuf,
-    /// `sudo`: the remote run becomes the **service user**, because the tree is that user's (ADR-0086). `-n` makes a
-    /// missing rule a refusal in one line rather than a password prompt on a pipe that has nobody to answer it; the
-    /// machine's rule is `holosmith ALL=(root) NOPASSWD: …` for the restart and an ordinary `sudo -u holosmith` for
-    /// the deploy itself.
-    pub sudo: PathBuf,
     pub uname: PathBuf,
     pub sha256sum: PathBuf,
     /// Whether to ask ssh for a pseudo-terminal: true exactly when stdin and stdout are both terminals.
@@ -113,7 +111,6 @@ impl Default for Tools {
     fn default() -> Self {
         Self {
             ssh: PathBuf::from("ssh"),
-            sudo: PathBuf::from("sudo"),
             uname: PathBuf::from("uname"),
             sha256sum: PathBuf::from("sha256sum"),
             interactive: std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
@@ -261,16 +258,8 @@ impl Remote {
             arguments.push("-t".to_string());
         }
         arguments.push(self.host.clone());
-        // The deploy is the service user's: the tree it writes is that user's root, so the remote run is one
-        // `sudo -n -u holosmith` rather than the ssh login itself (ADR-0086).
-        for part in [
-            tools.sudo.display().to_string(),
-            "-n".to_string(),
-            "-u".to_string(),
-            crate::deploy::SERVICE_USER.to_string(),
-        ] {
-            arguments.push(part);
-        }
+        // The run is the account the ssh login is: a machine is the operator's own and its tree is that account's
+        // (ADR-0088), so there is no second account to become and no `sudo` between the login and the deploy.
         arguments.push(sent.token.clone());
         arguments.extend(plan.arguments());
         let rendered = format!("{} {}", tools.ssh.display(), arguments.join(" "));

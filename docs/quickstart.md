@@ -113,7 +113,7 @@ deploy: into /var/lib/holosmith
 4. proxies: changed: …     # starts hs_key and hs_egress
 5. service: satisfied: …   # the unit is in the root; still root's to run: the install above
 6. health: satisfied: …    # `/api/health` answers and `doctor --full` finds nothing failing
-deploy: 6 steps: 4 satisfied, 2 changed, 0 skipped, 0 failed
+deploy: 6 steps: 4 satisfied, 0 needs, 2 changed, 0 skipped, 0 failed
 ```
 
 Verify it is serving:

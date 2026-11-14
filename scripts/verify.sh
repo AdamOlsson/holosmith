@@ -5246,7 +5246,7 @@ case_hub_deploy() {
       *) fail "$name/dry/$entry/reason" "the $entry skip does not say why a hub has no work for it: $line" ;;
     esac
   done
-  grep -q '^deploy: 6 steps: 1 satisfied, 0 changed, 2 skipped, 0 failed$' "$WORK/$name.dry.out" ||
+  grep -q '^deploy: 6 steps: 1 satisfied, 3 needs, 0 changed, 2 skipped, 0 failed$' "$WORK/$name.dry.out" ||
     fail "$name/dry/tally" "the tally does not count the two skips apart: $(cat "$WORK/$name.dry.out")"
   assertions=$((assertions + 1))
   [ ! -e "$hub_tree" ] || fail "$name/dry/root" "the dry run created $hub_tree"
@@ -5347,8 +5347,8 @@ APPLIED
 5 service
 6 health
 AGAIN
-  grep -q '^deploy: 6 steps: 4 satisfied, 0 changed, 2 skipped, 0 failed$' "$WORK/$name.again.out" ||
-    fail "$name/again/tally" "the second run's tally is not five satisfied and two skipped: $(cat "$WORK/$name.again.out")"
+  grep -q '^deploy: 6 steps: 4 satisfied, 0 needs, 0 changed, 2 skipped, 0 failed$' "$WORK/$name.again.out" ||
+    fail "$name/again/tally" "the second run's tally is not four satisfied and two skipped: $(cat "$WORK/$name.again.out")"
   assertions=$((assertions + 1))
 
   # ---- 3. the union: a server machine deployed as a hub is `both` ----------------------------------
@@ -10093,6 +10093,12 @@ deploy_listing() {
 # Every invocation is one line in <log>, `tailscale <all args>`, which is how a case asserts what the deploy asked
 # for. The two paths arrive through the environment rather than being written into the script — the shape
 # `case_key_proxy_request`'s fake `openssl` uses — so the body stays a plain `sh` script with no quoting of its own.
+#
+# It writes an `id` too, and for the same reason `tests/deploy.rs` shims one: step 2 asks `id -un` and `id -nG` about
+# the account running the deploy, and a case that left those to the gate host's own answer would assert this machine's
+# group membership rather than the deploy's behaviour — a gate run as root, or on a host whose socket is reachable by
+# a differently-named group, would fail a case that has nothing to do with it. The answer is a machine where the group
+# is right, so a second run's `2. files: satisfied:` is a fact about the fixture.
 deploy_machine_shims() {
   local dir="$1" log="$2" state="$3"
   mkdir -p "$dir" || fail "deploy_machine_shims/mkdir" "could not create $dir"
@@ -10166,6 +10172,17 @@ case "${1:-}" in
 esac
 SHIM
   chmod 0755 "$dir/tailscale"
+  cat >"$dir/id" <<'SHIM'
+#!/bin/sh
+# The account step 2 reads: the name it is running as, and the daemon's group among its groups — a machine that can
+# open the socket, so the only arm a case sees is `satisfied`.
+case "${1:-}" in
+  -un) printf 'operator\n' ;;
+  -nG) printf 'operator docker\n' ;;
+  *) exit 1 ;;
+esac
+SHIM
+  chmod 0755 "$dir/id"
 }
 
 # The gate's `ssh`, which is the other half of `case_deploy_ssh`.
@@ -12743,7 +12760,7 @@ case_deploy_ssh() {
   PATH="$WORK/$name.nodl:$shims:$PATH" "$artifact" hub deploy --ssh me@box --root "$root/hub" \
     --config "$WORK/config-deploy-ssh-hub.toml" >"$WORK/$name.again.out" 2>&1 || status=$?
   check "$name/again/exit" 0 "$status"
-  grep -qx 'deploy: 6 steps: 4 satisfied, 0 changed, 2 skipped, 0 failed' "$WORK/$name.again.out" ||
+  grep -qx 'deploy: 6 steps: 4 satisfied, 0 needs, 0 changed, 2 skipped, 0 failed' "$WORK/$name.again.out" ||
     fail "$name/again/tally" "the second run on the target is not idempotent: $(cat "$WORK/$name.again.out")"
   assertions=$((assertions + 1))
   # The second run is the same four children, and it copied again — the transport is stateless — but the name is the

@@ -41,13 +41,14 @@
 //! every state path this module builds is `<root>/…`, whether the root is the machine's or a test's own tree,
 //! and the config is the one path that is not under it.
 //!
-//! **This program never runs `sudo`.** Creating the account and making the root are root's, so the deploy **reads**
-//! their state and **prints** the commands — as the tail remark on the step that needs them — and the next run
-//! verifies them. The unit is not on that list: it is the operator's own file, written into the directory their user
-//! manager reads (ADR-0088), and the two `systemctl --user` commands that enable it are printed beside it. The only
-//! hard requirement is that this process can write the root, because the tree is written as its owner. That is what
-//! makes `sudo -u holosmith holosmith deploy` the one way to run it on a machine, and what leaves step 6
-//! (`/api/health` plus `doctor --full`) as the thing that notices a unit which was enabled and never started.
+//! **The deploy runs as whoever invokes it, and it never escalates.** There is no account to create and no ownership
+//! to hand over: the root, the config and the unit are the invoking account's own files (ADR-0088), and the unit is
+//! written into the directory that account's user manager reads. The one subject left is the same account, and the
+//! one question about it is whether it may open the machine's daemon socket: step 2 **reads** that and **prints** the
+//! one `usermod` when the answer is no — never runs it, and never a `sudo` of its own. The unit's two
+//! `systemctl --user` commands are printed the same way. The one hard requirement is that this process can write the
+//! root, because the tree is written as its owner, and step 6 (`/api/health` plus `doctor --full`) is what notices a
+//! unit that was enabled and never started.
 
 use std::fmt::{self, Write as _};
 use std::io::{ErrorKind, Write as _};
@@ -66,16 +67,12 @@ use crate::preflight::{self, Check, Outcome};
 use crate::proxies;
 use crate::vapid;
 
-/// The account step 2 reads: the spec's item 10 step 2 "service user", by name.
+/// The group that may open the machine's daemon socket: the one fact step 2 reads about the account running it.
 ///
-/// The unit does not render it: a user unit runs as its owner, so there is no `User=` (ADR-0088). Step 2's account
-/// half still does — it reads the account with `id -u` and prints `useradd`/`usermod` for it — and that half is the
-/// move still outstanding. Until it happens this name is also what the uninstall's reminder, the promotion's refusal
-/// sentence and the remote note spell.
-pub const SERVICE_USER: &str = "holosmith";
-
-/// The group the service user must be in: `serve` drives the machine's daemon through its socket.
-pub const SERVICE_GROUP: &str = "docker";
+/// A group's **name** is a real fact about a host and stays a constant, unlike the account ADR-0088 deleted: `serve`
+/// reaches the daemon through a socket this group owns, so an account outside it is a machine that cannot run a
+/// session, and the fix is one `usermod` the operator runs.
+pub const DOCKER_GROUP: &str = "docker";
 
 /// The unit file's name, which is also the argument `systemctl` gets.
 pub const UNIT_NAME: &str = "holosmith.service";
@@ -117,9 +114,9 @@ const HELD_PORT: &str =
 /// one is ADR-0058's.
 ///
 /// `doctor --quick` fails it on purpose: the unit runs `doctor --quick` as `ExecStartPre`, and a secrets directory
-/// the service user cannot read is a reason for systemd not to start the service. But `deploy` is the caller that
-/// **repairs** it — step 2's `Action::Mode` is exactly this finding's fix — so failing here would make the repair
-/// unreachable and leave the operator to run one `chmod` the deploy knows how to run.
+/// the account that runs the daemon cannot read is a reason for systemd not to start the service. But `deploy` is the
+/// caller that **repairs** it — step 2's `Action::Mode` is exactly this finding's fix — so failing here would make the
+/// repair unreachable and leave the operator to run one `chmod` the deploy knows how to run.
 const WRONG_MODE: &str = "; a wrong mode or owner in the install tree is what step 2 repairs, so it is a remark here and not a failure";
 
 /// The remark a broken `current` earns instead of failing the deploy — step 1's **third** divergence.
@@ -139,7 +136,7 @@ const LINK_NOT_LIVE: &str = "; the unit's `ExecStart` resolves through a `curren
 /// the machine ends up with, and [`Kind::group`]/[`Kind::skip`] are the two places a hub's half is not a server's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// `holosmith server deploy`: the six steps, a service user in the daemon's group, and both proxies.
+    /// `holosmith server deploy`: the six steps, the daemon's group asked about, and both proxies.
     Server,
     /// `holosmith hub deploy`: steps 1, 2, 5 and 6; no image, no proxy, and no daemon group.
     Hub,
@@ -162,12 +159,21 @@ impl Kind {
         }
     }
 
-    /// The group the service user joins, or `None` for the half that drives no daemon (item 10 §6's "without the
-    /// docker group").
-    pub fn group(self) -> Option<&'static str> {
-        match self {
-            Self::Server => Some(SERVICE_GROUP),
-            Self::Hub => None,
+    /// The group the account running this deploy must be in, or `None` when there is no such question — the half
+    /// that drives no daemon (item 10 §6's "without the docker group"), and the endpoint that is not a socket.
+    ///
+    /// **The endpoint decides it.** A socket on this machine is opened through the group that owns it, so there — and
+    /// only there — does "is this account in `docker`?" say whether the machine can run a session. A `tcp:` endpoint
+    /// is another host's daemon reached over the network, where no group of this account's has any bearing and a
+    /// `usermod` would change nothing; answering `Some` there would print a command and report `needs` on a machine
+    /// that already works, instead of the `satisfied` it earned.
+    ///
+    /// It is the whole of the account question: a [`Self::Hub`] opens no socket, so a hub deploy asks `id` nothing
+    /// about the account and prints no command for it.
+    pub fn group(self, docker_host: Option<&str>) -> Option<&'static str> {
+        match (self, local_socket(docker_host)) {
+            (Self::Server, true) => Some(DOCKER_GROUP),
+            _ => None,
         }
     }
 
@@ -196,6 +202,21 @@ impl fmt::Display for Kind {
     }
 }
 
+/// Whether `docker_host` names a socket on this machine — the one endpoint a group decides access to.
+///
+/// Unset is `preflight::DEFAULT_DOCKER_HOST`, the rootful daemon's socket, which is local; `unix://` and a bare path
+/// are local too. Anything with another scheme is a daemon reached over the network, where the account's groups are
+/// not what opens it.
+fn local_socket(docker_host: Option<&str>) -> bool {
+    match docker_host
+        .unwrap_or(preflight::DEFAULT_DOCKER_HOST)
+        .split_once("://")
+    {
+        Some((scheme, _)) => scheme == "unix",
+        None => true,
+    }
+}
+
 /// The role a machine holds after a deploy of `kind` has run on it: the spec's Roles table as one function.
 ///
 /// `server` then `hub` is `both`, and so is the other order; a machine that is already `both` stays `both`. The
@@ -217,7 +238,7 @@ pub enum DeployStep {
     /// 1. The preflight, as `doctor --quick`.
     Preflight,
     /// 2. The install tree under the root: the config file, the data root, the secrets (with the provider and the
-    ///    VAPID keys), and the read of the service user that will own them.
+    ///    VAPID keys), and the read of whether the account running this deploy may open the daemon's socket.
     Files,
     /// 3. The two images embedded in the binary.
     Images,
@@ -276,7 +297,9 @@ impl fmt::Display for DeployStep {
 pub enum Word {
     /// The read found nothing to do.
     Satisfied,
-    /// A dry run: what the apply would do, run against the read's answer.
+    /// The read found work this run has not done. A dry run's plan is the common case, and the other one is a real
+    /// run whose remaining action is the operator's — step 2's one `usermod`, which is root's and which this program
+    /// never runs (ADR-0088).
     Needs,
     /// The apply ran and did them.
     Changed,
@@ -361,8 +384,11 @@ impl Report {
     /// A block is the step's own line — `^N. step: word: ` — and, under a plan or an apply, one indented line per
     /// action (ADR-0085). That first line is what a gate greps, so it is the only line whose shape is a contract.
     ///
-    /// The tally's four counts are always printed — `skipped` included, as zero on a run that skipped nothing —
-    /// because a gate greps the line's shape and a reader diffs two runs by it (ADR-0056).
+    /// The tally's five counts are always printed — `skipped` included, as zero on a run that skipped nothing, and
+    /// `needs` included because a step whose remaining work is the operator's is still one of the steps the header
+    /// counts: a tally of four words would sum to fewer steps than the run reports, and leave out the one that says
+    /// the machine is not ready (ADR-0056, amended by ADR-0088), because a gate greps the line's shape and a reader
+    /// diffs two runs by it.
     pub fn render(&self) -> String {
         let count = |word: Word| self.lines.iter().filter(|line| line.word == word).count();
         let mut text = format!("deploy: {}\n", if self.dry_run { "dry run" } else { "run" });
@@ -380,9 +406,10 @@ impl Report {
         text.push('\n');
         let _ = writeln!(
             text,
-            "deploy: {} steps: {} satisfied, {} changed, {} skipped, {} failed",
+            "deploy: {} steps: {} satisfied, {} needs, {} changed, {} skipped, {} failed",
             self.lines.len(),
             count(Word::Satisfied),
+            count(Word::Needs),
             count(Word::Changed),
             count(Word::Skipped),
             count(Word::Failed)
@@ -518,19 +545,22 @@ impl<T: proxies::Containers + doctor::Machine + images::Images> Machine for T {}
 /// [`doctor::Tools`] is embedded rather than copied, for step 1's reason: the preflight is the same list `serve`
 /// refuses on, so it is the same shims. The additions are the three programs the tree's own writes use — `install`
 /// and `chmod` because every file action is one child process, `openssl` because the VAPID pair is generated by one
-/// — and `id`, which is the **only** question this run asks about root's half of the machine. They are `PathBuf`s
-/// for [`crate::preflight::Tools`]'s reason: this crate denies `unsafe` and so cannot set `PATH`, which leaves
-/// naming the program as the only way a test can point a write at a script it wrote.
+/// — and `id`, which answers the **only** question this run asks about an account: who is running it, and is that
+/// account in the daemon's group. They are `PathBuf`s for [`crate::preflight::Tools`]'s reason: this crate denies
+/// `unsafe` and so cannot set `PATH`, which leaves naming the program as the only way a test can point a write at a
+/// script it wrote.
 ///
-/// **This module spawns no escalation** (ADR-0086): what root would do is printed. [`Tools::sudo`] is here for the two
-/// release verbs' single restart, and [`Tools::health_wait`] is the one field that is not a program.
+/// **This module spawns no escalation** (ADR-0088, keeping ADR-0086 D2's principle): what root would do is printed.
+/// [`Tools::sudo`] is here for the two release verbs' single restart, and [`Tools::health_wait`] is the one field that
+/// is not a program.
 #[derive(Debug, Clone)]
 pub struct Tools {
     pub doctor: doctor::Tools,
     pub install: PathBuf,
     pub chmod: PathBuf,
     pub openssl: PathBuf,
-    /// `id`: the service user's uid and its groups, which is this run's whole read of root's half.
+    /// `id`: the name of the account running this deploy and its groups — `id -un`, `id -nG` — which is step 2's
+    /// whole read of an account.
     pub id: PathBuf,
     /// `sudo`: **not used by this module.** The two release verbs run `sudo -n systemctl restart <unit>` through it,
     /// because one restart is the only escalation a machine has (ADR-0086 D4) — and the field is here rather than in
@@ -761,52 +791,30 @@ fn disk_of_the_nearest_ancestor(
         .map(|finding| (probe, finding))
 }
 
-/// What `id` answered about the service user, before this run wrote anything.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct ServiceUser {
-    /// The uid, when the account exists.
-    uid: Option<String>,
-    /// Whether the group that owns the daemon's socket has the user.
-    grouped: bool,
+/// What `id` answered about the account running this deploy: its name, and the groups it is in.
+///
+/// The subject is deliberately **this** account and not a second one: a machine is the operator's own (ADR-0088), so
+/// the only thing step 2 can get wrong about an account is whether it may open the daemon's socket, and the only fix
+/// is a command the operator runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Account {
+    /// `id -un`: the name the one printed command spells.
+    name: String,
+    /// `id -nG`, split on whitespace: every group the account is in.
+    groups: Vec<String>,
 }
 
-impl ServiceUser {
-    /// The commands that would make the account what the unit's `User=` needs, in the order they must run.
-    ///
-    /// These are **printed**, never run: `useradd` and `usermod` are root's (ADR-0086). The list is empty when the
-    /// account is already what the unit names, which is what makes the step's line stop saying anything about it.
-    fn commands(&self, root: &Root, group: Option<&str>) -> Vec<String> {
-        let mut commands = Vec::new();
-        if self.uid.is_none() {
-            commands.push(match group {
-                Some(group) => format!(
-                    "sudo useradd --system --create-home --home-dir {} --shell /usr/sbin/nologin \
-                     --groups {group} {SERVICE_USER}",
-                    root.path().display()
-                ),
-                None => format!(
-                    "sudo useradd --system --create-home --home-dir {} --shell /usr/sbin/nologin {SERVICE_USER}",
-                    root.path().display()
-                ),
-            });
-        } else if let (Some(group), false) = (group, self.grouped) {
-            commands.push(format!("sudo usermod -aG {group} {SERVICE_USER}"));
-        }
-        commands
+impl Account {
+    /// Whether the account may open the daemon's socket, which is `group`'s membership and nothing else.
+    fn may_open(&self, group: &str) -> bool {
+        self.groups.iter().any(|found| found == group)
     }
 
-    /// The clause a step's line carries about the account, or an empty string when there is nothing to say.
-    fn remark(&self, group: Option<&str>) -> String {
-        match (self.uid.is_some(), group) {
-            (true, Some(group)) if self.grouped => {
-                format!("; the service user {SERVICE_USER} is in the {group} group")
-            }
-            (true, None) => format!(
-                "; the service user {SERVICE_USER} exists, and this run joined it to no group because a hub \
-                 drives no daemon"
-            ),
-            _ => String::new(),
-        }
+    /// The one command that would put that right.
+    ///
+    /// It is **printed**, never run: `usermod` is root's, and this program never escalates (ADR-0088).
+    fn command(&self, group: &str) -> String {
+        format!("sudo usermod -aG {group} {}", self.name)
     }
 }
 
@@ -819,9 +827,9 @@ impl ServiceUser {
 /// when it is absent and read-only afterwards, because regenerating it would silence every existing push
 /// subscription.
 ///
-/// The account is not an item: it is a machine fact, and it is the operator's to create. Its state is read, its
-/// commands are printed as the line's remark, and the run continues — because the tree's writes are this process's
-/// and the account's absence does not change them.
+/// The account is not an item either: it is the machine's own, and the whole question about it is whether it may open
+/// the daemon's socket. That is read, its one command is printed as the line's remark, and the run continues — because
+/// the tree's writes are this process's and the membership does not change them.
 fn files(config: &Config, root: &Root, tools: &Tools, dry_run: bool, kind: Kind) -> Line {
     let staging = staging_dir();
     let line = install(config, root, tools, dry_run, &staging, kind);
@@ -978,11 +986,10 @@ fn items(config: &Config, root: &Root) -> Result<Vec<Item>, String> {
     Ok(items)
 }
 
-/// The apply: read the service user, then every item, then run the pending actions in order, answering the step's
-/// line.
+/// The apply: read the account, then every item, then run the pending actions in order, answering the step's line.
 ///
-/// The account is read **first** and its commands are the line's remark whatever happens, because they are the half
-/// of this step no unprivileged run can do and a reader has to see them beside the list (ADR-0085).
+/// The account is read **first** and its clause is the line's remark whatever happens, because that membership is the
+/// one part of this step no unprivileged run can change and a reader has to see it beside the list (ADR-0085).
 fn install(
     config: &Config,
     root: &Root,
@@ -991,21 +998,40 @@ fn install(
     staging: &Path,
     kind: Kind,
 ) -> Line {
-    let user = match read_user(tools, kind.group()) {
-        Ok(user) => user,
-        Err(sentence) => return failed(DeployStep::Files, sentence),
+    let group = kind.group(config.docker_host.as_deref());
+    // No group means no account question: a hub drives no daemon, and a daemon reached over the network is not entered
+    // through a group — so in either case this step asks `id` nothing and says nothing about an account (item 10 §6's
+    // "without the docker group").
+    let account = match group {
+        None => None,
+        Some(group) => match read_account(tools, group) {
+            Ok(account) => Some(account),
+            Err(sentence) => return failed(DeployStep::Files, sentence),
+        },
     };
-    let account = user.commands(root, kind.group());
-    // The half this run cannot do is the line's remark, in both a dry run and an apply: a tree that is written but
-    // whose account is missing is a unit that boots into `ExecStartPre` failing (ADR-0086), so the words that fix it
-    // sit beside the count rather than being lost with a failure that only a broken run prints.
-    let remark = match account.is_empty() {
-        true => user.remark(kind.group()),
-        false => format!("; still root's to run: {}", account.join("; ")),
+    // The clause the line carries about the account, and — when the answer is no — the **one** command that would put
+    // it right. It is printed in both a dry run and an apply: a tree this run writes into an account that cannot open
+    // the daemon's socket is a machine that boots into `ExecStartPre` failing, so the words that fix it sit beside the
+    // count rather than being lost with a failure that only a broken run prints.
+    let mut still_to_run = false;
+    let remark = match (group, &account) {
+        (Some(group), Some(account)) if account.may_open(group) => format!(
+            "; the account {} is in the {group} group, so it may open the daemon's socket",
+            account.name
+        ),
+        (Some(group), Some(account)) => {
+            still_to_run = true;
+            format!(
+                "; the daemon's socket is owned by the {group} group, and this run never escalates: still yours to \
+                 run is `{}`, then log out and back in, because a group reaches a login only at the next one",
+                account.command(group)
+            )
+        }
+        _ => String::new(),
     };
-    // The root is one of the items, and it is the only one this process may not be able to make: its parent belongs
-    // to root on a real machine. The apply below attempts it like any other write and turns its failure into the
-    // command the operator runs instead (ADR-0086).
+    // The root is one of the items, and it is the only one this process may not be able to make: on a machine its
+    // parent is the account's own home directory. The apply below attempts it like any other write and says what to
+    // do with its failure.
     let items = match items(config, root) {
         Ok(items) => items,
         Err(sentence) => return failed(DeployStep::Files, sentence),
@@ -1022,7 +1048,12 @@ fn install(
     if actions.is_empty() {
         return Line {
             step: DeployStep::Files,
-            word: Word::Satisfied,
+            // `satisfied` is "nothing for this run to do", and an account outside the socket's group is something
+            // left to do — not by this run, which never escalates, but by the operator whose command it printed.
+            word: match still_to_run {
+                true => Word::Needs,
+                false => Word::Satisfied,
+            },
             sentence: format!(
                 "{} holds the data root, the secrets and the keys with their modes, and the config is {}{remark}",
                 root.describe(),
@@ -1037,28 +1068,24 @@ fn install(
             sentence: counted(&plan, &remark),
         };
     }
-    let mut command = None;
     for action in &actions {
-        // The root itself is the one action this process may not be able to do: its parent is root's on a real
-        // machine, so the child fails there with `permission denied`. The failure is turned into the command the
-        // operator runs instead — `install -d -o holosmith` — because "carry on with a partial tree" is not an option
-        // and "the tree could not be made" is not a description anyone can act on (ADR-0086).
-        if matches!(action, Action::Directory { path, .. } if path == root.path()) {
-            command = Some(format!(
-                "sudo install -d -o {SERVICE_USER} -g {SERVICE_USER} -m 0700 {}",
-                root.path().display()
-            ));
-        }
         if let Err(sentence) = apply(action, tools, staging) {
+            // The root is the one action whose failure is not a tree's problem: it is the account's own directory
+            // (ADR-0088), so a parent this process cannot write is a tree to make or a `--root` to name, never an
+            // ownership to hand over.
+            let at_root = matches!(action, Action::Directory { path, .. } if path == root.path());
             return failed(
                 DeployStep::Files,
-                match command {
-                    Some(command) => format!("{sentence} — run `{command}`, then re-run"),
-                    None => sentence,
+                match at_root {
+                    true => format!(
+                        "{sentence} — {} is the root, the account's own state directory: make it as the account \
+                         that runs this deploy, or name a tree you can write with `--root`",
+                        root.path().display()
+                    ),
+                    false => sentence,
                 },
             );
         }
-        command = None;
     }
     Line {
         step: DeployStep::Files,
@@ -1067,28 +1094,44 @@ fn install(
     }
 }
 
-/// What `id` answers about the account the unit names.
+/// What `id` answers about the account running this deploy: `id -un` for the name and `id -nG` for the groups.
 ///
-/// `id -u holosmith` is the existence question and `id -nG holosmith` the group one — two reads, because "the user
-/// exists" and "the user may talk to the daemon" are two facts with two fixes. A spawn failure is a failed step
-/// rather than "there is no user": an `id` this machine does not have cannot answer the question, and a deploy that
-/// guessed would print a `useradd` for an account that is already there.
-fn read_user(tools: &Tools, group: Option<&str>) -> Result<ServiceUser, String> {
-    let uid = ask(
+/// Two reads rather than one, because they are two facts: the name is what the one printed command spells, and the
+/// group list is the answer to "may this account open the daemon's socket". A spawn failure, or an `id` that answers
+/// nothing — an empty line for either question — is a **failed step** rather than a guess: a name this machine cannot
+/// read is a `usermod` this step cannot spell, the empty string is not an account, and no groups is not "in none",
+/// which would print a `usermod` for an account that may already be in the group.
+fn read_account(tools: &Tools, group: &str) -> Result<Account, String> {
+    let name = ask(
         &tools.id,
-        &["-u", SERVICE_USER],
-        "this step reads the service user before it says anything about it",
-    )?;
-    let grouped = match (uid.is_some(), group) {
-        (true, Some(group)) => ask(
-            &tools.id,
-            &["-nG", SERVICE_USER],
-            "this step asks whether the service user is in the daemon's group before it prints the command",
-        )?
-        .is_some_and(|groups| groups.split_whitespace().any(|found| found == group)),
-        _ => false,
-    };
-    Ok(ServiceUser { uid, grouped })
+        &["-un"],
+        "this step names the account it is running as before it prints a command for it",
+    )?
+    .filter(|name| !name.is_empty())
+    .ok_or_else(|| {
+        format!(
+            "`{} -un` named no account, and the one command this step prints is a `usermod` for the account that \
+             ran it: nothing here can guess the name",
+            tools.id.display()
+        )
+    })?;
+    let groups = ask(
+        &tools.id,
+        &["-nG"],
+        "this step asks whether the account running it is in the daemon's group before it prints the command",
+    )?
+    .filter(|groups| !groups.is_empty())
+    .ok_or_else(|| {
+        format!(
+            "`{} -nG` named no groups, so whether this account may open the daemon's socket is a question this run \
+             cannot answer — and the one command it would print is `sudo usermod -aG {group} {name}`",
+            tools.id.display()
+        )
+    })?;
+    Ok(Account {
+        name,
+        groups: groups.split_whitespace().map(str::to_string).collect(),
+    })
 }
 
 /// The same shape for a list of sentences: the count on the step's own line, then one action per line below it —
@@ -1102,8 +1145,8 @@ fn read_user(tools: &Tools, group: Option<&str>) -> Result<ServiceUser, String> 
 /// succeed before the rest can — is the first thing the wrap loses. The count stays where it was, so the step's
 /// first line keeps its `N. files: needs: 10 actions:` shape and a gate greps it the way it always has.
 ///
-/// `remark` is the clause a few steps carry about what the run does *not* do — the account's commands, the unit's
-/// install line, an `agent_image` this step does not build. It sits after the count rather than after the last
+/// `remark` is the clause a few steps carry about what the run does *not* do — the account's group membership, the
+/// unit's install line, an `agent_image` this step does not build. It sits after the count rather than after the last
 /// action, because it is a statement about the whole step: a reader who skimmed the list would otherwise take the
 /// actions for the run's whole effect. It starts with `; `, which is why the count's own colon gives way to it.
 fn counted(items: &[String], remark: &str) -> String {
@@ -1220,9 +1263,9 @@ fn read(item: &Item) -> Result<Option<Action>, String> {
 
 /// Whether `program` answered exit 0, and its stdout when it did.
 ///
-/// These are the deploy's **questions** — `id -u`, `id -nG` — so none of them is prefixed by anything: a question
+/// These are the deploy's **questions** — `id -un`, `id -nG` — so none of them is prefixed by anything: a question
 /// needs no privilege, and a spawn failure is a sentence rather than a "no" (a program this machine does not have
-/// cannot answer whether a user exists).
+/// cannot answer who is running the deploy).
 fn ask(program: &Path, arguments: &[&str], because: &str) -> Result<Option<String>, String> {
     let rendered = format!("{} {}", program.display(), arguments.join(" "));
     let output = Command::new(program)

@@ -150,9 +150,9 @@ case "$*" in
     fi
     ;;
 esac
-# The remote run is `sudo -n -u holosmith <token> deploy …` (ADR-0086): the target's privilege is stripped the way
-# a machine's sudo would grant it, and what is left is the command the login shell runs. A fixture without the prefix
-# keeps the old shape, so this stand-in measures the run either way.
+# The remote run is `<token> deploy …` (ADR-0088): the target's tree is the ssh login's own, so there is no `sudo`
+# hop to strip. A fixture whose run still arrives behind one keeps the old shape, so this stand-in measures the run
+# either way.
 set -- $*
 if [ "$1" = sudo ]; then shift 4; fi
 # The text ssh would hand the login shell, before it expands anything: the copy's first word is the unexpanded
@@ -190,9 +190,6 @@ impl Fixture {
             uname: uname_shim(&dir, arch),
             // The machine's own program, one hop out: the check is a real digest of the bytes that arrived.
             sha256sum: PathBuf::from("sha256sum"),
-            // The remote run is `sudo -n -u holosmith …`: the shim records the argv, so the identity travels as the
-            // words an operator would read (ADR-0086).
-            sudo: PathBuf::from("sudo"),
             interactive,
         };
         Self { dir, tools }

@@ -657,16 +657,17 @@ fn release_tree(root: &Path, unit_path: &Path) -> Finding {
 /// (spec item 10 step 2's modes).
 ///
 /// One check rather than one per path: a [`Finding`] is one check and one sentence, and a tree whose modes are
-/// wrong is usually wrong in one way an operator fixes with one `chmod`. The reference is deliberately **not** a
-/// uid from `getuid` and not the service user's name — the deploy writes the tree as whoever it ran as and then
-/// chowns it, so "every installed path belongs to the same user as the data root" is the invariant that holds on
-/// every machine, `--root` included, without this module knowing what a service user is.
+/// wrong is usually wrong in one way an operator fixes with one `chmod`. The reference is deliberately **not** a uid
+/// from `getuid` and not any account's name — it is **the tree's own owner**, the data root's: every installed path
+/// belonging to the same account as the data root is the invariant that holds on every machine, `--root` included,
+/// without this module knowing which account that is.
 ///
 /// The tree is the caller's, not the machine's: the config file and the admin directory come from [`Tools`], so a
 /// `--root` deploy's `doctor --full` reads the tree it just wrote rather than the host's real install.
 ///
 /// The limit is recorded rather than hidden: this asserts consistency and the modes the deploy writes, not "the
-/// right user owns it" — the latter is what the deploy's `chown` writes and what the unit's `User=` names.
+/// right account owns it" — there is no second account for it to be right about, because a machine is the
+/// operator's own (ADR-0088), and the owner the deploy writes is whoever ran it.
 fn perms(config: &Config, tools: &Tools) -> Finding {
     let data = &config.data_root;
     let owner = match std::fs::metadata(data) {
@@ -730,7 +731,7 @@ fn perms(config: &Config, tools: &Tools) -> Finding {
         }
         if metadata.uid() != owner {
             offenders.push(format!(
-                "{} is owned by {} where the data root's owner is {owner}: chown {owner}: {}",
+                "{} is owned by {} where the tree's owner — the data root's — is {owner}: chown {owner}: {}",
                 path.display(),
                 metadata.uid(),
                 path.display()

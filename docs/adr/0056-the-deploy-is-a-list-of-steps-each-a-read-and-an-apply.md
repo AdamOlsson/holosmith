@@ -26,6 +26,11 @@ the number is the spec's order and the word is the check's outcome. The words ar
 | `skipped` | another story owns this step's body, **and the line names it** |
 | `failed` | the read or the apply failed; the run stops here |
 
+**Amended by ADR-0088:** `needs` is also a real run whose remaining work is the operator's — step 2's one `usermod`,
+printed as exact argv and never run — so the word is no longer a dry run's alone. The tally names all five counts
+(`6 steps: 4 satisfied, 1 needs, 1 changed, 0 skipped, 0 failed`), because a `needs` step left out of it is the one
+that says the machine is not ready while the header still counts six.
+
 **Amended by ADR-0085:** the step's line is unchanged and is still the only line whose shape is a contract, but a
 step that prints a **list** — a plan, or the apply that did it — puts one action per line *under* that line, with the
 count staying on it (`2. files: needs: 10 actions:` and ten `    - …` lines below). A ten-action step joined with `; `

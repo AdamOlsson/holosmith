@@ -5,9 +5,9 @@
 //! operator has to act on is in [`crate::deploy`]'s lines.
 //!
 //! One function serves both commands, and [`crate::deploy::Kind`] is the whole difference: which half this run
-//! installs, which steps it has no work for, and which group the service user joins. **Nothing is refused over a
-//! role any more** — `server deploy` on a hub and `hub deploy` on a server are both ordinary runs, and the union
-//! each one writes into the config is what makes the second one land (`deploy::union`).
+//! installs, which steps it has no work for, and whether the account running it is asked about the daemon's group at
+//! all. **Nothing is refused over a role any more** — `server deploy` on a hub and `hub deploy` on a server are both
+//! ordinary runs, and the union each one writes into the config is what makes the second one land (`deploy::union`).
 //!
 //! Three things belong to the command rather than to the steps:
 //!

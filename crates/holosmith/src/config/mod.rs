@@ -644,15 +644,15 @@ impl std::fmt::Display for LoadError {
             Self::Missing(path) => write!(f, "no such file: {}", path.display()),
             Self::Io { path, source } => {
                 write!(f, "cannot read {}: {source}", path.display())?;
-                // The root is 0700 and belongs to the service user (ADR-0086), so the common cause of a refusal is
-                // "you are not that user" — and a bare `permission denied` leaves an operator with nowhere to go.
+                // The config is the invoking account's own file under its own `~/.config` (ADR-0088), so the common
+                // cause of a refusal is a run that is not that account — a `sudo`, whose `~` is another home — and a
+                // bare `permission denied` leaves an operator with nowhere to go.
                 if source.kind() == ErrorKind::PermissionDenied {
                     write!(
                         f,
-                        " — this machine's root belongs to the {} service user, so run this as it: \
-                         `sudo -u {} holosmith …`",
-                        crate::deploy::SERVICE_USER,
-                        crate::deploy::SERVICE_USER
+                        " — a machine is the account that runs it, not a service it is run for (ADR-0088): run \
+                         `holosmith …` as this account rather than through `sudo`, which reads root's home rather \
+                         than yours"
                     )?;
                 }
                 Ok(())

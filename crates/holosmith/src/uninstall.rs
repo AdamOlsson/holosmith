@@ -41,10 +41,11 @@
 //!
 //! # The root, and the privilege
 //!
-//! [`crate::deploy::Root`] is the same value the deploy installs into: one directory, owned by the service user
-//! (ADR-0086). This program never escalates, so the half that is root's — `systemctl disable --now`, the unit in
-//! `/etc/systemd/system`, `daemon-reload` — is **printed** as the unit line's remark, and what this run does itself is
-//! what the service user can do: remove `<root>/holosmith.service` and, with `--purge`, the data root.
+//! [`crate::deploy::Root`] is the same value the deploy installs into: one directory, owned by the account that runs
+//! the daemon — the operator's own (ADR-0088). This program never escalates, so the half that is root's — `systemctl
+//! disable --now`, the unit in `/etc/systemd/system`, `daemon-reload` — is **printed** as the unit line's remark, and
+//! what this run does itself is what that account can do: remove `<root>/holosmith.service` and, with `--purge`, the
+//! data root.
 
 use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};

@@ -624,7 +624,7 @@ fn prepare(admin_dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(admin_dir).map_err(|error| {
         format!(
             "the admin directory {} could not be created ({error}); `server deploy`'s step 2 creates it for \
-             the service user",
+             the account that runs it",
             admin_dir.display()
         )
     })?;

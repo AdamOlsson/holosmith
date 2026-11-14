@@ -221,9 +221,11 @@ impl Steps for Real {
     }
 
     fn restart(&self, tools: &deploy::Tools) -> Result<(), String> {
-        // One escalation, and it is `sudoers`-scoped: `holosmith ALL=(root) NOPASSWD: /usr/bin/systemctl restart
-        // holosmith.service` (ADR-0086 D4). `-n` makes a missing rule a refusal in one line rather than a password
-        // prompt on a service's stdin, and the sentence names the rule to add.
+        // One escalation, and it is `sudoers`-scoped **on the account that runs this machine**: `<your account>
+        // ALL=(root) NOPASSWD: /usr/bin/systemctl restart holosmith.service` (ADR-0086 D4). `-n` makes a missing rule
+        // a refusal in one line rather than a password prompt on a service's stdin, and the sentence names the rule
+        // to add. The account is the operator's own — a machine is not a service (ADR-0088) — so the rule belongs to
+        // whoever runs the promotion, and the sentence says so rather than naming a second account.
         let output = std::process::Command::new(&tools.sudo)
             .arg("-n")
             .arg(&tools.systemctl)
@@ -249,15 +251,13 @@ impl Steps for Real {
             .trim();
         Err(format!(
             "`{} -n {} restart {}` answered {} ({line}): this machine needs the one line ADR-0086 records — \
-             `{} ALL=(root) NOPASSWD: /usr/bin/systemctl restart {}` in `/etc/sudoers.d/{}` — and until it has it a \
-             release cannot confirm itself live",
+             `<your account> ALL=(root) NOPASSWD: /usr/bin/systemctl restart {}` in `/etc/sudoers.d/holosmith` — and \
+             until it has it a release cannot confirm itself live",
             tools.sudo.display(),
             tools.systemctl.display(),
             deploy::UNIT_NAME,
             output.status.code().unwrap_or(-1),
-            deploy::SERVICE_USER,
             deploy::UNIT_NAME,
-            deploy::SERVICE_USER,
         ))
     }
 

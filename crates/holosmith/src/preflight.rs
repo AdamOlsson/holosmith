@@ -367,17 +367,18 @@ fn docker(docker_host: Option<&str>) -> Finding {
 
 /// What a unix socket's refusal means, as the fix.
 ///
-/// **`permission denied` does not have the stopped daemon's fix.** A socket this user may not open is a
-/// group the operator is not in — the socket is answering, it just will not talk — so that sentence names
-/// `usermod`, not `systemctl`. Every other reason is the daemon not being there or not being healthy, and
-/// `systemctl start` is the fix for those. The account is the **service user's**, not the reader's: since ADR-0086
-/// the daemon talks to the socket as `holosmith`, and adding the operator would fix nothing.
+/// **`permission denied` does not have the stopped daemon's fix.** A socket this account may not open is a group it
+/// is not in — the socket is answering, it just will not talk — so that sentence names `usermod`, not `systemctl`.
+/// Every other reason is the daemon not being there or not being healthy, and `systemctl start` is the fix for those.
+/// The account is the **caller's**, because a machine is the operator's own (ADR-0088): nothing here escalates, so the
+/// command is printed for them to run, with the log-out it needs beside it.
 fn socket_sentence(host: &str, path: &str, reason: &Unreachable) -> String {
     if reason.kind == ErrorKind::PermissionDenied {
         return format!(
-            "the docker socket {path} refused this user ({}): add the service user to the docker group with \
-             `sudo usermod -aG docker holosmith` and restart the service, or set docker_host to a socket it can \
-             open (a rootless daemon's is `unix:///run/user/<uid>/docker.sock`)",
+            "the docker socket {path} refused this account ({}): the socket is group-owned by the `docker` group, so \
+             run `sudo usermod -aG docker <your account>` once and log out and back in — the group reaches a login \
+             only at the next one — or set docker_host to a socket this account can open (a rootless daemon's is \
+             `unix:///run/user/<uid>/docker.sock`)",
             reason.message
         );
     }

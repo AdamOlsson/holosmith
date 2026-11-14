@@ -182,7 +182,9 @@ the tree, the config, and the two files that are generated once.
 through a socket the `docker` group may open, and the question "may the account that runs `serve` talk to Docker" is
 now a question about the operator's own membership. It is the same read about a different account (`$(id -un)` instead
 of `holosmith`), which a machine that can run `docker ps` already answers, and `preflight`'s docker finding is the
-sentence when it does not.
+sentence when it does not. Step 2 prints the one `usermod` for it, spelled with `id -un`'s answer, when the read says
+the group does not have it — and asks the question at all only when `docker_host` names a socket, because a group is
+how a socket is opened and a `tcp:` daemon is reached by nobody's membership.
 
 `promote`'s restart becomes `systemctl --user restart holosmith`: `Tools::sudo`, the `-n`, the sudoers refusal sentence
 and its ADR-0086 D4 citation go. The two hints that told an operator to escalate also go — `config`'s "run `sudo -u
@@ -191,10 +193,9 @@ machine's sudoers rule.
 
 The move is half in the tree. Step 5 has it: the unit it renders carries no `User=` or `Group=`, the sandbox is the
 reduced set, it is enabled with `WantedBy=default.target` and the two `systemctl --user` commands, and it is written
-into the user manager's directory beside the config. Still outstanding: step 2's account and the `useradd`/`usermod` it
-prints, `promote`'s restart and the sudoers line its refusal names, `logs`'s journal spelling, `uninstall`'s words, and
-`loginctl enable-linger`. The decision is recorded here, and what D5 lists is the shape the code moves to rather than a
-description of the tree as it stands.
+into the user manager's directory beside the config. Still outstanding: `promote`'s restart and the sudoers line its
+refusal names, `logs`'s journal spelling, `uninstall`'s words, and `loginctl enable-linger`. The decision is recorded
+here, and what D5 lists is the shape the code moves to rather than a description of the tree as it stands.
 
 ## Refused
 
