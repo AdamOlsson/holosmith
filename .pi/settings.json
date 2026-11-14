@@ -1,0 +1,14 @@
+{
+  "subagents": {
+    "agentOverrides": {
+      "worker": {
+        "model": "opencode-go/deepseek-v4.1-flash",
+        "thinking": "medium"
+      },
+      "reviewer": {
+        "model": "opencode-go/deepseek-v4.1-flash",
+        "thinking": "high"
+      }
+    }
+  }
+}
