@@ -13662,9 +13662,15 @@ SHIM
 # The refusal's live row comes from a boot of its own over the tree's data root, which is the only way to put a row
 # in a database this case is about to delete without writing SQL by hand.
 #
-# **The unit is the operator's own user unit** (ADR-0088), so the three programs that retire it — `systemctl`,
-# `loginctl`, `rm` — are stand-ins on `PATH`, the same shape `case_logs` uses for `journalctl`: a real user manager
-# would refuse a unit under `target/`, and the order the recorded argv shows is what this case is for.
+# **This case's tree is a foreign one, and that is what it is here to prove.** The unit `--config` composes under
+# `$WORK` is not the file the account's own user manager loads, and `systemctl --user` resolves the **name** in that
+# manager's search path — so a `systemctl`/`loginctl` child here would reach the account's real unit and its linger
+# flag. The assertion is that the only child is the `rm` of the file. The four-child order the account's own unit gets
+# is `tests/uninstall.rs`'s, because this machine's real unit path is not a gate's to write and the `cargo test` phase
+# of this same run executes those tests. `systemctl` and `loginctl` still get recording stand-ins on `PATH`: they must
+# never run, and if the predicate ever regresses they are what turns a stopped daemon on the machine running this gate
+# into one recorded line and a failed assertion — the same reason every other case here hands in the machine it cannot
+# fake.
 case_uninstall() {
   local name=case_uninstall root="$repo_root/target/verify-uninstall-$$"
   local image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
@@ -13680,10 +13686,10 @@ case_uninstall() {
   # This case's tree is a **foreign** one on purpose: its unit is the file `--config` composes under `$WORK`, while the
   # file the account's own user manager loads is `~/.config/systemd/user/holosmith.service`. `systemctl --user` takes
   # the **name** and resolves it in that manager's search path, so it never looks in this tree at all — the teardown
-  # must therefore remove the file and ask the manager and `loginctl` nothing. So `rm` is the one stand-in, and it
+  # must therefore remove the file and ask the manager and `loginctl` nothing. `rm` is the one child expected, and it
   # records **and** removes (`command -p rm` is the account's own), which makes the log the whole list of children.
-  # **The four-child order the account's own unit gets is `tests/uninstall.rs`'s**: this machine's real unit path is not
-  # a gate's to write, and the `cargo test` phase of this same run executes those tests.
+  # The two manager programs are recorded as well even though nothing should run them: a regression is then a line in
+  # this log and a failed equality below, not this machine's real unit being stopped.
   shims="$root/shims"
   mkdir -p "$shims"
   export HS_UNIT_LOG="$root/unit.log"
@@ -13692,7 +13698,17 @@ case_uninstall() {
 printf 'rm %s\n' "$*" >>"$HS_UNIT_LOG"
 command -p rm "$@"
 SHIM
-  chmod 0755 "$shims/rm"
+  cat >"$shims/systemctl" <<'SHIM'
+#!/bin/sh
+printf 'systemctl %s\n' "$*" >>"$HS_UNIT_LOG"
+exit 1
+SHIM
+  cat >"$shims/loginctl" <<'SHIM'
+#!/bin/sh
+printf 'loginctl %s\n' "$*" >>"$HS_UNIT_LOG"
+exit 1
+SHIM
+  chmod 0755 "$shims/rm" "$shims/systemctl" "$shims/loginctl"
   printf 'owner = "%s"\nrole = "server"\nbackend = "stub"\nmin_free_gb = 1\n' \
     "$owner" >"$WORK/config-uninstall.toml"
   # The machine's network, as this case found it: `uninstall` removes it, so a run that did not put it back would
@@ -13719,7 +13735,8 @@ SHIM
     >"$root/first.out" 2>&1 || status=$?
   check "$name/first/exit" 0 "$status"
   # The unit is this tree's file and not the account's, so the only child is the `rm` that removes it: a `systemctl
-  # --user` here would have disabled the account's own unit, and a `loginctl` its linger flag.
+  # --user` here would have disabled the account's own unit, and a `loginctl` its linger flag. The stand-ins record, so
+  # this equality is also what contains a regression — one extra line, and the case fails instead of the machine.
   check "$name/first/children" "rm -f $unit" "$(cat "$HS_UNIT_LOG")"
   # Nothing is root's any more: the unit this run retired is the operator's own, so no line asks for `sudo`.
   grep -q 'sudo' "$root/first.out" &&

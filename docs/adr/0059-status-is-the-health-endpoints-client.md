@@ -125,8 +125,14 @@ teardown's commonest answer and the one the acceptance's idempotency asks for.
 
 ## D6 — what it removes, in what order, and what it keeps
 
-1. **The unit** — `systemctl disable --now holosmith.service`, then the file (`rm -f`, `sudo`-prefixed on a system
-   install), then `systemctl daemon-reload`. It goes first because it is what would restart anything.
+1. **The unit** — at `Root::unit`. The account's own user unit (`~/.config/systemd/user/holosmith.service`, the one
+   file `systemctl --user` resolves) is `systemctl --user disable --now holosmith.service` first, while the file is
+   still there because disable reads its `[Install]` section, then `rm -f` the file, then `systemctl --user
+   daemon-reload`, then `loginctl disable-linger`. Any **other** tree's unit — which is what `--root` and `--config`
+   compose — is a file and nothing else: the manager is looked up by **name** in its own search path and never at a
+   tree, so a child there would retire the account's unit instead. Either way the file's removal is the deliverable
+   and the unit goes first because it is what would restart anything. No line carries `sudo`: an install whose unit
+   is the account's own has no privileged half left (ADR-0088).
 2. **The two proxies** — `docker rm --force hs_egress hs_key`. The read is **existence**, not `running`:
    `--restart unless-stopped` keeps a stopped container's name and its definition, so a teardown that removed only
    running ones would leave two containers behind.
