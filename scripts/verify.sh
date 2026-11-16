@@ -10286,13 +10286,8 @@ done
 # The host.
 shift
 [ "$#" -gt 0 ] || exit 255
-# The run itself is `sudo -n -u holosmith <binary> server deploy …` (ADR-0086 D2: the deploy that writes a root is
-# the service user's, so the remote run is one `sudo -u` and not the ssh login). A gate has no service user, no
-# sudoers line and no password to give, so the stand-in drops that prefix and runs the words after it — which are the
-# same words this case asserts on.
-if [ "$#" -ge 4 ] && [ "$1" = "sudo" ] && [ "$2" = "-n" ] && [ "$3" = "-u" ]; then
-  shift 4
-fi
+# The run is the ssh login's own: there is no second account to become and no `sudo` between the login and the
+# deploy (ADR-0088), so what follows the host is the deploy's own arguments and the stand-in runs them as they are.
 exec sh -c "$*"
 SHIM
   chmod 0755 "$dir/ssh"
