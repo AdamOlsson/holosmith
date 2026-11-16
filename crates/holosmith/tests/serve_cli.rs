@@ -3,6 +3,13 @@
 //! Every test drives `CARGO_BIN_EXE_holosmith`: the startup lines, the exit codes, the signals
 //! and the files left behind are the real ones. `kill` is a process, not a syscall, so the
 //! test needs no `unsafe`.
+//!
+//! **Every test here takes [`one_at_a_time`]**, which is `tests/uninstall.rs`'s lock for the same reason: one test
+//! copies `CARGO_BIN_EXE_holosmith` and execs the copy, `fs::copy` holds its destination open for writing while it
+//! writes, and a `fork` from a test running beside it **inherits that descriptor** — `exec` of a file another process
+//! still holds open for writing is `ETXTBSY`. The symptom is a process that would not start, in the one test that
+//! copied a binary, blamed on whichever test happened to overlap it; it is a race, so it appears once in a hundred
+//! runs and reads like a flaky machine.
 
 use std::ffi::OsString;
 use std::fs;
@@ -17,6 +24,18 @@ use std::time::{Duration, Instant};
 
 mod support;
 use support::TempDir;
+
+/// Hold this for the whole body of a test here: one test at a time.
+///
+/// `fs::copy` opens its destination for writing, a sibling test's `fork` inherits that descriptor, and this test's
+/// `exec` of the copy then fails with `ETXTBSY` while the sibling still holds it — a failure in the test that
+/// copied a binary, caused by a test that only spawned a server. Poisoning is ignored for `tests/uninstall.rs`'s
+/// reason: the panic belongs to the test that took it, and the next test's own failure is the one worth reading.
+fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// The config every serving test reads, unless it needs another one.
 ///
@@ -172,6 +191,7 @@ impl Drop for Server {
 /// listener this run does not have.
 #[test]
 fn a_preview_port_that_is_taken_is_a_warning_and_the_control_listener_still_serves() {
+    let _guard = one_at_a_time();
     let dir = TempDir::new("preview-taken");
     let held = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port is bindable");
     let taken = held.local_addr().expect("a bound address").port();
@@ -248,6 +268,7 @@ fn build(args: &[&str]) -> Vec<OsString> {
 
 #[test]
 fn the_startup_lines_are_exact_and_name_the_bound_port() {
+    let _guard = one_at_a_time();
     let dir = TempDir::new("startup");
     let config = config(&dir);
     let data = dir.file("data");
@@ -325,6 +346,7 @@ fn the_startup_lines_are_exact_and_name_the_bound_port() {
 
 #[test]
 fn the_role_in_the_config_file_reaches_the_health_payload() {
+    let _guard = one_at_a_time();
     let dir = TempDir::new("role");
     let config = dir.write(
         "config.toml",
@@ -348,6 +370,7 @@ fn the_role_in_the_config_file_reaches_the_health_payload() {
 
 #[test]
 fn the_backend_comes_from_the_config_file() {
+    let _guard = one_at_a_time();
     // `backend = "stub"` is selectable from the file *and* by `--backend`, and the flag
     // wins — the same precedence `--port` and `--data-dir` already follow (ADR-0006).
     let dir = TempDir::new("backend");
@@ -373,6 +396,7 @@ fn the_backend_comes_from_the_config_file() {
 
 #[test]
 fn a_flag_backend_wins_over_the_config_file() {
+    let _guard = one_at_a_time();
     // The override this asserts *is* the Docker backend, so the machine has to pass the preflight: a
     // socket that answers `_ping`, and `min_free_gb = 0` so the real `df` on this sandbox's small disk
     // cannot fail a test that is about which backend the flag chose. The `git` check still runs
@@ -409,6 +433,7 @@ fn a_flag_backend_wins_over_the_config_file() {
 
 #[test]
 fn the_default_backend_is_docker_and_the_log_line_says_so() {
+    let _guard = one_at_a_time();
     // ADR-0001: the stub is opt-in, so a machine that says nothing about the backend runs the
     // Docker one — and a Docker run checks the machine first, so this test brings a daemon
     // that answers `_ping` and sets `min_free_gb = 0` so the real `df` on this sandbox's small disk cannot
@@ -439,6 +464,7 @@ fn the_default_backend_is_docker_and_the_log_line_says_so() {
 
 #[test]
 fn a_hub_is_not_checked_for_docker_because_it_runs_no_sessions() {
+    let _guard = one_at_a_time();
     // Spec item 10 §6: `hub deploy` runs the startup steps "without the Docker and git checks". A hub with
     // the default `backend = "docker"` and no daemon anywhere is the normal hub, so it must boot — and it
     // boots even though `min_free_gb` is the default 20 and this sandbox has 3.
@@ -467,6 +493,7 @@ fn a_hub_is_not_checked_for_docker_because_it_runs_no_sessions() {
 
 #[test]
 fn sigterm_stops_the_process_with_exit_zero() {
+    let _guard = one_at_a_time();
     let dir = TempDir::new("sigterm");
     let config = config(&dir);
     let mut server = Server::start(
@@ -479,6 +506,7 @@ fn sigterm_stops_the_process_with_exit_zero() {
 
 #[test]
 fn sigint_stops_the_process_with_exit_zero() {
+    let _guard = one_at_a_time();
     let dir = TempDir::new("sigint");
     let config = config(&dir);
     let mut server = Server::start(
@@ -491,6 +519,7 @@ fn sigint_stops_the_process_with_exit_zero() {
 
 #[test]
 fn an_invalid_config_is_reported_and_never_served() {
+    let _guard = one_at_a_time();
     let dir = TempDir::new("invalid");
     let config = dir.write(
         "config.toml",
@@ -512,6 +541,7 @@ fn an_invalid_config_is_reported_and_never_served() {
 
 #[test]
 fn a_config_file_the_operator_named_must_exist() {
+    let _guard = one_at_a_time();
     let output = holosmith(&["serve", "--config", "/nonexistent/holosmith/config.toml"]);
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -520,6 +550,7 @@ fn a_config_file_the_operator_named_must_exist() {
 
 #[test]
 fn a_port_that_collides_with_the_preview_port_is_refused_in_the_configs_words() {
+    let _guard = one_at_a_time();
     let dir = TempDir::new("collision");
     let config = dir.write("config.toml", "preview_listen = \"127.0.0.1:9123\"\n");
     let output = holosmith(&[
@@ -543,6 +574,7 @@ fn a_port_that_collides_with_the_preview_port_is_refused_in_the_configs_words() 
 
 #[test]
 fn a_data_dir_the_file_must_not_name_is_refused_from_the_cli_too() {
+    let _guard = one_at_a_time();
     // The repro this story's first P1 names: `config validate` refuses this data_root, so
     // `serve --data-dir` must refuse it in the same words and never bind.
     let dir = TempDir::new("data-dir-overlap");
@@ -574,6 +606,7 @@ fn a_data_dir_the_file_must_not_name_is_refused_from_the_cli_too() {
 
 #[test]
 fn a_relative_data_dir_is_refused_from_the_cli_too() {
+    let _guard = one_at_a_time();
     let dir = TempDir::new("data-dir-relative");
     let config = config(&dir);
     let output = holosmith(&[
@@ -593,6 +626,7 @@ fn a_relative_data_dir_is_refused_from_the_cli_too() {
 
 #[test]
 fn a_data_dir_that_is_not_utf8_can_be_served() {
+    let _guard = one_at_a_time();
     let dir = TempDir::new("osstring");
     let config = config(&dir);
     let mut data = dir.file("data").into_os_string().into_vec();
@@ -614,6 +648,7 @@ fn a_data_dir_that_is_not_utf8_can_be_served() {
 
 #[test]
 fn a_data_dir_that_cannot_be_created_is_reported_before_anything_binds() {
+    let _guard = one_at_a_time();
     // A regular file where the data root belongs: `mkdir -p` fails, so the start names the
     // path and exits 1 with no listener (ADR-0009).
     let dir = TempDir::new("data-dir-unwritable");
@@ -644,6 +679,7 @@ fn a_data_dir_that_cannot_be_created_is_reported_before_anything_binds() {
 
 #[test]
 fn the_data_root_serve_creates_is_the_mode_the_deploy_writes_whatever_the_umask() {
+    let _guard = one_at_a_time();
     // `doctor`'s `perms` finding compares the install tree with the modes `server deploy` writes, and the
     // data root's is 0755. `create_dir_all` uses the process's umask — 0775 on a machine whose umask is 0002 — so a
     // root `serve` made itself would fail the *next* boot's `ExecStartPre` over a mode nothing changed. `umask` is
@@ -694,6 +730,7 @@ fn the_data_root_serve_creates_is_the_mode_the_deploy_writes_whatever_the_umask(
 
 #[test]
 fn the_binary_serves_the_app_from_a_directory_that_holds_only_the_binary() {
+    let _guard = one_at_a_time();
     let dir = TempDir::new("empty-dir");
     let binary = dir.file("holosmith");
     fs::copy(env!("CARGO_BIN_EXE_holosmith"), &binary).expect("the binary is copyable");
