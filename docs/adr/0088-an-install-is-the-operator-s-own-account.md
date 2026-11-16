@@ -105,8 +105,11 @@ owner, and it keeps `ExecStartPre=<exe> doctor --quick`, the pre-line ADR-0084 D
 it works the same through the user manager.
 
 **`loginctl enable-linger` is what turns it into a boot service**, and a machine without it starts the daemon only
-while a session is open — which is not an install. It is measured unprivileged, so the deploy sets it rather than
-printing a command for the operator to copy, and the set of commands ADR-0086 D2's rule leaves to print is now empty.
+while a session is open — which is not an install. It is unprivileged, so nothing needs root to set it and the set of
+commands ADR-0086 D2's rule leaves to print is empty; what the tree does is narrower than this decision, and the
+narrower thing is the record. `server deploy` writes the unit and prints `systemctl --user daemon-reload` and
+`enable --now` without setting linger, and `uninstall` is the only verb that touches the flag: it turns it **off**,
+which is what stops a removed install starting at the next boot. Setting it is still outstanding (below).
 `journalctl --user -u holosmith` is the log, one flag away from the system spelling.
 
 **The sudoers line is deleted, and with it ADR-0086 D4's whole argument.** That decision existed for one reason: a
@@ -194,8 +197,13 @@ machine's sudoers rule.
 The move is half in the tree. Step 5 has it: the unit it renders carries no `User=` or `Group=`, the sandbox is the
 reduced set, it is enabled with `WantedBy=default.target` and the two `systemctl --user` commands, and it is written
 into the user manager's directory beside the config. Still outstanding: `promote`'s restart and the sudoers line its
-refusal names, `logs`'s journal spelling, `uninstall`'s words, and `loginctl enable-linger`. The decision is recorded
-here, and what D5 lists is the shape the code moves to rather than a description of the tree as it stands.
+refusal names, and `loginctl enable-linger`. `logs` reads `journalctl --user`, and `uninstall` retires the user unit
+itself — `systemctl --user disable --now` while the file is still there (disable reads its `[Install]` section), the
+file, `systemctl --user daemon-reload`, `loginctl disable-linger` — with no `sudo` on any line. It commands that
+manager only for the unit the manager actually loads, because `systemctl --user` resolves a **name** in its own
+search path while a `--root`/`--config` tree is a file no manager reads; such a tree's unit is removed and nothing
+else is asked of the manager. The decision is recorded here, and what D5 lists is the shape the code moves to rather
+than a description of the tree as it stands.
 
 ## Refused
 

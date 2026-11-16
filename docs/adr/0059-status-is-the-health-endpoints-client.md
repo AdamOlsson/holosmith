@@ -197,9 +197,16 @@ command that just ran, with its own flags made absolute) because re-running is t
   asserts they go while the data stays, and restores the network the rest of the gate needs; the purge refusal's
   live row comes from a boot of its own over a database this case seeds, and `--force` then takes the tree.
 
+  Its tree's unit is a **foreign** one: the file `--config` composes under the gate's work directory, not the file the
+  account's own manager loads. `systemctl --user` resolves a **name** in that manager's search path and never looks at
+  a tree, so a child there would retire the account's real unit and clear its linger flag — and the case therefore
+  asserts that the only child is the `rm` of that file, with `systemctl` and `loginctl` stand-ins on `PATH` that must
+  never be reached. The four-child order the account's own unit gets is `tests/uninstall.rs`'s, because this machine's
+  real unit path is not a gate's to write; the `cargo test` phase of the same run executes those.
+
 **What this machine cannot measure**: no systemd, so no unit is loaded and `disable --now`/`daemon-reload` are
-`tests/uninstall.rs`'s recorders (and a privileged run's unit *file* is untestable here, because `/etc/systemd/system`
-is not this user's to write — the case's `--root` arm and `AGENTS.md`'s by-hand procedure are the two proofs);
-no `journalctl` for a unit, so the server arm's real journal is a stand-in's; and no host registry, so `status`'s
-machines line names instead of a health it cannot ask for. Those three are the ship note's "said plainly",
-not gaps found later.
+`tests/uninstall.rs`'s recorders. The unit's **file** needs no systemd and is real: the deploy writes it beside the
+config, under a directory this user owns, so the case writes one and the teardown's `rm` is measured against a file
+that is there and gone. There is no `journalctl` for a unit, so the server arm's real journal is a stand-in's; and
+no host registry, so `status`'s machines line names instead of a health it cannot ask for. Those three are the ship
+note's "said plainly", not gaps found later.

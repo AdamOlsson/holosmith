@@ -124,7 +124,7 @@ curl -fsS http://127.0.0.1:8080/api/health
 ```
 
 `active (running)` plus a JSON body is the machine working. A unit that is `activating (auto-restart)` means the
-preflight refused — read `sudo holosmith doctor --quick` and `journalctl -u holosmith -n 30`.
+preflight refused — read `sudo holosmith doctor --quick` and `journalctl --user -u holosmith -n 30`.
 
 One more line, once, so a release can restart the unit and confirm itself live (ADR-0086 D4):
 
@@ -203,8 +203,8 @@ create time with a `422` — those are the three shapes that cannot be mounted s
 
 ```bash
 sudo -u holosmith holosmith status       # role, version, uptime, session counts, proxies
-sudo holosmith logs -f                   # journalctl -u holosmith.service (the journal is root's, or the
-                                         # `systemd-journal` group's)
+holosmith logs -f                        # journalctl --user -u holosmith.service, no group needed
+                                         # (the unit is your own: ADR-0088)
 sudo -u holosmith holosmith doctor --full
 sudo systemctl restart holosmith         # after any config edit
 sudo -u holosmith holosmith server deploy   # idempotent: the second run changes nothing
