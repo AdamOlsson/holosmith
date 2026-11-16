@@ -9,12 +9,10 @@
 //! table, and a fake count would be a test of the fake).
 //!
 //! **Handed in**: the daemon is a [`Fake`] ([`uninstall::Machines`]) and `--root` is what keeps every path inside the
-//! temp directory.
-//!
-//! The teardown never escalates (ADR-0086), so this file has no `sudo` and no `systemctl`: the unit it removes is the
-//! **written** one in the user manager's directory beside the config (`~/.config/systemd/user/holosmith.service`), and
-//! the three commands that clear an installed unit out of the system manager's are words on the line rather than
-//! children of the run.
+//! temp directory. The unit's own two programs are recorders ([`recorder`]): the unit is the operator's **user** unit
+//! beside the config (ADR-0088), so a real `systemctl --user disable --now` here would be a test asking this machine's
+//! manager to retire a unit under `target/` — and the teardown never escalates, so there is no `sudo` in this file at
+//! all.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -54,13 +52,51 @@ fn shim(dir: &TempDir, name: &str, body: &str) -> PathBuf {
     path
 }
 
-/// A `rm` that records its argv and removes nothing.
+/// A program that records its own name and argv, one line per call, into `log` — and does nothing else.
+///
+/// One log is what makes an **order** a measurement: three recorders writing to one path answer the sequence a step
+/// ran in, which three separate files cannot.
+fn recorder(dir: &TempDir, program: &str, log: &Path) -> PathBuf {
+    shim(
+        dir,
+        program,
+        &format!("printf '{program} %s\\n' \"$*\" >> '{}'", log.display()),
+    )
+}
+
+/// An `rm` that records its argv and removes nothing.
 fn rm_recorder(dir: &TempDir, log: &Path) -> PathBuf {
+    recorder(dir, "rm", log)
+}
+
+/// An `rm` that records its argv into `log` and then really removes what it was given.
+///
+/// [`rm_recorder`] removes nothing on purpose, because a purge's data root has to survive until its own line says
+/// otherwise. The unit step needs the removal *and* the record: its order is that `--user disable --now` ran while the
+/// file was still there, which only one log can show. `command -p rm` is the account's own `rm` from the shell's
+/// default `PATH`, so the shim cannot re-enter itself even if a test ever put its own directory on `PATH`.
+fn rm_that_removes(dir: &TempDir, log: &Path) -> PathBuf {
     shim(
         dir,
         "rm",
-        &format!("printf 'rm %s\\n' \"$*\" >> '{}'", log.display()),
+        &format!(
+            "printf 'rm %s\\n' \"$*\" >> '{}'\ncommand -p rm \"$@\"",
+            log.display()
+        ),
     )
+}
+
+/// The tools a run here gets: the `rm` the test named, and recorders for the unit's two systemd programs.
+///
+/// One helper rather than a `Tools` literal per test, because every test that installs a unit runs the whole step and
+/// a single literal forgetting one of the two would point a real `systemctl --user` at this machine.
+fn tools_for(dir: &TempDir, rm: PathBuf) -> uninstall::Tools {
+    uninstall::Tools {
+        rm,
+        systemctl: recorder(dir, "systemctl", &dir.file("systemctl.log")),
+        loginctl: recorder(dir, "loginctl", &dir.file("loginctl.log")),
+        ..uninstall::Tools::default()
+    }
 }
 
 /// The daemon, as a value: which containers and networks exist, and what it was asked to remove.
@@ -260,9 +296,13 @@ fn a_root_install_loses_the_unit_and_keeps_the_data() {
     let (root, deployed) = root_target(&dir);
     installed_tree(&root, &deployed);
     let machine = Fake::default();
-    let (sudo_log, systemctl_log) = (dir.file("sudo.log"), dir.file("systemctl.log"));
+    // All three programs record into one log, so the step's order is a measurement and not a claim: the disable has to
+    // come before the `rm -f` of the file it read, and the reload after it.
+    let children = dir.file("children.log");
     let tools = uninstall::Tools {
-        rm: PathBuf::from("rm"),
+        rm: rm_that_removes(&dir, &children),
+        systemctl: recorder(&dir, "systemctl", &children),
+        loginctl: recorder(&dir, "loginctl", &children),
         ..uninstall::Tools::default()
     };
     let report = uninstall::run(&deployed, &root, &tools, &machine, &Args::default())
@@ -278,6 +318,17 @@ fn a_root_install_loses_the_unit_and_keeps_the_data() {
         "{}",
         report.render()
     );
+    // The unit of the account that owns it: the disable reads the file's `[Install]` section, so it runs first, then
+    // the file goes, then the manager forgets it, then linger turns off.
+    assert_eq!(
+        std::fs::read_to_string(&children).expect("the three programs were called"),
+        format!(
+            "systemctl --user disable --now holosmith.service\nrm -f {}\nsystemctl --user daemon-reload\n\
+             loginctl disable-linger\n",
+            root.unit().display()
+        ),
+        "the unit is retired in one order: disabled while its file is there, removed, reloaded, linger off"
+    );
     assert!(!root.unit().exists(), "the unit file is gone");
     assert!(
         deployed
@@ -291,17 +342,11 @@ fn a_root_install_loses_the_unit_and_keeps_the_data() {
         deployed.data_root.exists(),
         "a plain uninstall keeps the data root"
     );
-    // A `--root` unit is one systemd cannot read, so the step asks it nothing at all — a child here would be a
-    // pretend half of the install.
+    // Nothing is root's: an install whose unit is the operator's own has no half left for `sudo`.
     assert!(
-        !systemctl_log.exists(),
-        "a --root uninstall asked systemd: {}",
-        std::fs::read_to_string(&systemctl_log).unwrap_or_default()
-    );
-    assert!(
-        !sudo_log.exists(),
-        "a --root uninstall used sudo: {}",
-        std::fs::read_to_string(&sudo_log).unwrap_or_default()
+        !report.render().contains("sudo"),
+        "a teardown of the account's own install asks nobody for a privilege: {}",
+        report.render()
     );
 }
 
@@ -312,13 +357,20 @@ fn the_second_run_says_nothing_and_keeps_succeeding() {
     let (root, deployed) = root_target(&dir);
     installed_tree(&root, &deployed);
     let machine = Fake::default();
-    let tools = uninstall::Tools {
-        rm: PathBuf::from("rm"),
-        ..uninstall::Tools::default()
-    };
+    let tools = tools_for(&dir, PathBuf::from("rm"));
     let first = uninstall::run(&deployed, &root, &tools, &machine, &Args::default())
         .expect("nothing refuses this run");
     assert_eq!(first.lines[0].word, Word::Removed);
+    let asked = std::fs::read_to_string(dir.file("systemctl.log"))
+        .expect("the first run disabled the unit it found");
+    assert!(
+        asked.starts_with("systemctl --user disable --now holosmith.service"),
+        "the first run does not disable the unit: {asked}"
+    );
+    let linger = std::fs::read_to_string(dir.file("loginctl.log")).expect(
+        "the first run turned linger off, which is what stops the unit starting at the next boot",
+    );
+    assert_eq!(linger, "loginctl disable-linger\n", "{}", linger);
     let second = uninstall::run(&deployed, &root, &tools, &machine, &Args::default())
         .expect("nothing refuses the second run either");
     assert_eq!(
@@ -333,6 +385,17 @@ fn the_second_run_says_nothing_and_keeps_succeeding() {
         second.render()
     );
     assert!(!second.failed(), "a teardown of nothing is not a failure");
+    // `nothing` in children as well as in words: the read found no file, so no program was asked to retire one.
+    assert_eq!(
+        std::fs::read_to_string(dir.file("systemctl.log")).expect("the log is still there"),
+        asked,
+        "the second run asked the manager about a unit whose file is gone"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.file("loginctl.log")).expect("the log is still there"),
+        linger,
+        "the second run turned linger off a second time"
+    );
 }
 
 #[test]
@@ -344,10 +407,7 @@ fn the_proxies_and_the_egress_network_go_containers_first() {
         &[container::PROXY_NAME, holosmith::key::KEY_PROXY_NAME],
         &[holosmith::docker::EGRESS_NETWORK, "agents_0123456789abcdef"],
     );
-    let tools = uninstall::Tools {
-        rm: PathBuf::from("rm"),
-        ..uninstall::Tools::default()
-    };
+    let tools = tools_for(&dir, PathBuf::from("rm"));
     let report = uninstall::run(&deployed, &root, &tools, &machine, &Args::default())
         .expect("nothing refuses this run");
     assert_eq!(
@@ -384,6 +444,59 @@ fn the_proxies_and_the_egress_network_go_containers_first() {
 }
 
 #[test]
+fn a_refused_disable_is_a_failed_step_and_leaves_the_file_where_it_was() {
+    let _guard = one_at_a_time();
+    let dir = TempDir::new("uninstall-disable-refused");
+    let (root, deployed) = root_target(&dir);
+    installed_tree(&root, &deployed);
+    // A manager that says no, in systemd's own words: the sentence the operator needs is the child's, not a verdict of
+    // this command's.
+    let reason = dir.file("reason");
+    std::fs::write(
+        &reason,
+        "Failed to disable unit: Unit file holosmith.service does not exist.\n",
+    )
+    .expect("the stand-in's line is writable");
+    // The base is built first and the one program replaced after it: `tools_for` writes its own `systemctl` into the
+    // same `bin`, so a struct-update base would overwrite the refusing stand-in with its recorder.
+    let mut tools = tools_for(&dir, PathBuf::from("rm"));
+    tools.systemctl = shim(
+        &dir,
+        "systemctl",
+        &format!("cat '{}' >&2\nexit 1", reason.display()),
+    );
+    let report = uninstall::run(&deployed, &root, &tools, &Fake::default(), &Args::default())
+        .expect("nothing refuses this run");
+    assert_eq!(
+        words(&report),
+        [("unit", Word::Failed)],
+        "a refused disable stops the run: {}",
+        report.render()
+    );
+    let sentence = &report.lines[0].sentence;
+    assert!(
+        sentence.contains("systemctl --user disable --now holosmith.service"),
+        "the failure does not name the command it ran: {sentence}"
+    );
+    assert!(
+        sentence.contains("Failed to disable unit"),
+        "the failure does not pass on what the child said: {sentence}"
+    );
+    assert!(
+        !sentence.contains("is gone"),
+        "a refused disable is reported as a unit that is gone: {sentence}"
+    );
+    assert!(
+        root.unit().exists(),
+        "the file a refused disable could not retire is still there"
+    );
+    assert!(
+        !dir.file("loginctl.log").exists(),
+        "a program after the refusal ran"
+    );
+}
+
+#[test]
 fn a_refused_removal_is_a_failed_step_and_stops_the_run() {
     let _guard = one_at_a_time();
     let dir = TempDir::new("uninstall-refused");
@@ -394,10 +507,7 @@ fn a_refused_removal_is_a_failed_step_and_stops_the_run() {
         refuse_removal: true,
         ..Fake::default()
     };
-    let tools = uninstall::Tools {
-        rm: PathBuf::from("rm"),
-        ..uninstall::Tools::default()
-    };
+    let tools = tools_for(&dir, PathBuf::from("rm"));
     let report = uninstall::run(&deployed, &root, &tools, &machine, &Args::default())
         .expect("nothing refuses this run");
     assert_eq!(
@@ -422,10 +532,7 @@ fn a_purge_refuses_over_a_live_session_and_removes_nothing() {
     // `starting` is live: the three statuses the cap counts and `live_count` answers with.
     let id = seed_row(&deployed, "starting");
     let machine = Fake::default();
-    let tools = uninstall::Tools {
-        rm: PathBuf::from("rm"),
-        ..uninstall::Tools::default()
-    };
+    let tools = tools_for(&dir, PathBuf::from("rm"));
     let sentence = uninstall::run(
         &deployed,
         &root,
@@ -473,10 +580,7 @@ fn a_forced_purge_removes_the_data_and_the_rows_own_names() {
         &[&format!("s_{id}")],
         &[&format!("agents_{id}"), "agents_0123456789abcdef"],
     );
-    let tools = uninstall::Tools {
-        rm: PathBuf::from("rm"),
-        ..uninstall::Tools::default()
-    };
+    let tools = tools_for(&dir, PathBuf::from("rm"));
     let report = uninstall::run(
         &deployed,
         &root,
@@ -511,17 +615,14 @@ fn a_forced_purge_removes_the_data_and_the_rows_own_names() {
 }
 
 #[test]
-fn a_purge_is_one_plain_rm_and_the_unit_line_names_the_three_root_commands() {
+fn a_purge_is_one_plain_rm_per_path_and_no_line_carries_sudo() {
     let _guard = one_at_a_time();
     let dir = TempDir::new("uninstall-plain-purge");
     let (root, deployed) = root_target(&dir);
     installed_tree(&root, &deployed);
     let machine = Fake::default();
     let rm_log = dir.file("rm.log");
-    let tools = uninstall::Tools {
-        rm: rm_recorder(&dir, &rm_log),
-        ..uninstall::Tools::default()
-    };
+    let tools = tools_for(&dir, rm_recorder(&dir, &rm_log));
     let report = uninstall::run(
         &deployed,
         &root,
@@ -544,20 +645,19 @@ fn a_purge_is_one_plain_rm_and_the_unit_line_names_the_three_root_commands() {
         ),
         "the unit goes first, then the data root, in one plain `rm` each"
     );
-    // The half that is root's is words on the unit line, not a child.
     let unit_line = &report.lines[0];
     assert_eq!(unit_line.word, Word::Removed, "{}", report.render());
-    for command in [
-        "sudo systemctl disable --now holosmith.service",
-        "sudo rm -f /etc/systemd/system/holosmith.service",
-        "sudo systemctl daemon-reload",
-    ] {
-        assert!(
-            unit_line.sentence.contains(command),
-            "the unit line does not name `{command}`: {}",
-            unit_line.sentence
-        );
-    }
+    // Nothing on any line is root's, and nothing names the system manager's directory: the unit this run retired is the
+    // operator's own, so there is no `sudo` command left to hand over.
+    let text = report.render();
+    assert!(
+        !text.contains("sudo"),
+        "a teardown of the account's own install has no root half to print: {text}"
+    );
+    assert!(
+        !text.contains("/etc/systemd/system"),
+        "the unit is the user manager's own, not a system one: {text}"
+    );
 }
 
 #[test]
@@ -567,10 +667,7 @@ fn a_machine_with_nothing_installed_is_nothing_rather_than_a_failure() {
     let (root, deployed) = root_target(&dir);
     std::fs::create_dir_all(root.path()).expect("the root is creatable");
     let machine = Fake::default();
-    let tools = uninstall::Tools {
-        rm: rm_recorder(&dir, &dir.file("rm.log")),
-        ..uninstall::Tools::default()
-    };
+    let tools = tools_for(&dir, rm_recorder(&dir, &dir.file("rm.log")));
     let report = uninstall::run(&deployed, &root, &tools, &machine, &Args::default())
         .expect("nothing refuses this run");
     assert_eq!(
@@ -586,6 +683,10 @@ fn a_machine_with_nothing_installed_is_nothing_rather_than_a_failure() {
     );
     assert!(!report.failed());
     assert!(!dir.file("rm.log").exists(), "nothing was removed");
+    assert!(
+        !dir.file("systemctl.log").exists(),
+        "a teardown that found no unit file asked the manager to retire one"
+    );
 }
 
 #[test]
@@ -593,10 +694,7 @@ fn the_report_prints_its_target_and_one_line_per_thing() {
     let _guard = one_at_a_time();
     let dir = TempDir::new("uninstall-render");
     let (root, deployed) = root_target(&dir);
-    let tools = uninstall::Tools {
-        rm: PathBuf::from("rm"),
-        ..uninstall::Tools::default()
-    };
+    let tools = tools_for(&dir, PathBuf::from("rm"));
     let report = uninstall::run(&deployed, &root, &tools, &Fake::default(), &Args::default())
         .expect("nothing refuses this run");
     let text = report.render();
@@ -605,7 +703,7 @@ fn the_report_prints_its_target_and_one_line_per_thing() {
     assert_eq!(
         header,
         format!("uninstall: from {}", root.describe()),
-        "the header names the tree and the privilege: {text}"
+        "the header names the tree: {text}"
     );
     let rest: Vec<&str> = lines.collect();
     assert_eq!(rest.len(), 4, "{text}");

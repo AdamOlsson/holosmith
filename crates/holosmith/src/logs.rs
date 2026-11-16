@@ -2,13 +2,17 @@
 //!
 //! Two sources, and they are read in two different ways on purpose:
 //!
-//! - **The server's log is journald's.** The spec says so ("Server log from journald"), and the unit systemd
-//!   loads is named by [`crate::deploy::UNIT_NAME`], so the read is one child: `journalctl -u holosmith.service`,
-//!   with `-f` appended when the operator asked to follow. Its stdout is inherited, not captured — following is
-//!   the child's job and a captured pipe would deliver nothing until journald exited — and **no `-n`**: any
-//!   window would be a truncation this command cannot label, and `journalctl`'s own pager is what an operator
-//!   navigates. A child that cannot be spawned, and a child that exits non-zero, are its own answer: the command
-//!   prints one sentence naming what was run and hands back the code.
+//! - **The server's log is journald's, in the account's own journal.** The spec says so ("Server log from
+//!   journald"), the unit systemd loads is named by [`crate::deploy::UNIT_NAME`], and it is the operator's **user**
+//!   unit ([`crate::deploy::Root::unit`], ADR-0088) — so the read is `journalctl --user -u holosmith.service`,
+//!   with `-f` appended when the operator asked to follow. The `--user` is what the unit type decided: a user unit
+//!   writes to that account's journal, which the account reads as itself, where the **system** journal needs
+//!   membership in `systemd-journal` — a group no other part of this build asks for, and one an operator who
+//!   installed their own unit never joined. Its stdout is inherited, not captured — following is the child's job
+//!   and a captured pipe would deliver nothing until journald exited — and **no `-n`**: any window would be a
+//!   truncation this command cannot label, and `journalctl`'s own pager is what an operator navigates. A child that
+//!   cannot be spawned, and a child that exits non-zero, are its own answer: the command prints one sentence naming
+//!   what was run and hands back the code.
 //! - **A session's log is a file this build wrote.** `<data>/sessions/<id>/session.log` is written by
 //!   [`crate::exit::Exits::record`] (the launch line, and the stderr's tail when a container failed), so reading it
 //!   is that writer's inverse and needs no program: the reader is `std::fs`, and `-f` is
@@ -57,13 +61,16 @@ impl Default for Tools {
     }
 }
 
-/// The child's arguments: the unit systemd loads, and `-f` when the operator wants to follow.
+/// The child's arguments: the user manager's journal for the unit, and `-f` when the operator wants to follow.
+///
+/// `--user` first, because the unit is the account's own ([`crate::deploy::Root::unit`]) and so is its log; the
+/// module docs say why that is what decides this argv.
 ///
 /// A function rather than a `match` inside the spawn, so the argv the gate asserts and the argv the command runs
 /// are the same expression — and `-u` before its value, which is what `journalctl` accepts and what an operator
 /// would type.
 pub fn arguments(follow: bool) -> Vec<&'static str> {
-    let mut arguments = vec!["-u", UNIT_NAME];
+    let mut arguments = vec!["--user", "-u", UNIT_NAME];
     if follow {
         arguments.push("-f");
     }
@@ -82,8 +89,8 @@ pub fn server(follow: bool, tools: &Tools) -> Result<i32, String> {
         .status()
         .map_err(|error| {
             format!(
-                "`{} {}` could not be run ({error}): this command reads the server's log from journald, which is \
-                 what the systemd unit writes",
+                "`{} {}` could not be run ({error}): this command reads the server's log from that account's own \
+                 journal, which is what the user unit writes",
                 tools.journalctl.display(),
                 arguments(follow).join(" ")
             )
@@ -192,9 +199,9 @@ mod tests {
     }
 
     #[test]
-    fn the_child_is_journalctl_for_the_unit_and_follows_only_when_asked() {
-        assert_eq!(arguments(false), ["-u", "holosmith.service"]);
-        assert_eq!(arguments(true), ["-u", "holosmith.service", "-f"]);
+    fn the_child_is_journalctl_in_the_user_journal_for_the_unit_and_follows_only_when_asked() {
+        assert_eq!(arguments(false), ["--user", "-u", "holosmith.service"]);
+        assert_eq!(arguments(true), ["--user", "-u", "holosmith.service", "-f"]);
     }
 
     #[test]
