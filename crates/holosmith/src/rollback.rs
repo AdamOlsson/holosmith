@@ -18,10 +18,10 @@
 //! 4. **the drain** — the same client a promotion uses, except that this one **joins** a drain already in progress
 //!    instead of refusing it (a machine left draining is exactly the machine that needs rolling back);
 //! 5. **the switch** — `Release::switch`, the same atomic rename of a relative symlink;
-//! 6. **the restart and the poll** — `promote::restart_and_poll`, the same `systemctl restart` and the same
+//! 6. **the restart and the poll** — `promote::restart_and_poll`, the same `systemctl --user restart` and the same
 //!    `/api/health` question for a process **younger than the restart**;
-//! 7. **the ending** — one line naming the release that is serving, or a loud sentence naming `systemctl status`,
-//!    `journalctl`, the release now `current` and the way back forward.
+//! 7. **the ending** — one line naming the release that is serving, or a loud sentence naming `systemctl --user
+//!    status`, `journalctl --user`, the release now `current` and the way back forward.
 //!
 //! # What this verb does not do
 //!
@@ -126,8 +126,8 @@ pub fn execute(
         ),
         DrainAnswer::Expired => {
             return Err(promote::draining(format!(
-                "the drain's wait ran out with a turn still running, so nothing was switched: `systemctl restart {}` \
-                 clears the drain, and releases/{current} is still live",
+                "the drain's wait ran out with a turn still running, so nothing was switched: `systemctl --user \
+                 restart {}` clears the drain, and releases/{current} is still live",
                 deploy::UNIT_NAME
             )));
         }
@@ -172,9 +172,10 @@ pub fn execute(
 /// The sentence a rollback whose own poll failed ends with: the state it left, and the next step.
 ///
 /// The acceptance's fourth bullet is "says so loudly and leaves the operator a stated next step", and there are three
-/// that are true: the journal (`systemctl status`/`journalctl`, which is where the service's own reason is), the
-/// release now `current` (named, so the operator knows what they are looking at), and `--to <the release it came
-/// from>` (which is *newer* than the live one now, and `--to` accepts it — going forward again is the same switch).
+/// that are true: the journal (`systemctl --user status`/`journalctl --user`, which is where the service's own reason
+/// is), the release now `current` (named, so the operator knows what they are looking at), and `--to <the release it
+/// came from>` (which is *newer* than the live one now, and `--to` accepts it — going forward again is the same
+/// switch).
 fn not_live(tag: &str, was: &str, info: &VersionInfo, attempt: &promote::Attempt) -> String {
     let restart = match &attempt.restarted {
         Ok(()) => String::new(),
@@ -182,13 +183,12 @@ fn not_live(tag: &str, was: &str, info: &VersionInfo, attempt: &promote::Attempt
     };
     format!(
         "{restart}releases/{tag} did not answer `/api/health` as a process younger than the restart, so this rollback \
-         is not confirmed live — and `current` still names it. `systemctl status {unit}` and `journalctl -u {unit}` \
-         say why the service will not start; `holosmith rollback --to {was}` switches back to the release that was \
-         live before this rollback, if that is the one you need. The database was not restored — the migration rule \
-         (expand/contract) is what makes switching `current` safe — and if releases/{tag} (schema {schema}) is older \
-         than the database, its own `doctor --quick` refuses the database before `ExecStart` (ADR-0047): the release \
-         to run is then one this database's schema understands",
-        unit = deploy::UNIT_NAME,
+         is not confirmed live — and `current` still names it. {}; `holosmith rollback --to {was}` switches back to \
+         the release that was live before this rollback, if that is the one you need. The database was not restored — \
+         the migration rule (expand/contract) is what makes switching `current` safe — and if releases/{tag} \
+         (schema {schema}) is older than the database, its own `doctor --quick` refuses the database before \
+         `ExecStart` (ADR-0047): the release to run is then one this database's schema understands",
+        promote::wont_start(),
         schema = info.schema_version
     )
 }
@@ -274,7 +274,7 @@ fn choose(release: &Release, current: &str, to: Option<&str>) -> Result<String, 
     if wanted == current {
         return Err(format!(
             "`--to {wanted}` is the release `current` already names: a rollback switches `current` away from what it \
-             names, so this would be a restart with no release changed (`systemctl restart {}` is that command). \
+             names, so this would be a restart with no release changed (`systemctl --user restart {}` is that command). \
              Nothing was drained and nothing was switched",
             deploy::UNIT_NAME
         ));

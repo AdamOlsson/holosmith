@@ -321,11 +321,10 @@ smoke image's base is a **red** smoke test, not a quiet `SKIP`.
 
 `holosmith upgrade <artifact> --acknowledge-review [--root DIR]` promotes: review acknowledged, smoke, the two
 product images when their labels say they changed, the drain, a database backup, the release directory, the
-`current` symlink, `systemctl restart` through the machine's single sudoers line, and a twenty-second health poll
-that puts the previous release back by itself (ADR-0082, ADR-0084). `--acknowledge-review` is not a formality: a
-promotion without it is refused before anything is asked of the machine. Every refusal leaves the machine as it
-found it and says so — **except a refusal after the drain**, which leaves the machine draining and says the
-restart is what clears it.
+`current` symlink, `systemctl --user restart`, and a twenty-second health poll that puts the previous release back by
+itself (ADR-0082, ADR-0084). `--acknowledge-review` is not a formality: a promotion without it is refused before
+anything is asked of the machine. Every refusal leaves the machine as it found it and says so — **except a refusal
+after the drain**, which leaves the machine draining and says the restart is what clears it.
 
 `holosmith rollback [--root DIR] [--to TAG]` is the emergency brake: drain, switch `current` one release back,
 restart, health-poll (ADR-0083). "One back" is the order the releases were **written** onto the tree (mtime),

@@ -8,11 +8,14 @@
 //!
 //! # Why a privileged install must be root
 //!
-//! A promotion writes the release tree (`/opt/holosmith`), the `current` symlink, the unit file and then restarts a
-//! system service. `server deploy` writes each of its own files as a `sudo`-prefixed child, and a promotion that did
-//! the same would be a dozen escalations for one command, each asking for the same credential. So the rule is one
-//! check with one sentence: run it as root, or name an install tree with `--root` (which is how the gate and the demo
-//! drive the whole pipeline, since neither may write `/etc` or needs systemd).
+//! A promotion writes the release tree (`/opt/holosmith`), the `current` symlink and the unit file, and then restarts
+//! the unit through the operator's own `systemctl --user` — the unit sits beside their config, in the directory their
+//! user manager reads, so the restart asks no privilege of anyone (ADR-0088 D2). The tree is the other half: a tree
+//! root owns is root's to write, and this verb spawns no escalation to reach it — `server deploy` prints what root
+//! would do instead of doing it, and a promotion that escalated file by file would be a dozen escalations for one
+//! command, each asking for the same credential. So the rule is one check with one sentence: run it as root, or name
+//! an install tree with `--root` (which is how the gate and the demo drive the whole pipeline, since neither may
+//! write `/etc` or needs systemd).
 
 use std::path::PathBuf;
 use std::process::ExitCode;

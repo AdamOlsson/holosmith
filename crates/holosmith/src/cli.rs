@@ -87,8 +87,8 @@ pub enum Cmd {
     /// Promote a new version: the whole pipeline, one printed line per step.
     ///
     /// The review gate acknowledged, the host smoke test, the two images when they changed, the drain, a database
-    /// backup, the release directory, the `current` symlink, `systemctl restart` and a 20-second health poll that
-    /// puts the previous release back when the candidate does not answer. Every refusal leaves the machine as it
+    /// backup, the release directory, the `current` symlink, `systemctl --user restart` and a 20-second health poll
+    /// that puts the previous release back when the candidate does not answer. Every refusal leaves the machine as it
     /// found it, and says so — except that a failure after the drain leaves it draining, which the sentence names.
     Upgrade {
         /// The candidate: the file a promotion is about to make live.
@@ -102,9 +102,9 @@ pub enum Cmd {
         wait: std::time::Duration,
         /// Promote into this root instead of `HOLOSMITH_ROOT`'s.
         ///
-        /// The same meaning as `server deploy --root`: the releases and `current` live under it. The restart is the
-        /// one command that is root's, and it goes through the machine's one sudoers line; without that line the
-        /// switch happens and this command says the restart is yours.
+        /// The same meaning as `server deploy --root`: the releases and `current` live under it. The restart goes
+        /// through the operator's own `systemctl --user`, so it is the same user manager whichever root this run
+        /// writes — the unit beside the config, not a file under the root.
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
     },

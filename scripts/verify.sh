@@ -11229,7 +11229,7 @@ SHIM
 # that can serve, so the 20-second poll fails and the symlink goes back by itself.
 #
 # What the order is measured by: the printed step lines (each is printed by the step that does the work), the
-# **recorded children** (the two `docker build`s, then the `systemctl restart`), and the effects — a session the drain
+# **recorded children** (the two `docker build`s, then the `systemctl --user restart`), and the effects — a session the drain
 # stopped is `idle` again after the restart, and a backup exists before `current` moves. What it cannot measure is a
 # real systemd: there is none on this machine, so the "restart" is the stand-in's own start of the binary `current`
 # names, and this comment is where that is disclosed.
@@ -11381,7 +11381,9 @@ SHIM
   # `systemctl` is what systemd would be: on `restart` it stops what is running and starts the binary the unit's
   # `ExecStart` names — read through `current`, which is the whole point of the layout. \`HS_BREAK_FIRST\` is the
   # failure the rollback arm injects: the first restart starts a `serve` with no config, so nothing answers the
-  # candidate's health poll and the promotion has to put the previous release back by itself.
+  # candidate's health poll and the promotion has to put the previous release back by itself. The verbs ask the
+  # **user** manager (ADR-0088 D2), so `--user` is recorded above and dropped here: the manager this stand-in is
+  # already that one, and the flag is the case's own assertion rather than something it has to act on.
   cat >"$bin/systemctl" <<SHIM
 #!/bin/sh
 {
@@ -11389,6 +11391,7 @@ SHIM
   for argument in "\$@"; do printf ' %s' "\$argument"; done
   printf '\n'
 } >>"$systemctl_log"
+[ "\$1" = "--user" ] && shift
 case "\$1" in
   daemon-reload) exit 0 ;;
   restart)
@@ -11410,17 +11413,10 @@ case "\$1" in
 esac
 exit 0
 SHIM
-  # `sudo`: the release verbs restart through `sudo -n systemctl restart <unit>` (ADR-0086 D4), and a real `sudo`
-  # resets PATH — so the `systemctl` above would never be reached, and on a machine without
-  # `/etc/sudoers.d/holosmith` it answers "a password is required" and the promotion has nothing to poll. A gate
-  # cannot install that line, so this stand-in is what a machine with it does: drop `-n` and run the program this
-  # case's PATH names.
-  cat >"$bin/sudo" <<'SUDO'
-#!/bin/sh
-[ "$1" = "-n" ] && shift
-exec "$@"
-SUDO
-  chmod 0755 "$bin/docker" "$bin/systemctl" "$bin/sudo"
+  # No `sudo` stand-in: the restart is the operator's own `systemctl --user`, so the stand-in above is reached
+  # through this case's PATH with no escalation between the verbs and it. A promotion that started escalating again
+  # would find no `sudo` here to reach, and its restart would not answer.
+  chmod 0755 "$bin/docker" "$bin/systemctl"
 
   # A machine that has promoted before: one release, `current` pointing at it, and the unit a deploy wrote through it.
   # That release is the promotion's **previous** one and what a rollback goes back to, so this case starts from the
@@ -11486,7 +11482,7 @@ SUDO
   esac
   grep -q '^upgrade: health: no answer with ' "$WORK/$name.rollback.out" ||
     fail "$name/rollback/health" "the poll did not report giving up: $(tail -5 "$WORK/$name.rollback.out")"
-  [ "$(grep -c '^systemctl restart holosmith.service$' "$systemctl_log")" -eq 2 ] ||
+  [ "$(grep -c '^systemctl --user restart holosmith.service$' "$systemctl_log")" -eq 2 ] ||
     fail "$name/rollback/restarts" "the rollback did not restart the service a second time: $(cat "$systemctl_log")"
   check "$name/rollback/current" "releases/old" "$(readlink "$root/current")"
   grep -q "^upgrade: live: releases/old ($version, $tag) (the candidate was not made live), backup $data/backups/app-" \
@@ -11531,10 +11527,10 @@ SUDO
     fail "$name/images/once" "the proxy image was built more than once for one candidate: $(cat "$docker_log")"
   grep -qF -- "HOLOSMITH_BINARY_SHA256=$digest" "$docker_log" ||
     fail "$name/images/digest" "the images were not built from the candidate's bytes: $(cat "$docker_log")"
-  grep -q '^systemctl restart holosmith.service$' "$systemctl_log" ||
+  grep -q '^systemctl --user restart holosmith.service$' "$systemctl_log" ||
     fail "$name/restart" "the promotion did not restart the unit: $(cat "$systemctl_log")"
   # The restart is the **last** child: after the drain and after the images.
-  tail -1 "$systemctl_log" | grep -qx 'systemctl restart holosmith.service' ||
+  tail -1 "$systemctl_log" | grep -qx 'systemctl --user restart holosmith.service' ||
     fail "$name/restart/last" "the restart is not the last child the promotion ran: $(cat "$systemctl_log")"
   assertions=$((assertions + 3))
 
@@ -11636,7 +11632,8 @@ case_rollback() {
 
   # `systemctl` is what systemd would be for this unit: it records its argv, records what `current` names, stops what
   # runs and starts the binary the link names. `HS_BREAK_RESTART=1` is the last arm's injection — the service is
-  # stopped and nothing is started, so the rollback's own poll has nothing to find.
+  # stopped and nothing is started, so the rollback's own poll has nothing to find. The verb asks the **user**
+  # manager (ADR-0088 D2), so `--user` is recorded above and dropped here: this stand-in already is that manager.
   cat >"$bin/systemctl" <<SHIM
 #!/bin/sh
 {
@@ -11644,6 +11641,7 @@ case_rollback() {
   for argument in "\$@"; do printf ' %s' "\$argument"; done
   printf '\n'
 } >>"$systemctl_log"
+[ "\$1" = "--user" ] && shift
 case "\$1" in
   daemon-reload) exit 0 ;;
   restart)
@@ -11662,14 +11660,9 @@ case "\$1" in
 esac
 exit 0
 SHIM
-  # `sudo`: the release verbs restart through `sudo -n systemctl restart <unit>` (ADR-0086 D4), and a real `sudo`
-  # resets PATH, so this case's `systemctl` above would never be reached. See `case_upgrade`'s copy of this shim.
-  cat >"$bin/sudo" <<'SUDO'
-#!/bin/sh
-[ "$1" = "-n" ] && shift
-exec "$@"
-SUDO
-  chmod 0755 "$bin/systemctl" "$bin/sudo"
+  # No `sudo` stand-in: the restart is the operator's own `systemctl --user` and needs no escalation, so the stand-in
+  # above is what the verb reaches through this case's PATH. See `case_upgrade`'s note.
+  chmod 0755 "$bin/systemctl"
 
   # ---- 1. the trees a rollback cannot go back in, and a `--to` that names nothing --------------------------------
   # A machine that has never promoted: no `current` at all, so there is no release to go one back from.
@@ -11817,7 +11810,7 @@ PY
   # The effects. One restart, and what `current` named when it ran: the switch is *before* the restart, which is what
   # makes the newly started process the release the rollback chose.
   check "$name/current" "releases/two" "$(readlink "$link")"
-  [ "$(grep -c '^systemctl restart holosmith.service$' "$systemctl_log")" -eq 1 ] ||
+  [ "$(grep -c '^systemctl --user restart holosmith.service$' "$systemctl_log")" -eq 1 ] ||
     fail "$name/restarts" "the rollback did not restart the service exactly once: $(cat "$systemctl_log")"
   check "$name/switch/before" "$root/releases/two" "$(cat "$restart_view" 2>/dev/null)"
   # The drain stopped the session, and the boot the restart started brought it back — the acceptance's "sessions survive
@@ -11848,7 +11841,7 @@ PY
   extra_pid=""
   check "$name/unanswered/exit" 1 "$status"
   case "$(cat "$WORK/$name.unanswered.out")" in
-    *"systemctl status holosmith.service"*"journalctl -u holosmith.service"*) assertions=$((assertions + 1)) ;;
+    *"systemctl --user status holosmith.service"*"journalctl --user -u holosmith.service"*) assertions=$((assertions + 1)) ;;
     *) fail "$name/unanswered/next" "the failure names no next step: $(tail -4 "$WORK/$name.unanswered.out")" ;;
   esac
   # The way back forward is the same switch, and the sentence names the release this one came from (two, which is now
@@ -11858,7 +11851,7 @@ PY
     *) fail "$name/unanswered/back" "the failure does not say how to go forward again: $(tail -4 "$WORK/$name.unanswered.out")" ;;
   esac
   check "$name/unanswered/current" "releases/one" "$(readlink "$link")"
-  [ "$(grep -c '^systemctl restart holosmith.service$' "$systemctl_log")" -eq 2 ] ||
+  [ "$(grep -c '^systemctl --user restart holosmith.service$' "$systemctl_log")" -eq 2 ] ||
     fail "$name/unanswered/restarts" "the failed rollback did not restart the service once: $(cat "$systemctl_log")"
 
   kill "$extra_pid" 2>/dev/null || true
