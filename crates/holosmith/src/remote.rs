@@ -5,8 +5,8 @@
 //! builds four `ssh` children, checks what they answer, and hands the target the same command line the operator
 //! would have typed there. It never decides which steps run — the target's own binary calls
 //! [`crate::deploy::run_as`] with the same [`crate::deploy::Kind`], the same `--root` and the same `--dry-run`, so
-//! a remote hub deploy installs the hub's five steps and no images. **A second step plan here is the failure this
-//! module exists to avoid.**
+//! a remote hub deploy installs the hub's six steps with images and proxies skipped, and builds nothing. **A second
+//! step plan here is the failure this module exists to avoid.**
 //!
 //! # The four children
 //!
