@@ -150,11 +150,9 @@ case "$*" in
     fi
     ;;
 esac
-# The remote run is `<token> deploy …` (ADR-0088): the target's tree is the ssh login's own, so there is no `sudo`
-# hop to strip. A fixture whose run still arrives behind one keeps the old shape, so this stand-in measures the run
-# either way.
-set -- $*
-if [ "$1" = sudo ]; then shift 4; fi
+# The remote run is `<token> deploy …` (ADR-0088): the target's tree is the ssh login's own account, so there is no
+# account between the host and the command and nothing here to strip. The words are used exactly as they arrive,
+# which is what leaves a prefix — if one came back — in the recorded argv rather than hidden by this stand-in.
 # The text ssh would hand the login shell, before it expands anything: the copy's first word is the unexpanded
 # `$HOME/.cache/holosmith/...` token, which is what makes this stand-in's "remote shell" the same one.
 case "$*" in
@@ -302,7 +300,15 @@ fn the_children_are_one_read_a_copy_a_check_and_the_run() {
     assert!(calls[2].contains("sha256sum"), "{}", calls[2]);
     // The run child is not batched, and it carries no `-t` when this process has no terminal at both ends.
     assert!(!calls[3].contains("BatchMode"), "{}", calls[3]);
-    assert!(calls[3].starts_with("ssh me@box "), "{}", calls[3]);
+    // Its argv is `ssh <host> <the copy> deploy …`, the copy's own token being the first word after the host: the run
+    // is the ssh login's account, so `sudo`'s absence is the acceptance — a prefix would be a recorded argv, because
+    // the stand-in strips nothing (ADR-0088).
+    assert!(
+        calls[3].starts_with(&format!("ssh me@box {} ", sent.token)),
+        "{}",
+        calls[3]
+    );
+    assert!(!calls[3].contains("sudo"), "{}", calls[3]);
     assert!(
         calls[3].ends_with("server deploy --root /srv/tree --dry-run"),
         "{}",
@@ -323,7 +329,8 @@ fn the_run_child_asks_for_a_terminal_only_when_there_is_one() {
     let _ = remote.run(&fixture.tools, &sent, &plan());
     let calls = fixture.calls();
     let run = calls.last().expect("four children ran");
-    // `-t` is what gives the target's `sudo` a tty to ask its password on (ADR-0056's landmine, one hop out).
+    // `-t` is about the deploy's own output and nothing else: a pty is what gives the target the terminal its lines
+    // were written for, and nothing on that side asks a password because the run is the ssh login itself (ADR-0088).
     assert!(run.starts_with("ssh -t me@box "), "{run}");
 }
 
