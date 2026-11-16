@@ -71,9 +71,9 @@ pub fn root() -> PathBuf {
 
 /// `<home>/.local/share/holosmith`: the state tree of the account this process runs as.
 ///
-/// The home is [`crate::identity::home`]'s — the password entry's, never `$HOME` — so `sudo holosmith …`
-/// resolves root's own state because it *is* root. A machine that keeps its state elsewhere says so with
-/// `HOLOSMITH_ROOT` or `--root`.
+/// The home is [`crate::identity::home`]'s — the password entry's, never `$HOME` — so the state is the one
+/// account's own because that account is the one running it. A machine that keeps its state elsewhere says so
+/// with `HOLOSMITH_ROOT` or `--root`.
 pub fn default_root() -> PathBuf {
     crate::identity::home().join(STATE_DIR).join(ROOT_NAME)
 }
@@ -644,15 +644,16 @@ impl std::fmt::Display for LoadError {
             Self::Missing(path) => write!(f, "no such file: {}", path.display()),
             Self::Io { path, source } => {
                 write!(f, "cannot read {}: {source}", path.display())?;
-                // The config is the invoking account's own file under its own `~/.config` (ADR-0088), so the common
-                // cause of a refusal is a run that is not that account — a `sudo`, whose `~` is another home — and a
-                // bare `permission denied` leaves an operator with nowhere to go.
+                // The config is the running account's own file under its own `~/.config` (ADR-0088), and a root
+                // invocation is refused before it gets this far ([`crate::identity::root_refusal`]), so a refusal on
+                // this read means the file belongs to a different account — and a bare `permission denied` leaves an
+                // operator with nowhere to go.
                 if source.kind() == ErrorKind::PermissionDenied {
                     write!(
                         f,
-                        " — a machine is the account that runs it, not a service it is run for (ADR-0088): run \
-                         `holosmith …` as this account rather than through `sudo`, which reads root's home rather \
-                         than yours"
+                        " — this file belongs to another account: every verb runs as you (ADR-0088), so make it \
+                         yours with `chown $(id -u):$(id -g) {}` rather than running as its owner",
+                        path.display()
                     )?;
                 }
                 Ok(())

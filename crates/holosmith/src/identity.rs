@@ -1,20 +1,21 @@
-//! The account this process runs as, and the home every default path is derived from (ADR-0088).
+//! The account this process runs as: the uid a root invocation is refused on, and the home every default path is
+//! derived from (ADR-0088, ADR-0090).
 //!
 //! The config and the state are the operator's own files: `~/.config/holosmith.toml` and
 //! `~/.local/share/holosmith`. `~` is therefore a fact the binary has to answer, and the answer is the
 //! **password entry of the uid the process runs as** — never `HOME`, and never a compile-time guess.
 //!
 //! `HOME` is not a fact about the account: a shell may export anything, an `ssh` may forward one, and `sudo`
-//! sets it from its own policy — the invoking user's by default, the target's under `-H` — so a typed
-//! `sudo holosmith …` would read a different config depending on a setting nobody in that sentence controls.
-//! The password database has no such freedom: `sudo holosmith …` reads root's entry because it *is* root, so
-//! "which home" and "which uid" are one fact, and the uid is the fact that decides what the process may read
-//! anyway. `XDG_CONFIG_HOME`/`XDG_DATA_HOME` are refused for the same reason: an operator who keeps their data
-//! elsewhere says so with `HOLOSMITH_ROOT`, `--root` or `--config`.
+//! sets it from its own policy. The password database has no such freedom: it describes the uid the process is
+//! running as, so "which home" and "which uid" are one fact, and the uid is the fact that decides what the
+//! process may read anyway. The run that would have made the difference visible — `sudo holosmith …`, whose `~`
+//! is root's — never reaches a default path at all: uid 0 is refused before anything is dispatched
+//! ([`root_refusal`]). `XDG_CONFIG_HOME`/`XDG_DATA_HOME` are refused for `HOME`'s reason: an operator who keeps
+//! their data elsewhere says so with `HOLOSMITH_ROOT`, `--root` or `--config`.
 //!
 //! There is no `getuid` to call: this crate denies `unsafe` and carries no `libc`. The uid is therefore a
 //! **read** — `/proc/self`'s owner is this process's own effective uid — and the passwd entry is parsed from
-//! `/etc/passwd`. One module, so every default path in the binary is derived in one place.
+//! `/etc/passwd`. One module, so which account this is, and every default path derived from it, are one answer.
 
 use std::fs;
 use std::os::unix::fs::MetadataExt as _;
@@ -35,9 +36,39 @@ const PASSWD: &str = "/etc/passwd";
 /// `--config`, `--root` or `HOLOSMITH_ROOT`.
 pub const NO_HOME: &str = "/";
 
+/// The uid a root invocation runs as: the one uid this program refuses, whatever was typed (ADR-0090).
+pub const ROOT_UID: u32 = 0;
+
 /// The effective uid of this process, or `None` when `/proc/self` cannot be read.
 pub fn euid() -> Option<u32> {
     fs::metadata(SELF).ok().map(|metadata| metadata.uid())
+}
+
+/// The one sentence a root invocation gets, or `None` when `uid` may run this program (ADR-0090).
+///
+/// **Why refuse at all.** A root run "works" and then breaks the machine: the `0600` secrets and the database end
+/// up owned by root, `doctor`'s permission check fails from then on, `deploy`'s directory actions report a change
+/// they never make, and git calls the repository a stranger's. Every one of those is a fact about **which uid
+/// wrote the file**, so the only place to stop it is before a file is opened — which is why `main` asks this
+/// before it parses a command line.
+///
+/// **Why the sentence names the command.** What an operator who typed `sudo ./holosmith status` needs is the line
+/// to type instead, so `command` — everything after the program name, verb, subcommand and flags included — is
+/// carried through unchanged, and an empty one leaves the sentence ending at the program name rather than at a
+/// dangling space.
+///
+/// `uid` is a parameter and not a read, so both answers are drivable by a test. It is [`euid`]'s — `/proc/self`'s
+/// owner — because a crate that denies `unsafe` and carries no `libc` has no `getuid` to call; a uid it cannot
+/// read is never a refusal, because an unread identity is not root.
+pub fn root_refusal(uid: u32, command: &str) -> Option<String> {
+    (uid == ROOT_UID).then(|| {
+        let program = if command.is_empty() {
+            String::from("holosmith")
+        } else {
+            format!("holosmith {command}")
+        };
+        format!("this runs as you, drop the sudo: {program}")
+    })
 }
 
 /// The home [`euid`]'s password entry names, or [`NO_HOME`] when the database cannot name one — no entry for the
@@ -137,6 +168,28 @@ nohome:x:1002:1002:::/bin/sh\n";
         let passwd = "a:x:10001:10001::/home/other:/bin/sh\nb:x:1000:1000::/home/me:/bin/sh\n";
         assert_eq!(passwd_home(passwd, 1000), Some(PathBuf::from("/home/me")));
         assert_eq!(passwd_home(passwd, 100), None);
+    }
+
+    #[test]
+    fn root_is_refused_and_a_normal_uid_is_not() {
+        assert_eq!(
+            root_refusal(ROOT_UID, "status"),
+            Some("this runs as you, drop the sudo: holosmith status".to_string())
+        );
+        assert_eq!(root_refusal(1000, "status"), None);
+    }
+
+    #[test]
+    fn the_refusal_names_the_command_as_typed_and_a_bare_run_names_none() {
+        assert_eq!(
+            root_refusal(ROOT_UID, "server deploy --root /x"),
+            Some("this runs as you, drop the sudo: holosmith server deploy --root /x".to_string())
+        );
+        // The sentence ends at the program name: a trailing space would be a command with nothing in it.
+        assert_eq!(
+            root_refusal(ROOT_UID, ""),
+            Some("this runs as you, drop the sudo: holosmith".to_string())
+        );
     }
 
     #[test]
