@@ -12768,8 +12768,8 @@ case_deploy_ssh() {
   [ ! -s "$WORK/$name.downloads.log" ] || fail "$name/dry/download" "the command ran a downloader: $(cat "$WORK/$name.downloads.log")"
   assertions=$((assertions + 1))
 
-  # ---- 2. a real install over the same transport: the hub's five steps, and a second run -------------
-  # A hub is the half that needs no daemon and no image, so this arm applies steps 2, 5, 6 and 7 for real in a
+  # ---- 2. a real install over the same transport: the hub's six steps, two skipped, and a second run -
+  # A hub is the half that needs no daemon and no image, so this arm applies steps 2, 5 and 6 for real in a
   # `--root` tree the case owns — and the two skips prove the `Kind` travelled rather than being decided here.
   deploy_config "$WORK/config-deploy-ssh-hub.toml" "$control" "$preview" "unix:///var/run/docker.sock" "pi-agent:local" hub
   holder_pid="$(health_responder "$control")"

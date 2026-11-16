@@ -40,8 +40,9 @@
 //!
 //! The run child is given a pseudo-terminal exactly when both of this command's ends are terminals
 //! ([`Tools::interactive`]): the deploy prints its lines to a terminal rather than to a pipe, and *not* allocating
-//! one when the output is piped keeps the deploy's lines LF-terminated and greppable. Nothing on the target asks a
-//! password: the run is the ssh login's own account and escalates nothing (ADR-0088).
+//! one when the output is piped keeps the deploy's lines LF-terminated and greppable — and keeps the target's stderr
+//! on stderr, where a pty would fold it into this command's stdout. Nothing on the target asks a password: the run
+//! is the ssh login's own account and escalates nothing (ADR-0088).
 
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};

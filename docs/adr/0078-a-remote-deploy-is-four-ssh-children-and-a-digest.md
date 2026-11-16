@@ -87,11 +87,12 @@ mismatch copies nothing.
 Over ssh, `--root DIR` is the same flag with the same meaning on the other machine. Two consequences, both wanted:
 
 - `--root` keeps its one meaning — the tree — and the privilege it used to carry is gone with ADR-0088: an install
-  is the operator's own account, so nothing escalates and `deploy::Target::privileged()` and the `sudo`-prefixed
-  children are gone. The run child has no `sudo` in front of it and no account to become: the binary that runs is the
-  ssh login's own, and every write it makes is that account's. A target whose login is outside the daemon's group is
-  step 2's `needs` line, printed there in that account's own name — the target's answer from the target's own `id`,
-  rather than a probe made here.
+  is the operator's own account, so nothing escalates and `deploy::Target::privileged()` and the deploy's
+  `sudo`-prefixed file children are gone. A release still spawns one `sudo` — the restart a promotion makes — which
+  ADR-0088 D5 records as outstanding; nothing on this path does. The run child has no `sudo` in front of it and no
+  account to become: the binary that runs is the ssh login's own, and every write it makes is that account's. A
+  target whose login is outside the daemon's group is step 2's `needs` line, printed there in that account's own
+  name — the target's answer from the target's own `id`, rather than a probe made here.
 - The configuration a remote run reads is **the target's**, so `Config::load` is not called at all on this path and a
   laptop with no `config.toml` can deploy. `--config` travels verbatim and names the target's file (that story's
   two-configs rule, one hop out); making it absolute here would name this machine's.
@@ -123,7 +124,7 @@ is that a word means what it measured.
 ## D5 — a remote `--dry-run` runs the deploy's dry run there
 
 The spec says "`--dry-run` lists the steps without running them", and the story's demo is "`--dry-run` … lists steps
-remotely". So a remote dry run is the target's own dry run: the seven lines in the spec's order, `needs` on the
+remotely". So a remote dry run is the target's own dry run: the six lines in the spec's order, `needs` on the
 applies and a read's verdict on step 1, and nothing written on the target except the copy.
 
 The acceptance bullet's wording — "`--dry-run` over SSH performs the preflight only" — is **read as "applies
@@ -161,11 +162,11 @@ because a value may not start with `-`.
 `case_deploy_ssh` puts an `sh` `ssh` on `PATH` that records every argv and runs the words after the host through
 `sh -c` — which is ssh's contract rather than an approximation of it — with `$HOME` pointed at a directory the case
 owns. "The target" is therefore this box, and everything after the transport is real: the shipped artifact's bytes,
-the machine's own `sha256sum`, and the artifact's own seven steps in a `--root` tree.
+the machine's own `sha256sum`, and the artifact's own six steps in a `--root` tree.
 
-It measures: the server arm's **seven lines streamed from the target** with the copy and the check in the shim's log
+It measures: the server arm's **six lines streamed from the target** with the copy and the check in the shim's log
 and the copy on disk with the artifact's bytes, mode 0755 and a digest-derived name; a hub install over the same
-transport (steps 2, 5, 6 and 7 applied, 3 and 4 `skipped` — the `Kind` travelled) and a second run that is idempotent,
+transport (steps 2, 5 and 6 applied, 3 and 4 `skipped` — the `Kind` travelled) and a second run that is idempotent,
 with the same digest-named copy overwritten rather than duplicated; the architecture refusal with **one** child in the
 log and no copy on the target, and the same target accepting `--binary` when it matches; a `cat` that corrupts one
 byte refused after the check with **no run child**; `--binary` without `--ssh` and an option smuggled through `--ssh`
@@ -181,10 +182,10 @@ used to excuse: the log is the shim's recording of every child **before** any of
 
 ## D9 — what carries forward
 
-`GLOSSARY.md` gains **Remote deploy**. A later change owns cross-machine sessions and the notification deep link. those stories
-(`upgrade`/`rollback`) take the same `--ssh`/`--binary` and must reuse this module's four children rather than write
-a second transport — an upgrade is "send the new binary and run `deploy`", which is exactly [`remote::Remote::send`]
-plus a different command line.
+`GLOSSARY.md` gains **Remote deploy**. A later change owns cross-machine sessions and the notification deep link.
+Those stories (`upgrade`/`rollback`) take the same `--ssh`/`--binary` and must reuse this module's four children
+rather than write a second transport — an upgrade is "send the new binary and run `deploy`", which is exactly
+[`remote::Remote::send`] plus a different command line.
 
 The follow-up this story leaves: the copy is never removed from the target, so a machine deployed to many times
 accumulates nothing (the name is the digest) but keeps at least one binary in the login user's cache. A later story
