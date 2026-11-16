@@ -1,4 +1,4 @@
-//! `uninstall`: the words, the tree, the refusal and the privilege (spec's Commands table).
+//! `uninstall`: the words, the tree and the refusal (spec's Commands table).
 //!
 //! The discipline is `tests/deploy.rs`'s, for the reason that story recorded: a teardown is a set of claims about
 //! *a host* — its unit, its systemd, its daemon, its paths — so every claim that can be handed in is, and the two
@@ -9,10 +9,12 @@
 //! table, and a fake count would be a test of the fake).
 //!
 //! **Handed in**: the daemon is a [`Fake`] ([`uninstall::Machines`]) and `--root` is what keeps every path inside the
-//! temp directory. The unit's own two programs are recorders ([`recorder`]): the unit is the operator's **user** unit
-//! beside the config (ADR-0088), so a real `systemctl --user disable --now` here would be a test asking this machine's
-//! manager to retire a unit under `target/` — and the teardown never escalates, so there is no `sudo` in this file at
-//! all.
+//! temp directory. The unit's own two programs are recorders ([`recorder`]), and so is the unit path the account's
+//! manager loads ([`uninstall::Tools::manager_unit`]): `systemctl --user` takes the **name** and resolves it in that
+//! manager, which never looks at a unit under `target/` — so a real child here would not be a test of this tree at
+//! all, it would command this machine's own unit. Every test but the foreign-tree one therefore points
+//! `manager_unit` at the tree's own unit, which is the arm that commands the manager; the teardown never escalates,
+//! so there is no `sudo` in this file at all.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -86,15 +88,20 @@ fn rm_that_removes(dir: &TempDir, log: &Path) -> PathBuf {
     )
 }
 
-/// The tools a run here gets: the `rm` the test named, and recorders for the unit's two systemd programs.
+/// The tools a run here gets: the `rm` the test named, recorders for the unit's two systemd programs, and
+/// `manager_unit` pointed at the tree's own unit.
 ///
 /// One helper rather than a `Tools` literal per test, because every test that installs a unit runs the whole step and
-/// a single literal forgetting one of the two would point a real `systemctl --user` at this machine.
-fn tools_for(dir: &TempDir, rm: PathBuf) -> uninstall::Tools {
+/// a single literal forgetting one of the two would point a real `systemctl --user` at this machine. `manager_unit` is
+/// the tree's own unit here because that is the arm this file measures: the account's own unit, where the manager is
+/// this run's to command. `a_tree_whose_unit_is_not_the_managers_is_a_file_and_no_more` builds its own `Tools`
+/// instead, with the account's real path in that field.
+fn tools_for(dir: &TempDir, root: &Root, rm: PathBuf) -> uninstall::Tools {
     uninstall::Tools {
         rm,
         systemctl: recorder(dir, "systemctl", &dir.file("systemctl.log")),
         loginctl: recorder(dir, "loginctl", &dir.file("loginctl.log")),
+        manager_unit: root.unit(),
         ..uninstall::Tools::default()
     }
 }
@@ -303,6 +310,9 @@ fn a_root_install_loses_the_unit_and_keeps_the_data() {
         rm: rm_that_removes(&dir, &children),
         systemctl: recorder(&dir, "systemctl", &children),
         loginctl: recorder(&dir, "loginctl", &children),
+        // This test is the account's own unit: the tree's is the one the manager loads, which is the arm that runs
+        // all four children.
+        manager_unit: root.unit(),
         ..uninstall::Tools::default()
     };
     let report = uninstall::run(&deployed, &root, &tools, &machine, &Args::default())
@@ -351,13 +361,68 @@ fn a_root_install_loses_the_unit_and_keeps_the_data() {
 }
 
 #[test]
+fn a_tree_whose_unit_is_not_the_managers_is_a_file_and_no_more() {
+    let _guard = one_at_a_time();
+    let dir = TempDir::new("uninstall-foreign-unit");
+    let (root, deployed) = root_target(&dir);
+    installed_tree(&root, &deployed);
+    let children = dir.file("children.log");
+    // The foreign arm on purpose: this tree's unit is a file under the temp directory, and `systemctl --user` resolves
+    // the **name** in the account's own manager, whose file is this — so no child but the `rm` may run.
+    let manager_unit = Root::resolve(None, None).unit();
+    assert_ne!(
+        manager_unit,
+        root.unit(),
+        "the fixture only proves the foreign arm if the two paths differ"
+    );
+    let tools = uninstall::Tools {
+        rm: rm_that_removes(&dir, &children),
+        systemctl: recorder(&dir, "systemctl", &children),
+        loginctl: recorder(&dir, "loginctl", &children),
+        manager_unit: manager_unit.clone(),
+        ..uninstall::Tools::default()
+    };
+    let report = uninstall::run(&deployed, &root, &tools, &Fake::default(), &Args::default())
+        .expect("nothing refuses this run");
+    assert_eq!(
+        words(&report),
+        [
+            ("unit", Word::Removed),
+            ("proxies", Word::Nothing),
+            ("network", Word::Nothing),
+            ("data", Word::Kept),
+        ],
+        "{}",
+        report.render()
+    );
+    // One child, and it is the `rm`: a `systemctl --user` or a `loginctl` here would have reached the account's own
+    // unit and its own linger flag, neither of which this tree is.
+    assert_eq!(
+        std::fs::read_to_string(&children).expect("the rm recorded itself"),
+        format!("rm -f {}\n", root.unit().display()),
+        "the file is the only child of a foreign tree's unit step"
+    );
+    assert!(!root.unit().exists(), "the tree's own unit file is gone");
+    let sentence = &report.lines[0].sentence;
+    assert!(
+        sentence.contains(&manager_unit.display().to_string()),
+        "the sentence does not name the unit the account's manager loads: {sentence}"
+    );
+    assert!(
+        sentence.contains("linger is unchanged") && !sentence.contains("boot"),
+        "the sentence claims something about what starts at the next boot, which this arm never turned off: \
+         {sentence}"
+    );
+}
+
+#[test]
 fn the_second_run_says_nothing_and_keeps_succeeding() {
     let _guard = one_at_a_time();
     let dir = TempDir::new("uninstall-again");
     let (root, deployed) = root_target(&dir);
     installed_tree(&root, &deployed);
     let machine = Fake::default();
-    let tools = tools_for(&dir, PathBuf::from("rm"));
+    let tools = tools_for(&dir, &root, PathBuf::from("rm"));
     let first = uninstall::run(&deployed, &root, &tools, &machine, &Args::default())
         .expect("nothing refuses this run");
     assert_eq!(first.lines[0].word, Word::Removed);
@@ -407,7 +472,7 @@ fn the_proxies_and_the_egress_network_go_containers_first() {
         &[container::PROXY_NAME, holosmith::key::KEY_PROXY_NAME],
         &[holosmith::docker::EGRESS_NETWORK, "agents_0123456789abcdef"],
     );
-    let tools = tools_for(&dir, PathBuf::from("rm"));
+    let tools = tools_for(&dir, &root, PathBuf::from("rm"));
     let report = uninstall::run(&deployed, &root, &tools, &machine, &Args::default())
         .expect("nothing refuses this run");
     assert_eq!(
@@ -459,7 +524,7 @@ fn a_refused_disable_is_a_failed_step_and_leaves_the_file_where_it_was() {
     .expect("the stand-in's line is writable");
     // The base is built first and the one program replaced after it: `tools_for` writes its own `systemctl` into the
     // same `bin`, so a struct-update base would overwrite the refusing stand-in with its recorder.
-    let mut tools = tools_for(&dir, PathBuf::from("rm"));
+    let mut tools = tools_for(&dir, &root, PathBuf::from("rm"));
     tools.systemctl = shim(
         &dir,
         "systemctl",
@@ -507,7 +572,7 @@ fn a_refused_removal_is_a_failed_step_and_stops_the_run() {
         refuse_removal: true,
         ..Fake::default()
     };
-    let tools = tools_for(&dir, PathBuf::from("rm"));
+    let tools = tools_for(&dir, &root, PathBuf::from("rm"));
     let report = uninstall::run(&deployed, &root, &tools, &machine, &Args::default())
         .expect("nothing refuses this run");
     assert_eq!(
@@ -532,7 +597,7 @@ fn a_purge_refuses_over_a_live_session_and_removes_nothing() {
     // `starting` is live: the three statuses the cap counts and `live_count` answers with.
     let id = seed_row(&deployed, "starting");
     let machine = Fake::default();
-    let tools = tools_for(&dir, PathBuf::from("rm"));
+    let tools = tools_for(&dir, &root, PathBuf::from("rm"));
     let sentence = uninstall::run(
         &deployed,
         &root,
@@ -580,7 +645,7 @@ fn a_forced_purge_removes_the_data_and_the_rows_own_names() {
         &[&format!("s_{id}")],
         &[&format!("agents_{id}"), "agents_0123456789abcdef"],
     );
-    let tools = tools_for(&dir, PathBuf::from("rm"));
+    let tools = tools_for(&dir, &root, PathBuf::from("rm"));
     let report = uninstall::run(
         &deployed,
         &root,
@@ -622,7 +687,7 @@ fn a_purge_is_one_plain_rm_per_path_and_no_line_carries_sudo() {
     installed_tree(&root, &deployed);
     let machine = Fake::default();
     let rm_log = dir.file("rm.log");
-    let tools = tools_for(&dir, rm_recorder(&dir, &rm_log));
+    let tools = tools_for(&dir, &root, rm_recorder(&dir, &rm_log));
     let report = uninstall::run(
         &deployed,
         &root,
@@ -667,7 +732,7 @@ fn a_machine_with_nothing_installed_is_nothing_rather_than_a_failure() {
     let (root, deployed) = root_target(&dir);
     std::fs::create_dir_all(root.path()).expect("the root is creatable");
     let machine = Fake::default();
-    let tools = tools_for(&dir, rm_recorder(&dir, &dir.file("rm.log")));
+    let tools = tools_for(&dir, &root, rm_recorder(&dir, &dir.file("rm.log")));
     let report = uninstall::run(&deployed, &root, &tools, &machine, &Args::default())
         .expect("nothing refuses this run");
     assert_eq!(
@@ -694,7 +759,7 @@ fn the_report_prints_its_target_and_one_line_per_thing() {
     let _guard = one_at_a_time();
     let dir = TempDir::new("uninstall-render");
     let (root, deployed) = root_target(&dir);
-    let tools = tools_for(&dir, PathBuf::from("rm"));
+    let tools = tools_for(&dir, &root, PathBuf::from("rm"));
     let report = uninstall::run(&deployed, &root, &tools, &Fake::default(), &Args::default())
         .expect("nothing refuses this run");
     let text = report.render();

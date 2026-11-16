@@ -1,8 +1,8 @@
 //! `holosmith uninstall`: tear the install down and keep the data.
 //!
-//! Thin, like the deploy it inverts: the config is read the way every command reads it, the target is what decides
-//! where the tree is and whether each write is `sudo`-prefixed, and everything an operator has to act on is in
-//! [`crate::uninstall`]'s lines.
+//! Thin, like the deploy it inverts: the config is read the way every command reads it, `--config` and `--root` are
+//! what say which tree this run tears down — and there is no privilege to decide, because every write is the account's
+//! own (ADR-0088) — and everything an operator has to act on is in [`crate::uninstall`]'s lines.
 //!
 //! Two answers belong to the command rather than to the steps:
 //!

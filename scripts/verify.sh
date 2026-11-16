@@ -13677,27 +13677,22 @@ case_uninstall() {
   fi
   rm -rf "$root"
   mkdir -p "$root"
-  # The unit this teardown retires is the operator's **user** unit (ADR-0088), so the three programs that retire it are
-  # stand-ins on `PATH`: a real user manager would refuse a unit under `target/`, and the argv is what this case can
-  # measure. `rm` records **and** removes — `command -p rm` is the account's own — so one log holds the whole order,
-  # which is what makes "the disable ran while the file was still there" a measurement rather than a claim.
+  # This case's tree is a **foreign** one on purpose: its unit is the file `--config` composes under `$WORK`, while the
+  # file the account's own user manager loads is `~/.config/systemd/user/holosmith.service`. `systemctl --user` takes
+  # the **name** and resolves it in that manager's search path, so it never looks in this tree at all — the teardown
+  # must therefore remove the file and ask the manager and `loginctl` nothing. So `rm` is the one stand-in, and it
+  # records **and** removes (`command -p rm` is the account's own), which makes the log the whole list of children.
+  # **The four-child order the account's own unit gets is `tests/uninstall.rs`'s**: this machine's real unit path is not
+  # a gate's to write, and the `cargo test` phase of this same run executes those tests.
   shims="$root/shims"
   mkdir -p "$shims"
   export HS_UNIT_LOG="$root/unit.log"
-  cat >"$shims/systemctl" <<'SHIM'
-#!/bin/sh
-printf 'systemctl %s\n' "$*" >>"$HS_UNIT_LOG"
-SHIM
-  cat >"$shims/loginctl" <<'SHIM'
-#!/bin/sh
-printf 'loginctl %s\n' "$*" >>"$HS_UNIT_LOG"
-SHIM
   cat >"$shims/rm" <<'SHIM'
 #!/bin/sh
 printf 'rm %s\n' "$*" >>"$HS_UNIT_LOG"
 command -p rm "$@"
 SHIM
-  chmod 0755 "$shims/systemctl" "$shims/loginctl" "$shims/rm"
+  chmod 0755 "$shims/rm"
   printf 'owner = "%s"\nrole = "server"\nbackend = "stub"\nmin_free_gb = 1\n' \
     "$owner" >"$WORK/config-uninstall.toml"
   # The machine's network, as this case found it: `uninstall` removes it, so a run that did not put it back would
@@ -13723,12 +13718,9 @@ SHIM
   PATH="$shims:$PATH" "$artifact" uninstall --root "$tree" --config "$WORK/config-uninstall.toml" \
     >"$root/first.out" 2>&1 || status=$?
   check "$name/first/exit" 0 "$status"
-  # The unit is retired by the account that owns it, in the one order that works: `disable` reads the file's `[Install]`
-  # section, so it is recorded before the `rm -f` that removes the file, and the reload after it.
-  check "$name/first/children" "systemctl --user disable --now holosmith.service
-rm -f $unit
-systemctl --user daemon-reload
-loginctl disable-linger" "$(cat "$HS_UNIT_LOG")"
+  # The unit is this tree's file and not the account's, so the only child is the `rm` that removes it: a `systemctl
+  # --user` here would have disabled the account's own unit, and a `loginctl` its linger flag.
+  check "$name/first/children" "rm -f $unit" "$(cat "$HS_UNIT_LOG")"
   # Nothing is root's any more: the unit this run retired is the operator's own, so no line asks for `sudo`.
   grep -q 'sudo' "$root/first.out" &&
     fail "$name/first/sudo" "the first run's output hands work to sudo: $(cat "$root/first.out")"
@@ -13778,9 +13770,10 @@ loginctl disable-linger" "$(cat "$HS_UNIT_LOG")"
   grep -q '^uninstall: resume: ' "$root/second.out" &&
     fail "$name/second/resume" "a successful run printed a resume command: $(cat "$root/second.out")"
   assertions=$((assertions + 1))
-  # `nothing` in children as well as in words: the read found no file, so neither systemd program was asked anything.
+  # `nothing` in children as well as in words: the read found no file, so nothing was asked to retire one — the first
+  # run above proved **which** child ran, this one proves none ran once the file was gone.
   [ ! -s "$HS_UNIT_LOG" ] ||
-    fail "$name/second/children" "the second run asked systemctl or loginctl: $(cat "$HS_UNIT_LOG")"
+    fail "$name/second/children" "the second run ran a child over a unit file that is not there: $(cat "$HS_UNIT_LOG")"
   assertions=$((assertions + 1))
 
   # ---- 2. the two proxies: `rm --force` by the names the machine's install gave them -------------

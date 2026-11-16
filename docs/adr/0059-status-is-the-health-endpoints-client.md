@@ -90,12 +90,13 @@ write. A missing database is six zeros (a machine that never served holds no ses
 
 ## D4 — `logs`: journald through one child, a session's log through one file
 
-The spec says "Server log from journald", so the server arm is one child: `journalctl -u holosmith.service`, `-f`
-appended when asked, **stdio inherited** (following is the child's, and a captured pipe would deliver nothing until
-it exited) and **no `-n`** — any window is a truncation this command cannot label, and journalctl's own pager is
-what an operator navigates. A child that cannot be started is one sentence from us; a child that exits non-zero is
-**its** answer and **its** code, because journald's own "no journal" line explains the machine better than a generic
-failure would.
+The spec says "Server log from journald", so the server arm is one child: `journalctl --user -u holosmith.service`
+— `--user` because the unit is the account's own (ADR-0088), so its journal is the one that account reads as itself —
+with `-f` appended when asked, **stdio inherited** (following is the child's, and a captured pipe would deliver
+nothing until it exited) and **no `-n`** — any window is a truncation this command cannot label, and journalctl's own
+pager is what an operator navigates. A child that cannot be started is one sentence from us; a child that exits
+non-zero is **its** answer and **its** code, because journald's own "no journal" line explains the machine better
+than a generic failure would.
 
 A session's log is `<data>/sessions/<id>/session.log`, written by `exit::Exits::record` (the launch line, plus the
 stderr's tail when a container failed), so the reader is that writer's inverse and needs **no program**: `std::fs`,
@@ -116,7 +117,8 @@ difference is deliberate: this one arm reads nothing from it.
 ADR-0056's five words (`satisfied`, `needs`, `changed`, `skipped`, `failed`) are a **deploy** contract: a step that
 read a state and applied a difference. A teardown's questions are different — was there one, and is it gone — so
 `uninstall` owns four words of its own: `removed`, `kept`, `nothing`, `failed`, on lines shaped
-`uninstall: <what>: <word>: <sentence>` after a header naming the tree and its privilege. Reusing the deploy's words
+`uninstall: <what>: <word>: <sentence>` after a header naming the tree — not its privilege, which an install whose
+unit is the account's own (ADR-0088) does not have. Reusing the deploy's words
 would have been a second user of a shape nobody documented for it, and the first thing they would lie about is
 `nothing`: a deploy has no word for "there was nothing to do because nothing was ever installed", which is a
 teardown's commonest answer and the one the acceptance's idempotency asks for.
