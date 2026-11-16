@@ -10979,6 +10979,9 @@ case_server_images() {
   # whose user is uid 0 is a proxy that cannot start at all. The egress container is the one that relies on the
   # image's own user — it passes no `--user` — which is what makes this the check that keeps that path honest.
   image_uid="$(timeout 120 docker run --rm --network none --entrypoint id "$proxy" -u 2>&1)"
+  case "$image_uid" in
+    '' | *[!0-9]*) fail "$name/proxy/uid" "the proxy image's uid could not be read: $image_uid" ;;
+  esac
   [ "$image_uid" != "0" ] ||
     fail "$name/proxy/root" "the proxy image runs as root, so the egress proxy is refused at its first line"
   assertions=$((assertions + 1))
@@ -10998,7 +11001,7 @@ case_server_images() {
   # loops on `--restart` — the same rule production follows by taking the owner from the store (`KeyProxy::run_args`).
   # The egress run above passes no `--user` on purpose: it is the one that starts as the image's own user.
   timeout 60 docker run -d --name "hs_images_key_$$" --network egress \
-    --user "$(id -u):$(id -g)" \
+    --user "$(stat -c %u:%g "$root/keys.toml")" \
     -v "$root/keys.toml:$root/keys.toml:ro" \
     --entrypoint /usr/local/bin/holosmith "$proxy" \
     proxy key --listen 0.0.0.0:8080 --keys "$root/keys.toml" >/dev/null 2>&1 ||

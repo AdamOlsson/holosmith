@@ -647,12 +647,13 @@ impl std::fmt::Display for LoadError {
                 // The config is the running account's own file under its own `~/.config` (ADR-0088), and a root
                 // invocation is refused before it gets this far ([`crate::identity::root_refusal`]), so a refusal on
                 // this read means the file belongs to a different account — and a bare `permission denied` leaves an
-                // operator with nowhere to go.
+                // operator with nowhere to go. Taking another account's file back is a privileged `chown`, which is
+                // not a `holosmith` invocation, so naming one here is no tension with that refusal.
                 if source.kind() == ErrorKind::PermissionDenied {
                     write!(
                         f,
                         " — this file belongs to another account: every verb runs as you (ADR-0088), so make it \
-                         yours with `chown $(id -u):$(id -g) {}` rather than running as its owner",
+                         yours with `sudo chown $(id -u):$(id -g) {}` rather than running as its owner",
                         path.display()
                     )?;
                 }

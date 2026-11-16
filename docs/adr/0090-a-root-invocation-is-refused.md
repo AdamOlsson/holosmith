@@ -43,8 +43,9 @@ this runs as you, drop the sudo: holosmith status
   `libc`, so the uid is `/proc/self`'s owner — the read `identity` already had. A `/proc` that cannot be read answers
   `None`, and `None` is never root: refusing on an unread identity would refuse a supported run.
 - **The decision takes a uid, so both answers are testable.** `identity::root_refusal(uid, command)` sits beside
-  `euid()`, and `tests/root_refusal.rs` enumerates clap's own verbs — a verb added later is measured without an edit,
-  and the enumeration is the file's exemption pin.
+  `euid()`, and `tests/root_refusal.rs` enumerates clap's own verbs: the sentence is the right one for every name clap
+  knows, and a verb added later is measured without an edit. That no verb can be exempt is the structural argument
+  above — the check precedes `Cli::parse`, which is where the suite points rather than what it asserts.
 
 ## What it cost
 
@@ -55,8 +56,9 @@ this runs as you, drop the sudo: holosmith status
 - **The key proxy's `--user` is now load-bearing.** `KeyProxy::run_args` already named the key store's owner, because
   the store is a `0600` file and `--cap-drop ALL` takes `DAC_OVERRIDE`; that flag now stands between a working key
   proxy and one that cannot start, and it overrides the image's user. `scripts/verify.sh`'s `case_server_images` boots
-  that container by hand against its own `0600` file, so it passes `--user "$(id -u):$(id -g)"`, and it asserts that
-  the proxy image's own `id -u` is not 0 — the same question it already asks of the agent image.
+  that container by hand against its own `0600` file, so it passes `--user "$(stat -c %u:%g <file>)"` — the owner,
+  the way the flag itself derives it — and it asserts that the proxy image's own `id -u` is not 0, the same question
+  it already asks of the agent image.
 - **One hint changed its advice.** `config`'s permission-denied sentence used to say a `sudo` reads root's home. A
   `sudo` never gets that far now, so the sentence names the file and what to do to it — make it this account's — rather
   than a second account to run as.
@@ -72,8 +74,13 @@ this runs as you, drop the sudo: holosmith status
 - **No gate case can be the refusal.** The gate runs as the operator, so `case_*` can only observe that the binary
   works; `tests/root_refusal.rs` covers the decision for uid 0 at the decision's own layer, and a suite that had to
   *become* root to prove it would be a suite nobody can run.
-- **`docs/config.md`'s `sudo holosmith …` illustration is still there**, describing an install ADR-0088 replaced; it
-  is that document's rewrite to make, and this decision makes one clause of it wrong in the meantime.
+- **Four places still tell an operator to type `sudo holosmith …`**, and this decision makes each one wrong:
+  `docs/config.md:5-6` ("`sudo holosmith …` reads root's own file"), `README.md:90,101,107,143` (`sudo holosmith
+  config edit`, `sudo holosmith status`, `sudo holosmith doctor --full`), and
+  `crates/holosmith/src/commands/upgrade.rs:9-17` together with `rollback.rs:4`, whose section says "run it as root, or
+  name an install tree with `--root`" and names a `deploy::privilege_problem` that no longer exists in the tree. The
+  sweep belongs to the docs work already tracked for the operator-account install; this decision is not it, and a
+  rewrite here would bury that diff.
 
 ## Consequences
 

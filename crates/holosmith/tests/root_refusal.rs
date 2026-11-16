@@ -2,8 +2,9 @@
 //!
 //! The decision takes a uid ([`holosmith::identity::root_refusal`]), so both answers are drivable here without a
 //! root account: uid 0 gets the sentence, an ordinary uid gets `None`. The verbs are **enumerated from clap's own
-//! command** rather than listed here, and that enumeration is the pin this file exists for: `main` asks before
-//! `Cli::parse`, so no verb can be exempt, and a verb added later is measured without an edit to this test.
+//! command** rather than listed here, so this measures that the sentence is the right one for every name clap knows
+//! and widens by itself when a verb is added. That no verb can be exempt is a structural fact this suite cannot
+//! measure: the check sits before `Cli::parse` in `main.rs`.
 
 use std::process::Command;
 
@@ -24,9 +25,10 @@ const ORDINARY_UID: u32 = 1000;
 
 #[test]
 fn every_verb_is_refused_with_the_same_sentence() {
-    // This is the exemption pin, and the verb list is clap's rather than this file's: a verb that gained an
-    // exemption would have to be named somewhere else to get one, because the decision is asked before the command
-    // line is parsed — so the enumeration is as wide as the build and widens by itself.
+    // The verb list is clap's rather than this file's: the sentence is the right one for every name clap knows, and a
+    // verb added later is measured without an edit here. That no verb has an exemption is argued in `main.rs`, where
+    // the check sits before `Cli::parse` and so before any verb is visible — not here, where the decision only ever
+    // prints the words back.
     let verbs: Vec<String> = Cli::command()
         .get_subcommands()
         .map(|verb| verb.get_name().to_string())
