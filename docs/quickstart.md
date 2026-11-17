@@ -110,22 +110,30 @@ holosmith server deploy --dry-run   # the plan; changes nothing
 holosmith server deploy             # the real run: six steps
 ```
 
-The first real run against a fresh tree ends with its last step `failed`: nothing serves yet, because a deploy writes
+The first real run against a fresh tree ends with its last step failed: nothing serves yet, because a deploy writes
 the unit and does not start it. That is the step `holosmith install` finishes, and a `deploy` on a machine that is
 serving reads:
 
 ```text
-deploy: run
-deploy: into /home/you/.local/share/holosmith
-1. preflight: satisfied: …
-2. files: satisfied: …     # the config, the data root, the secrets and the keys
-3. images: changed: …      # builds holosmith-proxy and agent-image, minutes on a first run
-4. proxies: changed: …     # starts hs_key and hs_egress
-5. service: satisfied: …   # the unit is beside the config, in the user manager's directory; still yours to run:
-                           # the two `systemctl --user` commands
-6. health: satisfied: …    # `/api/health` answers and `doctor --full` finds nothing failing
-deploy: 6 steps: 4 satisfied, 0 needs, 2 changed, 0 skipped, 0 failed
+1. preflight ✓
+2. files ✓
+3. images ✓ (built 2 images: holosmith-proxy:0.1.0, agent-image:0.1.0)
+4. proxies ✓ (2 actions)
+5. service ✓ (1 action)
+    still yours to run: `systemctl --user daemon-reload`; `systemctl --user enable --now holosmith.service`
+6. health ✓
+role: both
+url: http://workshop.example.ts.net:8443
+next: holosmith key set <provider>
 ```
+
+The six steps are the config (2), the two images (3), the two proxies (4), the unit (5) and `/api/health` (6). Each is
+one line and the mark is its verdict: `✓` done or nothing to do, `–` skipped because this half of the machine has no
+work for it, `!` still yours to run, `✗` failed. A step that wrote something says what in parentheses, a step that
+needs something keeps the line you run. A failure keeps its whole sentence and adds one indented `fix:` line — the
+command that puts it right, which is the step's own repair where it knows one and the command that just ran
+otherwise. `--verbose` prints the older shape instead: every step's full sentence, the install tree and a tally, which
+is what to reach for when you are diagnosing the machine rather than setting it up.
 
 Verify it is serving:
 

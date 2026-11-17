@@ -97,6 +97,35 @@ boot. Its machine names are `deploy::{Kind, union, run_as}`.
 _Avoid_: Partial deploy, role upgrade, half-install (a **Role** is what a machine holds; a deploy half is what one run
 adds to it)
 
+**Report**:
+What one `install`, `server deploy` or `hub deploy` prints at the end: a line per step the run evaluated, in the spec's
+order, with the step's **mark** and, where there is something to know or to run, its detail (ADR-0085). Two renderings,
+one vocabulary: the terse one is the default and prints `2. files ✓ (3 actions)`, and `--verbose` prints every step's
+full sentence with the install tree, a blank line between blocks and a tally — byte for byte what every earlier release
+printed. A **failed** step's line is followed by one `    fix: …` command in the terse rendering, and by the run's
+resume line in the verbose one. install's own three lines are part of its report and are unnumbered, because they are
+not the spec's six steps. Its machine names are `deploy::{Report, Line, render, render_verbose}` and
+`commands::install::{Report, render, render_verbose}`.
+_Avoid_: Output, log, summary (a **report** is one run's verdict, printed once, and it is not the **progress line**
+stream beside it)
+
+**Mark**:
+The one character a **report**'s terse line carries for its step's word: `✓` for `satisfied` and `changed`, `–` for
+`skipped`, `!` for `needs`, `✗` for `failed`. One function, `deploy::Word::mark`, so the five words have one short
+spelling wherever they are printed; `satisfied` and `changed` share `✓` because a green step is a green step and what a
+step wrote is in the parentheses beside it.
+_Avoid_: Glyph, icon, symbol
+
+**Progress line**:
+One line a run prints **while** it works, on **stderr**, before the fact it announces: `install: [3/6 images] building
+holosmith-proxy:0.1.0`. The label is the **report**'s own step number and word — `3/6 images` for one of the spec's
+six, `unit`/`linger`/`health` for one of install's own — so a line that arrived while waiting and the line that comes
+with the verdict are matched by what they say. One line per fact and nothing on a timer: a step's begin line, two notes
+around each image build, and the wait before `/api/health`. `deploy` and a plan print none, and a step the run skips
+prints none (ADR-0092). Its machine names are `progress::{Progress, Silent, Announce}` and `deploy::run_as_with`; the
+report stays on stdout, which is what makes `install > out 2> err` two streams by design.
+_Avoid_: Log line, status line, output (a **progress line** is never part of the **report**)
+
 **Host registry**:
 Every entry point a machine may send a request to: one row per host, keyed by the **name** the operator gives it, which
 is the row's identity — so registering a machine twice replaces its row rather than adding a second. A row holds the

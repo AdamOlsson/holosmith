@@ -579,4 +579,18 @@ fn a_plan_carries_a_hub_and_its_own_paths_verbatim() {
             "/srv/tree"
         ]
     );
+    // `--verbose` travels like every other flag: the target's stdout is the report the operator reads, so a rendering
+    // this side chose would be one the target never printed.
+    let spoken = Plan {
+        kind: Kind::Server,
+        dry_run: false,
+        verbose: true,
+        config: None,
+        root: None,
+    };
+    assert_eq!(
+        spoken.arguments(),
+        vec!["server", "deploy", "--verbose"],
+        "the rendering flag does not reach the target"
+    );
 }
