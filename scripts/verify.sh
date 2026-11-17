@@ -10286,8 +10286,9 @@ done
 # The host.
 shift
 [ "$#" -gt 0 ] || exit 255
-# The run is the ssh login's own: there is no second account to become and no `sudo` between the login and the
-# deploy (ADR-0088), so what follows the host is the deploy's own arguments and the stand-in runs them as they are.
+# Nothing is unescaped here: the run is the ssh login's own account (ADR-0088), so the words after the host are
+# `<binary> {server|hub} deploy …` with no `sudo` and no account between them. A prefix coming back would sit in the
+# log the argv was recorded in above, where the case asserts its absence, rather than be stripped by this stand-in.
 exec sh -c "$*"
 SHIM
   chmod 0755 "$dir/ssh"
@@ -12630,10 +12631,11 @@ AGAIN
 # the copy lands where the case can read it. Everything after that is real: the bytes are the shipped artifact's,
 # the check is the machine's own `sha256sum`, and the deploy that follows is the artifact's own six steps.
 #
-# What no arm here can measure is a real ssh, a key, a second machine and a real `sudo` (there is none on this
-# machine): `tests/remote.rs` covers all four argvs, every refusal and the `-t` rule, and `tests/deploy.rs` the
-# `sudo`-prefixed children. This case measures the transport's *inside*: the copy, the digest, the arch refusal, a
-# copy that does not verify, and that the target's lines really are this command's output.
+# What no arm here can measure is a real ssh, a key and a second machine: `tests/remote.rs` covers all four argvs,
+# every refusal and the `-t` rule, and `tests/deploy.rs` the deploy's own steps. This case measures the transport's
+# *inside*: the copy, the digest, the arch refusal, a copy that does not verify, that the target's lines really are
+# this command's output — and that no child becomes a second account (ADR-0088), which the argv log is the place to
+# read.
 #
 # It needs `python3` (two ports, a `_ping` socket and one `/api/health` responder), the artifact, and the machine's
 # `install`/`chmod`/`df`/`openssl`. It needs **no daemon and no image**: the server arm is a dry run over a `_ping`
@@ -12739,6 +12741,12 @@ case_deploy_ssh() {
   grep -q 'server deploy --config .* --root .*--dry-run' "$sshlog" ||
     fail "$name/dry/run" "the run child does not carry the operator's own flags: $(cat "$sshlog")"
   assertions=$((assertions + 1))
+  # No child becomes another account (ADR-0088): the run is the ssh login's own. Every argv is in the log before any
+  # of them runs and the shim strips nothing, so `sudo`'s absence is measured here rather than claimed.
+  if grep -q 'sudo' "$sshlog"; then
+    fail "$name/dry/sudo" "the transport escalated: $(cat "$sshlog")"
+  fi
+  assertions=$((assertions + 1))
   # The copy is the artifact's bytes, executable, and named by the digest it was verified against.
   copy="$(find "$home/.cache/holosmith" -name 'deploy-*' -type f | head -n 1)"
   [ -n "$copy" ] || fail "$name/dry/copy/file" "the copy is not on the target"
@@ -12753,8 +12761,8 @@ case_deploy_ssh() {
   [ ! -s "$WORK/$name.downloads.log" ] || fail "$name/dry/download" "the command ran a downloader: $(cat "$WORK/$name.downloads.log")"
   assertions=$((assertions + 1))
 
-  # ---- 2. a real install over the same transport: the hub's five steps, and a second run -------------
-  # A hub is the half that needs no daemon and no image, so this arm applies steps 2, 5, 6 and 7 for real in a
+  # ---- 2. a real install over the same transport: the hub's six steps, two skipped, and a second run -
+  # A hub is the half that needs no daemon and no image, so this arm applies steps 2, 5 and 6 for real in a
   # `--root` tree the case owns — and the two skips prove the `Kind` travelled rather than being decided here.
   deploy_config "$WORK/config-deploy-ssh-hub.toml" "$control" "$preview" "unix:///var/run/docker.sock" "pi-agent:local" hub
   holder_pid="$(health_responder "$control")"

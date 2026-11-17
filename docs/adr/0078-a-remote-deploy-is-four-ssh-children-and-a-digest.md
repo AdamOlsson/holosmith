@@ -7,6 +7,11 @@ internet"), and its five acceptance bullets. The story changes **how** a deploy 
 what one installs: the target's own binary calls `deploy::run_as` with the same `Kind`, the same `--root` and the
 same `--dry-run`.
 
+**Part of that sentence is no longer true, and ADR-0088 is why.** `with sudo` is gone: an install is the operator's
+own account, so a remote deploy runs as the ssh login and escalates nothing. The transport is exactly what this ADR
+decided — four children, a digest, the operator's own command line, inherited stdio — and D1, D3 and D8 below say
+where their reasoning about privilege was replaced.
+
 Six decisions carry it. Two of them are about *not* writing something — a second step plan, and a second tail.
 
 ## D1 — four `ssh` children, and no `scp`
@@ -40,12 +45,18 @@ decisions:
 has the *binary* on stdin), so an unverified host key or a password-only login would consume the file meant for the
 copy and surface as a mangled authentication error. Batched, ssh refuses with its own sentence instead. The run
 child is deliberately **not** batched — it keeps the operator's stdin — and it gets `-t` exactly when both of this
-command's ends are terminals, because a pty is what gives the target's `sudo` a tty to ask its password on
-(ADR-0056's landmine, one hop out), while *not* allocating one on a piped run is what keeps the deploy's lines
-LF-terminated and greppable. The cost of that rule is recorded rather than discovered: `… deploy --ssh me@box | tee
-log` typed at a terminal has a terminal stdin and a piped stdout, so it allocates **no** pty and a system-path
-deploy's `sudo` there has no tty to ask on. The two pulls are real — a pty for `sudo` against LF output for a pipe —
-and the answer is "both ends or neither", which the operator can see before it matters.
+command's ends are terminals, so a person watching the deploy watches it on a terminal: the target's report arrives
+through a pty, which is what the deploy would be writing to if it had been typed there.
+
+**ADR-0088 leaves that flag one reason, and it is the output's framing.** A pty used to be what gave the target's
+`sudo` a tty to ask its password on (ADR-0056's landmine, one hop out); nothing on the target asks a password now,
+because the run is the ssh login's own account and escalates nothing. What the rule still decides is what the lines
+look like: *not* allocating a pty when this command's output is piped is what keeps the target's lines LF-terminated
+and greppable — and a pty there would put the target's stderr on this command's stdout, the pair D4's prefix and the
+gate's failure arm exist to keep apart. The cost of "both ends or neither" is recorded rather than discovered: `…
+deploy --ssh me@box | tee log` typed at a terminal has a terminal stdin and a piped stdout, so it allocates **no**
+pty and the report in that log is the LF form a reader can grep, which is what the log is for. The operator can see
+which of the two they are getting before it matters.
 
 The check is the **target's** `sha256sum`: coreutils is on every systemd Linux this spec targets (and in busybox),
 and the alternatives are worse — `openssl dgst` is a second program a minimal target may not have, and trusting the
@@ -75,10 +86,13 @@ mismatch copies nothing.
 
 Over ssh, `--root DIR` is the same flag with the same meaning on the other machine. Two consequences, both wanted:
 
-- `deploy::Target::privileged()` keeps its one meaning — "no `--root`" — so a remote system-path deploy is the
-  deploy's own `sudo`-prefixed children, exactly as a local one is, and a remote `--root` deploy needs no privilege
-  at all. No `sudo` is prefixed to the **run** child: the binary that runs is the invoking user's, and every write
-  it makes escalates per child the way it already does.
+- `--root` keeps its one meaning — the tree — and the privilege it used to carry is gone with ADR-0088: an install
+  is the operator's own account, so nothing escalates and `deploy::Target::privileged()` and the deploy's
+  `sudo`-prefixed file children are gone. A release still spawns one `sudo` — the restart a promotion makes — which
+  ADR-0088 D5 records as outstanding; nothing on this path does. The run child has no `sudo` in front of it and no
+  account to become: the binary that runs is the ssh login's own, and every write it makes is that account's. A
+  target whose login is outside the daemon's group is step 2's `needs` line, printed there in that account's own
+  name — the target's answer from the target's own `id`, rather than a probe made here.
 - The configuration a remote run reads is **the target's**, so `Config::load` is not called at all on this path and a
   laptop with no `config.toml` can deploy. `--config` travels verbatim and names the target's file (that story's
   two-configs rule, one hop out); making it absolute here would name this machine's.
@@ -110,7 +124,7 @@ is that a word means what it measured.
 ## D5 — a remote `--dry-run` runs the deploy's dry run there
 
 The spec says "`--dry-run` lists the steps without running them", and the story's demo is "`--dry-run` … lists steps
-remotely". So a remote dry run is the target's own dry run: the seven lines in the spec's order, `needs` on the
+remotely". So a remote dry run is the target's own dry run: the six lines in the spec's order, `needs` on the
 applies and a read's verdict on step 1, and nothing written on the target except the copy.
 
 The acceptance bullet's wording — "`--dry-run` over SSH performs the preflight only" — is **read as "applies
@@ -148,11 +162,11 @@ because a value may not start with `-`.
 `case_deploy_ssh` puts an `sh` `ssh` on `PATH` that records every argv and runs the words after the host through
 `sh -c` — which is ssh's contract rather than an approximation of it — with `$HOME` pointed at a directory the case
 owns. "The target" is therefore this box, and everything after the transport is real: the shipped artifact's bytes,
-the machine's own `sha256sum`, and the artifact's own seven steps in a `--root` tree.
+the machine's own `sha256sum`, and the artifact's own six steps in a `--root` tree.
 
-It measures: the server arm's **seven lines streamed from the target** with the copy and the check in the shim's log
+It measures: the server arm's **six lines streamed from the target** with the copy and the check in the shim's log
 and the copy on disk with the artifact's bytes, mode 0755 and a digest-derived name; a hub install over the same
-transport (steps 2, 5, 6 and 7 applied, 3 and 4 `skipped` — the `Kind` travelled) and a second run that is idempotent,
+transport (steps 2, 5 and 6 applied, 3 and 4 `skipped` — the `Kind` travelled) and a second run that is idempotent,
 with the same digest-named copy overwritten rather than duplicated; the architecture refusal with **one** child in the
 log and no copy on the target, and the same target accepting `--binary` when it matches; a `cat` that corrupts one
 byte refused after the check with **no run child**; `--binary` without `--ssh` and an option smuggled through `--ssh`
@@ -160,16 +174,18 @@ both refused before any child; a run the *target* refuses, which is what measure
 command's, that the target's sentence arrives on stderr and the local resume is the last line on stdout; and a
 `curl`/`wget` recorder that must never fire ("the CLI downloads nothing").
 
-What it cannot measure is recorded in the case's own comment: a real ssh, a key, a second machine, and a real `sudo`
-(there is none on this machine). `tests/remote.rs` covers the four argvs, every refusal, the `-t` rule and the
-stdio inheritance's build-up, and `tests/deploy.rs` the `sudo`-prefixed children.
+What it cannot measure is recorded in the case's own comment: a real ssh, a key and a second machine. `tests/remote.rs`
+covers the four argvs, every refusal, the `-t` rule and the stdio inheritance's build-up, and `tests/deploy.rs` the
+deploy's own steps. Since ADR-0088 the case also measures one thing about the transport's argv that its own comment
+used to excuse: the log is the shim's recording of every child **before** any of them runs, so `sudo`'s absence from it
+— the run being the ssh login itself, with no account in between — is an assertion rather than a claim.
 
 ## D9 — what carries forward
 
-`GLOSSARY.md` gains **Remote deploy**. A later change owns cross-machine sessions and the notification deep link. those stories
-(`upgrade`/`rollback`) take the same `--ssh`/`--binary` and must reuse this module's four children rather than write
-a second transport — an upgrade is "send the new binary and run `deploy`", which is exactly [`remote::Remote::send`]
-plus a different command line.
+`GLOSSARY.md` gains **Remote deploy**. A later change owns cross-machine sessions and the notification deep link.
+Those stories (`upgrade`/`rollback`) take the same `--ssh`/`--binary` and must reuse this module's four children
+rather than write a second transport — an upgrade is "send the new binary and run `deploy`", which is exactly
+[`remote::Remote::send`] plus a different command line.
 
 The follow-up this story leaves: the copy is never removed from the target, so a machine deployed to many times
 accumulates nothing (the name is the digest) but keeps at least one binary in the login user's cache. A later story
