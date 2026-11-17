@@ -11,19 +11,20 @@ This repository tracks work in exactly one Linear project:
 | Field | Value |
 |---|---|
 | Project | **Holosmith** |
-| Project ID | `P-PER-2` |
+| Project ID | `P-HOL-2` |
 | Project UUID | `f3a9d020-848a-437b-baec-eba402b25b15` |
-| Team | `Personal` (`PER`) |
+| Team | `Holosmith` (`HOL`) |
 | URL | https://linear.app/adamolsson/project/holosmith-761104bbb042 |
 
 Rules:
 
 - Always pass `project: "Holosmith"` when calling `list_issues` or `save_issue`.
-- When creating an issue, set the Holosmith project and the `PER` team explicitly. Never leave either implicit.
+- When creating an issue, set the Holosmith project and the `HOL` team explicitly. Never leave either implicit.
+- Issues created before the move keep their `PER-*` identifiers and now belong to the same project, so they are in scope; new issues are `HOL-*`.
 - Never create, read, update, comment on, or close issues in another project. In particular, `VulkanRenderAPI` belongs to a different repository and is out of scope here — do not list it, do not borrow its issue numbers, and do not treat it as precedent.
 - If a Linear call cannot be scoped to Holosmith, report that to the user and stop. Do not fall back to a workspace-wide query.
 
-Issue tracking is remote only. Do not add `HS-*`/`PER-*` citations to code, comments, help text, or docs, and do not recreate `docs/stories`, `docs/review`, `docs/notes.md`, `RESUME.md`, `PROMPT.md`, or `HolosmithSpec.md`.
+Issue tracking is remote only. Do not add `HS-*`/`HOL-*`/`PER-*` citations to code, comments, help text, or docs, and do not recreate `docs/stories`, `docs/review`, `docs/notes.md`, `RESUME.md`, `PROMPT.md`, or `HolosmithSpec.md`.
 
 ## Repository map
 
