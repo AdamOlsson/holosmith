@@ -15022,24 +15022,24 @@ phase_serve() {
 
   start_serve
   local case_fn case_out skipped=0
-  # Errexit is off inside a function invoked in an `||` list, so the trap below cannot be a `|| fail` on the call.
-  set -E
   for case_fn in "${serve_cases[@]}"; do
     # A case's own standard output is captured so the loop can tell a case that measured something from one
     # that printed SKIP and returned. An `ok` for a case that skipped would log a pass for a check that never
     # ran, which is the one shape this gate may not have; nothing is swallowed, the lines are
     # printed below in order whatever they are.
     #
-    # **The exit status is the verdict's third source, beside `FAIL` and `SKIP`.** A case that dies without
-    # printing either of the other two would otherwise log an `ok` over a check that measured nothing. It is an
-    # `ERR` trap (inherited into the case through `set -E`) rather than a `|| fail` on the line that runs the case,
-    # because a function called in an `||` list has errexit switched off for its whole body: a bare failing command
-    # inside a case — a `cp`, a `mkdir`, a here-doc's reader — would be swallowed instead, which is a bigger hole
-    # than the one this closes.
+    # **The exit status is the verdict's third source, beside `FAIL` and `SKIP`.** A case that returned non-zero
+    # without printing either of the other two would otherwise log an `ok` over a check that measured nothing,
+    # which is what a case whose write or read died does before it reaches its first assertion.
+    #
+    # It is a `|| fail` on this line and not an `ERR` trap, and the reason is the whole shape of this phase:
+    # `run_phase` calls `phase_serve` in a `||` list, and bash switches errexit off for the *entire body* of a
+    # function invoked that way — measured, not assumed: a bare `false` between two `printf`s in a case of this
+    # phase runs on to the next statement. An `ERR` trap is suppressed by the same rule, so it would fire on
+    # nothing. A case's ordinary failing command is therefore already swallowed here and always was; the status
+    # this line reads is the one a case *returns*, which is what a run that aborted early returns.
     case_out="$WORK/case.out"
-    trap 'fail "${case_fn}/status" "a command inside the case exited non-zero without a FAIL or SKIP line: $BASH_COMMAND"' ERR
-    "$case_fn" >"$case_out"
-    trap - ERR
+    "$case_fn" >"$case_out" || fail "${case_fn}/status" "$case_fn exited non-zero without a FAIL or SKIP line"
     cat "$case_out"
     if grep -q '^SKIP' "$case_out"; then
       skipped=$((skipped + 1))
