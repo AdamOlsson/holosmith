@@ -89,7 +89,7 @@ _Avoid_: Hub install, hub setup, `server deploy --hub`
 **Deploy half**:
 Which part of a machine one `deploy` run installs: the **server** half (all six steps, both proxies) or the **hub**
 half (steps 1, 2, 5 and 6, no proxy). A run **unions** its half with the role the config already carries and writes the
-union into the `config.toml` step 2 installs, so `server deploy` then `hub
+union into the config file step 2 installs, so `server deploy` then `hub
 deploy` on one machine — in either order — leaves a machine whose config says `both`; nothing is refused over a role.
 Steps 1 and 6 ask their checks about **the half this run installs** rather than the union, which is why a hub deploy
 asks no Docker and no git question even on a `both` machine, while the unit step follows the **union** because a unit
@@ -929,10 +929,10 @@ machine starts a new one, and `holosmith status` prints `unknown:` with a senten
 guessing from `/proc` or from systemd.
 
 **Uninstall**:
-`holosmith uninstall [--purge]`: the inverse of `server deploy`. It removes the unit, the two proxies and the
-machine's `egress` network, and **keeps** the data root, the projects and every session's own container and network;
-`--purge` also removes the data root (and the containers and networks the rows named), and refuses while a session
-is live unless `--force`. Its lines carry four words of its own — `removed`, `kept`, `nothing`, `failed` — not the
+`holosmith uninstall [--purge]`: the inverse of an **install** (and of the `deploy` it runs). It removes the unit, the
+two proxies and the machine's `egress` network, and **keeps** the data root, the projects and every session's own
+container and network; `--purge` also removes the data root (and the containers and networks the rows named), and
+refuses while a session is live unless `--force`. Its lines carry four words of its own — `removed`, `kept`, `nothing`, `failed` — not the
 deploy's five. Its machine name is `uninstall::Report`.
 _Avoid_: Teardown, remove, destroy, deploy --reverse
 

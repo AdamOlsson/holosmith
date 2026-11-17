@@ -162,7 +162,7 @@ would therefore let one typed `sudo holosmith …` read a different config depen
 controls — the invoker's `~/.config/holosmith.toml` by default, the target's under `-H` — and would let a forwarded
 `HOME` point a command at a tree its uid does not own. The password database has no such freedom: `sudo holosmith …`
 reads root's entry because it *is* root, so "which home" and "which uid" are one fact, and the uid is the fact that
-decides what the process may read anyway.
+decides what the process may read anyway — and ADR-0090 refuses that run before any path is read at all.
 
 The same argument covers `XDG_DATA_HOME` and `XDG_CONFIG_HOME`: they are environment variables, and a variable exported
 in a shell is not the environment a user manager was started in, so an operator who keeps their data elsewhere says so
@@ -243,10 +243,12 @@ than a description of the tree as it stands.
 ## Consequences
 
 - The `holosmith` account is not part of the install this ADR describes, and only ADR-0086 carries the pointer. The
-  documents that still describe the install it replaced — `docs/quickstart.md`, `docs/config.md`'s
-  `<root>/config.toml` and its `/var/lib/holosmith` default, ADR-0056's privileged step list, ADR-0058's ownership
-  section, ADR-0082's root check and ADR-0087's measurement of a system account — are later stories' to rewrite, and
-  until they are they describe an install this one replaced.
+  documents that described the install it replaced — `docs/quickstart.md`, `docs/config.md`'s `<root>/config.toml`
+  and `/var/lib/holosmith` default — were swept afterwards: the guide now speaks the operator's account from §1 to
+  the day-two verbs, the config page's `sudo holosmith` sentence is gone, and the glossary's **Service user** entry is
+  retired. `README.md`'s by-hand recipe still describes the deleted account, because the human overview was not part
+  of that sweep. The superseded ADRs (0056, 0058, 0082, 0086, 0087) stay as they were: they are the history this one
+  reverses, and rewriting them would lose the record.
 - **ADR-0006's rejection of XDG is reversed, on its own premise.** It ruled the XDG paths out because the file was read
   by "a systemd unit running as the `holosmith` service user, which has no `$HOME` worth depending on", and with one uid
   the file is read by the account whose home it is, so "XDG is for per-user applications" now describes this install
