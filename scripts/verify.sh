@@ -13169,12 +13169,15 @@ SHIM
     fail "$name/first/next" "the run did not print the next step its half earns: $(cat "$root/first.out")"
   assertions=$((assertions + 1))
   # The two manager commands and the linger flag, as argv: the reads first, then the apply, in the order the command
-  # does them.
+  # does them — and the manager asked once more afterwards, because `enable --now`'s exit status is not the fact
+  # (`install.rs`'s `unit`): a start that failed still exits 0, so the run's own line reads `is-active` again and
+  # answers with the manager's word.
   check "$name/first/systemctl" \
     "$(printf '%s\n' 'systemctl --user is-enabled holosmith.service' \
       'systemctl --user is-active holosmith.service' \
       'systemctl --user daemon-reload' \
-      'systemctl --user enable --now holosmith.service')" \
+      'systemctl --user enable --now holosmith.service' \
+      'systemctl --user is-active holosmith.service')" \
     "$(cat "$logs/systemctl.log")"
   check "$name/first/loginctl" \
     "$(printf '%s\n' 'loginctl show-user operator --property=Linger --value' 'loginctl enable-linger')" \
