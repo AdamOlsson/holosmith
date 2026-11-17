@@ -1705,15 +1705,29 @@ pub fn unit_text(exe: &Path, role: Role, root: &Root) -> String {
     )
 }
 
-/// What the operator must run to make the rendered unit the one their user manager loads, in order.
+/// What the operator must run to make the rendered unit the one their user manager loads, in order — the argv a
+/// caller runs, which [`unit_commands_printed`] renders for the sentence an operator reads.
 ///
 /// No `sudo` and no copy: the bytes are already at [`Root::unit`], so the pair is the reload that makes the manager
 /// notice the file and the enable that starts it now, at every login, and at boot once linger is on.
-pub(crate) fn unit_commands() -> Vec<String> {
-    vec![
-        "systemctl --user daemon-reload".to_string(),
-        format!("systemctl --user enable --now {UNIT_NAME}"),
+///
+/// **One value, because two callers disagree about who runs them and nothing about what they say.** A deploy prints
+/// these and never runs one; an install runs them and repeats them in the sentence a foreign tree gets instead. A flag
+/// or a unit name added here therefore reaches both, and a sentence cannot describe a command nobody ran.
+pub(crate) fn unit_commands() -> [&'static [&'static str]; 2] {
+    [
+        &["--user", "daemon-reload"],
+        &["--user", "enable", "--now", UNIT_NAME],
     ]
+}
+
+/// [`unit_commands`] as lines, with `program` in front of each argv — the program the reader would type, which is
+/// the bare name in the deploy's remark and the path an install actually ran in its own.
+pub(crate) fn unit_commands_printed(program: &Path) -> Vec<String> {
+    unit_commands()
+        .iter()
+        .map(|arguments| format!("{} {}", program.display(), arguments.join(" ")))
+        .collect()
 }
 
 /// Step 5's read and apply: the file's bytes, and the commands that enable them.
@@ -1764,7 +1778,10 @@ fn service_line(
         Ok(None) => Vec::new(),
         Err(sentence) => return failed(DeployStep::Service, sentence),
     };
-    let remark = format!("; still yours to run: {}", unit_commands().join("; "));
+    let remark = format!(
+        "; still yours to run: {}",
+        unit_commands_printed(Path::new("systemctl")).join("; ")
+    );
     if actions.is_empty() {
         return Line {
             step: DeployStep::Service,

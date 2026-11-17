@@ -70,11 +70,19 @@ tree has a unit no manager reads. ADR-0088 already decided that such a tree's un
 `uninstall` already follows it; an install does the same, for the same reason — enabling that name would command the
 account's own unit, a service the run was never asked about. Its line says which two commands are still the operator's.
 
+**Linger follows the unit, not the tree's intent to be a service.** `loginctl enable-linger` sets a flag on the
+*account*, and the flag means "this account's user manager runs at boot" — so on a tree no manager reads it would turn
+on a boot service for the unit the manager *does* load, which is the account's and not this run's. The line is `needs`
+with `sudo loginctl enable-linger $USER` beside the two `systemctl --user` commands, and neither `loginctl` nor
+`systemctl` is run: "commands nothing" is about the account's real manager, which is where the write would have landed.
+
 ## What this does not measure
 
 - **No gate case and no daemon.** `tests/install.rs` drives a **hub's** install with the machine handed in, so the four
   container checks are `unknown` rather than measured; what a server's deploy does to a real daemon is `tests/deploy.rs`
-  and `scripts/verify.sh`'s cases.
+  and `scripts/verify.sh`'s cases. `install::run` itself is not driven either — its tool seam is the host's real
+  `systemctl` and `loginctl` — so the exit code is pinned through `Report::failed`, one case per exit class, and `run`'s
+  own three lines are the untested glue the test file's header names.
 - **No polkit-denied machine.** The refusal is what the shim says it is (`Interactive authentication required.`), which
   is the sentence `loginctl` gives; the run's own behaviour is measured, the machine's is not.
 - **`systemctl --user is-enabled`/`is-active` are read, not `show -p …`** — two children rather than one parse of a
@@ -88,3 +96,12 @@ account's own unit, a service the run was never asked about. Its line says which
   line, and `loginctl enable-linger $USER` as one step's remaining work.
 - A second run applies nothing: the unit's read is `is-enabled` **and** `is-active`, the linger read is
   `loginctl show-user --property=Linger`, and the words are `satisfied` on both.
+- A re-run that rewrote the unit's bytes while the old process still serves runs `daemon-reload` and `enable --now`,
+  and `enable --now` starts nothing that is already running — so that line says the manager loaded these bytes and the
+  serving process predates them, and names `systemctl --user restart` as the command that starts them. It is the one
+  arrangement in which "started it" would be false, and this ADR takes the words over a restart: an install is not a
+  promotion (ADR-0082), and interrupting a serving daemon is not a first setup's business.
+- **The guide's later sections still describe the install ADR-0088 replaced.** `docs/quickstart.md` §1–§3 are this
+  code — the operator's own account, `~/.local/share/holosmith`, one `holosmith install` — while §5 onward still spells
+  `sudo -u holosmith` and `/var/lib/holosmith`, the account and the tree ADR-0088 deleted. That sweep is its own work;
+  nothing in this ADR should be read as covering it.

@@ -17,6 +17,10 @@
 //! 4. **Linger**, so that manager starts the daemon at boot.
 //! 5. **The wait**: `/api/health` answering is what "installed" means.
 //!
+//! Steps 3 and 4 are skipped, and nothing is run, for a tree that manager does not load — `--root`/`--config` can name
+//! one, and `systemctl --user` resolves a *name* in this account's search path whatever the flags say. Both lines then
+//! carry the operator's own commands instead ([`Tools::manager_unit`], ADR-0091 D4).
+//!
 //! # The deploy's health line, and this command's
 //!
 //! The deploy's last step asks whether the machine serves, and on a first install the honest answer is **no**: step 5
@@ -149,9 +153,19 @@ pub struct Report {
 }
 
 impl Report {
-    /// Whether anything failed, which is exactly the exit code: the deploy's own step, or one of install's.
+    /// Whether anything failed, which is exactly the exit code: one of install's own lines, or a deploy step that is
+    /// **not** the deploy's health line.
+    ///
+    /// That line is tolerated on purpose (see the module docs): on a first install it answers `no` because nothing has
+    /// started the unit yet, which is the very step install does next, so the deploy's block prints it as it stands —
+    /// its tally stays honest — while the verdict is install's own wait after `enable --now`. Counting it here would
+    /// make a fresh machine exit 1 and never print the URL it just earned, and would make a second run on a serving
+    /// machine exit 1 whenever `doctor --full` has one failing finding.
     pub fn failed(&self) -> bool {
-        self.deploy.failed() || self.lines.iter().any(|line| line.word == Word::Failed)
+        self.deploy
+            .failed
+            .is_some_and(|step| step != DeployStep::Health)
+            || self.lines.iter().any(|line| line.word == Word::Failed)
     }
 
     /// The report as the operator reads it: the deploy's block — its header, its step lines and its tally — and then
@@ -247,6 +261,10 @@ pub fn execute(
     };
     let report = deploy::run_as(config, root, &pass, machine, dry_run, kind);
     let url = config.control_origin.as_str().to_string();
+    // **The deploy's tail cut to one.** `deploy` prints every next step its half earns, and a `both` machine's
+    // `server deploy` prints two (`key set`, then the hub's `hub host add`); this command prints one, because the story
+    // it implements promises "the one next step". So on a `both` machine the hub's line is not repeated here — the run
+    // that installed that half is where it was printed, and `deploy` is still the verb with the whole list.
     let next = super::deploy::next_steps(kind.installs())
         .first()
         .cloned()
@@ -271,7 +289,7 @@ pub fn execute(
     let mut lines = Vec::new();
     for line in [
         unit(root, tools, written, dry_run),
-        linger(tools, name.as_deref(), dry_run),
+        linger(root, tools, name.as_deref(), dry_run),
         health(config, tools, dry_run),
     ] {
         let failed = line.word == Word::Failed;
@@ -303,6 +321,15 @@ fn not_in_group(group: &str) -> String {
     )
 }
 
+/// Whether this tree's unit is the one the account's manager loads.
+///
+/// The one fact both of install's manager lines turn on: `systemctl --user` resolves the **name** [`UNIT_NAME`] in its
+/// own search path, so a tree under `target/` or one `--config`/`--root` moved has a unit no manager reads, and
+/// commanding that name would command a service this run was never asked about (ADR-0088, ADR-0091 D4).
+fn own_unit(root: &Root, tools: &Tools) -> bool {
+    root.unit() == tools.manager_unit
+}
+
 /// The unit, through the account's own manager — the two commands the deploy prints and never runs.
 ///
 /// Three things decide the word, and the first is not a program's:
@@ -319,7 +346,7 @@ fn not_in_group(group: &str) -> String {
 ///   questions answer.
 fn unit(root: &Root, tools: &Tools, written: bool, dry_run: bool) -> Line {
     let path = root.unit();
-    if path != tools.manager_unit {
+    if !own_unit(root, tools) {
         return Line {
             what: What::Unit,
             word: Word::Needs,
@@ -330,7 +357,7 @@ fn unit(root: &Root, tools: &Tools, written: bool, dry_run: bool) -> Line {
                  {}",
                 path.display(),
                 tools.manager_unit.display(),
-                deploy::unit_commands().join("; "),
+                deploy::unit_commands_printed(&tools.deploy.systemctl).join("; "),
                 root.config_file().display()
             ),
         };
@@ -339,7 +366,10 @@ fn unit(root: &Root, tools: &Tools, written: bool, dry_run: bool) -> Line {
         Ok(state) => state,
         Err(sentence) => return failed(What::Unit, sentence),
     };
-    if enabled && active && !written {
+    // The one state in which `enable --now` starts nothing: the manager is already running this unit, so the process
+    // serving is older than whatever `written` put on disk.
+    let already_running = enabled && active;
+    if already_running && !written {
         return Line {
             what: What::Unit,
             word: Word::Satisfied,
@@ -349,20 +379,16 @@ fn unit(root: &Root, tools: &Tools, written: bool, dry_run: bool) -> Line {
             ),
         };
     }
-    let reload = ["--user", "daemon-reload"];
-    let enable = ["--user", "enable", "--now", UNIT_NAME];
-    let plan = format!(
-        "`{} {}` and `{} {}`",
-        tools.deploy.systemctl.display(),
-        reload.join(" "),
-        tools.deploy.systemctl.display(),
-        enable.join(" ")
-    );
+    let plan = deploy::unit_commands_printed(&tools.deploy.systemctl)
+        .iter()
+        .map(|command| format!("`{command}`"))
+        .collect::<Vec<String>>()
+        .join(" and ");
     if dry_run {
         return Line {
             what: What::Unit,
             word: Word::Needs,
-            sentence: match enabled && active {
+            sentence: match already_running {
                 true => format!(
                     "would run {plan}: the manager is running this unit from the bytes it read before this run \
                      would write new ones"
@@ -373,7 +399,7 @@ fn unit(root: &Root, tools: &Tools, written: bool, dry_run: bool) -> Line {
             },
         };
     }
-    for command in [reload.as_slice(), enable.as_slice()] {
+    for command in deploy::unit_commands() {
         if let Err(sentence) = ran(
             &tools.deploy.systemctl,
             command,
@@ -385,9 +411,18 @@ fn unit(root: &Root, tools: &Tools, written: bool, dry_run: bool) -> Line {
     Line {
         what: What::Unit,
         word: Word::Changed,
-        sentence: format!(
-            "{plan} ran: the manager has loaded the unit this run wrote and started it"
-        ),
+        // `enable --now` starts a unit that is not running and leaves one that is alone, so "started it" is only true
+        // when the manager answered `inactive` a moment ago. A re-run that rewrote the unit's bytes with the previous
+        // process still serving is `already_running`, and what it needs is the restart.
+        sentence: match already_running {
+            true => format!(
+                "{plan} ran: the manager has loaded the unit this run wrote, and {UNIT_NAME} was already running — the \
+                 process serving predates these bytes, so `systemctl --user restart {UNIT_NAME}` is what starts them"
+            ),
+            false => {
+                format!("{plan} ran: the manager has loaded the unit this run wrote and started it")
+            }
+        },
     }
 }
 
@@ -424,7 +459,27 @@ fn manager_state(tools: &Tools) -> Result<(bool, bool), String> {
 /// answer is one command the operator runs: the machine serves either way, and what is missing is that it serves
 /// after a reboot as well. That is [`Word::Needs`], the deploy's word for a step whose remaining work is the
 /// operator's, and the same `$USER` the refusal prints.
-fn linger(tools: &Tools, name: Option<&str>, dry_run: bool) -> Line {
+///
+/// **A tree that is not the manager's gets no flag either** (ADR-0091 D4): the flag is what makes the unit the
+/// manager loads a boot service, so on a tree no manager reads it would set a boot service for a unit this run was
+/// never asked about — the one thing [`unit`] refuses to do. It is [`Word::Needs`] with the operator's own command
+/// instead, and nothing is read or run.
+fn linger(root: &Root, tools: &Tools, name: Option<&str>, dry_run: bool) -> Line {
+    if !own_unit(root, tools) {
+        return Line {
+            what: What::Linger,
+            word: Word::Needs,
+            sentence: format!(
+                "this run set no linger flag either: the flag is what makes the unit this account's manager loads a \
+                 boot service, and {} is not that unit (the manager reads {}). Still yours to run, on a machine whose \
+                 config is {}: {}; sudo loginctl enable-linger $USER",
+                root.unit().display(),
+                tools.manager_unit.display(),
+                root.config_file().display(),
+                deploy::unit_commands_printed(&tools.deploy.systemctl).join("; ")
+            ),
+        };
+    }
     // The flag is read from `loginctl show-user`, which names the account: this is why the run reads `id -un` even
     // for a half that asks no group question. `None` (no account name, no `loginctl`, a bus that will not answer) is
     // not "off" — it is "not known to be on", which is what makes the apply run and its own answer the line.

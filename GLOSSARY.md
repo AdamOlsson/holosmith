@@ -61,8 +61,7 @@ neither of which is an install)
 **Service user**:
 Retired. `holosmith` was the system account a machine ran `serve` as and the owner of its **root** (ADR-0086), and
 ADR-0088 deleted it together with every command that made it: a **machine** is the operator's own account — one uid,
-no `useradd`, no `chown` and no `sudo -u`. A sentence that needs one is describing the **install** ADR-0088 replaced;
-until the deploy that removes the account lands, this entry is the target rather than the build.
+no `useradd`, no `chown` and no `sudo -u`. A sentence that needs one is describing the **install** ADR-0088 replaced.
 _Avoid_: Service account, holosmith user, deploy user, run-as user
 
 **Root**:
@@ -73,9 +72,7 @@ from — so it is one path to back up and one to delete, and the config is delib
 `~/.config/holosmith.toml`, because that is the one file in an install a person edits, and the root is the state a
 backup carries. `--root DIR` is the same value's flag form: the tree the gate or an operator owns, not a second
 privilege mode. The unit's `ExecStart` names the config explicitly, so the daemon never resolves `~` and never decides
-the root from who ran it. These two paths are the build's: the root's default and the config's place are ADR-0088's,
-and the deploy still installs the unit as a system unit and creates the `holosmith` account, which is the deploy that
-has not moved yet.
+the root from who ran it. These two paths are the build's: the root's default and the config's place are ADR-0088's.
 _Avoid_: Install dir, home dir, prefix, install tree (when the whole root is meant — say root)
 
 **Hub**:

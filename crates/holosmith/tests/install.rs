@@ -6,10 +6,26 @@
 //! a directory it leaves out, and `--root`/`--config` keep both trees inside the temp directory.
 //!
 //! **The machine is a hub's on purpose.** A hub runs no session, so `doctor` asks it no Docker and no git question and
-//! every container finding is `unknown` rather than a failure — which is what lets three of these four cases run with
-//! no daemon, no image and no proxy in the picture. What a *server* deploy then does with a real daemon is
-//! `tests/deploy.rs`'s subject, and the one thing this file still needs a server for — the daemon's group — is a read
-//! that happens before any of it.
+//! every container finding is `unknown` rather than a failure — which is what lets every case here run with no daemon,
+//! no image and no proxy in the picture. What a *server* deploy then does with a real daemon is `tests/deploy.rs`'s
+//! subject, and the one thing this file still needs a server for — the daemon's group — is a read that happens before
+//! any of it.
+//!
+//! **Which layer each exit class is pinned at.** `install::run` is the glue that turns a report into an exit code, and
+//! no case here drives it: its tool seam is `install::Tools::default`, which is the host's real `systemctl` and
+//! `loginctl`, and its config comes from a file rather than a value. What is pinned instead is the predicate those
+//! lines read — `install::Report::failed` — at the layer that can fail, one case per class:
+//!
+//! - **a refusal is non-zero with nothing written** — `an_account_outside_the_docker_group_is_refused_and_nothing_is_written`,
+//!   and `a_dry_run_is_refused_too` for the arm that has no plan either;
+//! - **a fresh machine succeeds** — `a_first_install_whose_deploy_health_line_failed_still_succeeds`, where the
+//!   deploy's own step 6 fails and install's wait is the verdict;
+//! - **a stopped deploy fails** — `a_deploy_step_that_is_not_health_stops_the_run`, which is the one failed step an
+//!   install does not tolerate;
+//! - **an install that does not answer fails** — `a_health_poll_that_never_answers_fails_and_names_the_journal`.
+//!
+//! So `run`'s own three lines — print the report, print `resume` or the URL and the next step, return the code — are
+//! the untested glue, and they are the whole of what a green run here leaves unmeasured.
 //!
 //! Driven for real: `install`/`chmod` and `openssl` over the `--root` tree (a recorder would prove nothing about the
 //! modes step 2 writes), and a real socket answering `/api/health` (the wait is the install's own verdict).
@@ -26,6 +42,7 @@ use holosmith::config::{Config, Origin, Role};
 use holosmith::deploy::{self, DeployStep, Root, Word};
 use holosmith::doctor;
 use holosmith::images;
+use holosmith::key;
 use holosmith::preflight;
 use holosmith::proxies;
 use holosmith::selftest;
@@ -264,8 +281,13 @@ impl images::Images for NoDaemon {
 /// somebody else holds" rather than "this machine serves".
 const HEALTH_PAYLOAD: &str = r#"{"name":"holosmith","version":"verify","role":"hub","uptime_s":0,"preview_origin":"http://localhost:8081","application_server_key":null}"#;
 
-/// A control listener that answers `GET /api/health` for the rest of the test's life, and its address.
-fn health_responder() -> SocketAddr {
+/// A control listener answering `GET /api/health` for the rest of the test's life, and its address.
+///
+/// `ready` is asked per request, which is how a case makes the endpoint start answering at a moment of its own
+/// choosing: before it says so, the connection is accepted and closed unanswered, which is what the deploy's last
+/// step meets on a first install — the port is held, so the attempt is a real one rather than a refused one, and the
+/// thing that turns it into an answer has not happened yet.
+fn health_responder(ready: impl Fn() -> bool + Send + 'static) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a port is bindable");
     let listen = listener.local_addr().expect("the bound address is known");
     std::thread::spawn(move || {
@@ -277,7 +299,9 @@ fn health_responder() -> SocketAddr {
             let Ok(mut stream) = stream else { break };
             let mut request = [0_u8; 512];
             let _ = stream.read(&mut request);
-            let _ = stream.write_all(answer.as_bytes());
+            if ready() {
+                let _ = stream.write_all(answer.as_bytes());
+            }
         }
     });
     listen
@@ -389,13 +413,48 @@ fn an_account_outside_the_docker_group_is_refused_and_nothing_is_written() {
     }
 }
 
+/// The same machine, asked for a plan: ADR-0091 D1's "a dry run is refused too".
+///
+/// The plan exists to be acted on, and a plan for a machine that this run's own first line refuses is a lie about what
+/// the next run does — so `--dry-run` does not get as far as a step, let alone a write.
+#[test]
+fn a_dry_run_is_refused_too() {
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("install-docker-group-plan");
+    let config = server_config(format!("unix://{}", dir.file("docker.sock").display()));
+    let root = Root::resolve(Some(dir.file("root")), Some(dir.file("holosmith.toml")));
+    let deployed = deployed(&root, &config);
+    let tools = tools(&dir, &root, ("operator", "operator nogroup"));
+
+    let refusal = install::execute(&deployed, &root, &tools, &NoDaemon, true)
+        .expect_err("a plan for a machine this account cannot serve is refused as the apply is");
+
+    assert_eq!(
+        refusal.lines().last(),
+        Some("sudo usermod -aG docker $USER"),
+        "a refused plan does not end with the one command:\n{refusal}"
+    );
+    // A plan writes nothing either, and it does not read the manager to describe one.
+    assert!(
+        !root.config_file().exists(),
+        "a refused plan wrote {}",
+        root.config_file().display()
+    );
+    for program in ["systemctl", "loginctl"] {
+        assert!(
+            !dir.file(&format!("{program}.log")).exists(),
+            "a refused plan ran {program}"
+        );
+    }
+}
+
 // ---- linger ---------------------------------------------------------------------------------
 
 #[test]
 fn a_refused_linger_is_reported_and_the_run_still_succeeds() {
     let _serial = one_at_a_time();
     let dir = TempDir::new("install-linger");
-    let listen = health_responder();
+    let listen = health_responder(|| true);
     let config = hub_config(listen);
     let root = rooted(&dir, "root");
     let deployed = deployed(&root, &config);
@@ -452,13 +511,64 @@ fn a_refused_linger_is_reported_and_the_run_still_succeeds() {
     assert_eq!(report.next, "holosmith hub host add <name> <url>");
 }
 
+// ---- a first install, and the deploy health line that is not its failure --------------------
+
+#[test]
+fn a_first_install_whose_deploy_health_line_failed_still_succeeds() {
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("install-first-run");
+    // The endpoint is bound from the start and answers from the moment the manager has the unit, which is a first
+    // install exactly: the deploy's step 6 asks **before** `enable --now` has run, so its honest answer is no, and
+    // install's own wait asks after it. The unit's state file is what the shim's `--user enable` writes, so the
+    // moment is the real one rather than a marker this test invented.
+    let state = dir.file("unit-enabled");
+    let listen = health_responder(move || state.exists());
+    let config = hub_config(listen);
+    let root = rooted(&dir, "root");
+    let deployed = deployed(&root, &config);
+    let tools = tools(&dir, &root, ("operator", "operator docker"));
+
+    let report = install::execute(&deployed, &root, &tools, &NoDaemon, false)
+        .expect("a readable account is not a refusal");
+
+    // The deploy's step 6 did fail — that is the premise, not a detail — and its line and tally print as they stand.
+    assert_eq!(
+        report.deploy.failed,
+        Some(DeployStep::Health),
+        "the deploy pass answered before the unit was started:\n{}",
+        report.render()
+    );
+    assert!(
+        report.render().contains("1 failed"),
+        "the deploy's tally lost the failure it is entitled to:\n{}",
+        report.render()
+    );
+    // And it is **not** the verdict: install's own wait, after `enable --now`, is (ADR-0091 D2).
+    assert!(
+        !report.failed(),
+        "a fresh install whose deploy health line failed must still succeed — otherwise it exits 1 and never \
+         prints the URL it just earned:\n{}",
+        report.render()
+    );
+    assert_eq!(
+        line(&report, What::Health).word,
+        Word::Satisfied,
+        "the run did not reach the wait that ends it:\n{}",
+        report.render()
+    );
+    assert_eq!(line(&report, What::Unit).word, Word::Changed);
+    // The two lines `run` prints on this path, which are why the exit code matters.
+    assert_eq!(report.url, config.control_origin.as_str());
+    assert_eq!(report.next, "holosmith hub host add <name> <url>");
+}
+
 // ---- a second run ---------------------------------------------------------------------------
 
 #[test]
 fn a_second_run_changes_nothing_and_says_so() {
     let _serial = one_at_a_time();
     let dir = TempDir::new("install-second-run");
-    let listen = health_responder();
+    let listen = health_responder(|| true);
     let config = hub_config(listen);
     let root = rooted(&dir, "root");
     let deployed = deployed(&root, &config);
@@ -558,13 +668,66 @@ fn a_health_poll_that_never_answers_fails_and_names_the_journal() {
     );
 }
 
+// ---- the step that is not health -------------------------------------------------------------
+
+/// A deploy step that failed anywhere but health stops the run, and install's own lines are empty.
+///
+/// ADR-0091 D2's first consequence: the tree, the images and the proxies are what the two manager commands and the
+/// wait stand on, so a report that failed earlier has not earned them and install owns no step. What the operator gets
+/// is the deploy's own block — its `files` line and the resume-shaped line `run` prints for this verb.
+///
+/// The failure here is step 2's, and it is the one thing that step cannot work around: the key store is a file
+/// `serve` and the key proxy read, so a directory sitting at that path is a tree to put right — the deploy never
+/// writes over it.
+#[test]
+fn a_deploy_step_that_is_not_health_stops_the_run() {
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("install-files-failed");
+    let listen = health_responder(|| true);
+    let config = hub_config(listen);
+    let root = rooted(&dir, "root");
+    // The key store's path, occupied by a directory: step 1 reads no database there and passes, and step 2's read of
+    // this item is the one `Err` it can have.
+    std::fs::create_dir_all(root.data_root().join(key::SECRETS_DIR).join(key::KEYS_FILE))
+        .expect("the key store's path is a directory");
+    let deployed = deployed(&root, &config);
+    let tools = tools(&dir, &root, ("operator", "operator docker"));
+
+    let report = install::execute(&deployed, &root, &tools, &NoDaemon, false)
+        .expect("a failed step is a report, not a refusal");
+
+    assert!(
+        report.failed(),
+        "a deploy that did not get past its files failed and the run passed:\n{}",
+        report.render()
+    );
+    assert_eq!(
+        report.deploy.failed,
+        Some(DeployStep::Files),
+        "the run did not stop at the step that failed:\n{}",
+        report.render()
+    );
+    // None of install's own three steps was reached, in the report or on the machine.
+    assert!(
+        report.lines.is_empty(),
+        "an install that stopped at the deploy still claimed a step of its own:\n{}",
+        report.render()
+    );
+    for program in ["systemctl", "loginctl"] {
+        assert!(
+            !dir.file(&format!("{program}.log")).exists(),
+            "an install that stopped at the deploy ran {program}"
+        );
+    }
+}
+
 // ---- the tree whose unit no manager reads ---------------------------------------------------
 
 #[test]
 fn a_tree_whose_unit_is_not_the_managers_enables_nothing() {
     let _serial = one_at_a_time();
     let dir = TempDir::new("install-foreign-tree");
-    let listen = health_responder();
+    let listen = health_responder(|| true);
     let config = hub_config(listen);
     let root = rooted(&dir, "root");
     let deployed = deployed(&root, &config);
@@ -596,6 +759,32 @@ fn a_tree_whose_unit_is_not_the_managers_enables_nothing() {
         "a foreign tree's install commanded the account's own manager:\n{:?}",
         diary(&dir.file("systemctl.log"))
     );
+    // And the boot flag too: linger is what makes the unit the manager loads a boot service, so on a tree it does not
+    // load it would set one for a service this run was never asked about (ADR-0091 D4). The command is the
+    // operator's, and `loginctl` is neither asked nor run.
+    let linger = line(&report, What::Linger);
+    assert_eq!(
+        linger.word,
+        Word::Needs,
+        "a foreign tree's linger is the operator's remaining command: {linger}"
+    );
+    assert!(
+        linger
+            .sentence
+            .contains("sudo loginctl enable-linger $USER"),
+        "the linger line does not end with the command that is still the operator's:\n{}",
+        linger.sentence
+    );
+    assert!(
+        linger.sentence.contains("systemctl --user daemon-reload"),
+        "the linger line does not name the two commands that come first:\n{}",
+        linger.sentence
+    );
+    assert!(
+        diary(&dir.file("loginctl.log")).is_empty(),
+        "a foreign tree's install asked or commanded loginctl:\n{:?}",
+        diary(&dir.file("loginctl.log"))
+    );
 }
 
 // ---- the plan ------------------------------------------------------------------------------
@@ -604,7 +793,7 @@ fn a_tree_whose_unit_is_not_the_managers_enables_nothing() {
 fn a_dry_run_prints_the_plan_and_writes_nothing() {
     let _serial = one_at_a_time();
     let dir = TempDir::new("install-dry-run");
-    let listen = health_responder();
+    let listen = health_responder(|| true);
     let config = hub_config(listen);
     let root = rooted(&dir, "root");
     let deployed = deployed(&root, &config);
