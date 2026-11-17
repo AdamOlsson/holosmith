@@ -35,8 +35,14 @@
 # `interrupted`, the seqs stay unique and the counter is the log's highest), the names a crash leaves behind
 # swept on a real daemon (a leftover container, an orphan network and worktree directory gone, a kept branch
 # and ref kept, the session's container replaced under the same name), a boot over a database from a newer
-# release (which continues and says who refuses), the service and the keys a deploy writes in a case of their own
-# straight after `case_server_deploy` (`case_server_service`: the unit's bytes, the VAPID pair, the printed commands
+# release (which continues and says who refuses), the one-command install in three cases after `case_server_deploy`
+# (`case_install`: a hub installed on a machine of its own under `bwrap` — the `--config`/`--root` tree, the deploy's
+# six steps, the `systemctl --user daemon-reload`/`enable --now` argv, the unit's bytes beside the config, the
+# `loginctl` linger reads and apply, and a second run whose every line is `satisfied` while neither apply command runs
+# again; `case_install_group`: an account outside the daemon's group refused before anything is written, with exactly
+# one `usermod` printed; `case_root_refusal`: the shipped artifact run as uid 0 in a container made from its own bytes,
+# answering the one sentence), the service and the keys a deploy writes in a case of their own
+# (`case_server_service`: the unit's bytes, the VAPID pair, the printed commands
 # that are root's and `doctor`'s `perms` arms), the three service commands (`case_status`: one line per fact, with
 # the uptime read from the endpoint the boot answers; `case_logs`: the journald child's argv through a stand-in and a
 # session's log printed byte for byte; `case_uninstall`: the unit and the two proxies gone, the data kept, a second
@@ -184,6 +190,8 @@ extra_pid=""
 relay_pid=""
 # The second machine a case runs. Its own pid, for `start_peer`'s reason.
 peer_pid=""
+# The image `case_root_refusal` imports, so a `fail` between the import and its removal does not leave a tag behind.
+root_refusal_image=""
 
 cleanup() {
   local status=$?
@@ -250,6 +258,12 @@ cleanup() {
   for image_container in $(docker ps -aq --filter 'name=hs_images_' --filter 'name=hs_egress' --filter 'name=hs_key' 2>/dev/null || true); do
     docker rm --force "$image_container" >/dev/null 2>&1 || true
   done
+  # `case_root_refusal`'s imported image, for the same reason one level up: a `fail` between its import and its own
+  # removal would otherwise leave a tag behind for a run that failed somewhere else entirely.
+  if [ -n "$root_refusal_image" ]; then
+    docker image rm -f "$root_refusal_image" >/dev/null 2>&1 || true
+    root_refusal_image=""
+  fi
   # shellcheck disable=SC2086 # deliberate word splitting: each id is one word, and an empty list is no words.
   if [ "$status" -ne 0 ] || [ "$keep" -eq 1 ]; then
     printf 'work dir kept: %s\n' "$WORK" >&2
@@ -608,6 +622,9 @@ serve_cases=(
   case_rollback
   case_releases
   case_server_deploy
+  case_install
+  case_install_group
+  case_root_refusal
   case_server_service
   case_deploy_ssh
   case_status
@@ -10286,13 +10303,9 @@ done
 # The host.
 shift
 [ "$#" -gt 0 ] || exit 255
-# The run itself is `sudo -n -u holosmith <binary> server deploy …` (ADR-0086 D2: the deploy that writes a root is
-# the service user's, so the remote run is one `sudo -u` and not the ssh login). A gate has no service user, no
-# sudoers line and no password to give, so the stand-in drops that prefix and runs the words after it — which are the
-# same words this case asserts on.
-if [ "$#" -ge 4 ] && [ "$1" = "sudo" ] && [ "$2" = "-n" ] && [ "$3" = "-u" ]; then
-  shift 4
-fi
+# The run itself is `<copied binary> server deploy …`, as the ssh login's own account: a machine is the operator's
+# own, so there is no account to become and no `sudo` between the login and the deploy (ADR-0088). The stand-in runs
+# the words exactly as they arrive, which are the same words this case asserts on.
 exec sh -c "$*"
 SHIM
   chmod 0755 "$dir/ssh"
@@ -12631,7 +12644,7 @@ AGAIN
     fail "$name/again/tree" "the second run changed the tree: $(diff "$WORK/$name.tree1" "$WORK/$name.tree2" 2>&1 | head -5)"
   assertions=$((assertions + 1))
   cmp -s "$WORK/$name.config1" "$WORK/config-deploy-online.toml" ||
-    fail "$name/again/config" "the second run rewrote config.toml"
+    fail "$name/again/config" "the second run rewrote the config file"
   assertions=$((assertions + 1))
   cmp -s "$WORK/$name.keys1" "$root/install/data/secrets/keys.toml" ||
     fail "$name/again/keys" "the second run rewrote keys.toml, which holds every stored provider key"
@@ -12978,6 +12991,339 @@ CAT
   rm -rf "$root"
 }
 
+# `holosmith install`: the one command, measured on a machine the case owns rather than on this operator's.
+#
+# The command's own three lines turn on **which unit the account's manager loads**: `systemctl --user` resolves the
+# name `holosmith.service` in the search path of the account that runs it, and the deploy writes the unit beside
+# `--config` (ADR-0088, ADR-0091 D4). So the text is drivable two ways; this case drives the one the other cases
+# cannot.
+#
+# **A tree that is not the manager's** (the spelling every other case here uses) commands nothing, and its two lines
+# are `needs` carrying the operator's own commands — that arm is `case_server_deploy`'s and `case_uninstall`'s.
+#
+# **The account's own tree** is what `bwrap` makes safe to measure without root: a `/etc/passwd` this case wrote names
+# the home it owns, so `identity::home` (the password entry of the uid, never `$HOME`) makes `--config`'s unit path
+# equal the manager's, and `systemctl`/`loginctl` are recording stand-ins on `PATH`. Nothing on this machine's real
+# unit or linger flag is read or written, and no `sudo` is asked for. `--root` and `--config` are both passed
+# explicitly, as every case here does.
+#
+# What is measured, in one run each: the two manager commands with their argv (`daemon-reload`, `enable --now`) and
+# `loginctl show-user`/`enable-linger`, the unit's bytes and mode beside the config, the deploy's health line
+# `satisfied` because the responder answers, the control URL and next step, and then the **second**
+# run — every deploy step `satisfied`, install's own three lines `satisfied`, no `daemon-reload` and no
+# `enable-linger` run again, and the config, unit and key pair byte-identical. That is the acceptance's "re-running
+# changes nothing" at the one verb whose whole promise is one command.
+#
+# A machine without `bwrap` or `python3` prints one SKIP line: the home, not the command, is what it cannot hand over,
+# and `tests/install.rs` drives the same lines through install's own seam.
+case_install() {
+  local name=case_install root="$repo_root/target/verify-install-$$"
+  local home="$root/home" config="$root/home/.config/holosmith.toml" tree="$root/home/.local/share/holosmith"
+  local passwd="$root/passwd" shims="$root/bin" logs="$root/logs"
+  local control preview status unit holder_pid fake_uid log
+  # The guard is the harness, not the command: `bwrap` has to be able to make the namespace at all, and a machine
+  # that refuses it is a supported machine (AGENTS.md names it optional).
+  if ! command -v bwrap >/dev/null 2>&1 || ! bwrap --dev-bind / / true >/dev/null 2>&1; then
+    printf 'SKIP %s: no bwrap to hand the binary a home of its own (tests/install.rs drives the same lines)\n' "$name"
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to answer `/api/health` (tests/install.rs answers the same wait)\n' "$name"
+    return 0
+  fi
+  rm -rf "$root"
+  mkdir -p "$home/.config" "$shims" "$logs"
+  control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a second port"
+  # The uid the binary will read is procfs's, dereferenced: `identity::euid` stats `/proc/self`, which is the
+  # process's own entry and therefore the caller's uid — the same one outside the namespace. The passwd entry is keyed
+  # by that measured value rather than assumed, and a `0` here would mean the case had become the refusal rather than
+  # the install, which is the one answer it may not accept.
+  fake_uid="$(bwrap --dev-bind / / /bin/sh -c 'stat -L -c %u /proc/self')" ||
+    fail "$name/uid" "could not read the uid this namespace reports"
+  case "$fake_uid" in
+    '' | *[!0-9]*) fail "$name/uid" "the namespace's uid is not a number: $fake_uid" ;;
+  esac
+  [ "$fake_uid" != 0 ] ||
+    fail "$name/uid" "this namespace reports uid 0, which is the refusal and not the install"
+  # The account's own entry, and the overflow uid beside it: two spellings of the same home, so the lookup answers
+  # whichever entry the read lands on. The name the deploy reads is the `id` shim's, not this file's.
+  {
+    printf 'root:x:0:0:root:/root:/bin/sh\n'
+    printf 'operator:x:%s:%s::%s:/bin/sh\n' "$fake_uid" "$fake_uid" "$home"
+    printf 'nobody:x:65534:65534::%s:/bin/sh\n' "$home"
+  } >"$passwd"
+  # The machine's own answers where the deploy asks for a program, so the two manager commands below are the only
+  # children whose argv this case asserts.
+  deploy_config "$config" "$control" "$preview" "unix:///var/run/docker.sock" "pi-agent:local" "hub"
+  log="$logs/tailscale.log"
+  deploy_machine_shims "$shims" "$log" "$logs/tailscale.state"
+  cat >"$shims/systemctl" <<'SHIM'
+#!/bin/sh
+# The user manager, as a recorder: every argv is one line of the log, and `enable --now` writes the state a second
+# run reads back as `enabled`/`active` (ADR-0091's idempotence).
+printf 'systemctl %s\n' "$*" >>"$HS_SYSTEMCTL_LOG"
+case "$*" in
+  "--user is-enabled holosmith.service")
+    if [ -f "$HS_UNIT_STATE" ]; then printf 'enabled\n'; exit 0; fi
+    printf 'disabled\n'
+    exit 1
+    ;;
+  "--user is-active holosmith.service")
+    if [ -f "$HS_UNIT_STATE" ]; then printf 'active\n'; exit 0; fi
+    printf 'inactive\n'
+    exit 1
+    ;;
+  "--user daemon-reload") exit 0 ;;
+  "--user enable --now holosmith.service") : >"$HS_UNIT_STATE"; exit 0 ;;
+  *) exit 1 ;;
+esac
+SHIM
+  chmod 0755 "$shims/systemctl"
+  cat >"$shims/loginctl" <<'SHIM'
+#!/bin/sh
+# `loginctl`: the linger read and the apply, and the flag as a file — so the second run is `satisfied` for the
+# reason a real one would be.
+printf 'loginctl %s\n' "$*" >>"$HS_LOGINCTL_LOG"
+case "$*" in
+  "show-user operator --property=Linger --value")
+    if [ -f "$HS_LINGER_STATE" ]; then printf 'yes\n'; else printf 'no\n'; fi
+    exit 0
+    ;;
+  "enable-linger") : >"$HS_LINGER_STATE"; exit 0 ;;
+  *) exit 1 ;;
+esac
+SHIM
+  chmod 0755 "$shims/loginctl"
+  # One runner for both runs: the fake password database, the two recorders' paths, and this case's shims ahead of the
+  # machine's own programs (the deploy's `install`, `chmod`, `df` and `openssl` are the host's).
+  install_home() {
+    bwrap --dev-bind / / --die-with-parent --bind "$passwd" /etc/passwd \
+      --setenv PATH "$shims:$PATH" \
+      --setenv HS_SHIM_LOG "$logs/tailscale.log" \
+      --setenv HS_SHIM_STATE "$logs/tailscale.state" \
+      --setenv HS_SYSTEMCTL_LOG "$logs/systemctl.log" \
+      --setenv HS_UNIT_STATE "$logs/unit.state" \
+      --setenv HS_LOGINCTL_LOG "$logs/loginctl.log" \
+      --setenv HS_LINGER_STATE "$logs/linger.state" \
+      "$artifact" "$@"
+  }
+  # Step 6 waits for `/api/health`, and its `doctor --full` reads a held control port as the serving pass, so one
+  # responder on the config's port is what makes "this machine is serving" a measurement rather than a wait.
+  holder_pid="$(health_responder "$control")"
+  for _ in $(seq 1 100); do
+    if (exec 3<>/dev/tcp/127.0.0.1/"$control") 2>/dev/null; then break; fi
+    sleep 0.05
+  done
+
+  # ---- 1. the first run: the deploy, the two manager commands, the linger flag, the wait -----------------
+  status=0
+  install_home install --config "$config" --root "$tree" >"$root/first.out" 2>&1 || status=$?
+  check "$name/first/exit" 0 "$status"
+  # The deploy's six steps, verbatim: the two a hub has no work for are skips, and the health line is `satisfied`
+  # because the responder answers — the first-install case where it is `failed` is `tests/install.rs`'s, and it is
+  # the line this command tolerates.
+  for target in '^1\. preflight: satisfied: ' '^2\. files: changed: ' '^3\. images: skipped: ' \
+    '^4\. proxies: skipped: ' '^5\. service: changed: ' '^6\. health: satisfied: '; do
+    grep -qE "$target" "$root/first.out" ||
+      fail "$name/first/steps" "the first run does not say '$target': $(cat "$root/first.out")"
+    assertions=$((assertions + 1))
+  done
+  for target in '^install: unit: changed: ' '^install: linger: changed: ' '^install: health: satisfied: '; do
+    grep -qE "$target" "$root/first.out" ||
+      fail "$name/first/lines" "the first run does not say '$target': $(cat "$root/first.out")"
+    assertions=$((assertions + 1))
+  done
+  grep -qx "install: url: http://localhost:$control" "$root/first.out" ||
+    fail "$name/first/url" "the run did not print the control URL it earned: $(cat "$root/first.out")"
+  assertions=$((assertions + 1))
+  grep -qx 'install: next: holosmith hub host add <name> <url>' "$root/first.out" ||
+    fail "$name/first/next" "the run did not print the next step its half earns: $(cat "$root/first.out")"
+  assertions=$((assertions + 1))
+  # The two manager commands and the linger flag, as argv: the reads first, then the apply, in the order the command
+  # does them.
+  check "$name/first/systemctl" \
+    "$(printf '%s\n' 'systemctl --user is-enabled holosmith.service' \
+      'systemctl --user is-active holosmith.service' \
+      'systemctl --user daemon-reload' \
+      'systemctl --user enable --now holosmith.service')" \
+    "$(cat "$logs/systemctl.log")"
+  check "$name/first/loginctl" \
+    "$(printf '%s\n' 'loginctl show-user operator --property=Linger --value' 'loginctl enable-linger')" \
+    "$(cat "$logs/loginctl.log")"
+  # The unit is the user manager's file beside the config, 0644, enabled by `default.target`, and it names the
+  # binary that wrote it and the config this run installed — and it carries no `User=`/`Group=` or a mount directive,
+  # because a user unit runs as its owner and any one of them would make systemd enable `PrivateUsers=` (ADR-0088 D3).
+  unit="$(unit_for "$config")"
+  [ -f "$unit" ] || fail "$name/unit" "the run wrote no unit at $unit: $(cat "$root/first.out")"
+  assertions=$((assertions + 1))
+  check "$name/unit/mode" 644 "$(stat -c '%a' "$unit")"
+  for target in 'WantedBy=default.target' "ExecStartPre=$artifact doctor --quick" \
+    "ExecStart=$artifact serve --config $config"; do
+    grep -qxF "$target" "$unit" || fail "$name/unit/line" "the unit does not carry '$target': $(cat "$unit")"
+    assertions=$((assertions + 1))
+  done
+  for absent in '^User=' '^Group=' '^PrivateTmp=' '^ProtectSystem=' '^ProtectHome=' '^ReadWritePaths=' '^PrivateUsers='; do
+    if grep -q "$absent" "$unit"; then
+      fail "$name/unit/absent" "the unit carries '$absent', which a user unit cannot have: $(cat "$unit")"
+    fi
+    assertions=$((assertions + 1))
+  done
+  # The tree the issue's modes are about: one root at 0700, the data root and secrets, and the two files at 0600.
+  check "$name/tree/root" 700 "$(stat -c '%a' "$tree" 2>/dev/null || echo absent)"
+  check "$name/tree/data" 755 "$(stat -c '%a' "$tree/data" 2>/dev/null || echo absent)"
+  check "$name/tree/secrets" 700 "$(stat -c '%a' "$tree/data/secrets" 2>/dev/null || echo absent)"
+  check "$name/tree/keys" 600 "$(stat -c '%a' "$tree/data/secrets/keys.toml" 2>/dev/null || echo absent)"
+  check "$name/tree/vapid" 600 "$(stat -c '%a' "$tree/data/secrets/vapid.toml" 2>/dev/null || echo absent)"
+  check "$name/config/mode" 644 "$(stat -c '%a' "$config" 2>/dev/null || echo absent)"
+
+  # ---- 2. the second run: satisfied, and no command applied twice -----------------------------------------
+  cp "$config" "$root/config1"
+  cp "$unit" "$root/unit1"
+  cp "$tree/data/secrets/keys.toml" "$root/keys1"
+  cp "$tree/data/secrets/vapid.toml" "$root/vapid1"
+  : >"$logs/systemctl.log"
+  : >"$logs/loginctl.log"
+  status=0
+  install_home install --config "$config" --root "$tree" >"$root/second.out" 2>&1 || status=$?
+  check "$name/second/exit" 0 "$status"
+  for target in '^1\. preflight: satisfied: ' '^2\. files: satisfied: ' '^3\. images: skipped: ' \
+    '^4\. proxies: skipped: ' '^5\. service: satisfied: ' '^6\. health: satisfied: '; do
+    grep -qE "$target" "$root/second.out" ||
+      fail "$name/second/steps" "the second run does not say '$target': $(cat "$root/second.out")"
+    assertions=$((assertions + 1))
+  done
+  for target in '^install: unit: satisfied: ' '^install: linger: satisfied: ' '^install: health: satisfied: '; do
+    grep -qE "$target" "$root/second.out" ||
+      fail "$name/second/lines" "the second run does not say '$target': $(cat "$root/second.out")"
+    assertions=$((assertions + 1))
+  done
+  # The second run reads and does not apply: two `is-` queries and one linger read, and neither apply command.
+  check "$name/second/systemctl" \
+    "$(printf '%s\n' 'systemctl --user is-enabled holosmith.service' 'systemctl --user is-active holosmith.service')" \
+    "$(cat "$logs/systemctl.log")"
+  check "$name/second/loginctl" 'loginctl show-user operator --property=Linger --value' \
+    "$(cat "$logs/loginctl.log")"
+  # A re-run changes none of the four files: the config the deploy wrote, the unit, and the two it must never rewrite.
+  cmp -s "$root/config1" "$config" || fail "$name/second/config" "the second run rewrote the config"
+  assertions=$((assertions + 1))
+  cmp -s "$root/unit1" "$unit" || fail "$name/second/unit" "the second run rewrote the unit"
+  assertions=$((assertions + 1))
+  cmp -s "$root/keys1" "$tree/data/secrets/keys.toml" ||
+    fail "$name/second/keys" "the second run rewrote keys.toml, which holds every stored provider key"
+  assertions=$((assertions + 1))
+  cmp -s "$root/vapid1" "$tree/data/secrets/vapid.toml" ||
+    fail "$name/second/vapid" "the second run rewrote the VAPID pair, which invalidates every push subscription"
+  assertions=$((assertions + 1))
+
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  holder_pid=""
+  unset HS_SHIM_LOG HS_SHIM_STATE HS_SYSTEMCTL_LOG HS_UNIT_STATE HS_LOGINCTL_LOG HS_LINGER_STATE
+  unset -f install_home
+  rm -rf "$root"
+}
+
+# The account that cannot open the daemon's socket: `install` refuses before anything is written, and the refusal is
+# one sentence plus the **one** command that fixes it — `usermod`, which is root's and which the run prints rather than
+# escalating (ADR-0091 D1).
+#
+# No daemon, no systemd and no image: the group question is `id -un`/`id -nG`, so a stand-in answering for an account
+# outside `docker` is the whole fixture, and a `unix://` endpoint is what makes the question be asked at all. The
+# `--config`/`--root` tree is under `target/`, and "nothing has been written" is asserted rather than read out of the
+# sentence: no root, no rewritten config, no step line.
+case_install_group() {
+  local name=case_install_group root="$repo_root/target/verify-install-group-$$"
+  local shims="$root/bin" config="$WORK/config-install-group.toml" status line
+  rm -rf "$root"
+  mkdir -p "$shims"
+  cat >"$shims/id" <<'SHIM'
+#!/bin/sh
+# The account running the install, outside the daemon's group.
+case "${1:-}" in
+  -un) printf 'operator\n' ;;
+  -nG) printf 'operator users\n' ;;
+  *) exit 1 ;;
+esac
+SHIM
+  chmod 0755 "$shims/id"
+  # A server, because the question is the server half's: a hub opens no socket, and a `tcp:` daemon is entered through
+  # nobody's group. Port 0 asks the kernel; the preview listener differs so the two origins do.
+  deploy_config "$config" 0 1 "unix:///var/run/docker.sock" "pi-agent:local" "server"
+  cp "$config" "$root/config-before"
+  status=0
+  PATH="$shims:$PATH" "$artifact" install --config "$config" --root "$root/install" \
+    >"$root/out" 2>"$root/err" || status=$?
+  check "$name/exit" 1 "$status"
+  [ ! -s "$root/out" ] || fail "$name/stdout" "a refusal printed a report: $(cat "$root/out")"
+  assertions=$((assertions + 1))
+  # Exactly one printed command, and it is the last line — the thing to paste, unadorned. It spells `$USER` where the
+  # deploy's own sentence spells the account's name (ADR-0091 D1): this line is for the shell the operator is sitting
+  # in, and the two spellings never meet because this refusal happens before the deploy that prints the other.
+  check "$name/command/count" 1 "$(grep -c '^sudo ' "$root/err" || true)"
+  check "$name/command" 'sudo usermod -aG docker $USER' "$(tail -1 "$root/err")"
+  # The sentence says why, so the command is not one out of nowhere, and says nothing was written.
+  line="$(head -1 "$root/err")"
+  for target in 'not in the docker group' 'root:docker' '0660' 'nothing has been written yet'; do
+    case "$line" in
+      *"$target"*) assertions=$((assertions + 1)) ;;
+      *) fail "$name/sentence" "the refusal does not carry '$target': $line" ;;
+    esac
+  done
+  [ ! -e "$root/install" ] || fail "$name/tree" "a refused install wrote $root/install"
+  assertions=$((assertions + 1))
+  cmp -s "$root/config-before" "$config" || fail "$name/config" "a refused install rewrote the config"
+  assertions=$((assertions + 1))
+  if grep -qE '^[1-6]\. ' "$root/err"; then
+    fail "$name/steps" "a refused install ran the deploy: $(cat "$root/err")"
+  fi
+  assertions=$((assertions + 1))
+  rm -rf "$root"
+}
+
+# A root invocation is refused with one sentence, before any verb or flag is read (ADR-0090). The gate runs as the
+# operator and may not become root, so the container is what supplies uid 0: a root filesystem imported from this
+# case's own directory holds the shipped artifact and nothing else, and the container runs it as root — the one uid
+# the decision is about — on the same kernel and the same procfs the guard reads. A static artifact needs no image,
+# no base and no network, and the daemon is the only thing this case needs that the gate does not already have.
+#
+# What it does **not** measure is written where it belongs: `tests/root_refusal.rs` covers the decision for every verb
+# clap knows, and the host run below is the complement this case can state — the same binary as this account is not
+# refused.
+case_root_refusal() {
+  local name=case_root_refusal root="$repo_root/target/verify-root-refusal-$$" status answer
+  if ! command -v docker >/dev/null 2>&1; then
+    printf 'SKIP %s: no docker CLI (tests/root_refusal.rs covers the decision for every verb)\n' "$name"
+    return 0
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    printf 'SKIP %s: no Docker daemon answers (tests/root_refusal.rs covers the decision for every verb)\n' "$name"
+    return 0
+  fi
+  rm -rf "$root"
+  mkdir -p "$root/rootfs"
+  install -m 0755 "$artifact" "$root/rootfs/holosmith" ||
+    fail "$name/copy" "could not put the artifact in the image root"
+  tar -C "$root/rootfs" -cf "$root/rootfs.tar" . ||
+    fail "$name/tar" "could not make the image root"
+  root_refusal_image="holosmith-gate-root-refusal:$$"
+  docker image rm -f "$root_refusal_image" >/dev/null 2>&1 || true
+  docker import - "$root_refusal_image" <"$root/rootfs.tar" >/dev/null 2>"$root/import.err" ||
+    fail "$name/import" "docker could not import the image root: $(cat "$root/import.err")"
+  status=0
+  answer="$(docker run --rm "$root_refusal_image" /holosmith version 2>"$root/err")" || status=$?
+  check "$name/exit" 1 "$status"
+  check "$name/stdout" "" "$answer"
+  check "$name/sentence" "this runs as you, drop the sudo: holosmith version" "$(cat "$root/err")"
+  # The other half: the same binary, and an ordinary account, gets its version rather than the sentence.
+  status=0
+  "$artifact" version >/dev/null 2>&1 || status=$?
+  check "$name/ordinary" 0 "$status"
+  docker image rm -f "$root_refusal_image" >/dev/null 2>&1 || true
+  root_refusal_image=""
+  rm -rf "$root"
+}
+
 # the machine steps from the shipped artifact: the VAPID pair and the unit `server deploy` renders, the two
 # `systemctl --user` commands that enable it (as words on the step's line), and the `/api/health` wait that turns an
 # install into "this machine is serving" — with `doctor`'s `perms` as the finding that makes a wrong mode a
@@ -12997,8 +13343,8 @@ CAT
 #   ADR-0086). It needs the daemon and an image.
 #
 # What neither half can measure is recorded where it belongs: nothing here asks systemd to load the unit (there is no
-# systemd on this machine), the origins are the operator's own step now, and the service user's commands and the
-# `systemctl` pair are printed rather than run — `tests/deploy.rs`'s arms are what measure the words.
+# systemd on this machine), the origins are the operator's own step now, and the two `systemctl --user` commands are
+# printed rather than run — `tests/deploy.rs`'s arms are what measure the words.
 # `AGENTS.md` is the by-hand procedure for the parts only a real host can show.
 case_server_service() {
   local name=case_server_service root="$repo_root/target/verify-service-$$"
@@ -13036,10 +13382,9 @@ case_server_service() {
     log="$WORK/$name.tailscale.log"
     state="$WORK/$name.tailscale.state"
     deploy_machine_shims "$shims" "$log" "$state"
-    # `--root "$root"` is the tree this case made: `doctor`'s four install paths are the root's (ADR-0086 D1),
-    # so a run given only the file would answer about this machine's `<root>`, which on a machine that has
-    # deployed for real is a directory owned by the service user. The config still carries `data_root`, because
-    # `serve` and the dry run below read the file.
+    # `--root "$root"` is the tree this case made: `doctor`'s install paths are the root's (ADR-0088 D1), so a
+    # run given only the file would answer about this machine's own tree. The config still carries `data_root`,
+    # because `serve` and the dry run below read the file.
     deploy_config "$WORK/config-service-doctor.toml" "$control" "$preview" "unix://$root/docker.sock" "$image"
     printf 'data_root = "%s"\n' "$root/data" >>"$WORK/config-service-doctor.toml"
 

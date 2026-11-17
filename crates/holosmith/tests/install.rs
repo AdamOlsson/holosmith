@@ -25,7 +25,8 @@
 //! - **an install that does not answer fails** — `a_health_poll_that_never_answers_fails_and_names_the_journal`.
 //!
 //! So `run`'s own three lines — print the report, print `resume` or the URL and the next step, return the code — are
-//! the untested glue, and they are the whole of what a green run here leaves unmeasured.
+//! the glue no case here drives: `scripts/verify.sh`'s `case_install` runs the verb end to end under `bwrap` with a
+//! home and a user manager of its own, which is where those lines are measured.
 //!
 //! Driven for real: `install`/`chmod` and `openssl` over the `--root` tree (a recorder would prove nothing about the
 //! modes step 2 writes), and a real socket answering `/api/health` (the wait is the install's own verdict).
