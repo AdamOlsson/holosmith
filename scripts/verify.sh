@@ -10831,8 +10831,9 @@ case_disk_quota() {
 #   agent     inside the image: `pi --version` is the pin, git answers, both toolchains are installed, the uid is
 #             1000 (ADR-0035), and this binary runs `container snapshot --help` — the helper subcommand a session
 #             needs and the one thing a hand-built `pi-agent:local` does not have.
-#   proxy     the proxy image serves *both* proxies: `hs_egress` refuses a host that is not on its allow-list and
-#             `hs_key` refuses a provider path it does not know. Neither question needs TLS or the internet.
+#   proxy     the proxy image serves *both* proxies and runs as a user that is not root: `hs_egress` refuses a host
+#             that is not on its allow-list and `hs_key` refuses a provider path it does not know. Neither question
+#             needs TLS or the internet.
 #   again     the same deploy again says `satisfied` and leaves both image ids unchanged — the acceptance's "a
 #             second run changes nothing", for the step that is the most expensive to get wrong.
 #
@@ -10970,6 +10971,16 @@ case_server_images() {
     "$agent" container snapshot --help >/dev/null 2>&1 ||
     fail "$name/agent/snapshot" 'this binary: `container snapshot --help` does not run in the agent image'
   assertions=$((assertions + 1))
+  # Nor is the proxy image's own user root: a root invocation is refused before dispatch (ADR-0090), so an image
+  # whose user is uid 0 is a proxy that cannot start at all. The egress container is the one that relies on the
+  # image's own user — it passes no `--user` — which is what makes this the check that keeps that path honest.
+  image_uid="$(timeout 120 docker run --rm --network none --entrypoint id "$proxy" -u 2>&1)"
+  case "$image_uid" in
+    '' | *[!0-9]*) fail "$name/proxy/uid" "the proxy image's uid could not be read: $image_uid" ;;
+  esac
+  [ "$image_uid" != "0" ] ||
+    fail "$name/proxy/root" "the proxy image runs as root, so the egress proxy is refused at its first line"
+  assertions=$((assertions + 1))
 
   # The proxy image serves both proxies, from the one entrypoint and with nothing of the host's mounted.
   docker network inspect egress >/dev/null 2>&1 ||
@@ -10981,7 +10992,12 @@ case_server_images() {
     proxy egress --listen 0.0.0.0:3128 --allow example.com >/dev/null 2>&1 ||
     fail "$name/egress/run" "the proxy image did not start an egress proxy"
   assertions=$((assertions + 1))
+  # The key proxy names the identity its mount requires: this case's key file is 0600 and stays 0600, and
+  # `--cap-drop ALL` takes `DAC_OVERRIDE` with everything else, so uid 0 inside the container cannot read it and
+  # loops on `--restart` — the same rule production follows by taking the owner from the store (`KeyProxy::run_args`).
+  # The egress run above passes no `--user` on purpose: it is the one that starts as the image's own user.
   timeout 60 docker run -d --name "hs_images_key_$$" --network egress \
+    --user "$(stat -c %u:%g "$root/keys.toml")" \
     -v "$root/keys.toml:$root/keys.toml:ro" \
     --entrypoint /usr/local/bin/holosmith "$proxy" \
     proxy key --listen 0.0.0.0:8080 --keys "$root/keys.toml" >/dev/null 2>&1 ||

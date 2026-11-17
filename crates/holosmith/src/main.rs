@@ -5,8 +5,30 @@ use clap::Parser;
 use holosmith::cli::{Cli, Cmd, ContainerAction, HubAction, ProxyAction, ServerAction};
 use holosmith::commands;
 use holosmith::config::Overrides;
+use holosmith::identity;
+
+/// What was typed: every argument after the program name, joined by single spaces (ADR-0090).
+///
+/// It is what a refusal carries, because the sentence is about the command rather than about the mistake: a
+/// `sudo holosmith status` with no `holosmith status` in the answer leaves the operator to retype from memory. No
+/// verb, subcommand or flag is read here — the words are passed through, so the refusal cannot depend on one. They
+/// are read as `OsString`s and made lossy here, so a path that is not UTF-8 reaches this sentence rather than
+/// panicking on it.
+fn typed() -> String {
+    std::env::args_os()
+        .skip(1)
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 fn main() -> ExitCode {
+    // Before `Cli::parse`, so no verb and no flag can be read first: uid 0 is refused whatever was typed, which is
+    // what keeps a verb from acquiring an exemption (ADR-0090).
+    if let Some(refusal) = identity::euid().and_then(|uid| identity::root_refusal(uid, &typed())) {
+        eprintln!("{refusal}");
+        return ExitCode::FAILURE;
+    }
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Serve {

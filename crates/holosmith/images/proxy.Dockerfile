@@ -32,4 +32,11 @@ LABEL org.holosmith.version="${HOLOSMITH_VERSION}" \
       org.holosmith.pi-version="${HOLOSMITH_PI_VERSION}" \
       org.holosmith.binary-sha256="${HOLOSMITH_BINARY_SHA256}"
 
+# The image's own user is not root. The egress proxy mounts nothing and writes nothing, so the image's user is the
+# whole answer for it, and a proxy on a machine whose state is the operator's own is the last container that should
+# be uid 0. Numeric rather than `nobody` because the number is what Docker, `--user` and `id -u` speak. The key
+# proxy passes its own `--user` — the key store's owner — and that flag overrides this line, which is what a 0600
+# key store and a `--cap-drop ALL` container need.
+USER 65534:65534
+
 ENTRYPOINT ["/usr/local/bin/holosmith"]
