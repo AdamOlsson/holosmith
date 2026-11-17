@@ -13274,7 +13274,7 @@ SHIM
 case_install_terse() {
   local name=case_install_terse root="$repo_root/target/verify-install-terse-$$"
   local home="$root/home" config="$root/home/.config/holosmith.toml" tree="$root/home/.local/share/holosmith"
-  local passwd="$root/passwd" shims="$root/bin" logs="$root/logs" expected
+  local passwd="$root/passwd" shims="$root/bin" logs="$root/logs" expected="$root/expected"
   local control preview status fake_uid label holder_pid=""
   if ! command -v bwrap >/dev/null 2>&1 || ! bwrap --dev-bind / / true >/dev/null 2>&1; then
     printf 'SKIP %s: no bwrap to hand the binary a home of its own (tests/install.rs renders the same bytes)\n' "$name"
