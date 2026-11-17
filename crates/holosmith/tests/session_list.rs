@@ -67,24 +67,44 @@ fn listed(response: &Response) -> serde_json::Value {
     serde_json::from_str(&response.body).expect("the list answers JSON")
 }
 
-/// A default config with the machine's network default turned on, which is the one setting the
-/// list carries.
-fn network_on() -> Config {
+/// A default config whose data root is this test's own directory.
+///
+/// The list names the providers whose keys this machine holds (ADR-0093), so it reads
+/// `<data_root>/secrets/keys.toml`. A test left on the default data root reads the machine running it: a developer
+/// with a key stored would see it in these assertions and CI would not, which is a test that cannot fail where it
+/// is written.
+fn config_in(dir: &TempDir) -> Config {
     Config {
-        network_default: true,
+        data_root: dir.path().join("data"),
         ..Config::default()
     }
+}
+
+/// A config with the machine's network default turned on, which is the one setting the list carries.
+fn network_on(dir: &TempDir) -> Config {
+    Config {
+        network_default: true,
+        ..config_in(dir)
+    }
+}
+
+/// A key store at this test's data root, in the shape `holosmith key set` writes.
+fn write_keys(dir: &TempDir, text: &str) {
+    let secrets = dir.file("data/secrets");
+    std::fs::create_dir_all(&secrets).expect("the secrets directory is creatable");
+    std::fs::write(secrets.join("keys.toml"), text).expect("the key file is writable");
 }
 
 #[tokio::test]
 async fn an_empty_machine_answers_no_sessions_and_the_machines_default() {
     let dir = TempDir::new("session-list-empty");
-    let served = Served::start(http::router(state_in(&dir, Config::default())), GRACE).await;
+    let served = Served::start(http::router(state_in(&dir, config_in(&dir))), GRACE).await;
     let response = fetch(served.addr, "/api/sessions").await;
     let body = listed(&response);
     assert_eq!(
-        response.body, r#"{"sessions":[],"network_default":false,"stopped_ttl_days":7}"#,
-        "the empty list is one object with three keys"
+        response.body,
+        r#"{"sessions":[],"network_default":false,"stopped_ttl_days":7,"providers":[],"default_provider":"opencode-go"}"#,
+        "the empty list is one object with five keys"
     );
     assert_eq!(body["sessions"].as_array().map(Vec::len), Some(0));
     served.finish().await.expect("a clean shutdown");
@@ -93,7 +113,7 @@ async fn an_empty_machine_answers_no_sessions_and_the_machines_default() {
 #[tokio::test]
 async fn a_created_session_is_listed_with_every_column_and_still_starting() {
     let dir = TempDir::new("session-list-one");
-    let served = Served::start(http::router(state_in(&dir, Config::default())), GRACE).await;
+    let served = Served::start(http::router(state_in(&dir, config_in(&dir))), GRACE).await;
     let created = create(served.addr, "list-key-1").await;
     assert_eq!(created.status, 202, "{}", created.body);
     let created: serde_json::Value =
@@ -139,7 +159,7 @@ async fn a_created_session_is_listed_with_every_column_and_still_starting() {
 #[tokio::test]
 async fn the_lists_network_default_is_the_configs() {
     let dir = TempDir::new("session-list-network");
-    let served = Served::start(http::router(state_in(&dir, network_on())), GRACE).await;
+    let served = Served::start(http::router(state_in(&dir, network_on(&dir))), GRACE).await;
     let response = fetch(served.addr, "/api/sessions").await;
     let body = listed(&response);
     assert_eq!(
@@ -160,7 +180,7 @@ async fn the_lists_retention_window_is_the_configs() {
     let dir = TempDir::new("session-list-ttl");
     let config = Config {
         stopped_ttl_days: 14,
-        ..Config::default()
+        ..config_in(&dir)
     };
     let served = Served::start(http::router(state_in(&dir, config)), GRACE).await;
     let response = fetch(served.addr, "/api/sessions").await;
@@ -171,6 +191,53 @@ async fn the_lists_retention_window_is_the_configs() {
         "the window is the machine's: {}",
         response.body
     );
+    served.finish().await.expect("a clean shutdown");
+}
+
+#[tokio::test]
+async fn the_list_names_the_providers_this_machine_has_a_key_for() {
+    // The form needs to know which providers it may prefill (ADR-0093), and the ids are all it may be told. The
+    // order is the provider table's, so this file lists `anthropic` first and the answer still opens with the
+    // default row: a client that takes "the first provider this machine has" gets a stable id, not a name sort.
+    let dir = TempDir::new("session-list-keys");
+    write_keys(
+        &dir,
+        "[providers]\nanthropic = \"sk-ant-not-a-real-key\"\nopencode-go = \"not-a-real-key-either\"\n\
+         [sessions]\n",
+    );
+    let served = Served::start(http::router(state_in(&dir, config_in(&dir))), GRACE).await;
+    let response = fetch(served.addr, "/api/sessions").await;
+    let body = listed(&response);
+    assert_eq!(
+        body["providers"],
+        serde_json::json!(["opencode-go", "anthropic"]),
+        "the ids this machine has a key for, in the table's order: {}",
+        response.body
+    );
+    assert_eq!(body["default_provider"], "opencode-go", "{}", response.body);
+    // Ids only: no value, no length, no prefix of one. A key that reached this answer reached a browser.
+    for value in ["not-a-real-key-either", "sk-ant"] {
+        assert!(
+            !response.body.contains(value),
+            "the list leaked a key: {}",
+            response.body
+        );
+    }
+    served.finish().await.expect("a clean shutdown");
+}
+
+#[tokio::test]
+async fn a_key_store_the_machine_cannot_read_is_not_an_empty_list_of_keys() {
+    // An empty `providers` means "run `key set`", and a machine whose key file is damaged has a key: answering
+    // the list would tell the operator to store one they already hold. So the read's failure is the request's.
+    let dir = TempDir::new("session-list-keys-broken");
+    write_keys(&dir, "not a key file\n");
+    let served = Served::start(http::router(state_in(&dir, config_in(&dir))), GRACE).await;
+    let response = fetch(served.addr, "/api/sessions").await;
+    assert_eq!(response.status, 500, "{}", response.body);
+    let body: serde_json::Value =
+        serde_json::from_str(&response.body).expect("an envelope is JSON");
+    assert_eq!(body["code"], "internal", "{}", response.body);
     served.finish().await.expect("a clean shutdown");
 }
 

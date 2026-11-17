@@ -1354,6 +1354,43 @@ export function startLabel(host: string): string {
 export const NO_CREATE_TARGET =
   "no machine is reachable: register one on the Computers screen, or start a session on the machine itself";
 
+// What this machine's session list says about keys, and the two rules the new-session form draws from it.
+//
+// The ids only, which is the API's rule as much as this type's: a key never leaves the machine it is stored on, and a
+// length or a prefix of one is a key (ADR-0093). `providers` is in the provider table's order, and `default_provider`
+// is the table's first row — the same id `key set`'s refusal names first, sent by the machine so the page never
+// spells it.
+export type KeyFacts = { providers: string[]; default_provider: string };
+
+// The one model id the page names. The default provider serves this one (it is the model this build's credential
+// path was measured with, ADR-0050), so the example on a fresh machine is a model that machine can actually answer
+// with: one constant rather than a table of every provider's catalog, which nothing here could keep current.
+export const EXAMPLE_MODEL = "claude-haiku-5-5";
+
+// The model field's starting value: `<provider>/<model>`, never a bare id.
+//
+// A bare id is resolved across every provider that has a key, and pi's own resolver answers several candidates with
+// `status: "ambiguous"` rather than a model — so the id the operator starts from names its provider (ADR-0093). The
+// provider is the machine's default when this machine has a key for it, else the first one it does have (the list is
+// in table order, so that answer is stable), else the default again: a machine with no key starts the field at the
+// provider the sentence below tells the operator to store one for, so the two agree.
+export function modelPrefill(keys: KeyFacts): string {
+  const provider = keys.providers.includes(keys.default_provider)
+    ? keys.default_provider
+    : (keys.providers[0] ?? keys.default_provider);
+  return `${provider}/${EXAMPLE_MODEL}`;
+}
+
+// What the form says beside itself on a machine with no provider key: the command, with the machine's own default
+// provider id. A session created here would start and could not answer, and the key proxy's own sentence about it is
+// a `503` the agent's next model call produces — this is the same fact before the session exists, which is the only
+// moment it can still be acted on.
+export function noKeyNotice(keys: KeyFacts): string | null {
+  return keys.providers.length === 0
+    ? `no provider key is stored on this machine; run \`holosmith key set ${keys.default_provider}\``
+    : null;
+}
+
 // What a session's page says under the sentence when the machine that owns it did not answer at all. The
 // four composer actions, the delete and the Changes sheet are all requests to that a machine, so the page offers
 // none of them: this sentence is why there is nothing else on the screen.

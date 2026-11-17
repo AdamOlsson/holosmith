@@ -15,8 +15,8 @@ ever read.
 
 - **A uid-0 process is readable as one, and the refusal is one line.** `bwrap --unshare-all --uid 0 --gid 0`
   gives a process whose `/proc/self` reads `0`; this build there prints `this runs as you, drop the sudo: holosmith
-  …` on stderr, nothing on stdout, and exits 1 — for `status`, `server deploy --root /x`, `key set anthropic`, a bare
-  invocation and `--help` alike.
+  …` on stderr, nothing on stdout, and exits 1 — for `status`, `server deploy --root /x`, `key set opencode-go`,
+  a bare invocation and `--help` alike.
 - **The proxy image's own user was root, and the egress proxy names no `--user`.** `docker run --entrypoint id <proxy>
   -u` read `0`; with the `USER` line below it reads `65534`. A `0600` file owned by the operator is `Permission
   denied` to that user under `--cap-drop ALL`, and readable with `--user $(id -u):$(id -g)`.

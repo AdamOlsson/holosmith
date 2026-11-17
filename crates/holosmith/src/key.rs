@@ -62,7 +62,24 @@ pub enum Auth {
 ///
 /// The list is deliberately small and explicit. A provider that is missing is a `key set` refusal with a
 /// sentence naming what is supported, not a generic proxy that guesses a host.
+///
+/// **The first row is the machine's default provider** ([`default_provider`]): the id every operator-facing
+/// example names, the one the refusal lists first, and the one the new-session form prefills on a machine with
+/// no key. `opencode-go` is that row because it is the provider this build's credential path was measured with
+/// (ADR-0050, ADR-0093), so the first run asks for a key the repository has actually used. The rows are matched
+/// by id ([`provider`]), so the order matters only to the sentences that enumerate them.
 pub const PROVIDERS: &[Provider] = &[
+    // opencode.ai's Go gateway serves two API shapes under one host, and a row is one (host, path, auth)
+    // triple — so this row is the anthropic-messages shape, which is what pi's `claude-haiku-5-5` (the model
+    //  verified V3 with) speaks. The openai-completions shape would be a second row,
+    // `opencode-go-openai`, with `/inference/go/openai/v1` and `Bearer`; ADR-0050 says why that is a row rather
+    // than a per-request choice.
+    Provider {
+        id: "opencode-go",
+        host: "opencode.ai",
+        base_path: "/inference/go/anthropic",
+        auth: Auth::XApiKey,
+    },
     Provider {
         id: "anthropic",
         host: "api.anthropic.com",
@@ -129,22 +146,20 @@ pub const PROVIDERS: &[Provider] = &[
         base_path: "/v1",
         auth: Auth::Bearer,
     },
-    // opencode.ai's Go gateway serves two API shapes under one host, and a row is one (host, path, auth)
-    // triple — so this row is the anthropic-messages shape, which is what pi's `claude-haiku-5-5` (the model
-    //  verified V3 with) speaks. The openai-completions shape would be a second row,
-    // `opencode-go-openai`, with `/inference/go/openai/v1` and `Bearer`; ADR-0050 says why that is a row rather
-    // than a per-request choice.
-    Provider {
-        id: "opencode-go",
-        host: "opencode.ai",
-        base_path: "/inference/go/anthropic",
-        auth: Auth::XApiKey,
-    },
 ];
 
 /// The provider row `id` names, if this build has one.
 pub fn provider(id: &str) -> Option<&'static Provider> {
     PROVIDERS.iter().find(|provider| provider.id == id)
+}
+
+/// The machine's default provider: [`PROVIDERS`]' first row, and the one spelling of that id.
+///
+/// Four sentences name it — `key set`'s refusal, the session list the app reads, the form's model example and the
+/// line a machine with no key draws — so the choice lives in the table's order and nowhere else. The index is on a
+/// literal table with rows in it, and the test below pins which id is first.
+pub fn default_provider() -> &'static str {
+    PROVIDERS[0].id
 }
 
 /// The provider ids, in table order, for a refusal's sentence and the CLI's help.
@@ -643,5 +658,39 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(kept, 0o700, "the store reset a mode it did not choose");
+    }
+
+    /// The table's first row is the machine's default provider, and the sentence that lists the table opens with it.
+    ///
+    /// The order is load-bearing (ADR-0093): the app prefills its model with this id, a machine with no key is told
+    /// to store a key for it, and `key set bogus` names it before the other eleven. Two spellings of "the default"
+    /// would be a release where the form and the refusal disagree.
+    ///
+    #[test]
+    fn the_first_row_is_the_default_provider_and_the_refusal_opens_with_it() {
+        assert_eq!(default_provider(), "opencode-go");
+        assert_eq!(
+            provider_ids().first().copied(),
+            Some(default_provider()),
+            "the default provider is not the first id a refusal names"
+        );
+        assert!(
+            provider(default_provider()).is_some(),
+            "the default provider is not a row this build forwards to"
+        );
+
+        let scratch = Scratch::new("default-provider");
+        let refusal = Store::from_data_root(&scratch.0)
+            .set_provider("bogus", "sk-bogus")
+            .expect_err("an unknown provider is refused")
+            .to_string();
+        assert!(
+            refusal.contains(&format!("knows: {}, ", default_provider())),
+            "the refusal does not open with the default provider: {refusal}"
+        );
+        assert!(
+            refusal.ends_with(&provider_ids().join(", ")),
+            "the refusal does not name the whole table: {refusal}"
+        );
     }
 }

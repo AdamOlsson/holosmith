@@ -11,7 +11,7 @@ install` on a `role = "hub"` config asks neither Docker nor git question.
 | Linux with systemd | `holosmith install` enables `holosmith.service` in your user manager, and linger is what starts it at boot |
 | Docker Engine | every session is a container on its own `--internal` network, with two proxies beside it |
 | git 2.38 or newer | a session is a worktree plus an `agent/<id>` branch; merges use `git merge-tree --write-tree` |
-| a provider key | `anthropic`, `openai`, `openrouter` and nine more — a name it does not know is refused with the full list |
+| a provider key | `opencode-go` (the default), `anthropic`, `openai` and nine more — a name it does not know is refused with the full list |
 | free space | `min_free_gb` (default **20** GB) on the data root: checked before a boot and before a create |
 | openssl | the deploy generates the Web Push key pair with it, and the notification sender uses it |
 

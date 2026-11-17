@@ -12,7 +12,7 @@ ones a later reader would otherwise undo.
 
 ```toml
 [providers]
-anthropic = "sk-ant-…"
+opencode-go = "sk-…"
 
 [sessions]
 0123456789abcdef = "hs-dummy-…"

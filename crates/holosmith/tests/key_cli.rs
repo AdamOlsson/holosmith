@@ -133,10 +133,20 @@ fn set_refuses_an_unknown_provider_and_an_empty_key() {
         Some("sk-x\n"),
     );
     assert_eq!(unknown.status.code(), Some(1));
+    let refusal = stderr_of(&unknown);
     assert!(
-        stderr_of(&unknown).contains("not a provider this build knows"),
-        "{}",
-        stderr_of(&unknown)
+        refusal.contains("not a provider this build knows"),
+        "{refusal}"
+    );
+    // The whole table, in the table's own order, and the default provider opens it (ADR-0093): the operator is told
+    // which id to store first, not the ids in whatever order a map happened to hold.
+    assert!(
+        refusal.contains(&holosmith::key::provider_ids().join(", ")),
+        "the refusal does not name every provider: {refusal}"
+    );
+    assert!(
+        refusal.contains(&format!("knows: {}, ", holosmith::key::default_provider())),
+        "the refusal does not open with the default provider: {refusal}"
     );
     let empty = holosmith(&["--config", config, "key", "set", "anthropic"], Some("\n"));
     assert_eq!(empty.status.code(), Some(1));

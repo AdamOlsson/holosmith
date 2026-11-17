@@ -60,7 +60,9 @@ import {
   lastCheckText,
   mergeBlocked,
   mergedNotice,
+  modelPrefill,
   networkText,
+  noKeyNotice,
   ownLabel,
   parseFrame,
   preselectedTarget,
@@ -93,6 +95,7 @@ import {
   type DeltaKind,
   type HistoryPage,
   type Kept,
+  type KeyFacts,
   type Merged,
   type Published,
   type SessionState,
@@ -200,13 +203,18 @@ function newKey(): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-// The list's body: the rows and the machine setting the checkbox starts at (ADR-0017).
+// The list's body: the rows and the machine settings the screen starts from (ADR-0017).
 type SessionList = {
   sessions: Session[];
   network_default: boolean;
   // The machine's stopped-session window in days: the row carries `stopped_at`, this carries the
   // number, and the page adds them. One clock — the browser's — draws the countdown.
   stopped_ttl_days: number;
+  // The providers this machine has a key for, in the provider table's order (`KeyFacts`), and which id
+  // is the table's first row. Ids only, never a value: the form's model example and its no-key sentence are
+  // both built from these two, so the page spells neither.
+  providers: string[];
+  default_provider: string;
 };
 
 // The payload of a `session.status` event (ADR-0016). `from === to` is a provisioning step report.
@@ -525,23 +533,29 @@ function addSession(session: Session, host: string): void {
   list.prepend(sessionRow(session, stoppedTtlDays(list), host));
 }
 
-// The new-session form. `networkDefault` is the machine setting the list carried: the checkbox
-// starts where the config says and the operator may still change it for this session.
+// The new-session form. `own` is this machine's own answer to the session list: the checkbox starts where the config
+// says, and the model field starts at a provider this machine has a key for (`modelPrefill`) — a bare model id is a
+// question pi's resolver may answer with `ambiguous`, and an Anthropic-anchored one is a guess the operator then has
+// to notice. The operator may still change both for this session.
 //
 // Since the form also says **which machine** the session runs on, and it says so in the request rather than
 // in the body: the post goes to `POST /api/hosts/<host>/sessions`, so a hub forwards it to the machine the operator
 // picked and a machine that runs no sessions still answers `403 sessions_disabled` for its own path. `targets` is
 // `createTargets`' answer — this machine first when it can create, then every reachable peer.
-function createSection(networkDefault: boolean, targets: string[], ownName: string): HTMLElement {
+function createSection(
+  own: KeyFacts & { network_default: boolean },
+  targets: string[],
+  ownName: string,
+): HTMLElement {
   const section = make("section", "create");
   const form = document.createElement("form");
   const project = textInput("project", "holosmith");
-  const model = textInput("model", "claude-sonnet-4.5");
+  const model = textInput("model", modelPrefill(own));
   const thinking = textInput("thinking", "high");
   const network = document.createElement("input");
   network.type = "checkbox";
   network.name = "network";
-  network.checked = networkDefault;
+  network.checked = own.network_default;
   const internet = make("label", "checkbox");
   internet.append(network, make("span", "", "Internet access"));
   const button = make("button", "", "Start session");
@@ -645,7 +659,14 @@ function createSection(networkDefault: boolean, targets: string[], ownName: stri
     internet,
     button,
   );
-  section.append(make("h2", "", "New session"), form, error);
+  section.append(make("h2", "", "New session"), form);
+  // The machine's answer about keys, beside the form and never in `error`: a refusal replaces that paragraph on the
+  // next submit, and this sentence is true whether or not anyone has pressed the button.
+  const noKey = noKeyNotice(own);
+  if (noKey !== null) {
+    section.append(make("p", "notice", noKey));
+  }
+  section.append(error);
   return section;
 }
 
@@ -2684,7 +2705,7 @@ function render(
   // that said it was reachable. A hub with no reachable peer says why instead of offering a choice that can only be
   // refused (§1.5's question 2, `createOffered`'s rule one machine out).
   if (targets.length > 0) {
-    sections.push(createSection(own.network_default, targets, health.machine_name));
+    sections.push(createSection(own, targets, health.machine_name));
   } else {
     sections.push(noCreateSection());
   }

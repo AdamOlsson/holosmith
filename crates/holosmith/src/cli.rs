@@ -370,14 +370,14 @@ pub enum ContainerAction {
 pub enum KeyAction {
     /// Read one provider's key from stdin and store it, mode 0600.
     Set {
-        /// The provider id (`anthropic`, `openai`, …).
+        /// The provider id (`opencode-go`, `anthropic`, …).
         provider: String,
     },
     /// Print the providers that have a key. Never the values.
     List,
     /// Remove one provider's key.
     Remove {
-        /// The provider id.
+        /// The provider id (`opencode-go`, `anthropic`, …).
         provider: String,
     },
 }

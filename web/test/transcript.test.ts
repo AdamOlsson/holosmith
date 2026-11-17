@@ -20,6 +20,9 @@ import {
   HOST_ADD_LABEL,
   HOST_FORCE_LABEL,
   NO_CREATE_TARGET,
+  EXAMPLE_MODEL,
+  modelPrefill,
+  noKeyNotice,
   STREAM_LOST,
   awaySentence,
   createTargets,
@@ -1730,6 +1733,57 @@ test("the button says which machine before the click, and a hub with nothing to 
   assert.equal(startLabel(LOCAL_HOST), "Start session on local · this machine");
   assert.equal(startLabel("workshop"), "Start session on workshop");
   assert.match(NO_CREATE_TARGET, /no machine is reachable/);
+});
+
+// ---- the model a create starts from -------------------------------------------------------
+
+test("the model field starts at a provider this machine has a key for", () => {
+  const defaultProvider = "opencode-go";
+  // The fresh machine the story is about: one key, and it is the default provider's.
+  assert.equal(
+    modelPrefill({ providers: [defaultProvider], default_provider: defaultProvider }),
+    `opencode-go/${EXAMPLE_MODEL}`,
+  );
+  // The default provider wins even when another key sorts (or is listed) before it: this is the machine's own
+  // first row, not the list's first element.
+  assert.equal(
+    modelPrefill({ providers: ["anthropic", defaultProvider], default_provider: defaultProvider }),
+    `opencode-go/${EXAMPLE_MODEL}`,
+  );
+  // A machine with a key for something else starts at the first provider it does have — the list is in table order,
+  // so that choice is the same on every load — and still names it.
+  assert.equal(
+    modelPrefill({ providers: ["anthropic", "openai"], default_provider: defaultProvider }),
+    `anthropic/${EXAMPLE_MODEL}`,
+  );
+  // No key at all: the field and the sentence below it name the same provider, so `key set` is the command that makes
+  // the value the operator is looking at real.
+  assert.equal(
+    modelPrefill({ providers: [], default_provider: defaultProvider }),
+    `opencode-go/${EXAMPLE_MODEL}`,
+  );
+  // Always `provider/model`: a bare id is the shape pi answers with `ambiguous` when several providers have a key.
+  for (const keys of [
+    { providers: [], default_provider: defaultProvider },
+    { providers: [defaultProvider], default_provider: defaultProvider },
+  ]) {
+    assert.equal(modelPrefill(keys).split("/")[0], keys.providers[0] ?? keys.default_provider);
+  }
+});
+
+test("a machine with no provider key is told which command stores one", () => {
+  const notice = noKeyNotice({ providers: [], default_provider: "opencode-go" });
+  assert.equal(notice, "no provider key is stored on this machine; run `holosmith key set opencode-go`");
+  // The id is the machine's own answer and never a literal: a build whose first row changed says the new one.
+  assert.match(
+    noKeyNotice({ providers: [], default_provider: "some-other-provider" }) ?? "",
+    /key set some-other-provider`$/,
+  );
+  // One key, and there is nothing to say: the form is a form, not a warning.
+  assert.equal(
+    noKeyNotice({ providers: ["opencode-go"], default_provider: "opencode-go" }),
+    null,
+  );
 });
 
 test("an away machine's sentences name what the page cannot do", () => {

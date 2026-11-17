@@ -34,6 +34,7 @@ use crate::deleter;
 use crate::events::NewEvent;
 use crate::http::app::AppState;
 use crate::http::error::{ApiError, internal};
+use crate::key;
 use crate::ladder;
 use crate::sessions::activity;
 use crate::sessions::state::{StateError, Trigger};
@@ -607,8 +608,8 @@ fn created(session: Session) -> Response {
     response
 }
 
-/// The list's body: every row in the repository's own order, plus the two machine settings the screen needs
-/// to draw itself.
+/// The list's body: every row in the repository's own order, plus the machine settings the screen needs to draw
+/// itself.
 ///
 /// `network_default` rides here rather than on `/api/health` because that payload is pinned at four
 /// keys (ADR-0009) and because the screen needs both answers to draw itself: one round trip, no new
@@ -620,11 +621,22 @@ fn created(session: Session) -> Response {
 /// screen has no other way to learn it. It is one number and not an `expires_at` per row, because the row
 /// already carries `stopped_at`: the client adds the two and compares them with its own clock, which is the
 /// only clock that can draw a countdown.
+///
+/// `providers` and `default_provider` are the third and fourth, for the same one-round-trip reason: the
+/// new-session form prefills its model with a provider this machine has a key for, and a machine with no key has
+/// to say `holosmith key set <provider>` rather than start a session pi cannot resolve a model for (ADR-0093).
+/// **The ids only** — never a value, a length, or a prefix of one. The answer is drawn by a browser and forwarded
+/// across a hub from another machine, and a key is the one thing that may not travel with either. `providers` is
+/// in the provider table's order, which is what makes "the first provider this machine has" a stable answer, and
+/// `default_provider` is the table's first row ([`crate::key::default_provider`]): it is present so the app never
+/// spells that id itself.
 #[derive(Debug, Serialize)]
 pub struct SessionList {
     sessions: Vec<Session>,
     network_default: bool,
     stopped_ttl_days: u64,
+    providers: Vec<&'static str>,
+    default_provider: &'static str,
 }
 
 /// Answer `GET /api/sessions`: 200 and the collection, or the ADR-0008 envelope.
@@ -641,7 +653,20 @@ pub async fn list(state: &AppState) -> Response {
 ///
 /// No filter and no paging: the repository's state filter has no caller yet and a later change owns paging,
 /// so the answer is the order `list(None)` already returns (`last_active_at DESC, id ASC`).
+///
+/// The key store is read here, before the database's lock is taken, and on every answer rather than cached: a
+/// `key set` between two list reads has to show, and a cached copy would be a second source of truth for the file
+/// whose whole job is being the only place a key lives. A store this machine cannot read is `internal` rather than
+/// an empty `providers`, because an empty list means "run `key set`" and the operator's key file would then be a
+/// sentence telling them to store a key they already have.
 fn list_locked(state: &AppState) -> Result<SessionList, ApiError> {
+    let store = key::Store::from_data_root(&state.config.data_root);
+    let secrets = store.load().map_err(|error| internal("keys", error))?;
+    let providers: Vec<&'static str> = key::PROVIDERS
+        .iter()
+        .filter(|provider| secrets.providers.contains_key(provider.id))
+        .map(|provider| provider.id)
+        .collect();
     let database = state
         .database
         .lock()
@@ -654,6 +679,8 @@ fn list_locked(state: &AppState) -> Result<SessionList, ApiError> {
         sessions,
         network_default: state.config.network_default,
         stopped_ttl_days: state.config.stopped_ttl_days,
+        providers,
+        default_provider: key::default_provider(),
     })
 }
 

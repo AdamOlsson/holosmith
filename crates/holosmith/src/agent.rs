@@ -61,7 +61,8 @@ pub const SETTINGS: &str = "settings.json";
 ///
 /// Embedded rather than read from disk, because the binary is the product (item 10 §1): a deployment has
 /// no `templates/` next to the executable. The two fields are patched per session from the row
-/// ([`seed`]); the key proxy's `models.json` is a second file written beside this one by the Docker
+/// ([`seed`]), which adds pi's `defaultProvider` beside the model when the row's model names a provider; the key
+/// proxy's `models.json` is a second file written beside this one by the Docker
 /// backend, because it carries the session's dummy key and is therefore not part of this
 /// secret-free template.
 pub const TEMPLATE: &str = include_str!("../templates/pi-home/settings.json");
@@ -150,15 +151,34 @@ pub enum Created {
     Seeded,
 }
 
-/// The seed for `session`: the template, with the row's model and thinking level.
+/// The seed for `session`: the template, with the row's model, thinking level and — when the row's model names a
+/// provider — that provider too.
 ///
 /// Built as JSON rather than by formatting the template, so a model id with a quote in it cannot make the
 /// file unreadable. A template that does not parse is a bug in the embedded file, not a runtime condition,
 /// so the fallback is the two keys and nothing else — the values are what the row asked for either way.
+///
+/// **A `provider/model` request becomes two settings, split at the first `/`.** `defaultProvider` is pi's own key
+/// beside `defaultModel` (`docs/settings.md`, and `settings-schema.d.ts` in the pinned install), and the split is
+/// what makes the operator's model the one they meant: a bare id is resolved across every provider that has a key,
+/// and pi's resolver answers several candidates with `status: "ambiguous"` rather than a model. `opencode-go/…` is
+/// the shape the default provider is measured with, so `opencode-go/claude-haiku-5-5` seeds
+/// `defaultProvider: "opencode-go"` and `defaultModel: "claude-haiku-5-5"`. The tail keeps any further `/`: it is
+/// the provider's own model id. A model with no `/` (or with an empty half) writes the template's two keys and no
+/// `defaultProvider`, so a bare id is resolved exactly as it was and is never a refusal. The launch line's `--model`
+/// keeps the whole string either way, so the flag and this file name the same model.
 pub fn seed(session: &Session) -> String {
     let mut document: Value = serde_json::from_str(TEMPLATE).unwrap_or_else(|_| json!({}));
     if let Some(object) = document.as_object_mut() {
-        object.insert("defaultModel".to_string(), json!(session.model));
+        match session.model.split_once('/') {
+            Some((provider, model)) if !provider.is_empty() && !model.is_empty() => {
+                object.insert("defaultProvider".to_string(), json!(provider));
+                object.insert("defaultModel".to_string(), json!(model));
+            }
+            _ => {
+                object.insert("defaultModel".to_string(), json!(session.model));
+            }
+        }
         object.insert("defaultThinkingLevel".to_string(), json!(session.thinking));
     }
     let mut text = serde_json::to_string_pretty(&document).unwrap_or_default();
@@ -834,6 +854,65 @@ mod tests {
             template.as_object().map(|object| object.len()),
             "the seed adds and removes no key: it is the template with two values"
         );
+        // The acceptance line for a model string with no `/`: no `defaultProvider`, and no refusal either.
+        assert!(
+            document.get("defaultProvider").is_none(),
+            "a bare model id gained a provider: {document}"
+        );
+    }
+
+    /// The row with a given model, so a test can say which shape of model string it is about.
+    fn session_with_model(model: &str) -> Session {
+        Session {
+            model: model.to_string(),
+            ..session()
+        }
+    }
+
+    #[test]
+    fn a_qualified_model_seeds_the_provider_beside_the_model_it_serves() {
+        // What the form prefills, and what a create that named its provider answers: pi reads the two keys and
+        // resolves one model instead of guessing among the providers the machine has a key for.
+        let document: Value =
+            serde_json::from_str(&seed(&session_with_model("opencode-go/claude-haiku-5-5")))
+                .expect("the seed is JSON");
+        assert_eq!(document["defaultProvider"], "opencode-go");
+        assert_eq!(document["defaultModel"], "claude-haiku-5-5");
+        assert_eq!(document["defaultThinkingLevel"], "high");
+        let template: Value = serde_json::from_str(TEMPLATE).expect("the template is JSON");
+        assert_eq!(
+            document.as_object().map(|object| object.len()),
+            template
+                .as_object()
+                .map(|object| object.len())
+                .map(|len| len + 1),
+            "a qualified model is the template with exactly one more key"
+        );
+    }
+
+    #[test]
+    fn the_model_keeps_any_slash_after_the_first() {
+        // The split is at the FIRST `/`, because the provider's own model id may hold one.
+        let document: Value =
+            serde_json::from_str(&seed(&session_with_model("opencode-go/vendor/model-1")))
+                .expect("the seed is JSON");
+        assert_eq!(document["defaultProvider"], "opencode-go");
+        assert_eq!(document["defaultModel"], "vendor/model-1");
+    }
+
+    #[test]
+    fn a_model_with_an_empty_half_is_a_bare_model() {
+        // `/x` and `x/` are strings the create's own model rule allows, and neither half of an empty split is a
+        // provider: they must land in the bare arm rather than seed a `defaultProvider` of `""`.
+        for model in ["/claude-haiku-5-5", "opencode-go/"] {
+            let document: Value =
+                serde_json::from_str(&seed(&session_with_model(model))).expect("the seed is JSON");
+            assert!(
+                document.get("defaultProvider").is_none(),
+                "{model} seeded a provider: {document}"
+            );
+            assert_eq!(document["defaultModel"], model);
+        }
     }
 
     #[test]
