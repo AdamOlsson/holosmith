@@ -124,6 +124,11 @@ fn main() -> ExitCode {
         Cmd::Drain { wait, admin_dir } => {
             commands::drain::run(commands::drain::DrainArgs { wait, admin_dir })
         }
+        Cmd::Install { dry_run, root } => commands::install::run(commands::install::InstallArgs {
+            config: cli.config,
+            root,
+            dry_run,
+        }),
         Cmd::Server { action } => match action {
             ServerAction::Deploy {
                 dry_run,

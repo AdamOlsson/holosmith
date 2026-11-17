@@ -794,18 +794,19 @@ fn disk_of_the_nearest_ancestor(
 ///
 /// The subject is deliberately **this** account and not a second one: a machine is the operator's own (ADR-0088), so
 /// the only thing step 2 can get wrong about an account is whether it may open the daemon's socket, and the only fix
-/// is a command the operator runs.
+/// is a command the operator runs. `install` asks the same question before it writes anything, which is why this and
+/// its read are visible to the crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Account {
+pub(crate) struct Account {
     /// `id -un`: the name the one printed command spells.
-    name: String,
+    pub(crate) name: String,
     /// `id -nG`, split on whitespace: every group the account is in.
     groups: Vec<String>,
 }
 
 impl Account {
     /// Whether the account may open the daemon's socket, which is `group`'s membership and nothing else.
-    fn may_open(&self, group: &str) -> bool {
+    pub(crate) fn may_open(&self, group: &str) -> bool {
         self.groups.iter().any(|found| found == group)
     }
 
@@ -1100,20 +1101,11 @@ fn install(
 /// nothing — an empty line for either question — is a **failed step** rather than a guess: a name this machine cannot
 /// read is a `usermod` this step cannot spell, the empty string is not an account, and no groups is not "in none",
 /// which would print a `usermod` for an account that may already be in the group.
-fn read_account(tools: &Tools, group: &str) -> Result<Account, String> {
-    let name = ask(
-        &tools.id,
-        &["-un"],
-        "this step names the account it is running as before it prints a command for it",
-    )?
-    .filter(|name| !name.is_empty())
-    .ok_or_else(|| {
-        format!(
-            "`{} -un` named no account, and the one command this step prints is a `usermod` for the account that \
-             ran it: nothing here can guess the name",
-            tools.id.display()
-        )
-    })?;
+///
+/// Visible to the crate because `install` asks the same question **before** it writes anything, and asks it of the
+/// same account: the command its refusal carries is the one this name spells.
+pub(crate) fn read_account(tools: &Tools, group: &str) -> Result<Account, String> {
+    let name = read_name(tools)?;
     let groups = ask(
         &tools.id,
         &["-nG"],
@@ -1130,6 +1122,26 @@ fn read_account(tools: &Tools, group: &str) -> Result<Account, String> {
     Ok(Account {
         name,
         groups: groups.split_whitespace().map(str::to_string).collect(),
+    })
+}
+
+/// `id -un`: the account this process is running as, which is also the account every printed command names.
+///
+/// Apart from [`read_account`] because a run with no daemon's-group question still needs the name: `install` reads
+/// this account's linger flag with it, and a half that opens no socket asks `id` nothing about its groups.
+pub(crate) fn read_name(tools: &Tools) -> Result<String, String> {
+    ask(
+        &tools.id,
+        &["-un"],
+        "this step names the account it is running as before it prints a command for it",
+    )?
+    .filter(|name| !name.is_empty())
+    .ok_or_else(|| {
+        format!(
+            "`{} -un` named no account, and the one command this step prints is a `usermod` for the account that \
+             ran it: nothing here can guess the name",
+            tools.id.display()
+        )
     })
 }
 
@@ -1692,15 +1704,29 @@ pub fn unit_text(exe: &Path, role: Role, root: &Root) -> String {
     )
 }
 
-/// What the operator must run to make the rendered unit the one their user manager loads, in order.
+/// What the operator must run to make the rendered unit the one their user manager loads, in order — the argv a
+/// caller runs, which [`unit_commands_printed`] renders for the sentence an operator reads.
 ///
 /// No `sudo` and no copy: the bytes are already at [`Root::unit`], so the pair is the reload that makes the manager
 /// notice the file and the enable that starts it now, at every login, and at boot once linger is on.
-fn unit_commands() -> Vec<String> {
-    vec![
-        "systemctl --user daemon-reload".to_string(),
-        format!("systemctl --user enable --now {UNIT_NAME}"),
+///
+/// **One value, because two callers disagree about who runs them and nothing about what they say.** A deploy prints
+/// these and never runs one; an install runs them and repeats them in the sentence a foreign tree gets instead. A flag
+/// or a unit name added here therefore reaches both, and a sentence cannot describe a command nobody ran.
+pub(crate) fn unit_commands() -> [&'static [&'static str]; 2] {
+    [
+        &["--user", "daemon-reload"],
+        &["--user", "enable", "--now", UNIT_NAME],
     ]
+}
+
+/// [`unit_commands`] as lines, with `program` in front of each argv — the program the reader would type, which is
+/// the bare name in the deploy's remark and the path an install actually ran in its own.
+pub(crate) fn unit_commands_printed(program: &Path) -> Vec<String> {
+    unit_commands()
+        .iter()
+        .map(|arguments| format!("{} {}", program.display(), arguments.join(" ")))
+        .collect()
 }
 
 /// Step 5's read and apply: the file's bytes, and the commands that enable them.
@@ -1751,7 +1777,10 @@ fn service_line(
         Ok(None) => Vec::new(),
         Err(sentence) => return failed(DeployStep::Service, sentence),
     };
-    let remark = format!("; still yours to run: {}", unit_commands().join("; "));
+    let remark = format!(
+        "; still yours to run: {}",
+        unit_commands_printed(Path::new("systemctl")).join("; ")
+    );
     if actions.is_empty() {
         return Line {
             step: DeployStep::Service,

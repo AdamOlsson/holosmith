@@ -186,6 +186,23 @@ pub enum Cmd {
         #[arg(long, value_name = "PATH")]
         admin_dir: Option<PathBuf>,
     },
+    /// Install this machine's own half and start it: one command from nothing to a serving machine.
+    ///
+    /// It checks the daemon's group first, runs the deploy for the half this machine's config asks for (`hub`
+    /// installs the hub's, `server` and `both` the server's), enables the unit through this account's own systemd
+    /// manager, sets linger so the daemon starts at boot, and waits for `/api/health`. It runs no `sudo` and asks
+    /// no questions: anything that needs root is printed for you to run. Re-running is safe and changes nothing.
+    Install {
+        /// Print what each step would do and change nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Install into this directory instead of `HOLOSMITH_ROOT`'s (default `~/.local/share/holosmith`).
+        ///
+        /// The root is one directory: the data root, the release tree and the projects. It moves the state and
+        /// only the state — the config is `--config`'s, `~/.config/holosmith.toml` by default.
+        #[arg(long, value_name = "DIR")]
+        root: Option<PathBuf>,
+    },
     /// Install and start a server on this machine.
     Server {
         #[command(subcommand)]

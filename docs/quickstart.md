@@ -23,39 +23,52 @@ df -h /var/lib 2>/dev/null || df -h /
 
 You need: Docker answering, git 2.38+, the binary at a **stable path** (the unit names the path it was deployed
 from, so do not run a copy out of a build directory), a tailnet that reaches the phone, and at least as much free
-space as `min_free_gb` below. The deploy never runs `sudo` itself: creating the account, making the root and
-installing the unit are **commands it prints for you to run**, and the section below is that list (ADR-0086).
+space as `min_free_gb` below. Nothing here runs `sudo` for you, and nothing here needs it: an install is the account's
+own, and the two things that are root's — joining the daemon's group, and on some machines setting linger — are
+**commands it prints** for you to run.
 
 One value is substituted throughout: this node's MagicDNS name. Get it with
 `tailscale status --json | jq -r .Self.DNSName` and strip the trailing dot; this guide writes
 `huawei-laptop.tailnet.internal` wherever it appears, including inside the TOML.
 
-## 1. The machine's halves: one account, one root, one unit
+## 1. Install
 
-Everything below is root's, so you run it. The deploy is what tells you the exact lines (its step 2 and step 5 print
-them), but this is the shape:
+One command, as your own account — no `sudo`, no prompt, and nothing to create by hand:
 
 ```bash
-# 1. the service user, with the root as its home and no login shell
-sudo useradd --system --create-home --home-dir /var/lib/holosmith --shell /usr/sbin/nologin holosmith
-# 2. the one group it needs: the daemon's socket
-sudo usermod -aG docker holosmith
-# 3. the root itself, 0700, the service user's
-sudo install -d -o holosmith -g holosmith -m 0700 /var/lib/holosmith
+holosmith install
 ```
 
-`/var/lib/holosmith` is now one directory holding `config.toml`, `data/` (the database, secrets, sessions),
-`releases/` and `current` (what systemd runs), and `projects/`. It is also `holosmith`'s home, so `~holosmith` and
-the root are the same path.
+The one file you write first is your config (§2), when the defaults do not fit this machine; everything else is this
+command, and running it again changes nothing. It:
+
+- **refuses before writing anything** if this account is not in the `docker` group. The daemon's socket is
+  `root:docker` with mode 0660, so a session could not run, and the fix is one command the output ends with:
+
+  ```bash
+  sudo usermod -aG docker $USER        # then log out and back in: a group reaches a login only at the next one
+  ```
+
+- runs the deploy for the half this machine's config asks for — `server` and `both` install the server's, `hub` the
+  hub's;
+- enables `~/.config/systemd/user/holosmith.service` through your own systemd manager, and starts it;
+- sets `loginctl enable-linger`, so the daemon starts at boot rather than only while you are logged in. On a machine
+  whose polkit refuses that, the run says so, prints `sudo loginctl enable-linger $USER`, and carries on — the machine
+  serves either way;
+- waits for `/api/health`, then prints the control URL and the one next step.
+
+The state is `~/.local/share/holosmith` (one directory to back up and one to delete) and the config is
+`~/.config/holosmith.toml`, the only file in an install you edit. `--dry-run` prints each step's plan and changes
+nothing.
 
 ## 2. Write the config
 
-The deploy renders this file from the config it **loads**, so write it before the first deploy (as the service user —
-the root is 0700) and it survives every re-run. `min_free_gb` is the one value that must match this machine: `doctor`
-refuses below it, and a `serve` that refuses is a unit that restart-loops.
+The install renders this file from the config it **loads**, so write it first and it survives every re-run;
+`min_free_gb` is the one value that must match this machine, because `doctor` refuses below it and a `serve` that
+refuses is a unit that restart-loops.
 
 ```bash
-sudo -u holosmith tee /var/lib/holosmith/config.toml >/dev/null <<'EOF'
+mkdir -p ~/.config && tee ~/.config/holosmith.toml >/dev/null <<'EOF'
 role = "server"
 machine_name = "laptop"
 
@@ -65,9 +78,6 @@ control_origin = "http://huawei-laptop.tailnet.internal:8080"
 preview_origin = "http://huawei-laptop.tailnet.internal:8081"
 allowed_hosts  = ["huawei-laptop.tailnet.internal"]
 
-data_root = "/var/lib/holosmith/data"
-projects_root = "/var/lib/holosmith/projects"
-
 min_free_gb = 10
 session_disk_soft_gb = 5
 idle_stop_min = 30
@@ -76,8 +86,12 @@ turn_timeout_min = 45
 [egress]
 allow = ["crates.io", "index.crates.io", "static.crates.io", "registry.npmjs.org", "github.com"]
 EOF
-sudo -u holosmith holosmith config validate    # "config valid: /var/lib/holosmith/config.toml"
+holosmith config validate    # "config valid: /home/you/.config/holosmith.toml"
 ```
+
+`data_root` and `projects_root` are deliberately absent: they are the install's own —
+`~/.local/share/holosmith/data` and `~/.local/share/holosmith/projects`, under whatever root `--root` names — and the
+file it writes out carries them.
 
 Three notes on that file: `allowed_hosts` and both origins carry the **MagicDNS name**, not `localhost` — the page is
 loaded from the phone, and the guards compare the `Host` and `Origin` headers with these strings. `owner` is
@@ -85,33 +99,29 @@ deliberately unset: it is a check on the login header a proxy in front supplies,
 get in the way. `[egress] allow` is what a session may reach; with the list empty a session has no Internet at all.
 Provider traffic does not use this list — it goes through the key proxy, which is why no provider host appears above.
 
-## 3. Deploy
+## 3. The deploy underneath
 
-Run it as the service user: the tree is written as its owner, which is why it needs no `sudo` of its own.
-
-```bash
-sudo -u holosmith holosmith server deploy --dry-run   # the plan; changes nothing
-sudo -u holosmith holosmith server deploy             # the real run: six steps
-```
-
-The first real run stops at step 5 and prints the commands that finish the job. Run them, then run it again:
+`holosmith install` runs `holosmith server deploy` (or `hub deploy`) for you, and that is the lower-level command when
+you want the steps without the start: it checks the current state first and writes the tree, the config and the unit,
+and prints the two `systemctl --user` commands as the operator's rather than running them.
 
 ```bash
-sudo install -m 0644 /var/lib/holosmith/holosmith.service /etc/systemd/system/holosmith.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now holosmith.service
+holosmith server deploy --dry-run   # the plan; changes nothing
+holosmith server deploy             # the real run: six steps
 ```
 
-A second `deploy` then runs to the end:
+The first real run against a fresh tree ends with its last step `failed`: nothing serves yet, because a deploy writes
+the unit and does not start it. That is the step `holosmith install` finishes, and a `deploy` on a machine that is
+serving reads:
 
 ```text
 deploy: run
-deploy: into /var/lib/holosmith
+deploy: into /home/you/.local/share/holosmith
 1. preflight: satisfied: …
 2. files: satisfied: …     # the config, the data root, the secrets and the keys
 3. images: changed: …      # builds holosmith-proxy and agent-image, minutes on a first run
 4. proxies: changed: …     # starts hs_key and hs_egress
-5. service: satisfied: …   # the unit is in the root; still root's to run: the install above
+5. service: satisfied: …   # the unit is in the root; still yours to run: the two `systemctl --user` commands
 6. health: satisfied: …    # `/api/health` answers and `doctor --full` finds nothing failing
 deploy: 6 steps: 4 satisfied, 0 needs, 2 changed, 0 skipped, 0 failed
 ```
@@ -124,7 +134,10 @@ curl -fsS http://127.0.0.1:8080/api/health
 ```
 
 `active (running)` plus a JSON body is the machine working. A unit that is `activating (auto-restart)` means the
-preflight refused — read `sudo holosmith doctor --quick` and `journalctl --user -u holosmith -n 30`.
+preflight refused — read `holosmith doctor --quick` and `journalctl --user -u holosmith -n 30`.
+
+Nothing else has to be set for a release to restart the unit: `systemctl --user restart` is this account's own, so
+there is no `/etc/sudoers.d` line in an install.
 
 ## 4. Put it on the tailnet (plain HTTP)
 
