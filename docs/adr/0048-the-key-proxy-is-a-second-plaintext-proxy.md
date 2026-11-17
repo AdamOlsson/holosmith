@@ -41,9 +41,9 @@ request-controlled host or port. This is ADR-0045's exact-list rule applied to t
 can spend its dummy key must not also be able to say where the proxy connects, or the key proxy becomes a
 tunnel to the control listener.
 
-The table is small and explicit (`anthropic`, `openai`, `openrouter`, and a handful of OpenAI-compatible
-providers). An unknown provider is a 403 with a sentence naming the supported ids. Adding a provider is one row,
-which is the right size for a fact that is a host and a header.
+The table is small and explicit (`opencode-go`, `anthropic`, `openai`, `openrouter`, and a handful of
+OpenAI-compatible providers). An unknown provider is a 403 with a sentence naming the supported ids. Adding a
+provider is one row, which is the right size for a fact that is a host and a header.
 
 ## TLS is `openssl s_client`; the artifact is static
 

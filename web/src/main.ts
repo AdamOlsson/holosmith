@@ -62,7 +62,6 @@ import {
   mergedNotice,
   modelPrefill,
   networkText,
-  noKeyNotice,
   ownLabel,
   parseFrame,
   preselectedTarget,
@@ -88,6 +87,8 @@ import {
   stoppedDetail,
   STREAM_LOST,
   streamPath,
+  targetKeyFacts,
+  targetNoKeyNotice,
   targetOptions,
   uptimeText,
   type Change,
@@ -534,23 +535,38 @@ function addSession(session: Session, host: string): void {
 }
 
 // The new-session form. `own` is this machine's own answer to the session list: the checkbox starts where the config
-// says, and the model field starts at a provider this machine has a key for (`modelPrefill`) — a bare model id is a
-// question pi's resolver may answer with `ambiguous`, and an Anthropic-anchored one is a guess the operator then has
-// to notice. The operator may still change both for this session.
+// says, and the model field and the key sentence start from the **selected** machine's key facts (`targetKeyFacts`,
+// `targetNoKeyNotice`) — a bare model id is a question pi's resolver may answer with `ambiguous`, and a prefill
+// derived from this machine for a session that runs on a peer is a model the peer may have no key for at all. The
+// operator may still change both for this session.
 //
 // Since the form also says **which machine** the session runs on, and it says so in the request rather than
 // in the body: the post goes to `POST /api/hosts/<host>/sessions`, so a hub forwards it to the machine the operator
 // picked and a machine that runs no sessions still answers `403 sessions_disabled` for its own path. `targets` is
-// `createTargets`' answer — this machine first when it can create, then every reachable peer.
+// `createTargets`' answer — this machine first when it can create, then every reachable peer — and `groups` carries
+// the answer each peer's rows came in, which is also where the form's facts about a peer come from.
 function createSection(
-  own: KeyFacts & { network_default: boolean },
+  own: SessionList,
   targets: string[],
   ownName: string,
-): HTMLElement {
+  groups: SessionGroup[],
+): { element: HTMLElement; fill: (host: string, answer: Answer<SessionList>) => void } {
+  // One machine's key facts as the page knows them. A peer's arrive with its group's answer, so this map is the one
+  // place the form looks; `null` is a machine that has not answered (or refused), which `targetKeyFacts` turns into
+  // the fallback that names no fact of it.
+  const answers = new Map<string, KeyFacts | null>();
+  for (const group of groups) {
+    answers.set(group.host, peerKeyFacts(group.answer));
+  }
+  const factsFor = (host: string): KeyFacts => targetKeyFacts(host, own, answers.get(host) ?? null);
+
   const section = make("section", "create");
   const form = document.createElement("form");
   const project = textInput("project", "holosmith");
-  const model = textInput("model", modelPrefill(own));
+  // The initial selection is `targets[0]`, which `createTargets` makes `LOCAL_HOST` exactly when this machine can
+  // create — so the first draw is this machine's facts on a `server` and the first peer's on a `hub`. No form is drawn
+  // for an empty list (`render`'s `targets.length > 0`).
+  const model = textInput("model", modelPrefill(factsFor(targets[0])));
   const thinking = textInput("thinking", "high");
   const network = document.createElement("input");
   network.type = "checkbox";
@@ -574,14 +590,31 @@ function createSection(
     option.textContent = host === LOCAL_HOST ? ownLabel(ownName) : hostLabel(host);
     machine.append(option);
   }
+  // The notice the form draws under itself, one element so the picker can withdraw it again: a `hidden` paragraph and
+  // not an appended one, because a `change` that had to remove and re-add a node would have to remember its place.
+  const noKey = make("p", "notice");
+
+  // The model the page last put in the field. The field is written again only while it still holds this value: a model
+  // the operator typed is theirs, and a picker that changed it under them would be a form editing an answer.
+  let prefilled = model.value;
+  const redraw = (): void => {
+    button.textContent = startLabel(machine.value);
+    const facts = factsFor(machine.value);
+    const next = modelPrefill(facts);
+    if (model.value === prefilled) {
+      model.value = next;
+    }
+    prefilled = next;
+    const notice = targetNoKeyNotice(machine.value, facts);
+    noKey.textContent = notice ?? "";
+    noKey.hidden = notice === null;
+  };
   // Before the click, not only after it: the button names the machine the picker holds, so the one thing about this
   // form that can point at the wrong computer is on the button (item 11's "the UI shows which machine it will run
-  // on"). A create's answer then puts the row in that machine's own group with its own `hostLabel` badge.
-  const refreshLabel = (): void => {
-    button.textContent = startLabel(machine.value);
-  };
-  machine.addEventListener("change", refreshLabel);
-  refreshLabel();
+  // on"). The label, the model and the sentence are all that machine's, which is why one function moves all three. A
+  // create's answer then puts the row in that machine's own group with its own `hostLabel` badge.
+  machine.addEventListener("change", redraw);
+  redraw();
 
   // The key of the submission in flight or last refused. A retry has to repeat the same request,
   // so a refusal keeps the key; a 202 means the next press is a new intent, so it is dropped
@@ -662,12 +695,28 @@ function createSection(
   section.append(make("h2", "", "New session"), form);
   // The machine's answer about keys, beside the form and never in `error`: a refusal replaces that paragraph on the
   // next submit, and this sentence is true whether or not anyone has pressed the button.
-  const noKey = noKeyNotice(own);
-  if (noKey !== null) {
-    section.append(make("p", "notice", noKey));
+  section.append(noKey, error);
+  return {
+    element: section,
+    fill: (host, answer) => {
+      // A peer's answer is the only way the form learns a peer's keys, and it is worth redrawing only when the picker
+      // is on that machine: every other host's facts are drawn the moment it is selected.
+      answers.set(host, peerKeyFacts(answer));
+      if (host === machine.value) {
+        redraw();
+      }
+    },
+  };
+}
+
+// The key facts one machine's list answer carries, or `null` for an answer that has not arrived or was a refusal.
+// The three fields are picked out rather than the whole answer passed on: the facts are what the form draws, and an
+// `Answer` in the map would be a second spelling of "has this machine answered" that `targetKeyFacts` re-decides.
+function peerKeyFacts(answer: Answer<SessionList> | null): KeyFacts | null {
+  if (answer === null || !answer.ok) {
+    return null;
   }
-  section.append(error);
-  return section;
+  return { providers: answer.value.providers, default_provider: answer.value.default_provider };
 }
 
 // What a machine with nothing to offer draws instead of a form: a hub whose registry has no reachable peer, or a
@@ -2688,7 +2737,12 @@ function settingsSection(health: Health, hosts: HostRow[], origin: string): HTML
 // The sessions list: one group per machine, and the create form only where this machine can create.
 //
 // `own` is this machine's answer, which is also where the form's `network_default` comes from and the only place a
-// create can post to. `groups` carries every machine's rows; `health.role` decides the affordance.
+// create can post to. `groups` carries every machine's rows, and is also where the form reads a peer's key facts;
+// `health.role` decides the affordance.
+//
+// The returned `fill` has two readers: the machine's group, which always wants the answer, and the form, which wants
+// it only while the picker names that machine (`createSection`'s `fill` decides). One callback, so a peer's answer
+// cannot reach one of them and not the other.
 function render(
   health: Health,
   own: SessionList,
@@ -2704,13 +2758,17 @@ function render(
   // The form is drawn when there is somewhere to put a session: this machine (a role that runs sessions) or a peer
   // that said it was reachable. A hub with no reachable peer says why instead of offering a choice that can only be
   // refused (§1.5's question 2, `createOffered`'s rule one machine out).
-  if (targets.length > 0) {
-    sections.push(createSection(own, targets, health.machine_name));
-  } else {
-    sections.push(noCreateSection());
-  }
+  const create = targets.length > 0 ? createSection(own, targets, health.machine_name, groups) : null;
+  sections.push(create === null ? noCreateSection() : create.element);
   app.replaceChildren(...sections);
-  return list;
+  const fillGroup = list.fill;
+  return {
+    element: list.element,
+    fill: (host, answer) => {
+      fillGroup(host, answer);
+      create?.fill(host, answer);
+    },
+  };
 }
 
 function renderFailure(code: string, message: string): void {

@@ -23,6 +23,8 @@ import {
   EXAMPLE_MODEL,
   modelPrefill,
   noKeyNotice,
+  targetKeyFacts,
+  targetNoKeyNotice,
   STREAM_LOST,
   awaySentence,
   createTargets,
@@ -1751,7 +1753,10 @@ test("the model field starts at a provider this machine has a key for", () => {
     `opencode-go/${EXAMPLE_MODEL}`,
   );
   // A machine with a key for something else starts at the first provider it does have — the list is in table order,
-  // so that choice is the same on every load — and still names it.
+  // so that choice is the same on every load — and still names it. That pair is an **example the operator edits**:
+  // only `opencode-go/${EXAMPLE_MODEL}` is a provider and model this build measured together, and nothing here can
+  // know another provider's catalog. The qualified form is still the one to start from, because a bare id is the
+  // ambiguity this prefill exists to remove.
   assert.equal(
     modelPrefill({ providers: ["anthropic", "openai"], default_provider: defaultProvider }),
     `anthropic/${EXAMPLE_MODEL}`,
@@ -1784,6 +1789,41 @@ test("a machine with no provider key is told which command stores one", () => {
     noKeyNotice({ providers: ["opencode-go"], default_provider: "opencode-go" }),
     null,
   );
+});
+
+// ---- the machine the form's facts belong to ------------------------------------------------------------
+
+test("the form's facts are the selected machine's, and an unanswered peer names no fact of its own", () => {
+  const own = { providers: ["opencode-go"], default_provider: "opencode-go" };
+  // The first target is this machine exactly when it can create, and it is this machine's own answer.
+  assert.deepEqual(targetKeyFacts(LOCAL_HOST, own, null), own);
+  // A peer that has answered contributes its own list: the ids it has a key for and the table's first row. The arm is
+  // the peer's, so a machine whose only key is something else prefills from that key, not from this machine's.
+  assert.deepEqual(
+    targetKeyFacts("workshop", own, { providers: ["anthropic"], default_provider: "opencode-go" }),
+    { providers: ["anthropic"], default_provider: "opencode-go" },
+  );
+  // A peer that has not answered — including one whose read was a refusal — has told the page nothing. The fallback is
+  // `providers: []` ("unknown", and the notice is never drawn from it) and the one fact every machine of one release
+  // shares: `default_provider` is the provider table's first row, so it names no machine the page has not heard from.
+  const unknown = targetKeyFacts("workshop", own, null);
+  assert.deepEqual(unknown, { providers: [], default_provider: "opencode-go" });
+  // Which is the default provider's own qualified example: the field is never empty and never a bare id.
+  assert.equal(modelPrefill(unknown), `opencode-go/${EXAMPLE_MODEL}`);
+  assert.equal(
+    modelPrefill(targetKeyFacts("workshop", { providers: ["anthropic"], default_provider: "groq" }, null)),
+    `groq/${EXAMPLE_MODEL}`,
+  );
+});
+
+test("the no-key sentence is drawn only for this machine, never for a peer", () => {
+  const bare = { providers: [], default_provider: "opencode-go" };
+  // This machine's store: the sentence, built from the id the list carried.
+  assert.match(targetNoKeyNotice(LOCAL_HOST, bare) ?? "", /key set opencode-go`$/);
+  assert.equal(targetNoKeyNotice(LOCAL_HOST, { providers: ["opencode-go"], default_provider: "opencode-go" }), null);
+  // A peer's store is the peer's operator's business. A hub is the machine the product never asks to hold a key at
+  // all, and it would otherwise say this about every session it forwards.
+  assert.equal(targetNoKeyNotice("workshop", bare), null);
 });
 
 test("an away machine's sentences name what the page cannot do", () => {

@@ -160,9 +160,11 @@ real.
   in the create's 202 and behind the same guards, and inherit it: an idempotency
   key is extracted material, not a credential, and hiding one copy would leave the other.
 - The form's initial `project`, `model` and `thinking` are literals (`holosmith`,
-  `claude-sonnet-4.5`, `high`), because no endpoint enumerates projects or models yet. and
+  `opencode-go/claude-haiku-5-5`, `high`), because no endpoint enumerates projects or models yet. and
    are where those lists exist, and the literals become their defaults rather than a second
-  vocabulary.
+  vocabulary. **Amended by ADR-0093:** the model is the one that is derived rather than literal — it starts at
+  `<provider>/<model>` built from the key ids the machine's own list answer carried, so a machine whose only key
+  is `anthropic` starts at `anthropic/claude-haiku-5-5` — and the other two are still literals.
 - `crypto.randomUUID` exists only in a secure context, and the control listener is plain HTTP unless
   it sits behind `tailscale serve`. The page therefore generates the key with `randomUUID` when it
   can and with one `getRandomValues` fallback formatted as a v4 UUID when it cannot: the same

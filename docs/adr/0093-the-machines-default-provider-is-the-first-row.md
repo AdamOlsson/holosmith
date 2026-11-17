@@ -25,7 +25,10 @@ can tell the order changed.
 `opencode-go` is the first row because it is the provider this build's credential path was measured with
 (ADR-0050, V3/V4/V5): the ids a refusal lists are the ids a machine can actually use, and the one an operator is
 told to store first should be the one repository evidence exists for. `anthropic` stays a row and stays in the
-list — a machine with an Anthropic key works exactly as it did.
+list, and a machine holding an Anthropic key keeps its key path, its seed and its sessions exactly as they were.
+What changes for that machine is the form: its example is now a qualified id rather than a bare one, and the tail
+of it is a model this build measured against `opencode-go` and not against `anthropic` — so the pair is one the
+operator edits (D4).
 
 Every operator-facing example therefore names it: the README's quick start (`key set opencode-go`), the
 dependency table in `docs/requirements.md`, `key set`'s and `holosmith key remove`'s provider help, ADR-0048's
@@ -69,12 +72,36 @@ cache would be a second source of truth for the file whose whole job is being th
 **cannot read** is the request's own `500 internal` and not an empty `providers`, because an empty list means "run
 `key set`" and that operator already has a key.
 
+The collateral of that choice is deliberate and worth naming: the home screen reads this route to draw its list, so
+a `keys.toml` that cannot be parsed takes the **whole Sessions screen** down to the envelope's one generic
+sentence — no rows, no create form, no controls — where before this change the damage reached only the key proxy,
+which `serve` treats as survivable (`proxies.rs`). The alternative is the lie above. What repairs it is the file
+itself, and only by hand: it is the operator's, and `holosmith key set` cannot heal it, because `Store::set_provider`
+loads before it writes (`key.rs`) and so refuses the same parse. Nothing in the product rewrites a store it could
+not read, and no new error code names the case: the `500` is the route's answer and the file is where the operator
+looks.
+
 ## D4 — the form starts at a provider, and says the command when there is none
 
 The model field's starting value is `<provider>/<model>`, never a bare id: the machine's default provider when it
 has a key for it, otherwise the first provider it does have, otherwise the default again. One model-id constant,
-not a table — nothing in this repository can keep a catalog current, and the id it names is the one this build's
-turn was measured with.
+not a table — nothing in this repository can keep a catalog current — and the id it names is the tail of
+`opencode-go/claude-haiku-5-5`, the model this build's credential path was measured with. That pair is the one
+measured combination; the field's other arm is the same tail qualified with whichever provider a non-default
+machine holds, which is an example **the operator edits**, because nothing in this repository can know that
+provider's catalog. It is still the right starting value: the alternative the issue names is a bare id, which pi's
+resolver answers with `ambiguous` when several providers have a key.
+
+"The machine" here is the machine the picker names, which is not always the one drawing the page. A create posts to
+`POST /api/hosts/<host>/sessions`, so on a `hub` — where `createTargets` offers peers only — every fact this form
+starts from is a peer's, and a prefill composed from the hub's own empty store would name a provider that peer may
+hold no key for at all, which is the session that cannot answer this decision exists to remove. The facts are
+therefore the selected target's, read from that machine's own list answer, and the model is re-derived when the
+picker moves and again when the named peer's answer arrives — but only while the field still holds what the page
+wrote, because a model the operator typed is theirs. The no-key sentence is drawn only when the target is this
+machine: it names a store and a command on this machine, and a hub is precisely the machine the product never asks
+to hold a key (`server deploy` skips `key set` there). A peer that has not answered yet contributes nothing but
+`default_provider`, the table's first row, which every machine of one release answers identically.
 
 A machine with no key gets the sentence beside the form, built from the default id the list carried: `no provider
 key is stored on this machine; run holosmith key set opencode-go`. It is in the form's own area rather than the
@@ -96,7 +123,9 @@ has a route for it to name.
   machine running it.
 - `web/test/transcript.test.ts` pins the prefill's four arms — the default with a key, the default over an earlier
   key, the first key when the default has none, and no key — and the no-key sentence built from the id it was given
-  rather than a literal.
+  rather than a literal. It also pins the target rule: this machine's own answer for `LOCAL_HOST`, a peer's own
+  answer for a peer, the default provider's qualified example while a peer's answer is still out, and no sentence
+  about a peer's store.
 
 ## Refused
 

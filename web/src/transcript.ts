@@ -1362,18 +1362,21 @@ export const NO_CREATE_TARGET =
 // spells it.
 export type KeyFacts = { providers: string[]; default_provider: string };
 
-// The one model id the page names. The default provider serves this one (it is the model this build's credential
-// path was measured with, ADR-0050), so the example on a fresh machine is a model that machine can actually answer
-// with: one constant rather than a table of every provider's catalog, which nothing here could keep current.
+// The one model id the page names: the tail of `opencode-go/claude-haiku-5-5`, the model this build's credential
+// path was measured with (ADR-0050, ADR-0093). One constant rather than a table of every provider's catalog, which
+// nothing here could keep current — so on a machine whose key is **another** provider this id and that provider are
+// a pair nothing measured, an example the operator edits. The qualified form is still worth starting from: the bare
+// id is resolved across every provider that has a key, and pi answers several candidates with `status: "ambiguous"`
+// (the reading ADR-0050's measurement exists to remove), while `<provider>/` at least names one.
 export const EXAMPLE_MODEL = "claude-haiku-5-5";
 
 // The model field's starting value: `<provider>/<model>`, never a bare id.
 //
-// A bare id is resolved across every provider that has a key, and pi's own resolver answers several candidates with
-// `status: "ambiguous"` rather than a model — so the id the operator starts from names its provider (ADR-0093). The
-// provider is the machine's default when this machine has a key for it, else the first one it does have (the list is
-// in table order, so that answer is stable), else the default again: a machine with no key starts the field at the
-// provider the sentence below tells the operator to store one for, so the two agree.
+// The provider is the machine's default when this machine has a key for it, else the first one it does have (the list
+// is in table order, so that answer is stable), else the default again: a machine with no key starts the field at the
+// provider the sentence below tells the operator to store one for, so the two agree. Only the default arm is a pair
+// this build measured; the other arm is the same example qualified with whichever provider the machine has, and the
+// operator owns the tail (see `EXAMPLE_MODEL`).
 export function modelPrefill(keys: KeyFacts): string {
   const provider = keys.providers.includes(keys.default_provider)
     ? keys.default_provider
@@ -1389,6 +1392,32 @@ export function noKeyNotice(keys: KeyFacts): string | null {
   return keys.providers.length === 0
     ? `no provider key is stored on this machine; run \`holosmith key set ${keys.default_provider}\``
     : null;
+}
+
+// The facts the new-session form draws from: the machine the picker names, never this one by default.
+//
+// A create is a request to the machine in the path, so the model the form prefills and the sentence beside it are
+// facts about **that** machine. `own` answers for `LOCAL_HOST`, which `createTargets` puts first exactly when this
+// machine can create; `peer` is what that machine's session-list answer carried, or `null` while it has not
+// answered.
+//
+// A peer that has not answered has told this page nothing, and the fallback says no more than that: `providers: []`
+// is "unknown" and not "none" (`noKeyNotice` is never drawn from it), and `default_provider` is the one fact every
+// machine of one release shares — it is the provider table's first row, which no config key moves.
+export function targetKeyFacts(host: string, own: KeyFacts, peer: KeyFacts | null): KeyFacts {
+  if (host === LOCAL_HOST) {
+    return own;
+  }
+  return peer ?? { providers: [], default_provider: own.default_provider };
+}
+
+// The no-key sentence, drawn only where its subject is: this machine's own store.
+//
+// It names a file on the machine the operator is looking at and a command run on it, and a peer's store is the peer's
+// operator's business — a hub, which the product never asks to store a key at all (`server deploy` skips `key set`
+// there), would otherwise say this about every session it forwards.
+export function targetNoKeyNotice(host: string, keys: KeyFacts): string | null {
+  return host === LOCAL_HOST ? noKeyNotice(keys) : null;
 }
 
 // What a session's page says under the sentence when the machine that owns it did not answer at all. The
