@@ -785,7 +785,8 @@ pub fn architecture(images: &dyn Images, target: &str) -> Result<String, String>
 /// **`label` and `progress` are how a minutes-long build says it is working.** The label is the caller's spelling of
 /// this step — `3/6 images` for a deploy — and is passed in rather than composed here, because this module knows
 /// which images it builds and nothing about the run's step numbering. The two notes are one before a build and one
-/// after it, whatever it answered: a step's own line, printed with the report, is what says whether it succeeded.
+/// after it, and the second one carries the answer's word — `built <tag>` or `did not build <tag>` — because the
+/// step's own report line, which is where the reason is, does not arrive until the step is over.
 ///
 /// The two of them are two parameters rather than one because a sink outlives a step — `install`'s is one for the whole
 /// run and this module is handed it for the length of a step — which is also what takes this signature past the count
@@ -815,7 +816,12 @@ pub fn ensure(
         let arguments = build_arguments(&tag, &expectation);
         progress.note(label, &format!("building {tag}"));
         let built = images.build(&tag, &context, &arguments);
-        progress.note(label, &format!("built {tag}"));
+        // A daemon that could not run the build at all did not build the image either.
+        let success = built.as_ref().is_ok_and(|log| log.success);
+        progress.note(
+            label,
+            &format!("{} {tag}", if success { "built" } else { "did not build" }),
+        );
         match built? {
             Log { success: true, .. } => {}
             Log {

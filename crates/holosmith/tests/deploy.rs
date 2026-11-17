@@ -1833,6 +1833,52 @@ fn a_failed_build_is_step_threes_own_sentence_and_stops_the_run() {
     );
 }
 
+#[test]
+fn a_build_that_failed_says_so_in_its_note() {
+    // The one line a reader watching a silent step gets, and it may not claim the success the report is about to deny:
+    // the note's word is the build's own answer (ADR-0092 D3). Still two notes, one before and one after, so a reader
+    // is told the build ended — just not wrongly how.
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("deploy-images-failed-note");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let config = config(Some(format!("unix://{}", socket.display())));
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
+    let machine = Fake::new().with_failing_build(COPY_FAILURE);
+    let mut sink = Recorded::default();
+
+    let report = deploy::run_as_with(
+        &deployed,
+        &root,
+        &real_tools(&dir),
+        &machine,
+        false,
+        Kind::Server,
+        &mut sink,
+    );
+    assert_eq!(
+        report.failed,
+        Some(DeployStep::Images),
+        "{}",
+        report.render()
+    );
+
+    let notes: Vec<&str> = sink
+        .rendered()
+        .into_iter()
+        .filter(|line| line.starts_with("note "))
+        .collect();
+    assert_eq!(
+        notes,
+        [
+            format!("note [3/6 images] building {}", images::proxy_image()),
+            format!("note [3/6 images] did not build {}", images::proxy_image()),
+        ],
+        "the note over a failed build does not say it did not build"
+    );
+}
+
 // ---- step 4 and the refusal --------------------------------------------------------------
 
 #[test]
