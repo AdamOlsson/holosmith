@@ -45,12 +45,16 @@ A machine that runs sessions. Has Docker, git and a projects root.
 _Avoid_: Worker, agent host, runner
 
 **Install**:
-The one-command first setup: `holosmith server deploy` or `holosmith hub deploy`, which writes the **config** and the
-`~/.config/systemd/user/holosmith.service` unit, makes the state at the **root**, sets `loginctl enable-linger` so the
-daemon is a boot service, and then reports what it checked — all as the operator's own account, because a **machine**
-is not a service (ADR-0088). `--dry-run` is the read alone and re-running it is the whole recovery, which is what makes
-one verb enough: there is no account to create, no ownership to hand over and no file root has to write. It is done
-when a user unit answers `/api/health`; **Uninstall** is its inverse.
+The one-command first setup: `holosmith install`, which runs the **deploy** for the machine's own half (`server` and
+`both` install the server's, `hub` the hub's), enables `~/.config/systemd/user/holosmith.service` through the
+account's own systemd manager, sets `loginctl enable-linger` so the daemon is a boot service, and waits for
+`/api/health` — all as the operator's own account, because a **machine** is not a service (ADR-0088). The two
+`deploy` commands are the lower-level ones it runs: they write the tree, the config and the unit and **print** the two
+`systemctl --user` commands instead of running them. `--dry-run` is the read alone and re-running is the whole
+recovery, which is what makes one verb enough: there is no account to create, no ownership to hand over and no file
+root has to write. It refuses before writing anything when the account cannot open the daemon's socket, because that
+is the one thing whose fix — `usermod -aG docker` — is root's and reaches a login only at the next one. It is done when
+a user unit answers `/api/health`; **Uninstall** is its inverse.
 _Avoid_: Setup, provisioning, bootstrap, onboarding, install tree (that is the **root** and the **release tree**,
 neither of which is an install)
 

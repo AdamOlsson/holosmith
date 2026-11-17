@@ -119,7 +119,7 @@ fn role_line(found: Role, role: Role, kind: Kind, dry_run: bool) -> String {
 /// hub has no key proxy at all. `hub host add` is a **hub's**: it registers a machine this one will forward to, and a
 /// server cannot reach a hub's registry — a `server`-only machine's registry is a table nothing reads. A `both`
 /// machine earns both, in that order.
-fn next_steps(role: Role) -> Vec<String> {
+pub(crate) fn next_steps(role: Role) -> Vec<String> {
     let mut steps = Vec::new();
     if role != Role::Hub {
         steps.push("holosmith key set <provider>".to_string());
