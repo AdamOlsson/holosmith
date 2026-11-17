@@ -124,10 +124,15 @@ fn main() -> ExitCode {
         Cmd::Drain { wait, admin_dir } => {
             commands::drain::run(commands::drain::DrainArgs { wait, admin_dir })
         }
-        Cmd::Install { dry_run, root } => commands::install::run(commands::install::InstallArgs {
+        Cmd::Install {
+            dry_run,
+            root,
+            verbose,
+        } => commands::install::run(commands::install::InstallArgs {
             config: cli.config,
             root,
             dry_run,
+            verbose,
         }),
         Cmd::Server { action } => match action {
             ServerAction::Deploy {
@@ -135,6 +140,7 @@ fn main() -> ExitCode {
                 root,
                 ssh,
                 binary,
+                verbose,
             } => commands::deploy::run(commands::deploy::DeployArgs {
                 config: cli.config,
                 kind: holosmith::deploy::Kind::Server,
@@ -142,6 +148,7 @@ fn main() -> ExitCode {
                 root,
                 ssh,
                 binary,
+                verbose,
             }),
         },
         Cmd::Hub { action } => match action {
@@ -150,6 +157,7 @@ fn main() -> ExitCode {
                 root,
                 ssh,
                 binary,
+                verbose,
             } => commands::deploy::run(commands::deploy::DeployArgs {
                 config: cli.config,
                 kind: holosmith::deploy::Kind::Hub,
@@ -157,6 +165,7 @@ fn main() -> ExitCode {
                 root,
                 ssh,
                 binary,
+                verbose,
             }),
             HubAction::Host { action } => commands::hub::run_host(action, cli.config),
         },

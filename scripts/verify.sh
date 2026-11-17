@@ -35,13 +35,15 @@
 # `interrupted`, the seqs stay unique and the counter is the log's highest), the names a crash leaves behind
 # swept on a real daemon (a leftover container, an orphan network and worktree directory gone, a kept branch
 # and ref kept, the session's container replaced under the same name), a boot over a database from a newer
-# release (which continues and says who refuses), the one-command install in three cases after `case_server_deploy`
+# release (which continues and says who refuses), the one-command install in four cases after `case_server_deploy`
 # (`case_install`: a hub installed on a machine of its own under `bwrap` — the `--config`/`--root` tree, the deploy's
 # six steps, the `systemctl --user daemon-reload`/`enable --now` argv, the unit's bytes beside the config, the
 # `loginctl` linger reads and apply, and a second run whose every line is `satisfied` while neither apply command runs
-# again; `case_install_group`: an account outside the daemon's group refused before anything is written, with exactly
-# one `usermod` printed; `case_root_refusal`: the shipped artifact run as uid 0 in a container made from its own bytes,
-# answering the one sentence), the service and the keys a deploy writes in a case of their own
+# again; `case_install_terse`: the same install in its **default** rendering, diffed byte for byte against a real run's
+# stdout, with the progress lines on stderr and neither stream carrying the other's; `case_install_group`: an account
+# outside the daemon's group refused before anything is written, with exactly one `usermod` printed;
+# `case_root_refusal`: the shipped artifact run as uid 0 in a container made from its own bytes, answering the one
+# sentence), the service and the keys a deploy writes in a case of their own
 # (`case_server_service`: the unit's bytes, the VAPID pair, the printed commands
 # that are root's and `doctor`'s `perms` arms), the three service commands (`case_status`: one line per fact, with
 # the uptime read from the endpoint the boot answers; `case_logs`: the journald child's argv through a stand-in and a
@@ -623,6 +625,7 @@ serve_cases=(
   case_releases
   case_server_deploy
   case_install
+  case_install_terse
   case_install_group
   case_root_refusal
   case_server_service
@@ -5289,7 +5292,7 @@ case_hub_deploy() {
 
   # ---- 1. the dry run: the hub's plan, and nothing written -----------------------------------------
   status=0
-  PATH="$shims:$PATH" "$artifact" hub deploy --dry-run --root "$hub_tree" \
+  PATH="$shims:$PATH" "$artifact" hub deploy --verbose --dry-run --root "$hub_tree" \
     --config "$hub_config" >"$WORK/$name.dry.out" 2>&1 || status=$?
   check "$name/dry/exit" 0 "$status"
   got="$(sed -n 's/^\([1-7]\)\. .*/\1/p' "$WORK/$name.dry.out" | tr -d '\n')"
@@ -5341,7 +5344,7 @@ case_hub_deploy() {
     sleep 0.05
   done
   status=0
-  PATH="$shims:$PATH" "$artifact" hub deploy --root "$hub_tree" \
+  PATH="$shims:$PATH" "$artifact" hub deploy --verbose --root "$hub_tree" \
     --config "$hub_config" >"$WORK/$name.run.out" 2>&1 || status=$?
   check "$name/run/exit" 0 "$status"
   while read -r n entry; do
@@ -5402,7 +5405,7 @@ APPLIED
   check "$name/run/config/valid" 0 "$status"
   # The second run: re-running is the whole recovery procedure, so a run that reaches the end has to be idempotent.
   status=0
-  PATH="$shims:$PATH" "$artifact" hub deploy --root "$hub_tree" \
+  PATH="$shims:$PATH" "$artifact" hub deploy --verbose --root "$hub_tree" \
     --config "$hub_config" >"$WORK/$name.again.out" 2>&1 || status=$?
   check "$name/again/exit" 0 "$status"
   while read -r n entry; do
@@ -5424,7 +5427,7 @@ AGAIN
   # arm asserts are about a config that still says `server`.
   cp "$server_config" "$WORK/$name.union-source.toml"
   status=0
-  PATH="$shims:$PATH" "$artifact" hub deploy --root "$tree" \
+  PATH="$shims:$PATH" "$artifact" hub deploy --verbose --root "$tree" \
     --config "$server_config" >"$WORK/$name.union.out" 2>&1 || status=$?
   check "$name/union/exit" 0 "$status"
   grep -qx 'role = "both"' "$server_config" ||
@@ -5437,7 +5440,7 @@ AGAIN
   # written, and a past-tense "added the hub half" over a config that still says `server` would be the report's first
   # lie (ADR-0056's five words, and ADR-0077 D4's wording).
   status=0
-  PATH="$shims:$PATH" "$artifact" hub deploy --dry-run --root "$root/dry-union" \
+  PATH="$shims:$PATH" "$artifact" hub deploy --verbose --dry-run --root "$root/dry-union" \
     --config "$WORK/$name.union-source.toml" >"$WORK/$name.uniondry.out" 2>&1 || status=$?
   check "$name/uniondry/exit" 0 "$status"
   grep -qx 'deploy: dry run' "$WORK/$name.uniondry.out" ||
@@ -10923,7 +10926,7 @@ case_server_images() {
   done
 
   status=0
-  PATH="$shims:$PATH" "$artifact" server deploy --root "$root/install" --config "$WORK/config-images.toml" \
+  PATH="$shims:$PATH" "$artifact" server deploy --verbose --root "$root/install" --config "$WORK/config-images.toml" \
     >"$WORK/$name.deploy.out" 2>&1 || status=$?
   [ "$status" -eq 0 ] ||
     fail "$name/deploy/exit" "the deploy exited $status: $(tail -20 "$WORK/$name.deploy.out")"
@@ -11051,7 +11054,7 @@ case_server_images() {
   # The second deploy: `satisfied`, and neither image was rebuilt.
   id_before="$(docker image inspect --format '{{.Id}}' "$proxy") $(docker image inspect --format '{{.Id}}' "$agent")"
   status=0
-  PATH="$shims:$PATH" "$artifact" server deploy --root "$root/install" --config "$WORK/config-images.toml" \
+  PATH="$shims:$PATH" "$artifact" server deploy --verbose --root "$root/install" --config "$WORK/config-images.toml" \
     >"$WORK/$name.again.out" 2>&1 || status=$?
   [ "$status" -eq 0 ] ||
     fail "$name/again/exit" "the second deploy exited $status: $(tail -20 "$WORK/$name.again.out")"
@@ -12336,7 +12339,7 @@ case_server_deploy() {
 
     # 1. The dry run: the six steps in the spec's order, and an install root that does not appear.
     status=0
-    PATH="$shims:$PATH" "$artifact" server deploy --dry-run --root "$root/install" \
+    PATH="$shims:$PATH" "$artifact" server deploy --verbose --dry-run --root "$root/install" \
       --config "$WORK/config-deploy-offline.toml" >"$WORK/$name.dry.out" 2>&1 || status=$?
     check "$name/dry/exit" 0 "$status"
     got="$(sed -n 's/^\([1-7]\)\. .*/\1/p' "$WORK/$name.dry.out" | tr -d '\n')"
@@ -12412,7 +12415,7 @@ case_server_deploy() {
     #    resume command — the same command, with the resolved paths, and without `--dry-run`.
     deploy_config "$WORK/config-deploy-absent.toml" "$control" "$preview" "unix://$root/absent.sock" "$image"
     status=0
-    "$artifact" server deploy --root "$root/absent-install" \
+    "$artifact" server deploy --verbose --root "$root/absent-install" \
       --config "$WORK/config-deploy-absent.toml" >"$WORK/$name.absent.out" 2>&1 || status=$?
     check "$name/absent/exit" 1 "$status"
     grep -q '^1\. preflight: failed: .*absent\.sock' "$WORK/$name.absent.out" ||
@@ -12435,7 +12438,7 @@ case_server_deploy() {
     # 2b. A failed **dry run** resumes as a dry run. The command that just ran changed nothing, so a resume that
     #     installed step 2 for real would be a different command than the one the operator asked for.
     status=0
-    "$artifact" server deploy --dry-run --root "$root/absent-install" \
+    "$artifact" server deploy --verbose --dry-run --root "$root/absent-install" \
       --config "$WORK/config-deploy-absent.toml" >"$WORK/$name.absentdry.out" 2>&1 || status=$?
     check "$name/absentdry/exit" 1 "$status"
     line="$(tail -n 1 "$WORK/$name.absentdry.out")"
@@ -12455,7 +12458,7 @@ case_server_deploy() {
     #    sentence is the daemon's own — a socket that cannot answer `docker image inspect` is the reason no image
     #    could be built — and it names the proxy image, which is the one step 4 would have needed.
     status=0
-    "$artifact" server deploy --root "$root/partial" \
+    "$artifact" server deploy --verbose --root "$root/partial" \
       --config "$WORK/config-deploy-offline.toml" >"$WORK/$name.partial.out" 2>&1 || status=$?
     check "$name/partial/exit" 1 "$status"
     grep -q '^1\. preflight: satisfied: ' "$WORK/$name.partial.out" ||
@@ -12541,7 +12544,7 @@ case_server_deploy() {
   deploy_config "$WORK/config-deploy-online.toml" "$control" "$preview" "unix:///var/run/docker.sock" "$image"
 
   status=0
-  PATH="$shims:$PATH" "$artifact" server deploy --root "$root/install" \
+  PATH="$shims:$PATH" "$artifact" server deploy --verbose --root "$root/install" \
     --config "$WORK/config-deploy-online.toml" >"$WORK/$name.online.out" 2>&1 || status=$?
   check "$name/online/exit" 0 "$status"
   grep -q '^2\. files: changed: ' "$WORK/$name.online.out" ||
@@ -12617,7 +12620,7 @@ case_server_deploy() {
   cp "$WORK/config-deploy-online.toml" "$WORK/$name.config1"
   cp "$root/install/data/secrets/keys.toml" "$WORK/$name.keys1"
   status=0
-  PATH="$shims:$PATH" "$artifact" server deploy --root "$root/install" \
+  PATH="$shims:$PATH" "$artifact" server deploy --verbose --root "$root/install" \
     --config "$WORK/config-deploy-online.toml" >"$WORK/$name.again.out" 2>&1 || status=$?
   check "$name/again/exit" 0 "$status"
   while read -r n entry; do
@@ -12729,7 +12732,7 @@ case_deploy_ssh() {
   # remotely" in one measurement.
   deploy_config "$WORK/config-deploy-ssh.toml" "$control" "$preview" "unix://$root/docker.sock" "pi-agent:local"
   status=0
-  PATH="$WORK/$name.nodl:$shims:$PATH" "$artifact" server deploy --ssh me@box --dry-run --root "$root/tree" \
+  PATH="$WORK/$name.nodl:$shims:$PATH" "$artifact" server deploy --verbose --ssh me@box --dry-run --root "$root/tree" \
     --config "$WORK/config-deploy-ssh.toml" >"$WORK/$name.dry.out" 2>&1 || status=$?
   check "$name/dry/exit" 0 "$status"
   line="$(sed -n '1p' "$WORK/$name.dry.out")"
@@ -12805,7 +12808,7 @@ case_deploy_ssh() {
   done
   : >"$sshlog"
   status=0
-  PATH="$WORK/$name.nodl:$shims:$PATH" "$artifact" hub deploy --ssh me@box --root "$root/hub" \
+  PATH="$WORK/$name.nodl:$shims:$PATH" "$artifact" hub deploy --verbose --ssh me@box --root "$root/hub" \
     --config "$WORK/config-deploy-ssh-hub.toml" >"$WORK/$name.run.out" 2>&1 || status=$?
   check "$name/run/exit" 0 "$status"
   grep -q '^2\. files: changed: ' "$WORK/$name.run.out" ||
@@ -12844,7 +12847,7 @@ case_deploy_ssh() {
   assertions=$((assertions + 1))
   check "$name/run/children" 4 "$(grep -c '' "$sshlog")"
   status=0
-  PATH="$WORK/$name.nodl:$shims:$PATH" "$artifact" hub deploy --ssh me@box --root "$root/hub" \
+  PATH="$WORK/$name.nodl:$shims:$PATH" "$artifact" hub deploy --verbose --ssh me@box --root "$root/hub" \
     --config "$WORK/config-deploy-ssh-hub.toml" >"$WORK/$name.again.out" 2>&1 || status=$?
   check "$name/again/exit" 0 "$status"
   grep -qx 'deploy: 6 steps: 4 satisfied, 0 needs, 0 changed, 2 skipped, 0 failed' "$WORK/$name.again.out" ||
@@ -12871,7 +12874,7 @@ case_deploy_ssh() {
       "$name" "$other"
   else
     status=0
-    PATH="$WORK/$name.nodl:$shims:$PATH" "$artifact" server deploy --ssh me@box --binary "$other" --dry-run \
+    PATH="$WORK/$name.nodl:$shims:$PATH" "$artifact" server deploy --verbose --ssh me@box --binary "$other" --dry-run \
       --root "$root/arch" --config "$WORK/config-deploy-ssh.toml" >"$WORK/$name.arch.out" 2>&1 || status=$?
     check "$name/arch/exit" 1 "$status"
     grep -q 'cannot run there' "$WORK/$name.arch.out" ||
@@ -12892,7 +12895,7 @@ case_deploy_ssh() {
   # build": the digest-named copy is this artifact, and the dry run runs from it.
   : >"$sshlog"
   status=0
-  PATH="$WORK/$name.nodl:$shims:$PATH" "$artifact" server deploy --ssh me@box --binary "$artifact" --dry-run \
+  PATH="$WORK/$name.nodl:$shims:$PATH" "$artifact" server deploy --verbose --ssh me@box --binary "$artifact" --dry-run \
     --root "$root/arch-ok" --config "$WORK/config-deploy-ssh.toml" >"$WORK/$name.archok.out" 2>&1 || status=$?
   check "$name/archok/exit" 0 "$status"
   grep -q '^deploy: 6 steps: ' "$WORK/$name.archok.out" ||
@@ -12915,7 +12918,7 @@ CAT
   chmod 0755 "$corrupt/cat"
   : >"$sshlog"
   status=0
-  PATH="$corrupt:$shims:$PATH" "$artifact" server deploy --ssh me@box --dry-run --root "$root/corrupt" \
+  PATH="$corrupt:$shims:$PATH" "$artifact" server deploy --verbose --ssh me@box --dry-run --root "$root/corrupt" \
     --config "$WORK/config-deploy-ssh.toml" >"$WORK/$name.corrupt.out" 2>&1 || status=$?
   check "$name/corrupt/exit" 1 "$status"
   grep -q 'not the bytes that were sent' "$WORK/$name.corrupt.out" ||
@@ -12965,7 +12968,7 @@ CAT
   # line on stdout. Its report has no step line, because the target's config load refuses before step 1.
   : >"$sshlog"
   status=0
-  PATH="$WORK/$name.nodl:$shims:$PATH" "$artifact" server deploy --ssh me@box --dry-run \
+  PATH="$WORK/$name.nodl:$shims:$PATH" "$artifact" server deploy --verbose --ssh me@box --dry-run \
     --config "$WORK/$name.no-such-config.toml" >"$WORK/$name.failed.out" 2>"$WORK/$name.failed.err" || status=$?
   check "$name/failed/exit" 1 "$status"
   # Four children ran, and the last of them was the deploy itself: the transport did its work and the target said no.
@@ -13122,7 +13125,8 @@ SHIM
 
   # ---- 1. the first run: the deploy, the two manager commands, the linger flag, the wait -----------------
   status=0
-  install_home install --config "$config" --root "$tree" >"$root/first.out" 2>&1 || status=$?
+  install_home install --verbose --config "$config" --root "$tree" >"$root/first.out" 2>"$root/first.err" ||
+    status=$?
   check "$name/first/exit" 0 "$status"
   # The deploy's six steps, verbatim: the two a hub has no work for are skips, and the health line is `satisfied`
   # because the responder answers — the first-install case where it is `failed` is `tests/install.rs`'s, and it is
@@ -13138,6 +13142,22 @@ SHIM
       fail "$name/first/lines" "the first run does not say '$target': $(cat "$root/first.out")"
     assertions=$((assertions + 1))
   done
+  # The progress lines are the run's other half, and they are on **stderr**: one begin line per step it evaluated, the
+  # two a hub has no work for absent, and none of the report mixed in. `--verbose` changes the report, not the stream
+  # (ADR-0092).
+  for label in '1/6 preflight' '2/6 files' '5/6 service' '6/6 health' unit linger health; do
+    grep -qF "install: [$label] " "$root/first.err" ||
+      fail "$name/first/progress/$label" "the run announced no '$label': $(cat "$root/first.err")"
+    assertions=$((assertions + 1))
+  done
+  for label in '3/6 images' '4/6 proxies'; do
+    if grep -qF "install: [$label]" "$root/first.err"; then
+      fail "$name/first/progress/skip" "a step this hub skipped announced itself: $(cat "$root/first.err")"
+    fi
+    assertions=$((assertions + 1))
+  done
+  check "$name/first/stdout/progress" 0 "$(grep -c '^install: \[' "$root/first.out" || true)"
+  check "$name/first/stderr/report" 0 "$(grep -cE '^[1-6]\. ' "$root/first.err" || true)"
   grep -qx "install: url: http://localhost:$control" "$root/first.out" ||
     fail "$name/first/url" "the run did not print the control URL it earned: $(cat "$root/first.out")"
   assertions=$((assertions + 1))
@@ -13189,7 +13209,8 @@ SHIM
   : >"$logs/systemctl.log"
   : >"$logs/loginctl.log"
   status=0
-  install_home install --config "$config" --root "$tree" >"$root/second.out" 2>&1 || status=$?
+  install_home install --verbose --config "$config" --root "$tree" >"$root/second.out" 2>"$root/second.err" ||
+    status=$?
   check "$name/second/exit" 0 "$status"
   for target in '^1\. preflight: satisfied: ' '^2\. files: satisfied: ' '^3\. images: skipped: ' \
     '^4\. proxies: skipped: ' '^5\. service: satisfied: ' '^6\. health: satisfied: '; do
@@ -13220,11 +13241,166 @@ SHIM
     fail "$name/second/vapid" "the second run rewrote the VAPID pair, which invalidates every push subscription"
   assertions=$((assertions + 1))
 
+  # ---- 3. a plan says nothing while it works ------------------------------------------------------------
+  # `--dry-run` is the reads alone, so its sink is the silent one: nothing about it is slow, and a line announcing a
+  # step would be a line about work the run is not doing (ADR-0092). The report itself is the one `--dry-run` already
+  # printed — a plan, with its header and nothing written.
+  status=0
+  install_home install --dry-run --config "$config" --root "$tree" >"$root/dry.out" 2>"$root/dry.err" || status=$?
+  check "$name/dry/exit" 0 "$status"
+  [ -s "$root/dry.out" ] || fail "$name/dry/out" "a plan printed no report at all"
+  assertions=$((assertions + 1))
+  check "$name/dry/stderr" 0 "$(grep -c '' "$root/dry.err" || true)"
+
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
   holder_pid=""
   unset HS_SHIM_LOG HS_SHIM_STATE HS_SYSTEMCTL_LOG HS_UNIT_STATE HS_LOGINCTL_LOG HS_LINGER_STATE
   unset -f install_home
+  rm -rf "$root"
+}
+
+# `holosmith install`'s **default** rendering, byte for byte, on a machine that has never run it — and the two
+# streams that carry it.
+#
+# The report is what an operator reads, so its shape is measured once as bytes rather than as greps: the expected
+# lines are written to a file and `diff -u`d against stdout, which is the only way "one line per step, the mark and
+# the detail" is a fact rather than a family of patterns. What the run says **while** it works is the other half, and
+# it is on stderr: one `install: [<label>] …` line per step it evaluates, `3/6 images` and `4/6 proxies` absent
+# because a hub has no work for them, and nothing at all for a plan (ADR-0092).
+#
+# The fixture is `case_install`'s, cut to what one run needs: `bwrap` hands the binary a home of its own so the unit
+# `--config` composes is the one the account's manager resolves (ADR-0091 D4), the two manager programs are recorders,
+# and one responder on the control port makes step 6 and the wait after `enable --now` answer. `tests/install.rs`
+# asserts the same shapes at the layer that builds them; this case is the shipped artifact saying it.
+case_install_terse() {
+  local name=case_install_terse root="$repo_root/target/verify-install-terse-$$"
+  local home="$root/home" config="$root/home/.config/holosmith.toml" tree="$root/home/.local/share/holosmith"
+  local passwd="$root/passwd" shims="$root/bin" logs="$root/logs" expected="$root/expected"
+  local control preview status fake_uid label holder_pid=""
+  if ! command -v bwrap >/dev/null 2>&1 || ! bwrap --dev-bind / / true >/dev/null 2>&1; then
+    printf 'SKIP %s: no bwrap to hand the binary a home of its own (tests/install.rs renders the same bytes)\n' "$name"
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to answer `/api/health` (tests/install.rs answers the same wait)\n' "$name"
+    return 0
+  fi
+  rm -rf "$root"
+  mkdir -p "$home/.config" "$shims" "$logs"
+  control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a second port"
+  fake_uid="$(bwrap --dev-bind / / /bin/sh -c 'stat -L -c %u /proc/self')" ||
+    fail "$name/uid" "could not read the uid this namespace reports"
+  case "$fake_uid" in
+    '' | *[!0-9]*) fail "$name/uid" "the namespace's uid is not a number: $fake_uid" ;;
+  esac
+  [ "$fake_uid" != 0 ] || fail "$name/uid" "this namespace reports uid 0, which is the refusal"
+  {
+    printf 'root:x:0:0:root:/root:/bin/sh\n'
+    printf 'operator:x:%s:%s::%s:/bin/sh\n' "$fake_uid" "$fake_uid" "$home"
+    printf 'nobody:x:65534:65534::%s:/bin/sh\n' "$home"
+  } >"$passwd"
+  # A hub: no image, no proxy, no daemon question — two skips and one line each for what it does do.
+  deploy_config "$config" "$control" "$preview" "unix:///var/run/docker.sock" "pi-agent:local" "hub"
+  deploy_machine_shims "$shims" "$logs/tailscale.log" "$logs/tailscale.state"
+  cat >"$shims/systemctl" <<'SHIM'
+#!/bin/sh
+# The user manager, as a recorder: the two reads answer "not loaded yet" and the two applies do nothing but say yes,
+# which is the state a machine that has never run an install is in.
+printf 'systemctl %s\n' "$*" >>"$HS_SYSTEMCTL_LOG"
+case "$*" in
+  "--user is-enabled holosmith.service" | "--user is-active holosmith.service") exit 1 ;;
+  "--user daemon-reload" | "--user enable --now holosmith.service") exit 0 ;;
+  *) exit 1 ;;
+esac
+SHIM
+  chmod 0755 "$shims/systemctl"
+  cat >"$shims/loginctl" <<'SHIM'
+#!/bin/sh
+# `loginctl`: the flag is off and setting it is this account's own, which is the `changed` line.
+printf 'loginctl %s\n' "$*" >>"$HS_LOGINCTL_LOG"
+case "$*" in
+  "show-user operator --property=Linger --value") printf 'no\n' ;;
+  "enable-linger") exit 0 ;;
+  *) exit 1 ;;
+esac
+SHIM
+  chmod 0755 "$shims/loginctl"
+  # One runner for both runs, with this case's shims ahead of the machine's own programs.
+  terse_home() {
+    bwrap --dev-bind / / --die-with-parent --bind "$passwd" /etc/passwd \
+      --setenv PATH "$shims:$PATH" \
+      --setenv HS_SHIM_LOG "$logs/tailscale.log" \
+      --setenv HS_SHIM_STATE "$logs/tailscale.state" \
+      --setenv HS_SYSTEMCTL_LOG "$logs/systemctl.log" \
+      --setenv HS_LOGINCTL_LOG "$logs/loginctl.log" \
+      "$artifact" "$@"
+  }
+  holder_pid="$(health_responder "$control")"
+  for _ in $(seq 1 100); do
+    if (exec 3<>/dev/tcp/127.0.0.1/"$control") 2>/dev/null; then break; fi
+    sleep 0.05
+  done
+
+  # ---- 1. the run: the report on stdout, the progress on stderr ---------------------------------------
+  status=0
+  terse_home install --config "$config" --root "$tree" >"$root/out" 2>"$root/err" || status=$?
+  check "$name/exit" 0 "$status"
+  # The one line a pipe cannot know: the port the kernel gave this case.
+  cat >"$expected" <<'REPORT'
+1. preflight ✓
+2. files ✓ (7 actions)
+3. images –
+4. proxies –
+5. service ✓ (1 action)
+    still yours to run: systemctl --user daemon-reload; systemctl --user enable --now holosmith.service
+6. health ✓
+unit ✓
+linger ✓
+health ✓
+url: http://localhost:@PORT@
+next: holosmith hub host add <name> <url>
+REPORT
+  sed "s/@PORT@/$control/" "$expected" >"$expected.1" && mv "$expected.1" "$expected"
+  if ! diff -u "$expected" "$root/out" >"$root/diff"; then
+    fail "$name/report" "the terse report is not the shape an operator reads: $(cat "$root/diff")"
+  fi
+  assertions=$((assertions + 1))
+  # Every step the run evaluated announced itself on **stderr**, and the two a hub skips did not: the label is the
+  # report's own number and word, so a reader can tie the line that arrived to the line that came with the verdict.
+  for label in '1/6 preflight' '2/6 files' '5/6 service' '6/6 health' unit linger health; do
+    grep -qF "install: [$label] " "$root/err" ||
+      fail "$name/progress/$label" "no progress line for '$label': $(cat "$root/err")"
+    assertions=$((assertions + 1))
+  done
+  for label in '3/6 images' '4/6 proxies'; do
+    if grep -qF "install: [$label]" "$root/err"; then
+      fail "$name/progress/skip" "a step this hub skipped announced itself: $(cat "$root/err")"
+    fi
+    assertions=$((assertions + 1))
+  done
+  # And the two streams do not mix: not one progress line is on stdout, which is the report and nothing else.
+  check "$name/stdout/progress" 0 "$(grep -c '^install: \[' "$root/out" || true)"
+  check "$name/stderr/report" 0 "$(grep -cE '^[1-6]\. ' "$root/err" || true)"
+
+  # ---- 2. a plan says nothing while it works -----------------------------------------------------------
+  status=0
+  terse_home install --dry-run --config "$config" --root "$tree" >"$root/dry.out" 2>"$root/dry.err" || status=$?
+  check "$name/dry/exit" 0 "$status"
+  [ -s "$root/dry.out" ] || fail "$name/dry/out" "a plan printed no report at all"
+  assertions=$((assertions + 1))
+  # Nothing is slow in a read, so nothing is announced — and the plan says once that it is one.
+  check "$name/dry/stderr" 0 "$(grep -c '' "$root/dry.err" || true)"
+  grep -qxF 'install: dry run — nothing is written' "$root/dry.out" ||
+    fail "$name/dry/header" "a plan does not say it is one: $(cat "$root/dry.out")"
+  assertions=$((assertions + 1))
+
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  holder_pid=""
+  unset HS_SHIM_LOG HS_SHIM_STATE HS_SYSTEMCTL_LOG HS_LOGINCTL_LOG
+  unset -f terse_home
   rm -rf "$root"
 }
 
@@ -13444,7 +13620,7 @@ case_server_service() {
     #    step's block and not its first line alone (ADR-0085).
     deploy_config "$WORK/config-service-dry.toml" "$control" "$preview" "unix://$root/docker.sock" "$image"
     status=0
-    PATH="$shims:$PATH" "$artifact" server deploy --dry-run --root "$root/install" \
+    PATH="$shims:$PATH" "$artifact" server deploy --verbose --dry-run --root "$root/install" \
       --config "$WORK/config-service-dry.toml" >"$WORK/$name.dry.out" 2>&1 || status=$?
     check "$name/dry/exit" 0 "$status"
     line="$(deploy_block "$WORK/$name.dry.out" '^5\. service: needs: ')"
@@ -13518,7 +13694,7 @@ case_server_service() {
   deploy_config "$WORK/config-service-online.toml" "$control" "$preview" "unix:///var/run/docker.sock" "$image"
 
   status=0
-  PATH="$shims:$PATH" "$artifact" server deploy --root "$root/install" \
+  PATH="$shims:$PATH" "$artifact" server deploy --verbose --root "$root/install" \
     --config "$WORK/config-service-online.toml" >"$WORK/$name.online.out" 2>&1 || status=$?
   check "$name/online/exit" 0 "$status"
   for target in '^2\. files: changed: ' '^5\. service: changed: ' '^6\. health: satisfied: '; do
@@ -13585,7 +13761,7 @@ case_server_service() {
   cp "$vapid" "$WORK/$name.vapid1"
   cp "$unit" "$WORK/$name.unit1"
   status=0
-  PATH="$shims:$PATH" "$artifact" server deploy --root "$root/install" \
+  PATH="$shims:$PATH" "$artifact" server deploy --verbose --root "$root/install" \
     --config "$WORK/config-service-online.toml" >"$WORK/$name.again.out" 2>&1 || status=$?
   check "$name/again/exit" 0 "$status"
   while read -r n entry; do
@@ -14851,8 +15027,19 @@ phase_serve() {
     # that printed SKIP and returned. An `ok` for a case that skipped would log a pass for a check that never
     # ran, which is the one shape this gate may not have; nothing is swallowed, the lines are
     # printed below in order whatever they are.
+    #
+    # **The exit status is the verdict's third source, beside `FAIL` and `SKIP`.** A case that returned non-zero
+    # without printing either of the other two would otherwise log an `ok` over a check that measured nothing,
+    # which is what a case whose write or read died does before it reaches its first assertion.
+    #
+    # It is a `|| fail` on this line and not an `ERR` trap, and the reason is the whole shape of this phase:
+    # `run_phase` calls `phase_serve` in a `||` list, and bash switches errexit off for the *entire body* of a
+    # function invoked that way — measured, not assumed: a bare `false` between two `printf`s in a case of this
+    # phase runs on to the next statement. An `ERR` trap is suppressed by the same rule, so it would fire on
+    # nothing. A case's ordinary failing command is therefore already swallowed here and always was; the status
+    # this line reads is the one a case *returns*, which is what a run that aborted early returns.
     case_out="$WORK/case.out"
-    "$case_fn" >"$case_out"
+    "$case_fn" >"$case_out" || fail "${case_fn}/status" "$case_fn exited non-zero without a FAIL or SKIP line"
     cat "$case_out"
     if grep -q '^SKIP' "$case_out"; then
       skipped=$((skipped + 1))

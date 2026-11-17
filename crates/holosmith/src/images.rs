@@ -27,6 +27,7 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::docker::Docker;
+use crate::progress::Progress;
 use crate::version::VersionInfo;
 
 /// The proxy image's Dockerfile, as the file in `crates/holosmith/images/`.
@@ -780,6 +781,17 @@ pub fn architecture(images: &dyn Images, target: &str) -> Result<String, String>
 /// `release` is the version the images are built **for** and `binary` the bytes that go inside them: the same pair
 /// for `server deploy` (this process, its own bytes) and for a promotion (the candidate, its `.sha256`). The two
 /// cannot be given from different releases, which is the defect this parameter exists to prevent.
+///
+/// **`label` and `progress` are how a minutes-long build says it is working.** The label is the caller's spelling of
+/// this step — `3/6 images` for a deploy — and is passed in rather than composed here, because this module knows
+/// which images it builds and nothing about the run's step numbering. The two notes are one before a build and one
+/// after it, and the second one carries the answer's word — `built <tag>` or `did not build <tag>` — because the
+/// step's own report line, which is where the reason is, does not arrive until the step is over.
+///
+/// The two of them are two parameters rather than one because a sink outlives a step — `install`'s is one for the whole
+/// run and this module is handed it for the length of a step — which is also what takes this signature past the count
+/// clippy wants.
+#[allow(clippy::too_many_arguments)]
 pub fn ensure(
     images: &dyn Images,
     binary: &Path,
@@ -787,6 +799,8 @@ pub fn ensure(
     release: &VersionInfo,
     config: &Config,
     pending: &[(Kind, String)],
+    label: &str,
+    progress: &mut dyn Progress,
 ) -> Result<String, String> {
     if pending.is_empty() {
         return Ok("no image needed building".to_string());
@@ -800,7 +814,15 @@ pub fn ensure(
         let tag = expectation.tag();
         let context = archive(kind.dockerfile(), binary)?;
         let arguments = build_arguments(&tag, &expectation);
-        match images.build(&tag, &context, &arguments)? {
+        progress.note(label, &format!("building {tag}"));
+        let built = images.build(&tag, &context, &arguments);
+        // A daemon that could not run the build at all did not build the image either.
+        let success = built.as_ref().is_ok_and(|log| log.success);
+        progress.note(
+            label,
+            &format!("{} {tag}", if success { "built" } else { "did not build" }),
+        );
+        match built? {
             Log { success: true, .. } => {}
             Log {
                 success: false,

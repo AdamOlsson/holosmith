@@ -5,10 +5,12 @@
 //! it (ADR-0056). That pair is why a step cannot be one function that decides and acts — a dry run has to print
 //! the read's plan without running the apply, and "changed" has to be distinguishable from "was already right".
 //!
-//! Every step prints one line, `<n>. <step>: <word>: <sentence>`: [`DeployStep`]'s number is the spec's order and
-//! [`Word`] is the read's answer, one of five. A step that prints a list — a plan, or the apply that did it — puts
-//! one action per line under that line, with the count on the line itself (ADR-0085). The two words that carry the
-//! design are:
+//! Every step prints one line: [`DeployStep`]'s number is the spec's order and [`Word`] is the read's answer, one of
+//! five. There are two renderings of those lines and they are one vocabulary (ADR-0085). [`Report::render`] is the
+//! default and prints the mark for each word — `2. files ✓ (3 actions)` — with the detail only where a step wrote
+//! something, needs something or failed; [`Report::render_verbose`] is `--verbose` and prints what every release
+//! before this one printed, `<n>. <step>: <word>: <sentence>`, with a step's list — a plan, or the apply that did it —
+//! one action per line under it and the count on the line itself (ADR-0085). The two words that carry the design are:
 //!
 //! - **`skipped` is never `satisfied`.** A step that prints "already satisfied" over a check that read nothing is a
 //!   lie of exactly the kind this list exists to prevent, which is why the word is in [`Word`] at all. Since
@@ -64,6 +66,7 @@ use crate::doctor::{self, Depth};
 use crate::images::{self, Expectation, Kind as ImageKind};
 use crate::key;
 use crate::preflight::{self, Check, Outcome};
+use crate::progress::{Progress, Silent};
 use crate::proxies;
 use crate::vapid;
 
@@ -284,6 +287,35 @@ impl DeployStep {
             Self::Health => "health",
         }
     }
+
+    /// The bracket a progress line carries: `3/6 images`, the number and word the report's own line also uses.
+    ///
+    /// It is the report's spelling and not a second vocabulary, because the two lines describe one step: the progress
+    /// line arrives while it runs and the report's when it is over, and a reader matches them by what they say.
+    pub fn label(self) -> String {
+        format!("{}/6 {}", self.number(), self.word())
+    }
+
+    /// What the step is about to do, present tense, for the begin line [`Progress::begin`] carries.
+    ///
+    /// The phrase exists for the one silence a report cannot break: step 3 builds two images and the first build
+    /// downloads pi, so a first install is minutes of nothing. A phrase is a **duration expectation** as much as a
+    /// description — "a first install downloads pi, so this takes minutes" is what tells a reader that the silence is
+    /// work rather than a hang — which is why it lives here, beside [`Self::word`], and not in a caller's formatting.
+    /// The two steps that name no duration are the ones that cannot take long: a read of this machine, two
+    /// `docker run`s, one file's bytes.
+    pub fn beginning(self) -> &'static str {
+        match self {
+            Self::Preflight => "asking `doctor --quick` about this machine",
+            Self::Files => "reading and writing the install tree, the config and the secrets",
+            Self::Images => {
+                "building the two images — a first install downloads pi, so this takes minutes"
+            }
+            Self::Proxies => "starting the `egress` network and the machine's two proxies",
+            Self::Service => "writing the systemd unit",
+            Self::Health => "asking `/api/health` and `doctor --full` about the machine",
+        }
+    }
 }
 
 impl fmt::Display for DeployStep {
@@ -322,6 +354,22 @@ impl Word {
             Self::Failed => "failed",
         }
     }
+
+    /// The mark the terse report prints instead of the word: `✓` for the two words that mean the step is right
+    /// (nothing to do, or done), `–` for [`Self::Skipped`], `!` for [`Self::Needs`], `✗` for [`Self::Failed`].
+    ///
+    /// One function rather than four `match`es, because the marks and the slice of the tree that prints them are
+    /// one vocabulary: a second copy is a second spelling of what a step's outcome looks like. `satisfied` and
+    /// `changed` share `✓` deliberately — a reader asking what a run did not need to do reads the parentheses, and a
+    /// run that applied everything and one that needed nothing are both green.
+    pub fn mark(self) -> &'static str {
+        match self {
+            Self::Satisfied | Self::Changed => "✓",
+            Self::Skipped => "–",
+            Self::Needs => "!",
+            Self::Failed => "✗",
+        }
+    }
 }
 
 impl fmt::Display for Word {
@@ -336,6 +384,14 @@ pub struct Line {
     pub step: DeployStep,
     pub word: Word,
     pub sentence: String,
+    /// The one command that puts a **failed** step right, when the step knows a better answer than re-running the
+    /// whole run: a `chmod`, `systemctl --user enable --now`, `holosmith doctor --quick`.
+    ///
+    /// It is here rather than as a second sentence because the terse report prints it as its own indented line —
+    /// `    fix: chmod 0700 …` — and a value a reader pastes into a shell has to travel as a value, not as prose a
+    /// renderer has to find and cut out of it. The command layer fills `None` with the run's own resume command
+    /// ([`Report::fill_fix`]), so every failed step a reader sees carries exactly one pasteable line.
+    pub fix: Option<String>,
 }
 
 impl fmt::Display for Line {
@@ -379,7 +435,53 @@ impl Report {
         self.failed.is_some()
     }
 
-    /// The whole report as the operator reads it: the header, the root, one block per step and the tally.
+    /// Put `fallback` on the failed step's [`Line::fix`] when the step itself named no repair: the run's own resume
+    /// command, which is the command that just failed and every step's recovery (ADR-0056).
+    ///
+    /// The command layer owns the flags, so it owns that command: `--config`/`--root` made absolute, `--dry-run` only
+    /// on a dry run. A step that knew a more precise repair has already filled the field and keeps it.
+    pub fn fill_fix(&mut self, fallback: &str) {
+        if let Some(line) = self.lines.iter_mut().find(|line| line.word == Word::Failed)
+            && line.fix.is_none()
+        {
+            line.fix = Some(fallback.to_string());
+        }
+    }
+
+    /// The report as an operator reads a run: one line per step, the mark for its word, and the detail only where
+    /// there is something to know or to run.
+    ///
+    /// ```text
+    /// 1. preflight ✓
+    /// 2. files ✓ (3 actions)
+    /// 3. images ✓ (built 2 images: holosmith-proxy:0.1.0, agent-image:0.1.0)
+    /// ```
+    ///
+    /// Three facts decide the shape, and each is a section of ADR-0085:
+    ///
+    /// - **The mark is the verdict**, and a step with nothing to act on prints only it: the sentences are written for
+    ///   the operator who must *do* something about a step, which is right for the one that needs a `chmod` and a
+    ///   wall of text when all six passed.
+    /// - **The detail is the sentence's own, cut to its first clause** — `3 actions`, `built 2 images` — so the terse
+    ///   line says what the run wrote without a second vocabulary. Under a `needs` line the action lines follow
+    ///   indented exactly as the verbose report prints them; under a `changed` one only the remark does — what the step
+    ///   wrote is the parenthetical, and the remark is the command that is still the operator's.
+    /// - **A failure keeps its whole sentence and gains one `fix:` line**, which is the command that puts it right
+    ///   ([`Report::fill_fix`]).
+    ///
+    /// The header and the tally do not survive here: a run is one line per step, and which tree it installed into is
+    /// a question the verbose report answers. `dry_run` has no header of its own either — "nothing was written" is
+    /// the command's line to print, because it is the command's flag ([`crate::commands::deploy::run`]).
+    pub fn render(&self) -> String {
+        let mut text = String::new();
+        for line in &self.lines {
+            // A `String` cannot fail to be written to, which is why this is not a `?`.
+            let _ = writeln!(text, "{}", line.terse());
+        }
+        text
+    }
+
+    /// The report as any earlier release printed it: the header, the root, one block per step and the tally.
     ///
     /// A block is the step's own line — `^N. step: word: ` — and, under a plan or an apply, one indented line per
     /// action (ADR-0085). That first line is what a gate greps, so it is the only line whose shape is a contract.
@@ -389,7 +491,7 @@ impl Report {
     /// counts: a tally of four words would sum to fewer steps than the run reports, and leave out the one that says
     /// the machine is not ready (ADR-0056, amended by ADR-0088), because a gate greps the line's shape and a reader
     /// diffs two runs by it.
-    pub fn render(&self) -> String {
+    pub fn render_verbose(&self) -> String {
         let count = |word: Word| self.lines.iter().filter(|line| line.word == word).count();
         let mut text = format!("deploy: {}\n", if self.dry_run { "dry run" } else { "run" });
         // Which tree this report describes, on its own line: the step lines name paths, and a reader needs to see
@@ -415,6 +517,69 @@ impl Report {
             count(Word::Failed)
         );
         text
+    }
+}
+
+impl Line {
+    /// One terse line: `3. images ✓ (built 2 images)`, or the `fix:` line a failure earns, indented under it.
+    pub fn terse(&self) -> String {
+        let mut text = format!("{}. {} {}", self.step.number(), self.step, self.word.mark());
+        terse_detail(&mut text, self.word, &self.sentence, self.fix.as_deref());
+        text
+    }
+}
+
+/// What follows a terse line's mark, whatever the line is about — one function so that the deploy's lines and
+/// install's own say the same thing about the same five words.
+///
+/// - `satisfied` and `skipped` carry nothing: the mark is the whole answer.
+/// - `needs` carries the sentence's first line, which for a plan is its count and the remark about what the run does
+///   not do, and then every indented line under it — a step whose remaining work is the operator's keeps all of it,
+///   because dropping a `usermod` from the one line that says the operator must act is losing the line's subject.
+/// - `changed` carries the first clause in parentheses — what it wrote, in the sentence's own words — and then the
+///   remark, if the step has one, because a remark is a command the operator may still have to run.
+/// - `failed` carries the whole sentence and then `fix:`, one line, pasteable.
+pub(crate) fn terse_detail(text: &mut String, word: Word, sentence: &str, fix: Option<&str>) {
+    let mut lines = sentence.lines();
+    let first = lines.next().unwrap_or_default();
+    let (clause, remark) = split_remark(first);
+    match word {
+        Word::Satisfied | Word::Skipped => {}
+        Word::Needs => {
+            let _ = write!(text, " {}", clause.trim_end_matches(':'));
+            if let Some(remark) = remark {
+                let _ = write!(text, "; {remark}");
+            }
+            for line in lines {
+                text.push('\n');
+                text.push_str(line);
+            }
+        }
+        Word::Changed => {
+            let _ = write!(text, " ({})", clause.trim_end_matches(':'));
+            if let Some(remark) = remark {
+                let _ = write!(text, "\n    {remark}");
+            }
+        }
+        Word::Failed => {
+            let _ = write!(text, " {sentence}");
+            if let Some(fix) = fix {
+                let _ = write!(text, "\n    fix: {fix}");
+            }
+        }
+    }
+}
+
+/// A sentence's first line cut into the clause that names the work and the remark a few steps carry about what the run
+/// does **not** do (`; the account … is in the docker group`; `; still yours to run: systemctl …`).
+///
+/// The remark is split on the sentence's own separator rather than by a second field on [`Line`], because a sentence is
+/// the one thing both renderings print and the split is the same two characters `deploy`'s steps already write it
+/// with: the count's colon gives way to a `; ` remark ([`counted`]), so the first of those is where the clause ends.
+fn split_remark(first: &str) -> (&str, Option<&str>) {
+    match first.split_once("; ") {
+        Some((clause, remark)) => (clause, Some(remark)),
+        None => (first, None),
     }
 }
 
@@ -590,7 +755,9 @@ impl Default for Tools {
 /// Run the six steps in the spec's order and answer the report: a **server** deploy.
 ///
 /// This is [`run_as`] with [`Kind::Server`], which is what the name means: the six steps, the daemon's group and
-/// both proxies. `holosmith hub deploy` calls [`run_as`] with its own half.
+/// both proxies. `holosmith hub deploy` calls [`run_as`] with its own half. Every one of these three is quiet: a
+/// deploy's report is the whole of what it prints, so the run tells a sink nothing ([`run_as_with`] is where a caller
+/// that has someone to tell comes in).
 pub fn run(
     config: &Config,
     root: &Root,
@@ -621,6 +788,23 @@ pub fn run_as(
     dry_run: bool,
     kind: Kind,
 ) -> Report {
+    run_as_with(config, root, tools, machine, dry_run, kind, &mut Silent)
+}
+
+/// [`run_as`] with a sink told what the run is doing, which is `install`'s shape of it.
+///
+/// The split is the decision [`crate::progress::Progress`] records: a `deploy` prints its report and nothing else, so
+/// it has no one to tell and takes [`Silent`]; an install is a first run on a bare machine, minutes long, and silent
+/// until the end unless a caller says otherwise.
+pub fn run_as_with(
+    config: &Config,
+    root: &Root,
+    tools: &Tools,
+    machine: &dyn Machine,
+    dry_run: bool,
+    kind: Kind,
+    progress: &mut dyn Progress,
+) -> Report {
     let installed = Config {
         role: union(config.role, kind),
         ..root.config(config)
@@ -644,19 +828,26 @@ pub fn run_as(
     };
     for step in DeployStep::ALL {
         // A step this half has no work for is a `skipped` line and the run continues: the remaining steps are still
-        // this run's, and a stop here would leave steps 5–6 of a hub unevaluated for no reason (ADR-0056).
+        // this run's, and a stop here would leave steps 5–6 of a hub unevaluated for no reason (ADR-0056). It is also
+        // the one arm that says nothing to the sink: there is nothing to wait for, so a begin line over it would be a
+        // lie about the silence.
         if let Some(reason) = kind.skip(step) {
             report.lines.push(Line {
                 step,
                 word: Word::Skipped,
                 sentence: reason.to_string(),
+                fix: None,
             });
             continue;
         }
+        // The begin line goes **before** the step's first read: it is the only thing a reader waiting on a
+        // minutes-long step has, and the reason it is a sink rather than part of the report is that a report is
+        // written when the work is over (ADR-0092).
+        progress.begin(&step.label(), step.beginning());
         let line = match step {
             DeployStep::Preflight => preflight(&checked, &doctor_tools, machine),
             DeployStep::Files => files(&installed, root, tools, dry_run, kind),
-            DeployStep::Images => images_line(&installed, machine, dry_run),
+            DeployStep::Images => images_line(&installed, machine, dry_run, progress),
             DeployStep::Proxies => proxies_line(&installed, machine, dry_run),
             DeployStep::Service => service(&installed, root, tools, dry_run),
             DeployStep::Health => health(&checked, &doctor_tools, tools, machine, dry_run),
@@ -709,11 +900,13 @@ fn preflight(config: &Config, tools: &doctor::Tools, machine: &dyn Machine) -> L
         finding.is_failure()
             && !matches!(finding.check, Check::Ports | Check::Perms | Check::Release)
     }) {
-        return Line {
-            step: DeployStep::Preflight,
-            word: Word::Failed,
-            sentence: finding.sentence.clone(),
-        };
+        // `doctor --quick` is this step's own list with every check and every sentence in it, so the repair is not a
+        // second reading of the finding: it is the command that prints the whole of what this line cut to one.
+        return failed_with_fix(
+            DeployStep::Preflight,
+            finding.sentence.clone(),
+            "holosmith doctor --quick".to_string(),
+        );
     }
     let count = |outcome: Outcome| {
         findings
@@ -764,6 +957,7 @@ fn preflight(config: &Config, tools: &doctor::Tools, machine: &dyn Machine) -> L
         step: DeployStep::Preflight,
         word: Word::Satisfied,
         sentence,
+        fix: None,
     }
 }
 
@@ -1059,6 +1253,7 @@ fn install(
                 root.describe(),
                 root.config_file().display()
             ),
+            fix: None,
         };
     }
     if dry_run {
@@ -1066,6 +1261,7 @@ fn install(
             step: DeployStep::Files,
             word: Word::Needs,
             sentence: counted(&plan, &remark),
+            fix: None,
         };
     }
     for action in &actions {
@@ -1091,6 +1287,7 @@ fn install(
         step: DeployStep::Files,
         word: Word::Changed,
         sentence: counted(&plan, &remark),
+        fix: None,
     }
 }
 
@@ -1450,6 +1647,18 @@ fn failed(step: DeployStep, sentence: String) -> Line {
         step,
         word: Word::Failed,
         sentence,
+        fix: None,
+    }
+}
+
+/// A failed step's line whose repair this step knows better than a re-run: the one command a terse report's
+/// `fix:` line carries ([`Line::fix`]).
+fn failed_with_fix(step: DeployStep, sentence: String, fix: String) -> Line {
+    Line {
+        step,
+        word: Word::Failed,
+        sentence,
+        fix: Some(fix),
     }
 }
 
@@ -1463,7 +1672,12 @@ fn failed(step: DeployStep, sentence: String) -> Line {
 /// The binary is read before the read as well as before the apply: the digest is a property of those bytes, so a
 /// deploy that cannot read its own path cannot say whether an image is current, and says that instead of claiming
 /// `satisfied` on three strings.
-fn images_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
+fn images_line(
+    config: &Config,
+    machine: &dyn Machine,
+    dry_run: bool,
+    progress: &mut dyn Progress,
+) -> Line {
     // The digest of *this* binary, hashed once: it is the label that makes a rebuilt artifact a rebuild, and the
     // read needs it as much as the apply does — a read that skipped it would answer `satisfied` over an image
     // holding the previous program (the review found exactly that before this line existed).
@@ -1499,6 +1713,7 @@ fn images_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
                 &agent.binary[..12],
                 agent.toolchains.unwrap_or_default().join(" ")
             ),
+            fix: None,
         };
     }
     let reasons: Vec<String> = pending.iter().map(|(_, reason)| reason.clone()).collect();
@@ -1507,6 +1722,7 @@ fn images_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
             step: DeployStep::Images,
             word: Word::Needs,
             sentence: counted(&reasons, &remark),
+            fix: None,
         };
     }
     let binary = match std::env::current_exe() {
@@ -1521,11 +1737,15 @@ fn images_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
             );
         }
     };
-    match images::ensure(machine, &binary, &digest, &release, config, &pending) {
+    let label = DeployStep::Images.label();
+    match images::ensure(
+        machine, &binary, &digest, &release, config, &pending, &label, progress,
+    ) {
         Ok(sentence) => Line {
             step: DeployStep::Images,
             word: Word::Changed,
             sentence: format!("{sentence}{remark}"),
+            fix: None,
         },
         Err(sentence) => failed(DeployStep::Images, sentence),
     }
@@ -1582,6 +1802,7 @@ fn proxies_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
                 names[0],
                 names[1]
             ),
+            fix: None,
         };
     }
     let mut pending = Vec::new();
@@ -1612,6 +1833,7 @@ fn proxies_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
             step: DeployStep::Proxies,
             word: Word::Needs,
             sentence,
+            fix: None,
         };
     }
     if !network && let Err(sentence) = machine.ensure_network(docker::EGRESS_NETWORK) {
@@ -1629,6 +1851,7 @@ fn proxies_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
         step: DeployStep::Proxies,
         word: Word::Changed,
         sentence,
+        fix: None,
     }
 }
 
@@ -1790,6 +2013,7 @@ fn service_line(
                 root.unit().display(),
                 bytes.len()
             ),
+            fix: None,
         };
     }
     let plan: Vec<String> = actions.iter().map(Action::describe).collect();
@@ -1798,6 +2022,7 @@ fn service_line(
             step: DeployStep::Service,
             word: Word::Needs,
             sentence: counted(&plan, &remark),
+            fix: None,
         };
     }
     for action in &actions {
@@ -1809,6 +2034,7 @@ fn service_line(
         step: DeployStep::Service,
         word: Word::Changed,
         sentence: counted(&plan, &remark),
+        fix: None,
     }
 }
 
@@ -1839,6 +2065,7 @@ fn health(
                 config.control_listen,
                 measured.findings.len()
             ),
+            fix: None,
         };
     }
     let plan = vec![
@@ -1854,6 +2081,7 @@ fn health(
             step: DeployStep::Health,
             word: Word::Needs,
             sentence: counted(&plan, ""),
+            fix: None,
         };
     }
     if !wait_for_health(config.control_listen, tools.health_wait) {
@@ -1875,6 +2103,7 @@ fn health(
         step: DeployStep::Health,
         word: Word::Changed,
         sentence: counted(&plan, ""),
+        fix: None,
     }
 }
 

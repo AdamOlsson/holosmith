@@ -50,6 +50,7 @@ use crate::deploy::{self, Root};
 use crate::drain;
 use crate::http::health;
 use crate::images;
+use crate::progress;
 use crate::release::{self, Release};
 use crate::schema;
 use crate::smoke;
@@ -345,6 +346,10 @@ pub fn execute(
     }
 
     // 3. The two images, for the candidate's version and from the candidate's bytes.
+    //
+    // The sink is the silent one, and the label names this pipeline's step rather than a deploy's: a promotion prints
+    // a line per step of its own as it goes (`upgrade: images: …`), so a build's two lines would be a second spelling
+    // of one progress stream — `install` is the verb whose silence the sink exists for (ADR-0092).
     let pending = images::outstanding(steps.images(), config, &candidate.info, &candidate.digest);
     match images::ensure(
         steps.images(),
@@ -353,6 +358,8 @@ pub fn execute(
         &candidate.info,
         config,
         &pending,
+        "images",
+        &mut progress::Silent,
     ) {
         Ok(sentence) => println!("upgrade: images: {sentence}"),
         Err(sentence) => {

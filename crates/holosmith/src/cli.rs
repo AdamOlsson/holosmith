@@ -196,6 +196,9 @@ pub enum Cmd {
         /// Print what each step would do and change nothing.
         #[arg(long)]
         dry_run: bool,
+        /// Print every step's full sentence, the install tree and the tally, as earlier releases did.
+        #[arg(long)]
+        verbose: bool,
         /// Install into this directory instead of `HOLOSMITH_ROOT`'s (default `~/.local/share/holosmith`).
         ///
         /// The root is one directory: the data root, the release tree and the projects. It moves the state and
@@ -226,6 +229,11 @@ pub enum ServerAction {
         /// Print each step's plan and change nothing. A broken machine still exits non-zero.
         #[arg(long)]
         dry_run: bool,
+        /// Print every step's full sentence, the install tree and the tally, as earlier releases did.
+        ///
+        /// Without it a report is one line per step: the mark for its word, and the commands a step leaves to you.
+        #[arg(long)]
+        verbose: bool,
         /// Install into this directory instead of `HOLOSMITH_ROOT`'s (default `~/.local/share/holosmith`).
         ///
         /// The root is one directory: the data root, the release tree and the projects. It moves the state and
@@ -256,6 +264,11 @@ pub enum HubAction {
         /// Print each step's plan and change nothing. A broken machine still exits non-zero.
         #[arg(long)]
         dry_run: bool,
+        /// Print every step's full sentence, the install tree and the tally, as earlier releases did.
+        ///
+        /// Without it a report is one line per step: the mark for its word, and the commands a step leaves to you.
+        #[arg(long)]
+        verbose: bool,
         /// Install into this root instead of `HOLOSMITH_ROOT`'s (default `~/.local/share/holosmith`).
         ///
         /// The root is one directory: the data root, the release tree and the projects. It moves the state and

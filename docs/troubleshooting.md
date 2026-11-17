@@ -12,6 +12,14 @@ curl -fsS http://127.0.0.1:8080/api/health
 `active (running)` and a JSON body is the machine working. `activating (auto-restart)` means the preflight refused:
 `holosmith doctor --quick` and `journalctl --user -u holosmith -n 30` say why, and so does a failed deploy step.
 
+A report is one line per step: `1. preflight ✓` … `6. health ✓`, then `url:` and
+`next:`. The mark is the verdict — `✓` done or nothing to do, `–` this half has no work for the step, `!` still
+yours to run, `✗` failed — a step that needs something keeps the commands you run, and a failed one adds a `fix:` line
+with the command that puts it right. Add `--verbose` to `install`, `server deploy` or `hub deploy` for every step's
+full sentence, the findings it counted, the install tree and the tally; that is the shape to read when you are
+diagnosing the machine rather than setting it up. What a run prints *while* it works — `install: [3/6 images] …` — goes
+to stderr, so `holosmith install > out` keeps the report alone.
+
 ## When something refuses
 
 | What you see | What it means |
