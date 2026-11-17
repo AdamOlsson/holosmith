@@ -37,6 +37,7 @@ use holosmith::doctor;
 use holosmith::images::{self, Expectation, Kind as ImageKind};
 use holosmith::key;
 use holosmith::preflight;
+use holosmith::progress::Progress;
 use holosmith::proxies;
 use holosmith::selftest;
 
@@ -667,6 +668,7 @@ fn the_six_steps_are_the_specs_order() {
         step: DeployStep::Files,
         word: Word::Satisfied,
         sentence: "all 6 paths are present".to_string(),
+        fix: None,
     };
     assert_eq!(
         line.to_string(),
@@ -682,34 +684,39 @@ fn the_report_prints_the_tally_and_no_owner_list() {
                 step: DeployStep::Preflight,
                 word: Word::Satisfied,
                 sentence: "10 findings: 8 pass, 0 fail, 2 unknown (systemd, disk)".to_string(),
+                fix: None,
             },
             Line {
                 step: DeployStep::Files,
                 word: Word::Changed,
                 sentence: "2 actions; the account operator is in the docker group".to_string(),
+                fix: None,
             },
             Line {
                 step: DeployStep::Images,
                 word: Word::Changed,
                 sentence: "built 2 images: holosmith-proxy:0.1.0, agent-image:0.1.0".to_string(),
+                fix: None,
             },
             Line {
                 step: DeployStep::Service,
                 word: Word::Changed,
                 sentence: "1 action: install -m 0644 <staged> /var/lib/holosmith/holosmith.service"
                     .to_string(),
+                fix: None,
             },
             Line {
                 step: DeployStep::Health,
                 word: Word::Failed,
                 sentence: "the health endpoint never answered".to_string(),
+                fix: None,
             },
         ],
         failed: Some(DeployStep::Health),
         dry_run: false,
         root: "/var/lib/holosmith".to_string(),
     };
-    let text = report.render();
+    let text = report.render_verbose();
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines[0], "deploy: run");
     // Which tree the report describes is its own line, before the steps: a run's paths mean nothing without the root
@@ -750,18 +757,20 @@ fn the_report_prints_the_tally_and_no_owner_list() {
                 step: DeployStep::Preflight,
                 word: Word::Satisfied,
                 sentence: "clean".to_string(),
+                fix: None,
             },
             Line {
                 step: DeployStep::Files,
                 word: Word::Needs,
                 sentence: "1 action".to_string(),
+                fix: None,
             },
         ],
         failed: None,
         dry_run: true,
         root: "/var/lib/holosmith".to_string(),
     };
-    let text = dry.render();
+    let text = dry.render_verbose();
     assert_eq!(text.lines().next(), Some("deploy: dry run"));
     // Every word a step can report is counted, `needs` included, so the tally's numbers add up to the steps the header
     // names — a six-step run that reported five was missing the one line that says an operator has work left.
@@ -770,6 +779,253 @@ fn the_report_prints_the_tally_and_no_owner_list() {
         Some("deploy: 2 steps: 1 satisfied, 1 needs, 0 changed, 0 skipped, 0 failed")
     );
     assert!(!dry.failed());
+}
+
+/// Every word a step can report, in one report: one run cannot report all five, and the terse shape is a claim about
+/// how each word reads.
+fn five_words() -> Report {
+    Report {
+        lines: vec![
+            Line {
+                step: DeployStep::Preflight,
+                word: Word::Satisfied,
+                sentence: "10 findings: 8 pass, 0 fail, 2 unknown (systemd, disk)".to_string(),
+                fix: None,
+            },
+            Line {
+                step: DeployStep::Files,
+                word: Word::Changed,
+                sentence: "2 actions:".to_string(),
+                fix: None,
+            },
+            Line {
+                step: DeployStep::Images,
+                word: Word::Skipped,
+                sentence: "a hub builds no images".to_string(),
+                fix: None,
+            },
+            Line {
+                step: DeployStep::Proxies,
+                word: Word::Needs,
+                sentence: "2 actions:\n    - create the egress network\n    - replace hs_key, the only thing \
+                          that holds a real provider key, detached with `--restart unless-stopped`"
+                    .to_string(),
+                fix: None,
+            },
+            Line {
+                step: DeployStep::Service,
+                word: Word::Changed,
+                sentence: "1 action; still yours to run: `systemctl --user daemon-reload`; `systemctl \
+                          --user enable --now holosmith.service`"
+                    .to_string(),
+                fix: None,
+            },
+            Line {
+                step: DeployStep::Health,
+                word: Word::Failed,
+                sentence: "the control origin (127.0.0.1:8080) did not answer `/api/health` within 60 s"
+                    .to_string(),
+                fix: Some("journalctl --user -u holosmith.service -n 50".to_string()),
+            },
+        ],
+        failed: Some(DeployStep::Health),
+        dry_run: false,
+        root: "/var/lib/holosmith".to_string(),
+    }
+}
+
+#[test]
+fn the_terse_report_is_one_marked_line_per_step() {
+    // The report an operator reads by default (ADR-0085): the mark is the verdict, and a step says more only when it
+    // wrote something, needs something or failed. `scripts/verify.sh`'s `case_install_terse` diffs this shape byte for
+    // byte on a real run; this is the shape itself, one fixture with all five words in it.
+    assert_eq!(
+        five_words().render(),
+        "1. preflight ✓\n\
+         2. files ✓ (2 actions)\n\
+         3. images –\n\
+         4. proxies ! 2 actions\n\
+         \x20   - create the egress network\n\
+         \x20   - replace hs_key, the only thing that holds a real provider key, detached with `--restart \
+         unless-stopped`\n\
+         5. service ✓ (1 action)\n\
+         \x20   still yours to run: `systemctl --user daemon-reload`; `systemctl --user enable --now \
+         holosmith.service`\n\
+         6. health ✗ the control origin (127.0.0.1:8080) did not answer `/api/health` within 60 s\n\
+         \x20   fix: journalctl --user -u holosmith.service -n 50\n"
+    );
+    // The header and the tally do not survive into it: one line per step, and the number is what a reader counts.
+    assert!(!five_words().render().contains("deploy:"));
+    assert!(!five_words().render().contains("satisfied"));
+}
+
+#[test]
+fn a_failed_step_without_a_repair_of_its_own_gets_the_runs_resume_command() {
+    // `fix:` is one line and it is always pasteable: a step that knows a better answer than a re-run keeps it, and
+    // everything else gets the command that just ran (ADR-0085, ADR-0056).
+    let mut report = five_words();
+    report.fill_fix("holosmith server deploy --root /var/lib/holosmith");
+    assert_eq!(
+        report.lines.last().and_then(|line| line.fix.as_deref()),
+        Some("journalctl --user -u holosmith.service -n 50"),
+        "the step's own repair was replaced by the resume command"
+    );
+
+    let mut resume_only = Report {
+        lines: vec![Line {
+            step: DeployStep::Preflight,
+            word: Word::Failed,
+            sentence: "the daemon at unix:///run/docker.sock does not answer".to_string(),
+            fix: None,
+        }],
+        failed: Some(DeployStep::Preflight),
+        dry_run: false,
+        root: "/var/lib/holosmith".to_string(),
+    };
+    resume_only.fill_fix("holosmith server deploy --root /var/lib/holosmith");
+    assert_eq!(
+        resume_only.render(),
+        "1. preflight ✗ the daemon at unix:///run/docker.sock does not answer\n    fix: holosmith server deploy \
+         --root /var/lib/holosmith\n"
+    );
+}
+
+/// What a run told a sink, in the order it told it: the method, the label and the phrase, as one string per line.
+#[derive(Default)]
+struct Recorded(Vec<String>);
+
+impl Progress for Recorded {
+    fn begin(&mut self, label: &str, phrase: &str) {
+        self.0.push(format!("begin [{label}] {phrase}"));
+    }
+
+    fn note(&mut self, label: &str, phrase: &str) {
+        self.0.push(format!("note [{label}] {phrase}"));
+    }
+}
+
+impl Recorded {
+    /// The lines the sink was given, without the method, for the assertions that are about order and labels.
+    fn rendered(&self) -> Vec<&str> {
+        self.0.iter().map(String::as_str).collect()
+    }
+}
+
+#[test]
+fn a_run_tells_its_sink_one_begin_per_step_and_two_notes_around_each_build() {
+    // The silence the sink exists for: step 3's two builds are minutes and step 6's wait is a minute, and neither
+    // prints anything until the report. One begin per evaluated step, in the spec's order, and a note before and after
+    // each build — no heartbeat, no timer, one line per fact (ADR-0092).
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("deploy-progress");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let mut config = config(Some(format!("unix://{}", socket.display())));
+    config.control_listen = health_responder();
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
+    let machine = Fake::new();
+    let mut sink = Recorded::default();
+
+    let report = deploy::run_as_with(
+        &deployed,
+        &root,
+        &real_tools(&dir),
+        &machine,
+        false,
+        Kind::Server,
+        &mut sink,
+    );
+    assert!(!report.failed(), "the run failed:\n{}", report.render());
+
+    let begins: Vec<&str> = sink
+        .rendered()
+        .into_iter()
+        .filter(|line| line.starts_with("begin "))
+        .collect();
+    let labels: Vec<&str> = begins
+        .iter()
+        .map(|line| {
+            line.trim_start_matches("begin [")
+                .split_once(']')
+                .map(|(label, _)| label)
+                .unwrap_or_default()
+        })
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            "1/6 preflight",
+            "2/6 files",
+            "3/6 images",
+            "4/6 proxies",
+            "5/6 service",
+            "6/6 health"
+        ],
+        "the begin lines are not one per step in the spec's order: {begins:?}"
+    );
+    // The two steps that can take minutes say so, which is the whole reason a phrase is part of the line.
+    assert!(
+        begins[2].contains("a first install downloads pi, so this takes minutes"),
+        "step 3's begin line names no duration: {}",
+        begins[2]
+    );
+
+    // The two notes around each build, naming the image: the tag is how a reader knows which of the two is running
+    // when the minutes are the same size.
+    let notes: Vec<&str> = sink
+        .rendered()
+        .into_iter()
+        .filter(|line| line.starts_with("note "))
+        .collect();
+    assert_eq!(
+        notes,
+        [
+            format!("note [3/6 images] building {}", images::proxy_image()),
+            format!("note [3/6 images] built {}", images::proxy_image()),
+            format!("note [3/6 images] building {}", images::agent_image()),
+            format!("note [3/6 images] built {}", images::agent_image()),
+        ],
+        "the builds did not tell the sink before and after each one"
+    );
+}
+
+#[test]
+fn a_step_the_run_skips_says_nothing_to_the_sink() {
+    // A hub's images and proxies are `skipped`, which has already answered that there is nothing to wait for: a begin
+    // line over that silence would be a lie about what the silence is (ADR-0092).
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("deploy-progress-hub");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let mut config = config(Some(format!("unix://{}", socket.display())));
+    config.role = Role::Hub;
+    config.control_listen = health_responder();
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
+    let machine = Fake::new();
+    let mut sink = Recorded::default();
+
+    let report = deploy::run_as_with(
+        &deployed,
+        &root,
+        &real_tools(&dir),
+        &machine,
+        false,
+        Kind::Hub,
+        &mut sink,
+    );
+    assert!(!report.failed(), "the hub run failed:\n{}", report.render());
+    assert_eq!(
+        sink.rendered(),
+        [
+            "begin [1/6 preflight] asking `doctor --quick` about this machine",
+            "begin [2/6 files] reading and writing the install tree, the config and the secrets",
+            "begin [5/6 service] writing the systemd unit",
+            "begin [6/6 health] asking `/api/health` and `doctor --full` about the machine",
+        ],
+        "a hub's two skips put a line on the sink"
+    );
 }
 
 #[test]
@@ -1190,7 +1446,7 @@ fn a_failing_preflight_stops_at_step_one() {
         true,
     );
     assert_eq!(dry.failed, Some(DeployStep::Preflight));
-    assert!(dry.render().contains("deploy: dry run"));
+    assert!(dry.render_verbose().contains("deploy: dry run"));
 }
 
 #[test]

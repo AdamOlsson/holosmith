@@ -19,9 +19,15 @@
 //!   hub and cannot reach its registry) — so a hub-only machine is not told to run a command whose only answer is
 //!   "there is no key proxy here". It prints after any run that reached the end, because it is the command's answer
 //!   rather than a step's (ADR-0056); a failed run prints the resume command instead.
-//! - **The resume command**, which a failed run prints as its last line: the command that just ran, with the same
-//!   `--config` and `--root` made absolute and never `--dry-run`. Every step reads state first, so re-running is the
-//!   whole recovery procedure, and a second syntax would be a second entry point (ADR-0055/ADR-0056).
+//! - **The resume command**, which a failed verbose run prints as its last line: the command that just ran, with the
+//!   same `--config` and `--root` made absolute and never `--dry-run`. Every step reads state first, so re-running is
+//!   the whole recovery procedure, and a second syntax would be a second entry point (ADR-0055/ADR-0056). In the terse
+//!   rendering it is the failed step's `fix:` line instead, which is where a reader of one line per step looks for the
+//!   command to run ([`crate::deploy::Report::fill_fix`]).
+//!
+//! The three tail lines and the report are also the same two renderings install prints: `deploy: url: …` in the
+//! verbose one and `url: …` in the terse one, because a report of one line per step has one vocabulary for both verbs
+//! (ADR-0092).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -42,6 +48,9 @@ pub struct DeployArgs {
     pub config: Option<PathBuf>,
     pub kind: Kind,
     pub dry_run: bool,
+    /// Which of the two renderings to print, and — over ssh — what the target is told to print, because the target's
+    /// stdout is the report the operator reads (ADR-0078).
+    pub verbose: bool,
     pub root: Option<PathBuf>,
     pub ssh: Option<String>,
     pub binary: Option<PathBuf>,
@@ -69,22 +78,60 @@ pub fn run(args: DeployArgs) -> ExitCode {
     let deployed = root.config(&loaded.config);
     let tools = deploy::Tools::default();
     let machine = Docker::new(deployed.docker_host.clone());
-    let report = deploy::run_as(&deployed, &root, &tools, &machine, args.dry_run, args.kind);
-    print!("{}", report.render());
+    let mut report = deploy::run_as(&deployed, &root, &tools, &machine, args.dry_run, args.kind);
     if report.failed() {
-        println!("{}", resume(&args));
+        report.fill_fix(&resume_command(&args));
+    }
+    // A plan says once, on its own line, that it is a plan: read as a result it would be a machine that was described
+    // and never installed, which is the misreading this line prevents. A real run prints no header in the terse shape.
+    if args.dry_run && !args.verbose {
+        println!("deploy: dry run — nothing is written");
+    }
+    print!(
+        "{}",
+        match args.verbose {
+            true => report.render_verbose(),
+            false => report.render(),
+        }
+    );
+    if report.failed() {
+        // The verbose shape ends a failed run with the resume command, as it always has; the terse one carries it in
+        // the failed step's `fix:` line, and printing it twice would be one fact in two places.
+        if args.verbose {
+            println!("{}", resume(&args));
+        }
         return ExitCode::FAILURE;
     }
     let role = deploy::union(loaded.config.role, args.kind);
     println!(
         "{}",
-        role_line(loaded.config.role, role, args.kind, args.dry_run)
+        tail(
+            args.verbose,
+            "role",
+            &role_line(loaded.config.role, role, args.kind, args.dry_run)
+        )
     );
-    println!("deploy: url: {}", deployed.control_origin.as_str());
+    println!(
+        "{}",
+        tail(args.verbose, "url", deployed.control_origin.as_str())
+    );
     for next in next_steps(role) {
-        println!("deploy: next: {next}");
+        println!("{}", tail(args.verbose, "next", &next));
     }
     ExitCode::SUCCESS
+}
+
+/// One of the three lines the command prints after the steps, with the verb in front in the verbose shape and without
+/// it in the terse one: `deploy: url: …` as every earlier release printed it, `url: …` under a report whose steps are
+/// one line each.
+///
+/// The verb is a parameter rather than a second function per line, because a tail line's shape is one decision: a
+/// terse report has one vocabulary for both commands and a verbose one keeps each verb's own.
+fn tail(verbose: bool, field: &str, value: &str) -> String {
+    match verbose {
+        true => format!("deploy: {field}: {value}"),
+        false => format!("{field}: {value}"),
+    }
 }
 
 /// What the machine is now, and what this run changed about it — the acceptance's "yielding role `both`", as a line
@@ -97,16 +144,16 @@ pub fn run(args: DeployArgs) -> ExitCode {
 /// really holds.
 fn role_line(found: Role, role: Role, kind: Kind, dry_run: bool) -> String {
     if found == role {
-        return format!("deploy: role: {role}");
+        return role.to_string();
     }
     match dry_run {
         true => format!(
-            "deploy: role: {role} (would be: this machine's config says `{found}`, and `{} deploy` adds the {} half)",
+            "{role} (would be: this machine's config says `{found}`, and `{} deploy` adds the {} half)",
             kind.word(),
             kind.word()
         ),
         false => format!(
-            "deploy: role: {role} (this machine's config said `{found}`, and `{} deploy` added the {} half)",
+            "{role} (this machine's config said `{found}`, and `{} deploy` added the {} half)",
             kind.word(),
             kind.word()
         ),
@@ -141,7 +188,13 @@ pub(crate) fn next_steps(role: Role) -> Vec<String> {
 /// run's resume is a dry run: the command that just ran changed nothing, so a resume that installed step 2 for
 /// real would be a different command than the one that failed.
 fn resume(args: &DeployArgs) -> String {
-    let mut command = format!("deploy: resume: holosmith {} deploy", args.kind);
+    format!("deploy: resume: {}", resume_command(args))
+}
+
+/// [`resume`] as a reader pastes it: the same flags without the field's name, which is the form a failed step's
+/// `fix:` line carries ([`deploy::Report::fill_fix`]).
+fn resume_command(args: &DeployArgs) -> String {
+    let mut command = format!("holosmith {} deploy", args.kind);
     if let Some(config) = &args.config {
         command.push_str(&format!(" --config {}", deploy::absolute(config).display()));
     }
@@ -191,6 +244,7 @@ fn run_over_ssh(args: &DeployArgs, host: &str) -> ExitCode {
     let plan = Plan {
         kind: args.kind,
         dry_run: args.dry_run,
+        verbose: args.verbose,
         config: args.config.clone(),
         root: args.root.clone(),
     };

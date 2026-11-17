@@ -217,6 +217,7 @@ fn plan() -> Plan {
     Plan {
         kind: Kind::Server,
         dry_run: true,
+        verbose: false,
         config: None,
         root: Some(PathBuf::from("/srv/tree")),
     }
@@ -542,6 +543,7 @@ fn a_plan_carries_a_hub_and_its_own_paths_verbatim() {
     let hub = Plan {
         kind: Kind::Hub,
         dry_run: false,
+        verbose: false,
         config: Some(PathBuf::from("holosmith.toml")),
         root: Some(PathBuf::from("tree")),
     };
@@ -562,6 +564,7 @@ fn a_plan_carries_a_hub_and_its_own_paths_verbatim() {
     let spaced = Plan {
         kind: Kind::Server,
         dry_run: false,
+        verbose: false,
         config: Some(PathBuf::from("/srv/My Tree/holosmith.toml")),
         root: Some(PathBuf::from("/srv/tree")),
     };

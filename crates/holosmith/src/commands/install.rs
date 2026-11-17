@@ -38,13 +38,16 @@ use std::time::Duration;
 use crate::config::{Config, LoadError, Role};
 use crate::deploy::{self, DeployStep, Kind, Root, UNIT_NAME, Word};
 use crate::docker::Docker;
+use crate::progress::{Announce, Progress, Silent};
 
-/// What the command line asked for: the config every command reads, the install tree, and whether to apply anything.
+/// What the command line asked for: the config every command reads, the install tree, whether to apply anything, and
+/// which of the two renderings to print.
 #[derive(Debug)]
 pub struct InstallArgs {
     pub config: Option<PathBuf>,
     pub root: Option<PathBuf>,
     pub dry_run: bool,
+    pub verbose: bool,
 }
 
 /// The wait the **deploy pass's** last step is given, instead of the configured deadline.
@@ -122,6 +125,10 @@ pub struct Line {
     pub what: What,
     pub word: Word,
     pub sentence: String,
+    /// The one command that puts a failed line right, when this command knows a better answer than re-running it: the
+    /// deploy's field for the deploy's lines ([`deploy::Line::fix`]), filled here by the command layer with the run's
+    /// own resume command when the line named none.
+    pub fix: Option<String>,
 }
 
 impl fmt::Display for Line {
@@ -142,7 +149,8 @@ impl fmt::Display for Line {
 /// [`deploy::Report`]'s shape and the reason it has one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
-    /// The deploy's six steps, printed verbatim: this command runs the deploy rather than repeating its work.
+    /// The deploy's six steps, rendered by [`deploy::Report`]: this command runs the deploy rather than repeating its
+    /// work, so the steps read here exactly as `server deploy` prints them.
     pub deploy: deploy::Report,
     /// install's own lines, after the deploy's block. A failed one stops the run, so the last line is the failure.
     pub lines: Vec<Line>,
@@ -168,10 +176,46 @@ impl Report {
             || self.lines.iter().any(|line| line.word == Word::Failed)
     }
 
-    /// The report as the operator reads it: the deploy's block — its header, its step lines and its tally — and then
-    /// install's own lines, one per line under a blank line of their own.
+    /// Put `fallback` on whichever line decides this run failed, when that line named no repair of its own: the run's
+    /// own resume command (`install::resume`), which is the command that just failed.
+    ///
+    /// **The deploy's health line is skipped.** It may be `failed` on a run that succeeded — on a first install it
+    /// answers "not serving yet" because nothing has started the unit, which is the very next thing this command does
+    /// (ADR-0091 D2) — and a `fix:` on a line the run recovered from would offer the operator a command for a
+    /// problem they do not have.
+    pub fn fill_fix(&mut self, fallback: &str) {
+        if self
+            .deploy
+            .failed
+            .is_some_and(|step| step != DeployStep::Health)
+        {
+            self.deploy.fill_fix(fallback);
+            return;
+        }
+        if let Some(line) = self.lines.iter_mut().find(|line| line.word == Word::Failed)
+            && line.fix.is_none()
+        {
+            line.fix = Some(fallback.to_string());
+        }
+    }
+
+    /// The report as an operator reads a run that worked: one line per step, the mark for its word, and the detail
+    /// only where there is something to know or to run ([`deploy::Report::render`]).
+    ///
+    /// install's own three lines are **unnumbered** — they are not the spec's six steps, and the verbose report says the
+    /// same with `install:` where a number would be — and they render the same way, so one run has one shape.
     pub fn render(&self) -> String {
         let mut text = self.deploy.render();
+        for line in &self.lines {
+            let _ = writeln!(text, "{}", line.terse());
+        }
+        text
+    }
+
+    /// The report as any earlier release printed it: the deploy's block — its header, its step lines and its tally —
+    /// and then install's own lines, one per line under a blank line of their own.
+    pub fn render_verbose(&self) -> String {
+        let mut text = self.deploy.render_verbose();
         if self.lines.is_empty() {
             return text;
         }
@@ -179,6 +223,23 @@ impl Report {
         for line in &self.lines {
             // A `String` cannot fail to be written to, which is why this is not a `?`.
             let _ = writeln!(text, "{line}");
+        }
+        text
+    }
+}
+
+impl Line {
+    /// One terse line: `unit ✓`, unnumbered.
+    ///
+    /// A `changed` line of install's own stops at the mark, where a deploy step's adds a parenthetical: these three
+    /// sentences narrate what this run just did (`… ran: the manager has loaded the unit this run wrote`), so their
+    /// first clause is the whole sentence and a parenthetical of it would be longer than the verbose line it replaced.
+    /// What a reader needs from them is the word — and a `needs` or a `failed` one keeps everything, because what it
+    /// carries is the operator's.
+    fn terse(&self) -> String {
+        let mut text = format!("{} {}", self.what, self.word.mark());
+        if self.word != Word::Changed {
+            deploy::terse_detail(&mut text, self.word, &self.sentence, self.fix.as_deref());
         }
         text
     }
@@ -203,20 +264,53 @@ pub fn run(args: InstallArgs) -> ExitCode {
     let deployed = root.config(&loaded.config);
     let tools = Tools::default();
     let machine = Docker::new(deployed.docker_host.clone());
-    let report = match execute(&deployed, &root, &tools, &machine, args.dry_run) {
+    // Two sinks, one of them silent: a plan has nothing to wait for, so `--dry-run` says nothing while it works,
+    // and a real run tells its reader what this machine is about to do. **Only `install` announces in this change**:
+    // `server deploy` and `hub deploy` keep the silent default, because their report is the whole of what they print
+    // and an operator runs them on a machine that is already there (ADR-0092).
+    let mut quiet = Silent;
+    let mut shown = Announce;
+    let progress: &mut dyn Progress = if args.dry_run { &mut quiet } else { &mut shown };
+    let mut report = match execute(&deployed, &root, &tools, &machine, args.dry_run, progress) {
         Ok(report) => report,
         Err(refusal) => {
             eprintln!("holosmith: install: {refusal}");
             return ExitCode::FAILURE;
         }
     };
-    print!("{}", report.render());
     if report.failed() {
-        println!("{}", resume(&args));
+        report.fill_fix(&resume_command(&args));
+    }
+    // A plan says once, on its own line, that it is a plan: it is read as a result otherwise, which is the misreading
+    // this line exists to prevent. A real run prints no header in the terse shape.
+    if args.dry_run && !args.verbose {
+        println!("install: dry run — nothing is written");
+    }
+    print!(
+        "{}",
+        match args.verbose {
+            true => report.render_verbose(),
+            false => report.render(),
+        }
+    );
+    if report.failed() {
+        // The verbose shape ends a failed run with the resume command, as it always has; the terse one carries it in
+        // the failed step's `fix:` line, and printing it twice would be one fact in two places.
+        if args.verbose {
+            println!("{}", resume(&args));
+        }
         return ExitCode::FAILURE;
     }
-    println!("install: url: {}", report.url);
-    println!("install: next: {}", report.next);
+    match args.verbose {
+        true => {
+            println!("install: url: {}", report.url);
+            println!("install: next: {}", report.next);
+        }
+        false => {
+            println!("url: {}", report.url);
+            println!("next: {}", report.next);
+        }
+    }
     ExitCode::SUCCESS
 }
 
@@ -233,6 +327,7 @@ pub fn execute(
     tools: &Tools,
     machine: &dyn deploy::Machine,
     dry_run: bool,
+    progress: &mut dyn Progress,
 ) -> Result<Report, String> {
     let kind = match config.role {
         Role::Hub => Kind::Hub,
@@ -259,7 +354,7 @@ pub fn execute(
         health_wait: PASS_HEALTH_WAIT,
         ..tools.deploy.clone()
     };
-    let report = deploy::run_as(config, root, &pass, machine, dry_run, kind);
+    let report = deploy::run_as_with(config, root, &pass, machine, dry_run, kind, progress);
     let url = config.control_origin.as_str().to_string();
     // **The deploy's tail cut to one.** `deploy` prints every next step its half earns, and a `both` machine's
     // `server deploy` prints two (`key set`, then the hub's `hub host add`); this command prints one, because the story
@@ -287,11 +382,16 @@ pub fn execute(
         line.step == DeployStep::Service && matches!(line.word, Word::Changed | Word::Needs)
     });
     let mut lines = Vec::new();
-    for line in [
-        unit(root, tools, written, dry_run),
-        linger(root, tools, name.as_deref(), dry_run),
-        health(config, tools, dry_run),
-    ] {
+    // One at a time, and each begin line printed **before** the work it announces: an array of three lines is
+    // evaluated whole, which would put a 60-second wait's line after the wait and make a failed unit's step wait for a
+    // poll it never needs (`A failed one stops the run` below).
+    for what in [What::Unit, What::Linger, What::Health] {
+        progress.begin(what.as_str(), &beginning(what, config, tools));
+        let line = match what {
+            What::Unit => unit(root, tools, written, dry_run),
+            What::Linger => linger(root, tools, name.as_deref(), dry_run),
+            What::Health => health(config, tools, dry_run),
+        };
         let failed = line.word == Word::Failed;
         lines.push(line);
         if failed {
@@ -360,6 +460,7 @@ fn unit(root: &Root, tools: &Tools, written: bool, dry_run: bool) -> Line {
                 deploy::unit_commands_printed(&tools.deploy.systemctl).join("; "),
                 root.config_file().display()
             ),
+            fix: None,
         };
     }
     let (enabled, active) = match manager_state(tools) {
@@ -377,6 +478,7 @@ fn unit(root: &Root, tools: &Tools, written: bool, dry_run: bool) -> Line {
                 "`systemctl --user is-enabled` answers `enabled` and `is-active` answers `active`, so {UNIT_NAME} \
                  starts at boot and is running"
             ),
+            fix: None,
         };
     }
     let plan = deploy::unit_commands_printed(&tools.deploy.systemctl)
@@ -397,6 +499,7 @@ fn unit(root: &Root, tools: &Tools, written: bool, dry_run: bool) -> Line {
                     "would run {plan}: the manager has not loaded this unit, or has not started it"
                 ),
             },
+            fix: None,
         };
     }
     for command in deploy::unit_commands() {
@@ -423,6 +526,7 @@ fn unit(root: &Root, tools: &Tools, written: bool, dry_run: bool) -> Line {
                 format!("{plan} ran: the manager has loaded the unit this run wrote and started it")
             }
         },
+        fix: None,
     }
 }
 
@@ -478,6 +582,7 @@ fn linger(root: &Root, tools: &Tools, name: Option<&str>, dry_run: bool) -> Line
                 root.config_file().display(),
                 deploy::unit_commands_printed(&tools.deploy.systemctl).join("; ")
             ),
+            fix: None,
         };
     }
     // The flag is read from `loginctl show-user`, which names the account: this is why the run reads `id -un` even
@@ -501,6 +606,7 @@ fn linger(root: &Root, tools: &Tools, name: Option<&str>, dry_run: bool) -> Line
             sentence: "`loginctl show-user --property=Linger` answers `yes`, so the daemon starts at boot and not only \
                        while a session is open"
                 .to_string(),
+            fix: None,
         };
     }
     if dry_run {
@@ -510,6 +616,7 @@ fn linger(root: &Root, tools: &Tools, name: Option<&str>, dry_run: bool) -> Line
             sentence: "would run `loginctl enable-linger`, so the daemon starts at boot and not only while a session is \
                        open"
                 .to_string(),
+            fix: None,
         };
     }
     match ran(
@@ -522,6 +629,7 @@ fn linger(root: &Root, tools: &Tools, name: Option<&str>, dry_run: bool) -> Line
             word: Word::Changed,
             sentence: "`loginctl enable-linger` ran: the daemon starts at boot and not only while a session is open"
                 .to_string(),
+            fix: None,
         },
         Err(said) => Line {
             what: What::Linger,
@@ -531,6 +639,7 @@ fn linger(root: &Root, tools: &Tools, name: Option<&str>, dry_run: bool) -> Line
                  only while a session is open — the machine works, and this is the one command that makes it a boot \
                  service:\nsudo loginctl enable-linger $USER"
             ),
+            fix: None,
         },
     }
 }
@@ -552,6 +661,7 @@ fn health(config: &Config, tools: &Tools, dry_run: bool) -> Line {
                 "would wait for `/api/health` on {listen} for up to {bound} s, and print the control URL once it \
                  answers"
             ),
+            fix: None,
         };
     }
     if deploy::wait_for_health(listen, tools.deploy.health_wait) {
@@ -562,6 +672,7 @@ fn health(config: &Config, tools: &Tools, dry_run: bool) -> Line {
                 "the control origin ({}) answers `GET /api/health`, so this machine is serving",
                 config.control_origin.as_str()
             ),
+            fix: None,
         };
     }
     failed(
@@ -573,12 +684,43 @@ fn health(config: &Config, tools: &Tools, dry_run: bool) -> Line {
     )
 }
 
+/// What one of install's own lines is about to do, present tense, for the begin line [`Progress::begin`] carries.
+///
+/// The health wait is the one that names its bound and its address, because it is the one that may take a minute with
+/// nothing printed: `health_wait` is the configured deadline here, not the deploy pass's one second, so this is also
+/// where a reader sees which of the two waits they are watching.
+fn beginning(what: What, config: &Config, tools: &Tools) -> String {
+    match what {
+        What::Unit => {
+            "running this account's two `systemctl --user` commands for the unit".to_string()
+        }
+        What::Linger => {
+            "setting this account's linger flag, so the daemon starts at boot".to_string()
+        }
+        What::Health => format!(
+            "waiting for `/api/health` on {} for up to {}",
+            config.control_listen,
+            bound(tools.deploy.health_wait)
+        ),
+    }
+}
+
+/// A wait as the one number a progress line names: seconds where there is a whole one and milliseconds below that,
+/// because a bound printed as `0 s` says nothing about how long a reader is being asked to wait.
+fn bound(wait: Duration) -> String {
+    match wait.as_secs() {
+        0 => format!("{} ms", wait.as_millis()),
+        secs => format!("{secs} s"),
+    }
+}
+
 /// A failed line: the deploy's word and the sentence that says what stopped the run.
 fn failed(what: What, sentence: String) -> Line {
     Line {
         what,
         word: Word::Failed,
         sentence,
+        fix: None,
     }
 }
 
@@ -632,13 +774,16 @@ fn ran(program: &Path, arguments: &[&str], because: &str) -> Result<(), String> 
     ))
 }
 
-/// The resume command: this run's own flags, made absolute, and `--dry-run` only when this run was one.
+/// The resume command as a reader pastes it: this run's own flags, made absolute, and `--dry-run` when this run was
+/// one.
 ///
 /// The install is the recovery for its own failure — every step of it reads before it applies, the deploy's included
-/// — so the line names this verb rather than the two deploys it runs: `server deploy` would install the same tree and
-/// leave the unit printed rather than started, which is the command that just failed.
-fn resume(args: &InstallArgs) -> String {
-    let mut command = String::from("install: resume: holosmith install");
+/// — so the command names this verb rather than the two deploys it runs: `server deploy` would install the same tree
+/// and leave the unit printed rather than started, which is the command that just failed. It is a value and not a
+/// line because it travels twice: as a failed step's `fix:` ([`Report::fill_fix`]) and as the verbose shape's last
+/// line.
+fn resume_command(args: &InstallArgs) -> String {
+    let mut command = String::from("holosmith install");
     if let Some(config) = &args.config {
         command.push_str(&format!(" --config {}", deploy::absolute(config).display()));
     }
@@ -649,4 +794,9 @@ fn resume(args: &InstallArgs) -> String {
         command.push_str(" --dry-run");
     }
     command
+}
+
+/// [`resume_command`] as the verbose report prints it, with the field's name in front.
+fn resume(args: &InstallArgs) -> String {
+    format!("install: resume: {}", resume_command(args))
 }

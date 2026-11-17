@@ -46,6 +46,7 @@ use holosmith::doctor;
 use holosmith::images;
 use holosmith::key;
 use holosmith::preflight;
+use holosmith::progress::{Progress, Silent};
 use holosmith::proxies;
 use holosmith::selftest;
 
@@ -374,7 +375,7 @@ fn an_account_outside_the_docker_group_is_refused_and_nothing_is_written() {
     let deployed = deployed(&root, &config);
     let tools = tools(&dir, &root, ("operator", "operator nogroup"));
 
-    let refusal = install::execute(&deployed, &root, &tools, &NoDaemon, false)
+    let refusal = install::execute(&deployed, &root, &tools, &NoDaemon, false, &mut Silent)
         .expect_err("a machine whose account cannot open the daemon's socket must be refused");
 
     // The one command, exactly, as the last line — it is the thing to paste.
@@ -428,7 +429,7 @@ fn a_dry_run_is_refused_too() {
     let deployed = deployed(&root, &config);
     let tools = tools(&dir, &root, ("operator", "operator nogroup"));
 
-    let refusal = install::execute(&deployed, &root, &tools, &NoDaemon, true)
+    let refusal = install::execute(&deployed, &root, &tools, &NoDaemon, true, &mut Silent)
         .expect_err("a plan for a machine this account cannot serve is refused as the apply is");
 
     assert_eq!(
@@ -450,6 +451,197 @@ fn a_dry_run_is_refused_too() {
     }
 }
 
+// ---- the two renderings and the progress lines ----------------------------------------------
+
+#[test]
+fn the_terse_report_is_the_deploys_marked_steps_then_installs_own_unnumbered_ones() {
+    // The shape an operator reads by default (ADR-0085): the deploy's six steps by number, then install's own three
+    // lines unnumbered — they are not the spec's steps, and the verbose report says the same with `install:` where a
+    // number would be. A `changed` line of install's own is its confirmation and prints the mark and nothing else; a
+    // `needs` or a `failed` one keeps what the operator has to run.
+    let report = install::Report {
+        deploy: deploy::Report {
+            lines: vec![
+                deploy::Line {
+                    step: DeployStep::Preflight,
+                    word: Word::Satisfied,
+                    sentence: "10 findings: 8 pass, 0 fail, 2 unknown (systemd, disk)".to_string(),
+                    fix: None,
+                },
+                deploy::Line {
+                    step: DeployStep::Files,
+                    word: Word::Changed,
+                    sentence: "2 actions:".to_string(),
+                    fix: None,
+                },
+            ],
+            failed: None,
+            dry_run: false,
+            root: "/home/operator/.local/share/holosmith".to_string(),
+        },
+        lines: vec![
+            install::Line {
+                what: What::Unit,
+                word: Word::Changed,
+                sentence: "`systemctl --user daemon-reload` and `systemctl --user enable --now \
+                           holosmith.service` ran: the manager has loaded the unit this run wrote and started it"
+                    .to_string(),
+                fix: None,
+            },
+            install::Line {
+                what: What::Linger,
+                word: Word::Satisfied,
+                sentence: "`loginctl show-user --property=Linger` answers `yes`, so the daemon starts at boot"
+                    .to_string(),
+                fix: None,
+            },
+            install::Line {
+                what: What::Health,
+                word: Word::Failed,
+                sentence: "the control origin (127.0.0.1:8080) did not answer `/api/health` within 60 s"
+                    .to_string(),
+                fix: None,
+            },
+        ],
+        url: "http://localhost:8080".to_string(),
+        next: "holosmith key set <provider>".to_string(),
+    };
+    assert_eq!(
+        report.render(),
+        "1. preflight ✓\n\
+         2. files ✓ (2 actions)\n\
+         unit ✓\n\
+         linger ✓\n\
+         health ✗ the control origin (127.0.0.1:8080) did not answer `/api/health` within 60 s\n"
+    );
+    // The verbose rendering is the deploy's block as every earlier release printed it, then install's three lines
+    // with the verb where the step's number would be.
+    let verbose = report.render_verbose();
+    assert!(
+        verbose.starts_with("deploy: run\ndeploy: into /home/operator/.local/share/holosmith\n")
+    );
+    assert!(verbose.contains("\n\ninstall: unit: changed: `systemctl --user daemon-reload`"));
+    assert!(verbose.contains("\ninstall: health: failed: "));
+}
+
+#[test]
+fn a_failed_line_of_installs_own_gets_the_runs_resume_command_and_the_tolerated_health_line_does_not()
+ {
+    // The deploy's health line may be `failed` on a run that succeeded — on a first install it answers "not serving
+    // yet", which is the very next thing this command does (ADR-0091 D2) — so a `fix:` there would offer a command
+    // for a problem the operator does not have.
+    let mut report = install::Report {
+        deploy: deploy::Report {
+            lines: vec![deploy::Line {
+                step: DeployStep::Health,
+                word: Word::Failed,
+                sentence:
+                    "the control origin (127.0.0.1:8080) did not answer `/api/health` within 1 s"
+                        .to_string(),
+                fix: None,
+            }],
+            failed: Some(DeployStep::Health),
+            dry_run: false,
+            root: "/home/operator/.local/share/holosmith".to_string(),
+        },
+        lines: Vec::new(),
+        url: "http://localhost:8080".to_string(),
+        next: "holosmith key set <provider>".to_string(),
+    };
+    report.fill_fix("holosmith install --config /home/operator/.config/holosmith.toml");
+    assert_eq!(
+        report.render(),
+        "6. health ✗ the control origin (127.0.0.1:8080) did not answer `/api/health` within 1 s\n",
+        "the tolerated health line was given a fix it must not have"
+    );
+
+    // The line that does decide the run gets it, and it is the one command that re-runs what failed.
+    let mut failed = report.clone();
+    failed.lines.push(install::Line {
+        what: What::Health,
+        word: Word::Failed,
+        sentence: "the control origin (127.0.0.1:8080) did not answer `/api/health` within 60 s"
+            .to_string(),
+        fix: None,
+    });
+    failed.fill_fix("holosmith install --config /home/operator/.config/holosmith.toml");
+    assert!(
+        failed.render().ends_with(
+            "    fix: holosmith install --config /home/operator/.config/holosmith.toml\n"
+        ),
+        "the failed install line carries no resume command:\n{}",
+        failed.render()
+    );
+}
+
+/// What an install told a sink, in the order it told it.
+#[derive(Default)]
+struct Recorded(Vec<String>);
+
+impl Progress for Recorded {
+    fn begin(&mut self, label: &str, phrase: &str) {
+        self.0.push(format!("begin [{label}] {phrase}"));
+    }
+
+    fn note(&mut self, label: &str, phrase: &str) {
+        self.0.push(format!("note [{label}] {phrase}"));
+    }
+}
+
+#[test]
+fn an_install_tells_its_sink_every_step_it_evaluates_and_names_the_waits_bound() {
+    // The two silences an install has are the deploy's images and the wait after `enable --now`; the sink is what a
+    // reader gets instead of them (ADR-0092). One begin per evaluated step, in the order the run does them, the two a
+    // hub skips silent, and a health line that says how long it may wait and where.
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("install-progress");
+    let listen = health_responder(|| true);
+    let config = hub_config(listen);
+    let root = rooted(&dir, "root");
+    let deployed = deployed(&root, &config);
+    let tools = tools(&dir, &root, ("operator", "operator docker"));
+    let mut sink = Recorded::default();
+
+    let report = install::execute(&deployed, &root, &tools, &NoDaemon, false, &mut sink)
+        .expect("a readable account is not a refusal");
+    assert!(!report.failed(), "the run failed:\n{}", report.render());
+
+    assert_eq!(
+        sink.0,
+        [
+            "begin [1/6 preflight] asking `doctor --quick` about this machine".to_string(),
+            "begin [2/6 files] reading and writing the install tree, the config and the secrets"
+                .to_string(),
+            "begin [5/6 service] writing the systemd unit".to_string(),
+            "begin [6/6 health] asking `/api/health` and `doctor --full` about the machine"
+                .to_string(),
+            "begin [unit] running this account's two `systemctl --user` commands for the unit"
+                .to_string(),
+            "begin [linger] setting this account's linger flag, so the daemon starts at boot"
+                .to_string(),
+            format!("begin [health] waiting for `/api/health` on {listen} for up to 150 ms"),
+        ],
+        "the run did not announce each step it evaluated, in order"
+    );
+}
+
+#[test]
+fn a_plan_says_nothing_while_it_works() {
+    // `--dry-run` is the read alone: nothing is slow, so nothing is announced. The silent sink is the plan's, and
+    // `install::run` passing it is what makes the flag quiet on stderr as well as on stdout.
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("install-progress-dry");
+    let listen = health_responder(|| true);
+    let config = hub_config(listen);
+    let root = rooted(&dir, "root");
+    let deployed = deployed(&root, &config);
+    let tools = tools(&dir, &root, ("operator", "operator docker"));
+    let mut quiet = Silent;
+
+    install::execute(&deployed, &root, &tools, &NoDaemon, true, &mut quiet)
+        .expect("a plan is not a refusal");
+}
+
 // ---- linger ---------------------------------------------------------------------------------
 
 #[test]
@@ -464,7 +656,7 @@ fn a_refused_linger_is_reported_and_the_run_still_succeeds() {
     // The machine whose polkit will not let this account set its own linger flag.
     dir.write("polkit-denies", "");
 
-    let report = install::execute(&deployed, &root, &tools, &NoDaemon, false)
+    let report = install::execute(&deployed, &root, &tools, &NoDaemon, false, &mut Silent)
         .expect("a readable account is not a refusal");
 
     assert!(
@@ -530,7 +722,7 @@ fn a_first_install_whose_deploy_health_line_failed_still_succeeds() {
     let deployed = deployed(&root, &config);
     let tools = tools(&dir, &root, ("operator", "operator docker"));
 
-    let report = install::execute(&deployed, &root, &tools, &NoDaemon, false)
+    let report = install::execute(&deployed, &root, &tools, &NoDaemon, false, &mut Silent)
         .expect("a readable account is not a refusal");
 
     // The deploy's step 6 did fail — that is the premise, not a detail — and its line and tally print as they stand.
@@ -541,7 +733,7 @@ fn a_first_install_whose_deploy_health_line_failed_still_succeeds() {
         report.render()
     );
     assert!(
-        report.render().contains("1 failed"),
+        report.render_verbose().contains("1 failed"),
         "the deploy's tally lost the failure it is entitled to:\n{}",
         report.render()
     );
@@ -576,7 +768,7 @@ fn a_second_run_changes_nothing_and_says_so() {
     let deployed = deployed(&root, &config);
     let tools = tools(&dir, &root, ("operator", "operator docker"));
 
-    let first = install::execute(&deployed, &root, &tools, &NoDaemon, false)
+    let first = install::execute(&deployed, &root, &tools, &NoDaemon, false, &mut Silent)
         .expect("a readable account is not a refusal");
     assert!(!first.failed(), "the first run failed:\n{}", first.render());
     // The first run is where the three applies happen, one each.
@@ -595,7 +787,7 @@ fn a_second_run_changes_nothing_and_says_so() {
 
     let systemctl_before = diary(&dir.file("systemctl.log"));
     let loginctl_before = diary(&dir.file("loginctl.log"));
-    let second = install::execute(&deployed, &root, &tools, &NoDaemon, false)
+    let second = install::execute(&deployed, &root, &tools, &NoDaemon, false, &mut Silent)
         .expect("a readable account is not a refusal");
     assert!(
         !second.failed(),
@@ -636,7 +828,7 @@ fn a_health_poll_that_never_answers_fails_and_names_the_journal() {
     let deployed = deployed(&root, &config);
     let tools = tools(&dir, &root, ("operator", "operator docker"));
 
-    let report = install::execute(&deployed, &root, &tools, &NoDaemon, false)
+    let report = install::execute(&deployed, &root, &tools, &NoDaemon, false, &mut Silent)
         .expect("a readable account is not a refusal");
 
     assert!(report.failed(), "a machine that never answers passed");
@@ -695,7 +887,7 @@ fn a_deploy_step_that_is_not_health_stops_the_run() {
     let deployed = deployed(&root, &config);
     let tools = tools(&dir, &root, ("operator", "operator docker"));
 
-    let report = install::execute(&deployed, &root, &tools, &NoDaemon, false)
+    let report = install::execute(&deployed, &root, &tools, &NoDaemon, false, &mut Silent)
         .expect("a failed step is a report, not a refusal");
 
     assert!(
@@ -739,7 +931,7 @@ fn a_tree_whose_unit_is_not_the_managers_enables_nothing() {
         ..tools(&dir, &root, ("operator", "operator docker"))
     };
 
-    let report = install::execute(&deployed, &root, &tools, &NoDaemon, false)
+    let report = install::execute(&deployed, &root, &tools, &NoDaemon, false, &mut Silent)
         .expect("a readable account is not a refusal");
 
     let unit = line(&report, What::Unit);
@@ -801,7 +993,7 @@ fn a_dry_run_prints_the_plan_and_writes_nothing() {
     let deployed = deployed(&root, &config);
     let tools = tools(&dir, &root, ("operator", "operator docker"));
 
-    let report = install::execute(&deployed, &root, &tools, &NoDaemon, true)
+    let report = install::execute(&deployed, &root, &tools, &NoDaemon, true, &mut Silent)
         .expect("a readable account is not a refusal");
 
     assert!(!report.failed(), "the plan failed:\n{}", report.render());

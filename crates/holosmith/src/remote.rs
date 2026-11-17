@@ -497,6 +497,9 @@ impl Sent {
 pub struct Plan {
     pub kind: Kind,
     pub dry_run: bool,
+    /// The rendering the target prints, forwarded because **the target's stdout is the report the operator reads**:
+    /// this side measures none of the steps, so it cannot print the tail or the report itself (ADR-0078, ADR-0092).
+    pub verbose: bool,
     pub config: Option<PathBuf>,
     pub root: Option<PathBuf>,
 }
@@ -521,6 +524,9 @@ impl Plan {
         }
         if self.dry_run {
             arguments.push("--dry-run".to_string());
+        }
+        if self.verbose {
+            arguments.push("--verbose".to_string());
         }
         arguments
     }
@@ -716,6 +722,7 @@ mod tests {
         let plan = Plan {
             kind: Kind::Hub,
             dry_run: true,
+            verbose: false,
             config: Some(PathBuf::from("/etc/holosmith/config.toml")),
             root: Some(PathBuf::from("tree")),
         };
@@ -735,6 +742,7 @@ mod tests {
         let bare = Plan {
             kind: Kind::Server,
             dry_run: false,
+            verbose: false,
             config: None,
             root: None,
         };
