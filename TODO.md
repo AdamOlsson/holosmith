@@ -1,5 +1,10 @@
 # TODO
 
+## Holosmith To Be Issues
+- adding a provider key from the cli seems to hang
+- configurable default model to deepseek-v4.1-flash from opencode-go
+- develop holosmith using holosmith
+
 ## Workflow Improvements
 ### Less repeated work
 
