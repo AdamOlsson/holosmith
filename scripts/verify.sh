@@ -35,13 +35,15 @@
 # `interrupted`, the seqs stay unique and the counter is the log's highest), the names a crash leaves behind
 # swept on a real daemon (a leftover container, an orphan network and worktree directory gone, a kept branch
 # and ref kept, the session's container replaced under the same name), a boot over a database from a newer
-# release (which continues and says who refuses), the one-command install in three cases after `case_server_deploy`
+# release (which continues and says who refuses), the one-command install in four cases after `case_server_deploy`
 # (`case_install`: a hub installed on a machine of its own under `bwrap` — the `--config`/`--root` tree, the deploy's
 # six steps, the `systemctl --user daemon-reload`/`enable --now` argv, the unit's bytes beside the config, the
 # `loginctl` linger reads and apply, and a second run whose every line is `satisfied` while neither apply command runs
-# again; `case_install_group`: an account outside the daemon's group refused before anything is written, with exactly
-# one `usermod` printed; `case_root_refusal`: the shipped artifact run as uid 0 in a container made from its own bytes,
-# answering the one sentence), the service and the keys a deploy writes in a case of their own
+# again; `case_install_terse`: the same install in its **default** rendering, diffed byte for byte against a real run's
+# stdout, with the progress lines on stderr and neither stream carrying the other's; `case_install_group`: an account
+# outside the daemon's group refused before anything is written, with exactly one `usermod` printed;
+# `case_root_refusal`: the shipped artifact run as uid 0 in a container made from its own bytes, answering the one
+# sentence), the service and the keys a deploy writes in a case of their own
 # (`case_server_service`: the unit's bytes, the VAPID pair, the printed commands
 # that are root's and `doctor`'s `perms` arms), the three service commands (`case_status`: one line per fact, with
 # the uptime read from the endpoint the boot answers; `case_logs`: the journald child's argv through a stand-in and a
@@ -13299,7 +13301,7 @@ case_install_terse() {
     printf 'operator:x:%s:%s::%s:/bin/sh\n' "$fake_uid" "$fake_uid" "$home"
     printf 'nobody:x:65534:65534::%s:/bin/sh\n' "$home"
   } >"$passwd"
-  # A hub: no image, no proxy, no daemon question — three skips and one line each for what it does do.
+  # A hub: no image, no proxy, no daemon question — two skips and one line each for what it does do.
   deploy_config "$config" "$control" "$preview" "unix:///var/run/docker.sock" "pi-agent:local" "hub"
   deploy_machine_shims "$shims" "$logs/tailscale.log" "$logs/tailscale.state"
   cat >"$shims/systemctl" <<'SHIM'
@@ -13360,7 +13362,7 @@ health ✓
 url: http://localhost:@PORT@
 next: holosmith hub host add <name> <url>
 REPORT
-  sed -i "s/@PORT@/$control/" "$expected"
+  sed "s/@PORT@/$control/" "$expected" >"$expected.1" && mv "$expected.1" "$expected"
   if ! diff -u "$expected" "$root/out" >"$root/diff"; then
     fail "$name/report" "the terse report is not the shape an operator reads: $(cat "$root/diff")"
   fi
@@ -15020,13 +15022,24 @@ phase_serve() {
 
   start_serve
   local case_fn case_out skipped=0
+  # Errexit is off inside a function invoked in an `||` list, so the trap below cannot be a `|| fail` on the call.
+  set -E
   for case_fn in "${serve_cases[@]}"; do
     # A case's own standard output is captured so the loop can tell a case that measured something from one
     # that printed SKIP and returned. An `ok` for a case that skipped would log a pass for a check that never
     # ran, which is the one shape this gate may not have; nothing is swallowed, the lines are
     # printed below in order whatever they are.
+    #
+    # **The exit status is the verdict's third source, beside `FAIL` and `SKIP`.** A case that dies without
+    # printing either of the other two would otherwise log an `ok` over a check that measured nothing. It is an
+    # `ERR` trap (inherited into the case through `set -E`) rather than a `|| fail` on the line that runs the case,
+    # because a function called in an `||` list has errexit switched off for its whole body: a bare failing command
+    # inside a case — a `cp`, a `mkdir`, a here-doc's reader — would be swallowed instead, which is a bigger hole
+    # than the one this closes.
     case_out="$WORK/case.out"
+    trap 'fail "${case_fn}/status" "a command inside the case exited non-zero without a FAIL or SKIP line: $BASH_COMMAND"' ERR
     "$case_fn" >"$case_out"
+    trap - ERR
     cat "$case_out"
     if grep -q '^SKIP' "$case_out"; then
       skipped=$((skipped + 1))
