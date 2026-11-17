@@ -69,8 +69,10 @@ The report then follows on stdout, and says the same steps in the same order —
   a hub's images and proxies — emits nothing: `skipped` has already answered that there is nothing to wait for, and a
   begin line over that silence would be a lie about what it is.
 - **The two image builds get a note each, before and after.** The tag is in the line, because two minutes of
-  `docker build` and two more are the same silence otherwise, and a build that failed still gets its `built …` note:
-  the step's own report line is what says whether it succeeded.
+  `docker build` and two more are the same silence otherwise, and the second note carries the build's own answer —
+  `built <tag>`, or `did not build <tag>` — because the step's report line, which is where the reason is, does not
+  arrive until the step is over: a note that said `built` over a failure would be the one line a reader is watching
+  asserting the opposite of what happened.
 - **install's own three steps get a begin line each, and the health one names its bound and its address** — `waiting
   for `/api/health` on 127.0.0.1:8443 for up to 60 s` — because that is the second silence, and "up to a minute" is
   the fact a reader needs to not interrupt it.
@@ -95,15 +97,19 @@ lines are slow too.
 ## What measures it
 
 - `tests/deploy.rs` drives `deploy::run_as_with` with a recording sink: exactly one `begin` per evaluated step, in the
-  spec's order, the two `note` calls around each build with the tag in them, and **no** begin line for a hub's two
-  skips.
+  spec's order, the two `note` calls around each build with the tag in them — `built <tag>` when the build answered
+  yes and `did not build <tag>` when it did not — and **no** begin line for a hub's two skips.
 - `tests/install.rs` drives `install::execute` the same way: the six steps, then `unit`, `linger` and `health`, with
-  the health phrase naming the address and the bound — and a plan whose sink is told nothing.
-- `scripts/verify.sh`'s `case_install_terse` runs the shipped artifact under `bwrap` with the report on stdout and the
-  progress on stderr: one `install: [<label>] ` line per step the run evaluated, the skipped steps absent, stdout
-  holding not one progress line and stderr not one step line, and `--dry-run` putting nothing on stderr at all.
-- `case_install`'s runs keep `2>&1` and their own greps: a progress line does not match `^N. step: `, and the
-  `[N/6 …]` lines it now also writes are measured by the case above rather than by a grep that could pass over either.
+  the health phrase naming the address and the bound — and a plan handing its sink the same seven lines, because the
+  silent sink is `install::run`'s choice and not `execute`'s.
+- `scripts/verify.sh`'s `case_install` and `case_install_terse` both run the shipped artifact under `bwrap` with the
+  report on stdout and the progress on stderr, and both assert one `install: [<label>] ` line per step the run
+  evaluated, no line for the two steps a hub skips, stdout holding not one progress line and stderr not one step line
+  — and a `--dry-run` section that puts nothing on stderr at all.
+- **The terse shape is measured once, by bytes.** `case_install_terse` diffs a real run's stdout against a file of the
+  expected lines (`diff -u`), which is the only thing that pins the rendering an operator actually reads; the greps in
+  `case_install` pin the same stream on a fixture of its own — two runs over the manager's tree and a server-half
+  config — and neither case is redundant with the other.
 
 ## Refused
 

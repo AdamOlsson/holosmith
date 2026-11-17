@@ -120,11 +120,12 @@ serving reads:
 3. images ✓ (built 2 images: holosmith-proxy:0.1.0, agent-image:0.1.0)
 4. proxies ✓ (2 actions)
 5. service ✓ (1 action)
-    still yours to run: `systemctl --user daemon-reload`; `systemctl --user enable --now holosmith.service`
+    still yours to run: systemctl --user daemon-reload; systemctl --user enable --now holosmith.service
 6. health ✓
 role: both
 url: http://workshop.example.ts.net:8443
 next: holosmith key set <provider>
+next: holosmith hub host add <name> <url>
 ```
 
 The six steps are the config (2), the two images (3), the two proxies (4), the unit (5) and `/api/health` (6). Each is

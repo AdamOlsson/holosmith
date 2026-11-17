@@ -463,8 +463,9 @@ impl Report {
     ///   the operator who must *do* something about a step, which is right for the one that needs a `chmod` and a
     ///   wall of text when all six passed.
     /// - **The detail is the sentence's own, cut to its first clause** — `3 actions`, `built 2 images` — so the terse
-    ///   line says what the run wrote without a second vocabulary. Under a plan or a `changed` step's remark, the
-    ///   lines the operator may have to run follow indented, exactly as the verbose report prints them.
+    ///   line says what the run wrote without a second vocabulary. Under a `needs` line the action lines follow
+    ///   indented exactly as the verbose report prints them; under a `changed` one only the remark does — what the step
+    ///   wrote is the parenthetical, and the remark is the command that is still the operator's.
     /// - **A failure keeps its whole sentence and gains one `fix:` line**, which is the command that puts it right
     ///   ([`Report::fill_fix`]).
     ///

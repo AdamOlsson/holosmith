@@ -86,10 +86,12 @@ one is the default**:
 3. images ✓ (built 2 images: holosmith-proxy:0.1.0, agent-image:0.1.0)
 4. proxies ✓ (2 actions)
 5. service ✓ (1 action)
-    still yours to run: `systemctl --user daemon-reload`; `systemctl --user enable --now holosmith.service`
+    still yours to run: systemctl --user daemon-reload; systemctl --user enable --now holosmith.service
 6. health ✓
+role: both
 url: http://localhost:8444
 next: holosmith key set <provider>
+next: holosmith hub host add <name> <url>
 ```
 
 `--verbose` prints the block this ADR described, byte for byte as every release before it did — the header, the root,
@@ -113,10 +115,12 @@ print the same two renderings. Five facts are decisions:
   than prose a renderer cuts out, so it travels as a value and is printed as `    fix: chmod 0700 /…/data` — one
   line, pasteable, which is why it is a field and not a second sentence. A step that knows a better repair than a re-
   run
-  supplies it (step 1 names `holosmith doctor --quick`, install's health line names the journal); a step that does not
-  is filled in by the command layer with the run's own resume command, which is the command that just failed. So every
-  failed step a reader sees carries exactly one command. **The verbose rendering has no `fix:` line**: there the resume
-  line is still the run's last, as it always was, and a second copy of it would be one fact in two places.
+  supplies it (step 1 names `holosmith doctor --quick`); a step that does not is filled in by the command layer with
+  the run's own resume command, which is the command that just failed. install's health line is the second kind: it
+  names the journal in its own **sentence**, which is where a diagnostic read belongs, and keeps the resume command as
+  its `fix:` — the field is the one command that puts a failed step right. So every failed step a reader sees carries
+  exactly one command. **The verbose rendering has no `fix:` line**: there the resume line is still the run's last, as
+  it always was, and a second copy of it would be one fact in two places.
 - **The header and the tail are the command's, not the report's.** A real run prints no header in the terse shape; a
   dry run prints exactly one, and it says what a plan is — `install: dry run — nothing is written` — because a plan
   read as a result is the misreading the line prevents. The tally and `deploy: into <root>` do not survive into
@@ -127,12 +131,17 @@ print the same two renderings. Five facts are decisions:
 install's own three lines are unnumbered in both renderings — they are not the spec's six steps — and in the terse
 one a `changed` line of theirs stops at the mark: those sentences narrate what the run just did, so their first clause
 is the whole sentence and a parenthetical of it would be longer than the line it replaced. A `needs` or a `failed` one
-of theirs keeps everything, for the reason above.
+of theirs keeps everything, for the reason above. That is why the one arm of install's unit line that leaves a command
+— the manager was already running the unit, so the bytes this run wrote are served only after
+`systemctl --user restart holosmith.service` — is `needs` and not `changed`: a `changed` line stops at the mark, and a
+command must not stop at it.
 
-**The gate pays for both renderings.** Every case that asserts words runs with `--verbose` and keeps its greps
-unchanged, and one case — `case_install_terse` — writes the expected terse lines to a file and `diff -u`s them against
-a real run's stdout, so the shape an operator actually reads is measured once as bytes instead of as a family of
-patterns.
+**The gate pays for both renderings.** Every case that greps report words runs with `--verbose` and keeps its greps
+unchanged. Two runs do not carry the flag, and what they measure is something else: one case,
+`case_install_terse`, writes the expected terse lines to a file and `diff -u`s them against a real run's stdout, so
+the shape an operator actually reads is measured once as bytes instead of as a family of patterns; and
+`case_install`'s third section is a plan, where the words are not the point (its `--dry-run` report is the one the flag
+always printed) but the silence on stderr is.
 
 ## Refused
 
