@@ -13123,7 +13123,8 @@ SHIM
 
   # ---- 1. the first run: the deploy, the two manager commands, the linger flag, the wait -----------------
   status=0
-  install_home install --verbose --config "$config" --root "$tree" >"$root/first.out" 2>&1 || status=$?
+  install_home install --verbose --config "$config" --root "$tree" >"$root/first.out" 2>"$root/first.err" ||
+    status=$?
   check "$name/first/exit" 0 "$status"
   # The deploy's six steps, verbatim: the two a hub has no work for are skips, and the health line is `satisfied`
   # because the responder answers — the first-install case where it is `failed` is `tests/install.rs`'s, and it is
@@ -13139,6 +13140,22 @@ SHIM
       fail "$name/first/lines" "the first run does not say '$target': $(cat "$root/first.out")"
     assertions=$((assertions + 1))
   done
+  # The progress lines are the run's other half, and they are on **stderr**: one begin line per step it evaluated, the
+  # two a hub has no work for absent, and none of the report mixed in. `--verbose` changes the report, not the stream
+  # (ADR-0092).
+  for label in '1/6 preflight' '2/6 files' '5/6 service' '6/6 health' unit linger health; do
+    grep -qF "install: [$label] " "$root/first.err" ||
+      fail "$name/first/progress/$label" "the run announced no '$label': $(cat "$root/first.err")"
+    assertions=$((assertions + 1))
+  done
+  for label in '3/6 images' '4/6 proxies'; do
+    if grep -qF "install: [$label]" "$root/first.err"; then
+      fail "$name/first/progress/skip" "a step this hub skipped announced itself: $(cat "$root/first.err")"
+    fi
+    assertions=$((assertions + 1))
+  done
+  check "$name/first/stdout/progress" 0 "$(grep -c '^install: \[' "$root/first.out" || true)"
+  check "$name/first/stderr/report" 0 "$(grep -cE '^[1-6]\. ' "$root/first.err" || true)"
   grep -qx "install: url: http://localhost:$control" "$root/first.out" ||
     fail "$name/first/url" "the run did not print the control URL it earned: $(cat "$root/first.out")"
   assertions=$((assertions + 1))
@@ -13190,7 +13207,8 @@ SHIM
   : >"$logs/systemctl.log"
   : >"$logs/loginctl.log"
   status=0
-  install_home install --verbose --config "$config" --root "$tree" >"$root/second.out" 2>&1 || status=$?
+  install_home install --verbose --config "$config" --root "$tree" >"$root/second.out" 2>"$root/second.err" ||
+    status=$?
   check "$name/second/exit" 0 "$status"
   for target in '^1\. preflight: satisfied: ' '^2\. files: satisfied: ' '^3\. images: skipped: ' \
     '^4\. proxies: skipped: ' '^5\. service: satisfied: ' '^6\. health: satisfied: '; do
@@ -13220,6 +13238,17 @@ SHIM
   cmp -s "$root/vapid1" "$tree/data/secrets/vapid.toml" ||
     fail "$name/second/vapid" "the second run rewrote the VAPID pair, which invalidates every push subscription"
   assertions=$((assertions + 1))
+
+  # ---- 3. a plan says nothing while it works ------------------------------------------------------------
+  # `--dry-run` is the reads alone, so its sink is the silent one: nothing about it is slow, and a line announcing a
+  # step would be a line about work the run is not doing (ADR-0092). The report itself is the one `--dry-run` already
+  # printed — a plan, with its header and nothing written.
+  status=0
+  install_home install --dry-run --config "$config" --root "$tree" >"$root/dry.out" 2>"$root/dry.err" || status=$?
+  check "$name/dry/exit" 0 "$status"
+  [ -s "$root/dry.out" ] || fail "$name/dry/out" "a plan printed no report at all"
+  assertions=$((assertions + 1))
+  check "$name/dry/stderr" 0 "$(grep -c '' "$root/dry.err" || true)"
 
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
