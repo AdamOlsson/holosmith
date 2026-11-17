@@ -18,7 +18,7 @@ certificates. If your tailnet does issue them, the README's *Over a tailnet* sec
 holosmith version                 # this build
 docker info >/dev/null && echo docker ok
 tailscale status | head -1        # your node, and its MagicDNS name
-df -h /var/lib 2>/dev/null || df -h /
+df -h ~/.local/share/holosmith 2>/dev/null || df -h ~
 ```
 
 You need: Docker answering, git 2.38+, the binary at a **stable path** (the unit names the path it was deployed
@@ -121,7 +121,8 @@ deploy: into /home/you/.local/share/holosmith
 2. files: satisfied: …     # the config, the data root, the secrets and the keys
 3. images: changed: …      # builds holosmith-proxy and agent-image, minutes on a first run
 4. proxies: changed: …     # starts hs_key and hs_egress
-5. service: satisfied: …   # the unit is in the root; still yours to run: the two `systemctl --user` commands
+5. service: satisfied: …   # the unit is beside the config, in the user manager's directory; still yours to run:
+                           # the two `systemctl --user` commands
 6. health: satisfied: …    # `/api/health` answers and `doctor --full` finds nothing failing
 deploy: 6 steps: 4 satisfied, 0 needs, 2 changed, 0 skipped, 0 failed
 ```
@@ -136,8 +137,9 @@ curl -fsS http://127.0.0.1:8080/api/health
 `active (running)` plus a JSON body is the machine working. A unit that is `activating (auto-restart)` means the
 preflight refused — read `holosmith doctor --quick` and `journalctl --user -u holosmith -n 30`.
 
-Nothing else has to be set for a release to restart the unit: `systemctl --user restart` is this account's own, so
-there is no `/etc/sudoers.d` line in an install.
+The unit is started, stopped and restarted with `systemctl --user`, which is this account's own. A **promotion** is no
+exception: `upgrade` and `rollback` ask the same user manager for the restart, so there is no `/etc/sudoers.d` line in
+an install and nothing to set for a release to confirm itself live.
 
 ## 4. Put it on the tailnet (plain HTTP)
 
@@ -160,13 +162,13 @@ node as connected. Both `serve` entries live in tailscaled's own config and surv
 
 ## 5. The provider key
 
-One key, on stdin only, written to `/var/lib/holosmith/data/secrets/keys.toml` (0600). Run it **as the service
-user**: the file's owner must be the data root's owner, or `doctor`'s `perms` finding fails and the next boot's
-`ExecStartPre` refuses to start the unit.
+One key, on stdin only, written to `~/.local/share/holosmith/data/secrets/keys.toml` (0600). Run it as yourself:
+the file's owner must be the data root's owner, which is your own account, or `doctor`'s `perms` finding fails and
+the next boot's `ExecStartPre` refuses to start the unit.
 
 ```bash
-sudo -u holosmith holosmith key set anthropic < ~/anthropic.key
-sudo -u holosmith holosmith key list          # names only, never values
+holosmith key set anthropic < ~/anthropic.key
+holosmith key list          # names only, never values
 ```
 
 Twelve provider ids exist — `anthropic`, `openai`, `openrouter`, `deepseek`, `mistral`, `groq`, `xai`, `fireworks`,
@@ -176,15 +178,15 @@ restart is needed: the key proxy reads the store per request.
 ## 6. A project to work in
 
 A "project" is a directory **directly inside `projects_root`** that holds a `.git` directory; its name is what the
-new-session form asks for. Worktrees are made under `/var/lib/holosmith/projects/.worktrees/<id>`.
+new-session form asks for. Worktrees are made under `~/.local/share/holosmith/projects/.worktrees/<id>`.
 
 ```bash
-sudo -u holosmith git clone <repository-url> /var/lib/holosmith/projects/<project>
-sudo -u holosmith git -C /var/lib/holosmith/projects/<project> status --short
+git clone <repository-url> ~/.local/share/holosmith/projects/<project>
+git -C ~/.local/share/holosmith/projects/<project> status --short
 ```
 
-The clone must be the service user's, because `publish` and `merge` run on the host as that user and use **its**
-git credentials (`/var/lib/holosmith/.git-credentials`, or a deploy key under its home — which is the root).
+The clone must be yours, because `publish` and `merge` run on the host as your own account and use **your** git
+credentials (`~/.git-credentials`, or a deploy key under your home).
 
 A missing `.git`, a submodule (`.gitmodules` or `.git/modules`), or `extensions.worktreeConfig` set is refused at
 create time with a `422` — those are the three shapes that cannot be mounted safely.
@@ -193,7 +195,7 @@ create time with a `422` — those are the three shapes that cannot be mounted s
 
 1. Open `http://huawei-laptop.tailnet.internal:8080`.
 2. **Create a session** — the form asks for:
-   - **project**: the directory name from step 5 (the placeholder is `holosmith`);
+   - **project**: the directory name from step 6 (the placeholder is `holosmith`);
    - **model** and **thinking**: what the agent runs, with suggestions to edit;
    - **Internet access**: starts from `network_default`, which is `false` here — tick it for a session that needs
      cargo or npm;
@@ -208,12 +210,11 @@ create time with a `422` — those are the three shapes that cannot be mounted s
 ## 8. Day two
 
 ```bash
-sudo -u holosmith holosmith status       # role, version, uptime, session counts, proxies
-holosmith logs -f                        # journalctl --user -u holosmith.service, no group needed
-                                         # (the unit is your own: ADR-0088)
-sudo -u holosmith holosmith doctor --full
-systemctl --user restart holosmith       # after any config edit
-sudo -u holosmith holosmith server deploy   # idempotent: the second run changes nothing
+holosmith status                     # role, version, uptime, session counts, proxies
+holosmith logs -f                    # journalctl --user -u holosmith.service
+holosmith doctor --full
+systemctl --user restart holosmith   # after any config edit
+holosmith install                    # idempotent: a second run changes nothing
 ```
 
 ## When something refuses
@@ -227,8 +228,8 @@ sudo -u holosmith holosmith server deploy   # idempotent: the second run changes
 | `409 cap_reached` | `max_live_sessions` reached and nothing is idle to evict. Stop or delete a session. |
 | `507 disk_floor` | Free space below `min_free_gb` on the data root. Free space or lower the key, then restart. |
 | `422 git_not_directory` | The project has no `.git` directory, or has submodules, or sets `extensions.worktreeConfig`. |
-| Unit restart-loops on `perms` | Something under the data root is not owned by the data root's owner — usually a `key set` run as root. `sudo chown holosmith:holosmith /var/lib/holosmith/data/secrets/keys.toml`. |
-| Session `error` at the container step | `docker ps` and `holosmith logs --session <id>`; the images are `agent-image` and `holosmith-proxy` (`sudo docker image ls`). |
+| Unit restart-loops on `perms` | Something under the data root is not owned by the data root's owner — a file from an older install, or one a `sudo` wrote before this build refused it. `sudo chown "$(id -u):$(id -g)" ~/.local/share/holosmith/data/secrets/keys.toml`. |
+| Session `error` at the container step | `docker ps` and `holosmith logs --session <id>`; the images are `agent-image` and `holosmith-proxy` (`docker image ls`). |
 
 ## After the quickstart
 

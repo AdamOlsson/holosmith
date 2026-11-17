@@ -78,11 +78,13 @@ with `sudo loginctl enable-linger $USER` beside the two `systemctl --user` comma
 
 ## What this does not measure
 
-- **No gate case and no daemon.** `tests/install.rs` drives a **hub's** install with the machine handed in, so the four
-  container checks are `unknown` rather than measured; what a server's deploy does to a real daemon is `tests/deploy.rs`
-  and `scripts/verify.sh`'s cases. `install::run` itself is not driven either — its tool seam is the host's real
-  `systemctl` and `loginctl` — so the exit code is pinned through `Report::failed`, one case per exit class, and `run`'s
-  own three lines are the untested glue the test file's header names.
+- **The gate drives `run`, and still has no manager and no daemon.** `tests/install.rs` drives a **hub's** install
+  with the machine handed in, so the four container checks are `unknown` rather than measured; what a server's deploy
+  does to a real daemon is `tests/deploy.rs` and `scripts/verify.sh`'s cases. `scripts/verify.sh`'s `case_install`
+  drives `install::run` for a hub under `bwrap`: a passwd entry names a home the case owns, so the unit `--config`
+  composes is the one the account's "manager" resolves, and `systemctl`/`loginctl` are recording stand-ins on `PATH`.
+  That is what measures the argv, the unit's bytes, the linger lines and a second run's silence — and what it still
+  does not measure is a real user manager: no unit is loaded and no linger flag is set.
 - **No polkit-denied machine.** The refusal is what the shim says it is (`Interactive authentication required.`), which
   is the sentence `loginctl` gives; the run's own behaviour is measured, the machine's is not.
 - **`systemctl --user is-enabled`/`is-active` are read, not `show -p …`** — two children rather than one parse of a
@@ -101,7 +103,7 @@ with `sudo loginctl enable-linger $USER` beside the two `systemctl --user` comma
   serving process predates them, and names `systemctl --user restart` as the command that starts them. It is the one
   arrangement in which "started it" would be false, and this ADR takes the words over a restart: an install is not a
   promotion (ADR-0082), and interrupting a serving daemon is not a first setup's business.
-- **The guide's later sections still describe the install ADR-0088 replaced.** `docs/quickstart.md` §1–§3 are this
-  code — the operator's own account, `~/.local/share/holosmith`, one `holosmith install` — while §5 onward still spells
-  `sudo -u holosmith` and `/var/lib/holosmith`, the account and the tree ADR-0088 deleted. That sweep is its own work;
-  nothing in this ADR should be read as covering it.
+- **The guide is the operator's account throughout.** The sweep this ADR deferred has landed: `docs/quickstart.md`
+  §5–§8 now name `~/.local/share/holosmith`, run `key set` and `git clone` as the operator, read `journalctl --user`
+  and restart with `systemctl --user`, and the day-two verb is `holosmith install`. `README.md`'s by-hand recipe is
+  deliberately not part of that sweep.

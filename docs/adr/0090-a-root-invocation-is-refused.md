@@ -71,16 +71,20 @@ this runs as you, drop the sudo: holosmith status
   of 0, so that shape is not refused either; this machine cannot create one (`unshare -r` fails here with `write
   failed /proc/self/uid_map: Operation not permitted`), so that half is procfs's documented behaviour rather than a
   measurement. What the guard refuses is a process that can write root-owned files here.
-- **No gate case can be the refusal.** The gate runs as the operator, so `case_*` can only observe that the binary
-  works; `tests/root_refusal.rs` covers the decision for uid 0 at the decision's own layer, and a suite that had to
-  *become* root to prove it would be a suite nobody can run.
-- **Four places still tell an operator to type `sudo holosmith …`**, and this decision makes each one wrong:
-  `docs/config.md:5-6` ("`sudo holosmith …` reads root's own file"), `README.md:90,101,107,143` (`sudo holosmith
-  config edit`, `sudo holosmith status`, `sudo holosmith doctor --full`), and
-  `crates/holosmith/src/commands/upgrade.rs:9-17` together with `rollback.rs:4`, whose section says "run it as root, or
-  name an install tree with `--root`" and names a `deploy::privilege_problem` that no longer exists in the tree. The
-  sweep belongs to the docs work already tracked for the operator-account install; this decision is not it, and a
-  rewrite here would bury that diff.
+- **A gate case is the refusal, and it does not make the gate root.** `case_root_refusal` imports a root filesystem
+  holding the shipped artifact — a static binary needs no base image — and runs it as uid 0 in a container, which is
+  the one uid the decision is about; `tests/root_refusal.rs` still covers the decision at its own layer, for every
+  verb clap knows. What neither measures is a host run as root, and the namespace whose procfs shows the overflow uid
+  (above) is still not a refusal.
+- **The command modules stopped telling an operator to type `sudo holosmith …`; the README has not.** The
+  promotion's restart moved to the operator's own manager, so `crates/holosmith/src/commands/upgrade.rs` and
+  `rollback.rs` now describe a promotion that checks no account and escalates nothing, and the
+  `deploy::privilege_problem` this decision replaced is gone from the tree. `crates/holosmith/src/identity.rs` and
+  `main.rs` still spell `sudo holosmith …`, in explanation rather than instruction — what the shell would have run,
+  and why uid 0 is refused before it reaches a default path — which is the right place for it, and the refusal's own
+  sentence is built from the typed words. What remains wrong is `README.md:81,92,98,134`: its day-two verbs and its
+  tailnet steps. The human overview still describes the install ADR-0088 deleted, and sweeping it is its own work
+  rather than this decision's.
 
 ## Consequences
 

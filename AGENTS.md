@@ -175,9 +175,10 @@ no visible reason is usually one of them missing:
 - **`install`, `chmod`, `id`, `openssl`** for `server deploy` (ADR-0056): every file action is one child, and the
   programs `tests/deploy.rs` hands a script are `df`, `tailscale` and `id` — with `systemd` pointed at a path it leaves
   absent, because this host has no init to ask. `install`, `chmod` and `openssl` run for real there, since a shim
-  cannot show that `install -m 0600` produces a 0600 file. It spawns no `sudo`: the `usermod`, the `chown` and the two
-  `systemctl --user` commands it owes root are printed for the operator, never run. `--root DIR` builds an
-  unprivileged install tree, which is what every gate case uses — no test needs `sudo`.
+  cannot show that `install -m 0600` produces a 0600 file. It spawns no `sudo`, and the product escalates nothing: the
+  one command a deploy prints for the account — a `usermod` — is never run, and the two `systemctl --user` commands
+  step 5 prints are the operator's own. `--root DIR` builds an unprivileged install tree, which is what every gate case
+  uses — no test needs `sudo`.
 - **tailscale and systemd** as `doctor` questions only: a LAN-only machine and a hand-run `serve` are supported,
   and since ADR-0086 a deploy installs no unit and asks systemd nothing.
 
