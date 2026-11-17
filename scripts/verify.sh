@@ -11439,11 +11439,11 @@ case "\$1" in
 esac
 exit 0
 SHIM
-  # `sudo`: the release verbs restart through `sudo -n systemctl restart <unit>` (ADR-0086 D4), and a real `sudo`
-  # resets PATH — so the `systemctl` above would never be reached, and on a machine without
-  # `/etc/sudoers.d/holosmith` it answers "a password is required" and the promotion has nothing to poll. A gate
-  # cannot install that line, so this stand-in is what a machine with it does: drop `-n` and run the program this
-  # case's PATH names.
+  # `sudo`: the release verbs restart through `sudo -n systemctl restart <unit>` — ADR-0086 D4's shape, which ADR-0088
+  # D5 still lists as **outstanding** (it becomes `systemctl --user restart`) — and a real `sudo` resets PATH, so the
+  # `systemctl` above would never be reached: on a machine without `/etc/sudoers.d/holosmith` it answers "a password is
+  # required" and the promotion has nothing to poll. A gate cannot install that line, so this stand-in is what a
+  # machine with it does: drop `-n` and run the program this case's PATH names.
   cat >"$bin/sudo" <<'SUDO'
 #!/bin/sh
 [ "$1" = "-n" ] && shift
@@ -11691,8 +11691,9 @@ case "\$1" in
 esac
 exit 0
 SHIM
-  # `sudo`: the release verbs restart through `sudo -n systemctl restart <unit>` (ADR-0086 D4), and a real `sudo`
-  # resets PATH, so this case's `systemctl` above would never be reached. See `case_upgrade`'s copy of this shim.
+  # `sudo`: the release verbs restart through `sudo -n systemctl restart <unit>` (ADR-0086 D4, which ADR-0088 D5 still
+  # lists as **outstanding**), and a real `sudo` resets PATH, so this case's `systemctl` above would never be reached.
+  # See `case_upgrade`'s copy of this shim.
   cat >"$bin/sudo" <<'SUDO'
 #!/bin/sh
 [ "$1" = "-n" ] && shift
@@ -13020,7 +13021,11 @@ case_install() {
   local name=case_install root="$repo_root/target/verify-install-$$"
   local home="$root/home" config="$root/home/.config/holosmith.toml" tree="$root/home/.local/share/holosmith"
   local passwd="$root/passwd" shims="$root/bin" logs="$root/logs"
-  local control preview status unit holder_pid fake_uid log
+  local control preview status unit fake_uid log
+  # `holder_pid` is assigned up front on purpose: a `local` with no value is **unset** in bash, and the EXIT trap that
+  # runs after a `fail` in this function still sees its locals — so an unset one turns any failure into
+  # `line N: holder_pid: unbound variable` and buries the sentence that mattered (`case_deploy_ssh` says it in full).
+  local holder_pid=""
   # The guard is the harness, not the command: `bwrap` has to be able to make the namespace at all, and a machine
   # that refuses it is a supported machine (AGENTS.md names it optional).
   if ! command -v bwrap >/dev/null 2>&1 || ! bwrap --dev-bind / / true >/dev/null 2>&1; then
@@ -13169,7 +13174,7 @@ SHIM
     fi
     assertions=$((assertions + 1))
   done
-  # The tree the issue's modes are about: one root at 0700, the data root and secrets, and the two files at 0600.
+  # The install's modes (ADR-0088 D1): one root at 0700, the data root and secrets, and the two files at 0600.
   check "$name/tree/root" 700 "$(stat -c '%a' "$tree" 2>/dev/null || echo absent)"
   check "$name/tree/data" 755 "$(stat -c '%a' "$tree/data" 2>/dev/null || echo absent)"
   check "$name/tree/secrets" 700 "$(stat -c '%a' "$tree/data/secrets" 2>/dev/null || echo absent)"
@@ -13229,9 +13234,11 @@ SHIM
 # escalating (ADR-0091 D1).
 #
 # No daemon, no systemd and no image: the group question is `id -un`/`id -nG`, so a stand-in answering for an account
-# outside `docker` is the whole fixture, and a `unix://` endpoint is what makes the question be asked at all. The
-# `--config`/`--root` tree is under `target/`, and "nothing has been written" is asserted rather than read out of the
-# sentence: no root, no rewritten config, no step line.
+# outside `docker` is the whole fixture, and a `unix://` endpoint is what makes the question be asked at all. A socket
+# that does not exist is enough, because the question is the spelling and not reachability (ADR-0091 D1) — and a path
+# under `target/` means a regression cannot reach this machine's own daemon. The `--config`/`--root` tree is under
+# `target/` too, and "nothing has been written" is asserted rather than read out of the sentence: no root, no rewritten
+# config, no step line.
 case_install_group() {
   local name=case_install_group root="$repo_root/target/verify-install-group-$$"
   local shims="$root/bin" config="$WORK/config-install-group.toml" status line
@@ -13249,7 +13256,7 @@ SHIM
   chmod 0755 "$shims/id"
   # A server, because the question is the server half's: a hub opens no socket, and a `tcp:` daemon is entered through
   # nobody's group. Port 0 asks the kernel; the preview listener differs so the two origins do.
-  deploy_config "$config" 0 1 "unix:///var/run/docker.sock" "pi-agent:local" "server"
+  deploy_config "$config" 0 1 "unix://$root/absent.sock" "pi-agent:local" "server"
   cp "$config" "$root/config-before"
   status=0
   PATH="$shims:$PATH" "$artifact" install --config "$config" --root "$root/install" \
@@ -13257,6 +13264,8 @@ SHIM
   check "$name/exit" 1 "$status"
   [ ! -s "$root/out" ] || fail "$name/stdout" "a refusal printed a report: $(cat "$root/out")"
   assertions=$((assertions + 1))
+  # Two lines and no more — the sentence, then the command — so a warning slipped in between cannot pass.
+  check "$name/lines" 2 "$(wc -l <"$root/err")"
   # Exactly one printed command, and it is the last line — the thing to paste, unadorned. It spells `$USER` where the
   # deploy's own sentence spells the account's name (ADR-0091 D1): this line is for the shell the operator is sitting
   # in, and the two spellings never meet because this refusal happens before the deploy that prints the other.

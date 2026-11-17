@@ -137,8 +137,9 @@ curl -fsS http://127.0.0.1:8080/api/health
 `active (running)` plus a JSON body is the machine working. A unit that is `activating (auto-restart)` means the
 preflight refused — read `holosmith doctor --quick` and `journalctl --user -u holosmith -n 30`.
 
-Nothing else has to be set for a release to restart the unit: `systemctl --user restart` is this account's own, so
-there is no `/etc/sudoers.d` line in an install.
+The unit is started, stopped and restarted with `systemctl --user`, which is this account's own. A **promotion**'s
+single restart is the exception: it goes through `sudo -n systemctl restart`, for `upgrade` and `rollback` alike,
+so `/etc/sudoers.d/holosmith` keeps its one line until that restart becomes `systemctl --user`.
 
 ## 4. Put it on the tailnet (plain HTTP)
 

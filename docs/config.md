@@ -1,14 +1,13 @@
 # Configuring Holosmith
 
 One TOML file per machine, `~/.config/holosmith.toml`, read by every verb (`serve`, `install`, `doctor`, `deploy`,
-`status`, `build`, `hub host`, …). `~` is the home **of the account the command runs as**, read from the password database
-rather than from `HOME` — which is why a `sudo` cannot quietly point a command at another account's file: a root
-invocation is refused before anything is read. Your state is
-the root — `HOLOSMITH_ROOT`, default `~/.local/share/holosmith` — one directory holding the data root, the release
-tree and the projects; the config deliberately sits outside it, because it is the one file a person edits and the
-root is the state a backup carries. `--config PATH` names another file, and `--root DIR` moves the state and only
-the state; a file you named that does not exist is an error, while a missing default path means the built-in
-defaults.
+`status`, `build`, `hub host`, …). `~` is the home **of the account the command runs as**, read from the password
+database rather than from `HOME` — which is why a `sudo` cannot quietly point a command at another account's file:
+a root invocation is refused before anything is read. Your state is the root — `HOLOSMITH_ROOT`, default
+`~/.local/share/holosmith` — one directory holding the data root, the release tree and the projects; the config
+deliberately sits outside it, because it is the one file a person edits and the root is the state a backup
+carries. `--config PATH` names another file, and `--root DIR` moves the state and only the state; a file you named
+that does not exist is an error, while a missing default path means the built-in defaults.
 
 A uid with no password entry — a container started with `--user <uid>`, say — has no home to derive either path
 from, so the defaults become `/.config/holosmith.toml` and `/.local/share/holosmith`. Nothing unprivileged can

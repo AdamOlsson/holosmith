@@ -77,11 +77,12 @@ this runs as you, drop the sudo: holosmith status
   verb clap knows. What neither measures is a host run as root, and the namespace whose procfs shows the overflow uid
   (above) is still not a refusal.
 - **Three places still tell an operator to type `sudo holosmith …`**, and this decision makes each one wrong. The
-  operator-account docs pass removed `docs/config.md`'s ("`sudo holosmith …` reads root's own file"); what remains is
-  `README.md`'s day-two verbs and its by-hand recipe, `crates/holosmith/src/commands/upgrade.rs`'s header, and
-  `rollback.rs`'s section that says "run it as root, or name an install tree with `--root`" and names a
-  `deploy::privilege_problem` that no longer exists in the tree. The README is the human overview and the two
-  command modules are the promotion ticket's; neither is the docs pass's to rewrite.
+  operator-account docs pass removed `docs/config.md`'s sentence ("`sudo holosmith …` reads root's own file"); what
+  remains is `README.md`'s day-two verbs (`:90,101,107`) and its tailnet steps (`:143`),
+  `crates/holosmith/src/commands/upgrade.rs`'s header that says "run it as root, or name an install tree with
+  `--root`", and `crates/holosmith/src/commands/rollback.rs`'s, which names a `deploy::privilege_problem` that no
+  longer exists in the tree. The README is the human overview and the two command modules are the promotion ticket's;
+  none of the three is the docs pass's to rewrite.
 
 ## Consequences
 

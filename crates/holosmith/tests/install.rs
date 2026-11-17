@@ -24,9 +24,10 @@
 //!   install does not tolerate;
 //! - **an install that does not answer fails** — `a_health_poll_that_never_answers_fails_and_names_the_journal`.
 //!
-//! So `run`'s own three lines — print the report, print `resume` or the URL and the next step, return the code — are
-//! the glue no case here drives: `scripts/verify.sh`'s `case_install` runs the verb end to end under `bwrap` with a
-//! home and a user manager of its own, which is where those lines are measured.
+//! So the glue no case here drives is `run`'s own three lines — print the report, print `resume` or the URL and the
+//! next step, return the code. `scripts/verify.sh`'s `case_install` runs the verb end to end under `bwrap` with a home
+//! and a unit tree of its own, and that is where the report, the URL and next step, and the exit code are measured; a
+//! failing install's `install: resume:` line is still measured nowhere.
 //!
 //! Driven for real: `install`/`chmod` and `openssl` over the `--root` tree (a recorder would prove nothing about the
 //! modes step 2 writes), and a real socket answering `/api/health` (the wait is the install's own verdict).

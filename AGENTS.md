@@ -172,10 +172,10 @@ no visible reason is usually one of them missing:
   proxy, never a silent fallback; and on the host, because web push signs, derives and delivers through four
   `openssl` children per message (ADR-0071), which `doctor --full` reports as `Check::Openssl` rather than
   something `serve` refuses to start over.
-- **`install`, `chmod`, `id`, `openssl`**, and `df`/`git`/`tailscale` through the preflight: every deploy file action
-  is one child, and the one command a deploy prints for the account — a `usermod` — is never run. A deploy runs no
-  `sudo`; a promotion's `systemctl restart` is the product's one escalation. `--root DIR` builds an unprivileged
-  install tree, which is what every gate case uses — no test needs `sudo`.
+- **`install`, `chmod`, `id`, `openssl`** and `df`/`git` through the preflight and `tailscale` through `doctor`:
+  every deploy file action is one child, and the one command a deploy prints for the account — a `usermod` — is never
+  run. A deploy runs no `sudo`; a promotion's `systemctl restart` is the product's one escalation. `--root DIR`
+  builds an unprivileged install tree, which is what every gate case uses — no test needs `sudo`.
 - **tailscale and systemd** as `doctor` questions only: a LAN-only machine and a hand-run `serve` are supported, and a
   deploy writes the user unit beside the config and asks systemd nothing.
 

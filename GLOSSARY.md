@@ -88,12 +88,12 @@ _Avoid_: Hub install, hub setup, `server deploy --hub`
 
 **Deploy half**:
 Which part of a machine one `deploy` run installs: the **server** half (all six steps, both proxies) or the **hub**
-half (steps 1, 2, 5 and 6, no proxy). A run **unions** its half with the role the config already carries and writes the
-union into the config file step 2 installs, so `server deploy` then `hub
-deploy` on one machine — in either order — leaves a machine whose config says `both`; nothing is refused over a role.
-Steps 1 and 6 ask their checks about **the half this run installs** rather than the union, which is why a hub deploy
-asks no Docker and no git question even on a `both` machine, while the unit step follows the **union** because a unit
-describes the machine that will boot. Its machine names are `deploy::{Kind, union, run_as}`.
+half (steps 1, 2, 5 and 6, no proxy). A run **unions** its half with the role the config already carries and writes
+the union into the config file step 2 installs, so `server deploy` then `hub deploy` on one machine — in either order
+— leaves a machine whose config says `both`; nothing is refused over a role. Steps 1 and 6 ask their checks about
+**the half this run installs** rather than the union, which is why a hub deploy asks no Docker and no git question
+even on a `both` machine, while the unit step follows the **union** because a unit describes the machine that will
+boot. Its machine names are `deploy::{Kind, union, run_as}`.
 _Avoid_: Partial deploy, role upgrade, half-install (a **Role** is what a machine holds; a deploy half is what one run
 adds to it)
 
@@ -932,8 +932,8 @@ guessing from `/proc` or from systemd.
 `holosmith uninstall [--purge]`: the inverse of an **install** (and of the `deploy` it runs). It removes the unit, the
 two proxies and the machine's `egress` network, and **keeps** the data root, the projects and every session's own
 container and network; `--purge` also removes the data root (and the containers and networks the rows named), and
-refuses while a session is live unless `--force`. Its lines carry four words of its own — `removed`, `kept`, `nothing`, `failed` — not the
-deploy's five. Its machine name is `uninstall::Report`.
+refuses while a session is live unless `--force`. Its lines carry four words of its own — `removed`, `kept`,
+`nothing`, `failed` — not the deploy's five. Its machine name is `uninstall::Report`.
 _Avoid_: Teardown, remove, destroy, deploy --reverse
 
 **Builder image**:
@@ -1000,13 +1000,13 @@ _Avoid_: Version (that is the crate's semver, not a release), build, deploy
 
 **Release tree**:
 `<root>/releases`, holding `releases/<tag>/` and the **`current`** symlink at `<root>/current`. It is inside the root
-rather than a `/opt` of its own (ADR-0086), which is why `upgrade` and `rollback` write plain files as the service
-user and need no privilege for the tree. `holosmith upgrade` creates it and switches it; `holosmith rollback` switches
-it back one release, and its **order** — the order the releases were written onto the machine, newest first — is
-`Release::history`, which is also the order a **prune** keeps. A **promotion** prunes it to `keep_releases` when the
-candidate is live, `holosmith version` reports the release directory the running file is in, and `doctor` reports the
-resolved path and whether the link is intact. Its machine names are `release::Release`, `release::ROOT` and
-`release::running_tag`.
+rather than a `/opt` of its own (ADR-0086), which is why `upgrade` and `rollback` write the tree's files as the
+account that owns them, need no privilege for the tree itself, and escalate only the restart. `holosmith upgrade`
+creates it and switches it; `holosmith rollback` switches it back one release, and its **order** — the order the
+releases were written onto the machine, newest first — is `Release::history`, which is also the order a **prune**
+keeps. A **promotion** prunes it to `keep_releases` when the candidate is live, `holosmith version` reports the
+release directory the running file is in, and `doctor` reports the resolved path and whether the link is intact. Its
+machine names are `release::Release`, `release::ROOT` and `release::running_tag`.
 _Avoid_: Releases directory, install tree, versions
 
 **`current`**:
