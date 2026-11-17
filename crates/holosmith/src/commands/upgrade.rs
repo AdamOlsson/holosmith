@@ -1,18 +1,21 @@
 //! `holosmith upgrade <binary>`: the promotion pipeline as one command (spec item 10, ADR-0082).
 //!
 //! A **host** verb like `build` and `smoke`, and as thin: it loads the config the way every command does, resolves the
-//! install tree, refuses a promotion that needs `root` and does not have it (`deploy::privilege_problem`, the rule the
-//! two release verbs share —), and hands [`crate::promote`] the four facts it cannot work out itself — the
-//! candidate, whether the review was acknowledged, the drain's wait and the root. What this module owns is the
-//! command's surface: the flag names and the exit code (0 only for a candidate that is live).
+//! install tree, and hands [`crate::promote`] the four facts it cannot work out itself — the candidate, whether the
+//! review was acknowledged, the drain's wait and the root. What this module owns is the command's surface: the flag
+//! names and the exit code (0 only for a candidate that is live).
 //!
-//! # Why a privileged install must be root
+//! # Whose account a promotion runs as
 //!
-//! A promotion writes the release tree (`/opt/holosmith`), the `current` symlink, the unit file and then restarts a
-//! system service. `server deploy` writes each of its own files as a `sudo`-prefixed child, and a promotion that did
-//! the same would be a dozen escalations for one command, each asking for the same credential. So the rule is one
-//! check with one sentence: run it as root, or name an install tree with `--root` (which is how the gate and the demo
-//! drive the whole pipeline, since neither may write `/etc` or needs systemd).
+//! Nothing here checks the account, and on a default install there is nothing to check: a promotion writes the
+//! release tree and the `current` symlink under the root (`<home>/.local/share/holosmith`, unless `--root` or
+//! `HOLOSMITH_ROOT` names another), writes the unit in the directory the operator's user manager reads, and restarts
+//! through their own `systemctl --user` — so every one of the four is the running account's, and none asks a privilege
+//! of anyone (ADR-0088 D2). A tree that account may not write is therefore a failure at the first write that cannot
+//! be made rather than a refusal up front, and because the writes follow the drain, that failure is one of the ones
+//! whose sentence has to say the machine is draining. Restoring or replacing the check this verb used to carry is the
+//! install story's to decide (ADR-0088's consequences name it as outstanding); `--root DIR` names the tree, which is
+//! how the gate and the demo drive the whole pipeline.
 
 use std::path::PathBuf;
 use std::process::ExitCode;

@@ -79,7 +79,7 @@ struct Recorder {
     drain: DrainAnswer,
     /// What `/api/health` answers: `(version, uptime_s)`.
     health: (String, u64),
-    /// What `systemctl restart` answers.
+    /// What `systemctl --user restart` answers.
     restarted: Result<(), String>,
 }
 
@@ -431,8 +431,8 @@ fn a_rollback_that_fails_its_own_health_check_is_loud_and_names_the_next_step() 
     let error =
         execute(&world, &options(None), &steps).expect_err("an unanswered rollback is not live");
     // The four things the acceptance's fourth bullet asks for.
-    assert!(error.contains("systemctl status"), "{error}");
-    assert!(error.contains("journalctl -u"), "{error}");
+    assert!(error.contains("systemctl --user status"), "{error}");
+    assert!(error.contains("journalctl --user -u"), "{error}");
     assert!(
         error.contains("`current` still names it"),
         "the sentence does not say which release the link is on: {error}"
@@ -459,7 +459,8 @@ fn a_restart_that_fails_is_named_first_and_polls_nothing() {
     let _serial = one_at_a_time();
     let world = world_or_skip!("rollback-restart");
     let mut steps = recorder(&world);
-    steps.restarted = Err("`systemctl restart holosmith.service` answered 1 (nope)".to_string());
+    steps.restarted =
+        Err("`systemctl --user restart holosmith.service` answered 1 (nope)".to_string());
     let error = execute(&world, &options(None), &steps).expect_err("a failed restart is not live");
     assert!(error.contains("The restart itself failed first"), "{error}");
     assert!(error.contains("answered 1 (nope)"), "{error}");

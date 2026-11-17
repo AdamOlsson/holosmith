@@ -1,8 +1,9 @@
 //! `holosmith rollback`: the command surface of [`crate::rollback`].
 //!
-//! As thin as `upgrade`'s: it loads the config every command loads, resolves the install tree, refuses a rollback that
-//! needs `root` and does not have it (`deploy::privilege_problem`, the rule the two release verbs share), and hands the
-//! module the three facts it cannot work out itself — the `--to` tag, the drain's wait and the health window.
+//! As thin as `upgrade`'s: it loads the config every command loads, resolves the install tree, and hands the module
+//! the three facts it cannot work out itself — the `--to` tag, the drain's wait and the health window. Like that verb
+//! it checks no account: a rollback switches `current` and restarts the operator's own `systemctl --user` unit, both of
+//! which are the running account's (ADR-0088), and a tree it may not write fails at the write.
 //!
 //! One difference from `upgrade` is deliberate: the machine this command asks the machine through is
 //! [`crate::promote::Real::joining`], not `Real::new`. A promotion refuses a drain somebody else started; a rollback

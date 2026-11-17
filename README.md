@@ -68,15 +68,6 @@ Three things about that first run:
   `sudo systemctl daemon-reload`, `sudo systemctl enable --now holosmith.service`. Run them, run the deploy again, and
   step 6 waits for `/api/health` and reports `doctor --full`. A machine whose unit was never installed is caught
   there, by an endpoint that does not answer.
-- **One sudoers line, once**, so a release can restart the unit and confirm itself live:
-
-  ```bash
-  echo 'holosmith ALL=(root) NOPASSWD: /usr/bin/systemctl restart holosmith.service' \
-    | sudo tee /etc/sudoers.d/holosmith >/dev/null
-  ```
-
-  Without it `upgrade` still switches the release; it says the restart is yours rather than claiming a health check
-  it did not make.
 - **Tailscale is not part of this.** The deploy no longer configures `tailscale serve`: the listeners are
   `127.0.0.1:8080` and `127.0.0.1:8081`, and putting them on a tailnet is the operator's own step (below). A machine
   whose Tailscale is installed but logged *out* is still refused in the preflight, and the fix is `tailscale up`.
@@ -95,7 +86,7 @@ Three things about that first run:
   ```
 
   ```bash
-  sudo systemctl restart holosmith
+  systemctl --user restart holosmith
   ```
 
 Day two is the same verbs: `sudo holosmith status`, `sudo holosmith logs -f`, `sudo holosmith doctor --full`. A
@@ -114,7 +105,7 @@ preview_origin = "http://192.168.1.42:8081"
 allowed_hosts  = ["192.168.1.42"]
 ```
 
-`sudo systemctl restart holosmith`, open `http://192.168.1.42:8080` on the phone, and open the same port on the
+`systemctl --user restart holosmith`, open `http://192.168.1.42:8080` on the phone, and open the same port on the
 machine's firewall if it has one (`sudo ufw allow 8080/tcp`; 8081 too if you want the agent's dev-server previews on
 the phone).
 
@@ -152,7 +143,7 @@ the loopback port.
    allowed_hosts  = ["laptop.tailnet.ts.net"]
    ```
 
-3. `sudo systemctl restart holosmith` — the new origins are read at boot, and a deploy does not restart a unit that
+3. `systemctl --user restart holosmith` — the new origins are read at boot, and a deploy does not restart a unit that
    is already enabled.
 4. `sudo tailscale serve --bg --yes --https=443 http://127.0.0.1:8080` and the same for `--https=8444` with
    `http://127.0.0.1:8081`, then `sudo -u holosmith holosmith server deploy` to check the machine is healthy. Both

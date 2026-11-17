@@ -15,8 +15,8 @@
 //!    drain this promotion did not start (acceptance bullet 5's first half).
 //! 5. **the database backup** — `VACUUM INTO backups/app-<ts>.db`, five kept, over the read-only opener.
 //! 6. **the release, the symlink and the restart** — the candidate's bytes into `releases/<tag>/`, the unit's
-//!    `ExecStart` through `current`, the atomic switch, `systemctl restart`, and then a 20-second health poll that
-//!    looks for a process **younger than the restart** answering with the candidate's version. If it does not
+//!    `ExecStart` through `current`, the atomic switch, `systemctl --user restart`, and then a 20-second health poll
+//!    that looks for a process **younger than the restart** answering with the candidate's version. If it does not
 //!    answer, the previous link target goes back, the service is restarted again and the poll runs again — and the
 //!    database is not restored, because expand/contract is what makes the switch back safe (ADR-0047).
 //!
@@ -118,7 +118,7 @@ pub trait Steps {
     /// Ask the machine to drain, over its admin socket.
     fn drain(&self, admin_dir: &Path, wait: Duration) -> DrainAnswer;
 
-    /// `sudo -n systemctl restart <unit>`, whose exit status is the answer.
+    /// `systemctl --user restart <unit>`, whose exit status is the answer.
     fn restart(&self, tools: &deploy::Tools) -> Result<(), String>;
 
     /// `GET /api/health` once, on the control listener.
@@ -221,23 +221,22 @@ impl Steps for Real {
     }
 
     fn restart(&self, tools: &deploy::Tools) -> Result<(), String> {
-        // One escalation, and it is `sudoers`-scoped **on the account that runs this machine**: `<your account>
-        // ALL=(root) NOPASSWD: /usr/bin/systemctl restart holosmith.service` (ADR-0086 D4). `-n` makes a missing rule
-        // a refusal in one line rather than a password prompt on a service's stdin, and the sentence names the rule
-        // to add. The account is the operator's own — a machine is not a service (ADR-0088) — so the rule belongs to
-        // whoever runs the promotion, and the sentence says so rather than naming a second account.
-        let output = std::process::Command::new(&tools.sudo)
-            .arg("-n")
-            .arg(&tools.systemctl)
-            .args(["restart", deploy::UNIT_NAME])
+        // No escalation, and nothing to configure: the unit is the operator's own, written into their user manager's
+        // directory beside their config (ADR-0088 D2), so the account running this command is the account that
+        // manages it and `--user` is the whole of what says *which* manager. That is why there is no password to give,
+        // no rule to install and no sentence below telling an operator to edit one — the failure a machine can have
+        // here is a unit that will not start, so the sentence names where its own reason is written.
+        let output = std::process::Command::new(&tools.systemctl)
+            .args(["--user", "restart", deploy::UNIT_NAME])
             .stdin(std::process::Stdio::null())
             .output()
             .map_err(|error| {
                 format!(
-                    "`{} -n {} restart {}` could not be run ({error}): a promotion restarts the unit systemd runs",
-                    tools.sudo.display(),
+                    "`{} --user restart {}` could not be run ({error}): a promotion restarts the unit the operator's \
+                     user manager runs, and this restart never reached it — {}",
                     tools.systemctl.display(),
-                    deploy::UNIT_NAME
+                    deploy::UNIT_NAME,
+                    wont_start()
                 )
             })?;
         if output.status.success() {
@@ -250,14 +249,12 @@ impl Steps for Real {
             .unwrap_or("no output")
             .trim();
         Err(format!(
-            "`{} -n {} restart {}` answered {} ({line}): this machine needs the one line ADR-0086 records — \
-             `<your account> ALL=(root) NOPASSWD: /usr/bin/systemctl restart {}` in `/etc/sudoers.d/holosmith` — and \
-             until it has it a release cannot confirm itself live",
-            tools.sudo.display(),
+            "`{} --user restart {}` answered {} ({line}) — {}; a release cannot confirm itself live until it \
+             starts",
             tools.systemctl.display(),
             deploy::UNIT_NAME,
             output.status.code().unwrap_or(-1),
-            deploy::UNIT_NAME,
+            wont_start(),
         ))
     }
 
@@ -372,16 +369,16 @@ pub fn execute(
             return Err(format!(
                 "this machine is already draining (the drain answered `state: already draining`), so nothing was \
                  promoted: that drain is not this command's to wait out, and a drain is cleared by the restart it \
-                 exists for (`systemctl restart {}`) rather than by finishing — nothing was backed up and nothing \
-                 was switched",
+                 exists for (`systemctl --user restart {}`) rather than by finishing — nothing was backed up and \
+                 nothing was switched",
                 deploy::UNIT_NAME
             ));
         }
         DrainAnswer::Expired => {
             return Err(format!(
                 "the drain's wait ran out with a turn still running, so nothing was promoted: this machine is still \
-                 draining and keeps refusing new work, and `systemctl restart {}` is what clears a drain — nothing \
-                 was backed up and nothing was switched",
+                 draining and keeps refusing new work, and `systemctl --user restart {}` is what clears a drain — \
+                 nothing was backed up and nothing was switched",
                 deploy::UNIT_NAME
             ));
         }
@@ -606,7 +603,27 @@ fn take_backup(config: &Config) -> Result<PathBuf, String> {
 /// function so the five call sites cannot drift from it.
 pub(crate) fn draining(said: String) -> String {
     format!(
-        "{said} — this machine is draining until it is restarted (`systemctl restart {}`)",
+        "{said} — this machine is draining until it is restarted (`systemctl --user restart {}`)",
+        deploy::UNIT_NAME
+    )
+}
+
+/// Where a unit that will not start says so itself: the user manager's verdict, and the journal behind it.
+///
+/// Four sentences carry this clause — both refusals a restart comes back with, and the two endings that report a
+/// release that never answered — and all four are answering one question: the switch happened, the service is not
+/// there, so where is the reason? It is one function for the reason [`draining`] is one: `--user` is the half that
+/// matters, and a sentence that asks the system manager names a unit it does not have, so the operator who copies it
+/// is answered "Unit holosmith.service could not be found" rather than with the failing start (ADR-0088 D2).
+///
+/// What it carries is the two commands and what each one answers, not the sentence they sit in: an ending says the
+/// switch is unconfirmed and points at the reason, and a refusal reports what the manager answered, so each caller
+/// keeps its own frame.
+pub(crate) fn wont_start() -> String {
+    format!(
+        "`systemctl --user status {}` says what the user manager makes of the unit and `journalctl --user -u {}` \
+         says what it printed",
+        deploy::UNIT_NAME,
         deploy::UNIT_NAME
     )
 }
@@ -763,7 +780,7 @@ pub(crate) fn write_unit(
     Ok(())
 }
 
-/// `systemctl restart`, then the poll; then, if the candidate did not answer, the switch back.
+/// `systemctl --user restart`, then the poll; then, if the candidate did not answer, the switch back.
 #[allow(clippy::too_many_arguments)]
 fn serve_with(
     candidate: &VersionInfo,
@@ -910,11 +927,10 @@ fn rollback(
     );
     Err(format!(
         "the candidate did not answer, and neither did the release it was switched back to ({} as {live}): nothing is \
-         confirmed live. `systemctl status {unit}` and `journalctl -u {unit}` say why the service will not start -- \
-         if the candidate migrated the database, this release's `doctor --quick` refuses it before `ExecStart` \
-         (ADR-0047), and the backup at {backup} is the state before the promotion",
+         confirmed live. {} -- if the candidate migrated the database, this release's `doctor --quick` refuses it \
+         before `ExecStart` (ADR-0047), and the backup at {backup} is the state before the promotion",
         previous.link.display(),
-        unit = deploy::UNIT_NAME,
+        wont_start(),
         backup = backup.display()
     ))
 }
@@ -927,13 +943,13 @@ fn rollback(
 pub(crate) struct Attempt {
     /// When the clock started: **before** the restart was asked for, which is the fact [`poll`] compares against.
     pub started: Instant,
-    /// What `systemctl restart` answered.
+    /// What `systemctl --user restart` answered.
     pub restarted: Result<(), String>,
     /// The `/api/health` answer that counted, when one did.
     pub answered: Option<health::Answer>,
 }
 
-/// `systemctl restart`, then the poll for a process younger than it.
+/// `systemctl --user restart`, then the poll for a process younger than it.
 ///
 /// `version` is `None` only for a release whose own binary cannot answer `version --json`: there is nothing to look
 /// for then, so the restart is still run and the poll is not. `prefix` is what the printed lines say — `upgrade`,
@@ -949,8 +965,7 @@ pub(crate) fn restart_and_poll(
     let started = Instant::now();
     let restarted = steps.restart(tools);
     println!(
-        "{prefix}: restart: {} -n {} restart {}",
-        tools.sudo.display(),
+        "{prefix}: restart: {} --user restart {}",
         tools.systemctl.display(),
         deploy::UNIT_NAME
     );
@@ -1073,5 +1088,81 @@ mod tests {
             "a rollback must join the drain and take its ending"
         );
         server.join().expect("the fake server finishes");
+    }
+
+    /// A `systemctl` that records its argv and exits `status`, as an executable script.
+    ///
+    /// A shim rather than a recorder in process, because the question is what the **child** is given: `--user` is
+    /// argv, and the one bug it can have is being spelled nowhere but in a printed line.
+    fn systemctl_shim(label: &str, status: i32) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "holosmith-promote-systemctl-{label}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the shim's directory is creatable");
+        let log = dir.join("argv");
+        let program = dir.join("systemctl");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\n{{ printf '%s\\n' \"$@\"; }} > \"{}\"\nexit {status}\n",
+                log.display()
+            ),
+        )
+        .expect("the shim is writable");
+        std::fs::set_permissions(
+            &program,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .expect("the shim is executable");
+        (program, log)
+    }
+
+    /// The restart asks the operator's **own** user manager, and a manager that refuses says what to read.
+    ///
+    /// The unit is written beside the operator's config and managed by their `systemctl --user` (ADR-0088 D2), so the
+    /// restart is unprivileged and there is no rule to install — which makes the two facts worth measuring exactly
+    /// the argv the child receives and the sentences a failure carries. An escalation creeping back in would have to
+    /// redden one of them.
+    #[test]
+    fn a_restart_asks_the_operators_user_manager_and_names_what_to_read_when_it_fails() {
+        let config = Config::default();
+
+        let (program, log) = systemctl_shim("accepted", 0);
+        let tools = deploy::Tools {
+            systemctl: program,
+            ..deploy::Tools::default()
+        };
+        Real::new(&config)
+            .restart(&tools)
+            .expect("a restart the user manager accepted is a success");
+        let argv = std::fs::read_to_string(&log).expect("the shim recorded its argv");
+        assert_eq!(
+            argv.lines().collect::<Vec<&str>>(),
+            ["--user", "restart", deploy::UNIT_NAME],
+            "the restart did not ask the user manager for the unit: {argv:?}"
+        );
+
+        let (program, _) = systemctl_shim("refused", 1);
+        let tools = deploy::Tools {
+            systemctl: program,
+            ..deploy::Tools::default()
+        };
+        let said = Real::new(&config)
+            .restart(&tools)
+            .expect_err("a user manager that refused is a failed restart");
+        assert!(
+            said.contains("--user status holosmith.service"),
+            "the failure does not say where the manager's own reason is: {said}"
+        );
+        assert!(
+            said.contains("journalctl --user -u holosmith.service"),
+            "the failure does not say where the unit's output is: {said}"
+        );
+        assert!(
+            !said.contains("sudo"),
+            "the failure names an escalation the operator's own unit does not need: {said}"
+        );
     }
 }

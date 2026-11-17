@@ -550,9 +550,10 @@ impl<T: proxies::Containers + doctor::Machine + images::Images> Machine for T {}
 /// `unsafe` and so cannot set `PATH`, which leaves naming the program as the only way a test can point a write at a
 /// script it wrote.
 ///
-/// **This module spawns no escalation** (ADR-0088, keeping ADR-0086 D2's principle): what root would do is printed.
-/// [`Tools::sudo`] is here for the two release verbs' single restart, and [`Tools::health_wait`] is the one field that
-/// is not a program.
+/// **The subtree this module writes is the operator's own** (ADR-0088): no step here escalates, and what root would
+/// do is printed. [`Tools::systemctl`] is the one field a **different** module reaches for — the two release verbs'
+/// single restart, through the operator's own user manager — and [`Tools::health_wait`] is the one field that is not a
+/// program at all.
 #[derive(Debug, Clone)]
 pub struct Tools {
     pub doctor: doctor::Tools,
@@ -562,11 +563,10 @@ pub struct Tools {
     /// `id`: the name of the account running this deploy and its groups — `id -un`, `id -nG` — which is step 2's
     /// whole read of an account.
     pub id: PathBuf,
-    /// `sudo`: **not used by this module.** The two release verbs run `sudo -n systemctl restart <unit>` through it,
-    /// because one restart is the only escalation a machine has (ADR-0086 D4) — and the field is here rather than in
-    /// `promote`'s own tools so that a test points both programs at its recorders in one place.
-    pub sudo: PathBuf,
-    /// `systemctl`: the release verbs' restart, through [`Tools::sudo`].
+    /// `systemctl`: **not called by this module.** The two release verbs run `systemctl --user restart <unit>` through
+    /// it — the unit is the operator's own, so the restart needs no privilege and `--user` is the whole of what picks
+    /// the manager (ADR-0088 D2) — and the field lives here so that a test points it at its recorder beside the
+    /// others.
     pub systemctl: PathBuf,
     /// How long the last step's apply waits for `/api/health`; [`HEALTH_WAIT`] on a machine.
     pub health_wait: Duration,
@@ -581,7 +581,6 @@ impl Default for Tools {
             chmod: PathBuf::from("chmod"),
             openssl: PathBuf::from("openssl"),
             id: PathBuf::from("id"),
-            sudo: PathBuf::from("sudo"),
             systemctl: PathBuf::from("systemctl"),
             health_wait: HEALTH_WAIT,
         }

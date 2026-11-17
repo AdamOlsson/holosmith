@@ -1,6 +1,6 @@
 //! The drain: refusing new work until the machine is quiet enough to restart (spec item 10 step 3).
 //!
-//! Item 10's promotion runs `drain` between the smoke test and `systemctl restart`, so that an upgrade does
+//! Item 10's promotion runs `drain` between the smoke test and `systemctl --user restart`, so that an upgrade does
 //! not kill a turn somebody is watching. The drain is therefore **not** a shutdown: it flips one flag, waits
 //! for the turns that are already running, stops the sessions that are merely idle, and then says so — while
 //! `serve` keeps answering reads, exactly as item 7's 202s keep answering while work goes on.

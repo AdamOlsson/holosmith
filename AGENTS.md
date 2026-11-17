@@ -172,9 +172,12 @@ no visible reason is usually one of them missing:
   proxy, never a silent fallback; and on the host, because web push signs, derives and delivers through four
   `openssl` children per message (ADR-0071), which `doctor --full` reports as `Check::Openssl` rather than
   something `serve` refuses to start over.
-- **`install`, `chmod`, `id`, `openssl`** and the operator's own `sudo` for `server deploy` (ADR-0056): every
-  file action is one child, and `useradd`/`usermod`/`chown`/`systemctl` are recorded argv in `tests/deploy.rs`.
-  `--root DIR` builds an unprivileged install tree, which is what every gate case uses — no test needs `sudo`.
+- **`install`, `chmod`, `id`, `openssl`** for `server deploy` (ADR-0056): every file action is one child, and the
+  programs `tests/deploy.rs` hands a script are `df`, `tailscale` and `id` — with `systemd` pointed at a path it leaves
+  absent, because this host has no init to ask. `install`, `chmod` and `openssl` run for real there, since a shim
+  cannot show that `install -m 0600` produces a 0600 file. It spawns no `sudo`: the `usermod`, the `chown` and the two
+  `systemctl --user` commands it owes root are printed for the operator, never run. `--root DIR` builds an
+  unprivileged install tree, which is what every gate case uses — no test needs `sudo`.
 - **tailscale and systemd** as `doctor` questions only: a LAN-only machine and a hand-run `serve` are supported,
   and since ADR-0086 a deploy installs no unit and asks systemd nothing.
 
@@ -322,11 +325,10 @@ smoke image's base is a **red** smoke test, not a quiet `SKIP`.
 
 `holosmith upgrade <artifact> --acknowledge-review [--root DIR]` promotes: review acknowledged, smoke, the two
 product images when their labels say they changed, the drain, a database backup, the release directory, the
-`current` symlink, `systemctl restart` through the machine's single sudoers line, and a twenty-second health poll
-that puts the previous release back by itself (ADR-0082, ADR-0084). `--acknowledge-review` is not a formality: a
-promotion without it is refused before anything is asked of the machine. Every refusal leaves the machine as it
-found it and says so — **except a refusal after the drain**, which leaves the machine draining and says the
-restart is what clears it.
+`current` symlink, `systemctl --user restart`, and a twenty-second health poll that puts the previous release back by
+itself (ADR-0082, ADR-0084). `--acknowledge-review` is not a formality: a promotion without it is refused before
+anything is asked of the machine. Every refusal leaves the machine as it found it and says so — **except a refusal
+after the drain**, which leaves the machine draining and says the restart is what clears it.
 
 `holosmith rollback [--root DIR] [--to TAG]` is the emergency brake: drain, switch `current` one release back,
 restart, health-poll (ADR-0083). "One back" is the order the releases were **written** onto the tree (mtime),

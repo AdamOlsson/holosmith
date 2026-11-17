@@ -119,19 +119,12 @@ deploy: 6 steps: 4 satisfied, 0 needs, 2 changed, 0 skipped, 0 failed
 Verify it is serving:
 
 ```bash
-systemctl status holosmith.service --no-pager
+systemctl --user status holosmith.service --no-pager
 curl -fsS http://127.0.0.1:8080/api/health
 ```
 
 `active (running)` plus a JSON body is the machine working. A unit that is `activating (auto-restart)` means the
-preflight refused — read `sudo holosmith doctor --quick` and `journalctl -u holosmith -n 30`.
-
-One more line, once, so a release can restart the unit and confirm itself live (ADR-0086 D4):
-
-```bash
-echo 'holosmith ALL=(root) NOPASSWD: /usr/bin/systemctl restart holosmith.service' \
-  | sudo tee /etc/sudoers.d/holosmith >/dev/null
-```
+preflight refused — read `sudo holosmith doctor --quick` and `journalctl --user -u holosmith -n 30`.
 
 ## 4. Put it on the tailnet (plain HTTP)
 
@@ -206,7 +199,7 @@ sudo -u holosmith holosmith status       # role, version, uptime, session counts
 sudo holosmith logs -f                   # journalctl -u holosmith.service (the journal is root's, or the
                                          # `systemd-journal` group's)
 sudo -u holosmith holosmith doctor --full
-sudo systemctl restart holosmith         # after any config edit
+systemctl --user restart holosmith       # after any config edit
 sudo -u holosmith holosmith server deploy   # idempotent: the second run changes nothing
 ```
 

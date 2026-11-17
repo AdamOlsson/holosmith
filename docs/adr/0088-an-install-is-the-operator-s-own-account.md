@@ -191,11 +191,21 @@ and its ADR-0086 D4 citation go. The two hints that told an operator to escalate
 holosmith holosmith key set`", which is now the operator writing their own 0600 file, and `remote`'s note about the
 machine's sudoers rule.
 
-The move is half in the tree. Step 5 has it: the unit it renders carries no `User=` or `Group=`, the sandbox is the
-reduced set, it is enabled with `WantedBy=default.target` and the two `systemctl --user` commands, and it is written
-into the user manager's directory beside the config. Still outstanding: `promote`'s restart and the sudoers line its
-refusal names, `logs`'s journal spelling, `uninstall`'s words, and `loginctl enable-linger`. The decision is recorded
-here, and what D5 lists is the shape the code moves to rather than a description of the tree as it stands.
+**The move is in the tree for the unit, its commands and the restart.** Step 5 has it: the unit it renders carries
+no `User=` or `Group=`, the sandbox is the reduced set, it is enabled with `WantedBy=default.target` and the two
+`systemctl --user` commands, and it is written into the user manager's directory beside the config. `promote`'s
+restart has it too — `upgrade` and `rollback` ask `systemctl --user restart`, `Tools` carries no `sudo`, and a restart
+that fails names `systemctl --user status` and `journalctl --user` — so the line D2 deleted is gone from the failure
+path as well as from the argument. The operator-facing commands moved too: `README.md` and `docs/quickstart.md`
+now ask this unit's own manager (`systemctl --user status`, `journalctl --user -u`, `systemctl --user restart`),
+which is what makes them work at all, since the system spelling answers `Unit holosmith.service could not be found`.
+
+Still outstanding: `logs`'s journal spelling, `uninstall`'s words, `loginctl enable-linger`, `hosts/client.rs`'s
+refusal sentence (`sudo systemctl start holosmith`), and the rest of those two documents' install prose — the
+`/etc/systemd/system/` install act (`sudo install …`, `sudo systemctl daemon-reload`, `enable --now`), the
+`sudo -u holosmith …` day-two list and the `/var/lib/holosmith` default. That is ADR-0086's install, and it is left
+to the story that rewrites it rather than half-moved here: the three lines are one act of putting a file into
+`/etc/systemd/system`, so a `--user` tail on them would break the sequence instead of fixing it.
 
 ## Refused
 
