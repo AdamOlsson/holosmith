@@ -2,7 +2,8 @@
 
 **Amended:** this block shape is what `--verbose` prints, and the default is one marked line per step — the section
 "The terse report is the default, and the marks are its words" below. What a run prints *while* it works, beside the
-report, is ADR-0092's.
+report, is ADR-0092's. **Amended by ADR-0093:** a `satisfied` or `skipped` line's remark is printed under its mark, so
+the clause that says which binary the unit ends up running reaches the default report rather than only `--verbose`'s.
 
 ADR-0056 made a deploy step print **one line**, `<n>. <step>: <word>: <sentence>`, and six of the seven steps put a
 list in that sentence. The shape was right for the words that carry a verdict — `satisfied`, `skipped`, `failed`, and
@@ -103,8 +104,12 @@ print the same two renderings. Five facts are decisions:
   because the marks and the renderers are one vocabulary. `satisfied` and `changed` share `✓` deliberately: a reader
   who wants to know what a run *did* reads the parentheses, and "applied everything" and "needed nothing" are both
   green.
-- **A step with nothing to act on prints only its mark.** `satisfied` and `skipped` carry no detail at all — the
-  sentences behind them are a count of findings and a reason for the skip, and both are `--verbose`'s.
+- **A step with nothing to act on prints its mark, and the remark when it has one.** `satisfied` and `skipped`
+  carry no detail: the sentences behind them are a count of findings and a reason for the skip, and both are
+  `--verbose`'s — except for the remark, the `; `-separated clause a few steps append about what the run does **not**
+  do or about which binary the unit ends up running, which prints on the indented line a `changed` line's remark uses.
+  That clause is the one part of those sentences an operator may have to act on, so a rendering that dropped it would
+  be a clause written for nobody.
 - **A step that writes keeps its first clause, and a step that needs keeps its first line.** `changed` adds a
   parenthetical in the sentence's own words — `(7 actions)`, `(built 2 images: …)` — and, when the step carries a
   remark, that remark on an indented line under it, because a remark is a command the operator may still have to run

@@ -29,8 +29,9 @@
 //!   because a `current` the unit executes through and that resolves to nothing is a machine systemd cannot start.
 //!
 //! What needed is also here: the tree's creation (a first promotion seeds the previous release out of the binary
-//! the unit runs), the switch, and the answer "what does the unit execute" ([`Release::live`]), which `deploy`'s step
-//! 5 reads so that a later `server deploy` neither undoes a promotion nor rewrites a correct unit.
+//! the unit runs, and a deploy with no live release seeds one out of the binary it is running), the switch, and the
+//! answer "what does the unit execute" ([`Release::live`]), which `deploy`'s step 5 reads so that a later
+//! `server deploy` neither undoes a promotion nor rewrites a correct unit.
 //!
 //! Nothing here starts a process or reads a database: a release tree is directories, two files and one symlink.
 
@@ -270,6 +271,33 @@ impl Release {
             .then(|| self.current().join(BINARY))
     }
 
+    /// What [`write`](Self::write) would do with `digest` for `tag`, without writing anything.
+    ///
+    /// The question a caller that must **read** before it writes asks — a dry run's plan, and a deploy deciding
+    /// whether it can plant this tree at all — and it is the write's own question, so the two cannot disagree:
+    /// [`Written::Fresh`] when the directory holds no binary, [`Written::Current`] when it holds exactly these bytes,
+    /// and the write's refusal when it holds a different binary for this tag.
+    pub fn placement(&self, tag: &str, digest: &str) -> Result<Written, String> {
+        if let Some(problem) = tag_problem(tag) {
+            return Err(problem);
+        }
+        let artifact = self.binary(tag);
+        if !artifact.is_file() {
+            return Ok(Written::Fresh);
+        }
+        let existing = crate::images::digest(&artifact)?;
+        match existing == digest {
+            true => Ok(Written::Current),
+            false => Err(format!(
+                "{} already holds a different binary for {tag} (sha256 {existing}, and this binary is \
+                 {digest}): nothing was replaced, because one release directory holding two binaries is the \
+                 ambiguity a rollback cannot resolve — build the binary under its own tag, or move that \
+                 directory away",
+                artifact.display()
+            )),
+        }
+    }
+
     /// Write one release's two files, or refuse a directory that already holds a different binary for this tag.
     ///
     /// The bytes are written aside (`builder::PENDING`, the name `holosmith build` also uses) and renamed into
@@ -277,9 +305,7 @@ impl Release {
     /// bytes is [`Written::Current`] and writes only the digest when that is missing — the idempotent re-run
     /// [`builder::place`] is.
     pub fn write(&self, tag: &str, bytes: &[u8], digest: &str) -> Result<Written, String> {
-        if let Some(problem) = tag_problem(tag) {
-            return Err(problem);
-        }
+        let placement = self.placement(tag, digest)?;
         let dir = self.dir_of(tag);
         std::fs::create_dir_all(&dir).map_err(|error| {
             format!(
@@ -287,21 +313,11 @@ impl Release {
                 dir.display()
             )
         })?;
-        let artifact = dir.join(BINARY);
-        if artifact.is_file() {
-            let existing = crate::images::digest(&artifact)?;
-            if existing == digest {
-                write_digest(&dir, digest)?;
-                return Ok(Written::Current);
-            }
-            return Err(format!(
-                "{} already holds a different binary for {tag} (sha256 {existing}, and this candidate is \
-                 {digest}): nothing was replaced, because one release directory holding two binaries is the \
-                 ambiguity a rollback cannot resolve — build the candidate under its own tag, or move that \
-                 directory away",
-                artifact.display()
-            ));
+        if placement == Written::Current {
+            write_digest(&dir, digest)?;
+            return Ok(Written::Current);
         }
+        let artifact = dir.join(BINARY);
         let pending = dir.join(PENDING);
         write_binary(&pending, bytes)?;
         std::fs::rename(&pending, &artifact).map_err(|error| {

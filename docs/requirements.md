@@ -41,8 +41,9 @@ Nothing else is required: no Python or Node runtime, no database server, no reve
 
 Re-running changes nothing, and `holosmith install --dry-run` prints each step's plan and writes nothing. The first
 real run builds `holosmith-proxy` and `agent-image` from the embedded recipes, which takes minutes; every later run
-is a read. Keep the binary somewhere permanent: the unit names the absolute path it was installed from, so a copy in
-a build directory is a unit that breaks on the next `cargo clean`.
+is a read. The run copies the binary it is running into the install tree's release directory and points the unit at
+that copy, so where the download landed stops mattering — when this binary's tag can name a release directory; the
+step's line says why, and names the file it ran instead, when it cannot.
 
 The state is one directory, `~/.local/share/holosmith`, and the config is one file,
 `~/.config/holosmith.toml`. `holosmith config show` prints the resolved config with every default,

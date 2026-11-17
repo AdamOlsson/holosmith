@@ -1030,9 +1030,11 @@ _Avoid_: Version (that is the crate's semver, not a release), build, deploy
 **Release tree**:
 `<root>/releases`, holding `releases/<tag>/` and the **`current`** symlink at `<root>/current`. It is inside the root
 rather than a `/opt` of its own (ADR-0086), which is why `upgrade` and `rollback` write the tree's files as the
-account that owns them, need no privilege for the tree itself, and escalate only the restart. `holosmith upgrade`
-creates it and switches it; `holosmith rollback` switches it back one release, and its **order** — the order the
-releases were written onto the machine, newest first — is `Release::history`, which is also the order a **prune**
+account that owns them, need no privilege for the tree itself, and escalate only the restart. `server deploy` and
+`hub deploy` plant the binary they are running as a release and point `current` at it when no release is live
+(ADR-0093); `holosmith upgrade` plants a candidate, switches and prunes; `holosmith rollback` switches it back one
+release, and its **order** — the order the releases were written onto the machine, newest first — is
+`Release::history`, which is also the order a **prune**
 keeps. A **promotion** prunes it to `keep_releases` when the candidate is live, `holosmith version` reports the
 release directory the running file is in, and `doctor` reports the resolved path and whether the link is intact. Its
 machine names are `release::Release`, `release::ROOT` and `release::running_tag`.
@@ -1042,8 +1044,9 @@ _Avoid_: Releases directory, install tree, versions
 The symlink systemd executes through: `<root>/current`, pointing at `releases/<tag>` **relatively**, so the tree can be
 moved. A switch creates a staged symlink and `rename`s it onto `current`, which replaces the old target
 in one step; a rollback writes back the target it read, verbatim. The unit's `ExecStart` names
-`<root>/current/holosmith`, so a restart picks a switch up — and `server deploy`'s step 5 renders that
-path once a release tree resolves, so a deploy after a promotion does not undo it.
+`<root>/current/holosmith`, so a restart picks a switch up — and `server deploy`'s step 5 renders that path, planting
+the binary it is running as a release when none is live and leaving a live tree alone (ADR-0093), so a deploy neither
+leaves a fresh machine naming the file it was downloaded to nor undoes a promotion.
 _Avoid_: Pointer, live link, symlink target
 
 **Promotion**:

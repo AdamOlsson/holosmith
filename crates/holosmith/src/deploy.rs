@@ -58,6 +58,7 @@ use std::net::SocketAddr;
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::config::{self, Config, Role};
@@ -68,6 +69,7 @@ use crate::key;
 use crate::preflight::{self, Check, Outcome};
 use crate::progress::{Progress, Silent};
 use crate::proxies;
+use crate::release::{self, Release};
 use crate::vapid;
 
 /// The group that may open the machine's daemon socket: the one fact step 2 reads about the account running it.
@@ -126,11 +128,12 @@ const WRONG_MODE: &str = "; a wrong mode or owner in the install tree is what st
 ///
 /// `doctor --quick` fails it on purpose: the unit runs `doctor --quick` as `ExecStartPre`, and a `current` the unit
 /// executes through that resolves to nothing is a boot that cannot happen. But a deploy is one of the two commands
-/// that can **repair** it — step 5 renders the unit for the binary this run is running whenever `Release::live` names
-/// nothing, so the machine boots again on a plain path — and failing at step 1 would make that repair unreachable,
-/// exactly ADR-0058's argument for `Perms` one finding over.
-const LINK_NOT_LIVE: &str = "; the unit's `ExecStart` resolves through a `current` that is not live — step 5 rewrites \
-                             the unit to the binary this run is running, which is what makes the machine boot again";
+/// that can **repair** it — step 5 plants the binary this run is running as a release and points `current` at it, so
+/// the machine boots again through a live link — and failing at step 1 would make that repair unreachable, exactly
+/// ADR-0058's argument for `Perms` one finding over.
+const LINK_NOT_LIVE: &str = "; the unit's `ExecStart` resolves through a `current` that is not live — step 5 plants \
+                             the binary this run is running as a release and points `current` at it, which is what \
+                             makes the machine boot again";
 
 /// Which deploy a run is: the server's six steps, or the hub's four and two skips (item 10 §6).
 ///
@@ -459,13 +462,14 @@ impl Report {
     ///
     /// Three facts decide the shape, and each is a section of ADR-0085:
     ///
-    /// - **The mark is the verdict**, and a step with nothing to act on prints only it: the sentences are written for
-    ///   the operator who must *do* something about a step, which is right for the one that needs a `chmod` and a
-    ///   wall of text when all six passed.
+    /// - **The mark is the verdict**, and a step with nothing to act on prints only it and the remark it earns: the
+    ///   sentences are written for the operator who must *do* something about a step, which is right for the one that
+    ///   needs a `chmod` and a wall of text when all six passed — and the `; `-separated remark is the exception,
+    ///   because it carries a command or a fact about which binary the unit ends up running.
     /// - **The detail is the sentence's own, cut to its first clause** — `3 actions`, `built 2 images` — so the terse
     ///   line says what the run wrote without a second vocabulary. Under a `needs` line the action lines follow
-    ///   indented exactly as the verbose report prints them; under a `changed` one only the remark does — what the step
-    ///   wrote is the parenthetical, and the remark is the command that is still the operator's.
+    ///   indented exactly as the verbose report prints them; under a `satisfied` or a `changed` one only the remark
+    ///   does — what the step wrote is the parenthetical, and the remark is the clause the operator is left with.
     /// - **A failure keeps its whole sentence and gains one `fix:` line**, which is the command that puts it right
     ///   ([`Report::fill_fix`]).
     ///
@@ -532,7 +536,10 @@ impl Line {
 /// What follows a terse line's mark, whatever the line is about — one function so that the deploy's lines and
 /// install's own say the same thing about the same five words.
 ///
-/// - `satisfied` and `skipped` carry nothing: the mark is the whole answer.
+/// - `satisfied` and `skipped` carry the mark alone, and the remark when the step has one: a satisfied line whose
+///   sentence carries a clause — which binary the unit runs, which filesystem an absent data root will land on — prints
+///   that clause on the indented line a `changed` line's remark uses, because the terse rendering is the one an
+///   operator reads and a clause is the whole reason the line was written (ADR-0085).
 /// - `needs` carries the sentence's first line, which for a plan is its count and the remark about what the run does
 ///   not do, and then every indented line under it — a step whose remaining work is the operator's keeps all of it,
 ///   because dropping a `usermod` from the one line that says the operator must act is losing the line's subject.
@@ -544,7 +551,11 @@ pub(crate) fn terse_detail(text: &mut String, word: Word, sentence: &str, fix: O
     let first = lines.next().unwrap_or_default();
     let (clause, remark) = split_remark(first);
     match word {
-        Word::Satisfied | Word::Skipped => {}
+        Word::Satisfied | Word::Skipped => {
+            if let Some(remark) = remark {
+                let _ = write!(text, "\n    {remark}");
+            }
+        }
         Word::Needs => {
             let _ = write!(text, " {}", clause.trim_end_matches(':'));
             if let Some(remark) = remark {
@@ -877,8 +888,8 @@ pub fn run_as_with(
 /// failure that is not one. `perms` is the same shape one finding later: `serve` refuses on a wrong mode through
 /// `ExecStartPre`, but the deploy *repairs* one, so refusing here would make step 2's chmod actions unreachable
 /// (ADR-0058). `release` is the third for that same reason, one step later: a `current` that does not resolve is a
-/// boot that cannot happen, and step 5 writes the unit for the binary this run is running whenever `Release::live`
-/// names nothing — refusing at step 1 would make the repair unreachable too (ADR-0084).
+/// boot that cannot happen, and step 5 plants the binary this run is running as a release and points `current` at it
+/// whenever `Release::live` names nothing — refusing at step 1 would make the repair unreachable too (ADR-0084).
 fn preflight(config: &Config, tools: &doctor::Tools, machine: &dyn Machine) -> Line {
     let report = doctor::run(config, Depth::Quick, tools, machine);
     let mut findings = report.findings;
@@ -1052,6 +1063,12 @@ enum ItemKind {
 }
 
 /// One write, as a value: the read's answer and the apply's work are the same list.
+///
+/// The first four are the install tree's, read by [`read`] and run by [`apply`] as `install` and `chmod` children. The
+/// last two are the release tree's, which [`crate::release`] owns: their read is a placement question the tree
+/// answers itself ([`Release::placement`], [`Release::link`]) and their apply is its own two writes, because a
+/// release directory may hold only one binary per tag and a binary is staged beside its name and renamed into place.
+/// They are `Action`s all the same, so a plan and an apply stay one list in one vocabulary.
 enum Action {
     /// `install -d -m <mode>`: the directory is absent, is not a directory, or has the wrong mode.
     Directory { path: PathBuf, mode: u32 },
@@ -1066,6 +1083,20 @@ enum Action {
     /// The key pair is absent and a child generates it: `openssl` prints the SEC1 DER, and the rendered pair is
     /// installed by the same `install -m 0600` every other file action uses.
     Vapid { path: PathBuf },
+    /// One release's two files, `releases/<tag>/holosmith` and its `.sha256`, from this run's own bytes.
+    ///
+    /// The bytes are a shared handle rather than a copy of the payload: [`own_copy`] cached them for the process, a
+    /// plan lives as long as the run, and a deploy that held two copies of a 40 MB artifact to write one of them
+    /// would be paying memory for a value it already has.
+    Release {
+        tree: Release,
+        tag: String,
+        bytes: Arc<Vec<u8>>,
+        digest: String,
+    },
+    /// `current` is pointed at `releases/<tag>`: absent, or naming another tag. A `current` that names this tag with
+    /// no binary behind it needs no switch — the release above is what makes that case resolve.
+    Current { tree: Release, tag: String },
 }
 
 impl Action {
@@ -1086,6 +1117,22 @@ impl Action {
                 "openssl ecparam -name prime256v1 -genkey -noout -outform DER > <staged>; install -m 0600 \
                  <staged> {}",
                 path.display()
+            ),
+            // The two files and the digest that names them, in the tree's own words: no child writes these, so the
+            // line names the paths rather than an argv.
+            Self::Release {
+                tree, tag, digest, ..
+            } => format!(
+                "{} and {}, from this binary (sha256 {})",
+                tree.binary(tag).display(),
+                tree.dir_of(tag).join(release::DIGEST).display(),
+                &digest[..12]
+            ),
+            // A switch as an operator would write it; the apply makes it atomic with a staged link and a rename.
+            Self::Current { tree, tag } => format!(
+                "{} -> {}",
+                tree.current().display(),
+                Path::new(release::RELEASES).join(tag).display()
             ),
         }
     }
@@ -1491,7 +1538,9 @@ fn ask(program: &Path, arguments: &[&str], because: &str) -> Result<Option<Strin
 ///
 /// `install` for a directory or a file, `chmod` for a mode, and for the pair a generation followed by the same
 /// `install -m 0600` a file action uses. Every one goes through [`child`], so a spawn failure and a non-zero answer
-/// are one sentence shape wherever they happen.
+/// are one sentence shape wherever they happen. The release tree's two actions are the exception, and deliberately:
+/// they are [`Release`]'s own writes, because a release is a directory holding one binary per tag and a binary that
+/// must be whole before it is named.
 fn apply(action: &Action, tools: &Tools, staging: &Path) -> Result<(), String> {
     match action {
         Action::Directory { path, mode } => child(
@@ -1532,6 +1581,15 @@ fn apply(action: &Action, tools: &Tools, staging: &Path) -> Result<(), String> {
             let staged = stage(staging, path, vapid::render(&pair).as_bytes())?;
             install_staged(tools, &staged, path, 0o600)
         }
+        // The release tree's two writes are its own module's, not children's: one binary per tag, written beside its
+        // name and renamed into place, and a link replaced in one syscall.
+        Action::Release {
+            tree,
+            tag,
+            bytes,
+            digest,
+        } => tree.write(tag, bytes.as_slice(), digest).map(drop),
+        Action::Current { tree, tag } => tree.switch(tag).map(drop),
     }
 }
 
@@ -1946,12 +2004,32 @@ pub(crate) fn unit_commands_printed(program: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Step 5's read and apply: the file's bytes, and the commands that enable them.
+/// Step 5's read and apply: the file's bytes, the release tree that binary runs from, and the commands that enable
+/// the unit.
 fn service(config: &Config, root: &Root, tools: &Tools, dry_run: bool) -> Line {
     let staging = staging_dir();
     let line = service_line(config, root, tools, dry_run, &staging);
     let _ = std::fs::remove_dir_all(&staging);
     line
+}
+
+/// Where `ExecStart` will point, and the release-tree writes that put a binary there.
+///
+/// The two are one value because they are one decision: the unit names `current/holosmith` only when the tree can be
+/// made to hold this binary, and a tree that cannot be used is a unit naming [`Self::path`] as it stands.
+struct Executable {
+    /// The path the unit names: a live release's `current/holosmith`, or the binary this run is running.
+    path: PathBuf,
+    /// The release tree's writes, in the order they must run — the release, then `current`, and the unit after them.
+    /// Empty when the tree is live (a deploy never reseeds one) or could not be used.
+    actions: Vec<Action>,
+    /// One clause for the step's line: why the tree was not seeded, or what a live tree does not replace.
+    remark: String,
+    /// The binary this run is running, which is what the unit names when the tree's own writes fail: the fourth arm,
+    /// and the reason it is carried rather than read again is that a seed that got this far has already read it once.
+    /// `None` when there is no seed to fail — a live tree, or a tree that could not be read, neither of which plans a
+    /// release write.
+    running: Option<PathBuf>,
 }
 
 fn service_line(
@@ -1961,44 +2039,92 @@ fn service_line(
     dry_run: bool,
     staging: &Path,
 ) -> Line {
-    // `ExecStart` names the **release tree's** binary when one is live, and this process's own path otherwise.
+    // `ExecStart` names the **release tree's** binary: the live release's when `current` resolves, and this binary
+    // planted as a release when it does not.
     //
-    // That is the one fact a promotion changes and a deploy must not undo: a machine whose `current`
-    // symlink resolves is a machine that systemd should start *through* it, so a switch is what a restart picks up.
-    // The unit's bytes are rendered from the same function either way, which is why this read and the promotion's
-    // write agree byte for byte -- and why a second deploy on a promoted machine says `satisfied`.
-    let exe = match crate::release::Release::of(root).live() {
-        Some(live) => live,
-        None => match std::env::current_exe() {
-            Ok(exe) => exe,
-            Err(error) => {
-                return failed(
-                    DeployStep::Service,
-                    format!(
-                        "no unit was written: this process's own path could not be read ({error}), and `ExecStart` \
-                         names it because a program resolved through systemd's `PATH` is not the binary that wrote the \
-                         unit"
-                    ),
-                );
-            }
-        },
+    // The live arm is the one fact a promotion changes and a deploy must not undo: a machine whose `current` symlink
+    // resolves is a machine that systemd should start *through* it, so a switch is what a restart picks up. The
+    // seeding arm is what makes the path this run was started from stop mattering — a binary in a build directory or
+    // a `deploy --ssh` copy under `~/.cache` is the file the tree is planted from, never the file the unit runs. The
+    // unit's bytes are rendered from the same function either way, which is why this read and the promotion's write
+    // agree byte for byte -- and why a second deploy on either tree says `satisfied`.
+    let executable = match executable(root) {
+        Ok(executable) => executable,
+        Err(sentence) => return failed(DeployStep::Service, sentence),
     };
-    let bytes = unit_text(&exe, config.role, root);
+    // The release tree's writes run **before** the unit's, because the unit names a path through `current` and the
+    // link has to resolve when systemd first reads the file. A write that fails here is the **fourth** arm, and it
+    // follows the rule the three reads share: it costs the seed and not the install. So the unit is rendered from the
+    // running path instead, and the line says what failed — a machine whose `current` is a directory still ends with
+    // a unit that names a binary that exists.
+    let mut plan: Vec<String> = Vec::new();
+    for action in &executable.actions {
+        if !dry_run && let Err(sentence) = apply(action, tools, staging) {
+            let Some(running) = executable.running.as_deref() else {
+                return failed(DeployStep::Service, sentence);
+            };
+            return unit_line(
+                config,
+                root,
+                tools,
+                dry_run,
+                staging,
+                running,
+                Vec::new(),
+                &unseeded(&sentence),
+            );
+        }
+        plan.push(action.describe());
+    }
+    unit_line(
+        config,
+        root,
+        tools,
+        dry_run,
+        staging,
+        &executable.path,
+        plan,
+        &executable.remark,
+    )
+}
+
+/// The unit's own write, for the path this run settled on, and the line that says what happened.
+///
+/// `plan` is the release tree's actions already applied; `remark` is the clause the step earned — why the tree was
+/// not seeded, or what a live one does not replace — and the two commands that are still the operator's follow it.
+#[allow(clippy::too_many_arguments)]
+fn unit_line(
+    config: &Config,
+    root: &Root,
+    tools: &Tools,
+    dry_run: bool,
+    staging: &Path,
+    path: &Path,
+    mut plan: Vec<String>,
+    remark: &str,
+) -> Line {
+    let bytes = unit_text(path, config.role, root);
     let unit = Item {
         path: root.unit(),
         mode: 0o644,
         kind: ItemKind::Rendered(bytes.clone().into_bytes()),
     };
-    let actions: Vec<Action> = match read(&unit) {
-        Ok(Some(action)) => vec![action],
-        Ok(None) => Vec::new(),
+    let write = match read(&unit) {
+        Ok(write) => write,
         Err(sentence) => return failed(DeployStep::Service, sentence),
     };
+    if let Some(action) = &write {
+        plan.push(action.describe());
+    }
+    // The clause the line carries: why the release tree could not be used (or why a live one was left alone), then the
+    // two commands that are still the operator's. Both renderings take it — the terse one as the indented line under
+    // the mark — because which binary `ExecStart` names is the fact a reader came to this line for.
     let remark = format!(
-        "; still yours to run: {}",
+        "{}; still yours to run: {}",
+        remark,
         unit_commands_printed(Path::new("systemctl")).join("; ")
     );
-    if actions.is_empty() {
+    if plan.is_empty() {
         return Line {
             step: DeployStep::Service,
             word: Word::Satisfied,
@@ -2010,7 +2136,6 @@ fn service_line(
             fix: None,
         };
     }
-    let plan: Vec<String> = actions.iter().map(Action::describe).collect();
     if dry_run {
         return Line {
             step: DeployStep::Service,
@@ -2019,10 +2144,10 @@ fn service_line(
             fix: None,
         };
     }
-    for action in &actions {
-        if let Err(sentence) = apply(action, tools, staging) {
-            return failed(DeployStep::Service, sentence);
-        }
+    if let Some(action) = &write
+        && let Err(sentence) = apply(action, tools, staging)
+    {
+        return failed(DeployStep::Service, sentence);
     }
     Line {
         step: DeployStep::Service,
@@ -2030,6 +2155,161 @@ fn service_line(
         sentence: counted(&plan, &remark),
         fix: None,
     }
+}
+
+/// The binary `ExecStart` names, and the release-tree writes that make it one inside the install tree.
+///
+/// The arms, in the order they are asked: a **live release** (`current` resolves) is named and left alone; **no live
+/// release** means this binary is planted as one and named through `current`; and a tree that **cannot be seeded**
+/// falls back to naming the binary this run is running. That last arm is why nothing here refuses over a tree it
+/// cannot use: a machine with a unit that names a build directory is better than a machine with no unit at all, so an
+/// unusable tag or a directory already holding another binary under this tag costs the seeding and not the install.
+fn executable(root: &Root) -> Result<Executable, String> {
+    let release = Release::of(root);
+    if let Some(live) = release.live() {
+        return Ok(Executable {
+            remark: live_remark(&live),
+            path: live,
+            actions: Vec::new(),
+            running: None,
+        });
+    }
+    let exe = std::env::current_exe().map_err(|error| {
+        format!(
+            "no unit was written: this process's own path could not be read ({error}), and `ExecStart` names it \
+             because a program resolved through systemd's `PATH` is not the binary that wrote the unit"
+        )
+    })?;
+    let unusable = |why: &str| Executable {
+        remark: unseeded(why),
+        path: exe.clone(),
+        actions: Vec::new(),
+        running: None,
+    };
+    // The tag is **this process's own**, read from the value the build put in it: a promotion spawns
+    // `<candidate> version --json` because it is reading a foreign file, and that spawn here would answer a question
+    // about bytes this run has not got.
+    let tag = crate::version::VersionInfo::current().git_tag;
+    if release::tag_problem(&tag).is_some() {
+        return Ok(unusable(&format!(
+            "this binary's git tag {tag:?} cannot name a release directory, and a release is `releases/<tag>/`"
+        )));
+    }
+    let (bytes, digest) = match own_copy() {
+        Ok(copy) => copy,
+        Err(why) => return Ok(unusable(&why)),
+    };
+    let placement = match release.placement(&tag, digest) {
+        Ok(placement) => placement,
+        Err(why) => return Ok(unusable(&why)),
+    };
+    // A release is a **write** only when there is something to write: `Written::Current` with the digest file already
+    // holding this digest is the tree saying the release is here, and `write` would rewrite one file with the content
+    // it has. Counting that as an action would make the plan's number a thing the run did not do.
+    let recorded = std::fs::read_to_string(release.dir_of(&tag).join(release::DIGEST))
+        .ok()
+        .and_then(|line| crate::remote::digest_of(&line));
+    let held = matches!(placement, release::Written::Current)
+        && recorded.as_deref() == Some(digest.as_str());
+    let mut actions = Vec::new();
+    if !held {
+        actions.push(Action::Release {
+            tree: release.clone(),
+            tag: tag.clone(),
+            bytes: Arc::clone(bytes),
+            digest: digest.clone(),
+        });
+    }
+    // A `current` that already names this release needs no switch: the release above is what makes it resolve. Every
+    // other state — no link, a link to another tag, a link whose directory holds no binary — is repaired by one.
+    let link = release.link();
+    let named = link.as_deref().and_then(|link| release.tag_of(link));
+    if named.as_deref() != Some(tag.as_str()) {
+        actions.push(Action::Current {
+            tree: release.clone(),
+            tag: tag.clone(),
+        });
+    }
+    // A link this tree does not understand — one naming something that is not `releases/<tag>` — is **repaired**
+    // rather than refused, because a deploy is the command that puts a machine back in a state it can boot from, and
+    // a promotion is the one that refuses this state instead (it needs a release to go back to, ADR-0082). The line
+    // says which target it replaced: a link that moved with no word is the one thing a `(2 actions)` cannot show.
+    let remark = match &link {
+        Some(link) if named.is_none() => format!(
+            "; `{}` named {}, which is not a release of this tree, and it now names `releases/{tag}`: a deploy \
+             repairs the link a promotion refuses",
+            release.current().display(),
+            link.display()
+        ),
+        _ => String::new(),
+    };
+    Ok(Executable {
+        path: release.current().join(release::BINARY),
+        actions,
+        remark,
+        running: Some(exe),
+    })
+}
+
+/// The clause a step earns when the release tree could not be used: why, and what `ExecStart` names instead.
+///
+/// One function so the four arms — an unusable tag, unreadable bytes, a refused placement, a failed write — are one
+/// sentence shape, and so the fallback the read took and the fallback the write takes read the same.
+fn unseeded(why: &str) -> String {
+    format!("; no release was planted, so `ExecStart` names the binary this run is running: {why}")
+}
+
+/// What [`own_copy`] caches: this process's bytes, and the digest that names them.
+///
+/// One name rather than the tuple written twice, because the cache's type and the reader's answer are the same value
+/// and a reader that spelled it out again would be one edit away from disagreeing with the cache.
+type OwnCopy = (Arc<Vec<u8>>, String);
+
+/// This process's own bytes and their digest, read and hashed **once per process**.
+///
+/// The bytes are why this is not [`images::own_digest`]: the digest is the same value that function caches for step
+/// 3's image labels, and a seed needs the bytes beside it, which `own_digest` throws away. Cached for that function's
+/// own reason — this process's file cannot change while the process runs, so a second deploy in one process would pay
+/// for the read and the hash again for one answer — and handed out as an [`Arc`] so a plan holds a handle to those
+/// bytes rather than a second copy of them.
+fn own_copy() -> Result<&'static OwnCopy, String> {
+    static COPY: std::sync::OnceLock<Result<OwnCopy, String>> = std::sync::OnceLock::new();
+    COPY.get_or_init(|| {
+        let exe = std::env::current_exe().map_err(|error| {
+            format!("this process's own path could not be read ({error})")
+        })?;
+        let bytes = std::fs::read(&exe).map_err(|error| {
+            format!(
+                "this process's own bytes could not be read ({error}): a release is a copy of the binary that \
+                 plants it"
+            )
+        })?;
+        let digest = images::hex(&images::sha256(&bytes));
+        Ok((Arc::new(bytes), digest))
+    })
+    .as_ref()
+    .map_err(Clone::clone)
+}
+
+/// The clause a live release earns when this run is a **different** binary: the tree is left alone, and the command
+/// that does replace a live release is named.
+///
+/// `server deploy` after a `cargo build` is the case: the unit keeps naming the release that is live, which is the
+/// property that makes a deploy unable to undo a promotion, and an operator who expected their new binary to go live
+/// needs the one word for what would.
+fn live_remark(live: &Path) -> String {
+    let (Ok(own), Ok(found)) = (images::own_digest(), images::digest(live)) else {
+        return String::new();
+    };
+    if own == found {
+        return String::new();
+    }
+    format!(
+        "; this run's binary is not the live release's (sha256 {} and {}), and a deploy does not replace a live \
+         release — `holosmith upgrade` does",
+        &own[..12],
+        &found[..12]
+    )
 }
 
 /// Step 6: wait for `/api/health`, then ask `doctor --full` (spec item 10 step 7).
@@ -2164,5 +2444,56 @@ mod tests {
             listed.iter().map(|item| item.mode).collect::<Vec<u32>>()
         );
         assert_eq!(listed[0].mode, 0o700, "the root is not the 0700 item");
+    }
+
+    /// A satisfied line's remark is the one thing the terse rendering keeps, because it is the clause that says
+    /// something the mark cannot: which binary `ExecStart` names, or why the release tree was not seeded.
+    ///
+    /// The default report is what `holosmith install` and `server deploy` print, so a clause that only `--verbose`
+    /// showed would be a clause written for nobody (ADR-0085, ADR-0093 D3).
+    #[test]
+    fn a_satisfied_lines_remark_is_printed_under_its_mark() {
+        let line = |word: Word, sentence: &str| Line {
+            step: DeployStep::Service,
+            word,
+            sentence: sentence.to_string(),
+            fix: None,
+        };
+        assert_eq!(
+            line(
+                Word::Satisfied,
+                "/tree/holosmith.service holds this binary's unit (9 bytes)"
+            )
+            .terse(),
+            "5. service ✓",
+            "a satisfied line with no remark grew a detail"
+        );
+        assert_eq!(
+            line(
+                Word::Satisfied,
+                "/tree/holosmith.service holds this binary's unit (9 bytes); still yours to run: systemctl \
+                 --user daemon-reload"
+            )
+            .terse(),
+            "5. service ✓\n    still yours to run: systemctl --user daemon-reload",
+            "a satisfied line's remark did not reach the terse rendering"
+        );
+        // The same arm for `skipped`, which shares it: a skip with a remark keeps it, a bare one is the mark alone.
+        assert_eq!(
+            line(
+                Word::Skipped,
+                "a hub builds no images: it runs no containers"
+            )
+            .terse(),
+            "5. service –"
+        );
+        assert_eq!(
+            line(
+                Word::Skipped,
+                "a hub builds no images: it runs no containers; nothing was asked of it"
+            )
+            .terse(),
+            "5. service –\n    nothing was asked of it"
+        );
     }
 }

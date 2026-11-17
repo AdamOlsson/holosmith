@@ -86,6 +86,56 @@ fn a_release_is_a_binary_and_the_digest_that_names_it() {
     assert!(error.contains("a/b"), "{error}");
 }
 
+/// [`Release::placement`] is what a caller that must **read** before it writes asks, so it has to answer the three
+/// arms `write` does — a deploy's plan, and a deploy deciding whether it can plant a tree at all, are its two readers.
+#[test]
+fn a_placement_is_the_write_s_own_question_asked_without_writing() {
+    let dir = TempDir::new("release-placement");
+    let release = Release::at(dir.file("opt/holosmith"));
+    let bytes = b"#!/bin/sh\nexit 0\n";
+    let digest = digest_of(&dir, bytes);
+    let before = std::fs::read_dir(dir.path())
+        .expect("the tree reads")
+        .count();
+
+    // A tree with no release directory at all is `Fresh`, and asking must not create one.
+    assert_eq!(
+        release
+            .placement("v1", &digest)
+            .expect("a fresh tag is free"),
+        Written::Fresh
+    );
+    assert!(
+        !release.releases().exists(),
+        "the placement question wrote the tree"
+    );
+    assert_eq!(
+        std::fs::read_dir(dir.path())
+            .expect("the tree reads")
+            .count(),
+        before
+    );
+
+    release
+        .write("v1", bytes, &digest)
+        .expect("a release is writable");
+    // The same bytes are `Current`, a different binary under the same tag is the write's refusal.
+    assert_eq!(
+        release
+            .placement("v1", &digest)
+            .expect("the same bytes are current"),
+        Written::Current
+    );
+    let other = digest_of(&dir, b"#!/bin/sh\nexit 1\n");
+    let error = release
+        .placement("v1", &other)
+        .expect_err("a second binary under one tag is refused");
+    assert!(
+        error.contains(&digest) && error.contains(&other) && error.contains("v1"),
+        "{error}"
+    );
+}
+
 #[test]
 fn a_switch_is_a_relative_link_replaced_in_one_step() {
     let dir = TempDir::new("release-switch");
